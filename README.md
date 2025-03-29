@@ -2,6 +2,26 @@
 
 Iris is a Python- and Triton-based library that provide SHMEM-like RDMA support in Triton.
 
+Iris matches PyTorch APIs on the host side:
+```python
+import iris
+
+heap_size = 2**30
+shmem = iris.Iris(heap_size)
+buffer_size = 4096
+buffer = shmem.zeros(buffer_size, device="cuda", dtype=torch.float32)
+```
+
+And matches Triton APIs on the device side:
+```python
+import iris
+
+@triton.jit
+def producer_kernel(buffer, heap_bases_ptr):
+    source_rank = 0
+    target_rank = 1
+    values = iris.get(buffer, source_rank, target_rank, heap_bases_ptr)
+```
 ## Examples
 
 ### Stream-K + Iris
