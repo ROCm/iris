@@ -62,17 +62,12 @@ source activate.sh
 
 ## Installation
 
-## Installation
-
 To install the package normally:
 
 ```shell
 pip install .
 ```
 
----
-
-## Development
 
 To install in editable mode (auto-reloads on code changes):
 
