@@ -16,3 +16,5 @@ redo.sh
 !dataset/*
 omni*.pdf
 slurm*.out
+
+*.egg-info

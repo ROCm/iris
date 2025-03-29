@@ -1,0 +1,37 @@
+[project]
+name = "Iris"
+version = "0.1.0"
+description = "Python- and Triton-based library that provide SHMEM-like RDMA support in Triton."
+authors = [
+    { name = "Muhammad Awad", email = "muhaawad@amd.com" },
+    { name = "Muhammad Osama", email = "Muhammad.Osama@amd.com" },
+    { name = "Brandon Potter", email = "Brandon.Potter@amd.com" }
+]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.8"
+
+dependencies = [
+    "numpy",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "mypy",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+

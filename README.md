@@ -60,11 +60,22 @@ Once inside the Apptainer image, source the `activate.sh` script.
 source activate.sh
 ```
 
-### Dependencies
+## Installation
 
-Once you are inside a Conda environment (in docker or apptainer). Before running code, you need to build `finegrained_alloc`, a C library interface for fine-grained allocation. The plugin is required to redirect PyTorch allocation to fine-grained memory.
+## Installation
+
+To install the package normally:
 
 ```shell
-./scripts/build_dependencies.sh
+pip install .
 ```
 
+---
+
+## Development
+
+To install in editable mode (auto-reloads on code changes):
+
+```shell
+pip install -e .
+```
