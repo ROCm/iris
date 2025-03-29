@@ -264,6 +264,19 @@ def translate(src_ptr, cur_rank, target_rank, heap_bases, debug=False):
 
 @triton.jit
 def get(src_ptr, cur_rank, target_rank, heap_bases, mask=None):
+    """
+    Loads a value from the specified memory location and rank.
+
+    Args:
+        src_ptr (int): The source pointer.
+        cur_rank (int): The current rank.
+        target_rank (int): The target rank.
+        heap_bases (int): The heap bases.
+        mask (Optional[tl.tensor], optional): A boolean tensor used to guard memory accesses.
+
+    Returns:
+        Any: The loaded value.
+    """
     dst_ptr = translate(src_ptr, cur_rank, target_rank, heap_bases)
     result = tl.load(dst_ptr, mask=mask)
     return result
@@ -271,6 +284,20 @@ def get(src_ptr, cur_rank, target_rank, heap_bases, mask=None):
 
 @triton.jit
 def put(src_ptr, data, cur_rank, target_rank, heap_bases, mask=None):
+    """
+    Writes data to the specified memory location and rank.
+
+    Args:
+        src_ptr (int): The source pointer.
+        data (Any): The value to be written.
+        cur_rank (int): The current rank.
+        target_rank (int): The target rank.
+        heap_bases (int): The heap bases.
+        mask (Optional[tl.tensor], optional): A boolean tensor used to guard memory accesses. Defaults to None.
+
+    Returns:
+        None
+    """
     dst_ptr = translate(src_ptr, cur_rank, target_rank, heap_bases, False)
     tl.store(dst_ptr, data, mask=mask)
 
@@ -279,6 +306,24 @@ def put(src_ptr, data, cur_rank, target_rank, heap_bases, mask=None):
 def atomic_add(
     src_ptr, data, cur_rank, target_rank, heap_bases, mask=None, sem=None, scope=None
 ):
+    """
+        Atomically adds data to the specified memory location and rank.
+
+        Args:
+            src_ptr (int): The source pointer.
+            data (Any): The value to be added.
+            cur_rank (int): The current rank.
+            target_rank (int): The target rank.
+            heap_bases (int): The heap bases.
+            mask (Optional[tl.tensor], optional): A boolean tensor used to guard memory accesses. Defaults to None.
+            sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are “acquire”, “release”, “acq_rel” (stands for “ACQUIRE_RELEASE”), and
+    “relaxed”. Defaults to “acq_rel”.
+            scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are “gpu” (default), “cta”
+    (cooperative thread array, thread block), or “sys” (stands for “SYSTEM”). Defaults to “gpu”.
+
+        Returns:
+            Any: The result before the atomic addition.
+    """
     dst_ptr = translate(src_ptr, cur_rank, target_rank, heap_bases, False)
     return tl.atomic_add(dst_ptr, data, mask=mask, sem=sem, scope=scope)
 
@@ -287,6 +332,24 @@ def atomic_add(
 def atomic_sub(
     src_ptr, data, cur_rank, target_rank, heap_bases, mask=None, sem=None, scope=None
 ):
+    """
+    Atomically subtracts data from the specified memory location and rank.
+
+    Args:
+        src_ptr (int): The source pointer.
+        data (Any): The value to be subtracted.
+        cur_rank (int): The current rank.
+        target_rank (int): The target rank.
+        heap_bases (int): The heap bases.
+        mask (Optional[tl.tensor], optional): A boolean tensor used to guard memory accesses. Defaults to None.
+        sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are “acquire”, “release”, “acq_rel” (stands for “ACQUIRE_RELEASE”), and 
+“relaxed”. Defaults to “acq_rel”.
+        scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are “gpu” (default), “cta” 
+(cooperative thread array, thread block), or “sys” (stands for “SYSTEM”). Defaults to “gpu”.
+
+    Returns:
+        Any: The value before the atomic subtraction.
+    """    
     dst_ptr = translate(src_ptr, cur_rank, target_rank, heap_bases, False)
     return tl.atomic_sub(dst_ptr, data, mask=mask, sem=sem, scope=scope)
 
@@ -295,6 +358,24 @@ def atomic_sub(
 def atomic_cas(
     src_ptr, compare, value, cur_rank, target_rank, heap_bases, sem=None, scope=None
 ):
+    """
+    Atomically compares and exchanges the memory location at src_ptr.
+
+    Args:
+        src_ptr (int): The source pointer.
+        compare (Any): The expected value to be compared with the current value.
+        value (Any): The new value to be written if the compare succeeds.
+        cur_rank (int): The current rank.
+        target_rank (int): The target rank.
+        heap_bases (int): The heap bases.
+        sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are “acquire”, “release”, “acq_rel” (stands for “ACQUIRE_RELEASE”), and 
+“relaxed”. Defaults to “acq_rel”.
+        scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are “gpu” (default), “cta” 
+(cooperative thread array, thread block), or “sys” (stands for “SYSTEM”). Defaults to “gpu”.
+
+    Returns:
+        Any: The value contained at the pointer before the atomic operation attempt.
+    """    
     dst_ptr = translate(src_ptr, cur_rank, target_rank, heap_bases, False)
     return tl.atomic_cas(dst_ptr, compare, value, sem=sem, scope=scope)
 
@@ -303,5 +384,23 @@ def atomic_cas(
 def atomic_xchg(
     src_ptr, value, cur_rank, target_rank, heap_bases, mask=None, sem=None, scope=None
 ):
+    """
+    Atomically exchanges the memory location at src_ptr with the given value.
+
+    Args:
+        src_ptr (int): The source pointer.
+        value (Any): The new value to be written.
+        cur_rank (int): The current rank.
+        target_rank (int): The target rank.
+        heap_bases (int): The heap bases.
+        mask (Optional[tl.tensor], optional): A boolean tensor used to guard memory accesses. Defaults to None.
+        sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are “acquire”, “release”, “acq_rel” (stands for “ACQUIRE_RELEASE”), and 
+“relaxed”. Defaults to “acq_rel”.
+        scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are “gpu” (default), “cta” 
+(cooperative thread array, thread block), or “sys” (stands for “SYSTEM”). Defaults to “gpu”.
+
+    Returns:
+        Any: The old value at src_ptr before the exchange.
+    """
     dst_ptr = translate(src_ptr, cur_rank, target_rank, heap_bases, False)
     return tl.atomic_xchg(dst_ptr, value, mask=mask, sem=sem, scope=scope)
