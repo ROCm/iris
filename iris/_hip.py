@@ -3,7 +3,6 @@ import numpy as np
 import sys
 
 rt_path = "libamdhip64.so"
-# rt_path="/work1/amd/muhaawad/git/amd/pdp/fused_gemm/hipShim/libhip_shim.so"
 hip_runtime = ctypes.cdll.LoadLibrary(rt_path)
 
 
@@ -75,7 +74,7 @@ def get_device():
     return device_id.value
 
 def get_wall_clock_rate(device_id):
-    hipDeviceAttributeWallClockRate = 10017 # lol
+    hipDeviceAttributeWallClockRate = 10017
     wall_clock_rate = ctypes.c_int()
     status = hip_runtime.hipDeviceGetAttribute(ctypes.byref(wall_clock_rate), hipDeviceAttributeWallClockRate, device_id)
     hip_try(status)

@@ -7,7 +7,6 @@ import argparse
 import json
 from utils import *
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 import iris
 
 from communication import all_scatter_kernel, one_shot_kernel, all_reduce_kernel
