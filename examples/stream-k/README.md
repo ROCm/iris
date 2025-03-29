@@ -1,7 +1,7 @@
 
 # Stream-K + Iris
 
-![dist_gemm](images/dist_gemm.excalidraw.svg)
+![dist_gemm](../../images/dist_gemm.excalidraw.svg)
 
 ## Algorithms
 For Stream-K GEMMs + communication kernels, at the moment, we assume that:
