@@ -5,6 +5,7 @@ from iris._mpi_helpers import (
     init_mpi,
     mpi_allgather,
     world_barrier,
+    mpi_broadcast_scalar
 )
 from iris._hip import (
     set_device,
@@ -92,6 +93,9 @@ class Iris:
         if STATS:
             print(f"[Iris] [{self.cur_rank}/{self.num_ranks}] {message}")
 
+    def broadcast(self, source_rank, value):
+        return mpi_broadcast_scalar(source_rank, value)
+        
     def allocate(self, num_elements, dtype):
         self.log_debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")
 

@@ -24,7 +24,7 @@ def producer_kernel(buffer, heap_bases_ptr):
 ```
 ## Examples
 
-1. [Message Passing](./examples/p2p/README.md)
+1. [P2P](./examples/p2p/README.md)
 2. [Stream-K + Iris](./examples/stream-k/README.md)
 
 ## Getting started

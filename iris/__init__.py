@@ -59,6 +59,9 @@ from .iris import (
     atomic_cas,
     atomic_xchg,
 )
+from .util import (
+    do_bench
+)
 
 __all__ = [
     "Iris",
@@ -69,4 +72,5 @@ __all__ = [
     "atomic_sub",
     "atomic_cas",
     "atomic_xchg,",
+    "do_bench,",
 ]

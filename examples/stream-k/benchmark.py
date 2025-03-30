@@ -419,7 +419,7 @@ def main():
 
     if args["benchmark"]:
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
-        triton_ms = do_bench(run_experiment, shmem.barrier)
+        triton_ms = iris.do_bench(run_experiment, shmem.barrier)
         triton_tflops = perf(triton_ms)
         algo_string = args["algorithm"]
         shmem.log_stats(
