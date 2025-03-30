@@ -47,7 +47,7 @@ def _summarize_statistics(times, quantiles, return_mode):
     elif return_mode == "median":
         return statistics.median(times)
                              
-def do_bench(fn, barrier_fn, n_warmup=25, n_repeat=100, quantiles=None, return_mode="mean"):
+def do_bench(fn, barrier_fn=lambda: None, n_warmup=25, n_repeat=100, quantiles=None, return_mode="mean"):
 
     # Wait for anything that happened before
     barrier_fn()

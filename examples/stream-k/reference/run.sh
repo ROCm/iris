@@ -1,5 +1,8 @@
 #!/bin/bash
 
+pushd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" > /dev/null || exit 1
+
+
 NUM_GPUS=2
 OMP_NUM_THREADS=1
 COLLECTIVE="all_gather"
@@ -31,3 +34,6 @@ export OMP_NUM_THREADS=$OMP_NUM_THREADS
 
 echo "Running '$COLLECTIVE' with $NUM_GPUS GPUs..."
 python -m torch.distributed.run --nproc_per_node=${NUM_GPUS} "${COLLECTIVE}.py"
+
+popd > /dev/null || exit 1
+

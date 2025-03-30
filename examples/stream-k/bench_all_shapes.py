@@ -172,7 +172,7 @@ if __name__ == "__main__":
     commit_hashes = list(dict.fromkeys([commit_before, commit_after]))
 
     config = {
-        "image_name": "rocshmem_rocm_6.2.3.sif",
+        "image_name": "iris.sif",
         "partition": partition,
         "time_limit": "00:05:00",
         "exclude_list": "",
