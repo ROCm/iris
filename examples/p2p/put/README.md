@@ -1,6 +1,6 @@
-# Message Passing
+# Put benchmark
 
-A simple message passing example using Triton. This example demonstrates how to send and receive messages between two processes.
+Put benchmark using Iris.
 
 ## Usage
 
