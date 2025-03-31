@@ -13,13 +13,12 @@ Iris is a Python- and Triton-based library that provide SHMEM-like RDMA support 
 Iris matches PyTorch APIs on the host side and Triton APIs on the device side:
 ```python
 import torch
+import triton
 import triton.language as tl
-
 import iris
 
 @triton.jit
-def kernel(buffer, buffer_size, block_size, heap_bases_ptr):
-
+def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bases_ptr):
     # Compute start index of this block
     pid = tl.program_id(0)
     block_start = pid * block_size
@@ -41,17 +40,17 @@ block_size = 1024
 shmem = iris.Iris(heap_size)
 cur_rank = shmem.get_rank()
 buffer = shmem.zeros(buffer_size, device="cuda", dtype=torch.float32)
-grid = lambda meta: (triton.cdiv(buffer_size, meta["BLOCK_SIZE"]),)
+grid = lambda meta: (triton.cdiv(buffer_size, meta["block_size"]),)
 
 source_rank = 0
 if cur_rank == source_rank:
-    put_kernel[grid](
+    kernel[grid](
         buffer,
         buffer_size,
         block_size,
         shmem.get_heap_bases(),
     )
-shmem.barrier()    
+shmem.barrier() 
 ```
 
 ## Examples
