@@ -92,8 +92,8 @@ def main(hashes, config, sbatch_script_content):
 
     unique_mkn = list(set((entry["m"], entry["k"], entry["n"]) for entry in data))
 
-    enable_algorithms = False
-    enable_mkn = False
+    enable_algorithms = True
+    enable_mkn = True
 
     algorithms_iter = algorithms if enable_algorithms else ["all_reduce"]
     unique_mkn_iter = enumerate(unique_mkn) if enable_mkn else [(0, (4096, 11008, 65536))]

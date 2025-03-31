@@ -10,7 +10,6 @@ __pycache__/
 *.log
 *.txt
 slurm_logs*/
-*.ipynb
 redo.sh
 
 !dataset/*
