@@ -150,11 +150,11 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
         triton_sec = triton_ms * 1e-3
         element_size_bytes = torch.tensor([], dtype=dtype).element_size()
         total_bytes = n_elements * element_size_bytes
-        bandwidth_gbps = total_bytes / triton_sec / 1e9
+        bandwidth_gbps = total_bytes / triton_sec / 2**30
         if args["verbose"]:
-            shmem.log(f"Copied {total_bytes / 2**30:.2f} GB in {triton_sec:.4f} seconds")
+            shmem.log(f"Copied {total_bytes / 2**30:.2f} GiB in {triton_sec:.4f} seconds")
             shmem.log(
-                f"Bandwidth between {source_rank} and {destination_rank} is {bandwidth_gbps:.4f} GB/s"
+                f"Bandwidth between {source_rank} and {destination_rank} is {bandwidth_gbps:.4f} GiB/s"
             )
     shmem.barrier()
     bandwidth_gbps = shmem.broadcast(bandwidth_gbps, source_rank)
@@ -189,7 +189,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
     shmem.barrier()
     return bandwidth_gbps
 
-def print_bandwidth_matrix(matrix, label="Unidirectional GET bandwidth GB/s [Remote read]"):
+def print_bandwidth_matrix(matrix, label="Unidirectional GET bandwidth GiB/s [Remote read]"):
     num_ranks = matrix.shape[0]
     col_width = 10  # Adjust for alignment
 

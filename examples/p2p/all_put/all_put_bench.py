@@ -86,7 +86,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "-p", "--heap_size", type=int, default=1 << 34, help="Iris heap size"
+        "-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size"
     )
 
     return vars(parser.parse_args())
@@ -98,7 +98,7 @@ def run_experiment(shmem, args, buffer):
     world_size = shmem.get_num_ranks()
 
     if args["verbose"]:
-        shmem.log(f"Measuring bandwidth for rank {cur_rank}...")
+        shmem.log(f"Measuring bandwidth for rank {cur_rank} and buffer size {buffer.numel()} elements ({buffer.numel() * torch.tensor([], dtype=dtype).element_size() / 2**30:.2f} GiB)...")
     n_elements = buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
@@ -123,10 +123,10 @@ def run_experiment(shmem, args, buffer):
     # Each rank sends n_elements to (world_size - 1) other ranks
     total_bytes = n_elements * element_size_bytes * (world_size - 1)
     # Total bandwidth is bytes / time
-    bandwidth_gbps = total_bytes / triton_sec / 1e9
+    bandwidth_gbps = total_bytes / triton_sec / 2**30
     if args["verbose"]:
-        shmem.log(f"Copied {total_bytes / 2**30:.2f} GB in {triton_sec:.4f} seconds")
-        shmem.log(f"Total bandwidth for rank {cur_rank} is {bandwidth_gbps:.4f} GB/s")
+        shmem.log(f"Copied {total_bytes / 2**30:.2f} GiB in {triton_sec:.4f} seconds")
+        shmem.log(f"Total bandwidth for rank {cur_rank} is {bandwidth_gbps:.4f} GiB/s")
 
     success = True
     if args["validate"]:
@@ -160,7 +160,7 @@ def run_experiment(shmem, args, buffer):
 
 
 def print_bandwidth_matrix(
-    bandwidth_data, buffer_sizes, label="Total Bandwidth (GB/s) vs Buffer Size"
+    bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size"
 ):
     num_ranks = len(bandwidth_data)
     col_width = 12  # Adjust for alignment
@@ -181,7 +181,8 @@ def print_bandwidth_matrix(
 def main():
     args = parse_args()
 
-    shmem = iris.Iris(args["heap_size"])
+    heap_size = args["heap_size"]
+    shmem = iris.Iris(heap_size)
     num_ranks = shmem.get_num_ranks()
 
     dtype = torch_dtype_from_str(args["datatype"])
@@ -190,21 +191,23 @@ def main():
     min_buffer_size = args["buffer_size_min"]
     max_buffer_size = args["buffer_size_max"]
     buffer_size = min_buffer_size
-    buffers = []
     buffer_sizes = []
     while buffer_size <= max_buffer_size:
-        buffer = shmem.zeros(
-            buffer_size // element_size_bytes, device="cuda", dtype=dtype
-        )
-        buffers.append(buffer)
         buffer_sizes.append(buffer_size)
         buffer_size *= 2
 
-    # Initialize bandwidth data structure: [rank][buffer_size_index]
-    bandwidth_data = [[0.0 for _ in range(len(buffers))] for _ in range(num_ranks)]
+    # Allocate one large buffer that can fit the maximum size
+    max_elements = max_buffer_size // element_size_bytes
+    buffer = shmem.zeros(max_elements, device="cuda", dtype=dtype)
 
-    for buffer_idx, buffer in enumerate(buffers):
-        bandwidth_gbps = run_experiment(shmem, args, buffer)
+    # Initialize bandwidth data structure: [rank][buffer_size_index]
+    bandwidth_data = [[0.0 for _ in range(len(buffer_sizes))] for _ in range(num_ranks)]
+
+    for buffer_idx, size in enumerate(buffer_sizes):
+        # Use a slice of the large buffer for this experiment
+        n_elements = size // element_size_bytes
+        sub_buffer = buffer[:n_elements]
+        bandwidth_gbps = run_experiment(shmem, args, sub_buffer)
         # Store bandwidth for current rank
         cur_rank = shmem.get_rank()
         bandwidth_data[cur_rank][buffer_idx] = bandwidth_gbps
@@ -212,10 +215,8 @@ def main():
 
     # Gather all bandwidth data to rank 0
     for rank in range(num_ranks):
-        for buffer_idx in range(len(buffers)):
-            bandwidth_data[rank][buffer_idx] = shmem.broadcast(
-                bandwidth_data[rank][buffer_idx], rank
-            )
+        for buffer_idx in range(len(buffer_sizes)):
+            bandwidth_data[rank][buffer_idx] = shmem.broadcast(bandwidth_data[rank][buffer_idx], rank)
         shmem.barrier()
 
     if shmem.get_rank() == 0:
