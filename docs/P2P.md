@@ -20,3 +20,23 @@ GPU 05  ->     48.66     48.24     47.99     48.13     49.15   3534.84     49.43
 GPU 06  ->     49.19     49.25     48.53     48.55     49.11     49.26   3571.96     49.20
 GPU 07  ->     49.23     49.02     48.39     48.79     49.33     49.04     49.30   3670.31
 ```
+
+# Message Passing
+
+A simple message passing example using Triton. This example demonstrates how to send and receive messages between two processes.
+
+## Usage
+
+```terminal
+mpirun -np 2 python examples/p2p/mp/message_passing.py
+```
+Prints:
+```terminal
+[Iris] [1/2] Rank 1 is receiving data from rank 0.
+[Iris] [0/2] Rank 0 is sending data to rank 1.
+[Iris] [1/2] Rank 1 has finished sending/receiving data.
+[Iris] [1/2] Validating output...
+[Iris] [0/2] Rank 0 has finished sending/receiving data.
+[Iris] [0/2] Validating output...
+[Iris] [1/2] Validation successful.
+```

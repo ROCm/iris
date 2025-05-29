@@ -1,6 +1,6 @@
-# Iris
+# Iris: First-Class Multi-GPU Programming Experience in Triton
 
-Iris is a Python- and Triton-based library that provide SHMEM-like RDMA support in Triton.
+Iris is a triton-based framework for Remote Direct Memory Access (RDMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton’s programmability and performance.
 
 ## Key Features
 
@@ -8,7 +8,12 @@ Iris is a Python- and Triton-based library that provide SHMEM-like RDMA support 
 - **Simple and Intuitive API**: Iris provides simple and intuitive RMA APIs. Writing multi-GPU programs is as easy as writing single-GPU programs.
 - **Triton-based**: Iris is built on top of Triton and inherits Triton's performance and capabilities.
 
-## Examples
+## Documentation
+
+1. [Peer-to-Peer Communication](./docs/P2P.md)
+2. [Fine-grained GEMM & Communication Overlap](./docs/FINEGRAINED_OVERLAP.md)
+
+## API Example
 
 Iris matches PyTorch APIs on the host side and Triton APIs on the device side:
 ```python
@@ -53,67 +58,30 @@ if cur_rank == source_rank:
 shmem.barrier() 
 ```
 
-## Examples
-
-1. [P2P](./examples/p2p/README.md)
-2. [GEMM + Iris](./examples/gemm/README.md)
-
-
-## Installation
-
-To install the package normally:
-
-```shell
-pip install .
-```
-
-
-To install in editable mode (auto-reloads on code changes):
-
-```shell
-pip install -e .
-```
-
-## Getting started
-
-We provide both a Docker and Apptainer files that sets up all dependencies.
-
-#### Docker
-
-To build the image:
-
-```shell
-cd ./docker
-./build.sh
-```
-
-And then to run the image,
-```shell
-./docker/run.sh
-```
-
-#### Apptainer
-To build the image:
-```shell
-./apptainer/build.sh
-```
-
-And then to run the image,
-```shell
-./apptainer/run.sh
-```
-
-Once inside the Apptainer image, source the `activate.sh` script.
-
-```
-source activate.sh
-```
-
-### Development Environment
+## Quick Start Guide (using Docker)
 
 Using docker compose, you can get started with a simple dev environment where the active iris directory is mounted inside the docker container. This way, any changes you make outside the container to iris are reflected inside the container (getting set up with a vscode instance becomes easy!)
 
 ```shell
 docker compose up --build -d
 docker attach iris-dev
+cd iris && pip install -e .
+```
+
+## Getting started
+
+### Docker
+
+```shell
+cd ./docker
+./build.sh
+./docker/run.sh
+cd iris && pip install -e .
+```
+
+### Apptainer
+```shell
+./apptainer/build.sh <image-name>
+./apptainer/run.sh
+source activate.sh
 ```

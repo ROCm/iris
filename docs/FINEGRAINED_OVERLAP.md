@@ -1,10 +1,10 @@
 
-# Stream-K + Iris
+# Fine-grained GEMM & Communication Overlap
 
 ![dist_gemm](../../images/dist_gemm.excalidraw.svg)
 
 ## Algorithms
-For Stream-K GEMMs + communication kernels, at the moment, we assume that:
+For GEMM GEMMs + communication kernels, at the moment, we assume that:
 
 $C = A \times B$
 where,
@@ -14,17 +14,17 @@ where,
 
 Currently, there are two implementations:
 
-1. Stream-K + All reduce.
+1. GEMM + All reduce
 Where $B$ is partitioned *row-wise* and hence $A$ is partitioned column-wise so that we have two tall skinny matrices producing a partial $C$ with shape of $M \times N$ and the all reduce kernel reduces the results across all GPUs or ranks (right figure).
 
-2. Stream-K + All scatter
+2. GEMM + All scatter
 Where $B$ is partitioned  *column-wise* and hence each rank produces non-overlapping columns in the output $C$ matrix such that we only need all gather/scatter to broadcast the final result (left figure).
 
 
 You can run the example code by following these two steps:
 
 ```shell
-mpirun -np 4 python benchmark.py --benchmark --validate --algorithm one_shot
+mpirun -np 4 python examples/gemm/benchmark.py --benchmark --validate --algorithm one_shot
 ```
 
 ```terminal
@@ -32,7 +32,7 @@ python benchmark.py --help
 usage: benchmark.py [-h] [-m M] [-n N] [-k K] [--debug] [--validate] [--benchmark] [--datatype {fp16,fp32,int8,bf16}] [--algorithm {all_reduce,all_scatter,one_shot}]
                     [--output_file OUTPUT_FILE] [--BLK_M BLK_M] [--BLK_N BLK_N] [--BLK_K BLK_K] [--COMMUNICATION_TILE_M COMMUNICATION_TILE_M] [--COMMUNICATION_TILE_N COMMUNICATION_TILE_N]
                     [--gsize_m GSIZE_M] [--two_tiles TWO_TILES] [--num_stages NUM_STAGES] [--num_warps NUM_WARPS] [--waves_per_eu WAVES_PER_EU] [--mfmaInstrSize MFMAINSTRSIZE]
-                    [--kpack KPACK] [--heap_size HEAP_SIZE] [--gemm_sms STREAMK_SMS] [--total_sms TOTAL_SMS] [--communication_block_size COMMUNICATION_BLOCK_SIZE]
+                    [--kpack KPACK] [--heap_size HEAP_SIZE] [--gemm_sms GEMM_SMS] [--total_sms TOTAL_SMS] [--communication_block_size COMMUNICATION_BLOCK_SIZE]
 
 Parse matrix dimensions and configuration.
 
@@ -71,8 +71,8 @@ options:
   --kpack KPACK         K packing size (default: 2)
   --heap_size HEAP_SIZE
                         Iris heap size (default: 4294967296)
-  --gemm_sms STREAMK_SMS
-                        Number of SMs for Stream-K (default: 256)
+  --gemm_sms GEMM_SMS
+                        Number of SMs for GEMM (default: 256)
   --total_sms TOTAL_SMS
                         Total number of SMs (default: 304)
   --communication_block_size COMMUNICATION_BLOCK_SIZE
