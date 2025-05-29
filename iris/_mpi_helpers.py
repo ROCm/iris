@@ -14,6 +14,7 @@ def mpi_allgather(data):
     reshaped = recv_data.reshape(shm_size, len(data))
     return reshaped
 
+
 def mpi_broadcast_scalar(value=None, root=0):
     thread_comm = MPI.COMM_WORLD
     shmcomm = thread_comm.Split_type(MPI.COMM_TYPE_SHARED)
@@ -34,6 +35,7 @@ def mpi_broadcast_scalar(value=None, root=0):
     shmcomm.Bcast(value, root=root)
     shmcomm.Free()
     return value[0]
+
 
 def world_barrier():
     MPI.COMM_WORLD.Barrier()

@@ -65,7 +65,6 @@ def do_bench(
     quantiles=None,
     return_mode="mean",
 ):
-
     # Wait for anything that happened before
     barrier_fn()
     preamble_fn()

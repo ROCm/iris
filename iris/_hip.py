@@ -31,9 +31,7 @@ def open_ipc_handle(ipc_handle_data, rank):
         ipc_handle_bytes = ipc_handle_data.tobytes()
         ipc_handle_data = (ctypes.c_char * 64).from_buffer_copy(ipc_handle_bytes)
     else:
-        raise TypeError(
-            "ipc_handle_data must be a numpy.ndarray of dtype uint8 with 64 elements"
-        )
+        raise TypeError("ipc_handle_data must be a numpy.ndarray of dtype uint8 with 64 elements")
 
     raw_memory = ctypes.create_string_buffer(64)
     ctypes.memset(raw_memory, 0x00, 64)
@@ -73,6 +71,7 @@ def get_device():
     hip_try(hip_runtime.hipGetDevice(ctypes.byref(device_id)))
     return device_id.value
 
+
 def get_cu_count(device_id=None):
     if device_id is None:
         device_id = get_device()
@@ -80,13 +79,10 @@ def get_cu_count(device_id=None):
     hipDeviceAttributeMultiprocessorCount = 63
     cu_count = ctypes.c_int()
 
-    hip_try(hip_runtime.hipDeviceGetAttribute(
-        ctypes.byref(cu_count),
-        hipDeviceAttributeMultiprocessorCount,
-        device_id
-    ))
+    hip_try(hip_runtime.hipDeviceGetAttribute(ctypes.byref(cu_count), hipDeviceAttributeMultiprocessorCount, device_id))
 
     return cu_count.value
+
 
 # Starting ROCm 6.5
 # def get_xcc_count(device_id=None):
@@ -104,6 +100,7 @@ def get_cu_count(device_id=None):
 
 #     return xcc_count
 
+
 def get_wall_clock_rate(device_id):
     hipDeviceAttributeWallClockRate = 10017
     wall_clock_rate = ctypes.c_int()
@@ -117,11 +114,7 @@ def get_wall_clock_rate(device_id):
 def malloc_fine_grained(size):
     hipDeviceMallocFinegrained = 0x1
     ptr = ctypes.c_void_p()
-    hip_try(
-        hip_runtime.hipExtMallocWithFlags(
-            ctypes.byref(ptr), size, hipDeviceMallocFinegrained
-        )
-    )
+    hip_try(hip_runtime.hipExtMallocWithFlags(ctypes.byref(ptr), size, hipDeviceMallocFinegrained))
     return ptr
 
 

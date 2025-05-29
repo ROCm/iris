@@ -7,7 +7,7 @@ import numpy as np
 import os
 
 # Communication Algorithms
-NONE = tl.constexpr(0) # TODO: None is bad here
+NONE = tl.constexpr(0)  # TODO: None is bad here
 ALL_SCATTER = tl.constexpr(1)
 ALL_REDUCE = tl.constexpr(2)
 ONE_SHOT = tl.constexpr(3)
@@ -42,23 +42,13 @@ class Timestamps:
     def __init__(self, num_tiles):
         self.max_ts = torch.iinfo(torch.int64).max
         self.min_ts = 0
-        self.mm_begin_timestamp = torch.empty(
-            num_tiles, dtype=torch.int64, device="cuda"
-        )
+        self.mm_begin_timestamp = torch.empty(num_tiles, dtype=torch.int64, device="cuda")
         self.mm_end_timestamp = torch.zeros(num_tiles, dtype=torch.int64, device="cuda")
 
-        self.comm_begin_timestamp = torch.empty(
-            num_tiles, dtype=torch.int64, device="cuda"
-        )
-        self.comm_middle_min_timestamp = torch.zeros(
-            num_tiles, dtype=torch.int64, device="cuda"
-        )
-        self.comm_middle_max_timestamp = torch.zeros(
-            num_tiles, dtype=torch.int64, device="cuda"
-        )
-        self.comm_end_timestamp = torch.zeros(
-            num_tiles, dtype=torch.int64, device="cuda"
-        )
+        self.comm_begin_timestamp = torch.empty(num_tiles, dtype=torch.int64, device="cuda")
+        self.comm_middle_min_timestamp = torch.zeros(num_tiles, dtype=torch.int64, device="cuda")
+        self.comm_middle_max_timestamp = torch.zeros(num_tiles, dtype=torch.int64, device="cuda")
+        self.comm_end_timestamp = torch.zeros(num_tiles, dtype=torch.int64, device="cuda")
 
     def reset(self):
         self.mm_begin_timestamp.fill_(self.max_ts)

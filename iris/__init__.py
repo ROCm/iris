@@ -22,9 +22,7 @@ from .util import (
 
 # Pipe allocations via finegrained allocator
 current_dir = os.path.dirname(__file__)
-finegrained_alloc_path = os.path.join(
-    current_dir, "finegrained_alloc", "libfinegrained_allocator.so"
-)
+finegrained_alloc_path = os.path.join(current_dir, "finegrained_alloc", "libfinegrained_allocator.so")
 
 
 def compile():
@@ -53,14 +51,7 @@ def compile():
     std_flags = ["-std=c++17"]
     output_flags = ["-shared", "-fPIC", "-o", finegrained_alloc_path]
 
-    cmd = (
-        ["hipcc"]
-        + basic_warnings
-        + strict_warnings
-        + std_flags
-        + output_flags
-        + [src_file]
-    )
+    cmd = ["hipcc"] + basic_warnings + strict_warnings + std_flags + output_flags + [src_file]
 
     try:
         subprocess.run(cmd, cwd=os.path.dirname(src_file), check=True)

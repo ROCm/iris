@@ -28,22 +28,12 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-m", type=int, default=8192, help="Number of rows in matrix A")
-    parser.add_argument(
-        "-n", type=int, default=4608, help="Number of columns in matrix B"
-    )
-    parser.add_argument(
-        "-k", type=int, default=36864, help="Common dimension between matrices A and B"
-    )
+    parser.add_argument("-n", type=int, default=4608, help="Number of columns in matrix B")
+    parser.add_argument("-k", type=int, default=36864, help="Common dimension between matrices A and B")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    parser.add_argument(
-        "--validate", action="store_true", help="Enable validation mode"
-    )
-    parser.add_argument(
-        "--trace_tiles", action="store_true", help="Enable tile-tracing mode"
-    )
-    parser.add_argument(
-        "--benchmark", action="store_true", help="Enable benchmarking mode"
-    )
+    parser.add_argument("--validate", action="store_true", help="Enable validation mode")
+    parser.add_argument("--trace_tiles", action="store_true", help="Enable tile-tracing mode")
+    parser.add_argument("--benchmark", action="store_true", help="Enable benchmarking mode")
     parser.add_argument(
         "--datatype",
         type=str,
@@ -81,29 +71,21 @@ def parse_args():
         default=128,
         help="N tile size for reduction, scatter or one-shot",
     )
-    
+
     # Best to try 1, 6 or 8
     parser.add_argument("--gsize_m", type=int, default=6, help="Grid size M")
     parser.add_argument("--two_tiles", type=str, default="True", help="Use two tiles")
     parser.add_argument("--num_stages", type=int, default=1, help="Number of stages")
     parser.add_argument("--num_warps", type=int, default=8, help="Number of warps")
-    parser.add_argument(
-        "--waves_per_eu", type=int, default=0, help="Waves per execution unit"
-    )
-    parser.add_argument(
-        "--mfmaInstrSize", type=int, default=16, help="MFMA instruction size"
-    )
+    parser.add_argument("--waves_per_eu", type=int, default=0, help="Waves per execution unit")
+    parser.add_argument("--mfmaInstrSize", type=int, default=16, help="MFMA instruction size")
     parser.add_argument("--kpack", type=int, default=2, help="K packing size")
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
-    
+
     # For All Scatter, use: 288
     # For One Shot, use: 256
-    parser.add_argument(
-        "--gemm_sms", type=int, default=288, help="Number of SMs for Stream-K"
-    )
-    parser.add_argument(
-        "--total_sms", type=int, default=304, help="Total number of SMs"
-    )
+    parser.add_argument("--gemm_sms", type=int, default=288, help="Number of SMs for Stream-K")
+    parser.add_argument("--total_sms", type=int, default=304, help="Total number of SMs")
     parser.add_argument(
         "--communication_block_size",
         type=int,
@@ -129,7 +111,7 @@ def main():
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
     cu_count = shmem.get_cu_count()
-    
+
     # GEMM
     datatype = torch.float32
     if args["datatype"] == "fp16":
@@ -144,12 +126,8 @@ def main():
         print("Unknown datatype.")
         exit(1)
 
-    assert (
-        args["n"] % world_size == 0
-    ), f"N ({args['n']}) must be divisible by world size ({world_size})."
-    assert (
-        args["k"] % world_size == 0
-    ), f"K ({args['k']}) must be divisible by world size ({world_size})."
+    assert args["n"] % world_size == 0, f"N ({args['n']}) must be divisible by world size ({world_size})."
+    assert args["k"] % world_size == 0, f"K ({args['k']}) must be divisible by world size ({world_size})."
 
     A = shmem.randn(args["m"], args["k"], device="cuda", dtype=datatype)
     B = shmem.randn(args["n"], args["k"], device="cuda", dtype=datatype).T
@@ -167,10 +145,7 @@ def main():
         args["n"] = args["n"] // world_size
         local_B = B[:, rank * args["n"] : (rank + 1) * args["n"]].clone()
         local_A = A
-    elif (
-        args["algorithm"] == "all_reduce"
-        or args["algorithm"] == "one_shot"
-    ):
+    elif args["algorithm"] == "all_reduce" or args["algorithm"] == "one_shot":
         rows_per_gpu = args["k"] // world_size
         args["k"] = rows_per_gpu
         start_row = rank * rows_per_gpu
@@ -192,19 +167,13 @@ def main():
     total_tiles = total_blocks_M * total_blocks_N
 
     if args["gemm_sms"] >= args["total_sms"]:
-        print(
-            f"Invalid number of stream-K SMs. {args['gemm_sms']} >= {args['total_sms']}"
-        )
+        print(f"Invalid number of stream-K SMs. {args['gemm_sms']} >= {args['total_sms']}")
         exit(1)
 
-    communication_sms = (args["total_sms"] - args["gemm_sms"]) * args[
-        "communication_sms_multiplier"
-    ]
+    communication_sms = (args["total_sms"] - args["gemm_sms"]) * args["communication_sms_multiplier"]
 
     communication_num_threads = args["communication_block_size"] * communication_sms
-    comm_grid = lambda meta: (
-        triton.cdiv(communication_num_threads, meta["BLOCK_SIZE"]),
-    )
+    comm_grid = lambda meta: (triton.cdiv(communication_num_threads, meta["BLOCK_SIZE"]),)
 
     tile_completed = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int32)
 
@@ -271,8 +240,8 @@ def main():
             timestamps.reset()
             shmem.barrier()
 
-        torch.cuda.nvtx.range_push(f"GEMM + Communication")
-        torch.cuda.nvtx.range_push(f"GEMM")
+        torch.cuda.nvtx.range_push("GEMM + Communication")
+        torch.cuda.nvtx.range_push("GEMM")
         with torch.cuda.stream(gemm_stream):
             kernel_timing["gemm"]["start_event"].record()
             local_C = matmul.apply(
@@ -307,7 +276,7 @@ def main():
             kernel_timing["gemm"]["experiments"] += 1
 
         torch.cuda.nvtx.range_pop()
-        torch.cuda.nvtx.range_push(f"Communication")
+        torch.cuda.nvtx.range_push("Communication")
 
         with torch.cuda.stream(comm_stream):
             kernel_timing["communication"]["start_event"].record()
@@ -399,9 +368,7 @@ def main():
                 if not is_triton_interpret_set():
                     comm_registers = ss.n_regs
                     comm_spills = ss.n_spills
-                    shmem.log_debug(
-                        f"Communication kernel: {ss.n_regs} registers used, {ss.n_spills} spills"
-                    )
+                    shmem.log_debug(f"Communication kernel: {ss.n_regs} registers used, {ss.n_spills} spills")
             kernel_timing["communication"]["end_event"].record()
             kernel_timing["communication"]["experiments"] += 1
 
@@ -409,9 +376,7 @@ def main():
         shmem.barrier()
 
         for k in ["gemm", "communication"]:
-            ms = kernel_timing[k]["start_event"].elapsed_time(
-                kernel_timing[k]["end_event"]
-            )
+            ms = kernel_timing[k]["start_event"].elapsed_time(kernel_timing[k]["end_event"])
             kernel_timing[k]["ms"] += ms
 
         torch.cuda.nvtx.range_pop()
@@ -478,9 +443,7 @@ def main():
         json_writer.add_field("triton_ms", triton_ms)
 
         for k in ["gemm", "communication"]:
-            json_writer.add_field(
-                k + "_ms", kernel_timing[k]["ms"] / kernel_timing[k]["experiments"]
-            )
+            json_writer.add_field(k + "_ms", kernel_timing[k]["ms"] / kernel_timing[k]["experiments"])
             json_writer.add_field(k + "_experiments", kernel_timing[k]["experiments"])
 
         # Wait for all to finish benchmarking

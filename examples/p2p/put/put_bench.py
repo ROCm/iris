@@ -69,16 +69,12 @@ def parse_args():
         choices=["fp16", "fp32", "int8", "bf16"],
         help="Datatype of computation",
     )
-    parser.add_argument(
-        "-z", "--buffer_size", type=int, default=1 << 32, help="Buffer Size"
-    )
+    parser.add_argument("-z", "--buffer_size", type=int, default=1 << 32, help="Buffer Size")
     parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-d", "--validate", action="store_true", help="Enable validation output")
 
-    parser.add_argument(
-        "-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size"
-    )
+    parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
 
     return vars(parser.parse_args())
 
@@ -90,7 +86,6 @@ def run_experiment(shmem, args, source_rank, destination_rank, buffer):
 
     # Allocate source and destination buffers on the symmetric heap
 
-
     if source_rank >= world_size:
         raise ValueError(
             f"Source rank must be less than or equal to the world size. World size is {world_size} and source rank is {source_rank}."
@@ -101,9 +96,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, buffer):
         )
     if cur_rank == 0:
         if args["verbose"]:
-            shmem.log(
-            f"Measuring bandwidth between the ranks {source_rank} and {destination_rank}..."
-        )
+            shmem.log(f"Measuring bandwidth between the ranks {source_rank} and {destination_rank}...")
     n_elements = buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
@@ -132,17 +125,14 @@ def run_experiment(shmem, args, source_rank, destination_rank, buffer):
         bandwidth_gbps = total_bytes / triton_sec / 1e9
         if args["verbose"]:
             shmem.log(f"Copied {total_bytes / 2**30:.2f} GB in {triton_sec:.4f} seconds")
-            shmem.log(
-                f"Bandwidth between {source_rank} and {destination_rank} is {bandwidth_gbps:.4f} GB/s"
-            )
+            shmem.log(f"Bandwidth between {source_rank} and {destination_rank} is {bandwidth_gbps:.4f} GB/s")
     shmem.barrier()
     bandwidth_gbps = shmem.broadcast(bandwidth_gbps, source_rank)
 
-    
     success = True
     if args["validate"] and cur_rank == destination_rank:
         if args["verbose"]:
-            shmem.log(f"Validating output...")
+            shmem.log("Validating output...")
 
         expected = torch.arange(n_elements, dtype=dtype, device="cuda")
         diff_mask = ~torch.isclose(buffer, expected, atol=1)
@@ -155,9 +145,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, buffer):
                 idx = tuple(idx.tolist())
                 computed_val = buffer[idx]
                 expected_val = expected[idx]
-                shmem.log(
-                    f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}"
-                )
+                shmem.log(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
                 success = False
                 break
 
@@ -168,6 +156,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, buffer):
 
     shmem.barrier()
     return bandwidth_gbps
+
 
 def print_bandwidth_matrix(matrix, label="Unidirectional PUT bandwidth GB/s [Remote write]"):
     num_ranks = matrix.shape[0]
@@ -186,7 +175,6 @@ def print_bandwidth_matrix(matrix, label="Unidirectional PUT bandwidth GB/s [Rem
         print(row)
 
 
-
 def main():
     args = parse_args()
 
@@ -196,10 +184,8 @@ def main():
 
     dtype = torch_dtype_from_str(args["datatype"])
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-    buffer = shmem.zeros(
-        args["buffer_size"] // element_size_bytes, device="cuda", dtype=dtype
-    )
-    
+    buffer = shmem.zeros(args["buffer_size"] // element_size_bytes, device="cuda", dtype=dtype)
+
     for source_rank in range(num_ranks):
         for destination_rank in range(num_ranks):
             bandwidth_gbps = run_experiment(shmem, args, source_rank, destination_rank, buffer)
@@ -208,6 +194,7 @@ def main():
 
     if shmem.get_rank() == 0:
         print_bandwidth_matrix(bandwidth_matrix)
+
 
 if __name__ == "__main__":
     main()

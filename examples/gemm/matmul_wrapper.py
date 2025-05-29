@@ -13,8 +13,8 @@ from utils import ALL_SCATTER, ALL_REDUCE, ONE_SHOT
 
 gemm_kernel = persistent_gemm
 
-class matmul(torch.autograd.Function):
 
+class matmul(torch.autograd.Function):
     _debug = True
 
     @staticmethod
@@ -52,13 +52,12 @@ class matmul(torch.autograd.Function):
         mm_begin_timestamp: torch.Tensor = None,
         mm_end_timestamp: torch.Tensor = None,
     ):
-
         #        assert a.is_contiguous() and b.is_contiguous(), "non-contiguous inputs are not supported"
         # checks constraints
         assert a.shape[1] == b.shape[0], "incompatible dimensions"
         M, K = a.shape
         _, N = b.shape
-        
+
         num_xcds = 1
         if cu_count == 304:
             num_xcds = 8

@@ -123,7 +123,7 @@ def persistent_gemm(
         # set the flag for the consumer kernel
         tl.debug_barrier()
 
-        if (COMMUNICATION_ALGORITHM == ONE_SHOT):
+        if COMMUNICATION_ALGORITHM == ONE_SHOT:
             for remote in range(world_size):
                 iris.atomic_add(
                     tile_completed + tile_id,
@@ -134,15 +134,10 @@ def persistent_gemm(
                     sem="release",
                     scope="sys",
                 )
-        elif (
-            COMMUNICATION_ALGORITHM == ALL_SCATTER
-            or COMMUNICATION_ALGORITHM == ALL_REDUCE
-        ):
+        elif COMMUNICATION_ALGORITHM == ALL_SCATTER or COMMUNICATION_ALGORITHM == ALL_REDUCE:
             compare = 0
             value = 1
-            tl.atomic_cas(
-                tile_completed + tile_id, compare, value, sem="release", scope="sys"
-            )
+            tl.atomic_cas(tile_completed + tile_id, compare, value, sem="release", scope="sys")
 
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
