@@ -1,7 +1,8 @@
 
 # Fine-grained GEMM & Communication Overlap
 
-![dist_gemm](../../images/dist_gemm.excalidraw.svg)
+![dist_gemm](../images/fine-grained-local.png)
+![dist_gemm](../images/fine-grained-global.png)
 
 ## Algorithms
 For GEMM GEMMs + communication kernels, at the moment, we assume that:
@@ -17,9 +18,12 @@ Currently, there are two implementations:
 1. GEMM + All reduce
 Where $B$ is partitioned *row-wise* and hence $A$ is partitioned column-wise so that we have two tall skinny matrices producing a partial $C$ with shape of $M \times N$ and the all reduce kernel reduces the results across all GPUs or ranks (right figure).
 
+![all-reduce](../images/all_reduce.png)
+
 2. GEMM + All scatter
 Where $B$ is partitioned  *column-wise* and hence each rank produces non-overlapping columns in the output $C$ matrix such that we only need all gather/scatter to broadcast the final result (left figure).
 
+![all-reduce](../images/all_scatter.png)
 
 You can run the example code by following these two steps:
 
