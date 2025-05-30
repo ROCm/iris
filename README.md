@@ -73,9 +73,8 @@ cd iris && pip install -e .
 ### Docker
 
 ```shell
-cd ./docker
-./build.sh
-./docker/run.sh
+./docker/build.sh <image-name>
+./docker/run.sh <image-name>
 cd iris && pip install -e .
 ```
 
