@@ -1,6 +1,6 @@
 # Iris: First-Class Multi-GPU Programming Experience in Triton
 
-Iris is a triton-based framework for Remote Direct Memory Access (RDMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton’s programmability and performance.
+Iris is a Triton-based framework for Remote Direct Memory Access (RDMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton’s programmability and performance.
 
 ## Key Features
 
@@ -60,7 +60,7 @@ shmem.barrier()
 
 ## Quick Start Guide (using Docker)
 
-Using docker compose, you can get started with a simple dev environment where the active iris directory is mounted inside the docker container. This way, any changes you make outside the container to iris are reflected inside the container (getting set up with a vscode instance becomes easy!)
+Using docker compose, you can get started with a simple dev environment where the active Iris directory is mounted inside the docker container. This way, any changes you make outside the container to Iris are reflected inside the container (getting set up with a vscode instance becomes easy!)
 
 ```shell
 docker compose up --build -d
@@ -81,7 +81,7 @@ cd iris && pip install -e .
 
 ### Apptainer
 ```shell
-./apptainer/build.sh <image-name>
+./apptainer/build.sh
 ./apptainer/run.sh
 source activate.sh
 ```

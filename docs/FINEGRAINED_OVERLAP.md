@@ -5,7 +5,7 @@
 ![dist_gemm](../images/fine-grained-global.png)
 
 ## Algorithms
-For GEMM GEMMs + communication kernels, at the moment, we assume that:
+For GEMM + communication kernels, at the moment, we assume that:
 
 $C = A \times B$
 where,
