@@ -18,16 +18,10 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-m", type=int, default=8192, help="Number of rows in matrix A")
-    parser.add_argument(
-        "-n", type=int, default=8192, help="Number of columns in matrix B"
-    )
+    parser.add_argument("-n", type=int, default=8192, help="Number of columns in matrix B")
     parser.add_argument("-k", type=int, default=30720, help="Shared dimension")
-    parser.add_argument(
-        "-v", "--validate", action="store_true", help="Enable validation"
-    )
-    parser.add_argument(
-        "-b", "--benchmark", action="store_true", help="Enable benchmarking"
-    )
+    parser.add_argument("-v", "--validate", action="store_true", help="Enable validation")
+    parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking")
     parser.add_argument(
         "-d",
         "--datatype",
@@ -36,9 +30,7 @@ def parse_args():
         choices=["fp16", "fp32", "bf16"],
         help="Datatype",
     )
-    parser.add_argument(
-        "-o", "--output_file", type=str, default="log.json", help="Output file"
-    )
+    parser.add_argument("-o", "--output_file", type=str, default="log.json", help="Output file")
     return vars(parser.parse_args())
 
 
@@ -65,9 +57,7 @@ def main():
     json_writer = JSONWriter(args["output_file"])
     json_writer.add_field("world_size", world_size)
 
-    print(
-        f"Starting distributed GEMM on Rank {rank} of {world_size} on device cuda:{rank}"
-    )
+    print(f"Starting distributed GEMM on Rank {rank} of {world_size} on device cuda:{rank}")
 
     # Shared input
     A = torch.randn(m, k, device=f"cuda:{rank}", dtype=dtype)
@@ -83,9 +73,7 @@ def main():
     output = torch.empty_like(C_partial)  # Output buffer
 
     # Stack all ranks contribute partial to same slot
-    stacked = torch.zeros(
-        world_size, *C_partial.shape, device=f"cuda:{rank}", dtype=dtype
-    )
+    stacked = torch.zeros(world_size, *C_partial.shape, device=f"cuda:{rank}", dtype=dtype)
     stacked[rank].copy_(C_partial)
 
     args["n"] = cols_per_rank
@@ -136,9 +124,7 @@ def main():
         torch.cuda.nvtx.range_pop()
 
         for k in ["gemm", "communication"]:
-            ms = kernel_timing[k]["start_event"].elapsed_time(
-                kernel_timing[k]["end_event"]
-            )
+            ms = kernel_timing[k]["start_event"].elapsed_time(kernel_timing[k]["end_event"])
             kernel_timing[k]["ms"] += ms
 
     run_experiment()
