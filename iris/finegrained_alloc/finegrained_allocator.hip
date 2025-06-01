@@ -32,16 +32,7 @@ void* finegrained_hipMalloc(ssize_t size,
                             int device,
                             hipStream_t stream [[maybe_unused]]) {
   void* ptr;
-  // const auto flags = hipDeviceMallocFinegrained;
   const auto flags = hipDeviceMallocUncached;
-  //   std::cout << "Allocating " << size << " bytes on device " << device
-  //             << " with flags " << flags << std::endl;
-  //   if (flags == hipDeviceMallocUncached) {
-  //     std::cout << "Allocating uncached" << std::endl;
-  //   }
-  //   if (flags == hipDeviceMallocFinegrained) {
-  //     std::cout << "Allocating fine-grained" << std::endl;
-  //   }
 
   int current_device;
   hip_try(hipGetDevice(&current_device));
