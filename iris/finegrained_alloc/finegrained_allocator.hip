@@ -29,7 +29,7 @@ extern "C" {
 void* finegrained_hipMalloc(ssize_t size, int device,
                             hipStream_t stream [[maybe_unused]]) {
   void* ptr;
-  const auto flags = hipDeviceMallocFinegrained;
+  const auto flags = hipDeviceMallocUncached;
 
   int current_device;
   hip_try(hipGetDevice(&current_device));

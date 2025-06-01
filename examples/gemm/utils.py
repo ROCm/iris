@@ -13,6 +13,7 @@ ALL_REDUCE = tl.constexpr(2)
 ONE_SHOT = tl.constexpr(3)
 ONE_SHOT_V1 = tl.constexpr(4)
 ONE_SHOT_V2 = tl.constexpr(5)
+ALL_GATHER = tl.constexpr(6)
 
 
 class JSONWriter:

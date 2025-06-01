@@ -23,7 +23,7 @@ Where $B$ is partitioned *row-wise* and hence $A$ is partitioned column-wise so 
 2. GEMM + All scatter
 Where $B$ is partitioned  *column-wise* and hence each rank produces non-overlapping columns in the output $C$ matrix such that we only need all gather/scatter to broadcast the final result (left figure).
 
-![all-reduce](../images/all_scatter.png)
+![all-scatter](../images/all_scatter.png)
 
 You can run the example code by following these two steps:
 
@@ -86,7 +86,7 @@ options:
 
 ## Reference implementations
 
-There are two reference implementations (`all_gather.py` and `all_reduce.py`) that use RCCL inside the [reference](./reference/) directory. To run any of them,
+There are two reference implementations (`all_gather.py` and `all_reduce.py`) that use RCCL inside the [reference](../examples/gemm/reference/) directory. To run any of them,
 
 ```shell
 cd reference

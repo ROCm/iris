@@ -6,7 +6,7 @@ import os
 import argparse
 import json
 
-from utils import JSONWriter, ONE_SHOT, ALL_REDUCE, ALL_SCATTER, Timestamps, is_triton_interpret_set
+from utils import JSONWriter, ONE_SHOT, ALL_REDUCE, ALL_SCATTER, ALL_GATHER, Timestamps, is_triton_interpret_set
 
 import iris
 
@@ -14,6 +14,7 @@ from communication import (
     all_scatter_kernel,
     one_shot_kernel,
     all_reduce_kernel,
+    all_gather_kernel,
 )
 from matmul_wrapper import matmul
 from validation import validate_gemm
@@ -45,7 +46,7 @@ def parse_args():
         "--algorithm",
         type=str,
         default="all_reduce",
-        choices=["all_reduce", "all_scatter", "one_shot"],
+        choices=["all_reduce", "all_scatter", "all_gather", "one_shot"],
         help="Algorithm to use",
     )
     parser.add_argument(
@@ -68,7 +69,7 @@ def parse_args():
     parser.add_argument(
         "--COMMUNICATION_TILE_N",
         type=int,
-        default=128,
+        default=64,
         help="N tile size for reduction, scatter or one-shot",
     )
 
@@ -141,7 +142,7 @@ def main():
     json_writer.add_field("world_size", world_size)
 
     # Splitting
-    if args["algorithm"] == "all_scatter":
+    if args["algorithm"] == "all_scatter" or args["algorithm"] == "all_gather":
         args["n"] = args["n"] // world_size
         local_B = B[:, rank * args["n"] : (rank + 1) * args["n"]].clone()
         local_A = A
@@ -217,6 +218,8 @@ def main():
         COMMUNICATION_ALGORITHM = ALL_REDUCE
     elif args["algorithm"] == "all_scatter":
         COMMUNICATION_ALGORITHM = ALL_SCATTER
+    elif args["algorithm"] == "all_gather":
+        COMMUNICATION_ALGORITHM = ALL_GATHER
 
     # Timestamps
     timestamps = Timestamps(num_tiles=total_tiles)
@@ -339,6 +342,34 @@ def main():
                     )
                 elif args["algorithm"] == "one_shot":
                     ss = one_shot_kernel[comm_grid](
+                        local_C,
+                        global_C,
+                        tile_completed,
+                        args["m"],
+                        args["n"],
+                        local_C.stride(0),
+                        local_C.stride(1),
+                        C.stride(0),
+                        C.stride(1),
+                        args["BLK_M"],
+                        args["BLK_N"],
+                        args["gsize_m"],
+                        total_tiles,
+                        args["communication_block_size"],
+                        communication_sms,
+                        shmem.get_heap_bases(),
+                        rank,
+                        world_size,
+                        args["COMMUNICATION_TILE_M"],
+                        args["COMMUNICATION_TILE_N"],
+                        args["trace_tiles"],
+                        timestamps.comm_begin_timestamp,
+                        timestamps.comm_middle_min_timestamp,
+                        timestamps.comm_middle_max_timestamp,
+                        timestamps.comm_end_timestamp,
+                    )
+                elif args["algorithm"] == "all_gather":
+                    ss = all_gather_kernel[comm_grid](
                         local_C,
                         global_C,
                         tile_completed,

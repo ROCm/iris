@@ -1,7 +1,7 @@
 import triton
 import triton.language as tl
 from utils import read_realtime
-from utils import ALL_SCATTER, ALL_REDUCE, ONE_SHOT
+from utils import ALL_SCATTER, ALL_REDUCE, ONE_SHOT, ALL_GATHER
 
 import sys
 import os
@@ -123,7 +123,7 @@ def persistent_gemm(
         # set the flag for the consumer kernel
         tl.debug_barrier()
 
-        if COMMUNICATION_ALGORITHM == ONE_SHOT:
+        if COMMUNICATION_ALGORITHM == ONE_SHOT or COMMUNICATION_ALGORITHM == ALL_GATHER:
             for remote in range(world_size):
                 iris.atomic_add(
                     tile_completed + tile_id,

@@ -91,7 +91,7 @@ def extract_submask_and_offset(
 
 @triton.jit
 def all_reduce_kernel(
-    local_C_partial_ptr,
+    partial_c,
     c,
     tile_completed_ptr,
     M_local,
@@ -180,7 +180,7 @@ def all_reduce_kernel(
             )
 
             # Load data from the local partial result
-            data = tl.load(local_C_partial_ptr + sub_offset, mask=sub_mask)
+            data = tl.load(partial_c + sub_offset, mask=sub_mask)
 
             # Store data to the global result using atomic_add
             for remote_rank in range(world_size):
@@ -201,7 +201,7 @@ def all_reduce_kernel(
 
 @triton.jit
 def all_scatter_kernel(
-    local_C_partial_ptr,
+    partial_c,
     c,
     tile_completed_ptr,
     M_local,
@@ -291,7 +291,7 @@ def all_scatter_kernel(
             )
 
             # Load data from the local partial result
-            data = tl.load(local_C_partial_ptr + sub_offset, mask=sub_mask, cache_modifier=".cv")
+            data = tl.load(partial_c + sub_offset, mask=sub_mask, cache_modifier=".cv")
 
             # Translate to global
             sub_mask, global_offset = extract_submask_and_offset(
@@ -309,16 +309,152 @@ def all_scatter_kernel(
                 stride_cm_global,
                 stride_cn_global,
             )
-            # Store data to the global result using relaxed atomics
+
+            # Store data to the global result using puts
             for remote_rank in range(world_size):
-                iris.put(
-                    c + global_offset,
-                    data,
-                    cur_rank,
-                    remote_rank,
-                    heap_bases,
-                    mask=sub_mask,
+                if remote_rank == cur_rank:
+                    # For the current rank, we can use store
+                    tl.store(c + global_offset, data, mask=sub_mask)
+                else:
+                    iris.put(
+                        c + global_offset,
+                        data,
+                        cur_rank,
+                        remote_rank,
+                        heap_bases,
+                        mask=sub_mask,
+                    )
+
+        if COLLECT_TIMESTAMPS:
+            timestamp = read_realtime()
+            tl.atomic_max(end_timestamp_ptr + tile, timestamp)
+
+
+@triton.jit
+def all_gather_kernel(
+    partial_c,
+    c,
+    tile_completed_ptr,
+    M_local,
+    N_local,
+    stride_cm_local,
+    stride_cn_local,
+    stride_cm_global,
+    stride_cn_global,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M_global: tl.constexpr,
+    total_tiles: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    heap_bases: tl.tensor,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    GATHER_TILE_M: tl.constexpr = 128,
+    GATHER_TILE_N: tl.constexpr = 128,
+    COLLECT_TIMESTAMPS: tl.constexpr = False,
+    begin_timestamp_ptr: tl.tensor = None,
+    middle_min_timestamp_ptr: tl.tensor = None,
+    middle_max_timestamp_ptr: tl.tensor = None,
+    end_timestamp_ptr: tl.tensor = None,
+):
+    pid = tl.program_id(axis=0)
+    pid = (pid % 8) * (NUM_SMS // 8) + (pid // 8)
+
+    for tile in range(pid, total_tiles, NUM_SMS):
+        if COLLECT_TIMESTAMPS:
+            timestamp = read_realtime()
+            tl.atomic_min(begin_timestamp_ptr + tile, timestamp)
+
+        # Spin untill all ranks have produced the tile.
+        result = 0
+        while result < world_size:
+            compare = world_size
+            value = 0
+            result = iris.atomic_cas(
+                tile_completed_ptr + tile,
+                compare,
+                value,
+                cur_rank,
+                cur_rank,
+                heap_bases,
+                sem="acquire",
+                scope="sys",
+            )
+
+        if COLLECT_TIMESTAMPS:
+            timestamp = read_realtime()
+            tl.atomic_max(middle_max_timestamp_ptr + tile, timestamp)
+            tl.atomic_min(middle_min_timestamp_ptr + tile, timestamp)
+
+        # Consume the tile
+        rm, rn, mask, rm_start, rn_start = offset_for_tile(
+            tile, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M_global, M_local, N_local
+        )
+
+        # Calculate the number of sub-tiles in each dimension
+        num_sub_tiles_m = tl.cdiv(BLOCK_SIZE_M, GATHER_TILE_M)
+        num_sub_tiles_n = tl.cdiv(BLOCK_SIZE_N, GATHER_TILE_N)
+        total_sub_tiles = num_sub_tiles_m * num_sub_tiles_n
+
+        for remote_rank in range(world_size):
+            # Flattened loop over all sub-tiles, triton is
+            # better at handling flat loops instead of nested loops
+            for sub_tile_idx in range(0, total_sub_tiles):
+                # Calculate start_row and start_col for the current sub-tile
+                start_row = (sub_tile_idx // num_sub_tiles_n) * GATHER_TILE_M
+                start_col = (sub_tile_idx % num_sub_tiles_n) * GATHER_TILE_N
+
+                # Extract the sub-mask and sub-offset for the current sub-block
+                sub_mask, sub_offset = extract_submask_and_offset(
+                    rm,
+                    rn,
+                    mask,
+                    rm_start,
+                    rn_start,
+                    start_row,
+                    start_col,
+                    GATHER_TILE_M,
+                    GATHER_TILE_N,
+                    BLOCK_SIZE_M,
+                    BLOCK_SIZE_N,
+                    stride_cm_local,
+                    stride_cn_local,
                 )
+
+                # Load data from the local partial result.
+                if remote_rank == cur_rank:
+                    data = tl.load(partial_c + sub_offset, mask=sub_mask, cache_modifier=".cv")
+                # For other ranks, we need to get the data from the remote rank.
+                else:
+                    data = iris.get(
+                        partial_c + sub_offset,
+                        cur_rank,
+                        remote_rank,
+                        heap_bases,
+                        mask=sub_mask,
+                    )
+
+                # Translate to global
+                sub_global_mask, global_offset = extract_submask_and_offset(
+                    rm,
+                    rn + remote_rank * N_local,
+                    mask,
+                    rm_start,
+                    rn_start + remote_rank * N_local,
+                    start_row,
+                    start_col,
+                    GATHER_TILE_M,
+                    GATHER_TILE_N,
+                    BLOCK_SIZE_M,
+                    BLOCK_SIZE_N,
+                    stride_cm_global,
+                    stride_cn_global,
+                )
+
+                # Store data to the global result using store
+                tl.store(c + global_offset, data, mask=sub_global_mask)
+
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
             tl.atomic_max(end_timestamp_ptr + tile, timestamp)
