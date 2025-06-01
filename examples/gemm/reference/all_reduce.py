@@ -27,7 +27,7 @@ def parse_args():
         "--datatype",
         type=str,
         default="fp16",
-        choices=["fp16", "fp32", "int8", "bf16"],
+        choices=["fp16", "fp32", "bf16"],
         help="Datatype of computation",
     )
     parser.add_argument(
