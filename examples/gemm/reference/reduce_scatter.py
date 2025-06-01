@@ -5,13 +5,8 @@ import torch.distributed as dist
 import random
 import iris
 import argparse
-import os
-import sys
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
-
-from utils import JSONWriter
+from examples.gemm.utils import JSONWriter
 
 torch.manual_seed(123)
 random.seed(123)
