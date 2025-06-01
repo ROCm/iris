@@ -5,13 +5,8 @@ import torch.distributed as dist
 import random
 import iris
 import argparse
-import os
-import sys
 
-from utils import JSONWriter
-
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
+from ..utils import JSONWriter
 
 
 torch.manual_seed(123)
@@ -23,12 +18,13 @@ def parse_args():
         description="Parse matrix dimensions and configuration.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-m", type=int, default=4864, help="Number of rows in matrix A")
-    parser.add_argument("-n", type=int, default=4096, help="Number of columns in matrix B")
-    parser.add_argument("-k", type=int, default=8256, help="Common dimension between matrices A and B")
-    parser.add_argument("--validate", action="store_true", help="Enable validation mode")
-    parser.add_argument("--benchmark", action="store_true", help="Enable benchmarking mode")
+    parser.add_argument("-m", type=int, default=8192, help="Number of rows in matrix A")
+    parser.add_argument("-n", type=int, default=8192, help="Number of columns in matrix B")
+    parser.add_argument("-k", type=int, default=30720, help="Common dimension between matrices A and B")
+    parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
+    parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking mode")
     parser.add_argument(
+        "-d",
         "--datatype",
         type=str,
         default="fp16",
@@ -36,6 +32,7 @@ def parse_args():
         help="Datatype of computation",
     )
     parser.add_argument(
+        "-o",
         "--output_file",
         type=str,
         default="log.json",
@@ -68,8 +65,15 @@ def main():
 
     print(f"Starting distributed GEMM on Rank {rank} of {world_size} on device cuda:{rank}")
 
-    A_full = torch.randn(m, k, device=f"cuda:{rank}")
-    B_full = torch.randn(k, n, device=f"cuda:{rank}")
+    dtype_map = {
+        "fp16": torch.float16,
+        "fp32": torch.float32,
+        "bf16": torch.bfloat16,
+    }
+    dtype = dtype_map[args["datatype"]]
+
+    A_full = torch.randn(m, k, device=f"cuda:{rank}", dtype=dtype)
+    B_full = torch.randn(k, n, device=f"cuda:{rank}", dtype=dtype)
 
     # Split B column-wise
     cols_per_gpu = n // world_size
@@ -83,7 +87,7 @@ def main():
         json_writer.add_field(key, value)
 
     # Allocate tensor for gathered results
-    C_global = torch.empty(m, n, device=f"cuda:{rank}")
+    C_global = torch.empty(m, n, device=f"cuda:{rank}", dtype=dtype)
 
     kernel_timing = {
         "gemm": {

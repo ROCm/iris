@@ -5,14 +5,8 @@ import torch.distributed as dist
 import random
 import iris
 import argparse
-import os
-import sys
 
-from utils import JSONWriter
-
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
-
+from examples.gemm.utils import JSONWriter
 
 torch.manual_seed(123)
 random.seed(123)
@@ -23,12 +17,13 @@ def parse_args():
         description="Parse matrix dimensions and configuration.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-m", type=int, default=4864, help="Number of rows in matrix A")
-    parser.add_argument("-n", type=int, default=4096, help="Number of columns in matrix B")
-    parser.add_argument("-k", type=int, default=8256, help="Common dimension between matrices A and B")
-    parser.add_argument("--validate", action="store_true", help="Enable validation mode")
-    parser.add_argument("--benchmark", action="store_true", help="Enable benchmarking mode")
+    parser.add_argument("-m", type=int, default=8192, help="Number of rows in matrix A")
+    parser.add_argument("-n", type=int, default=8192, help="Number of columns in matrix B")
+    parser.add_argument("-k", type=int, default=30720, help="Common dimension between matrices A and B")
+    parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
+    parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking mode")
     parser.add_argument(
+        "-d",
         "--datatype",
         type=str,
         default="fp16",
@@ -36,6 +31,7 @@ def parse_args():
         help="Datatype of computation",
     )
     parser.add_argument(
+        "-o",
         "--output_file",
         type=str,
         default="log.json",
@@ -59,6 +55,13 @@ def main():
     world_size = dist.get_world_size()
     torch.cuda.set_device(rank)
 
+    dtype_map = {
+        "fp16": torch.float16,
+        "fp32": torch.float32,
+        "bf16": torch.bfloat16,
+    }
+    dtype = dtype_map[args["datatype"]]
+
     args["M"] = args["m"]
     args["N"] = args["n"]
     args["K"] = args["k"]
@@ -68,14 +71,14 @@ def main():
 
     print(f"Starting distributed GEMM on Rank {rank} of {world_size} on device cuda:{rank}")
 
-    A_full = torch.randn(m, k).cuda(rank)
-    B_full = torch.randn(k, n).cuda(rank)
+    A_full = torch.randn(m, k, device=f"cuda:{rank}", dtype=dtype)
+    B_full = torch.randn(k, n, device=f"cuda:{rank}", dtype=dtype)
     rows_per_gpu = k // world_size
     start_row = rank * rows_per_gpu
     end_row = start_row + rows_per_gpu
     B_local = B_full[start_row:end_row, :]
     A_local = A_full[:, start_row:end_row]
-    C_global = torch.zeros((m, n), device=f"cuda:{rank}")
+    C_global = torch.zeros((m, n), device=f"cuda:{rank}", dtype=dtype)
 
     args["k"] = args["k"] // world_size
 
@@ -141,12 +144,13 @@ def main():
     # Validation step
     if validate:
         C_full = A_full @ B_full
-        valid = torch.allclose(C_global, C_full, atol=1)
+        valid = torch.allclose(C_global, C_full, atol=2)
+        max_diff = torch.max(torch.abs(C_global - C_full))
         if valid:
             print(f"Rank {rank}: Validation passed! Distributed GEMM matches full GEMM.")
         else:
             print(f"Rank {rank}: Validation failed! Results do not match.")
-
+            print(f"Max difference: {max_diff}")
     dist.barrier()
 
     if benchmark:
