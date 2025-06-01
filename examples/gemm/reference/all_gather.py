@@ -6,7 +6,7 @@ import random
 import iris
 import argparse
 
-from ..utils import JSONWriter
+from examples.gemm.utils import JSONWriter
 
 
 torch.manual_seed(123)
