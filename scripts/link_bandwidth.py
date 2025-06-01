@@ -39,7 +39,7 @@ config = {
     "gemm_ms": 8.405209632146926,
     "gemm_experiments": 126,
     "communication_ms": 1.5411831916324676,
-    "communication_experiments": 126
+    "communication_experiments": 126,
 }
 
 # Calculate effective link bandwidth from communication time
