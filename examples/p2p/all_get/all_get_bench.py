@@ -1,10 +1,10 @@
 import argparse
-
 import torch
 import triton
 import triton.language as tl
 import random
 import numpy as np
+from tabulate import tabulate
 
 import iris
 
@@ -53,22 +53,61 @@ def all_get_kernel(
     # Guard for out-of-bounds accesses
     mask = offsets < buffer_size
 
-    # Initialize accumulator
-    data = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-
-    # Get chunk from source buffer
-    for source_rank in range(world_size):
-        if source_rank != cur_rank:  # Skip local HBM access
-            remote_data = iris.get(
-                source_buffer + offsets,
-                cur_rank,
-                source_rank,
-                heap_bases_ptr,
-                mask=mask,
-            )
-            data += remote_data
-
-    tl.store(target_buffer + offsets, data, mask=mask)
+    # Initialize accumulator in registers
+    if world_size == 1:
+        data = iris.get(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
+        tl.store(target_buffer + offsets, data, mask=mask)
+    elif world_size == 2:
+        data_0 = iris.get(
+            source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask
+        )
+        data_1 = iris.get(
+            source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask
+        )
+        sum = data_0 + data_1
+        tl.store(target_buffer + offsets, sum, mask=mask)
+    elif world_size == 4:
+        data_0 = iris.get(
+            source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask
+        )
+        data_1 = iris.get(
+            source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask
+        )
+        data_2 = iris.get(
+            source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask
+        )
+        data_3 = iris.get(
+            source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask
+        )
+        sum = data_0 + data_1 + data_2 + data_3
+        tl.store(target_buffer + offsets, sum, mask=mask)
+    else:
+        data_0 = iris.get(
+            source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask
+        )
+        data_1 = iris.get(
+            source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask
+        )
+        data_2 = iris.get(
+            source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask
+        )
+        data_3 = iris.get(
+            source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask
+        )
+        data_4 = iris.get(
+            source_buffer + offsets, cur_rank, 4, heap_bases_ptr, mask=mask
+        )
+        data_5 = iris.get(
+            source_buffer + offsets, cur_rank, 5, heap_bases_ptr, mask=mask
+        )
+        data_6 = iris.get(
+            source_buffer + offsets, cur_rank, 6, heap_bases_ptr, mask=mask
+        )
+        data_7 = iris.get(
+            source_buffer + offsets, cur_rank, 7, heap_bases_ptr, mask=mask
+        )
+        sum = data_0 + data_1 + data_2 + data_3 + data_4 + data_5 + data_6 + data_7
+        tl.store(target_buffer + offsets, sum, mask=mask)
 
 
 def torch_dtype_from_str(datatype: str) -> torch.dtype:
@@ -94,7 +133,7 @@ def parse_args():
         "-t",
         "--datatype",
         type=str,
-        default="fp32",
+        default="fp16",
         choices=["fp16", "fp32", "int8", "bf16"],
         help="Datatype of computation",
     )
@@ -119,13 +158,18 @@ def parse_args():
     return vars(parser.parse_args())
 
 
+wrote_asm = False
+
+
 def run_experiment(shmem, args, buffer):
     dtype = torch_dtype_from_str(args["datatype"])
     cur_rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
     if args["verbose"]:
-        shmem.log(f"Measuring bandwidth for rank {cur_rank} and buffer size {buffer.numel()} elements ({buffer.numel() * torch.tensor([], dtype=dtype).element_size() / 2**30:.2f} GiB)...")
+        shmem.log(
+            f"Measuring bandwidth for rank {cur_rank} and buffer size {buffer.numel()} elements ({buffer.numel() * torch.tensor([], dtype=dtype).element_size() / 2**30:.2f} GiB)..."
+        )
     n_elements = buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
@@ -134,7 +178,7 @@ def run_experiment(shmem, args, buffer):
     target_buffer = shmem.zeros_like(buffer)
 
     def run_all_get():
-        all_get_kernel[grid](
+        return all_get_kernel[grid](
             source_buffer,
             target_buffer,
             cur_rank,
@@ -152,7 +196,59 @@ def run_experiment(shmem, args, buffer):
         )
 
     # Warmup both kernels
-    run_all_get()
+    all_get_code = run_all_get()
+
+    if cur_rank == 0:
+        global wrote_asm
+        if not wrote_asm:
+            comm_registers = all_get_code.n_regs
+            comm_spills = all_get_code.n_spills
+            print("Writing assembly to files")
+            print(f"Registers: {comm_registers}, Spills: {comm_spills}")
+            wrote_asm = True
+            try:
+                import os
+
+                script_name = os.path.splitext(os.path.basename(__file__))[0]
+                dir_name = os.path.join("asm", script_name, args["datatype"])
+                suffix = "_static_range"
+                # suffix = "_range"
+
+                os.makedirs(dir_name, exist_ok=True)
+
+                filename = script_name + suffix
+                with open(f"{dir_name}/{filename}.amdgcn", "w") as f:
+                    f.write(all_get_code.asm["amdgcn"])
+                with open(f"{dir_name}/{filename}.ttgir", "w") as f:
+                    f.write(all_get_code.asm["ttgir"])
+
+                filename = script_name + "_cleaned" + suffix
+                with open(f"{dir_name}/{filename}.amdgcn", "w") as f:
+                    # remove any line with . in it
+                    f.write(
+                        "\n".join(
+                            [
+                                line
+                                for line in all_get_code.asm["amdgcn"].split("\n")
+                                if "." not in line
+                            ]
+                        )
+                    )
+                with open(f"{dir_name}/{filename}.ttgir", "w") as f:
+                    f.write(
+                        "\n".join(
+                            [
+                                line
+                                for line in all_get_code.asm["ttgir"].split("\n")
+                                if "." not in line
+                            ]
+                        )
+                    )
+
+            except Exception as e:
+                print(f"Error writing asm to file: {e}")
+                pass
+
     run_store_only()
     shmem.barrier()
 
@@ -166,7 +262,9 @@ def run_experiment(shmem, args, buffer):
     net_ms = total_ms - store_ms
 
     if args["verbose"]:
-        shmem.log(f"Total time: {total_ms:.4f} ms, Store overhead: {store_ms:.4f} ms, Net all_get time: {net_ms:.4f} ms")
+        shmem.log(
+            f"Total time: {total_ms:.4f} ms, Store overhead: {store_ms:.4f} ms, Net all_get time: {net_ms:.4f} ms"
+        )
 
     triton_sec = net_ms * 1e-3
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
@@ -213,19 +311,22 @@ def print_bandwidth_matrix(
     bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size"
 ):
     num_ranks = len(bandwidth_data)
-    col_width = 12  # Adjust for alignment
 
-    print(f"\n{label}")
-    header = "Buffer Size".ljust(col_width)
-    for rank in range(num_ranks):
-        header += f"GPU {rank:02d}".rjust(col_width)
-    print(header)
+    # Prepare headers
+    headers = ["Size (MiB)", "log2(bytes)"] + [f"GPU {i:02d}" for i in range(num_ranks)]
 
+    # Prepare rows
+    rows = []
     for i, size in enumerate(buffer_sizes):
-        row = f"{size/1024/1024:.1f}MB".ljust(col_width)
-        for rank in range(num_ranks):
-            row += f"{bandwidth_data[rank][i]:12.2f}"
-        print(row)
+        row = [
+            f"{size/1024/1024:.1f}",
+            f"{int(np.log2(size))}",
+        ] + [f"{bandwidth_data[rank][i]:.2f}" for rank in range(num_ranks)]
+        rows.append(row)
+
+    # Print table in markdown format
+    print(f"\n{label}")
+    print(tabulate(rows, headers=headers, tablefmt="pipe", floatfmt=".2f"))
 
 
 def main():
@@ -266,7 +367,9 @@ def main():
     # Gather all bandwidth data to rank 0
     for rank in range(num_ranks):
         for buffer_idx in range(len(buffer_sizes)):
-            bandwidth_data[rank][buffer_idx] = shmem.broadcast(bandwidth_data[rank][buffer_idx], rank)
+            bandwidth_data[rank][buffer_idx] = shmem.broadcast(
+                bandwidth_data[rank][buffer_idx], rank
+            )
         shmem.barrier()
 
     if shmem.get_rank() == 0:
