@@ -16,10 +16,10 @@ def producer_kernel(
     target_buffer,  # tl.tensor: pointer to target data
     flag,  # tl.tensor: pointer to flags
     buffer_size,  # int32: total number of elements
-    producer_rank: tl.constexpr ,
+    producer_rank: tl.constexpr,
     consumer_rank: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    heap_bases_ptr: tl.tensor # tl.tensor: pointer to heap bases pointers
+    heap_bases_ptr: tl.tensor,  # tl.tensor: pointer to heap bases pointers
 ):
     pid = tl.program_id(0)
 
@@ -31,9 +31,7 @@ def producer_kernel(
     mask = offsets < buffer_size
 
     # Load chunk from source buffer
-    values = iris.get(
-        source_buffer + offsets, producer_rank, producer_rank, heap_bases_ptr, mask=mask
-    )
+    values = iris.get(source_buffer + offsets, producer_rank, producer_rank, heap_bases_ptr, mask=mask)
 
     # Store chunk to target buffer
     iris.put(
@@ -56,7 +54,7 @@ def consumer_kernel(
     buffer_size,  # int32: total number of elements
     consumer_rank: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    heap_bases_ptr: tl.tensor # tl.tensor: pointer to heap bases pointers
+    heap_bases_ptr: tl.tensor,  # tl.tensor: pointer to heap bases pointers
 ):
     pid = tl.program_id(0)
 
@@ -70,9 +68,7 @@ def consumer_kernel(
         done = tl.load(flag + pid)
 
     # Read from the target buffer (written by producer)
-    values = iris.get(
-        buffer + offsets, consumer_rank, consumer_rank, heap_bases_ptr, mask=mask
-    )
+    values = iris.get(buffer + offsets, consumer_rank, consumer_rank, heap_bases_ptr, mask=mask)
 
     # Do something with values...
     # (Here you might write to output, do computation, etc.)
@@ -123,14 +119,10 @@ def parse_args():
         choices=["fp16", "fp32", "int8", "bf16"],
         help="Datatype of computation",
     )
-    parser.add_argument(
-        "-s", "--buffer_size", type=int, default=4096, help="Buffer Size"
-    )
+    parser.add_argument("-s", "--buffer_size", type=int, default=4096, help="Buffer Size")
     parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
 
-    parser.add_argument(
-        "-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size"
-    )
+    parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
 
     return vars(parser.parse_args())
 
@@ -147,7 +139,6 @@ def main():
     source_buffer = shmem.zeros(args["buffer_size"], device="cuda", dtype=dtype)
     destination_buffer = shmem.randn(args["buffer_size"], device="cuda", dtype=dtype)
 
-
     if world_size != 2:
         raise ValueError("This example requires exactly two processes.")
 
@@ -157,7 +148,7 @@ def main():
     n_elements = source_buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
     num_blocks = triton.cdiv(n_elements, args["block_size"])
-    
+
     # Allocate flags on the symmetric heap
     flags = shmem.zeros((num_blocks,), device="cuda", dtype=torch.int32)
 
@@ -171,22 +162,17 @@ def main():
             producer_rank,
             consumer_rank,
             args["block_size"],
-            shmem.get_heap_bases()
+            shmem.get_heap_bases(),
         )
     else:
         shmem.log(f"Rank {cur_rank} is receiving data from rank {producer_rank}.")
         kk = consumer_kernel[grid](
-            destination_buffer,
-            flags,
-            n_elements,
-            consumer_rank,
-            args["block_size"],
-            shmem.get_heap_bases()
+            destination_buffer, flags, n_elements, consumer_rank, args["block_size"], shmem.get_heap_bases()
         )
     shmem.barrier()
     shmem.log(f"Rank {cur_rank} has finished sending/receiving data.")
-    shmem.log(f"Validating output...")
-    
+    shmem.log("Validating output...")
+
     success = True
     if cur_rank == consumer_rank:
         expected = source_buffer * 2
@@ -203,12 +189,12 @@ def main():
                 shmem.log(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
                 success = False
                 break
-            
+
         if success:
             shmem.log("Validation successful.")
         else:
             shmem.log("Validation failed.")
-    
+
     shmem.barrier()
 
 

@@ -1,1 +1,0 @@
-hipcc -shared -fPIC -o libhip_shim.so hip_shim.cpp -std=c++17

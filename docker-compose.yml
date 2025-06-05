@@ -1,0 +1,31 @@
+services:
+  iris-dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: iris-dev:latest
+    container_name: iris-dev
+    network_mode: "host"
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    shm_size: "16g"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      stack:
+        soft: 67108864
+        hard: 67108864
+    volumes:
+      - ${HOME}:${HOME}     # Mount home directory
+      - ./:/workspace/iris  # Mount iris directory to /workspace/iris
+    working_dir: /workspace
+    tty: true
+    stdin_open: true

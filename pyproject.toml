@@ -1,3 +1,13 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "." }
+
+[tool.setuptools.packages.find]
+include = ["iris"]
+
 [project]
 name = "Iris"
 version = "0.1.0"
@@ -14,6 +24,8 @@ requires-python = ">=3.8"
 dependencies = [
     "numpy",
     "requests",
+    "mpi4py",
+    "ruff"
 ]
 
 [project.optional-dependencies]
@@ -23,15 +35,16 @@ dev = [
     "mypy",
 ]
 
-[tool.setuptools]
-include-package-data = true
+[tool.ruff]
+line-length = 120
+exclude = [
+    "iris/finegrained_alloc/**",  # explicitly exclude all contents
+    "**/*.ipynb"                  # match notebooks anywhere
+]
 
-[tool.setuptools.packages.find]
-where = ["."]
+[tool.ruff.lint]
+select = ["E", "F", "W"] 
+ignore = ["E501", "E701", "E731", "E741", "F841", "F401", "F811"]
 
-
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-
+[tool.ruff.format]
+quote-style = "double"

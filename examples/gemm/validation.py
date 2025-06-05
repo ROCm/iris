@@ -1,5 +1,6 @@
 import torch
 
+
 def validate_gemm(A, B, C, shmem):
     expected = A @ B
     diff_mask = ~torch.isclose(C, expected, atol=1)

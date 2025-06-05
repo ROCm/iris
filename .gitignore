@@ -18,3 +18,5 @@ omni*.pdf
 slurm*.out
 
 *.egg-info
+
+examples/gemm/results/*
