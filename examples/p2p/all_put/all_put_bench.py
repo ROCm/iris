@@ -71,23 +71,13 @@ def parse_args():
         choices=["fp16", "fp32", "int8", "bf16"],
         help="Datatype of computation",
     )
-    parser.add_argument(
-        "-m", "--buffer_size_min", type=int, default=1 << 20, help="Minimum buffer size"
-    )
-    parser.add_argument(
-        "-M", "--buffer_size_max", type=int, default=1 << 32, help="Maximum buffer size"
-    )
+    parser.add_argument("-m", "--buffer_size_min", type=int, default=1 << 20, help="Minimum buffer size")
+    parser.add_argument("-M", "--buffer_size_max", type=int, default=1 << 32, help="Maximum buffer size")
     parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Enable verbose output"
-    )
-    parser.add_argument(
-        "-d", "--validate", action="store_true", help="Enable validation output"
-    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("-d", "--validate", action="store_true", help="Enable validation output")
 
-    parser.add_argument(
-        "-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size"
-    )
+    parser.add_argument("-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size")
 
     return vars(parser.parse_args())
 
@@ -98,7 +88,9 @@ def run_experiment(shmem, args, buffer):
     world_size = shmem.get_num_ranks()
 
     if args["verbose"]:
-        shmem.log(f"Measuring bandwidth for rank {cur_rank} and buffer size {buffer.numel()} elements ({buffer.numel() * torch.tensor([], dtype=dtype).element_size() / 2**30:.2f} GiB)...")
+        shmem.log(
+            f"Measuring bandwidth for rank {cur_rank} and buffer size {buffer.numel()} elements ({buffer.numel() * torch.tensor([], dtype=dtype).element_size() / 2**30:.2f} GiB)..."
+        )
     n_elements = buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
@@ -131,7 +123,7 @@ def run_experiment(shmem, args, buffer):
     success = True
     if args["validate"]:
         if args["verbose"]:
-            shmem.log(f"Validating output...")
+            shmem.log("Validating output...")
 
         expected = torch.arange(n_elements, dtype=dtype, device="cuda")
         diff_mask = ~torch.isclose(buffer, expected, atol=1)
@@ -144,9 +136,7 @@ def run_experiment(shmem, args, buffer):
                 idx = tuple(idx.tolist())
                 computed_val = buffer[idx]
                 expected_val = expected[idx]
-                shmem.log(
-                    f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}"
-                )
+                shmem.log(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
                 success = False
                 break
 
@@ -159,9 +149,7 @@ def run_experiment(shmem, args, buffer):
     return bandwidth_gbps
 
 
-def print_bandwidth_matrix(
-    bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size"
-):
+def print_bandwidth_matrix(bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size"):
     num_ranks = len(bandwidth_data)
     col_width = 12  # Adjust for alignment
 
@@ -172,7 +160,7 @@ def print_bandwidth_matrix(
     print(header)
 
     for i, size in enumerate(buffer_sizes):
-        row = f"{size/1024/1024:.1f}MB".ljust(col_width)
+        row = f"{size / 1024 / 1024:.1f}MB".ljust(col_width)
         for rank in range(num_ranks):
             row += f"{bandwidth_data[rank][i]:12.2f}"
         print(row)

@@ -125,12 +125,9 @@ def run_experiment(shmem, args, source_rank, destination_rank, buffer):
         bandwidth_gbps = total_bytes / triton_sec / 2**30
         if args["verbose"]:
             shmem.log(f"Copied {total_bytes / 2**30:.2f} GiB in {triton_sec:.4f} seconds")
-            shmem.log(
-                f"Bandwidth between {source_rank} and {destination_rank} is {bandwidth_gbps:.4f} GiB/s"
-            )
+            shmem.log(f"Bandwidth between {source_rank} and {destination_rank} is {bandwidth_gbps:.4f} GiB/s")
     shmem.barrier()
     bandwidth_gbps = shmem.broadcast(bandwidth_gbps, source_rank)
-
 
     success = True
     if args["validate"] and cur_rank == destination_rank:
@@ -160,6 +157,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, buffer):
     shmem.barrier()
     return bandwidth_gbps
 
+
 def print_bandwidth_matrix(matrix, label="Unidirectional PUT bandwidth GiB/s [Remote write]"):
     num_ranks = matrix.shape[0]
     col_width = 10  # Adjust for alignment
@@ -186,9 +184,7 @@ def main():
 
     dtype = torch_dtype_from_str(args["datatype"])
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-    buffer = shmem.zeros(
-        args["buffer_size"] // element_size_bytes, device="cuda", dtype=dtype
-    )
+    buffer = shmem.zeros(args["buffer_size"] // element_size_bytes, device="cuda", dtype=dtype)
 
     for source_rank in range(num_ranks):
         for destination_rank in range(num_ranks):

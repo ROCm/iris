@@ -43,6 +43,7 @@ def get_kernel(
     # Store data to result buffer
     tl.store(result_buffer + offsets, result, mask=mask)
 
+
 @triton.jit
 def store_kernel(
     result_buffer,  # tl.tensor: pointer to result data
@@ -54,6 +55,7 @@ def store_kernel(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < buffer_size
     tl.store(result_buffer + offsets, 0, mask=mask)
+
 
 def torch_dtype_from_str(datatype: str) -> torch.dtype:
     dtype_map = {
@@ -82,16 +84,12 @@ def parse_args():
         choices=["fp16", "fp32", "int8", "bf16"],
         help="Datatype of computation",
     )
-    parser.add_argument(
-        "-z", "--buffer_size", type=int, default=1 << 32, help="Buffer Size"
-    )
+    parser.add_argument("-z", "--buffer_size", type=int, default=1 << 32, help="Buffer Size")
     parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-d", "--validate", action="store_true", help="Enable validation output")
 
-    parser.add_argument(
-        "-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size"
-    )
+    parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
 
     return vars(parser.parse_args())
 
@@ -111,9 +109,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
         )
     if cur_rank == 0:
         if args["verbose"]:
-            shmem.log(
-            f"Measuring bandwidth between the ranks {source_rank} and {destination_rank}..."
-        )
+            shmem.log(f"Measuring bandwidth between the ranks {source_rank} and {destination_rank}...")
     n_elements = source_buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
@@ -153,16 +149,14 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
         bandwidth_gbps = total_bytes / triton_sec / 2**30
         if args["verbose"]:
             shmem.log(f"Copied {total_bytes / 2**30:.2f} GiB in {triton_sec:.4f} seconds")
-            shmem.log(
-                f"Bandwidth between {source_rank} and {destination_rank} is {bandwidth_gbps:.4f} GiB/s"
-            )
+            shmem.log(f"Bandwidth between {source_rank} and {destination_rank} is {bandwidth_gbps:.4f} GiB/s")
     shmem.barrier()
     bandwidth_gbps = shmem.broadcast(bandwidth_gbps, source_rank)
 
     success = True
     if args["validate"] and cur_rank == destination_rank:
         if args["verbose"]:
-            shmem.log(f"Validating output...")
+            shmem.log("Validating output...")
 
         expected = torch.arange(n_elements, dtype=dtype, device="cuda")
         diff_mask = ~torch.isclose(result_buffer, expected, atol=1)
@@ -175,9 +169,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
                 idx = tuple(idx.tolist())
                 computed_val = result_buffer[idx]
                 expected_val = expected[idx]
-                shmem.log(
-                    f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}"
-                )
+                shmem.log(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
                 success = False
                 break
 
@@ -188,6 +180,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
 
     shmem.barrier()
     return bandwidth_gbps
+
 
 def print_bandwidth_matrix(matrix, label="Unidirectional GET bandwidth GiB/s [Remote read]"):
     num_ranks = matrix.shape[0]
@@ -206,7 +199,6 @@ def print_bandwidth_matrix(matrix, label="Unidirectional GET bandwidth GiB/s [Re
         print(row)
 
 
-
 def main():
     args = parse_args()
 
@@ -216,9 +208,7 @@ def main():
 
     dtype = torch_dtype_from_str(args["datatype"])
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-    source_buffer = shmem.arange(
-        args["buffer_size"] // element_size_bytes, device="cuda", dtype=dtype
-    )
+    source_buffer = shmem.arange(args["buffer_size"] // element_size_bytes, device="cuda", dtype=dtype)
     result_buffer = shmem.zeros_like(source_buffer)
 
     for source_rank in range(num_ranks):
@@ -229,6 +219,7 @@ def main():
 
     if shmem.get_rank() == 0:
         print_bandwidth_matrix(bandwidth_matrix)
+
 
 if __name__ == "__main__":
     main()

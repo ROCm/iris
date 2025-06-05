@@ -58,54 +58,26 @@ def all_get_kernel(
         data = iris.get(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
         tl.store(target_buffer + offsets, data, mask=mask)
     elif world_size == 2:
-        data_0 = iris.get(
-            source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask
-        )
-        data_1 = iris.get(
-            source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask
-        )
+        data_0 = iris.get(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
+        data_1 = iris.get(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
         sum = data_0 + data_1
         tl.store(target_buffer + offsets, sum, mask=mask)
     elif world_size == 4:
-        data_0 = iris.get(
-            source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask
-        )
-        data_1 = iris.get(
-            source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask
-        )
-        data_2 = iris.get(
-            source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask
-        )
-        data_3 = iris.get(
-            source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask
-        )
+        data_0 = iris.get(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
+        data_1 = iris.get(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
+        data_2 = iris.get(source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask)
+        data_3 = iris.get(source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask)
         sum = data_0 + data_1 + data_2 + data_3
         tl.store(target_buffer + offsets, sum, mask=mask)
     else:
-        data_0 = iris.get(
-            source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask
-        )
-        data_1 = iris.get(
-            source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask
-        )
-        data_2 = iris.get(
-            source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask
-        )
-        data_3 = iris.get(
-            source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask
-        )
-        data_4 = iris.get(
-            source_buffer + offsets, cur_rank, 4, heap_bases_ptr, mask=mask
-        )
-        data_5 = iris.get(
-            source_buffer + offsets, cur_rank, 5, heap_bases_ptr, mask=mask
-        )
-        data_6 = iris.get(
-            source_buffer + offsets, cur_rank, 6, heap_bases_ptr, mask=mask
-        )
-        data_7 = iris.get(
-            source_buffer + offsets, cur_rank, 7, heap_bases_ptr, mask=mask
-        )
+        data_0 = iris.get(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
+        data_1 = iris.get(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
+        data_2 = iris.get(source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask)
+        data_3 = iris.get(source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask)
+        data_4 = iris.get(source_buffer + offsets, cur_rank, 4, heap_bases_ptr, mask=mask)
+        data_5 = iris.get(source_buffer + offsets, cur_rank, 5, heap_bases_ptr, mask=mask)
+        data_6 = iris.get(source_buffer + offsets, cur_rank, 6, heap_bases_ptr, mask=mask)
+        data_7 = iris.get(source_buffer + offsets, cur_rank, 7, heap_bases_ptr, mask=mask)
         sum = data_0 + data_1 + data_2 + data_3 + data_4 + data_5 + data_6 + data_7
         tl.store(target_buffer + offsets, sum, mask=mask)
 
@@ -137,23 +109,13 @@ def parse_args():
         choices=["fp16", "fp32", "int8", "bf16"],
         help="Datatype of computation",
     )
-    parser.add_argument(
-        "-m", "--buffer_size_min", type=int, default=1 << 20, help="Minimum buffer size"
-    )
-    parser.add_argument(
-        "-M", "--buffer_size_max", type=int, default=1 << 32, help="Maximum buffer size"
-    )
+    parser.add_argument("-m", "--buffer_size_min", type=int, default=1 << 20, help="Minimum buffer size")
+    parser.add_argument("-M", "--buffer_size_max", type=int, default=1 << 32, help="Maximum buffer size")
     parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Enable verbose output"
-    )
-    parser.add_argument(
-        "-d", "--validate", action="store_true", help="Enable validation output"
-    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("-d", "--validate", action="store_true", help="Enable validation output")
 
-    parser.add_argument(
-        "-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size"
-    )
+    parser.add_argument("-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size")
 
     return vars(parser.parse_args())
 
@@ -225,25 +187,9 @@ def run_experiment(shmem, args, buffer):
                 filename = script_name + "_cleaned" + suffix
                 with open(f"{dir_name}/{filename}.amdgcn", "w") as f:
                     # remove any line with . in it
-                    f.write(
-                        "\n".join(
-                            [
-                                line
-                                for line in all_get_code.asm["amdgcn"].split("\n")
-                                if "." not in line
-                            ]
-                        )
-                    )
+                    f.write("\n".join([line for line in all_get_code.asm["amdgcn"].split("\n") if "." not in line]))
                 with open(f"{dir_name}/{filename}.ttgir", "w") as f:
-                    f.write(
-                        "\n".join(
-                            [
-                                line
-                                for line in all_get_code.asm["ttgir"].split("\n")
-                                if "." not in line
-                            ]
-                        )
-                    )
+                    f.write("\n".join([line for line in all_get_code.asm["ttgir"].split("\n") if "." not in line]))
 
             except Exception as e:
                 print(f"Error writing asm to file: {e}")
@@ -279,7 +225,7 @@ def run_experiment(shmem, args, buffer):
     success = True
     if args["validate"]:
         if args["verbose"]:
-            shmem.log(f"Validating output...")
+            shmem.log("Validating output...")
 
         expected = torch.arange(n_elements, dtype=dtype, device="cuda")
         diff_mask = ~torch.isclose(target_buffer, expected, atol=1)
@@ -292,9 +238,7 @@ def run_experiment(shmem, args, buffer):
                 idx = tuple(idx.tolist())
                 computed_val = target_buffer[idx]
                 expected_val = expected[idx]
-                shmem.log(
-                    f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}"
-                )
+                shmem.log(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
                 success = False
                 break
 
@@ -307,9 +251,7 @@ def run_experiment(shmem, args, buffer):
     return bandwidth_gbps
 
 
-def print_bandwidth_matrix(
-    bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size"
-):
+def print_bandwidth_matrix(bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size"):
     num_ranks = len(bandwidth_data)
 
     # Prepare headers
@@ -319,7 +261,7 @@ def print_bandwidth_matrix(
     rows = []
     for i, size in enumerate(buffer_sizes):
         row = [
-            f"{size/1024/1024:.1f}",
+            f"{size / 1024 / 1024:.1f}",
             f"{int(np.log2(size))}",
         ] + [f"{bandwidth_data[rank][i]:.2f}" for rank in range(num_ranks)]
         rows.append(row)
@@ -367,9 +309,7 @@ def main():
     # Gather all bandwidth data to rank 0
     for rank in range(num_ranks):
         for buffer_idx in range(len(buffer_sizes)):
-            bandwidth_data[rank][buffer_idx] = shmem.broadcast(
-                bandwidth_data[rank][buffer_idx], rank
-            )
+            bandwidth_data[rank][buffer_idx] = shmem.broadcast(bandwidth_data[rank][buffer_idx], rank)
         shmem.barrier()
 
     if shmem.get_rank() == 0:
