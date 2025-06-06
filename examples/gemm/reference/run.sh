@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 
 pushd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" > /dev/null || exit 1
 
@@ -36,4 +39,3 @@ echo "Running '$COLLECTIVE' with $NUM_GPUS GPUs..."
 python -m torch.distributed.run --nproc_per_node=${NUM_GPUS} "${COLLECTIVE}.py"
 
 popd > /dev/null || exit 1
-

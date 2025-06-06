@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 
 # python_file=examples/gemm/reference/all_scatter.py
 # python_file=examples/gemm/reference/all_gather.py

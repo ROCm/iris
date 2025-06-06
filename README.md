@@ -1,3 +1,8 @@
+<!--
+SPDX-License-Identifier: MIT
+Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+-->
+
 # Iris: First-Class Multi-GPU Programming Experience in Triton
 
 Iris is a Triton-based framework for Remote Direct Memory Access (RDMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton’s programmability and performance.
