@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 FROM rocm/pytorch:rocm6.3.1_ubuntu22.04_py3.10_pytorch
 
 # Use bash shell for RUN commands
