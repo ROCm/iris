@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
@@ -38,7 +40,7 @@ def store_kernel(
 
 
 @triton.jit
-def all_get_kernel(
+def all_read_kernel(
     source_buffer,  # tl.tensor: pointer to source data
     target_buffer,  # tl.tensor: pointer to target data
     cur_rank: tl.constexpr,
@@ -119,11 +121,8 @@ def parse_args():
     parser.add_argument("-d", "--validate", action="store_true", help="Enable validation output")
 
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size")
-
+    parser.add_argument("-x", "--num_experiments", type=int, default=1, help="Number of experiments")
     return vars(parser.parse_args())
-
-
-wrote_asm = False
 
 
 def run_experiment(shmem, args, buffer):
@@ -143,7 +142,7 @@ def run_experiment(shmem, args, buffer):
     target_buffer = shmem.zeros_like(buffer)
 
     def run_all_load():
-        return all_get_kernel[grid](
+        return all_read_kernel[grid](
             source_buffer,
             target_buffer,
             cur_rank,
@@ -161,51 +160,26 @@ def run_experiment(shmem, args, buffer):
         )
 
     # Warmup both kernels
-    all_get_code = run_all_load()
-
-    if cur_rank == 0:
-        global wrote_asm
-        if not wrote_asm:
-            comm_registers = all_get_code.n_regs
-            comm_spills = all_get_code.n_spills
-            print("Writing assembly to files")
-            print(f"Registers: {comm_registers}, Spills: {comm_spills}")
-            wrote_asm = True
-            try:
-                import os
-
-                script_name = os.path.splitext(os.path.basename(__file__))[0]
-                dir_name = os.path.join("asm", script_name, args["datatype"])
-                suffix = "_static_range"
-                # suffix = "_range"
-
-                os.makedirs(dir_name, exist_ok=True)
-
-                filename = script_name + suffix
-                with open(f"{dir_name}/{filename}.amdgcn", "w") as f:
-                    f.write(all_get_code.asm["amdgcn"])
-                with open(f"{dir_name}/{filename}.ttgir", "w") as f:
-                    f.write(all_get_code.asm["ttgir"])
-
-                filename = script_name + "_cleaned" + suffix
-                with open(f"{dir_name}/{filename}.amdgcn", "w") as f:
-                    # remove any line with . in it
-                    f.write("\n".join([line for line in all_get_code.asm["amdgcn"].split("\n") if "." not in line]))
-                with open(f"{dir_name}/{filename}.ttgir", "w") as f:
-                    f.write("\n".join([line for line in all_get_code.asm["ttgir"].split("\n") if "." not in line]))
-
-            except Exception as e:
-                print(f"Error writing asm to file: {e}")
-                pass
+    all_read_code = run_all_load()
 
     run_store_only()
     shmem.barrier()
 
     # Measure all_get + store
-    total_ms = iris.do_bench(run_all_get, shmem.barrier)
+    total_ms = iris.do_bench(
+        run_all_load,
+        shmem.barrier,
+        n_warmup=args["num_experiments"],
+        n_repeat=args["num_experiments"],
+    )
 
     # Measure store overhead
-    store_ms = iris.do_bench(run_store_only, shmem.barrier)
+    store_ms = iris.do_bench(
+        run_store_only,
+        shmem.barrier,
+        n_warmup=args["num_experiments"],
+        n_repeat=args["num_experiments"],
+    )
 
     # Net time for just the all_get operations
     net_ms = total_ms - store_ms

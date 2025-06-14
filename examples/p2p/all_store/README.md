@@ -3,14 +3,14 @@ SPDX-License-Identifier: MIT
 Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 -->
 
-# All-Put benchmark
+# All-Store benchmark
 
-All-Put benchmark using Iris.
+All-Store benchmark using Iris.
 
 ## Usage
 
 ```terminal
-mpirun -np 8 python examples/p2p/all_put/all_put_bench.py
+mpirun -np 8 python examples/p2p/all_store/all_store_bench.py
 ```
 On an MI300X, this example will run on 8 GPUs. It prints:
 

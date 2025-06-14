@@ -3,18 +3,18 @@ SPDX-License-Identifier: MIT
 Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 -->
 
-# Put benchmark
+# Store benchmark
 
-Put benchmark using Iris.
+Store benchmark using Iris.
 
 ## Usage
 
 ```terminal
-mpirun -np 8 python examples/p2p/put/put_bench.py
+mpirun -np 8 python examples/p2p/store/store_bench.py
 ```
 On an MI300X, this example will run on 8 GPUs. It prints:
 ```terminal
-Unidirectional PUT bandwidth GiB/s [Remote write]
+Unidirectional STORE bandwidth GiB/s [Remote write]
  SRC\DST      GPU 00    GPU 01    GPU 02    GPU 03    GPU 04    GPU 05    GPU 06    GPU 07
 GPU 00  ->   3316.50     45.95     45.60     45.92     45.10     45.32     45.55     45.82
 GPU 01  ->     46.03   3296.77     46.07     45.29     44.98     45.15     45.63     45.59

@@ -3,14 +3,14 @@ SPDX-License-Identifier: MIT
 Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 -->
 
-# All-Get benchmark
+# All-Load benchmark
 
-All-Get benchmark using Iris.
+All-Load benchmark using Iris.
 
 ## Usage
 
 ```terminal
-mpirun -np 8 python examples/p2p/all_get/all_get_bench.py
+mpirun -np 8 python examples/p2p/all_load/all_load_bench.py
 ```
 On an MI300X, this example will run on 8 GPUs. It prints:
 

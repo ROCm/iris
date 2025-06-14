@@ -3,18 +3,18 @@ SPDX-License-Identifier: MIT
 Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 -->
 
-# Get benchmark
+# Load benchmark
 
-Get benchmark using Iris.
+Load benchmark using Iris.
 
 ## Usage
 
 ```terminal
-mpirun -np 8 python examples/p2p/get/get_bench.py
+mpirun -np 8 python examples/p2p/load/load_bench.py
 ```
 On an MI300X, this example will run on 8 GPUs. It prints:
 ```terminal
-Unidirectional GET bandwidth GiB/s [Remote read]
+Unidirectional LOAD bandwidth GiB/s [Remote read]
  SRC\DST      GPU 00    GPU 01    GPU 02    GPU 03    GPU 04    GPU 05    GPU 06    GPU 07
 GPU 00  ->   3545.14     41.84     41.41     41.58     40.70     40.99     41.12     41.17
 GPU 01  ->     41.65   3594.34     41.55     41.00     40.66     40.54     41.42     41.18

@@ -17,7 +17,7 @@ random.seed(123)
 
 
 @triton.jit
-def put_kernel(
+def store_kernel(
     target_buffer,  # tl.tensor: pointer to target data
     buffer_size,  # int32: total number of elements
     source_rank: tl.constexpr,
@@ -105,7 +105,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, buffer):
 
     def run_experiment():
         if cur_rank == source_rank:
-            kk = put_kernel[grid](
+            kk = store_kernel[grid](
                 buffer,
                 n_elements,
                 source_rank,
@@ -161,7 +161,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, buffer):
     return bandwidth_gbps
 
 
-def print_bandwidth_matrix(matrix, label="Unidirectional PUT bandwidth GiB/s [Remote write]"):
+def print_bandwidth_matrix(matrix, label="Unidirectional STORE bandwidth GiB/s [Remote write]"):
     num_ranks = matrix.shape[0]
     col_width = 10  # Adjust for alignment
 
