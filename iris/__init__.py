@@ -10,8 +10,8 @@ import subprocess
 from .iris import (
     Iris,
     translate,
-    get,
-    put,
+    load,
+    store,
     atomic_add,
     atomic_sub,
     atomic_cas,
@@ -76,8 +76,8 @@ torch.cuda.memory.change_current_allocator(finegrained_allocator)
 __all__ = [
     "Iris",
     "translate",
-    "get",
-    "put",
+    "load",
+    "store",
     "atomic_add",
     "atomic_sub",
     "atomic_cas",
