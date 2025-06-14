@@ -242,7 +242,7 @@ def persistent_gemm_all_scatter(
                     # For the current rank, we can use store
                     tl.store(c_global + global_offset, c, mask=sub_mask)
                 else:
-                    iris.put(
+                    iris.store(
                         c_global + global_offset,
                         c,
                         cur_rank,

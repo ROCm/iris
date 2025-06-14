@@ -37,7 +37,7 @@ def all_put_kernel(
     # Store chunk to target buffer
     for destination_rank in range(world_size):
         if destination_rank != source_rank:  # Skip local HBM access
-            iris.put(
+            iris.store(
                 target_buffer + offsets,
                 offsets,
                 source_rank,

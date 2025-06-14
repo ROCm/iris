@@ -40,7 +40,7 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
     # Store 1 in the target buffer at each offset
     source_rank = 0
     target_rank = 1
-    iris.put(buffer + offsets, 1,
+    iris.store(buffer + offsets, 1,
             source_rank, target_rank,
             heap_bases_ptr, mask=mask)
 

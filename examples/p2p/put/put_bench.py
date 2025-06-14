@@ -35,7 +35,7 @@ def put_kernel(
     mask = offsets < buffer_size
 
     # Store chunk to target buffer
-    iris.put(
+    iris.store(
         target_buffer + offsets,
         offsets,
         source_rank,

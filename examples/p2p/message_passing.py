@@ -34,10 +34,10 @@ def producer_kernel(
     mask = offsets < buffer_size
 
     # Load chunk from source buffer
-    values = iris.get(source_buffer + offsets, producer_rank, producer_rank, heap_bases_ptr, mask=mask)
+    values = iris.load(source_buffer + offsets, producer_rank, producer_rank, heap_bases_ptr, mask=mask)
 
     # Store chunk to target buffer
-    iris.put(
+    iris.store(
         target_buffer + offsets,
         values,
         producer_rank,
@@ -71,14 +71,14 @@ def consumer_kernel(
         done = tl.load(flag + pid)
 
     # Read from the target buffer (written by producer)
-    values = iris.get(buffer + offsets, consumer_rank, consumer_rank, heap_bases_ptr, mask=mask)
+    values = iris.load(buffer + offsets, consumer_rank, consumer_rank, heap_bases_ptr, mask=mask)
 
     # Do something with values...
     # (Here you might write to output, do computation, etc.)
     values = values * 2
 
     # Store chunk to target buffer
-    iris.put(
+    iris.store(
         buffer + offsets,
         values,
         consumer_rank,

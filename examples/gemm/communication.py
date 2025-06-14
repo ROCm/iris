@@ -319,7 +319,7 @@ def all_scatter_kernel(
                     # For the current rank, we can use store
                     tl.store(c + global_offset, data, mask=sub_mask)
                 else:
-                    iris.put(
+                    iris.store(
                         c + global_offset,
                         data,
                         cur_rank,
@@ -430,7 +430,7 @@ def all_gather_kernel(
                     data = tl.load(partial_c + sub_offset, mask=sub_mask, cache_modifier=".cv")
                 # For other ranks, we need to get the data from the remote rank.
                 else:
-                    data = iris.get(
+                    data = iris.load(
                         partial_c + sub_offset,
                         cur_rank,
                         remote_rank,
@@ -559,7 +559,7 @@ def one_shot_kernel(
 
             # Simpler logic for reduction:
             # for remote_rank in range(0, world_size):
-            #     acc += iris.get(
+            #     acc += iris.load(
             #         partial_c + sub_offset,
             #         cur_rank,
             #         remote_rank,
@@ -572,7 +572,7 @@ def one_shot_kernel(
             # and while that is being reduced into acc, we will prefetch the next
             # sub-tile into pp. This way we can overlap the reduction with the
             # prefetching of the next sub-tile.
-            rr = iris.get(
+            rr = iris.load(
                 partial_c + sub_offset,
                 cur_rank,
                 0,
@@ -585,7 +585,7 @@ def one_shot_kernel(
 
             for remote_rank in range(1, world_size):
                 acc += rr
-                pp = iris.get(
+                pp = iris.load(
                     partial_c + sub_offset,
                     cur_rank,
                     remote_rank,

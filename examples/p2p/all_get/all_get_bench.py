@@ -58,29 +58,29 @@ def all_get_kernel(
 
     # Initialize accumulator in registers
     if world_size == 1:
-        data = iris.get(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
+        data = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
         tl.store(target_buffer + offsets, data, mask=mask)
     elif world_size == 2:
-        data_0 = iris.get(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
-        data_1 = iris.get(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
+        data_0 = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
+        data_1 = iris.load(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
         sum = data_0 + data_1
         tl.store(target_buffer + offsets, sum, mask=mask)
     elif world_size == 4:
-        data_0 = iris.get(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
-        data_1 = iris.get(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
-        data_2 = iris.get(source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask)
-        data_3 = iris.get(source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask)
+        data_0 = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
+        data_1 = iris.load(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
+        data_2 = iris.load(source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask)
+        data_3 = iris.load(source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask)
         sum = data_0 + data_1 + data_2 + data_3
         tl.store(target_buffer + offsets, sum, mask=mask)
     else:
-        data_0 = iris.get(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
-        data_1 = iris.get(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
-        data_2 = iris.get(source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask)
-        data_3 = iris.get(source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask)
-        data_4 = iris.get(source_buffer + offsets, cur_rank, 4, heap_bases_ptr, mask=mask)
-        data_5 = iris.get(source_buffer + offsets, cur_rank, 5, heap_bases_ptr, mask=mask)
-        data_6 = iris.get(source_buffer + offsets, cur_rank, 6, heap_bases_ptr, mask=mask)
-        data_7 = iris.get(source_buffer + offsets, cur_rank, 7, heap_bases_ptr, mask=mask)
+        data_0 = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
+        data_1 = iris.load(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
+        data_2 = iris.load(source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask)
+        data_3 = iris.load(source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask)
+        data_4 = iris.load(source_buffer + offsets, cur_rank, 4, heap_bases_ptr, mask=mask)
+        data_5 = iris.load(source_buffer + offsets, cur_rank, 5, heap_bases_ptr, mask=mask)
+        data_6 = iris.load(source_buffer + offsets, cur_rank, 6, heap_bases_ptr, mask=mask)
+        data_7 = iris.load(source_buffer + offsets, cur_rank, 7, heap_bases_ptr, mask=mask)
         sum = data_0 + data_1 + data_2 + data_3 + data_4 + data_5 + data_6 + data_7
         tl.store(target_buffer + offsets, sum, mask=mask)
 
@@ -142,7 +142,7 @@ def run_experiment(shmem, args, buffer):
     source_buffer = buffer
     target_buffer = shmem.zeros_like(buffer)
 
-    def run_all_get():
+    def run_all_load():
         return all_get_kernel[grid](
             source_buffer,
             target_buffer,
@@ -161,7 +161,7 @@ def run_experiment(shmem, args, buffer):
         )
 
     # Warmup both kernels
-    all_get_code = run_all_get()
+    all_get_code = run_all_load()
 
     if cur_rank == 0:
         global wrote_asm

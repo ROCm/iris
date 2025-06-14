@@ -257,7 +257,7 @@ def translate(src_ptr, cur_rank, target_rank, heap_bases, debug=False):
 
 
 @triton.jit
-def get(src_ptr, cur_rank, target_rank, heap_bases, mask=None):
+def load(src_ptr, cur_rank, target_rank, heap_bases, mask=None):
     """
     Loads a value from the specified memory location and rank.
 
@@ -277,7 +277,7 @@ def get(src_ptr, cur_rank, target_rank, heap_bases, mask=None):
 
 
 @triton.jit
-def put(src_ptr, data, cur_rank, target_rank, heap_bases, mask=None):
+def store(src_ptr, data, cur_rank, target_rank, heap_bases, mask=None):
     """
     Writes data to the specified memory location and rank.
 

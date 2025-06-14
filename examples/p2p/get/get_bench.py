@@ -35,7 +35,7 @@ def get_kernel(
     mask = offsets < buffer_size
 
     # Get data from target buffer
-    result = iris.get(
+    result = iris.load(
         source_buffer + offsets,
         source_rank,
         destination_rank,
@@ -120,7 +120,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
         if cur_rank == source_rank:
             store_kernel[grid](result_buffer, n_elements, args["block_size"])
 
-    def run_get():
+    def run_load():
         if cur_rank == source_rank:
             get_kernel[grid](
                 source_buffer,
@@ -137,7 +137,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
     shmem.barrier()
     store_ms = iris.do_bench(run_store, shmem.barrier)
 
-    run_get()
+    run_load()
     shmem.barrier()
     get_ms = iris.do_bench(run_get, shmem.barrier)
 
