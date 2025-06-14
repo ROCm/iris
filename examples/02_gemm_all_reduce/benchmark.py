@@ -125,7 +125,6 @@ def main():
     local_B = B[start_row:end_row, :]
     local_A = A[:, start_row:end_row]
 
-
     for key, value in args.items():
         json_writer.add_field(key, value)
 
@@ -154,7 +153,6 @@ def main():
     gemm_stream = torch.cuda.Stream()
 
     json_writer.add_field("gemm_sms", args["gemm_sms"])
-
 
     kernel_timing = {
         "gemm": {

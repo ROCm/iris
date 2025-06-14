@@ -124,7 +124,6 @@ def persistent_gemm(
         # set the flag for the consumer kernel
         tl.debug_barrier()
 
-
         compare = 0
         value = 1
         tl.atomic_cas(tile_completed + tile_id, compare, value, sem="release", scope="sys")
