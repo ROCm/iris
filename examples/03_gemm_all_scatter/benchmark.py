@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
@@ -28,10 +30,10 @@ def parse_args():
     parser.add_argument("-m", type=int, default=8192, help="Number of rows in matrix A")
     parser.add_argument("-n", type=int, default=4608, help="Number of columns in matrix B")
     parser.add_argument("-k", type=int, default=36864, help="Common dimension between matrices A and B")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    parser.add_argument("--validate", action="store_true", help="Enable validation mode")
-    parser.add_argument("--trace_tiles", action="store_true", help="Enable tile-tracing mode")
-    parser.add_argument("--benchmark", action="store_true", help="Enable benchmarking mode")
+    parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
+    parser.add_argument("-t", "--trace_tiles", action="store_true", help="Enable tile-tracing mode")
+    parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking mode")
     parser.add_argument(
         "--datatype",
         type=str,
