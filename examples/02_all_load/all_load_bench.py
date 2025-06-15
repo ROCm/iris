@@ -8,7 +8,6 @@ import triton
 import triton.language as tl
 import random
 import numpy as np
-from tabulate import tabulate
 
 import iris
 
@@ -232,19 +231,22 @@ def print_bandwidth_matrix(bandwidth_data, buffer_sizes, label="Total Bandwidth 
 
     # Prepare headers
     headers = ["Size (MiB)", "log2(bytes)"] + [f"GPU {i:02d}" for i in range(num_ranks)]
-
-    # Prepare rows
-    rows = []
+    
+    # Print label
+    print(f"\n{label}")
+    
+    # Print header
+    header_str = " | ".join(headers)
+    print(header_str)
+    print("-" * len(header_str))
+    
+    # Print rows
     for i, size in enumerate(buffer_sizes):
         row = [
             f"{size / 1024 / 1024:.1f}",
             f"{int(np.log2(size))}",
         ] + [f"{bandwidth_data[rank][i]:.2f}" for rank in range(num_ranks)]
-        rows.append(row)
-
-    # Print table in markdown format
-    print(f"\n{label}")
-    print(tabulate(rows, headers=headers, tablefmt="pipe", floatfmt=".2f"))
+        print(" | ".join(row))
 
 
 def main():
