@@ -11,7 +11,7 @@ import os
 # from streamk_kernel_atomic import streamk_gemm
 from gemm_all_scatter import persistent_gemm_all_scatter
 
-from utils import is_triton_interpret_set
+from examples.common.utils import is_triton_interpret_set
 
 gemm_kernel = persistent_gemm_all_scatter
 

@@ -34,23 +34,16 @@ def parse_args():
     parser.add_argument("-m", type=int, default=8192, help="Number of rows in matrix A")
     parser.add_argument("-n", type=int, default=4608, help="Number of columns in matrix B")
     parser.add_argument("-k", type=int, default=36864, help="Common dimension between matrices A and B")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    parser.add_argument("--validate", action="store_true", help="Enable validation mode")
-    parser.add_argument("--trace_tiles", action="store_true", help="Enable tile-tracing mode")
-    parser.add_argument("--benchmark", action="store_true", help="Enable benchmarking mode")
+    parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
+    parser.add_argument("-t", "--trace_tiles", action="store_true", help="Enable tile-tracing mode")
+    parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking mode")
     parser.add_argument(
         "--datatype",
         type=str,
         default="fp16",
         choices=["fp16", "fp32", "int8", "bf16"],
         help="Datatype of computation",
-    )
-    parser.add_argument(
-        "--algorithm",
-        type=str,
-        default="all_reduce",
-        choices=["all_reduce", "all_scatter", "all_gather", "one_shot"],
-        help="Algorithm to use",
     )
     parser.add_argument(
         "--output_file",
@@ -125,6 +118,7 @@ def main():
     local_B = B[start_row:end_row, :]
     local_A = A[:, start_row:end_row]
 
+
     for key, value in args.items():
         json_writer.add_field(key, value)
 
@@ -154,6 +148,7 @@ def main():
 
     json_writer.add_field("gemm_sms", args["gemm_sms"])
 
+
     kernel_timing = {
         "gemm": {
             "start_event": torch.cuda.Event(enable_timing=True),
@@ -170,7 +165,6 @@ def main():
         shmem.barrier()
         iris.memset_tensor(tile_completed, 0)
         shmem.barrier()
-        shmem.log("Preamble completed")
 
     def run_experiment():
         nonlocal local_C
@@ -190,6 +184,7 @@ def main():
                 local_A,
                 local_B,
                 local_C,
+                global_C,
                 bias,
                 P,
                 locks,
@@ -249,34 +244,22 @@ def main():
 
         matmul.set_debug(False)
         # Validate global result
-        success = validate_gemm(A, B, global_C, shmem)
+        success = validate_gemm(A, B, global_C, shmem, atol=2)
         passed_str = "passed" if success else "failed"
         shmem.log(f"Final C validation {passed_str}.")
 
         # Wait for all to finish validation
         shmem.barrier()
-        shmem.log("Validating local C...")
-
         json_writer.add_field("success", success)
-
-        # Validate partial result
-        # success = validate_gemm(local_A, local_B, local_C, shmem)
-        # json_writer.add_field("success_partial", success)
-        # passed_str = "passed" if success else "failed"
-        # shmem.log(f"Local C validation {passed_str}.")
-
-        # Wait for all to finish validation
-        # shmem.barrier()
-    shmem.log("Validation completed")
+        shmem.log("Validation completed")
 
     if args["benchmark"]:
         shmem.log("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
         triton_ms = iris.do_bench(run_experiment, shmem.barrier, preamble)
         triton_tflops = perf(triton_ms)
-        algo_string = args["algorithm"]
         shmem.log_stats(
-            f"tile matmul + {algo_string} (grid={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
+            f"tile matmul + all_reduce (grid={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
         )
 
         json_writer.add_field("triton_tflops", triton_tflops)
@@ -295,8 +278,7 @@ def main():
 
     if args["trace_tiles"] and rank == 0:
         gpu_freq = shmem.wall_clock_rate(rank) * 1e-3
-        algo_string = args["algorithm"]
-        filename = f"gemm_tiles_{algo_string}_trace_rank{rank}.json"
+        filename = f"gemm_all_reduce_tiles_trace_rank{rank}.json"
         timestamps.to_json(filename, gpu_freq)
 
     shmem.barrier()

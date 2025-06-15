@@ -4,12 +4,12 @@
 import torch
 
 
-def validate_gemm(A, B, C, shmem):
+def validate_gemm(A, B, C, shmem, atol=1):
     expected = A @ B
-    diff_mask = ~torch.isclose(C, expected, atol=1)
+    diff_mask = ~torch.isclose(C, expected, atol=atol)
     breaking_indices = torch.nonzero(diff_mask, as_tuple=False)
 
-    if not torch.allclose(C, expected, atol=1):
+    if not torch.allclose(C, expected, atol=atol):
         max_diff = (C - expected).abs().max().item()
         shmem.log(f"Max absolute difference: {max_diff}")
         for idx in breaking_indices:

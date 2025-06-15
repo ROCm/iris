@@ -10,6 +10,7 @@ import os
 
 import iris
 
+
 @triton.jit
 def tile_id_to_index_range(
     tile_id,
@@ -44,9 +45,6 @@ def tile_id_to_index_range(
 
     rm = tl.minimum(rm, max_m)
     rn = tl.minimum(rn, max_n)
-
-    # rm_mod = rm % M
-    # rm = tl.max_contiguous(tl.multiple_of(rm_mod, BLOCK_SIZE_M), BLOCK_SIZE_M)
 
     return rm, rn, rm_start, rn_start
 
@@ -94,7 +92,7 @@ def extract_submask_and_offset(
 
 
 @triton.jit()
-def persistent_gemm_all_scatter(
+def persistent_gemm_all_reduce(
     A,
     B,
     C,
@@ -203,7 +201,7 @@ def persistent_gemm_all_scatter(
         # rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         # c_mask = (rm[:, None] < M) & (rn[None, :] < N)
         # C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        # # tl.store(C_, c, c_mask)
+        # tl.store(C_, c, c_mask)
 
         rm, rn, mask, rm_start, rn_start = offset_for_tile(tile_id, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M, M, N)
 
@@ -220,10 +218,10 @@ def persistent_gemm_all_scatter(
             # Translate to global
             sub_mask, global_offset = extract_submask_and_offset(
                 rm,
-                rn + cur_rank * N,
+                rn,
                 mask,
                 rm_start,
-                rn_start + cur_rank * N,
+                rn_start,
                 start_row,
                 start_col,
                 BLOCK_SIZE_M,
@@ -238,9 +236,9 @@ def persistent_gemm_all_scatter(
             for remote_rank in range(world_size):
                 if remote_rank == cur_rank:
                     # For the current rank, we can use store
-                    tl.store(c_global + global_offset, c, mask=sub_mask)
+                    tl.atomic_add(c_global + global_offset, c, mask=sub_mask)
                 else:
-                    iris.store(
+                    iris.atomic_add(
                         c_global + global_offset,
                         c,
                         cur_rank,

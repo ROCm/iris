@@ -9,11 +9,11 @@ import os
 
 # from streamk_kernel import streamk_gemm
 # from streamk_kernel_atomic import streamk_gemm
-from gemm import persistent_gemm
+from gemm_all_reduce import persistent_gemm_all_reduce
 
 from examples.common.utils import is_triton_interpret_set
 
-gemm_kernel = persistent_gemm
+gemm_kernel = persistent_gemm_all_reduce
 
 
 class matmul(torch.autograd.Function):
@@ -30,6 +30,7 @@ class matmul(torch.autograd.Function):
         a: torch.Tensor,
         b: torch.Tensor,
         c: torch.Tensor,
+        c_global: torch.Tensor,
         bias: torch.Tensor,
         P: torch.Tensor,
         locks: torch.Tensor,
@@ -109,6 +110,7 @@ class matmul(torch.autograd.Function):
             a,
             b,
             c,
+            c_global,
             bias,
             P,
             locks,
@@ -122,6 +124,8 @@ class matmul(torch.autograd.Function):
             b.stride(1),
             c.stride(0),
             c.stride(1),
+            c_global.stride(0),
+            c_global.stride(1),
             stride_bias,
             BLOCK_SIZE_M=BLK_M,
             BLOCK_SIZE_N=BLK_N,
@@ -137,8 +141,8 @@ class matmul(torch.autograd.Function):
             waves_per_eu=waves_per_eu,
             matrix_instr_nonkdim=mfmaInstrSize,
             kpack=kpack,
-            heap_bases_ptr=heap_bases_ptr,
-            rank=rank,
+            heap_bases=heap_bases_ptr,
+            cur_rank=rank,
             world_size=world_size,
             COLLECT_TIMESTAMPS=COLLECT_TIMESTAMPS,
             mm_begin_timestamp_ptr=mm_begin_timestamp,
@@ -160,6 +164,7 @@ class matmul(torch.autograd.Function):
         a: torch.Tensor,
         b: torch.Tensor,
         c: torch.Tensor,
+        c_global: torch.Tensor,
         bias: torch.Tensor,
         P: torch.Tensor,
         locks: torch.Tensor,
@@ -187,6 +192,7 @@ class matmul(torch.autograd.Function):
             a=a,
             b=b,
             c=c,
+            c_global=c_global,
             bias=bias,
             P=P,
             locks=locks,

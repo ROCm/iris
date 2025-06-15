@@ -11,12 +11,12 @@ import os
 import argparse
 import json
 
-from utils import JSONWriter, Timestamps, is_triton_interpret_set
+from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set
+from examples.gemm.validation import validate_gemm
 
 import iris
 
 from matmul_wrapper import matmul
-from validation import validate_gemm
 
 torch.manual_seed(123)
 random.seed(123)
