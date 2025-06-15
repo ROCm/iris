@@ -10,7 +10,7 @@ Store benchmark using Iris.
 ## Usage
 
 ```terminal
-mpirun -np 8 python examples/p2p/store/store_bench.py
+mpirun -np 8 python examples/00_store/store_bench.py
 ```
 On an MI300X, this example will run on 8 GPUs. It prints:
 ```terminal

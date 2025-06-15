@@ -9,7 +9,7 @@ import os
 
 # from streamk_kernel import streamk_gemm
 # from streamk_kernel_atomic import streamk_gemm
-from gemm_all_reduce import persistent_gemm_all_reduce
+from gemm_atomics_all_reduce import persistent_gemm_all_reduce
 
 from examples.common.utils import is_triton_interpret_set
 

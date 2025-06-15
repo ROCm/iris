@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import argparse
+
 import torch
 import triton
 import triton.language as tl
 import random
 import numpy as np
-from tabulate import tabulate
 
 import iris
 
@@ -19,31 +18,9 @@ random.seed(123)
 
 
 @triton.jit
-def store_kernel(
+def all_put_kernel(
     target_buffer,  # tl.tensor: pointer to target data
-    buffer_size,  # int32: total number of elements
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    # Compute start index of this block
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-
-    # Guard for out-of-bounds accesses
-    mask = offsets < buffer_size
-
-    # Simple data to store (similar to what we accumulate)
-    data = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
-
-    tl.store(target_buffer + offsets, data, mask=mask)
-
-
-@triton.jit
-def all_read_kernel(
-    source_buffer,  # tl.tensor: pointer to source data
-    target_buffer,  # tl.tensor: pointer to target data
-    cur_rank: tl.constexpr,
+    source_rank: tl.constexpr,
     buffer_size,  # int32: total number of elements
     world_size: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -58,33 +35,17 @@ def all_read_kernel(
     # Guard for out-of-bounds accesses
     mask = offsets < buffer_size
 
-    # Initialize accumulator in registers
-    if world_size == 1:
-        data = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
-        tl.store(target_buffer + offsets, data, mask=mask)
-    elif world_size == 2:
-        data_0 = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
-        data_1 = iris.load(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
-        sum = data_0 + data_1
-        tl.store(target_buffer + offsets, sum, mask=mask)
-    elif world_size == 4:
-        data_0 = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
-        data_1 = iris.load(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
-        data_2 = iris.load(source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask)
-        data_3 = iris.load(source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask)
-        sum = data_0 + data_1 + data_2 + data_3
-        tl.store(target_buffer + offsets, sum, mask=mask)
-    else:
-        data_0 = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
-        data_1 = iris.load(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
-        data_2 = iris.load(source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask)
-        data_3 = iris.load(source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask)
-        data_4 = iris.load(source_buffer + offsets, cur_rank, 4, heap_bases_ptr, mask=mask)
-        data_5 = iris.load(source_buffer + offsets, cur_rank, 5, heap_bases_ptr, mask=mask)
-        data_6 = iris.load(source_buffer + offsets, cur_rank, 6, heap_bases_ptr, mask=mask)
-        data_7 = iris.load(source_buffer + offsets, cur_rank, 7, heap_bases_ptr, mask=mask)
-        sum = data_0 + data_1 + data_2 + data_3 + data_4 + data_5 + data_6 + data_7
-        tl.store(target_buffer + offsets, sum, mask=mask)
+    # Store chunk to target buffer
+    for destination_rank in range(world_size):
+        if destination_rank != source_rank:  # Skip local HBM access
+            iris.store(
+                target_buffer + offsets,
+                offsets,
+                source_rank,
+                destination_rank,
+                heap_bases_ptr,
+                mask=mask,
+            )
 
 
 def torch_dtype_from_str(datatype: str) -> torch.dtype:
@@ -110,7 +71,7 @@ def parse_args():
         "-t",
         "--datatype",
         type=str,
-        default="fp16",
+        default="fp32",
         choices=["fp16", "fp32", "int8", "bf16"],
         help="Datatype of computation",
     )
@@ -121,7 +82,7 @@ def parse_args():
     parser.add_argument("-d", "--validate", action="store_true", help="Enable validation output")
 
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size")
-    parser.add_argument("-x", "--num_experiments", type=int, default=1, help="Number of experiments")
+
     return vars(parser.parse_args())
 
 
@@ -137,14 +98,9 @@ def run_experiment(shmem, args, buffer):
     n_elements = buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
-    # Create source and target buffers
-    source_buffer = buffer
-    target_buffer = shmem.zeros_like(buffer)
-
-    def run_all_load():
-        return all_read_kernel[grid](
-            source_buffer,
-            target_buffer,
+    def run_experiment():
+        all_put_kernel[grid](
+            buffer,
             cur_rank,
             n_elements,
             world_size,
@@ -152,51 +108,20 @@ def run_experiment(shmem, args, buffer):
             shmem.get_heap_bases(),
         )
 
-    def run_store_only():
-        store_kernel[grid](
-            target_buffer,
-            n_elements,
-            args["block_size"],
-        )
-
-    # Warmup both kernels
-    all_read_code = run_all_load()
-
-    run_store_only()
+    # Warmup
+    run_experiment()
     shmem.barrier()
 
-    # Measure all_get + store
-    total_ms = iris.do_bench(
-        run_all_load,
-        shmem.barrier,
-        n_warmup=args["num_experiments"],
-        n_repeat=args["num_experiments"],
-    )
+    triton_ms = iris.do_bench(run_experiment, shmem.barrier)
 
-    # Measure store overhead
-    store_ms = iris.do_bench(
-        run_store_only,
-        shmem.barrier,
-        n_warmup=args["num_experiments"],
-        n_repeat=args["num_experiments"],
-    )
-
-    # Net time for just the all_get operations
-    net_ms = total_ms - store_ms
-
-    if args["verbose"]:
-        shmem.log(
-            f"Total time: {total_ms:.4f} ms, Store overhead: {store_ms:.4f} ms, Net all_get time: {net_ms:.4f} ms"
-        )
-
-    triton_sec = net_ms * 1e-3
+    triton_sec = triton_ms * 1e-3
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-    # Each rank gets n_elements from (world_size - 1) other ranks
+    # Each rank sends n_elements to (world_size - 1) other ranks
     total_bytes = n_elements * element_size_bytes * (world_size - 1)
     # Total bandwidth is bytes / time
     bandwidth_gbps = total_bytes / triton_sec / 2**30
     if args["verbose"]:
-        shmem.log(f"Got {total_bytes / 2**30:.2f} GiB in {triton_sec:.4f} seconds")
+        shmem.log(f"Copied {total_bytes / 2**30:.2f} GiB in {triton_sec:.4f} seconds")
         shmem.log(f"Total bandwidth for rank {cur_rank} is {bandwidth_gbps:.4f} GiB/s")
 
     success = True
@@ -205,15 +130,15 @@ def run_experiment(shmem, args, buffer):
             shmem.log("Validating output...")
 
         expected = torch.arange(n_elements, dtype=dtype, device="cuda")
-        diff_mask = ~torch.isclose(target_buffer, expected, atol=1)
+        diff_mask = ~torch.isclose(buffer, expected, atol=1)
         breaking_indices = torch.nonzero(diff_mask, as_tuple=False)
 
-        if not torch.allclose(target_buffer, expected, atol=1):
-            max_diff = (target_buffer - expected).abs().max().item()
+        if not torch.allclose(buffer, expected, atol=1):
+            max_diff = (buffer - expected).abs().max().item()
             shmem.log(f"Max absolute difference: {max_diff}")
             for idx in breaking_indices:
                 idx = tuple(idx.tolist())
-                computed_val = target_buffer[idx]
+                computed_val = buffer[idx]
                 expected_val = expected[idx]
                 shmem.log(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
                 success = False
@@ -230,22 +155,19 @@ def run_experiment(shmem, args, buffer):
 
 def print_bandwidth_matrix(bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size"):
     num_ranks = len(bandwidth_data)
+    col_width = 12  # Adjust for alignment
 
-    # Prepare headers
-    headers = ["Size (MiB)", "log2(bytes)"] + [f"GPU {i:02d}" for i in range(num_ranks)]
-
-    # Prepare rows
-    rows = []
-    for i, size in enumerate(buffer_sizes):
-        row = [
-            f"{size / 1024 / 1024:.1f}",
-            f"{int(np.log2(size))}",
-        ] + [f"{bandwidth_data[rank][i]:.2f}" for rank in range(num_ranks)]
-        rows.append(row)
-
-    # Print table in markdown format
     print(f"\n{label}")
-    print(tabulate(rows, headers=headers, tablefmt="pipe", floatfmt=".2f"))
+    header = "Buffer Size".ljust(col_width)
+    for rank in range(num_ranks):
+        header += f"GPU {rank:02d}".rjust(col_width)
+    print(header)
+
+    for i, size in enumerate(buffer_sizes):
+        row = f"{size / 1024 / 1024:.1f}MB".ljust(col_width)
+        for rank in range(num_ranks):
+            row += f"{bandwidth_data[rank][i]:12.2f}"
+        print(row)
 
 
 def main():

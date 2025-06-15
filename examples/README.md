@@ -1,0 +1,41 @@
+# Algorithm Implementations
+
+This directory contains various algorithm implementations for distributed computing and matrix operations.
+
+## Directory Structure
+
+### Basic Operations
+- `00_load`: Load operations across multiple GPUs
+- `01_store`: Store operations across multiple GPUs
+- `02_all_load`: Load operations where all GPUs load simultaneously
+- `03_all_store`: Store operations where all GPUs store simultaneously
+- `04_message_passing`: Point-to-point message passing
+
+### GEMM Operations
+- `05_gemm_all_scatter`: Matrix multiplication with all-scatter communication
+- `06_gemm_all_reduce_atomics`: Matrix multiplication with all-reduce using atomics
+
+## Usage
+
+### Basic Operations
+```terminal
+# Example command to run distributed load operations
+mpirun -np 8 python examples/00_load/benchmark.py  # Load across GPUs
+mpirun -np 8 python examples/02_all_load/benchmark.py  # Simultaneous load on all GPUs
+
+# Example command to run distributed store operations
+mpirun -np 8 python examples/01_store/benchmark.py  # Store across GPUs
+mpirun -np 8 python examples/03_all_store/benchmark.py  # Simultaneous store on all GPUs
+
+# Example command to run message passing
+python examples/04_message_passing/benchmark.py
+```
+
+### GEMM Operations
+```terminal
+# Example command to run benchmark with all-scatter algorithm
+mpirun -np 8 python examples/05_gemm_all_scatter/benchmark.py --benchmark --validate
+
+# Example command to run benchmark with all-reduce algorithm
+mpirun -np 8 python examples/06_gemm_all_reduce_atomics/benchmark.py --benchmark --validate
+```
