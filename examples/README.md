@@ -21,7 +21,7 @@ This directory contains various algorithm implementations for distributed comput
 ```terminal
 # Example command to run distributed load operations
 mpirun -np 8 python examples/00_load/load_bench.py  # Load across GPUs
-mpirun -np 8 python examples/02_all_load/benchmark.py  # Simultaneous load on all GPUs
+mpirun -np 8 python examples/02_all_load/all_load_bench.py  # Simultaneous load on all GPUs
 
 # Example command to run distributed store operations
 mpirun -np 8 python examples/01_store/benchmark.py  # Store across GPUs
