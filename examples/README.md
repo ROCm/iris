@@ -28,7 +28,7 @@ mpirun -np 8 python examples/01_store/store_bench.py  # Store across GPUs
 mpirun -np 8 python examples/03_all_store/all_store_bench.py  # Simultaneous store on all GPUs
 
 # Example command to run message passing
-python examples/04_message_passing/benchmark.py
+python examples/04_message_passing/message_passing.py
 ```
 
 ### GEMM Operations
