@@ -25,7 +25,7 @@ mpirun -np 8 python examples/02_all_load/all_load_bench.py  # Simultaneous load 
 
 # Example command to run distributed store operations
 mpirun -np 8 python examples/01_store/store_bench.py  # Store across GPUs
-mpirun -np 8 python examples/03_all_store/benchmark.py  # Simultaneous store on all GPUs
+mpirun -np 8 python examples/03_all_store/all_store_bench.py  # Simultaneous store on all GPUs
 
 # Example command to run message passing
 python examples/04_message_passing/benchmark.py
