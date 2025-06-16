@@ -298,6 +298,52 @@ def store(src_ptr, data, cur_rank, target_rank, heap_bases, mask=None):
 
 
 @triton.jit
+def get(src_ptr, dst_ptr, cur_rank, target_rank, heap_bases, mask=None):
+    """
+    Loads a value from the specified memory location and rank.
+
+    Args:
+        src_ptr (int): The source pointer.
+        dst_ptr (int): The destination pointer.
+        cur_rank (int): The current rank.
+        target_rank (int): The target rank.
+        heap_bases (int): The heap bases.
+        mask (Optional[tl.tensor], optional): A boolean tensor used to guard memory accesses.
+
+    Returns:
+        Any: The loaded value.
+    """
+    remote_src_ptr = translate(src_ptr, cur_rank, target_rank, heap_bases)
+
+    data = tl.load(remote_src_ptr, mask=mask)
+
+    tl.store(dst_ptr, data, mask=mask)
+
+
+@triton.jit
+def put(src_ptr, dst_ptr, cur_rank, target_rank, heap_bases, mask=None):
+    """
+    Writes data to the specified memory location and rank.
+
+    Args:
+        src_ptr (int): The source pointer.
+        dst_ptr (int): The destination pointer.
+        cur_rank (int): The current rank.
+        target_rank (int): The target rank.
+        heap_bases (int): The heap bases.
+        mask (Optional[tl.tensor], optional): A boolean tensor used to guard memory accesses. Defaults to None.
+
+    Returns:
+        None
+    """
+    remote_dst_ptr = translate(dst_ptr, cur_rank, target_rank, heap_bases, False)
+
+    data = tl.load(src_ptr, mask=mask)
+
+    tl.store(remote_dst_ptr, data, mask=mask)
+
+
+@triton.jit
 def atomic_add(src_ptr, data, cur_rank, target_rank, heap_bases, mask=None, sem=None, scope=None):
     """
         Atomically adds data to the specified memory location and rank.
