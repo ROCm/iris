@@ -231,15 +231,15 @@ def print_bandwidth_matrix(bandwidth_data, buffer_sizes, label="Total Bandwidth 
 
     # Prepare headers
     headers = ["Size (MiB)", "log2(bytes)"] + [f"GPU {i:02d}" for i in range(num_ranks)]
-    
+
     # Print label
     print(f"\n{label}")
-    
+
     # Print header
     header_str = " | ".join(headers)
     print(header_str)
     print("-" * len(header_str))
-    
+
     # Print rows
     for i, size in enumerate(buffer_sizes):
         row = [

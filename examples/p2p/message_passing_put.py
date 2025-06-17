@@ -69,9 +69,9 @@ def consumer_kernel(
 
     # Store chunk to target buffer
     tl.store(
-       buffer + offsets,
-       values,
-       mask=mask,
+        buffer + offsets,
+        values,
+        mask=mask,
     )
 
     # Optionally reset the flag for next iteration
