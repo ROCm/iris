@@ -15,7 +15,7 @@ Iris is a Triton-based framework for Remote Direct Memory Access (RDMA) operatio
 
 ## Documentation
 
-1. [Peer-to-Peer Communication](./docs/P2P.md)
+1. [Peer-to-Peer Communication](examples/README.md)
 2. [Fine-grained GEMM & Communication Overlap](./docs/FINEGRAINED_OVERLAP.md)
 
 ## API Example
