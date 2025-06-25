@@ -53,9 +53,9 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
 heap_size = 2**30
 buffer_size = 4096
 block_size = 1024
-shmem = iris.Iris(heap_size)
-cur_rank = shmem.get_rank()
-buffer = shmem.zeros(buffer_size, device="cuda", dtype=torch.float32)
+iris_ctx = iris.Iris(heap_size)
+cur_rank = iris_ctx.get_rank()
+buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
 grid = lambda meta: (triton.cdiv(buffer_size, meta["block_size"]),)
 
 source_rank = 0
@@ -64,9 +64,9 @@ if cur_rank == source_rank:
         buffer,
         buffer_size,
         block_size,
-        shmem.get_heap_bases(),
+        iris_ctx.get_heap_bases(),
     )
-shmem.barrier() 
+iris_ctx.barrier() 
 ```
 
 ## Quick Start Guide
@@ -84,7 +84,7 @@ docker attach iris-dev
 cd iris && pip install -e .
 ```
 
-For alternative setup methods (manual Docker or Apptainer), see [docs/SETUP_ALTERNATIVES.md](docs/SETUP_ALTERNATIVES.md).
+For manual Docker or Apptainer setup, see [setup alternatives](docs/SETUP_ALTERNATIVES.md).
 
 ## Next Steps
 
