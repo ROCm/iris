@@ -11,7 +11,7 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 # Iris: First-Class Multi-GPU Programming Experience in Triton
 
-Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton’s programmability and performance.
+Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton's programmability and performance.
 
 ## Key Features
 
@@ -96,6 +96,23 @@ cd iris && pip install -e .
 source activate.sh
 ```
 
+## Supported GPUs
+
+Iris currently supports:
+
+- MI300X
+
+**Note**: 
+> [!NOTE]
+> Iris may work on other AMD GPUs with ROCm compatibility, but has only been tested on MI300X.
+
+## Roadmap
+
+We plan to extend Iris with the following features:
+
+- **Extended GPU Support**: Testing and optimization for other AMD GPUs beyond MI300X
+- **RDMA Support**: Multi-node support using Remote Direct Memory Access (RDMA) for distributed computing across multiple machines
+- **More Code Examples**: Comprehensive examples covering various use cases and patterns
 
 # Contributing
 
@@ -105,9 +122,12 @@ We welcome contributions! Please see our [Contributing Guide](docs/CONTRIBUTING.
 
 ## Support
 
-For support, please:
-1. Open an [issue](https://github.com/ROCm/iris/issues/new/choose)
-2. Contact the development team
+Need help? We're here to support you! Here are a few ways to get in touch:
+
+1. **Open an Issue**: Found a bug or have a feature request? [Open an issue](https://github.com/ROCm/iris/issues/new/choose) on GitHub
+2. **Contact the Team**: If GitHub issues aren't working for you or you need to reach us directly, feel free to contact our development team
+
+We welcome your feedback and contributions!
 
 ## License
 
