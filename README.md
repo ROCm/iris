@@ -3,9 +3,15 @@ SPDX-License-Identifier: MIT
 Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 -->
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml)
+
+> [!IMPORTANT]  
+> This project is intended for research purposes only and is provided by AMD Research and Advanced Development team.  This is not a product. Use it at your own risk and discretion.
+
+
 # Iris: First-Class Multi-GPU Programming Experience in Triton
 
-Iris is a Triton-based framework for Remote Direct Memory Access (RDMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton’s programmability and performance.
+Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton’s programmability and performance.
 
 ## Key Features
 
@@ -89,3 +95,20 @@ cd iris && pip install -e .
 ./apptainer/run.sh
 source activate.sh
 ```
+
+
+# Contributing
+
+We welcome contributions! Please see our [Contributing Guide](docs/CONTRIBUTING.md) for details on how to set up your development environment and contribute to the project.
+
+
+
+## Support
+
+For support, please:
+1. Open an [issue](https://github.com/ROCm/iris/issues/new/choose)
+2. Contact the development team
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
