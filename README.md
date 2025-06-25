@@ -88,8 +88,7 @@ For alternative setup methods (manual Docker or Apptainer), see [docs/SETUP_ALTE
 
 ## Next Steps
 
-Check out our [examples](examples/) directory for ready-to-run scripts and usage patterns, including peer-to-peer communication and GEMM benchmarks.  
-See [examples/README.md](examples/README.md) for an overview.
+Check out our [examples](examples/) directory for ready-to-run scripts and usage patterns, including peer-to-peer communication and GEMM benchmarks. 
 
 ## Supported GPUs
 
