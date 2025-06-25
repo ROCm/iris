@@ -87,6 +87,7 @@ pip install -e .
    - Go to the GitHub repository
    - Create a new pull request from your branch
    - Fill in the PR description with details about your changes
+   - Feel free to open a draft PR and ask for early feedback while you're still working on your changes
 
 ## License
 
