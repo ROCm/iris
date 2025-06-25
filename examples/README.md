@@ -5,15 +5,15 @@ This directory contains various algorithm implementations for distributed comput
 ## Directory Structure
 
 ### Basic Operations
-- `00_load`: Load operations across multiple GPUs
-- `01_store`: Store operations across multiple GPUs
-- `02_all_load`: Load operations where all GPUs load simultaneously
-- `03_all_store`: Store operations where all GPUs store simultaneously
-- `04_message_passing`: Point-to-point message passing
+- [`00_load`](../examples/00_load): Load operations across multiple GPUs
+- [`01_store`](../examples/01_store): Store operations across multiple GPUs
+- [`02_all_load`](../examples/02_all_load): Load operations where all GPUs load simultaneously
+- [`03_all_store`](../examples/03_all_store): Store operations where all GPUs store simultaneously
+- [`04_message_passing`](../examples/04_message_passing): Point-to-point message passing
 
 ### GEMM Operations
-- `05_gemm_all_scatter`: Matrix multiplication with all-scatter communication
-- `06_gemm_all_reduce_atomics`: Matrix multiplication with all-reduce using atomics
+- [`05_gemm_all_scatter`](../examples/05_gemm_all_scatter): Matrix multiplication with all-scatter communication
+- [`06_gemm_all_reduce_atomics`](../examples/06_gemm_all_reduce_atomics): Matrix multiplication with all-reduce using atomics
 
 ## Usage
 
