@@ -69,32 +69,22 @@ if cur_rank == source_rank:
 shmem.barrier() 
 ```
 
-## Quick Start Guide (using Docker)
+## Quick Start Guide
 
-Using docker compose, you can get started with a simple dev environment where the active Iris directory is mounted inside the docker container. This way, any changes you make outside the container to Iris are reflected inside the container (getting set up with a vscode instance becomes easy!)
+The recommended way to get started is using Docker Compose, which provides a development environment with the Iris directory mounted inside the container. This allows you to make changes to the code outside the container and see them reflected inside.
 
 ```shell
+# Start the development container
 docker compose up --build -d
+
+# Attach to the running container
 docker attach iris-dev
+
+# Install Iris in development mode
 cd iris && pip install -e .
 ```
 
-## Getting started
-
-### Docker
-
-```shell
-./docker/build.sh <image-name>
-./docker/run.sh <image-name>
-cd iris && pip install -e .
-```
-
-### Apptainer
-```shell
-./apptainer/build.sh
-./apptainer/run.sh
-source activate.sh
-```
+For alternative setup methods (manual Docker or Apptainer), see [docs/SETUP_ALTERNATIVES.md](docs/SETUP_ALTERNATIVES.md).
 
 ## Supported GPUs
 
