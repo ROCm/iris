@@ -95,7 +95,7 @@ def parse_args():
 
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
-    
+
     return vars(parser.parse_args())
 
 
@@ -203,19 +203,20 @@ def print_bandwidth_matrix(matrix, label="Unidirectional LOAD bandwidth GiB/s [R
             row += f"{matrix[src, dst]:10.2f}"
         print(row)
 
-
     if output_file is not None:
         if output_file.endswith(".json"):
             detailed_results = []
             for src in range(num_ranks):
                 for dst in range(num_ranks):
-                    detailed_results.append({
-                        "source_gpu": f"GPU_{src:02d}",
-                        "destination_gpu": f"GPU_{dst:02d}",
-                        "source_rank": src,
-                        "destination_rank": dst,
-                        "bandwidth_gbps": float(matrix[src, dst])
-                    })
+                    detailed_results.append(
+                        {
+                            "source_gpu": f"GPU_{src:02d}",
+                            "destination_gpu": f"GPU_{dst:02d}",
+                            "source_rank": src,
+                            "destination_rank": dst,
+                            "bandwidth_gbps": float(matrix[src, dst]),
+                        }
+                    )
             with open(output_file, "w") as f:
                 json.dump(detailed_results, f, indent=2)
         else:
