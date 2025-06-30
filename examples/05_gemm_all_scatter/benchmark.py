@@ -217,7 +217,6 @@ def main():
         shmem.barrier()
         iris.memset_tensor(tile_completed, 0)
         shmem.barrier()
-        shmem.log("Preamble completed")
 
     def run_experiment():
         nonlocal local_C
