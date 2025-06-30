@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 import random
 import numpy as np
-
+import json
 import iris
 
 
@@ -94,7 +94,8 @@ def parse_args():
     parser.add_argument("-d", "--validate", action="store_true", help="Enable validation output")
 
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
-
+    parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
+    
     return vars(parser.parse_args())
 
 
@@ -186,7 +187,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
     return bandwidth_gbps
 
 
-def print_bandwidth_matrix(matrix, label="Unidirectional LOAD bandwidth GiB/s [Remote read]"):
+def print_bandwidth_matrix(matrix, label="Unidirectional LOAD bandwidth GiB/s [Remote read]", output_file=None):
     num_ranks = matrix.shape[0]
     col_width = 10  # Adjust for alignment
 
@@ -201,6 +202,24 @@ def print_bandwidth_matrix(matrix, label="Unidirectional LOAD bandwidth GiB/s [R
         for dst in range(num_ranks):
             row += f"{matrix[src, dst]:10.2f}"
         print(row)
+
+
+    if output_file is not None:
+        if output_file.endswith(".json"):
+            detailed_results = []
+            for src in range(num_ranks):
+                for dst in range(num_ranks):
+                    detailed_results.append({
+                        "source_gpu": f"GPU_{src:02d}",
+                        "destination_gpu": f"GPU_{dst:02d}",
+                        "source_rank": src,
+                        "destination_rank": dst,
+                        "bandwidth_gbps": float(matrix[src, dst])
+                    })
+            with open(output_file, "w") as f:
+                json.dump(detailed_results, f, indent=2)
+        else:
+            raise ValueError(f"Unsupported output file extension: {output_file}")
 
 
 def main():
@@ -222,7 +241,7 @@ def main():
             shmem.barrier()
 
     if shmem.get_rank() == 0:
-        print_bandwidth_matrix(bandwidth_matrix)
+        print_bandwidth_matrix(bandwidth_matrix, output_file=args["output_file"])
 
 
 if __name__ == "__main__":

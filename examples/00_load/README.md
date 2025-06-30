@@ -10,7 +10,7 @@ Load benchmark using Iris.
 ## Usage
 
 ```terminal
-mpirun -np 8 python examples/p2p/load/load_bench.py
+mpirun -np 8 python examples/00_load/load_bench.py
 ```
 On an MI300X, this example will run on 8 GPUs. It prints:
 ```terminal

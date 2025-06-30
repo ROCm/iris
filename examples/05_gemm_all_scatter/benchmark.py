@@ -83,7 +83,7 @@ def parse_args():
 
     # For All Scatter, use: 288
     # For One Shot, use: 256
-    parser.add_argument("--gemm_sms", type=int, default=288, help="Number of SMs for Stream-K")
+    parser.add_argument("--gemm_sms", type=int, default=304, help="Number of SMs for Stream-K")
     parser.add_argument("--total_sms", type=int, default=304, help="Total number of SMs")
     parser.add_argument(
         "--communication_block_size",

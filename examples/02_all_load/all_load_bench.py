@@ -120,6 +120,7 @@ def parse_args():
 
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size")
     parser.add_argument("-x", "--num_experiments", type=int, default=1, help="Number of experiments")
+    parser.add_argument("-a", "--active_ranks", type=int, default=1, help="Number of active ranks")
     return vars(parser.parse_args())
 
 
@@ -140,15 +141,16 @@ def run_experiment(shmem, args, buffer):
     target_buffer = shmem.zeros_like(buffer)
 
     def run_all_load():
-        return all_read_kernel[grid](
-            source_buffer,
-            target_buffer,
-            cur_rank,
-            n_elements,
-            world_size,
-            args["block_size"],
-            shmem.get_heap_bases(),
-        )
+        if cur_rank < args["active_ranks"]:
+            return all_read_kernel[grid](
+                source_buffer,
+                target_buffer,
+                cur_rank,
+                n_elements,
+                world_size,
+                args["block_size"],
+                shmem.get_heap_bases(),
+            )
 
     def run_store_only():
         store_kernel[grid](

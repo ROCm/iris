@@ -13,6 +13,7 @@ From: rocm/pytorch:latest-release
     conda install -y -n py_3.10 -c conda-forge mpi4py openmpi jupyter ninja cmake wheel
     git clone https://github.com/triton-lang/triton.git \$TRITON_PATH
     cd \$TRITON_PATH
+    git checkout eb73b0373a7fb4cd2e563f68e3488a96525562eb
     pip install -e .
     wget https://github.com/ROCm/rocprofiler-systems/releases/latest/download/rocprofiler-systems-install.py
     python3 ./rocprofiler-systems-install.py --prefix /opt/rocprofiler-systems --rocm 6.3

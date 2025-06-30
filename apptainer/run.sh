@@ -22,7 +22,8 @@ while getopts "s:" opt; do
 done
 
 # Create filesystem image overlay, if it doesn't exist
-overlay="/tmp/iris_overlay_$(whoami).img"
+timestamp=$(date +%s)
+overlay="/tmp/iris_overlay_$(whoami)_${timestamp}.img"
 if [ ! -f $overlay ]; then
     echo "[Log] Overlay image ${overlay} does not exist. Creating overlay of ${size} MiB..."
     apptainer overlay create --size ${size} --create-dir /var/cache/iris ${overlay}
