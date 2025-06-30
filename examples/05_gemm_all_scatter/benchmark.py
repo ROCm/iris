@@ -58,19 +58,6 @@ def parse_args():
     parser.add_argument("--BLK_M", type=int, default=256, help="Block size M")
     parser.add_argument("--BLK_N", type=int, default=64, help="Block size N")
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K")
-    parser.add_argument(
-        "--COMMUNICATION_TILE_M",
-        type=int,
-        default=128,
-        help="M tile size for reduction, scatter or one-shot",
-    )
-    parser.add_argument(
-        "--COMMUNICATION_TILE_N",
-        type=int,
-        default=64,
-        help="N tile size for reduction, scatter or one-shot",
-    )
-
     # Best to try 1, 6 or 8
     parser.add_argument("--gsize_m", type=int, default=6, help="Grid size M")
     parser.add_argument("--two_tiles", type=str, default="True", help="Use two tiles")
@@ -84,22 +71,7 @@ def parse_args():
     # For All Scatter, use: 288
     # For One Shot, use: 256
     parser.add_argument("--gemm_sms", type=int, default=304, help="Number of SMs for Stream-K")
-    parser.add_argument("--total_sms", type=int, default=304, help="Total number of SMs")
-    parser.add_argument(
-        "--communication_block_size",
-        type=int,
-        default=256,
-        help="Communication block size",
-    )
 
-    # For All Scatter, use: 10
-    # For One Shot, use: 2
-    parser.add_argument(
-        "--communication_sms_multiplier",
-        type=int,
-        default=2,
-        help="Communication SMS multiplier",
-    )
     return vars(parser.parse_args())
 
 
@@ -144,16 +116,6 @@ def main():
     args["n"] = args["n"] // world_size
     local_B = B[:, rank * args["n"] : (rank + 1) * args["n"]].clone()
     local_A = A
-    # elif args["algorithm"] == "all_reduce" or args["algorithm"] == "one_shot":
-    #     rows_per_gpu = args["k"] // world_size
-    #     args["k"] = rows_per_gpu
-    #     start_row = rank * rows_per_gpu
-    #     end_row = start_row + rows_per_gpu
-    #     local_B = B[start_row:end_row, :]
-    #     local_A = A[:, start_row:end_row]
-    # else:
-    #     print("Unknown algorithm.")
-    #     exit(1)
 
     for key, value in args.items():
         json_writer.add_field(key, value)
@@ -164,10 +126,6 @@ def main():
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
     total_tiles = total_blocks_M * total_blocks_N
-
-    # if args["gemm_sms"] >= args["total_sms"]:
-    #     print(f"Invalid number of stream-K SMs. {args['gemm_sms']} >= {args['total_sms']}")
-    #     exit(1)
 
     tile_completed = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int32)
 
@@ -182,7 +140,6 @@ def main():
 
     gemm_stream = torch.cuda.Stream()
 
-    # json_writer.add_field("communication_sms", communication_sms)
     json_writer.add_field("gemm_sms", args["gemm_sms"])
 
     kernel_timing = {
@@ -199,16 +156,6 @@ def main():
             "experiments": 0,
         },
     }
-
-    # COMMUNICATION_ALGORITHM = None
-    # if args["algorithm"] == "one_shot":
-    #     COMMUNICATION_ALGORITHM = ONE_SHOT
-    # elif args["algorithm"] == "all_reduce":
-    #     COMMUNICATION_ALGORITHM = ALL_REDUCE
-    # elif args["algorithm"] == "all_scatter":
-    #     COMMUNICATION_ALGORITHM = ALL_SCATTER
-    # elif args["algorithm"] == "all_gather":
-    #     COMMUNICATION_ALGORITHM = ALL_GATHER
 
     # Timestamps
     timestamps = Timestamps(num_tiles=total_tiles)
