@@ -27,8 +27,8 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-m", type=int, default=8192, help="Number of rows in matrix A")
-    parser.add_argument("-n", type=int, default=4608, help="Number of columns in matrix B")
-    parser.add_argument("-k", type=int, default=36864, help="Common dimension between matrices A and B")
+    parser.add_argument("-n", type=int, default=3584, help="Number of columns in matrix B")
+    parser.add_argument("-k", type=int, default=14336, help="Common dimension between matrices A and B")
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
     parser.add_argument("-t", "--trace_tiles", action="store_true", help="Enable tile-tracing mode")
@@ -55,17 +55,17 @@ def parse_args():
     )
     # For All Scatter, use: 256x64x64
     # For One Shot, use: 256x256x64
-    parser.add_argument("--BLK_M", type=int, default=256, help="Block size M")
-    parser.add_argument("--BLK_N", type=int, default=64, help="Block size N")
+    parser.add_argument("--BLK_M", type=int, default=128, help="Block size M")
+    parser.add_argument("--BLK_N", type=int, default=128, help="Block size N")
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K")
     # Best to try 1, 6 or 8
-    parser.add_argument("--gsize_m", type=int, default=6, help="Grid size M")
+    parser.add_argument("--gsize_m", type=int, default=4, help="Grid size M")
     parser.add_argument("--two_tiles", type=str, default="True", help="Use two tiles")
-    parser.add_argument("--num_stages", type=int, default=1, help="Number of stages")
+    parser.add_argument("--num_stages", type=int, default=2, help="Number of stages")
     parser.add_argument("--num_warps", type=int, default=8, help="Number of warps")
     parser.add_argument("--waves_per_eu", type=int, default=0, help="Waves per execution unit")
     parser.add_argument("--mfmaInstrSize", type=int, default=16, help="MFMA instruction size")
-    parser.add_argument("--kpack", type=int, default=2, help="K packing size")
+    parser.add_argument("--kpack", type=int, default=1, help="K packing size")
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
 
     # For All Scatter, use: 288
@@ -271,7 +271,7 @@ def main():
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
         triton_ms = iris.do_bench(run_experiment, shmem.barrier, preamble)
         triton_tflops = perf(triton_ms)
-        algo_string = args["algorithm"]
+        algo_string = "all_scatter"
         shmem.log_stats(
             f"tile matmul + {algo_string} (grid={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
         )
@@ -292,7 +292,7 @@ def main():
 
     if args["trace_tiles"] and rank == 0:
         gpu_freq = shmem.wall_clock_rate(rank) * 1e-3
-        algo_string = args["algorithm"]
+        algo_string = "all_scatter"
         filename = f"gemm_tiles_{algo_string}_trace_rank{rank}.json"
         timestamps.to_json(filename, gpu_freq)
 

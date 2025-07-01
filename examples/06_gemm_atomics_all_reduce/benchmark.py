@@ -53,7 +53,7 @@ def parse_args():
     # For All Scatter, use: 256x64x64
     # For One Shot, use: 256x256x64
     parser.add_argument("--BLK_M", type=int, default=256, help="Block size M")
-    parser.add_argument("--BLK_N", type=int, default=64, help="Block size N")
+    parser.add_argument("--BLK_N", type=int, default=128, help="Block size N")
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K")
 
     # Best to try 1, 6 or 8

@@ -244,14 +244,12 @@ def translate(src_ptr, cur_rank, target_rank, heap_bases, debug=False):
     dst_ptr_byte = dst_base_byte + offset
     # Cast dst_base back to pointer type
     dst_ptr = tl.cast(dst_ptr_byte, src_ptr.dtype)
-
-    pid = tl.program_id(axis=0)
-    if debug and pid == 0:
-        print("src_ptr", src_ptr)
-        print("src_base", src_base)
-        print("dst_base", dst_base)
-        print("offset", offset)
-        print("dst_ptr", dst_ptr)
+    
+    
+    # Optimization to vectorize the load/store
+    # We can't do this in general because we don't know the shape of the tensor
+    #src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, (64, 64)), (64, 64))
+    #dst_ptr = tl.max_contiguous(tl.multiple_of(dst_ptr, (64, 64)), (64, 64))
 
     return dst_ptr
 
@@ -293,7 +291,6 @@ def store(src_ptr, data, cur_rank, target_rank, heap_bases, mask=None):
         None
     """
     dst_ptr = translate(src_ptr, cur_rank, target_rank, heap_bases, False)
-
     tl.store(dst_ptr, data, mask=mask)
 
 

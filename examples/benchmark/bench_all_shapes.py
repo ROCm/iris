@@ -133,7 +133,7 @@ def main(hashes, config, sbatch_script_content, input_json, tiling_json, dry_run
     for hash in hashes:
         for algorithm in algorithms_iter:
             for i, (m, k, n) in unique_mkn_iter:
-                max_gpus = 4
+                max_gpus = 8
                 min_gpus = 1
                 num_gpus = min_gpus
                 print(f"Index: {i} / {len(unique_mkn)}, m: {m}, k: {k}, n: {n}")
@@ -164,6 +164,15 @@ def main(hashes, config, sbatch_script_content, input_json, tiling_json, dry_run
                     blk_n = gemm_params.get("BLK_N")
                     blk_k = gemm_params.get("BLK_K")
                     gsize_m = gemm_params.get("gsize_m")
+
+                    if blk_m == 128 and blk_n == 256:
+                        blk_m = 256
+                        blk_n = 128
+                    if blk_m == 128 and blk_n == 128:
+                        blk_m = 256
+                        blk_n = 128
+                    
+                    
                     launch_sbatch(
                         config,
                         m,
