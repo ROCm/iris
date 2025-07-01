@@ -244,12 +244,11 @@ def translate(src_ptr, cur_rank, target_rank, heap_bases, debug=False):
     dst_ptr_byte = dst_base_byte + offset
     # Cast dst_base back to pointer type
     dst_ptr = tl.cast(dst_ptr_byte, src_ptr.dtype)
-    
-    
+
     # Optimization to vectorize the load/store
     # We can't do this in general because we don't know the shape of the tensor
-    #src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, (64, 64)), (64, 64))
-    #dst_ptr = tl.max_contiguous(tl.multiple_of(dst_ptr, (64, 64)), (64, 64))
+    # src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, (64, 64)), (64, 64))
+    # dst_ptr = tl.max_contiguous(tl.multiple_of(dst_ptr, (64, 64)), (64, 64))
 
     return dst_ptr
 

@@ -129,7 +129,7 @@ def main(hashes, config, sbatch_script_content, input_json, tiling_json, dry_run
     unique_mkn_iter = list(enumerate(unique_mkn)) if enable_mkn else [(0, (8192, 36864, 4608))]
 
     python_file = "examples/05_gemm_all_scatter/benchmark.py"
-    
+
     for hash in hashes:
         for algorithm in algorithms_iter:
             for i, (m, k, n) in unique_mkn_iter:
@@ -146,9 +146,7 @@ def main(hashes, config, sbatch_script_content, input_json, tiling_json, dry_run
                         key = (m, k, n // num_gpus)
                     # Check for missing entry
                     if key not in mkn_gemm_tiles:
-                        print(
-                            f"[WARNING] GEMM params not found for {algorithm} with key={key}, using default."
-                        )
+                        print(f"[WARNING] GEMM params not found for {algorithm} with key={key}, using default.")
                     # Now safely get the params
                     gemm_params = mkn_gemm_tiles.get(
                         key,
@@ -171,8 +169,7 @@ def main(hashes, config, sbatch_script_content, input_json, tiling_json, dry_run
                     if blk_m == 128 and blk_n == 128:
                         blk_m = 256
                         blk_n = 128
-                    
-                    
+
                     launch_sbatch(
                         config,
                         m,
