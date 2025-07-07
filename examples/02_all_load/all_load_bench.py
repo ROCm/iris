@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 import random
 import numpy as np
+import json
 
 import iris
 
@@ -119,8 +120,10 @@ def parse_args():
     parser.add_argument("-d", "--validate", action="store_true", help="Enable validation output")
 
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size")
-    parser.add_argument("-x", "--num_experiments", type=int, default=1, help="Number of experiments")
+    parser.add_argument("-x", "--num_experiments", type=int, default=20, help="Number of experiments")
+    parser.add_argument("-w", "--num_warmup", type=int, default=2, help="Number of warmup experiments")
     parser.add_argument("-a", "--active_ranks", type=int, default=1, help="Number of active ranks")
+    parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
     return vars(parser.parse_args())
 
 
@@ -169,7 +172,7 @@ def run_experiment(shmem, args, buffer):
     total_ms = iris.do_bench(
         run_all_load,
         shmem.barrier,
-        n_warmup=args["num_experiments"],
+        n_warmup=args["num_warmup"],
         n_repeat=args["num_experiments"],
     )
 
@@ -177,7 +180,7 @@ def run_experiment(shmem, args, buffer):
     store_ms = iris.do_bench(
         run_store_only,
         shmem.barrier,
-        n_warmup=args["num_experiments"],
+        n_warmup=args["num_warmup"],
         n_repeat=args["num_experiments"],
     )
 
@@ -228,7 +231,7 @@ def run_experiment(shmem, args, buffer):
     return bandwidth_gbps
 
 
-def print_bandwidth_matrix(bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size"):
+def print_bandwidth_matrix(bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size", output_file=None):
     num_ranks = len(bandwidth_data)
 
     # Prepare headers
@@ -249,6 +252,26 @@ def print_bandwidth_matrix(bandwidth_data, buffer_sizes, label="Total Bandwidth 
             f"{int(np.log2(size))}",
         ] + [f"{bandwidth_data[rank][i]:.2f}" for rank in range(num_ranks)]
         print(" | ".join(row))
+
+    if output_file is not None:
+        if output_file.endswith(".json"):
+            detailed_results = []
+            for buffer_idx, size in enumerate(buffer_sizes):
+                for rank in range(num_ranks):
+                    detailed_results.append(
+                        {
+                            "buffer_size_bytes": size,
+                            "buffer_size_mib": size / 1024 / 1024,
+                            "log2_bytes": int(np.log2(size)),
+                            "gpu_rank": rank,
+                            "gpu_id": f"GPU_{rank:02d}",
+                            "bandwidth_gbps": float(bandwidth_data[rank][buffer_idx]),
+                        }
+                    )
+            with open(output_file, "w") as f:
+                json.dump(detailed_results, f, indent=2)
+        else:
+            raise ValueError(f"Unsupported output file extension: {output_file}")
 
 
 def main():
@@ -293,7 +316,7 @@ def main():
         shmem.barrier()
 
     if shmem.get_rank() == 0:
-        print_bandwidth_matrix(bandwidth_data, buffer_sizes)
+        print_bandwidth_matrix(bandwidth_data, buffer_sizes, output_file=args["output_file"])
 
 
 if __name__ == "__main__":
