@@ -443,7 +443,7 @@ def iris(heap_size=1 << 30):
 
     Args:
         heap_size (int): Size of the heap in bytes. Defaults to 1GB.
-    
+
     Returns:
         Iris: An initialized Iris instance.
     """
