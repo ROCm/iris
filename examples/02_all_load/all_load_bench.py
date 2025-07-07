@@ -122,7 +122,7 @@ def parse_args():
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size")
     parser.add_argument("-x", "--num_experiments", type=int, default=20, help="Number of experiments")
     parser.add_argument("-w", "--num_warmup", type=int, default=2, help="Number of warmup experiments")
-    parser.add_argument("-a", "--active_ranks", type=int, default=1, help="Number of active ranks")
+    parser.add_argument("-a", "--active_ranks", type=int, default=8, help="Number of active ranks")
     parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
     return vars(parser.parse_args())
 
@@ -239,23 +239,57 @@ def print_bandwidth_matrix(
     # Prepare headers
     headers = ["Size (MiB)", "log2(bytes)"] + [f"GPU {i:02d}" for i in range(num_ranks)]
 
+    # Calculate column widths
+    col_widths = []
+    for header in headers:
+        col_widths.append(len(header))
+    
+    # Check data widths for each column
+    for i, size in enumerate(buffer_sizes):
+        # Size column
+        size_str = f"{size / 1024 / 1024:.1f}"
+        col_widths[0] = max(col_widths[0], len(size_str))
+        
+        # log2 column
+        log2_str = f"{int(np.log2(size))}"
+        col_widths[1] = max(col_widths[1], len(log2_str))
+        
+        # GPU columns
+        for rank in range(num_ranks):
+            gpu_str = f"{bandwidth_data[rank][i]:.2f}"
+            col_widths[2 + rank] = max(col_widths[2 + rank], len(gpu_str))
+
     # Print label
     print(f"\n{label}")
 
     # Print header
-    header_str = " | ".join(headers)
+    header_parts = []
+    for i, header in enumerate(headers):
+        header_parts.append(f"{header:>{col_widths[i]}}")
+    header_str = " | ".join(header_parts)
     print(header_str)
     print("-" * len(header_str))
 
     # Print rows
     for i, size in enumerate(buffer_sizes):
-        row = [
-            f"{size / 1024 / 1024:.1f}",
-            f"{int(np.log2(size))}",
-        ] + [f"{bandwidth_data[rank][i]:.2f}" for rank in range(num_ranks)]
-        print(" | ".join(row))
+        row_parts = []
+        
+        # Size column
+        size_str = f"{size / 1024 / 1024:.1f}"
+        row_parts.append(f"{size_str:>{col_widths[0]}}")
+        
+        # log2 column
+        log2_str = f"{int(np.log2(size))}"
+        row_parts.append(f"{log2_str:>{col_widths[1]}}")
+        
+        # GPU columns
+        for rank in range(num_ranks):
+            gpu_str = f"{bandwidth_data[rank][i]:.2f}"
+            row_parts.append(f"{gpu_str:>{col_widths[2 + rank]}}")
+        
+        print(" | ".join(row_parts))
 
-    if output_file is not None:
+    if output_file != "":
         if output_file.endswith(".json"):
             detailed_results = []
             for buffer_idx, size in enumerate(buffer_sizes):

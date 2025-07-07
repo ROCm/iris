@@ -186,7 +186,7 @@ def print_bandwidth_matrix(
             row += f"{matrix[src, dst]:10.2f}"
         print(row)
 
-    if output_file is not None:
+    if output_file != "":
         if output_file.endswith(".json"):
             detailed_results = []
             for src in range(num_ranks):

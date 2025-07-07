@@ -40,22 +40,6 @@ def atomic_add_kernel(
         source_buffer + offsets, 1, source_rank, destination_rank, heap_bases_ptr, mask=mask, sem="relaxed", scope="sys"
     )
 
-    # Store data to result buffer
-    # tl.store(result_buffer + offsets, result, mask=mask)
-
-
-@triton.jit
-def store_kernel(
-    result_buffer,  # tl.tensor: pointer to result data
-    buffer_size,  # int32: total number of elements
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < buffer_size
-    tl.store(result_buffer + offsets, 0, mask=mask)
-
 
 def torch_dtype_from_str(datatype: str) -> torch.dtype:
     dtype_map = {
@@ -117,10 +101,6 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
     n_elements = source_buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
-    def run_store():
-        if cur_rank == source_rank:
-            store_kernel[grid](result_buffer, n_elements, args["block_size"])
-
     def run_atomic_add():
         if cur_rank == source_rank:
             atomic_add_kernel[grid](
@@ -134,10 +114,6 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
             )
 
     # Warmup
-    run_store()
-    shmem.barrier()
-    store_ms = iris.do_bench(run_store, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"])
-
     run_atomic_add()
     shmem.barrier()
     atomic_add_ms = iris.do_bench(
@@ -146,7 +122,6 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
 
     # Subtract overhead
     triton_ms = atomic_add_ms
-    # - store_ms
 
     bandwidth_gbps = 0
     if cur_rank == source_rank:
@@ -207,7 +182,7 @@ def print_bandwidth_matrix(
             row += f"{matrix[src, dst]:10.2f}"
         print(row)
 
-    if output_file is not None:
+    if output_file != "":
         if output_file.endswith(".json"):
             detailed_results = []
             for src in range(num_ranks):

@@ -95,7 +95,8 @@ def parse_args():
 
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
-
+    parser.add_argument("-n", "--num_experiments", type=int, default=10, help="Number of experiments")
+    parser.add_argument("-w", "--num_warmup", type=int, default=1, help="Number of warmup iterations")
     return vars(parser.parse_args())
 
 
@@ -137,11 +138,11 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
     # Warmup
     run_store()
     shmem.barrier()
-    store_ms = iris.do_bench(run_store, shmem.barrier)
+    store_ms = iris.do_bench(run_store, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"])
 
     run_load()
     shmem.barrier()
-    get_ms = iris.do_bench(run_load, shmem.barrier)
+    get_ms = iris.do_bench(run_load, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"])
 
     # Subtract overhead
     triton_ms = get_ms - store_ms
@@ -203,7 +204,7 @@ def print_bandwidth_matrix(matrix, label="Unidirectional LOAD bandwidth GiB/s [R
             row += f"{matrix[src, dst]:10.2f}"
         print(row)
 
-    if output_file is not None:
+    if output_file != "":
         if output_file.endswith(".json"):
             detailed_results = []
             for src in range(num_ranks):

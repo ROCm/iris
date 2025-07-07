@@ -19,7 +19,7 @@ random.seed(123)
 
 
 @triton.jit
-def all_put_kernel(
+def all_store_kernel(
     target_buffer,  # tl.tensor: pointer to target data
     source_rank: tl.constexpr,
     buffer_size,  # int32: total number of elements
@@ -85,7 +85,7 @@ def parse_args():
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size")
     parser.add_argument("-x", "--num_experiments", type=int, default=20, help="Number of experiments")
     parser.add_argument("-w", "--num_warmup", type=int, default=2, help="Number of warmup experiments")
-    parser.add_argument("-a", "--active_ranks", type=int, default=1, help="Number of active ranks")
+    parser.add_argument("-a", "--active_ranks", type=int, default=8, help="Number of active ranks")
     parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
 
     return vars(parser.parse_args())
@@ -105,7 +105,7 @@ def run_experiment(shmem, args, buffer):
 
     def run_experiment():
         if cur_rank < args["active_ranks"]:
-            all_put_kernel[grid](
+            all_store_kernel[grid](
                 buffer,
                 cur_rank,
                 n_elements,
@@ -165,21 +165,61 @@ def print_bandwidth_matrix(
     bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size", output_file=None
 ):
     num_ranks = len(bandwidth_data)
-    col_width = 12  # Adjust for alignment
 
-    print(f"\n{label}")
-    header = "Buffer Size".ljust(col_width)
-    for rank in range(num_ranks):
-        header += f"GPU {rank:02d}".rjust(col_width)
-    print(header)
+    # Prepare headers
+    headers = ["Size (MiB)", "log2(bytes)"] + [f"GPU {i:02d}" for i in range(num_ranks)]
 
+    # Calculate column widths
+    col_widths = []
+    for header in headers:
+        col_widths.append(len(header))
+    
+    # Check data widths for each column
     for i, size in enumerate(buffer_sizes):
-        row = f"{size / 1024 / 1024:.1f}MB".ljust(col_width)
+        # Size column
+        size_str = f"{size / 1024 / 1024:.1f}"
+        col_widths[0] = max(col_widths[0], len(size_str))
+        
+        # log2 column
+        log2_str = f"{int(np.log2(size))}"
+        col_widths[1] = max(col_widths[1], len(log2_str))
+        
+        # GPU columns
         for rank in range(num_ranks):
-            row += f"{bandwidth_data[rank][i]:12.2f}"
-        print(row)
+            gpu_str = f"{bandwidth_data[rank][i]:.2f}"
+            col_widths[2 + rank] = max(col_widths[2 + rank], len(gpu_str))
 
-    if output_file is not None:
+    # Print label
+    print(f"\n{label}")
+
+    # Print header
+    header_parts = []
+    for i, header in enumerate(headers):
+        header_parts.append(f"{header:>{col_widths[i]}}")
+    header_str = " | ".join(header_parts)
+    print(header_str)
+    print("-" * len(header_str))
+
+    # Print rows
+    for i, size in enumerate(buffer_sizes):
+        row_parts = []
+        
+        # Size column
+        size_str = f"{size / 1024 / 1024:.1f}"
+        row_parts.append(f"{size_str:>{col_widths[0]}}")
+        
+        # log2 column
+        log2_str = f"{int(np.log2(size))}"
+        row_parts.append(f"{log2_str:>{col_widths[1]}}")
+        
+        # GPU columns
+        for rank in range(num_ranks):
+            gpu_str = f"{bandwidth_data[rank][i]:.2f}"
+            row_parts.append(f"{gpu_str:>{col_widths[2 + rank]}}")
+        
+        print(" | ".join(row_parts))
+
+    if output_file != "":
         if output_file.endswith(".json"):
             detailed_results = []
             for buffer_idx, size in enumerate(buffer_sizes):

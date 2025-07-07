@@ -128,7 +128,7 @@ def main(hashes, config, sbatch_script_content, input_json, tiling_json, dry_run
     algorithms_iter = algorithms if enable_algorithms else ["all_scatter"]
     unique_mkn_iter = list(enumerate(unique_mkn)) if enable_mkn else [(0, (8192, 36864, 4608))]
 
-    python_file = "examples/05_gemm_all_scatter/benchmark.py"
+    python_file = "examples/07_gemm_all_scatter/benchmark.py"
 
     for hash in hashes:
         for algorithm in algorithms_iter:
