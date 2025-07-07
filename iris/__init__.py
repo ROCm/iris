@@ -27,14 +27,14 @@ from .util import (
 
 # Pipe allocations via finegrained allocator
 current_dir = os.path.dirname(__file__)
-project_root = os.path.dirname(current_dir)
-finegrained_alloc_path = os.path.join(project_root, "csrc", "finegrained_alloc", "libfinegrained_allocator.so")
+# Look for the library in the installed package location
+finegrained_alloc_path = os.path.join(current_dir, "csrc", "finegrained_alloc", "libfinegrained_allocator.so")
 
 # Check if the library exists (should be built during pip install)
 if not os.path.exists(finegrained_alloc_path):
     raise RuntimeError(
         f"Fine-grained allocator library not found at {finegrained_alloc_path}. "
-        "Please run 'pip install -e .' to build the library."
+        "Please ensure the package was installed correctly."
     )
 
 finegrained_allocator = torch.cuda.memory.CUDAPluggableAllocator(
