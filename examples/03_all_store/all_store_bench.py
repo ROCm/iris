@@ -173,17 +173,17 @@ def print_bandwidth_matrix(
     col_widths = []
     for header in headers:
         col_widths.append(len(header))
-    
+
     # Check data widths for each column
     for i, size in enumerate(buffer_sizes):
         # Size column
         size_str = f"{size / 1024 / 1024:.1f}"
         col_widths[0] = max(col_widths[0], len(size_str))
-        
+
         # log2 column
         log2_str = f"{int(np.log2(size))}"
         col_widths[1] = max(col_widths[1], len(log2_str))
-        
+
         # GPU columns
         for rank in range(num_ranks):
             gpu_str = f"{bandwidth_data[rank][i]:.2f}"
@@ -203,20 +203,20 @@ def print_bandwidth_matrix(
     # Print rows
     for i, size in enumerate(buffer_sizes):
         row_parts = []
-        
+
         # Size column
         size_str = f"{size / 1024 / 1024:.1f}"
         row_parts.append(f"{size_str:>{col_widths[0]}}")
-        
+
         # log2 column
         log2_str = f"{int(np.log2(size))}"
         row_parts.append(f"{log2_str:>{col_widths[1]}}")
-        
+
         # GPU columns
         for rank in range(num_ranks):
             gpu_str = f"{bandwidth_data[rank][i]:.2f}"
             row_parts.append(f"{gpu_str:>{col_widths[2 + rank]}}")
-        
+
         print(" | ".join(row_parts))
 
     if output_file != "":

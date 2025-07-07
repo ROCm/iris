@@ -121,7 +121,9 @@ def run_experiment(shmem, args, source_rank, destination_rank, buffer):
     run_experiment()
     shmem.barrier()
 
-    triton_ms = iris.do_bench(run_experiment, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"])
+    triton_ms = iris.do_bench(
+        run_experiment, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"]
+    )
 
     bandwidth_gbps = 0
     if cur_rank == source_rank:
