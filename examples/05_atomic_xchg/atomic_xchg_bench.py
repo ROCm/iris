@@ -37,19 +37,11 @@ def atomic_xchg_kernel(
 
     # Get data from target buffer
     result = iris.atomic_xchg(
-        source_buffer + offsets,
-        1,
-        source_rank,
-        destination_rank,
-        heap_bases_ptr,
-        mask=mask,
-        sem="relaxed",
-        scope="sys"
+        source_buffer + offsets, 1, source_rank, destination_rank, heap_bases_ptr, mask=mask, sem="relaxed", scope="sys"
     )
 
     # Store data to result buffer
     tl.store(result_buffer + offsets, result, mask=mask)
-
 
 
 def torch_dtype_from_str(datatype: str) -> torch.dtype:
@@ -87,7 +79,7 @@ def parse_args():
 
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
-    
+
     parser.add_argument("-x", "--num_experiments", type=int, default=16, help="Number of experiments")
     parser.add_argument("-w", "--num_warmup", type=int, default=4, help="Number of warmup experiments")
 
@@ -128,7 +120,9 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
     # Warmup
     run_atomic_xchg()
     shmem.barrier()
-    atomic_xchg_ms = iris.do_bench(run_atomic_xchg, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"])
+    atomic_xchg_ms = iris.do_bench(
+        run_atomic_xchg, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"]
+    )
 
     # Subtract overhead
     triton_ms = atomic_xchg_ms
@@ -174,7 +168,9 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
     return bandwidth_gbps
 
 
-def print_bandwidth_matrix(matrix, label="Unidirectional ATOMIC_XCHG bandwidth GiB/s [Remote atomic exchange]", output_file=None):
+def print_bandwidth_matrix(
+    matrix, label="Unidirectional ATOMIC_XCHG bandwidth GiB/s [Remote atomic exchange]", output_file=None
+):
     num_ranks = matrix.shape[0]
     col_width = 10  # Adjust for alignment
 

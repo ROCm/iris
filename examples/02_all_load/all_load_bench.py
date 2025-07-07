@@ -231,7 +231,9 @@ def run_experiment(shmem, args, buffer):
     return bandwidth_gbps
 
 
-def print_bandwidth_matrix(bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size", output_file=None):
+def print_bandwidth_matrix(
+    bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size", output_file=None
+):
     num_ranks = len(bandwidth_data)
 
     # Prepare headers

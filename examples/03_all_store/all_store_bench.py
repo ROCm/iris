@@ -84,7 +84,7 @@ def parse_args():
 
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 36, help="Iris heap size")
     parser.add_argument("-x", "--num_experiments", type=int, default=20, help="Number of experiments")
-    parser.add_argument("-w", "--num_warmup", type=int, default=2, help="Number of warmup experiments")    
+    parser.add_argument("-w", "--num_warmup", type=int, default=2, help="Number of warmup experiments")
     parser.add_argument("-a", "--active_ranks", type=int, default=1, help="Number of active ranks")
     parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
 
@@ -118,7 +118,9 @@ def run_experiment(shmem, args, buffer):
     run_experiment()
     shmem.barrier()
 
-    triton_ms = iris.do_bench(run_experiment, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"])
+    triton_ms = iris.do_bench(
+        run_experiment, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"]
+    )
 
     triton_sec = triton_ms * 1e-3
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
@@ -159,7 +161,9 @@ def run_experiment(shmem, args, buffer):
     return bandwidth_gbps
 
 
-def print_bandwidth_matrix(bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size", output_file=None):
+def print_bandwidth_matrix(
+    bandwidth_data, buffer_sizes, label="Total Bandwidth (GiB/s) vs Buffer Size", output_file=None
+):
     num_ranks = len(bandwidth_data)
     col_width = 12  # Adjust for alignment
 

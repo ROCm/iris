@@ -197,6 +197,7 @@ def print_bandwidth_matrix(matrix, label="Unidirectional STORE bandwidth GiB/s [
         else:
             raise ValueError(f"Unsupported output file extension: {output_file}")
 
+
 def main():
     args = parse_args()
 
