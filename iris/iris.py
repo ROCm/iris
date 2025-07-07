@@ -12,10 +12,8 @@ from iris._mpi_helpers import (
 )
 from iris._hip import (
     set_device,
-    get_device,
     get_cu_count,
     count_devices,
-    malloc_fine_grained,
     get_ipc_handle,
     open_ipc_handle,
     get_wall_clock_rate,

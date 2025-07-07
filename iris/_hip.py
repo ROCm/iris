@@ -69,7 +69,7 @@ def set_device(gpu_id):
     hip_try(hip_runtime.hipSetDevice(gpu_id))
 
 
-def get_device():
+def get_device_id():
     device_id = ctypes.c_int()
     hip_try(hip_runtime.hipGetDevice(ctypes.byref(device_id)))
     return device_id.value
@@ -77,7 +77,7 @@ def get_device():
 
 def get_cu_count(device_id=None):
     if device_id is None:
-        device_id = get_device()
+        device_id = get_device_id()
 
     hipDeviceAttributeMultiprocessorCount = 63
     cu_count = ctypes.c_int()

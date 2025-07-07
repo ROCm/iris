@@ -50,7 +50,7 @@ exclude = [
 
 [tool.ruff.lint]
 select = ["E", "F", "W"] 
-ignore = ["E501", "E701", "E731", "E741", "F841", "F401", "F811"]
+ignore = ["E501", "E701", "E731", "E741", "F841", "F401"]
 
 [tool.ruff.format]
 quote-style = "double"
