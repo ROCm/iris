@@ -62,7 +62,7 @@ class HIPBuildPy(build_py):
         try:
             subprocess.run(cmd, cwd=src_dir, check=True, capture_output=True, text=True)
             print(f"Successfully built: {output_file}")
-            
+
             # Copy the built library to the iris package directory for installation
             iris_package_dir = os.path.join(project_root, "iris")
             target_dir = os.path.join(iris_package_dir, "csrc", "finegrained_alloc")
@@ -70,7 +70,7 @@ class HIPBuildPy(build_py):
             target_file = os.path.join(target_dir, "libfinegrained_allocator.so")
             shutil.copy2(output_file, target_file)
             print(f"Copied library to: {target_file}")
-            
+
         except subprocess.CalledProcessError as e:
             print(f"Build failed with return code {e.returncode}")
             print(f"stdout: {e.stdout}")
