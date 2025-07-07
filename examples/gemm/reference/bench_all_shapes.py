@@ -7,7 +7,6 @@ import subprocess
 import os
 from datetime import datetime
 import argparse
-import subprocess
 import json
 
 
