@@ -5,6 +5,9 @@
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.dynamic]
+version = {attr = "iris.__version__"}
+
 [tool.setuptools]
 package-dir = { "" = "." }
 
@@ -41,7 +44,7 @@ dev = [
 [tool.ruff]
 line-length = 120
 exclude = [
-    "iris/finegrained_alloc/**",  # explicitly exclude all contents
+    "csrc/finegrained_alloc/**",  # explicitly exclude all contents
     "**/*.ipynb"                  # match notebooks anywhere
 ]
 

@@ -1,0 +1,12 @@
+# Include C++ source files
+include csrc/finegrained_alloc/*.hip
+include csrc/finegrained_alloc/build.sh
+
+# Include documentation
+include README.md
+include LICENSE
+include iris/README.md
+
+# Include build configuration
+include pyproject.toml
+include setup.py 
