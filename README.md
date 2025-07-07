@@ -53,7 +53,7 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
 heap_size = 2**30
 buffer_size = 4096
 block_size = 1024
-iris_ctx = iris.Iris(heap_size)
+iris_ctx = iris.iris(heap_size)
 cur_rank = iris_ctx.get_rank()
 buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
 grid = lambda meta: (triton.cdiv(buffer_size, meta["block_size"]),)

@@ -209,7 +209,7 @@ def print_bandwidth_matrix(
 def main():
     args = parse_args()
 
-    shmem = iris.Iris(args["heap_size"])
+    shmem = iris.iris(args["heap_size"])
     num_ranks = shmem.get_num_ranks()
     bandwidth_matrix = np.zeros((num_ranks, num_ranks), dtype=np.float32)
 

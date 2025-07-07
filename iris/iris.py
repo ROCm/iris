@@ -353,10 +353,10 @@ def atomic_add(src_ptr, data, cur_rank, target_rank, heap_bases, mask=None, sem=
             target_rank (int): The target rank.
             heap_bases (int): The heap bases.
             mask (Optional[tl.tensor], optional): A boolean tensor used to guard memory accesses. Defaults to None.
-            sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are “acquire”, “release”, “acq_rel” (stands for “ACQUIRE_RELEASE”), and
-    “relaxed”. Defaults to “acq_rel”.
-            scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are “gpu” (default), “cta”
-    (cooperative thread array, thread block), or “sys” (stands for “SYSTEM”). Defaults to “gpu”.
+            sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and
+    "relaxed". Defaults to "acq_rel".
+            scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta"
+    (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
 
         Returns:
             Any: The result before the atomic addition.
@@ -377,10 +377,10 @@ def atomic_sub(src_ptr, data, cur_rank, target_rank, heap_bases, mask=None, sem=
             target_rank (int): The target rank.
             heap_bases (int): The heap bases.
             mask (Optional[tl.tensor], optional): A boolean tensor used to guard memory accesses. Defaults to None.
-            sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are “acquire”, “release”, “acq_rel” (stands for “ACQUIRE_RELEASE”), and
-    “relaxed”. Defaults to “acq_rel”.
-            scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are “gpu” (default), “cta”
-    (cooperative thread array, thread block), or “sys” (stands for “SYSTEM”). Defaults to “gpu”.
+            sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and
+    "relaxed". Defaults to "acq_rel".
+            scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta"
+    (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
 
         Returns:
             Any: The value before the atomic subtraction.
@@ -401,10 +401,10 @@ def atomic_cas(src_ptr, compare, value, cur_rank, target_rank, heap_bases, sem=N
             cur_rank (int): The current rank.
             target_rank (int): The target rank.
             heap_bases (int): The heap bases.
-            sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are “acquire”, “release”, “acq_rel” (stands for “ACQUIRE_RELEASE”), and
-    “relaxed”. Defaults to “acq_rel”.
-            scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are “gpu” (default), “cta”
-    (cooperative thread array, thread block), or “sys” (stands for “SYSTEM”). Defaults to “gpu”.
+            sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and
+    "relaxed". Defaults to "acq_rel".
+            scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta"
+    (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
 
         Returns:
             Any: The value contained at the pointer before the atomic operation attempt.
@@ -425,13 +425,26 @@ def atomic_xchg(src_ptr, value, cur_rank, target_rank, heap_bases, mask=None, se
             target_rank (int): The target rank.
             heap_bases (int): The heap bases.
             mask (Optional[tl.tensor], optional): A boolean tensor used to guard memory accesses. Defaults to None.
-            sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are “acquire”, “release”, “acq_rel” (stands for “ACQUIRE_RELEASE”), and
-    “relaxed”. Defaults to “acq_rel”.
-            scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are “gpu” (default), “cta”
-    (cooperative thread array, thread block), or “sys” (stands for “SYSTEM”). Defaults to “gpu”.
+            sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and
+    "relaxed". Defaults to "acq_rel".
+            scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta"
+    (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
 
         Returns:
             Any: The old value at src_ptr before the exchange.
     """
     dst_ptr = translate(src_ptr, cur_rank, target_rank, heap_bases, False)
     return tl.atomic_xchg(dst_ptr, value, mask=mask, sem=sem, scope=scope)
+
+
+def iris(heap_size=1 << 30):
+    """
+    Create and return an Iris instance with the specified heap size.
+    
+    Args:
+        heap_size (int): Size of the heap in bytes. Defaults to 1GB.
+    
+    Returns:
+        Iris: An initialized Iris instance.
+    """
+    return Iris(heap_size)

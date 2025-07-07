@@ -314,7 +314,7 @@ def main():
     args = parse_args()
 
     heap_size = args["heap_size"]
-    shmem = iris.Iris(heap_size)
+    shmem = iris.iris(heap_size)
     num_ranks = shmem.get_num_ranks()
 
     dtype = torch_dtype_from_str(args["datatype"])

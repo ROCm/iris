@@ -132,7 +132,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    shmem = iris.Iris(args["heap_size"])
+    shmem = iris.iris(args["heap_size"])
     dtype = torch_dtype_from_str(args["datatype"])
     cur_rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()

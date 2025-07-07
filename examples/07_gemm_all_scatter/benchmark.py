@@ -78,7 +78,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    shmem = iris.Iris(args["heap_size"])
+    shmem = iris.iris(args["heap_size"])
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
     cu_count = shmem.get_cu_count()
