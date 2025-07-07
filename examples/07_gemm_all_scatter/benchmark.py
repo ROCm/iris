@@ -27,8 +27,8 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-m", type=int, default=8192, help="Number of rows in matrix A")
-    parser.add_argument("-n", type=int, default=3584, help="Number of columns in matrix B")
-    parser.add_argument("-k", type=int, default=14336, help="Common dimension between matrices A and B")
+    parser.add_argument("-n", type=int, default=4608, help="Number of columns in matrix B")
+    parser.add_argument("-k", type=int, default=36864, help="Common dimension between matrices A and B")
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
     parser.add_argument("-t", "--trace_tiles", action="store_true", help="Enable tile-tracing mode")
@@ -55,8 +55,8 @@ def parse_args():
     )
     # For All Scatter, use: 256x64x64
     # For One Shot, use: 256x256x64
-    parser.add_argument("--BLK_M", type=int, default=128, help="Block size M")
-    parser.add_argument("--BLK_N", type=int, default=128, help="Block size N")
+    parser.add_argument("--BLK_M", type=int, default=256, help="Block size M")
+    parser.add_argument("--BLK_N", type=int, default=64, help="Block size N")
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K")
     # Best to try 1, 6 or 8
     parser.add_argument("--gsize_m", type=int, default=4, help="Grid size M")
