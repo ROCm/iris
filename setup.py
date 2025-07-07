@@ -11,13 +11,13 @@ from setuptools.command.build_py import build_py
 
 class HIPBuildPy(build_py):
     """Custom build command that also builds the HIP library."""
-    
+
     def run(self):
         # Build the HIP library first
         self.build_hip_library()
         # Then run the normal Python build
         super().run()
-    
+
     def build_hip_library(self):
         """Build the finegrained allocator using hipcc."""
         # Get the project root directory (where setup.py is located)
@@ -25,7 +25,7 @@ class HIPBuildPy(build_py):
         src_dir = os.path.join(project_root, "csrc", "finegrained_alloc")
         src_file = os.path.join(src_dir, "finegrained_allocator.hip")
         output_file = os.path.join(src_dir, "libfinegrained_allocator.so")
-        
+
         # Check if source file exists
         if not os.path.exists(src_file):
             raise FileNotFoundError(
@@ -33,10 +33,10 @@ class HIPBuildPy(build_py):
                 "This might happen if the repository is incomplete or if you're "
                 "installing from a source distribution that doesn't include the C++ source."
             )
-        
+
         # Ensure the output directory exists
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
-        
+
         basic_warnings = ["-Wall", "-Wextra", "-Werror"]
         strict_warnings = [
             "-pedantic",
@@ -53,11 +53,11 @@ class HIPBuildPy(build_py):
         ]
         std_flags = ["-std=c++17"]
         output_flags = ["-shared", "-fPIC", "-o", output_file]
-        
+
         cmd = ["hipcc"] + basic_warnings + strict_warnings + std_flags + output_flags + [src_file]
-        
+
         print(f"Building finegrained allocator: {' '.join(cmd)}")
-        
+
         try:
             subprocess.run(cmd, cwd=src_dir, check=True, capture_output=True, text=True)
             print(f"Successfully built: {output_file}")
@@ -68,7 +68,9 @@ class HIPBuildPy(build_py):
             raise
         except FileNotFoundError:
             print("hipcc not found. Please ensure ROCm/HIP is installed.")
-            print("You can install ROCm following the instructions at: https://rocmdocs.amd.com/en/latest/Installation_Guide/Installation-Guide.html")
+            print(
+                "You can install ROCm following the instructions at: https://rocmdocs.amd.com/en/latest/Installation_Guide/Installation-Guide.html"
+            )
             raise
 
 
@@ -77,4 +79,4 @@ if __name__ == "__main__":
         cmdclass={
             "build_py": HIPBuildPy,
         },
-    ) 
+    )
