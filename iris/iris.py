@@ -440,7 +440,7 @@ def atomic_xchg(src_ptr, value, cur_rank, target_rank, heap_bases, mask=None, se
 def iris(heap_size=1 << 30):
     """
     Create and return an Iris instance with the specified heap size.
-    
+
     Args:
         heap_size (int): Size of the heap in bytes. Defaults to 1GB.
     
