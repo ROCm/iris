@@ -27,7 +27,6 @@ services:
         soft: 67108864
         hard: 67108864
     volumes:
-      - ${HOME}:${HOME}     # Mount home directory
       - ./:/workspace/iris  # Mount iris directory to /workspace/iris
     working_dir: /workspace
     tty: true
