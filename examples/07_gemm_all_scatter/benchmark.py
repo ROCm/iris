@@ -11,7 +11,7 @@ import argparse
 import json
 
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set
-from examples.gemm.validation import validate_gemm
+from examples.common.validation import validate_gemm
 
 import iris
 
