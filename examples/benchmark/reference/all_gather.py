@@ -9,7 +9,7 @@ import random
 import iris
 import argparse
 
-from examples.gemm.utils import JSONWriter
+from examples.common.utils import JSONWriter
 
 
 torch.manual_seed(123)
