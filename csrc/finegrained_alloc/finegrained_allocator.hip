@@ -12,7 +12,7 @@
   if (error != hipSuccess) {                                                                      \
     std::cerr << "[finegrained_allocator] Hip error: " << hipGetErrorString(error) << " at line " \
               << __LINE__ << std::endl;                                                           \
-    exit(-1);                                                                                     \
+    std::exit(EXIT_FAILURE);                                                                      \
   }
 
 inline bool is_logging_enabled() { return std::getenv("LOG_FINEGRAINED_ALLOCATOR") != nullptr; }

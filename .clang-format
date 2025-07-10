@@ -33,5 +33,3 @@ PointerAlignment: Left
 ReflowComments : true
 ExperimentalAutoDetectBinPacking: false
 BreakBeforeBraces: Attach
-
-# AlignAfterOpenBracket: AlwaysBreak
