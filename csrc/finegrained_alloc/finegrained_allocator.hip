@@ -27,7 +27,7 @@ inline void log_allocation(const char* operation, void* ptr, ssize_t size, int d
 extern "C" {
 void* finegrained_hipMalloc(ssize_t size, int device, hipStream_t stream [[maybe_unused]]) {
   void* ptr;
-  const auto flags = hipDeviceMallocUncached;
+  const auto flags = hipDeviceMallocFinegrained;
 
   int current_device;
   hip_try(hipGetDevice(&current_device));
