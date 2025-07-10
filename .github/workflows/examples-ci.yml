@@ -1,0 +1,206 @@
+name: Iris examples CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-iris:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install doctl
+      uses: digitalocean/action-doctl@v2
+      with:
+        token: ${{ secrets.DEV_CLOUD_KEY }}
+
+    - name: Install jq
+      timeout-minutes: 20
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y jq
+
+    - name: Create Droplet
+      id: create
+      run: |
+        DROPLET_NAME="iris-$(date +%s)"
+        
+        # Create droplet and capture JSON output
+        DROPLET_JSON=$(doctl compute droplet create \
+          --image 188571990 \
+          --size gpu-mi300x8-1536gb \
+          --region atl1 \
+          --ssh-keys ${{ secrets.SSH_KEY_ID }} \
+          "$DROPLET_NAME" \
+          -o json \
+          --wait)
+        
+        # Check if droplet creation was successful
+        if [ $? -ne 0 ]; then
+          echo "❌ Failed to create droplet"
+          exit 1
+        fi
+        
+        # Extract droplet ID and IP
+        DROPLET_ID=$(echo "$DROPLET_JSON" | jq -r '.[0].id')
+        PUBLIC_IP=$(echo "$DROPLET_JSON" | jq -r '.[0].networks.v4[] | select(.type=="public") | .ip_address')
+        
+        # Set outputs for other steps
+        echo "droplet_id=$DROPLET_ID" >> $GITHUB_OUTPUT
+        echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
+        
+        echo "✅ Droplet created successfully!"
+
+    - name: Setup SSH key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ steps.create.outputs.public_ip }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+    - name: Wait for SSH to be ready
+      run: |
+        echo "⏳ Waiting for SSH to be ready..."
+        for i in {1..30}; do
+          if ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@${{ steps.create.outputs.public_ip }} "echo 'SSH ready'" 2>/dev/null; then
+            echo "✅ SSH is ready!"
+            break
+          fi
+          echo "Attempt $i/30: SSH not ready yet, waiting 10 seconds..."
+          sleep 10
+        done
+
+    - name: Determine commit hash
+      id: commit_hash
+      run: |
+        if [ "${{ github.event_name }}" == "pull_request" ]; then
+          echo "commit_hash=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
+        else
+          echo "commit_hash=${{ github.sha }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Install Iris and run tests
+      run: |
+        echo "🚀Iris installation..."
+        
+        # Setup SSH, clone repo, and install dependencies
+        ssh -o StrictHostKeyChecking=no root@${{ steps.create.outputs.public_ip }} "
+          set -e
+          
+          # Remove any stale dpkg locks
+          sudo rm -f /var/lib/apt/lists/lock
+          sudo rm -f /var/cache/apt/archives/lock
+          sudo rm -f /var/lib/dpkg/lock*
+          
+          # Setup SSH key for git access
+          mkdir -p ~/.ssh
+          echo '${{ secrets.SSH_PRIVATE_KEY }}' > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          
+          # Set environment variables
+          export ROCM_PATH=/opt/rocm
+          export PATH=\$ROCM_PATH/bin:\$PATH
+          export LD_LIBRARY_PATH=\$ROCM_PATH/lib:\$LD_LIBRARY_PATH
+          
+          # Install system dependencies
+          sudo apt-get update && sudo apt-get install -y python3-venv cmake openmpi-bin libopenmpi-dev
+
+          # Clone the repository
+          git clone git@github.com:ROCm/iris.git
+          cd iris
+          echo 'Checking out commit ${{ steps.commit_hash.outputs.commit_hash }}'
+          git checkout ${{ steps.commit_hash.outputs.commit_hash }}
+          
+          # Setup Python environment
+          python3 -m venv iris_env
+          source iris_env/bin/activate
+
+          pip3 install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm6.4
+          pip3 install -e .
+          
+          # Create results directory
+          mkdir -p /iris_results
+          
+          # Run the Iris examples
+          ./.github/workflows/scripts/examples.sh
+        "
+
+    - name: Download test outputs
+      if: always()
+      run: |
+        echo "📥 Downloading test outputs..."
+        mkdir -p test_outputs
+        scp -r -o StrictHostKeyChecking=no root@${{ steps.create.outputs.public_ip }}:/iris_results/ ./test_outputs/ || echo "No results directory found"
+        
+        # Create tar artifact
+        tar -czf iris_test_outputs.tar.gz -C test_outputs .
+        echo "✅ Test outputs archived as iris_test_outputs.tar.gz"
+        
+        # Print test results summary with GitHub Actions annotations
+        echo "📊 Iris Test Results Summary:"
+        
+        # Check each test result by parsing the success field
+        check_test_result() {
+          local file="$1"
+          local test_name="$2"
+          if [ -f "$file" ]; then
+            if jq -e '.success == true' "$file" >/dev/null 2>&1; then
+              echo "::notice::✅ $test_name: PASSED"
+              return 0
+            else
+              echo "::warning::❌ $test_name: FAILED"
+              return 1
+            fi
+          else
+            echo "::warning::❌ $test_name: FAILED (file not found)"
+            return 1
+          fi
+        }
+        
+        # Track overall success
+        overall_success=true
+        
+        check_test_result "./test_outputs/iris_results/load_bench.json" "Load" || overall_success=false
+        check_test_result "./test_outputs/iris_results/store_bench.json" "Store" || overall_success=false
+        check_test_result "./test_outputs/iris_results/all_load_bench.json" "All Load" || overall_success=false
+        check_test_result "./test_outputs/iris_results/all_store_bench.json" "All Store" || overall_success=false
+        check_test_result "./test_outputs/iris_results/atomic_add_bench.json" "Atomic Add" || overall_success=false
+        check_test_result "./test_outputs/iris_results/atomic_xchg_bench.json" "Atomic Xchg" || overall_success=false
+        #check_test_result "./test_outputs/iris_results/message_passing_load_store.json" "Message Passing Load Store" || overall_success=false
+        #check_test_result "./test_outputs/iris_results/message_passing_put.json" "Message Passing Put" || overall_success=false
+        check_test_result "./test_outputs/iris_results/gemm_all_scatter_bench.json" "GEMM All Scatter" || overall_success=false
+        check_test_result "./test_outputs/iris_results/gemm_atomics_all_reduce_bench.json" "GEMM Atomics All Reduce" || overall_success=false
+        check_test_result "./test_outputs/iris_results/gemm_one_shot_all_reduce_bench.json" "GEMM One Shot All Reduce" || overall_success=false
+        
+        echo ""
+        if [ "$overall_success" = true ]; then
+          echo "::notice::🎯 All Iris tests PASSED! ✅"
+        else
+          echo "::error::⚠️ Some Iris tests FAILED! ❌"
+        fi
+
+    - name: Upload test outputs as artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: iris-test-outputs
+        path: iris_test_outputs.tar.gz
+        retention-days: 15
+
+    - name: Auto-destroy droplet after use
+      if: always()
+      run: |
+        echo "🗑️ Auto-destroying droplet ${{ steps.create.outputs.droplet_id }}..."
+        doctl compute droplet delete ${{ steps.create.outputs.droplet_id }} --force
+        echo "✅ Droplet auto-destroyed successfully!"

@@ -42,7 +42,8 @@ mpirun -np 8 python examples/04_atomic_add/atomic_add_bench.py  # Atomic add acr
 mpirun -np 8 python examples/05_atomic_xchg/atomic_xchg_bench.py  # Atomic exchange across GPUs
 
 # Example command to run message passing
-python examples/06_message_passing/message_passing.py
+mpirun -np 2 python examples/06_message_passing/message_passing_load_store.py
+mpirun -np 2 python examples/06_message_passing/message_passing_put.py
 ```
 
 ### GEMM Operations
