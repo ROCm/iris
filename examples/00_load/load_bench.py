@@ -63,10 +63,10 @@ def store_kernel(
 
 def torch_dtype_from_str(datatype: str) -> torch.dtype:
     dtype_map = {
-        "fp16": torch.float16,
-        "fp32": torch.float32,
         "int8": torch.int8,
+        "fp16": torch.float16,
         "bf16": torch.bfloat16,
+        "fp32": torch.float32,
     }
     try:
         return dtype_map[datatype]
@@ -85,7 +85,7 @@ def parse_args():
         "--datatype",
         type=str,
         default="fp16",
-        choices=["fp16", "fp32", "int8", "bf16"],
+        choices=["int8", "fp16", "bf16", "fp32"],
         help="Datatype of computation",
     )
     parser.add_argument("-z", "--buffer_size", type=int, default=1 << 32, help="Buffer Size")
@@ -100,8 +100,19 @@ def parse_args():
     return vars(parser.parse_args())
 
 
-def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, result_buffer):
-    dtype = torch_dtype_from_str(args["datatype"])
+def bench_load(
+    shmem,
+    source_rank,
+    destination_rank,
+    source_buffer,
+    result_buffer,
+    BLOCK_SIZE,
+    dtype,
+    verbose=False,
+    validate=False,
+    num_experiments=1,
+    num_warmup=0,
+):
     cur_rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
@@ -114,14 +125,14 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
             f"Destination rank must be less than or equal to the world size. World size is {world_size} and destination rank is {destination_rank}."
         )
     if cur_rank == 0:
-        if args["verbose"]:
+        if verbose:
             shmem.log(f"Measuring bandwidth between the ranks {source_rank} and {destination_rank}...")
     n_elements = source_buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
     def run_store():
         if cur_rank == source_rank:
-            store_kernel[grid](result_buffer, n_elements, args["block_size"])
+            store_kernel[grid](result_buffer, n_elements, BLOCK_SIZE)
 
     def run_load():
         if cur_rank == source_rank:
@@ -131,18 +142,12 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
                 n_elements,
                 source_rank,
                 destination_rank,
-                args["block_size"],
+                BLOCK_SIZE,
                 shmem.get_heap_bases(),
             )
 
-    # Warmup
-    run_store()
-    shmem.barrier()
-    store_ms = iris.do_bench(run_store, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"])
-
-    run_load()
-    shmem.barrier()
-    get_ms = iris.do_bench(run_load, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"])
+    store_ms = iris.do_bench(run_store, shmem.barrier, n_repeat=num_experiments, n_warmup=num_warmup)
+    get_ms = iris.do_bench(run_load, shmem.barrier, n_repeat=num_experiments, n_warmup=num_warmup)
 
     # Subtract overhead
     triton_ms = get_ms - store_ms
@@ -153,15 +158,15 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
         element_size_bytes = torch.tensor([], dtype=dtype).element_size()
         total_bytes = n_elements * element_size_bytes
         bandwidth_gbps = total_bytes / triton_sec / 2**30
-        if args["verbose"]:
+        if verbose:
             shmem.log(f"Copied {total_bytes / 2**30:.2f} GiB in {triton_sec:.4f} seconds")
             shmem.log(f"Bandwidth between {source_rank} and {destination_rank} is {bandwidth_gbps:.4f} GiB/s")
     shmem.barrier()
     bandwidth_gbps = shmem.broadcast(bandwidth_gbps, source_rank)
 
     success = True
-    if args["validate"] and cur_rank == destination_rank:
-        if args["verbose"]:
+    if validate and cur_rank == destination_rank:
+        if verbose:
             shmem.log("Validating output...")
 
         expected = torch.arange(n_elements, dtype=dtype, device="cuda")
@@ -179,9 +184,9 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
                 success = False
                 break
 
-        if success and args["verbose"]:
+        if success and verbose:
             shmem.log("Validation successful.")
-        if not success and args["verbose"]:
+        if not success and verbose:
             shmem.log("Validation failed.")
 
     shmem.barrier()
@@ -238,7 +243,19 @@ def main():
 
     for source_rank in range(num_ranks):
         for destination_rank in range(num_ranks):
-            bandwidth_gbps = run_experiment(shmem, args, source_rank, destination_rank, source_buffer, result_buffer)
+            bandwidth_gbps = bench_load(
+                shmem,
+                source_rank,
+                destination_rank,
+                source_buffer,
+                result_buffer,
+                args["block_size"],
+                dtype,
+                verbose=args["verbose"],
+                validate=args["validate"],
+                num_experiments=args["num_experiments"],
+                num_warmup=args["num_warmup"],
+            )
             bandwidth_matrix[source_rank, destination_rank] = bandwidth_gbps
             shmem.barrier()
 
