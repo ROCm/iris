@@ -100,7 +100,19 @@ def parse_args():
     return vars(parser.parse_args())
 
 
-def bench_load(shmem, source_rank, destination_rank, source_buffer, result_buffer, BLOCK_SIZE, dtype, verbose=False, validate=False, num_experiments=1, num_warmup=0):
+def bench_load(
+    shmem,
+    source_rank,
+    destination_rank,
+    source_buffer,
+    result_buffer,
+    BLOCK_SIZE,
+    dtype,
+    verbose=False,
+    validate=False,
+    num_experiments=1,
+    num_warmup=0,
+):
     cur_rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
@@ -231,8 +243,20 @@ def main():
 
     for source_rank in range(num_ranks):
         for destination_rank in range(num_ranks):
-            bandwidth_gbps = bench_load(shmem, args, source_rank, destination_rank, source_buffer, result_buffer, 
-                                        args["block_size"], dtype, verbose=args["verbose"], validate=args["validate"], num_experiments=args["num_experiments"], num_warmup=args["num_warmup"])
+            bandwidth_gbps = bench_load(
+                shmem,
+                args,
+                source_rank,
+                destination_rank,
+                source_buffer,
+                result_buffer,
+                args["block_size"],
+                dtype,
+                verbose=args["verbose"],
+                validate=args["validate"],
+                num_experiments=args["num_experiments"],
+                num_warmup=args["num_warmup"],
+            )
             bandwidth_matrix[source_rank, destination_rank] = bandwidth_gbps
             shmem.barrier()
 

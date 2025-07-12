@@ -19,10 +19,11 @@ spec = importlib.util.spec_from_file_location(module_name, file_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
+
 @pytest.mark.parametrize(
-    "dtype", 
+    "dtype",
     [
-        torch.int8, # ISSUE!
+        torch.int8,  # ISSUE!
         torch.float16,
         torch.bfloat16,
         torch.float32,
@@ -32,26 +33,28 @@ spec.loader.exec_module(module)
     "buffer_size, heap_size",
     [
         ((1 << 32), (1 << 33)),
-    ]
+    ],
 )
 @pytest.mark.parametrize(
     "block_size",
     [
         256,
         512,
-    ]
+    ],
 )
 def test_load(dtype, buffer_size, heap_size, block_size):
     shmem = iris.iris(heap_size)
     num_ranks = shmem.get_num_ranks()
-    
+
     bandwidth_matrix = np.zeros((num_ranks, num_ranks), dtype=np.float32)
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
     source_buffer = shmem.arange(buffer_size // element_size_bytes, device="cuda", dtype=dtype)
     result_buffer = shmem.zeros_like(source_buffer)
-    
+
     for source_rank in range(num_ranks):
         for destination_rank in range(num_ranks):
-            bandwidth_gbps = module.bench_load(shmem, source_rank, destination_rank, source_buffer, result_buffer, block_size, dtype)
+            bandwidth_gbps = module.bench_load(
+                shmem, source_rank, destination_rank, source_buffer, result_buffer, block_size, dtype
+            )
             bandwidth_matrix[source_rank, destination_rank] = bandwidth_gbps
             shmem.barrier()
