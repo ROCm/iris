@@ -42,7 +42,7 @@ spec.loader.exec_module(module)
         512,
     ],
 )
-def test_load(dtype, buffer_size, heap_size, block_size):
+def test_load_bench(dtype, buffer_size, heap_size, block_size):
     shmem = iris.iris(heap_size)
     num_ranks = shmem.get_num_ranks()
 
