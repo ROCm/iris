@@ -245,7 +245,6 @@ def main():
         for destination_rank in range(num_ranks):
             bandwidth_gbps = bench_load(
                 shmem,
-                args,
                 source_rank,
                 destination_rank,
                 source_buffer,
