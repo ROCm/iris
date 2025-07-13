@@ -315,28 +315,28 @@ class Iris:
 
 
 @triton.jit
-def translate(src_ptr, cur_rank, target_rank, heap_bases, debug=False):
-    src_base = tl.load(heap_bases + cur_rank)
-    dst_base = tl.load(heap_bases + target_rank)
+def __translate(local_ptr, local_rank, remote_rank, heap_bases, debug=False):
+    local_base = tl.load(heap_bases + local_rank)
+    remote_base = tl.load(heap_bases + remote_rank)
     # convert to int to compute difference
-    src_ptr_int = tl.cast(src_ptr, tl.uint64)
-    # Find the offset from current rank heap
-    offset = src_ptr_int - src_base
+    local_ptr_int = tl.cast(local_ptr, tl.uint64)
+    # Find the offset from local rank heap
+    offset = local_ptr_int - local_base
     # Byte cast for byte offset addition
-    dst_base_byte = tl.cast(dst_base, tl.pointer_type(tl.int8))
-    # Find the offset into the destination heap
-    dst_ptr_byte = dst_base_byte + offset
-    # Cast dst_base back to pointer type
-    dst_ptr = tl.cast(dst_ptr_byte, src_ptr.dtype)
+    remote_base_byte = tl.cast(remote_base, tl.pointer_type(tl.int8))
+    # Find the offset into the remote heap
+    remote_ptr_byte = remote_base_byte + offset
+    # Cast remote_base back to pointer type
+    remote_ptr = tl.cast(remote_ptr_byte, local_ptr.dtype)
 
     # Optimization to vectorize the load/store
     # We can't do this in general because we don't know the shape of the tensor
-    # src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, (64, 64)), (64, 64))
-    # dst_ptr = tl.max_contiguous(tl.multiple_of(dst_ptr, (64, 64)), (64, 64))
+    # local_ptr = tl.max_contiguous(tl.multiple_of(local_ptr, (64, 64)), (64, 64))
+    # remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, (64, 64)), (64, 64))
 
-    # src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, 512), 512)
-    # dst_ptr = tl.max_contiguous(tl.multiple_of(dst_ptr, 512), 512)
-    return dst_ptr
+    # local_ptr = tl.max_contiguous(tl.multiple_of(local_ptr, 512), 512)
+    # remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, 512), 512)
+    return remote_ptr
 
 
 @triton.jit
@@ -358,7 +358,7 @@ def load(local_ptr, local_rank, remote_rank, heap_bases, mask=None):
     Returns:
         Block: The loaded value from the remote memory location.
     """
-    remote_ptr = translate(local_ptr, local_rank, remote_rank, heap_bases)
+    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases)
     result = tl.load(remote_ptr, mask=mask)
     return result
 
@@ -383,7 +383,7 @@ def store(local_ptr, data, local_rank, remote_rank, heap_bases, mask=None):
     Returns:
         None
     """
-    remote_ptr = translate(local_ptr, local_rank, remote_rank, heap_bases, False)
+    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases, False)
     tl.store(remote_ptr, data, mask=mask)
 
 
@@ -407,7 +407,7 @@ def get(remote_ptr, local_ptr, local_rank, remote_rank, heap_bases, mask=None):
     Returns:
         None
     """
-    translated_remote_ptr = translate(remote_ptr, local_rank, remote_rank, heap_bases)
+    translated_remote_ptr = __translate(remote_ptr, local_rank, remote_rank, heap_bases)
 
     data = tl.load(translated_remote_ptr, mask=mask)
 
@@ -433,7 +433,7 @@ def put(local_ptr, remote_ptr, local_rank, remote_rank, heap_bases, mask=None):
     Returns:
         None
     """
-    translated_remote_ptr = translate(remote_ptr, local_rank, remote_rank, heap_bases, False)
+    translated_remote_ptr = __translate(remote_ptr, local_rank, remote_rank, heap_bases, False)
 
     data = tl.load(local_ptr, mask=mask)
 
@@ -462,7 +462,7 @@ def atomic_add(local_ptr, data, local_rank, remote_rank, heap_bases, mask=None, 
     Returns:
         Block: The data stored at local_ptr before the atomic operation.
     """
-    remote_ptr = translate(local_ptr, local_rank, remote_rank, heap_bases, False)
+    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases, False)
     return tl.atomic_add(remote_ptr, data, mask=mask, sem=sem, scope=scope)
 
 
@@ -488,7 +488,7 @@ def atomic_sub(local_ptr, data, local_rank, remote_rank, heap_bases, mask=None, 
     Returns:
         Block: The value at the memory location before the atomic subtraction.
     """
-    remote_ptr = translate(local_ptr, local_rank, remote_rank, heap_bases, False)
+    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases, False)
     return tl.atomic_sub(remote_ptr, data, mask=mask, sem=sem, scope=scope)
 
 
@@ -514,7 +514,7 @@ def atomic_cas(local_ptr, compare, value, local_rank, remote_rank, heap_bases, s
     Returns:
         Block: The value contained at the memory location before the atomic operation attempt.
     """
-    remote_ptr = translate(local_ptr, local_rank, remote_rank, heap_bases, False)
+    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases, False)
     return tl.atomic_cas(remote_ptr, compare, value, sem=sem, scope=scope)
 
 
@@ -540,7 +540,7 @@ def atomic_xchg(local_ptr, value, local_rank, remote_rank, heap_bases, mask=None
     Returns:
         Block: The data stored at local_ptr before the atomic operation.
     """
-    remote_ptr = translate(local_ptr, local_rank, remote_rank, heap_bases, False)
+    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases, False)
     return tl.atomic_xchg(remote_ptr, value, mask=mask, sem=sem, scope=scope)
 
 
