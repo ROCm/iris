@@ -315,7 +315,7 @@ class Iris:
 
 
 @triton.jit
-def __translate(local_ptr, local_rank, remote_rank, heap_bases, debug=False):
+def __translate(local_ptr, local_rank, remote_rank, heap_bases):
     local_base = tl.load(heap_bases + local_rank)
     remote_base = tl.load(heap_bases + remote_rank)
     # convert to int to compute difference
@@ -383,7 +383,7 @@ def store(local_ptr, data, local_rank, remote_rank, heap_bases, mask=None):
     Returns:
         None
     """
-    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases, False)
+    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases)
     tl.store(remote_ptr, data, mask=mask)
 
 
@@ -433,7 +433,7 @@ def put(local_ptr, remote_ptr, local_rank, remote_rank, heap_bases, mask=None):
     Returns:
         None
     """
-    translated_remote_ptr = __translate(remote_ptr, local_rank, remote_rank, heap_bases, False)
+    translated_remote_ptr = __translate(remote_ptr, local_rank, remote_rank, heap_bases)
 
     data = tl.load(local_ptr, mask=mask)
 
@@ -462,7 +462,7 @@ def atomic_add(local_ptr, data, local_rank, remote_rank, heap_bases, mask=None, 
     Returns:
         Block: The data stored at local_ptr before the atomic operation.
     """
-    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases, False)
+    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases)
     return tl.atomic_add(remote_ptr, data, mask=mask, sem=sem, scope=scope)
 
 
@@ -488,7 +488,7 @@ def atomic_sub(local_ptr, data, local_rank, remote_rank, heap_bases, mask=None, 
     Returns:
         Block: The value at the memory location before the atomic subtraction.
     """
-    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases, False)
+    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases)
     return tl.atomic_sub(remote_ptr, data, mask=mask, sem=sem, scope=scope)
 
 
@@ -514,7 +514,7 @@ def atomic_cas(local_ptr, compare, value, local_rank, remote_rank, heap_bases, s
     Returns:
         Block: The value contained at the memory location before the atomic operation attempt.
     """
-    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases, False)
+    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases)
     return tl.atomic_cas(remote_ptr, compare, value, sem=sem, scope=scope)
 
 
@@ -540,7 +540,7 @@ def atomic_xchg(local_ptr, value, local_rank, remote_rank, heap_bases, mask=None
     Returns:
         Block: The data stored at local_ptr before the atomic operation.
     """
-    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases, False)
+    remote_ptr = __translate(local_ptr, local_rank, remote_rank, heap_bases)
     return tl.atomic_xchg(remote_ptr, value, mask=mask, sem=sem, scope=scope)
 
 
