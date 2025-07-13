@@ -53,7 +53,6 @@ def test_load_bench(dtype, buffer_size, heap_size, block_size):
     max_val = torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
     num_elements = min(max_elements, max_val)
 
-    print(f"num_elements: {num_elements}")
     source_buffer = shmem.arange(num_elements, device="cuda", dtype=dtype)
     result_buffer = shmem.zeros_like(source_buffer)
 
