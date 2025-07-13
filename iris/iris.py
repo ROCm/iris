@@ -124,7 +124,7 @@ class Iris:
 
     def arange(self, start=0, end=None, step=1, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
         """
-        Returns a 1-D tensor of size ⌈(end - start) / step⌉ with values from the interval [start, end) 
+        Returns a 1-D tensor of size ⌈(end - start) / step⌉ with values from the interval [start, end)
         taken with common difference step beginning from start.
 
         Args:
