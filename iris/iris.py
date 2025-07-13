@@ -126,7 +126,7 @@ class Iris:
         """
         Returns a 1-D tensor of size ⌈(end - start) / step⌉ with values from the interval [start, end) 
         taken with common difference step beginning from start.
-        
+
         Args:
             start (Number, optional): the starting value for the set of points. Default: 0.
             end (Number): the ending value for the set of points
@@ -138,28 +138,27 @@ class Iris:
             requires_grad (bool, optional): If autograd should record operations on the returned tensor. Default: False.
         """
         self.log_debug(f"arange: start = {start}, end = {end}, step = {step}, dtype = {dtype}")
-        
+
         # Handle the case where only one argument is provided (end)
         if end is None:
             end = start
             start = 0
-            
         # Calculate the number of elements
         num_elements = math.ceil((end - start) / step)
-        
         # Infer dtype if not provided
         if dtype is None:
             if any(isinstance(x, float) for x in [start, end, step]):
                 dtype = torch.get_default_dtype()
             else:
                 dtype = torch.int64
-                
-        tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+        if out is not None:
+            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            tensor = out
+        else:
+            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
         tensor[:] = torch.arange(start, end, step, dtype=dtype, device="cuda")
-        
         if requires_grad:
             tensor.requires_grad_()
-            
         return tensor
 
     def zeros(self, *size, dtype=torch.int, device=None, requires_grad=False, **kwargs):
@@ -192,11 +191,40 @@ class Iris:
             tensor.requires_grad_()
         return tensor.reshape(size)
 
-    def ones(self, *size, dtype=torch.int):
-        self.log_debug(f"ones: size = {size}, dtype = {dtype}")
+    def ones(self, *size, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+        """
+        Returns a tensor filled with the scalar value 1, with the shape defined by the variable argument size.
+
+        Args:
+            *size (int...): a sequence of integers defining the shape of the output tensor. Can be a variable number of arguments or a collection like a list or tuple.
+
+        Keyword Arguments:
+            out (Tensor, optional): the output tensor.
+            dtype (torch.dtype, optional): the desired data type of returned tensor. Default: if None, uses a global default (see torch.set_default_dtype()).
+            layout (torch.layout, optional): the desired layout of returned Tensor. Default: torch.strided.
+            device (torch.device, optional): the desired device of returned tensor. Default: if None, uses the current device for the default tensor type.
+            requires_grad (bool, optional): If autograd should record operations on the returned tensor. Default: False.
+        """
+        self.log_debug(f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
+
+        # Handle the case where size is provided as a single tuple/list
+        if len(size) == 1 and isinstance(size[0], (tuple, list)):
+            size = size[0]
+
+        # Use global default dtype if None is provided
+        if dtype is None:
+            dtype = torch.get_default_dtype()
         size, num_elements = self.parse_size(size)
-        tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+
+        # If out is provided, use it; otherwise allocate new tensor
+        if out is not None:
+            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            tensor = out
+        else:
+            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
         tensor.fill_(1)
+        if requires_grad:
+            tensor.requires_grad_()
         return tensor.reshape(size)
 
     def full(self, size, fill_value, dtype=torch.int):
@@ -260,6 +288,21 @@ class Iris:
     def wall_clock_rate(self, rank):
         return get_wall_clock_rate(rank)
 
+    def __throw_if_invalid_output_tensor(self, tensor: torch.Tensor, num_elements: int, dtype: torch.dtype):
+        if not self.__tensor_on_device(tensor):
+            raise RuntimeError(f"The output tensor is not on the same device as the Iris instance. The Iris instance is on device {self.device} but the output tensor is on device {tensor.device}")
+        if not self.__on_symmetric_heap(tensor):
+            raise RuntimeError(f"The output tensor is not on the symmetric heap. The Iris instance is on heap base {self.heap_bases[self.cur_rank]} but the output tensor is on heap base {tensor.data_ptr()}")
+        if tensor.numel() != num_elements:
+            raise RuntimeError(f"The output tensor has {tensor.numel()} elements, but {num_elements} are required")
+        if tensor.dtype != dtype:
+            raise RuntimeError(f"The output tensor has dtype {tensor.dtype}, but {dtype} is required")
+
+    def __tensor_on_device(self, tensor: torch.Tensor):
+        return tensor.device == self.device
+
+    def __on_symmetric_heap(self, tensor: torch.Tensor):
+        return tensor.data_ptr() >= self.heap_bases[self.cur_rank] and tensor.data_ptr() < self.heap_bases[self.cur_rank] + self.heap_size
 
 @triton.jit
 def translate(src_ptr, cur_rank, target_rank, heap_bases, debug=False):

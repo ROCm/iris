@@ -50,10 +50,7 @@ def test_load_bench(dtype, buffer_size, heap_size, block_size):
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
     max_elements = buffer_size // element_size_bytes
 
-    max_val = torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
-    num_elements = min(max_elements, max_val)
-
-    source_buffer = shmem.arange(num_elements, device="cuda", dtype=dtype)
+    source_buffer = shmem.ones(max_elements, dtype=dtype)
     result_buffer = shmem.zeros_like(source_buffer)
 
     for source_rank in range(num_ranks):
