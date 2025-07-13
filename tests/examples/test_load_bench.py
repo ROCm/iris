@@ -48,9 +48,7 @@ def test_load_bench(dtype, buffer_size, heap_size, block_size):
 
     bandwidth_matrix = np.zeros((num_ranks, num_ranks), dtype=np.float32)
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-    max_elements = buffer_size // element_size_bytes
-
-    source_buffer = shmem.ones(max_elements, dtype=dtype)
+    source_buffer = shmem.ones(buffer_size // element_size_bytes, dtype=dtype)
     result_buffer = shmem.zeros_like(source_buffer)
 
     for source_rank in range(num_ranks):
