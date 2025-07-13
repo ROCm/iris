@@ -122,7 +122,9 @@ class Iris:
         new_tensor.zero_()
         return new_tensor
 
-    def arange(self, start=0, end=None, step=1, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+    def arange(
+        self, start=0, end=None, step=1, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False
+    ):
         """
         Returns a 1-D tensor of size ⌈(end - start) / step⌉ with values from the interval [start, end)
         taken with common difference step beginning from start.
@@ -290,9 +292,13 @@ class Iris:
 
     def __throw_if_invalid_output_tensor(self, tensor: torch.Tensor, num_elements: int, dtype: torch.dtype):
         if not self.__tensor_on_device(tensor):
-            raise RuntimeError(f"The output tensor is not on the same device as the Iris instance. The Iris instance is on device {self.device} but the output tensor is on device {tensor.device}")
+            raise RuntimeError(
+                f"The output tensor is not on the same device as the Iris instance. The Iris instance is on device {self.device} but the output tensor is on device {tensor.device}"
+            )
         if not self.__on_symmetric_heap(tensor):
-            raise RuntimeError(f"The output tensor is not on the symmetric heap. The Iris instance is on heap base {self.heap_bases[self.cur_rank]} but the output tensor is on heap base {tensor.data_ptr()}")
+            raise RuntimeError(
+                f"The output tensor is not on the symmetric heap. The Iris instance is on heap base {self.heap_bases[self.cur_rank]} but the output tensor is on heap base {tensor.data_ptr()}"
+            )
         if tensor.numel() != num_elements:
             raise RuntimeError(f"The output tensor has {tensor.numel()} elements, but {num_elements} are required")
         if tensor.dtype != dtype:
@@ -302,7 +308,11 @@ class Iris:
         return tensor.device == self.device
 
     def __on_symmetric_heap(self, tensor: torch.Tensor):
-        return tensor.data_ptr() >= self.heap_bases[self.cur_rank] and tensor.data_ptr() < self.heap_bases[self.cur_rank] + self.heap_size
+        return (
+            tensor.data_ptr() >= self.heap_bases[self.cur_rank]
+            and tensor.data_ptr() < self.heap_bases[self.cur_rank] + self.heap_size
+        )
+
 
 @triton.jit
 def translate(src_ptr, cur_rank, target_rank, heap_bases, debug=False):
