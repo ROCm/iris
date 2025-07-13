@@ -23,7 +23,7 @@ spec.loader.exec_module(module)
 @pytest.mark.parametrize(
     "dtype",
     [
-        torch.int8,  # ISSUE!
+        torch.int8,
         torch.float16,
         torch.bfloat16,
         torch.float32,
@@ -38,8 +38,8 @@ spec.loader.exec_module(module)
 @pytest.mark.parametrize(
     "block_size",
     [
-        256,
         512,
+        1024,
     ],
 )
 def test_load_bench(dtype, buffer_size, heap_size, block_size):

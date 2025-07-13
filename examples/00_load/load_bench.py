@@ -93,7 +93,7 @@ def parse_args():
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-d", "--validate", action="store_true", help="Enable validation output")
 
-    parser.add_argument("-p", "--heap_size", type=int, default=1 << 34, help="Iris heap size")
+    parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
     parser.add_argument("-n", "--num_experiments", type=int, default=10, help="Number of experiments")
     parser.add_argument("-w", "--num_warmup", type=int, default=1, help="Number of warmup iterations")
@@ -240,7 +240,7 @@ def main():
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
     source_buffer = shmem.ones(args["buffer_size"] // element_size_bytes, device="cuda", dtype=dtype)
     result_buffer = shmem.zeros_like(source_buffer)
-    
+
     for source_rank in range(num_ranks):
         for destination_rank in range(num_ranks):
             bandwidth_gbps = bench_load(
