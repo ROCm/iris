@@ -48,7 +48,13 @@ def test_load_bench(dtype, buffer_size, heap_size, block_size):
 
     bandwidth_matrix = np.zeros((num_ranks, num_ranks), dtype=np.float32)
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-    source_buffer = shmem.arange(buffer_size // element_size_bytes, device="cuda", dtype=dtype)
+    max_elements = buffer_size // element_size_bytes
+
+    max_val = torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
+    num_elements = min(max_elements, max_val)
+
+    print(f"num_elements: {num_elements}")
+    source_buffer = shmem.arange(num_elements, device="cuda", dtype=dtype)
     result_buffer = shmem.zeros_like(source_buffer)
 
     for source_rank in range(num_ranks):

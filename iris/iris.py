@@ -122,12 +122,45 @@ class Iris:
         new_tensor.zero_()
         return new_tensor
 
-    def arange(self, *size, dtype=torch.int, device=None):
-        self.log_debug(f"arange: size = {size}, dtype = {dtype}")
-        size, num_elements = self.parse_size(size)
+    def arange(self, start=0, end=None, step=1, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+        """
+        Returns a 1-D tensor of size ⌈(end - start) / step⌉ with values from the interval [start, end) 
+        taken with common difference step beginning from start.
+        
+        Args:
+            start (Number, optional): the starting value for the set of points. Default: 0.
+            end (Number): the ending value for the set of points
+            step (Number, optional): the gap between each pair of adjacent points. Default: 1.
+            out (Tensor, optional): the output tensor.
+            dtype (torch.dtype, optional): the desired data type of returned tensor.
+            layout (torch.layout, optional): the desired layout of returned Tensor. Default: torch.strided.
+            device (torch.device, optional): the desired device of returned tensor.
+            requires_grad (bool, optional): If autograd should record operations on the returned tensor. Default: False.
+        """
+        self.log_debug(f"arange: start = {start}, end = {end}, step = {step}, dtype = {dtype}")
+        
+        # Handle the case where only one argument is provided (end)
+        if end is None:
+            end = start
+            start = 0
+            
+        # Calculate the number of elements
+        num_elements = math.ceil((end - start) / step)
+        
+        # Infer dtype if not provided
+        if dtype is None:
+            if any(isinstance(x, float) for x in [start, end, step]):
+                dtype = torch.get_default_dtype()
+            else:
+                dtype = torch.int64
+                
         tensor = self.allocate(num_elements=num_elements, dtype=dtype)
-        tensor[:] = torch.arange(num_elements, device="cuda", dtype=dtype)
-        return tensor.reshape(size)
+        tensor[:] = torch.arange(start, end, step, dtype=dtype, device="cuda")
+        
+        if requires_grad:
+            tensor.requires_grad_()
+            
+        return tensor
 
     def zeros(self, *size, dtype=torch.int, device=None, requires_grad=False, **kwargs):
         self.log_debug(f"zeros: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
