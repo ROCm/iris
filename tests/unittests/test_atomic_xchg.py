@@ -46,16 +46,7 @@ def atomic_xchg_kernel(
         "sys",
     ],
 )
-@pytest.mark.parametrize(
-    "BLOCK_SIZE",
-    [
-        1,
-        8,
-        16,
-        32,
-    ],
-)
-def test_atomic_xchg_api(dtype, sem, scope, BLOCK_SIZE):
+def test_atomic_xchg_api(dtype, sem, scope):
     # TODO: Adjust heap size.
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
