@@ -350,7 +350,7 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None):
 
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's address space that will be translated to the to_rank's address space.
-        to_rank (int): The rank ID to which the pointer will be translated.
+        to_rank (int): The rank ID to which the pointer will be translated. Must be the current rank where the pointer is local.
         from_rank (int): The rank ID from which to read the data.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address pointer[idx]. Defaults to None.
@@ -375,7 +375,7 @@ def store(pointer, val, from_rank, to_rank, heap_bases, mask=None):
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's address space that will be translated to the to_rank's address space.
         val (Block): The tensor of elements to be stored.
-        from_rank (int): The rank ID from which the pointer originates.
+        from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the data will be written.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not store the data at address pointer[idx]. Defaults to None.
@@ -452,7 +452,7 @@ def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
     Args:
         pointer (Block of dtype=triton.PointerDType): The memory locations in the from_rank's address space that will be translated to the to_rank's address space.
         val (Block of dtype=pointer.dtype.element_ty): The values with which to perform the atomic operation.
-        from_rank (int): The rank ID from which the pointer originates.
+        from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the atomic operation will be performed.
         heap_bases (Block of dtype=triton.PointerDType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
@@ -478,7 +478,7 @@ def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's address space that will be translated to the to_rank's address space.
         val (Block): The tensor of elements to be subtracted atomically.
-        from_rank (int): The rank ID from which the pointer originates.
+        from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the atomic operation will be performed.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
@@ -505,7 +505,7 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
         pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's address space that will be translated to the to_rank's address space.
         cmp (Block): The expected value to be compared with the current value at the memory location.
         val (Block): The new value to be written if the compare succeeds.
-        from_rank (int): The rank ID from which the pointer originates.
+        from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the atomic operation will be performed.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". Defaults to "acq_rel".
@@ -530,7 +530,7 @@ def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=Non
     Args:
         pointer (Block of dtype=triton.PointerDType): The memory locations in the from_rank's address space that will be translated to the to_rank's address space.
         val (Block of dtype=pointer.dtype.element_ty): The values with which to perform the atomic operation.
-        from_rank (int): The rank ID from which the pointer originates.
+        from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the atomic operation will be performed.
         heap_bases (Block of dtype=triton.PointerDType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
