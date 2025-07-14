@@ -31,6 +31,8 @@ def atomic_add_kernel(
 @pytest.mark.parametrize(
     "dtype",
     [
+        torch.int32,
+        torch.int64,
         torch.float16,
         torch.bfloat16,
         torch.float32,
