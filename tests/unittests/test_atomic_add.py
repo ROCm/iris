@@ -4,6 +4,7 @@ import triton.language as tl
 import pytest
 import iris
 
+
 @triton.jit
 def atomic_add_kernel(
     results,

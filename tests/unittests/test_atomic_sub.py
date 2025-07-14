@@ -4,6 +4,7 @@ import triton.language as tl
 import pytest
 import iris
 
+
 @triton.jit
 def atomic_sub_kernel(
     results,
@@ -30,7 +31,7 @@ def atomic_sub_kernel(
 @pytest.mark.parametrize(
     "dtype",
     [
-        torch.int8, # Int8 Atomics might not be supported.
+        torch.int8,  # Int8 Atomics might not be supported.
         torch.float16,
         torch.bfloat16,
         torch.float32,

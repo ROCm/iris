@@ -4,6 +4,7 @@ import triton.language as tl
 import pytest
 import iris
 
+
 @triton.jit
 def atomic_xchg_kernel(
     results,
@@ -15,7 +16,7 @@ def atomic_xchg_kernel(
 ):
     # Cast constants to match results.dtype
     dtype = results.dtype.element_ty
-    val = tl.full((), num_ranks, dtype=dtype)    # scalar num_ranks
+    val = tl.full((), num_ranks, dtype=dtype)  # scalar num_ranks
 
     for target_rank in range(num_ranks):
         iris.atomic_xchg(results, val, cur_rank, target_rank, heap_bases, mask=None, sem=sem, scope=scope)
