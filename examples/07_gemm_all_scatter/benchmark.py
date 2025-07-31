@@ -291,7 +291,7 @@ def main():
         json_writer.display()
 
     if args["trace_tiles"] and rank == 0:
-        gpu_freq = shmem.wall_clock_rate(rank) * 1e-3
+        gpu_freq = iris.hip.get_wall_clock_rate(rank) * 1e-3
         algo_string = "all_scatter"
         filename = f"gemm_tiles_{algo_string}_trace_rank{rank}.json"
         timestamps.to_json(filename, gpu_freq)

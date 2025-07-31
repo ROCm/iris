@@ -10,7 +10,7 @@ from iris._mpi_helpers import (
     world_barrier,
     mpi_broadcast_scalar,
 )
-from iris._hip import (
+from iris.hip import (
     set_device,
     get_cu_count,
     count_devices,
@@ -286,9 +286,6 @@ class Iris:
 
     def get_num_ranks(self):
         return self.num_ranks
-
-    def wall_clock_rate(self, rank):
-        return get_wall_clock_rate(rank)
 
     def __throw_if_invalid_output_tensor(self, tensor: torch.Tensor, num_elements: int, dtype: torch.dtype):
         if not self.__tensor_on_device(tensor):
