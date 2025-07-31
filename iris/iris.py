@@ -90,8 +90,8 @@ class Iris:
         if STATS:
             print(f"[Iris] [{self.cur_rank}/{self.num_ranks}] {message}")
 
-    def broadcast(self, source_rank, value):
-        return mpi_broadcast_scalar(source_rank, value)
+    def broadcast(self, value, source_rank):
+        return mpi_broadcast_scalar(value, source_rank)
 
     def allocate(self, num_elements, dtype):
         self.log_debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")
