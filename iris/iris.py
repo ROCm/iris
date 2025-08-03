@@ -342,21 +342,22 @@ def __translate(local_ptr, local_rank, remote_rank, heap_bases):
 @triton.jit
 def load(pointer, to_rank, from_rank, heap_bases, mask=None):
     """
-    Loads a value from a remote rank's memory location.
+    Loads a value from the specified rank's memory location.
 
-    This function performs a remote memory read operation by translating the pointer
-    from the from_rank's address space to the to_rank's address space and loading
-    data from the remote memory location.
+    This function performs a memory read operation by translating the pointer
+    from the source rank's address space to the destination rank's address space and loading
+    data from the target memory location. If the source and destination ranks are the same,
+    this function performs a local load operation.
 
     Args:
-        pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's address space that will be translated to the to_rank's address space.
+        pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the source rank's address space that will be translated to the destination rank's address space.
         to_rank (int): The rank ID to which the pointer will be translated. Must be the current rank where the pointer is local.
         from_rank (int): The rank ID from which to read the data.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address pointer[idx]. Defaults to None.
 
     Returns:
-        Block: The loaded value from the remote memory location.
+        Block: The loaded value from the target memory location.
     """
     remote_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     result = tl.load(remote_ptr, mask=mask)
@@ -366,14 +367,15 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None):
 @triton.jit
 def store(pointer, val, from_rank, to_rank, heap_bases, mask=None):
     """
-    Writes data to a remote rank's memory location.
+    Writes data to the specified rank's memory location.
 
-    This function performs a remote memory write operation by translating the pointer
-    from the from_rank's address space to the to_rank's address space and storing
-    the provided data to the remote memory location.
+    This function performs a memory write operation by translating the pointer
+    from the source rank's address space to the destination rank's address space and storing
+    the provided data to the target memory location. If the source and destination ranks are the same,
+    this function performs a local store operation.
 
     Args:
-        pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's address space that will be translated to the to_rank's address space.
+        pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the source rank's address space that will be translated to the destination rank's address space.
         val (Block): The tensor of elements to be stored.
         from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the data will be written.
@@ -388,69 +390,72 @@ def store(pointer, val, from_rank, to_rank, heap_bases, mask=None):
 
 
 @triton.jit
-def get(remote_ptr, local_ptr, local_rank, remote_rank, heap_bases, mask=None):
+def get(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
     """
-    Copies data from a remote rank's memory to the current rank's local memory.
+    Copies data from the specified rank's memory to the current rank's local memory.
 
-    This function performs a remote memory read operation by translating the remote pointer
-    from the local rank's address space to the remote rank's address space, loading data
-    from the remote memory location, and storing it to the local destination pointer.
+    This function performs a memory read operation by translating the source pointer
+    from the current rank's address space to the source rank's address space, loading data
+    from the source memory location, and storing it to the local destination pointer.
+    If the source rank is the same as the current rank, this function performs a local copy operation.
 
     Args:
-        remote_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the local rank's address space that will be translated to the remote rank's address space.
-        local_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the local rank's local memory where the data will be stored.
-        local_rank (int): The local rank ID.
-        remote_rank (int): The remote rank ID from which to read the data.
+        from_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the source rank's address space.
+        to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's local memory where the data will be stored.
+        from_rank (int): The source rank ID from which to read the data.
+        to_rank (int): The current rank ID where the data will be stored.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
-        mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address remote_ptr[idx] and do not store to local_ptr[idx]. Defaults to None.
+        mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
 
     Returns:
         None
     """
-    translated_remote_ptr = __translate(remote_ptr, local_rank, remote_rank, heap_bases)
+    translated_from_ptr = __translate(from_ptr, to_rank, from_rank, heap_bases)
 
-    data = tl.load(translated_remote_ptr, mask=mask)
+    data = tl.load(translated_from_ptr, mask=mask)
 
-    tl.store(local_ptr, data, mask=mask)
+    tl.store(to_ptr, data, mask=mask)
 
 
 @triton.jit
-def put(local_ptr, remote_ptr, local_rank, remote_rank, heap_bases, mask=None):
+def put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
     """
-    Copies data from the current rank's local memory to a remote rank's memory.
-    This function performs a remote memory write operation by loading data from the local
-    source pointer, translating the destination pointer from the local rank's address
-    space to the remote rank's address space, and storing the data to the remote memory location.
+    Copies data from the current rank's local memory to the specified rank's memory.
+    This function performs a memory write operation by loading data from the current
+    rank's source pointer, translating the destination pointer from the current rank's address
+    space to the target rank's address space, and storing the data to the target memory location.
+    If the target rank is the same as the current rank, this function performs a local copy operation.
 
     Args:
-        local_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the local rank's local memory from which to read data.
-        remote_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the local rank's address space that will be translated to the remote rank's address space.
-        local_rank (int): The local rank ID.
-        remote_rank (int): The remote rank ID to which the data will be written.
+        from_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's local memory from which to read data.
+        to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the target rank's address space.
+        from_rank (int): The current rank ID from which to read the data.
+        to_rank (int): The target rank ID to which the data will be written.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
-        mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address local_ptr[idx] and do not store to remote_ptr[idx]. Defaults to None.
+        mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
 
     Returns:
         None
     """
-    translated_remote_ptr = __translate(remote_ptr, local_rank, remote_rank, heap_bases)
+    translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases)
 
-    data = tl.load(local_ptr, mask=mask)
+    data = tl.load(from_ptr, mask=mask)
 
-    tl.store(translated_remote_ptr, data, mask=mask)
+    tl.store(translated_to_ptr, data, mask=mask)
 
 
 @triton.jit
 def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
     """
-    Performs an atomic add at a remote rank's memory location specified by pointer.
+    Performs an atomic add at the specified rank's memory location.
 
-    This function performs a remote atomic addition operation by translating the pointer
-    from the from_rank's address space to the to_rank's address space and atomically
-    adding the provided data to the remote memory location.
+    This function performs an atomic addition operation by translating the pointer
+    from the source rank's address space to the target rank's address space and atomically
+    adding the provided data to the target memory location. If the source and target ranks are the same,
+    this function performs a local atomic addition operation.
 
     Args:
-        pointer (Block of dtype=triton.PointerDType): The memory locations in the from_rank's address space that will be translated to the to_rank's address space.
+        pointer (Block of dtype=triton.PointerDType): The memory locations in the source rank's address space that will be translated to the target rank's address space.
         val (Block of dtype=pointer.dtype.element_ty): The values with which to perform the atomic operation.
         from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the atomic operation will be performed.
@@ -469,14 +474,15 @@ def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 @triton.jit
 def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
     """
-    Atomically subtracts data from a remote rank's memory location.
+    Atomically subtracts data from the specified rank's memory location.
 
-    This function performs a remote atomic subtraction operation by translating the pointer
-    from the from_rank's address space to the to_rank's address space and atomically
-    subtracting the provided data from the remote memory location.
+    This function performs an atomic subtraction operation by translating the pointer
+    from the source rank's address space to the target rank's address space and atomically
+    subtracting the provided data from the target memory location. If the source and target ranks are the same,
+    this function performs a local atomic subtraction operation.
 
     Args:
-        pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's address space that will be translated to the to_rank's address space.
+        pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the source rank's address space that will be translated to the target rank's address space.
         val (Block): The tensor of elements to be subtracted atomically.
         from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the atomic operation will be performed.
@@ -495,14 +501,15 @@ def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 @triton.jit
 def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scope=None):
     """
-    Atomically compares and exchanges a remote rank's memory location.
+    Atomically compares and exchanges the specified rank's memory location.
 
-    This function performs a remote atomic compare-and-swap operation by translating the pointer
-    from the from_rank's address space to the to_rank's address space and atomically
+    This function performs an atomic compare-and-swap operation by translating the pointer
+    from the source rank's address space to the target rank's address space and atomically
     comparing the current value with the expected value, then writing the new value if they match.
+    If the source and target ranks are the same, this function performs a local atomic compare-and-swap operation.
 
     Args:
-        pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's address space that will be translated to the to_rank's address space.
+        pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the source rank's address space that will be translated to the target rank's address space.
         cmp (Block): The expected value to be compared with the current value at the memory location.
         val (Block): The new value to be written if the compare succeeds.
         from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
@@ -521,14 +528,15 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
 @triton.jit
 def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
     """
-    Performs an atomic exchange at a remote rank's memory location specified by pointer.
+    Performs an atomic exchange at the specified rank's memory location.
 
-    This function performs a remote atomic exchange operation by translating the pointer
-    from the from_rank's address space to the to_rank's address space and atomically
-    exchanging the current value with the provided new value.
+    This function performs an atomic exchange operation by translating the pointer
+    from the source rank's address space to the target rank's address space and atomically
+    exchanging the current value with the provided new value. If the source and target ranks are the same,
+    this function performs a local atomic exchange operation.
 
     Args:
-        pointer (Block of dtype=triton.PointerDType): The memory locations in the from_rank's address space that will be translated to the to_rank's address space.
+        pointer (Block of dtype=triton.PointerDType): The memory locations in the source rank's address space that will be translated to the target rank's address space.
         val (Block of dtype=pointer.dtype.element_ty): The values with which to perform the atomic operation.
         from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the atomic operation will be performed.
