@@ -58,5 +58,5 @@ __all__ = [
     "atomic_xchg",
     "do_bench",
     "memset_tensor",
-    "hip"
+    "hip",
 ]
