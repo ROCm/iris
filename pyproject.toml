@@ -31,7 +31,8 @@ dependencies = [
     "numpy",
     "requests",
     "mpi4py",
-    "ruff"
+    "ruff",
+    "triton"
 ]
 
 [project.optional-dependencies]

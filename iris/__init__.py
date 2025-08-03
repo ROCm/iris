@@ -24,6 +24,8 @@ from .util import (
     memset_tensor,
 )
 
+from . import hip
+
 # Pipe allocations via finegrained allocator
 current_dir = os.path.dirname(__file__)
 # Look for the library in the installed package location
@@ -56,4 +58,5 @@ __all__ = [
     "atomic_xchg",
     "do_bench",
     "memset_tensor",
+    "hip"
 ]
