@@ -362,7 +362,7 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None):
 
 
 @triton.jit
-def store(pointer, val, from_rank, to_rank, heap_bases, mask=None):
+def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
     """
     Writes data to the specified rank's memory location.
 
@@ -373,7 +373,7 @@ def store(pointer, val, from_rank, to_rank, heap_bases, mask=None):
 
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the source rank's address space that will be translated to the destination rank's address space.
-        val (Block): The tensor of elements to be stored.
+        value (Block): The tensor of elements to be stored.
         from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the data will be written.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
@@ -383,7 +383,7 @@ def store(pointer, val, from_rank, to_rank, heap_bases, mask=None):
         None
     """
     remote_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
-    tl.store(remote_ptr, val, mask=mask)
+    tl.store(remote_ptr, value, mask=mask)
 
 
 @triton.jit
@@ -442,7 +442,7 @@ def put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
 
 
 @triton.jit
-def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+def atomic_add(pointer, value, from_rank, to_rank, heap_bases, mask=None, semantics=None, scope=None):
     """
     Performs an atomic add at the specified rank's memory location.
 
@@ -453,23 +453,23 @@ def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
     Args:
         pointer (Block of dtype=triton.PointerDType): The memory locations in the source rank's address space that will be translated to the target rank's address space.
-        val (Block of dtype=pointer.dtype.element_ty): The values with which to perform the atomic operation.
+        value (Block of dtype=pointer.dtype.element_ty): The values with which to perform the atomic operation.
         from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the atomic operation will be performed.
         heap_bases (Block of dtype=triton.PointerDType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
-        sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
+        semantics (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
     """
     remote_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
-    return tl.atomic_add(remote_ptr, val, mask=mask, sem=sem, scope=scope)
+    return tl.atomic_add(remote_ptr, value, mask=mask, sem=semantics, scope=scope)
 
 
 @triton.jit
-def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+def atomic_sub(pointer, value, from_rank, to_rank, heap_bases, mask=None, semantics=None, scope=None):
     """
     Atomically subtracts data from the specified rank's memory location.
 
@@ -480,23 +480,23 @@ def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the source rank's address space that will be translated to the target rank's address space.
-        val (Block): The tensor of elements to be subtracted atomically.
+        value (Block): The tensor of elements to be subtracted atomically.
         from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the atomic operation will be performed.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
-        sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". Defaults to "acq_rel".
+        semantics (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". Defaults to "acq_rel".
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
 
     Returns:
         Block: The value at the memory location before the atomic subtraction.
     """
     remote_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
-    return tl.atomic_sub(remote_ptr, val, mask=mask, sem=sem, scope=scope)
+    return tl.atomic_sub(remote_ptr, value, mask=mask, sem=semantics, scope=scope)
 
 
 @triton.jit
-def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scope=None):
+def atomic_cas(pointer, cmp, value, from_rank, to_rank, heap_bases, semantics=None, scope=None):
     """
     Atomically compares and exchanges the specified rank's memory location.
 
@@ -508,22 +508,22 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the source rank's address space that will be translated to the target rank's address space.
         cmp (Block): The expected value to be compared with the current value at the memory location.
-        val (Block): The new value to be written if the compare succeeds.
+        value (Block): The new value to be written if the compare succeeds.
         from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the atomic operation will be performed.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
-        sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". Defaults to "acq_rel".
+        semantics (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". Defaults to "acq_rel".
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
 
     Returns:
         Block: The value contained at the memory location before the atomic operation attempt.
     """
     remote_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
-    return tl.atomic_cas(remote_ptr, cmp, val, sem=sem, scope=scope)
+    return tl.atomic_cas(remote_ptr, cmp, value, sem=semantics, scope=scope)
 
 
 @triton.jit
-def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+def atomic_xchg(pointer, value, from_rank, to_rank, heap_bases, mask=None, semantics=None, scope=None):
     """
     Performs an atomic exchange at the specified rank's memory location.
 
@@ -534,19 +534,19 @@ def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=Non
 
     Args:
         pointer (Block of dtype=triton.PointerDType): The memory locations in the source rank's address space that will be translated to the target rank's address space.
-        val (Block of dtype=pointer.dtype.element_ty): The values with which to perform the atomic operation.
+        value (Block of dtype=pointer.dtype.element_ty): The values with which to perform the atomic operation.
         from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
         to_rank (int): The rank ID to which the atomic operation will be performed.
         heap_bases (Block of dtype=triton.PointerDType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
-        sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
+        semantics (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
     """
     remote_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
-    return tl.atomic_xchg(remote_ptr, val, mask=mask, sem=sem, scope=scope)
+    return tl.atomic_xchg(remote_ptr, value, mask=mask, sem=semantics, scope=scope)
 
 
 def iris(heap_size=1 << 30):
