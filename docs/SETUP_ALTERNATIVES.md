@@ -1,3 +1,10 @@
+<!--
+SPDX-License-Identifier: MIT
+Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+-->
+
+**[README](../README.md)** » **Alternative Setup**
+
 # Alternative Setup Methods for Iris
 
 This document describes alternative ways to set up and run Iris, including manual Docker setup and Apptainer. Use these methods if Docker Compose is not suitable for your workflow.
