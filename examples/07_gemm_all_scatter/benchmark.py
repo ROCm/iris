@@ -124,8 +124,7 @@ def main():
     }
 
     # Allocate Timestamps
-    if args["trace_tiles"]:
-        timestamps = Timestamps(num_tiles=total_tiles)
+    timestamps = Timestamps(num_tiles=total_tiles)
 
     def run_experiment():
         nonlocal local_C
@@ -143,23 +142,23 @@ def main():
         with torch.cuda.stream(gemm_stream):
             kernel_timing["gemm"]["start_event"].record()
             local_C = matmul.apply(
-                a=local_A,
-                b=local_B,
-                c=local_C,
-                c_global=global_C,
-                bis=bias,
-                rank=rank,
-                world_size=world_size,
-                num_sms=args["gemm_sms"],
-                BLK_M=args["BLK_M"],
-                BLK_N=args["BLK_N"],
-                BLK_K=args["BLK_K"],
-                gsize_m=args["gsize_m"],
-                heap_base_ptr=shmem.get_heap_bases(),
-                arch="gfx942",
-                COLLECT_TIMESTAMPS=args["trace_tiles"],
-                mm_begin_timestamp=timestamps.mm_begin_timestamp,
-                mm_end_timestamp=timestamps.mm_end_timestamp,
+                local_A,
+                local_B,
+                local_C,
+                global_C,
+                bias,
+                rank,
+                world_size,
+                args["gemm_sms"],
+                args["BLK_M"],
+                args["BLK_N"],
+                args["BLK_K"],
+                args["gsize_m"],
+                shmem.get_heap_bases(),
+                "gfx942",
+                args["trace_tiles"],
+                timestamps.mm_begin_timestamp,
+                timestamps.mm_end_timestamp,
             )
             kernel_timing["gemm"]["end_event"].record()
             kernel_timing["gemm"]["experiments"] += 1
@@ -185,17 +184,11 @@ def main():
         kernel_timing[k]["ms"] = 0
         kernel_timing[k]["experiments"] = 0
 
-    if not is_triton_interpret_set():
-        gemm_registers = matmul.streamk_registers
-        gemm_spills = matmul.streamk_spills
 
-        json_writer.add_field("gemm_registers", gemm_registers)
-        json_writer.add_field("gemm_spills", gemm_spills)
-
+        
     if args["validate"]:
         shmem.log("Validating...")
-
-        matmul.set_debug(False)
+        matmul.set_debug(True)
         # Validate global result
         success = validate_gemm(A, B, global_C, shmem)
         passed_str = "passed" if success else "failed"
@@ -206,16 +199,25 @@ def main():
         shmem.log("Validating local C...")
 
         json_writer.add_field("success", success)
-    shmem.log("Validation completed")
 
+        if not is_triton_interpret_set():
+            gemm_registers = matmul.get_matmul_registers()
+            gemm_spills = matmul.get_matmul_spills()
+
+            json_writer.add_field("gemm_registers", gemm_registers)
+            json_writer.add_field("gemm_spills", gemm_spills)
+        
+        shmem.log("Validation completed")
+    
     if args["benchmark"]:
+        matmul.set_debug(False)
         shmem.log("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
         triton_ms = iris.do_bench(run_experiment, shmem.barrier)
         triton_tflops = perf(triton_ms)
         algo_string = "all_scatter"
         shmem.log_stats(
-            f"tile matmul + {algo_string} (grid={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
+            f"tile matmul + {algo_string} (total_tiles={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
         )
 
         json_writer.add_field("tflops", triton_tflops)
