@@ -184,8 +184,6 @@ def main():
         kernel_timing[k]["ms"] = 0
         kernel_timing[k]["experiments"] = 0
 
-
-        
     if args["validate"]:
         shmem.log("Validating...")
         matmul.set_debug(True)
@@ -206,9 +204,9 @@ def main():
 
             json_writer.add_field("gemm_registers", gemm_registers)
             json_writer.add_field("gemm_spills", gemm_spills)
-        
+
         shmem.log("Validation completed")
-    
+
     if args["benchmark"]:
         matmul.set_debug(False)
         shmem.log("Benchmarking...")

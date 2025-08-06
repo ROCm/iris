@@ -15,18 +15,18 @@ class matmul(torch.autograd.Function):
     _debug = False
     _registers = None
     _spills = None
-    
+
     @staticmethod
     def set_debug(debug: bool):
         matmul._debug = debug
-    
+
     @staticmethod
     def get_matmul_registers():
         if matmul._debug:
             return matmul._registers
         else:
             raise RuntimeError("Debug mode is not enabled. Call set_debug(True) first.")
-        
+
     @staticmethod
     def get_matmul_spills():
         if matmul._debug:
