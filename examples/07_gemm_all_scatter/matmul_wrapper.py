@@ -7,6 +7,7 @@ import triton
 # from streamk_kernel import streamk_gemm
 from gemm_all_scatter import persistent_gemm_all_scatter
 from examples.common.utils import is_triton_interpret_set
+
 gemm_kernel = persistent_gemm_all_scatter
 
 
@@ -47,7 +48,7 @@ class matmul(torch.autograd.Function):
         num_xcds = 1
         if arch == "gfx942" or arch == "gfx950":
             num_xcds = 8
-            
+
         # TODO: Use arch-specific values.
         num_stages = 2
         num_warps = 8

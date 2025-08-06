@@ -223,7 +223,7 @@ def persistent_gemm_all_scatter(
                 stride_cm_global,
                 stride_cn_global,
             )
-            
+
             # Timestamp for GEMM before store
             if COLLECT_TIMESTAMPS:
                 timestamp = read_realtime()
@@ -243,4 +243,3 @@ def persistent_gemm_all_scatter(
                         heap_bases,
                         mask=sub_mask,
                     )
-  
