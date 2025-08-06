@@ -22,6 +22,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 -->
 
+**[README](../README.md)** » **Contributing to Iris**
+
 # Contributing to Iris
 
 Thank you for your interest in contributing to Iris! This document provides guidelines for contributing to the project.

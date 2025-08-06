@@ -41,36 +41,17 @@ def parse_args():
         help="Datatype of computation",
     )
     parser.add_argument(
-        "--algorithm",
-        type=str,
-        default="all_reduce",
-        choices=["all_reduce", "all_scatter", "all_gather", "one_shot"],
-        help="Algorithm to use",
-    )
-    parser.add_argument(
         "--output_file",
         type=str,
         default="log.json",
         help="Output file",
     )
-    # For All Scatter, use: 256x64x64
-    # For One Shot, use: 256x256x64
     parser.add_argument("--BLK_M", type=int, default=256, help="Block size M")
     parser.add_argument("--BLK_N", type=int, default=64, help="Block size N")
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K")
-    # Best to try 1, 6 or 8
-    parser.add_argument("--gsize_m", type=int, default=4, help="Grid size M")
-    parser.add_argument("--two_tiles", type=str, default="True", help="Use two tiles")
-    parser.add_argument("--num_stages", type=int, default=2, help="Number of stages")
-    parser.add_argument("--num_warps", type=int, default=8, help="Number of warps")
-    parser.add_argument("--waves_per_eu", type=int, default=0, help="Waves per execution unit")
-    parser.add_argument("--mfmaInstrSize", type=int, default=16, help="MFMA instruction size")
-    parser.add_argument("--kpack", type=int, default=1, help="K packing size")
+    parser.add_argument("--gsize_m", type=int, default=6, help="L2-cache locality swizzle parameter")
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
-
-    # For All Scatter, use: 288
-    # For One Shot, use: 256
-    parser.add_argument("--gemm_sms", type=int, default=304, help="Number of SMs for Stream-K")
+    parser.add_argument("--gemm_sms", type=int, default=304, help="Number of SMs for persistent GEMM algorithm")
 
     return vars(parser.parse_args())
 
@@ -102,7 +83,7 @@ def main():
 
     A = shmem.randn(args["m"], args["k"], device="cuda", dtype=datatype)
     B = shmem.randn(args["n"], args["k"], device="cuda", dtype=datatype).T
-    C = shmem.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
+    # C = shmem.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
 
     args["M"] = args["m"]
     args["N"] = args["n"]
@@ -112,7 +93,6 @@ def main():
     json_writer.add_field("world_size", world_size)
 
     # Splitting
-    # if args["algorithm"] == "all_scatter" or args["algorithm"] == "all_gather":
     args["n"] = args["n"] // world_size
     local_B = B[:, rank * args["n"] : (rank + 1) * args["n"]].clone()
     local_A = A
@@ -128,14 +108,6 @@ def main():
     total_tiles = total_blocks_M * total_blocks_N
 
     tile_completed = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int32)
-
-    locks = shmem.zeros((args["gemm_sms"],), device="cuda", dtype=torch.int32)
-
-    P = shmem.zeros(
-        (args["gemm_sms"], args["BLK_M"] * args["BLK_N"]),
-        device="cuda",
-        dtype=torch.float32,
-    )
     bias = None
 
     gemm_stream = torch.cuda.Stream()
@@ -149,21 +121,11 @@ def main():
             "ms": 0,
             "experiments": 0,
         },
-        "communication": {
-            "start_event": torch.cuda.Event(enable_timing=True),
-            "end_event": torch.cuda.Event(enable_timing=True),
-            "ms": 0,
-            "experiments": 0,
-        },
     }
 
-    # Timestamps
-    timestamps = Timestamps(num_tiles=total_tiles)
-
-    def preamble():
-        shmem.barrier()
-        iris.memset_tensor(tile_completed, 0)
-        shmem.barrier()
+    # Allocate Timestamps
+    if args["trace_tiles"]:
+        timestamps = Timestamps(num_tiles=total_tiles)
 
     def run_experiment():
         nonlocal local_C
@@ -181,32 +143,23 @@ def main():
         with torch.cuda.stream(gemm_stream):
             kernel_timing["gemm"]["start_event"].record()
             local_C = matmul.apply(
-                local_A,
-                local_B,
-                local_C,
-                global_C,
-                bias,
-                P,
-                locks,
-                tile_completed,
-                rank,
-                world_size,
-                args["gemm_sms"],
-                args["BLK_M"],
-                args["BLK_N"],
-                args["BLK_K"],
-                args["gsize_m"],
-                args["two_tiles"],
-                args["num_stages"],
-                args["num_warps"],
-                args["waves_per_eu"],
-                args["mfmaInstrSize"],
-                args["kpack"],
-                shmem.get_heap_bases(),
-                cu_count,
-                args["trace_tiles"],
-                timestamps.mm_begin_timestamp,
-                timestamps.mm_end_timestamp,
+                a=local_A,
+                b=local_B,
+                c=local_C,
+                c_global=global_C,
+                bis=bias,
+                rank=rank,
+                world_size=world_size,
+                num_sms=args["gemm_sms"],
+                BLK_M=args["BLK_M"],
+                BLK_N=args["BLK_N"],
+                BLK_K=args["BLK_K"],
+                gsize_m=args["gsize_m"],
+                heap_base_ptr=shmem.get_heap_bases(),
+                arch="gfx942",
+                COLLECT_TIMESTAMPS=args["trace_tiles"],
+                mm_begin_timestamp=timestamps.mm_begin_timestamp,
+                mm_end_timestamp=timestamps.mm_end_timestamp,
             )
             kernel_timing["gemm"]["end_event"].record()
             kernel_timing["gemm"]["experiments"] += 1
@@ -227,10 +180,8 @@ def main():
     run_experiment()
 
     shmem.barrier()
-    preamble()
-    shmem.barrier()
 
-    for k in ["gemm", "communication"]:
+    for k in ["gemm"]:
         kernel_timing[k]["ms"] = 0
         kernel_timing[k]["experiments"] = 0
 
@@ -255,29 +206,20 @@ def main():
         shmem.log("Validating local C...")
 
         json_writer.add_field("success", success)
-
-        # Validate partial result
-        # success = validate_gemm(local_A, local_B, local_C, shmem)
-        # json_writer.add_field("success_partial", success)
-        # passed_str = "passed" if success else "failed"
-        # shmem.log(f"Local C validation {passed_str}.")
-
-        # # Wait for all to finish validation
-        # shmem.barrier()
     shmem.log("Validation completed")
 
     if args["benchmark"]:
         shmem.log("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
-        triton_ms = iris.do_bench(run_experiment, shmem.barrier, preamble)
+        triton_ms = iris.do_bench(run_experiment, shmem.barrier)
         triton_tflops = perf(triton_ms)
         algo_string = "all_scatter"
         shmem.log_stats(
             f"tile matmul + {algo_string} (grid={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
         )
 
-        json_writer.add_field("triton_tflops", triton_tflops)
-        json_writer.add_field("triton_ms", triton_ms)
+        json_writer.add_field("tflops", triton_tflops)
+        json_writer.add_field("total_ms", triton_ms)
 
         for k in ["gemm"]:
             json_writer.add_field(k + "_ms", kernel_timing[k]["ms"] / kernel_timing[k]["experiments"])

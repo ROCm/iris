@@ -101,9 +101,6 @@ def persistent_gemm_all_scatter(
     C,
     c_global,
     bias_ptr,
-    P,
-    locks,
-    tile_completed,
     M,
     N,
     K,
@@ -121,14 +118,12 @@ def persistent_gemm_all_scatter(
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     NUM_SMS: tl.constexpr,
-    STREAMK_TILES: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
-    NOTIFY_REMOTES: tl.constexpr = False,
     COLLECT_TIMESTAMPS: tl.constexpr = False,
     mm_begin_timestamp_ptr: tl.tensor = None,
     mm_end_timestamp_ptr: tl.tensor = None,
@@ -197,14 +192,8 @@ def persistent_gemm_all_scatter(
             b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
             acc += tl.dot(a, b)
 
+        # Accumulator registers with C results
         c = acc.to(C.type.element_ty)
-        # rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        # rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        # rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        # rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        # c_mask = (rm[:, None] < M) & (rn[None, :] < N)
-        # C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        # # tl.store(C_, c, c_mask)
 
         rm, rn, mask, rm_start, rn_start = offset_for_tile(tile_id, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M, M, N)
 
@@ -234,6 +223,11 @@ def persistent_gemm_all_scatter(
                 stride_cm_global,
                 stride_cn_global,
             )
+            
+            # Timestamp for GEMM before store
+            if COLLECT_TIMESTAMPS:
+                timestamp = read_realtime()
+                tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
             # Store data to the global result using puts
             for remote_rank in range(world_size):
@@ -249,7 +243,4 @@ def persistent_gemm_all_scatter(
                         heap_bases,
                         mask=sub_mask,
                     )
-
-        if COLLECT_TIMESTAMPS:
-            timestamp = read_realtime()
-            tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
+  
