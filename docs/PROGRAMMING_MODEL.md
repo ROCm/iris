@@ -43,35 +43,49 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 ```python
 @triton.jit
-def load(local_ptr, local_rank, remote_rank, heap_bases, mask=None):
-    """
-    Loads a value from the specified memory location and rank.
-      Args:
-        local_ptr (int): The source pointer.
-        local_rank (int): The current rank.
-        remote_rank (int): The remote rank.
-        heap_bases (int): The heap bases.
-        mask (Optional[tl.tensor], optional): A boolean tensor 	used to guard memory accesses.
-      Returns:
-        Any: The loaded value.
-    """
+def load(pointer, to_rank, from_rank, heap_bases, mask=None):
+    """
+    Loads a value from the specified rank's memory location.
+
+    This function performs a memory read operation by translating the pointer
+    from the from_rank's address space to the to_rank's address space and loading
+    data from the target memory location. If the from_rank and to_rank are the same,
+    this function performs a local load operation.
+
+    Args:
+        pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's address space that will be translated to the to_rank's address space. Must be the current rank where the pointer is local.
+        to_rank (int): The rank ID to which the pointer will be translated. Must be the current rank where the pointer is local.
+        from_rank (int): The rank ID from which to read the data.
+        heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
+        mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address pointer[idx]. Defaults to None.
+
+    Returns:
+        Block: The loaded value from the target memory location.
+    """
 ```
 
 ```python
 @triton.jit
-def store(local_ptr, data, local_rank, remote_rank, heap_bases, mask=None):
-    """
-    Writes data to the specified memory location and rank.
-      Args:
-        local_ptr (int): The destination pointer.
-        data (Any): The value to be written.
-        local_rank (int): The current rank.
-        remote_rank (int): The remote rank.
-        heap_bases (int): The heap bases.
-        mask (Optional[tl.tensor], optional): A boolean tensor 	used to guard memory accesses. Defaults to None.
-      Returns:
-        None
-    """
+def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
+    """
+    Writes data to the specified rank's memory location.
+
+    This function performs a memory write operation by translating the pointer
+    from the from_rank's address space to the to_rank's address space and storing
+    the provided data to the target memory location. If the from_rank and to_rank are the same,
+    this function performs a local store operation.
+
+    Args:
+        pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's address space that will be translated to the to_rank's address space. Must be the current rank where the pointer is local.
+        value (Block): The tensor of elements to be stored.
+        from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
+        to_rank (int): The rank ID to which the data will be written.
+        heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
+        mask (Block of triton.int1, optional): If mask[idx] is false, do not store the data at address pointer[idx]. Defaults to None.
+
+    Returns:
+        None
+    """
 ```
 
 ## `iris` Symmetric Heap & Implementation
@@ -91,19 +105,21 @@ Allocation routine for symmetric variables must be collective or offset must be 
 
 ```python
 @triton.jit
-def load(local_ptr, local_rank, remote_rank, heap_bases, mask=None):
-    remote_ptr = translate(local_ptr, local_rank,
-                    remote_rank, heap_bases)
-    result = tl.load(remote_ptr, mask=mask)
-    return result
+def load(pointer, to_rank, from_rank, heap_bases, mask=None):
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    result = tl.load(translated_ptr, mask=mask)
+    return result
 
 @triton.jit
-def translate(local_ptr, local_rank, remote_rank, heap_bases):
-    local_base = tl.load(heap_bases + local_rank)
-    remote_base = tl.load(heap_bases + remote_rank)
-    offset = tl.cast(local_ptr, tl.uint64) – local_base
-    remote_base_byte = tl.cast(remote_base, tl.pointer_type(tl.int8))
-    remote_ptr_byte = remote_base_byte + offset
-    remote_ptr = tl.cast(remote_ptr_byte, local_ptr.dtype)
-    return remote_ptr
+@triton.jit
+def __translate(ptr, from_rank, to_rank, heap_bases):
+    from_base = tl.load(heap_bases + from_rank)
+    to_base = tl.load(heap_bases + to_rank)
+    ptr_int = tl.cast(ptr, tl.uint64)
+    offset = ptr_int - from_base
+    to_base_byte = tl.cast(to_base, tl.pointer_type(tl.int8))
+    translated_ptr_byte = to_base_byte + offset
+    translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
+
+    return translated_ptr
 ```

@@ -24,9 +24,10 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris
 
 ## Documentation
 
-1. [Peer-to-Peer Communication](examples/README.md)
-2. [Fine-grained GEMM & Communication Overlap](./docs/FINEGRAINED_OVERLAP.md)
-3. [Setup Alternatives](docs/SETUP_ALTERNATIVES.md)
+1. [Programming Model](docs/PROGRAMMING_MODEL.md)
+2. [Peer-to-Peer Communication](examples/README.md)
+3. [Fine-grained GEMM & Communication Overlap](docs/FINEGRAINED_OVERLAP.md)
+4. [Setup Alternatives](docs/SETUP_ALTERNATIVES.md)
 
 ## API Example
 
@@ -37,11 +38,8 @@ import torch
 import triton
 import triton.language as tl
 import iris
-```
 
-### Device-side APIs
-
-```python
+# Device-side APIs.
 @triton.jit
 def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bases_ptr):
     # Compute start index of this block.
@@ -58,11 +56,7 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
     iris.store(buffer + offsets, 1,
             source_rank, target_rank,
             heap_bases_ptr, mask=mask)
-```
 
-### Host-side APIs and Setup
-
-```python
 # Iris symmetric heap setup.
 heap_size = 2**30
 buffer_size = 4096
