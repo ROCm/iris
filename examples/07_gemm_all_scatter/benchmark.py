@@ -83,7 +83,6 @@ def main():
 
     A = shmem.randn(args["m"], args["k"], device="cuda", dtype=datatype)
     B = shmem.randn(args["n"], args["k"], device="cuda", dtype=datatype).T
-    # C = shmem.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
 
     args["M"] = args["m"]
     args["N"] = args["n"]
