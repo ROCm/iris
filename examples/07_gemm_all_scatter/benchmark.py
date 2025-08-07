@@ -107,7 +107,6 @@ def main():
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
     total_tiles = total_blocks_M * total_blocks_N
 
-    tile_completed = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int32)
     bias = None
 
     gemm_stream = torch.cuda.Stream()
