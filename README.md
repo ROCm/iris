@@ -107,7 +107,7 @@ Iris currently supports:
 - MI300X, MI350X & MI355X
 
 > [!NOTE]
-> Iris may work on other AMD GPUs with ROCm compatibility, but has only been tested on MI300X.
+> Iris may work on other AMD GPUs with ROCm compatibility.
 
 ## Roadmap
 
