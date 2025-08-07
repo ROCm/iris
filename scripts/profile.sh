@@ -3,8 +3,8 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 
-python_file=examples/p2p/all_get/all_get_bench.py
-num_gpus=8
+python_file=examples/benchmark/reference/gemm.py
+num_gpus=1
 rocprof_sys=/opt/rocprofiler-systems/bin/rocprof-sys-run
 
 filename=$(basename "$python_file" .py)
@@ -26,12 +26,8 @@ if [ "$profile" = true ]; then
     echo "[INFO] Running with profiler enabled"
 
     mpirun --allow-run-as-root -np ${num_gpus} ${rocprof_sys} \
-    -T \
-    --perfetto-annotations \
-    --output "${rocprof_output}" \
-    --use-rocm \
-    --rocm-marker-api-operations roctxRangePushA roctxRangePop \
-    -- ${python_cmd} 2>&1 | tee ${rocprof_output}/${output_log_file}
+    --use-roctx -o "${rocprof_output}" \
+    -- ${python_cmd} 2>&1 | tee ${output_log_file}
 
 else
     echo "[INFO] Running without profiler"

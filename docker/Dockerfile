@@ -27,8 +27,8 @@ RUN apt-get update && \
 
 # Install Python packages with pip
 RUN pip3 install --upgrade pip && \
-    pip3 install wheel jupyter 
-    
+    pip3 install wheel jupyter
+
 # This needs sudo, I can only get it to install with sudo
 # or using conda, but conda runs into issues with too many requests.
 #  https://stackoverflow.com/a/54052470/5729690
@@ -37,12 +37,13 @@ RUN sudo pip3 install mpi4py
 # Clone and install Triton
 WORKDIR $TRITON_PATH
 RUN git clone https://github.com/triton-lang/triton.git $TRITON_PATH
+RUN git checkout eb73b0373a7fb4cd2e563f68e3488a96525562eb
 RUN pip3 install -e .
 ENV PYTHONPATH=$TRITON_PATH:$PYTHONPATH
 
 # Install rocprofiler-systems
 WORKDIR /workspace
-RUN wget https://github.com/ROCm/rocprofiler-systems/releases/latest/download/rocprofiler-systems-install.py && \
+RUN wget https://github.com/ROCm/rocprofiler-systems/releases/download/rocm-6.3.1/rocprofiler-systems-install.py && \
     python3 ./rocprofiler-systems-install.py --prefix /opt/rocprofiler-systems --rocm 6.3 && \
     rm -f rocprofiler-systems-install.py
 

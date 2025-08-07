@@ -39,6 +39,6 @@ If you prefer to use Apptainer:
 # Run the container
 ./apptainer/run.sh
 
-# Activate the environment
-source activate.sh
-``` 
+# Install Iris in development mode
+pip install -e .
+```

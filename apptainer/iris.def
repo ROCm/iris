@@ -2,7 +2,7 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 Bootstrap: docker
-From: rocm/pytorch:latest-release
+From: rocm/pytorch:rocm6.3.1_ubuntu22.04_py3.10_pytorch
 
 %post
     /bin/bash -c "
@@ -15,7 +15,7 @@ From: rocm/pytorch:latest-release
     cd \$TRITON_PATH
     git checkout eb73b0373a7fb4cd2e563f68e3488a96525562eb
     pip install -e .
-    wget https://github.com/ROCm/rocprofiler-systems/releases/latest/download/rocprofiler-systems-install.py
+    wget https://github.com/ROCm/rocprofiler-systems/releases/download/rocm-6.3.1/rocprofiler-systems-install.py
     python3 ./rocprofiler-systems-install.py --prefix /opt/rocprofiler-systems --rocm 6.3
     "
 

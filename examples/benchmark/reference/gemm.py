@@ -3,6 +3,7 @@
 
 import torch
 import triton
+import torch.cuda.nvtx as nvtx
 
 
 def main():
@@ -17,9 +18,14 @@ def main():
     B_full = torch.randn(k, n, device=f"cuda:{rank}")
 
     def run_experiment():
-        return A_full @ B_full
+        nvtx.range_push("GEMM Computation")
+        result = A_full @ B_full
+        nvtx.range_pop()
+        return result
 
+    nvtx.range_push("Full Experiment")
     C_global = run_experiment()
+    nvtx.range_pop()
 
     if benchmark:
         perf = lambda ms: 2 * m * n * k * 1e-12 / (ms * 1e-3)

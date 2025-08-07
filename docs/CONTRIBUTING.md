@@ -45,7 +45,6 @@ cd iris && pip install -e .
 ```bash
 ./apptainer/build.sh
 ./apptainer/run.sh
-source activate.sh
 pip install -e .
 ```
 
@@ -73,7 +72,7 @@ pip install -e .
    # Run code quality checks
    ruff check .
    ruff format .
-   
+
    # Run tests (if available)
    pytest
    ```
@@ -93,4 +92,4 @@ pip install -e .
 
 ## License
 
-By contributing to Iris, you agree that your contributions will be licensed under the MIT License. 
+By contributing to Iris, you agree that your contributions will be licensed under the MIT License.
