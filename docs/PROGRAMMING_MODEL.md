@@ -7,16 +7,13 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 # Programming Model
 
-<div style="overflow: hidden;">
-  <p style="float: left; width: 50%;">
-    Iris is an open-source triton-based framework for Remote Memory Access (RMA[^1]) operations written in only a few 100 lines of code. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming.
-  </p>
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="../images/iris-model.png">
-    <source media="(prefers-color-scheme: light)" srcset="../images/iris-model-light.png">
-    <img alt="Iris Model" align="right" src="../images/iris-model.png" width="300px">
-  </picture>
-</div>
+
+Iris is an open-source triton-based framework for Remote Memory Access (RMA)[^1] operations written in only a few 100 lines of code. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../images/iris-model.png">
+  <source media="(prefers-color-scheme: light)" srcset="../images/iris-model-light.png">
+  <img alt="Iris Model" align="right" src="../images/iris-model.png" width="300px">
+</picture>
 
 1. **Designed by Experts, Built for Scale**
     - Written from scratch by GPU and distributed computing experts
