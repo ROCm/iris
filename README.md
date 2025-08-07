@@ -31,7 +31,6 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris
 
 ## API Example
 
-### Iris Imports
 
 ```python
 import torch
