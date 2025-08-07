@@ -108,7 +108,6 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None):
     return result
 
 @triton.jit
-@triton.jit
 def __translate(ptr, from_rank, to_rank, heap_bases):
     from_base = tl.load(heap_bases + from_rank)
     to_base = tl.load(heap_bases + to_rank)
