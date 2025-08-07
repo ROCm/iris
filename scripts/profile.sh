@@ -8,12 +8,13 @@ num_gpus=1
 rocprof_sys=/opt/rocprofiler-systems/bin/rocprof-sys-run
 
 filename=$(basename "$python_file" .py)
-output_base="profile_results/${filename}"
+timestamp=$(date +"%Y-%m-%d_%H.%M")
+output_base="profile_results/${filename}/${timestamp}"
 mkdir -p $output_base
 
 # Final outputs
-output_log_file="${output_base}.log"
 rocprof_output="${output_base}"
+output_log_file="${output_base}/${filename}.log"
 
 echo "Rocprof Output Prefix: ${rocprof_output}"
 
@@ -33,3 +34,7 @@ else
     echo "[INFO] Running without profiler"
     mpirun --allow-run-as-root -np ${num_gpus} ${python_cmd}  2>&1 | tee ${output_log_file}
 fi
+
+echo "[INFO] Profiling complete"
+echo "[INFO] Output directory: ${rocprof_output}"
+echo "[INFO] Output log: ${output_log_file}"
