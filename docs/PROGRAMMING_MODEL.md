@@ -9,9 +9,13 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 <div style="overflow: hidden;">
   <p style="float: left; width: 50%;">
-    Iris is an open-source triton-based framework for Remote Memory Access (RMA†) operations written in only a few 100 lines of code. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming.
+    Iris is an open-source triton-based framework for Remote Memory Access (RMA[^1]) operations written in only a few 100 lines of code. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming.
   </p>
-  <img src="../images/iris-model.png" alt="Iris Model" align="right" width="300px;">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../images/iris-model.png">
+    <source media="(prefers-color-scheme: light)" srcset="../images/iris-model-light.png">
+    <img alt="Iris Model" align="right" src="../images/iris-model.png" width="300px">
+  </picture>
 </div>
 
 1. **Designed by Experts, Built for Scale**
@@ -33,6 +37,7 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
     - Full scale-up (multi-GPU node) support
     - Scale-out (multi-node) in progress
 
+[^1]: Remote Direct Memory Access (RDMA) is work-in-progress.
 
 ## Simple `load` & `store` APIs
 
@@ -71,7 +76,11 @@ def store(local_ptr, data, local_rank, remote_rank, heap_bases, mask=None):
 
 ## `iris` Symmetric Heap & Implementation
 
-![symmetric heap](../images/heap.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../images/heap.png">
+  <source media="(prefers-color-scheme: light)" srcset="../images/heap-light.png">
+  <img alt="Iris Symmetric Heap" src="../images/heap.png">
+</picture>
 
 Symmetric Heap is a Partitioned Global Address Space (PGAS) abstraction
 Key idea is that you can know the remote address of any symmetric variable with two offsets:
