@@ -38,56 +38,50 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. We p
 ```bash
 ./docker/build.sh <image-name>
 ./docker/run.sh <image-name>
-pip install -e .
+pip install -e ".[dev]"
 ```
 
 #### Using Apptainer
 ```bash
 ./apptainer/build.sh
 ./apptainer/run.sh
-pip install -e .
+pip install -e ".[dev]"
 ```
-
-### Local Development Setup
-
-1. **Install Dependencies**:
-   ```bash
-   pip install -e ".[dev]"
-   ```
 
 ## Development Workflow
 
-1. **Create a Feature Branch**:
-   ```bash
-   git checkout -b $USER/your-feature-name
-   ```
+### 1. Create a Feature Branch
+```bash
+git checkout -b $USER/your-feature-name
+```
 
-2. **Make Your Changes**:
-   - Follow the existing code style
-   - Add tests for new functionality
-   - Update documentation as needed
+### 2. Make Your Changes
+- Follow the existing code style
+- Add tests for new functionality
+- Update documentation as needed
 
-3. **Test Your Changes**:
-   ```bash
-   # Run code quality checks
-   ruff check .
-   ruff format .
+### 3. Test Your Changes
+```bash
+# Run code quality checks
+ruff check .
+ruff format .
 
-   pytest
-   ```
+# Run tests
+pytest
+```
 
-4. **Commit and Push**:
-   ```bash
-   git add .
-   git commit -m "Description of your changes"
-   git push origin $USER/your-feature-name
-   ```
+### 4. Commit and Push
+```bash
+git add .
+git commit -m "Description of your changes"
+git push origin $USER/your-feature-name
+```
 
-5. **Create a Pull Request**:
-   - Go to the GitHub repository
-   - Create a new pull request from your branch
-   - Fill in the PR description with details about your changes
-   - Feel free to open a draft PR and ask for early feedback while you're still working on your changes
+### 5. Create a Pull Request
+- Go to the GitHub repository
+- Create a new pull request from your branch
+- Fill in the PR description with details about your changes
+- Feel free to open a draft PR and ask for early feedback while you're still working on your changes
 
 ## License
 
