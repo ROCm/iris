@@ -6,19 +6,7 @@
 import os
 import torch
 
-from .iris import (
-    Iris,
-    iris,
-    load,
-    store,
-    get,
-    put,
-    atomic_add,
-    atomic_sub,
-    atomic_cas,
-    atomic_xchg,
-    atomic_xor
-)
+from .iris import Iris, iris, load, store, get, put, atomic_add, atomic_sub, atomic_cas, atomic_xchg, atomic_xor
 
 from .util import (
     do_bench,
