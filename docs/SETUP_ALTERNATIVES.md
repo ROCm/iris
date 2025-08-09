@@ -23,7 +23,7 @@ If you prefer to build and run Docker containers manually:
 ./docker/run.sh <image-name>
 
 # Install Iris in development mode
-cd iris && pip install -e .
+pip install -e .
 ```
 
 ---

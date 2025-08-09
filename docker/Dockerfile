@@ -39,7 +39,7 @@ WORKDIR $TRITON_PATH
 RUN git clone https://github.com/triton-lang/triton.git $TRITON_PATH
 RUN git checkout eb73b0373a7fb4cd2e563f68e3488a96525562eb
 RUN pip3 install -e .
-ENV PYTHONPATH=$TRITON_PATH:$PYTHONPATH
+ENV PYTHONPATH=$TRITON_PATH
 
 # Install rocprofiler-systems
 WORKDIR /workspace

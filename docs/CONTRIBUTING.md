@@ -38,7 +38,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. We p
 ```bash
 ./docker/build.sh <image-name>
 ./docker/run.sh <image-name>
-cd iris && pip install -e .
+pip install -e .
 ```
 
 #### Using Apptainer
@@ -59,7 +59,7 @@ pip install -e .
 
 1. **Create a Feature Branch**:
    ```bash
-   git checkout -b feature/your-feature-name
+   git checkout -b $USER/your-feature-name
    ```
 
 2. **Make Your Changes**:
@@ -73,7 +73,6 @@ pip install -e .
    ruff check .
    ruff format .
 
-   # Run tests (if available)
    pytest
    ```
 
@@ -81,7 +80,7 @@ pip install -e .
    ```bash
    git add .
    git commit -m "Description of your changes"
-   git push origin feature/your-feature-name
+   git push origin $USER/your-feature-name
    ```
 
 5. **Create a Pull Request**:
