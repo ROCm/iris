@@ -549,6 +549,33 @@ def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=Non
     return tl.atomic_xchg(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
 
+@triton.jit
+def atomic_xor(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+    """
+    Performs an atomic xor at the specified rank's memory location.
+
+    This function performs an atomic xor operation by translating the pointer
+    from the from_rank's address space to the to_rank's address space and atomically
+    xoring the provided data to the to_rank memory location. If the from_rank and to_rank are the same,
+    this function performs a local atomic xor operation.
+
+    Args:
+        pointer (triton.PointerType, or block of dtype=triton.PointerType): The memory locations in the from_rank's address space that will be translated to the to_rank's address space. Must be the current rank where the pointer is local.
+        val (Block of dtype=pointer.dtype.element_ty): The values with which to perform the atomic operation.
+        from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
+        to_rank (int): The rank ID to which the atomic operation will be performed.
+        heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
+        mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
+        sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
+        scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
+
+    Returns:
+        Block: The data stored at pointer before the atomic operation.
+    """
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    return tl.atomic_xor(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+
 def iris(heap_size=1 << 30):
     """
     Create and return an Iris instance with the specified heap size.
