@@ -638,7 +638,7 @@ def atomic_min(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
     This function performs an atomic min operation by translating the pointer
     from the from_rank's address space to the to_rank's address space and atomically
     performing the min on the provided data to the to_rank memory location. If the from_rank and to_rank are the same,
-    this function performs a local atomic or operation.
+    this function performs a local atomic min operation.
 
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): The memory locations in the from_rank's address space that will be translated to the to_rank's address space. Must be the current rank where the pointer is local.
@@ -665,7 +665,7 @@ def atomic_max(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
     This function performs an atomic max operation by translating the pointer
     from the from_rank's address space to the to_rank's address space and atomically
     performing the max on the provided data to the to_rank memory location. If the from_rank and to_rank are the same,
-    this function performs a local atomic or operation.
+    this function performs a local atomic max operation.
 
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): The memory locations in the from_rank's address space that will be translated to the to_rank's address space. Must be the current rank where the pointer is local.
