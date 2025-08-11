@@ -6,7 +6,7 @@
 import os
 import torch
 
-from .iris import Iris, iris, load, store, get, put, atomic_add, atomic_sub, atomic_cas, atomic_xchg, atomic_xor
+from .iris import Iris, iris, load, store, get, put, atomic_add, atomic_sub, atomic_cas, atomic_xchg, atomic_xor, atomic_and
 
 from .util import (
     do_bench,
@@ -46,6 +46,7 @@ __all__ = [
     "atomic_cas",
     "atomic_xchg",
     "atomic_xor",
+    "atomic_and",
     "do_bench",
     "memset_tensor",
     "hip",
