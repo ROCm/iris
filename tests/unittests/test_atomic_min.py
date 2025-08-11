@@ -65,7 +65,7 @@ def test_atomic_or_rank_aware(dtype, sem, scope, BLOCK_SIZE):
     heap_bases = shmem.get_heap_bases()
     cur_rank = shmem.get_rank()
 
-    max_val = torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
+    max_val = torch.iinfo(dtype).max
     results = shmem.ones(BLOCK_SIZE, dtype=dtype) * max_val
 
     grid = lambda meta: (1,)
