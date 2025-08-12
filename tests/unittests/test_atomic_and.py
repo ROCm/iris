@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 import torch
 import triton
 import triton.language as tl
@@ -60,7 +63,7 @@ def atomic_and_kernel(
         32,
     ],
 )
-def test_atomic_and_rank_aware(dtype, sem, scope, BLOCK_SIZE):
+def test_atomic_and_api(dtype, sem, scope, BLOCK_SIZE):
     # TODO: Adjust heap size.
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
@@ -77,6 +80,9 @@ def test_atomic_and_rank_aware(dtype, sem, scope, BLOCK_SIZE):
     atomic_and_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()
 
+    # All ranks start out with a full mask vector 0xFFFFFF (initial_mask)
+    # All ranks then take turns in clearing the their bit position in the mask
+    # By the end we would have effective_bits - num_ranks many ones followed by num_ranks zeros
     expected_scalar = ~((1 << num_ranks) - 1) & initial_mask
     expected = torch.full((BLOCK_SIZE,), expected_scalar, dtype=dtype, device="cuda")
 

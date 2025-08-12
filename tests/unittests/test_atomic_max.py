@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 import torch
 import triton
 import triton.language as tl
@@ -58,7 +61,7 @@ def atomic_max_kernel(
         32,
     ],
 )
-def test_atomic_or_rank_aware(dtype, sem, scope, BLOCK_SIZE):
+def test_atomic_max_api(dtype, sem, scope, BLOCK_SIZE):
     # TODO: Adjust heap size.
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
@@ -72,6 +75,9 @@ def test_atomic_or_rank_aware(dtype, sem, scope, BLOCK_SIZE):
     atomic_max_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()
 
+    # All ranks participate in performing the max operation
+    # Each rank performs the atomic operation: max(rank_id + 1)
+    # The result equals the ID of the last rank + 1
     expected = torch.full((BLOCK_SIZE,), num_ranks, dtype=dtype, device="cuda")
 
     try:
