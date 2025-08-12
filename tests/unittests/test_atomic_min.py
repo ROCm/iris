@@ -69,7 +69,7 @@ def test_atomic_min_api(dtype, sem, scope, BLOCK_SIZE):
     cur_rank = shmem.get_rank()
 
     max_val = torch.iinfo(dtype).max
-    results = shmem.ones(BLOCK_SIZE, dtype=dtype) * max_val
+    results  = shmem.full((BLOCK_SIZE,), max_val, dtype=dtype)
 
     grid = lambda meta: (1,)
     atomic_min_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
