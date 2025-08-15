@@ -70,9 +70,9 @@ def test_atomic_and_api(dtype, sem, scope, BLOCK_SIZE):
     heap_bases = shmem.get_heap_bases()
     cur_rank = shmem.get_rank()
 
-    bit_width      = 32 if dtype == torch.int32 else 64
+    bit_width = 32 if dtype == torch.int32 else 64
     effective_bits = min(num_ranks, bit_width)
-    initial_mask   = (1 << effective_bits) - 1
+    initial_mask = (1 << effective_bits) - 1
 
     results = shmem.full((BLOCK_SIZE,), initial_mask, dtype=dtype)
 

@@ -69,14 +69,14 @@ def test_atomic_min_api(dtype, sem, scope, BLOCK_SIZE):
     cur_rank = shmem.get_rank()
 
     max_val = torch.iinfo(dtype).max
-    results  = shmem.full((BLOCK_SIZE,), max_val, dtype=dtype)
+    results = shmem.full((BLOCK_SIZE,), max_val, dtype=dtype)
 
     grid = lambda meta: (1,)
     atomic_min_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()
     # All ranks participate in performing the max operation
     # Each rank performs the atomic operation: max(rank_id + 1)
-    # The result equals the ID of the first rank + 1 
+    # The result equals the ID of the first rank + 1
     expected = torch.full((BLOCK_SIZE,), 1, dtype=dtype, device="cuda")
 
     try:
