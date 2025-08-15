@@ -9,7 +9,7 @@ import iris
 
 
 @triton.jit
-def atomic_or_kernel(
+def atomic_and_kernel(
     results,
     sem: tl.constexpr,
     scope: tl.constexpr,
@@ -23,11 +23,12 @@ def atomic_or_kernel(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < BLOCK_SIZE
 
-    val = 1 << (cur_rank % results.type.element_ty.primitive_bitwidth)
+    bit = (cur_rank // 32) % 2
+    val = bit << (cur_rank % results.type.element_ty.primitive_bitwidth)
     acc = tl.full([BLOCK_SIZE], val, dtype=results.type.element_ty)
 
     for target_rank in range(num_ranks):
-        iris.atomic_or(results + offsets, acc, cur_rank, target_rank, heap_bases, mask, sem=sem, scope=scope)
+        iris.atomic_and(results + offsets, acc, cur_rank, target_rank, heap_bases, mask, sem=sem, scope=scope)
 
 
 @pytest.mark.parametrize(
@@ -62,27 +63,27 @@ def atomic_or_kernel(
         32,
     ],
 )
-def test_atomic_or_api(dtype, sem, scope, BLOCK_SIZE):
+def test_atomic_and_api(dtype, sem, scope, BLOCK_SIZE):
     # TODO: Adjust heap size.
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     heap_bases = shmem.get_heap_bases()
     cur_rank = shmem.get_rank()
 
-    results = shmem.zeros(BLOCK_SIZE, dtype=dtype)
+    bit_width      = 32 if dtype == torch.int32 else 64
+    effective_bits = min(num_ranks, bit_width)
+    initial_mask   = (1 << effective_bits) - 1
+
+    results = shmem.full((BLOCK_SIZE,), initial_mask, dtype=dtype)
 
     grid = lambda meta: (1,)
-    atomic_or_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
+    atomic_and_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()
 
-    bit_width = 32 if dtype == torch.int32 else 64
-    effective_bits = min(num_ranks, bit_width)
-    expected_scalar = (1 << effective_bits) - 1
-
-    # All ranks start out with a zero mask
-    # All ranks then take turns in sertting the their bit position in the mask to 1
-    # By the end we would have a bit vector with num_ranks many 1's as long as num_ranks <= bit_width
-    # or a full bit vector if num_ranks > bit_width
+    # All ranks start out with a full mask vector 0xFFFFFF (initial_mask)
+    # All ranks then take turns in clearing the their bit position in the mask
+    # By the end we would have effective_bits - num_ranks many ones followed by num_ranks zeros
+    expected_scalar = ~((1 << num_ranks) - 1) & initial_mask
     expected = torch.full((BLOCK_SIZE,), expected_scalar, dtype=dtype, device="cuda")
 
     try:
