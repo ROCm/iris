@@ -21,6 +21,9 @@ This directory contains various algorithm implementations for distributed comput
 - [`07_gemm_all_scatter`](07_gemm_all_scatter): Matrix multiplication with all-scatter communication
 - [`08_gemm_atomics_all_reduce`](08_gemm_atomics_all_reduce): Matrix multiplication with all-reduce using atomics
 - [`09_gemm_one_shot_all_reduce`](09_gemm_one_shot_all_reduce): Matrix multiplication with one-shot all-reduce
+- [`10_gemm_all_scatter_wg_specialization`](10_gemm_all_scatter_wg_specialization): Matrix multiplication with all-scatter using workgroup specialization
+- [`11_gemm_all_scatter_producer_consumer`](11_gemm_all_scatter_producer_consumer): Matrix multiplication with all-scatter using producer-consumer concurrent kernels
+- [`12_gemm_all_scatter_bulk_synchronous`](12_gemm_all_scatter_bulk_synchronous): Matrix multiplication with all-scatter using the bulk synchronous parallel approach
 
 ### Utilities
 - [`benchmark`](benchmark): Benchmarking utilities
@@ -57,4 +60,13 @@ mpirun -np 8 python examples/08_gemm_atomics_all_reduce/benchmark.py --benchmark
 
 # Example command to run benchmark with one-shot all-reduce algorithm
 mpirun -np 8 python examples/09_gemm_one_shot_all_reduce/benchmark.py --benchmark --validate
+
+# Example command to run benchmark with all-scatter and workgroup specialization
+mpirun -np 8 python examples/10_gemm_all_scatter_wg_specialization/benchmark.py --benchmark --validate
+
+# Example command to run benchmark with all-scatter producer-consumer pattern
+mpirun -np 8 python examples/11_gemm_all_scatter_producer_consumer/benchmark.py --benchmark --validate
+
+# Example command to run benchmark with all-scatter bulk synchronous approach
+mpirun -np 8 python examples/12_gemm_all_scatter_bulk_synchronous/benchmark.py --benchmark --validate
 ```
