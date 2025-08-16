@@ -15,7 +15,7 @@ This directory contains various algorithm implementations for distributed comput
 - [`05_atomic_xchg`](05_atomic_xchg): Atomic exchange operations across multiple GPUs
 
 ### Communication Patterns
-- [`06_message_passing`](06_message_passing): Point-to-point message passing
+- [06_message_passing](06_message_passing): Point-to-point message passing (load/store and put/get operations)
 
 ### GEMM Operations
 - [`07_gemm_all_scatter`](07_gemm_all_scatter): Matrix multiplication with all-scatter communication
@@ -26,9 +26,8 @@ This directory contains various algorithm implementations for distributed comput
 - [`12_gemm_all_scatter_bulk_synchronous`](12_gemm_all_scatter_bulk_synchronous): Matrix multiplication with all-scatter using the bulk synchronous parallel approach
 
 ### Utilities
-- [`benchmark`](benchmark): Benchmarking utilities
-- [`common`](common): Common utilities and shared code
-- [`gemm`](gemm): General GEMM implementations
+- [`benchmark`](benchmark): Benchmarking utilities and performance testing tools
+- [`common`](common): Common utilities and shared code for examples
 
 ## Usage
 
@@ -47,7 +46,8 @@ mpirun -np 8 python examples/04_atomic_add/atomic_add_bench.py  # Atomic add acr
 mpirun -np 8 python examples/05_atomic_xchg/atomic_xchg_bench.py  # Atomic exchange across GPUs
 
 # Example command to run message passing
-python examples/06_message_passing/message_passing.py
+python examples/06_message_passing/message_passing_put.py
+python examples/06_message_passing/message_passing_load_store.py
 ```
 
 ### GEMM Operations
