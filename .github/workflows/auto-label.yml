@@ -1,7 +1,11 @@
-name: Labeling new issue
+name: Auto labeling
+
 on:
   issues:
     types: ['opened']
+  pull_request:
+    types: ['opened']
+
 jobs:
   build:
     runs-on: ubuntu-latest
