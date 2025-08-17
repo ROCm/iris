@@ -9,7 +9,6 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
-  # org project writes not needed here because we use a PAT input for the action below
 
 jobs:
   # Label ISSUES using Renato66/auto-label
