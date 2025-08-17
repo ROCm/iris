@@ -1,13 +1,19 @@
 name: Auto labeling
-
 on:
   issues:
-    types: ['opened']
+    types: [opened]
   pull_request:
-    types: ['opened']
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
-  build:
+  # Label ISSUES using Renato66/auto-label
+  label-issues:
+    if: github.event_name == 'issues'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,3 +24,19 @@ jobs:
       - uses: Renato66/auto-label@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Label PRs: always add iris
+  label-prs:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add iris label to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: ["iris"]
+            });
