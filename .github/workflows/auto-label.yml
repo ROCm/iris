@@ -9,6 +9,7 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
+  # org project writes not needed here because we use a PAT input for the action below
 
 jobs:
   # Label ISSUES using Renato66/auto-label
@@ -25,12 +26,22 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Label PRs: always add iris
+  # Add ISSUES to ROCm Project #91 so they land in Todo
+  add-issues-to-project:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@v1
+        with:
+          project-url: https://github.com/orgs/ROCm/projects/91
+          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
+
+  # PRs: label so the project rule moves them to In Progress
   label-prs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - name: Add iris label to PR
+      - name: Add iris + in-progress labels to PR
         uses: actions/github-script@v7
         with:
           script: |
