@@ -407,7 +407,7 @@ def get(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
     Returns:
         None
     """
-    translated_from_ptr = __translate(from_ptr, to_rank, from_rank, heap_bases)
+    translated_from_ptr = __translate(from_ptr, from_rank, to_rank, heap_bases)
 
     data = tl.load(translated_from_ptr, mask=mask)
 
