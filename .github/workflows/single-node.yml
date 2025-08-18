@@ -1,0 +1,22 @@
+name: Iris Single Node Checks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  
+
+jobs:
+  rocm-smi:
+    runs-on: [self-hosted, 1mi300x]
+    steps:
+      - name: Check ROCm SMI
+        run: rocm-smi
+        shell: bash
+      
+      - name: Display ROCm SMI output
+        run: |
+          echo "=== ROCm SMI Output ==="
+          rocm-smi
+          echo "=== End Output ==="
