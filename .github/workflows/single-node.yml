@@ -8,15 +8,11 @@ on:
   workflow_dispatch:  
 
 jobs:
-  rocm-smi:
+  build-image:
     runs-on: [self-hosted, 1mi300x]
     steps:
-      - name: Check ROCm SMI
-        run: rocm-smi
-        shell: bash
-      
-      - name: Display ROCm SMI output
+      - name: Check docker version
         run: |
-          echo "=== ROCm SMI Output ==="
-          rocm-smi
-          echo "=== End Output ==="
+          ls /opt/
+          docker version
+          docker buildx version
