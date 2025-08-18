@@ -11,8 +11,17 @@ jobs:
   build-image:
     runs-on: [self-hosted, 1mi300x]
     steps:
-      - name: Check docker version
+      - name: Check system and docker
         run: |
+          echo "=== System Information ==="
           ls /opt/
+          echo "=== Docker Version ==="
           docker version
+          echo "=== Docker Buildx Version ==="
           docker buildx version
+          echo "=== Docker Daemon Status ==="
+          sudo systemctl status docker || echo "Docker service not found via systemctl"
+          echo "=== Docker Socket Check ==="
+          ls -la /var/run/docker.sock || echo "Docker socket not found"
+          echo "=== Docker Process Check ==="
+          ps aux | grep docker || echo "No docker processes found"
