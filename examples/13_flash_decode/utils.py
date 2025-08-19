@@ -20,7 +20,6 @@ def print_correctness_report(
     """
     Prints a detailed report from rank 0 and the final status from all ranks.
     """
-    # This detailed report prints only from Rank 0
     if rank == 0:
         print(f"\n<<<<<<<<<< Correctness Test Report (Impl: FUSED_FULL) >>>>>>>>>>")
         print(f"--- Detailed Validation on Rank {rank} ---")
