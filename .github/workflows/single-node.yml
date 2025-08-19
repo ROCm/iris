@@ -20,14 +20,29 @@ jobs:
           echo "=== Docker Buildx Version ==="
           docker buildx version || echo "Docker buildx not accessible"
       
+      - name: Install and start Docker daemon
+        run: |
+          echo "=== Installing Docker daemon ==="
+          # Update package list
+          apt-get update
+          # Install Docker daemon
+          apt-get install -y docker.io
+          # Start Docker daemon
+          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
+          # Wait for Docker to be ready
+          sleep 10
+          # Test Docker daemon
+          docker info
+          echo "=== Docker daemon started successfully ==="
+      
       - name: Check Docker daemon status
         run: |
           echo "=== Docker Daemon Status ==="
-          sudo systemctl status docker || echo "Docker service not found via systemctl"
           echo "=== Docker Socket Check ==="
           ls -la /var/run/docker.sock || echo "Docker socket not found"
           echo "=== Docker Process Check ==="
           ps aux | grep docker || echo "No docker processes found"
-          echo "=== Docker Service Status ==="
-          sudo systemctl is-active docker || echo "Docker service is not active"
-          sudo systemctl is-enabled docker || echo "Docker service is not enabled"
+          echo "=== Docker Info ==="
+          docker info
+          echo "=== Test Docker Build ==="
+          docker run --rm hello-world || echo "Docker run test failed"
