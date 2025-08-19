@@ -11,6 +11,9 @@ jobs:
   build-image:
     runs-on: [self-hosted, 8mi300x]
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
       - name: Setup Docker
         run: |
           # Update package list
@@ -21,15 +24,6 @@ jobs:
           dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
           # Wait for Docker to be ready
           timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
-      
-      - name: Check system information
-        run: |
-          echo "=== System Information ==="
-          ls /opt/
-          echo "=== Docker Client Version ==="
-          docker --version
-          echo "=== Docker Buildx Version ==="
-          docker buildx version
       
       - name: Build Iris Docker container
         run: |
