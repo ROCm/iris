@@ -1,4 +1,4 @@
-name: Iris Single Node Checks
+name: Iris Tests
 
 on:
   push:
@@ -13,7 +13,6 @@ jobs:
     steps:
       - name: Setup Docker
         run: |
-          echo "=== Installing Docker daemon ==="
           # Update package list
           apt-get update
           # Install Docker daemon
@@ -21,9 +20,7 @@ jobs:
           # Start Docker daemon
           dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
           # Wait for Docker to be ready
-          echo "Waiting for Docker daemon to be ready..."
-          timeout 30 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
-          echo "=== Docker daemon started successfully ==="
+          timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
       
       - name: Check system information
         run: |
@@ -34,14 +31,6 @@ jobs:
           echo "=== Docker Buildx Version ==="
           docker buildx version
       
-      - name: Check Docker daemon status
+      - name: Build Iris Docker container
         run: |
-          echo "=== Docker Daemon Status ==="
-          echo "=== Docker Socket Check ==="
-          ls -la /var/run/docker.sock || echo "Docker socket not found"
-          echo "=== Docker Process Check ==="
-          ps aux | grep docker || echo "No docker processes found"
-          echo "=== Docker Info ==="
-          docker info
-          echo "=== Test Docker Build ==="
-          docker run --rm hello-world || echo "Docker run test failed"
+          ./docker/build.sh
