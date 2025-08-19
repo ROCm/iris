@@ -8,8 +8,8 @@ on:
   workflow_dispatch:  
 
 jobs:
-  test-mpi:
-    runs-on: [self-hosted, 8mi300x]
+  run-iris-tests:
+    runs-on: [self-hosted, mi3008x]
     timeout-minutes: 90
     strategy:
       matrix:
