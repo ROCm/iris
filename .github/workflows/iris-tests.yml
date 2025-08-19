@@ -48,9 +48,24 @@ jobs:
 
       - name: Run Iris Tests with ${{ matrix.ranks }} MPI ranks
         run: |
-          docker run --rm iris-dev rocm-smi
-          docker run --rm iris-dev hipconfig
-          docker run --rm iris-dev mpirun -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
+          # Start persistent container
+          docker run -d --name iris-test-${{ github.job }}-${{ matrix.ranks }} iris-dev sleep infinity
+          
+          # Install iris in editable mode
+          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} pip install -e .
+          
+          # Run ROCm and HIP checks
+          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} rocm-smi
+          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} hipconfig
+          
+          # Run MPI test
+          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} mpirun -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
+      
+      - name: Cleanup containers
+        if: always()
+        run: |
+          # Stop and remove any iris-test containers
+          docker ps -a --filter "name=iris-test-" --format "{{.Names}}" | xargs -r docker rm -f
 
   push:
     needs: [build, test]
