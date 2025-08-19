@@ -8,23 +8,42 @@ on:
   workflow_dispatch:  
 
 jobs:
-  build-image:
+  test-mpi:
     runs-on: [self-hosted, 8mi300x]
+    timeout-minutes: 90
+    strategy:
+      matrix:
+        ranks: [1]
+        #ranks: [1, 2, 4, 8]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.ranks }}
+      cancel-in-progress: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         
       - name: Setup Docker
         run: |
-          # Update package list
-          apt-get update
-          # Install Docker daemon
-          apt-get install -y docker.io
-          # Start Docker daemon
+          # Install docker
+          apt-get update && apt-get install -y docker.io
+          # Start Docker daemon and wait for it to be ready
           dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
-          # Wait for Docker to be ready
           timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
       
       - name: Build Iris Docker container
         run: |
           ./docker/build.sh
+      
+      - name: Test with ${{ matrix.ranks }} MPI ranks
+        uses: docker://iris-dev
+        with:
+          args: |
+            echo '=== Testing with ${{ matrix.ranks }} MPI rank(s) ==='
+            echo '=== ROCm SMI ==='
+            rocm-smi
+            echo '=== HIP Config ==='
+            hipconfig
+            echo '=== MPI Test ==='
+            mpirun -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
+            echo '=== Done ==='
+
