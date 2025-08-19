@@ -34,7 +34,7 @@ jobs:
         run: |
           ./docker/build.sh
       
-      - name: Test with ${{ matrix.ranks }} MPI ranks
+      - name: Run Iris Tests with ${{ matrix.ranks }} MPI ranks
         uses: docker://iris-dev
         with:
           args: |
