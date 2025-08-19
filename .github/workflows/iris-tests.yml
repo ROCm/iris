@@ -23,7 +23,7 @@ jobs:
 
       - name: Build Iris Docker container
         run: |
-          ./docker/build.sh
+          docker build --no-cache --rm --force-rm -t iris-dev ./docker
 
   test:
     needs: build
