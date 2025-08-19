@@ -9,18 +9,9 @@ on:
 
 jobs:
   build-image:
-    runs-on: [self-hosted, 1mi300x]
+    runs-on: [self-hosted, 8mi300x]
     steps:
-      - name: Check system information
-        run: |
-          echo "=== System Information ==="
-          ls /opt/
-          echo "=== Docker Client Version ==="
-          docker --version || echo "Docker client not accessible"
-          echo "=== Docker Buildx Version ==="
-          docker buildx version || echo "Docker buildx not accessible"
-      
-      - name: Install and start Docker daemon
+      - name: Setup Docker
         run: |
           echo "=== Installing Docker daemon ==="
           # Update package list
@@ -30,10 +21,18 @@ jobs:
           # Start Docker daemon
           dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
           # Wait for Docker to be ready
-          sleep 10
-          # Test Docker daemon
-          docker info
+          echo "Waiting for Docker daemon to be ready..."
+          timeout 30 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
           echo "=== Docker daemon started successfully ==="
+      
+      - name: Check system information
+        run: |
+          echo "=== System Information ==="
+          ls /opt/
+          echo "=== Docker Client Version ==="
+          docker --version
+          echo "=== Docker Buildx Version ==="
+          docker buildx version
       
       - name: Check Docker daemon status
         run: |
