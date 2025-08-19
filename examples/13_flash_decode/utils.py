@@ -2,6 +2,8 @@ import sys
 from typing import List, Dict, Any, Optional
 
 import torch
+import os
+import json 
 
 def dist_print(message: str, rank: int, is_error: bool = False):
     """Prints a message only from rank 0."""
@@ -69,3 +71,26 @@ class PerfLogger:
             row = f"{r['kv_len']:<15} | {r.get(impl_name, 'N/A'):<18.3f}"
             self.log(row)
         self.log("-" * len(header))
+        
+
+class JSONWriter:
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.data = {}
+
+        if not os.path.exists(file_path):
+            with open(file_path, "w") as f:
+                json.dump({}, f)
+
+    def add_field(self, key, value):
+        self.data[key] = value
+
+    def _write_to_file(self):
+        with open(self.file_path, "w") as f:
+            json.dump(self.data, f, indent=4)
+
+    def display(self):
+        print(json.dumps(self.data, indent=4))
+
+    def flush(self):
+        self._write_to_file()
