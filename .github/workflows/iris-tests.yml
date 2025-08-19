@@ -2,9 +2,9 @@ name: Iris Tests
 
 on:
   push:
-    branches: [ main, muhaawad/single-node-ci ]
+    branches: [ main ]
   pull_request:
-    branches: [ main, muhaawad/single-node-ci ]
+    branches: [ main ]
   workflow_dispatch:  
 
 jobs:
