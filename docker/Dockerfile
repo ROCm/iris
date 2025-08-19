@@ -32,14 +32,14 @@ RUN pip3 install --upgrade pip && \
 # This needs sudo, I can only get it to install with sudo
 # or using conda, but conda runs into issues with too many requests.
 #  https://stackoverflow.com/a/54052470/5729690
-RUN sudo pip3 install mpi4py
+#RUN sudo pip3 install mpi4py
 
 # Clone and install Triton
-WORKDIR $TRITON_PATH
-RUN git clone https://github.com/triton-lang/triton.git $TRITON_PATH
-RUN git checkout dd5823453bcc7973eabadb65f9d827c43281c434
-RUN pip3 install -e .
-ENV PYTHONPATH=$TRITON_PATH
+#WORKDIR $TRITON_PATH
+#RUN git clone https://github.com/triton-lang/triton.git $TRITON_PATH
+#RUN git checkout dd5823453bcc7973eabadb65f9d827c43281c434
+#RUN pip3 install -e .
+#ENV PYTHONPATH=$TRITON_PATH
 
 # Install rocprofiler-systems
 WORKDIR /workspace

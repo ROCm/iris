@@ -32,7 +32,7 @@ dependencies = [
     "requests",
     "mpi4py",
     "ruff",
-    "triton"
+    "triton @ git+https://github.com/triton-lang/triton.git@dd5823453bcc7973eabadb65f9d827c43281c434"
 ]
 
 [project.optional-dependencies]
