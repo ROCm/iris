@@ -8,9 +8,27 @@ on:
   workflow_dispatch:  
 
 jobs:
-  run-iris-tests:
+  build:
     runs-on: [self-hosted, mi3008x]
     timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Docker
+        run: |
+          apt-get update && apt-get install -y docker.io
+          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
+          timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
+      - name: Build Iris Docker container
+        run: |
+          ./docker/build.sh
+
+  test:
+    needs: build
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 60
     strategy:
       matrix:
         ranks: [1]
@@ -21,29 +39,45 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      
+      - name: Setup Docker
+        run: |
+          apt-get update && apt-get install -y docker.io
+          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
+          timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
+      - name: Run Iris Tests with ${{ matrix.ranks }} MPI ranks
+        run: |
+          docker run --rm iris-dev rocm-smi
+          docker run --rm iris-dev hipconfig
+          docker run --rm iris-dev mpirun -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
+
+  push:
+    needs: [build, test]
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 30
+    env:
+      DOCKERHUB_USER: muhaawad
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
         
       - name: Setup Docker
         run: |
-          # Install docker
           apt-get update && apt-get install -y docker.io
-          # Start Docker daemon and wait for it to be ready
           dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
           timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
-      
-      - name: Build Iris Docker container
+
+      - name: Login to Docker Hub
         run: |
-          ./docker/build.sh
-      
-      - name: Run Iris Tests with ${{ matrix.ranks }} MPI ranks
-        uses: docker://iris-dev
-        with:
-          args: |
-            echo '=== Testing with ${{ matrix.ranks }} MPI rank(s) ==='
-            echo '=== ROCm SMI ==='
-            rocm-smi
-            echo '=== HIP Config ==='
-            hipconfig
-            echo '=== MPI Test ==='
-            mpirun -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
-            echo '=== Done ==='
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ env.DOCKERHUB_USER }}" --password-stdin
+
+      - name: Tag and push image
+        run: |
+          IMAGE_REPO="${{ env.DOCKERHUB_USER }}/iris-dev"
+          IMAGE_TAG="${{ github.sha }}"
+          docker tag iris-dev "$IMAGE_REPO:$IMAGE_TAG"
+          docker tag iris-dev "$IMAGE_REPO:latest"
+          docker push "$IMAGE_REPO:$IMAGE_TAG"
+          docker push "$IMAGE_REPO:latest"
 
