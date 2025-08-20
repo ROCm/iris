@@ -50,13 +50,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Apptainer
-        run: |
-          apt-get update && apt-get install -y software-properties-common
-          add-apt-repository -y ppa:apptainer/ppa
-          apt-get update
-          apt-get install -y apptainer
-
       - name: Run Iris Tests with ${{ matrix.ranks }} MPI ranks
         run: |
           apptainer exec ~/apptainer/iris-dev.sif bash -c "
