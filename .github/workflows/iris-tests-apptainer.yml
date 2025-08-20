@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-apptainer-image:
     runs-on: [self-hosted, mi3008x]
     timeout-minutes: 90
     steps:
@@ -35,8 +35,8 @@ jobs:
           else
             echo "Using existing Apptainer image"
           fi
-  test:
-    needs: build
+  run-tests:
+    needs: build-apptainer-image
     runs-on: [self-hosted, mi3008x]
     timeout-minutes: 20
     strategy:
@@ -58,15 +58,8 @@ jobs:
             # Create function for mpirun with root permissions
             mpirun-root() { mpirun --allow-run-as-root \"\$@\"; }
 
-            # Run ROCm and HIP checks
-            rocm-smi
-            hipconfig
-
-            # Run MPI test
-            mpirun-root -np ${{ matrix.ranks }} echo 'MPI working with ${{ matrix.ranks }} rank(s)'
-
-            # Run examples tests one at a time with MPI
-            echo 'Running examples tests one at a time with MPI...'
+            # Run examples tests one at a time
+            echo 'Running examples tests one at a time...'
             for test_file in tests/examples/test_*.py; do
               if [ -f \"\$test_file\" ]; then
                 echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
@@ -74,8 +67,8 @@ jobs:
               fi
             done
 
-            # Run unit tests one at a time with MPI
-            echo 'Running unit tests one at a time with MPI...'
+            # Run unit tests one at a time
+            echo 'Running unit tests one at a time...'
             for test_file in tests/unittests/test_*.py; do
               if [ -f \"\$test_file\" ]; then
                 echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
