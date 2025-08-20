@@ -71,6 +71,8 @@ def test_atomic_max_api(dtype, sem, scope, BLOCK_SIZE):
     min_val = torch.iinfo(dtype).min
     results = shmem.full((BLOCK_SIZE,), min_val, dtype=dtype)
 
+    shmem.barrier()
+
     grid = lambda meta: (1,)
     atomic_max_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()
