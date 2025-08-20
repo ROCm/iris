@@ -61,6 +61,8 @@ def test_store_api(dtype, BLOCK_SIZE):
     src = shmem.ones(BLOCK_SIZE, dtype=dtype)
     results = shmem.zeros_like(src)
 
+    shmem.barrier()
+
     grid = lambda meta: (1,)
     store_kernel[grid](src, results, destination_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()

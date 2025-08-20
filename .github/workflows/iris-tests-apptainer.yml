@@ -1,0 +1,76 @@
+name: Iris Tests with Apptainer
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-apptainer-image:
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 90
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-build
+      cancel-in-progress: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Apptainer
+        run: |
+          apt-get update && apt-get install -y software-properties-common
+          add-apt-repository -y ppa:apptainer/ppa
+          apt-get update && apt-get install -y apptainer
+
+      - name: Build Iris Apptainer container
+        run: |
+          # Create persistent Apptainer directory
+          mkdir -p ~/apptainer
+
+          # Build Apptainer image from definition file (only if it doesn't exist)
+          if [ ! -f ~/apptainer/iris-dev.sif ]; then
+            echo "Building new Apptainer image..."
+            apptainer build ~/apptainer/iris-dev.sif apptainer/iris.def
+          else
+            echo "Using existing Apptainer image"
+          fi
+  run-tests:
+    name: ${{ matrix.ranks }}-rank Iris Test
+    needs: build-apptainer-image
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        ranks: [1, 2, 4, 8]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-${{ matrix.ranks }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Iris Tests with ${{ matrix.ranks }} MPI ranks
+        run: |
+          apptainer exec ~/apptainer/iris-dev.sif bash -c "
+            # Install iris first
+            pip install -e .
+
+            # Create function for mpirun with root permissions
+            mpirun-root() { mpirun --allow-run-as-root \"\$@\"; }
+
+            # Run examples tests one at a time
+            echo 'Running examples tests one at a time...'
+            for test_file in tests/examples/test_*.py; do
+              echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
+              mpirun-root -np ${{ matrix.ranks }} python -m pytest \"\$test_file\" -v --tb=short
+            done
+
+            # Run unit tests one at a time
+            echo 'Running unit tests one at a time...'
+            for test_file in tests/unittests/test_*.py; do
+              echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
+              mpirun-root -np ${{ matrix.ranks }} python -m pytest \"\$test_file\" -v --tb=short
+            done
+          "

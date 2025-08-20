@@ -75,6 +75,8 @@ def test_atomic_add_api(dtype, sem, scope, BLOCK_SIZE):
 
     results = shmem.zeros(BLOCK_SIZE, dtype=dtype)
 
+    shmem.barrier()
+
     grid = lambda meta: (1,)
     atomic_add_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()

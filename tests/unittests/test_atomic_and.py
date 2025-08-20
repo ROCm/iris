@@ -76,6 +76,8 @@ def test_atomic_and_api(dtype, sem, scope, BLOCK_SIZE):
 
     results = shmem.full((BLOCK_SIZE,), initial_mask, dtype=dtype)
 
+    shmem.barrier()
+
     grid = lambda meta: (1,)
     atomic_and_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()

@@ -72,6 +72,8 @@ def test_atomic_xor_api(dtype, sem, scope, BLOCK_SIZE):
 
     results = shmem.zeros(BLOCK_SIZE, dtype=dtype)
 
+    shmem.barrier()
+
     grid = lambda meta: (1,)
     atomic_xor_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()
