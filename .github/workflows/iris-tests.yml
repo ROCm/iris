@@ -27,6 +27,7 @@ jobs:
 
       - name: Build Iris Docker container
         run: |
+          df -h /
           docker build -t iris-dev ./docker
           docker builder prune -a --force
           df -h /
