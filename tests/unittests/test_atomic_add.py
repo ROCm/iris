@@ -91,7 +91,7 @@ def test_atomic_add_api(dtype, sem, scope, BLOCK_SIZE):
     shmem.barrier()
 
     # Verify the results
-    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda")
+    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * num_ranks
 
     try:
         torch.testing.assert_close(results, expected, rtol=0, atol=0)
