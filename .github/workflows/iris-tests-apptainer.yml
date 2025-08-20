@@ -11,6 +11,9 @@ jobs:
   build-apptainer-image:
     runs-on: [self-hosted, mi3008x]
     timeout-minutes: 90
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-build
+      cancel-in-progress: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,6 +37,7 @@ jobs:
             echo "Using existing Apptainer image"
           fi
   run-tests:
+    name: Test with ${{ matrix.ranks }} ranks
     needs: build-apptainer-image
     runs-on: [self-hosted, mi3008x]
     timeout-minutes: 20
