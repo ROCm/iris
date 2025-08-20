@@ -18,29 +18,19 @@ jobs:
       - name: Setup Docker
         run: |
           apt-get update && apt-get install -y docker.io
-          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
+          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 --storage-driver=overlay2 &
           timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
 
       - name: Build Iris Docker container
         run: |
-          echo "=== Disk space BEFORE build ==="
-          df -h /
-          echo ""
-          echo "=== Building Docker image ==="
           docker build -t iris-dev ./docker
-          echo ""
-          echo "=== Disk space AFTER build ==="
-          df -h /
-          echo ""
-          docker system df
-          echo "=== Cleaning up Docker build cache ==="
           docker builder prune -a --force
-          echo ""
-          echo "=== Disk space AFTER cleanup ==="
           df -h /
-          docker system df
           yes | docker system prune
-          docker system df
+          rm -rf /var/lib/docker/vfs/dir/*
+          df -h /
+          docker image ls
+
 
 
 #  test:
