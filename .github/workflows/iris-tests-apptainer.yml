@@ -56,8 +56,8 @@ jobs:
             # Install iris first
             pip install -e .
 
-            # Create alias for mpirun with root permissions
-            alias mpirun-root='mpirun --allow-run-as-root'
+            # Create function for mpirun with root permissions
+            mpirun-root() { mpirun --allow-run-as-root \"\$@\"; }
 
             # Run ROCm and HIP checks
             rocm-smi
