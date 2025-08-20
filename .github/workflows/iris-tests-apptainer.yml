@@ -59,18 +59,14 @@ jobs:
             # Run examples tests one at a time
             echo 'Running examples tests one at a time...'
             for test_file in tests/examples/test_*.py; do
-              if [ -f \"\$test_file\" ]; then
-                echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
-                mpirun-root -np ${{ matrix.ranks }} python -m pytest \"\$test_file\" -v --tb=short
-              fi
+              echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
+              mpirun-root -np ${{ matrix.ranks }} python -m pytest \"\$test_file\" -v --tb=short
             done
 
             # Run unit tests one at a time
             echo 'Running unit tests one at a time...'
             for test_file in tests/unittests/test_*.py; do
-              if [ -f \"\$test_file\" ]; then
-                echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
-                mpirun-root -np ${{ matrix.ranks }} python -m pytest \"\$test_file\" -v --tb=short
-              fi
+              echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
+              mpirun-root -np ${{ matrix.ranks }} python -m pytest \"\$test_file\" -v --tb=short
             done
           "
