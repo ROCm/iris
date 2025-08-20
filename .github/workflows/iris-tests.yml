@@ -18,6 +18,10 @@ jobs:
       - name: Setup Docker
         run: |
           apt-get update && apt-get install -y docker.io
+          # Kill any existing Docker processes
+          pkill -f dockerd || true
+          pkill -f docker || true
+          rm -f /var/run/docker.pid || true
           dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 --storage-driver=overlay2 &
           timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
 
