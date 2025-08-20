@@ -41,8 +41,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        ranks: [1]
-        #ranks: [1, 2, 4, 8]
+        ranks: [1, 2, 4, 8]
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.ranks }}
       cancel-in-progress: true
@@ -66,11 +65,21 @@ jobs:
             # Run MPI test
             mpirun-root -np ${{ matrix.ranks }} echo 'MPI working with ${{ matrix.ranks }} rank(s)'
 
-            # Run examples tests
-            echo 'Running examples tests...'
-            mpirun-root python -m pytest tests/examples -v --tb=short
+            # Run examples tests one at a time with MPI
+            echo 'Running examples tests one at a time with MPI...'
+            for test_file in tests/examples/test_*.py; do
+              if [ -f \"\$test_file\" ]; then
+                echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
+                mpirun-root -np ${{ matrix.ranks }} python -m pytest \"\$test_file\" -v --tb=short
+              fi
+            done
 
-            # Run unit tests
-            echo 'Running unit tests...'
-            mpirun-root python -m pytest tests/unittests -v --tb=short
+            # Run unit tests one at a time with MPI
+            echo 'Running unit tests one at a time with MPI...'
+            for test_file in tests/unittests/test_*.py; do
+              if [ -f \"\$test_file\" ]; then
+                echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
+                mpirun-root -np ${{ matrix.ranks }} python -m pytest \"\$test_file\" -v --tb=short
+              fi
+            done
           "
