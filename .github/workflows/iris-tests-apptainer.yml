@@ -35,20 +35,10 @@ jobs:
           else
             echo "Using existing Apptainer image"
           fi
-
-
-      - name: Install Iris in container
-        run: |
-          # Create overlay for this CI run
-          apptainer overlay create ~/apptainer/iris-dev.overlay
-
-          # Install iris in editable mode (this persists for this run)
-          apptainer exec --overlay ~/apptainer/iris-dev.overlay ~/apptainer/iris-dev.sif pip install -e .
-
   test:
     needs: build
     runs-on: [self-hosted, mi3008x]
-    timeout-minutes: 60
+    timeout-minutes: 20
     strategy:
       matrix:
         ranks: [1]
@@ -69,21 +59,31 @@ jobs:
 
       - name: Run Iris Tests with ${{ matrix.ranks }} MPI ranks
         run: |
-          # Run ROCm and HIP checks
-          apptainer exec ~/apptainer/iris-dev.sif rocm-smi
-          apptainer exec ~/apptainer/iris-dev.sif hipconfig
+          apptainer exec ~/apptainer/iris-dev.sif bash -c "
+            # Install iris first
+            pip install -e .
 
-          # Run MPI test
-          apptainer exec ~/apptainer/iris-dev.sif mpirun --allow-run-as-root -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
+            # Create alias for mpirun with root permissions
+            alias mpirun-root='mpirun --allow-run-as-root'
 
-          echo "Running examples tests..."
-          apptainer exec --overlay ~/apptainer/iris-dev.overlay ~/apptainer/iris-dev.sif python -m pytest tests/examples -v --tb=short
-          echo "Running unit tests..."
-          apptainer exec --overlay ~/apptainer/iris-dev.overlay ~/apptainer/iris-dev.sif python -m pytest tests/unittests -v --tb=short
+            # Run ROCm and HIP checks
+            rocm-smi
+            hipconfig
+
+            # Run MPI test
+            mpirun-root -np ${{ matrix.ranks }} echo 'MPI working with ${{ matrix.ranks }} rank(s)'
+
+            # Run examples tests
+            echo 'Running examples tests...'
+            mpirun-root python -m pytest tests/examples -v --tb=short
+
+            # Run unit tests
+            echo 'Running unit tests...'
+            mpirun-root python -m pytest tests/unittests -v --tb=short
+          "
 
       - name: Cleanup
         if: always()
         run: |
-          # Clean up overlays but keep the main image
-          rm -f ~/apptainer/iris-dev.overlay
+          # Keep the main image
           echo "Kept persistent image: ~/apptainer/iris-dev.sif"
