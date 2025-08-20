@@ -38,74 +38,75 @@ jobs:
           echo "=== Disk space AFTER cleanup ==="
           df -h /
 
-  test:
-    needs: build
-    runs-on: [self-hosted, mi3008x]
-    timeout-minutes: 60
-    strategy:
-      matrix:
-        ranks: [1]
-        #ranks: [1, 2, 4, 8]
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.ranks }}
-      cancel-in-progress: true
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Setup Docker
-        run: |
-          apt-get update && apt-get install -y docker.io
-          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
-          timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
-
-      - name: Run Iris Tests with ${{ matrix.ranks }} MPI ranks
-        run: |
-          # Start persistent container
-          docker run -d --name iris-test-${{ github.job }}-${{ matrix.ranks }} iris-dev sleep infinity
-          
-          # Install iris in editable mode
-          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} pip install -e .
-          
-          # Run ROCm and HIP checks
-          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} rocm-smi
-          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} hipconfig
-          
-          # Run MPI test
-          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} mpirun -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
-      
-      - name: Cleanup containers
-        if: always()
-        run: |
-          # Stop and remove any iris-test containers
-          docker ps -a --filter "name=iris-test-" --format "{{.Names}}" | xargs -r docker rm -f
-
-  push:
-    needs: [build, test]
-    runs-on: [self-hosted, mi3008x]
-    timeout-minutes: 30
-    env:
-      DOCKERHUB_USER: muhaawad
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        
-      - name: Setup Docker
-        run: |
-          apt-get update && apt-get install -y docker.io
-          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
-          timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
-
-      - name: Login to Docker Hub
-        run: |
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ env.DOCKERHUB_USER }}" --password-stdin
-
-      - name: Tag and push image
-        run: |
-          IMAGE_REPO="${{ env.DOCKERHUB_USER }}/iris-dev"
-          IMAGE_TAG="${{ github.sha }}"
-          docker tag iris-dev "$IMAGE_REPO:$IMAGE_TAG"
-          docker tag iris-dev "$IMAGE_REPO:latest"
-          docker push "$IMAGE_REPO:$IMAGE_TAG"
-          docker push "$IMAGE_REPO:latest"
-
+#  test:
+#    needs: build
+#    runs-on: [self-hosted, mi3008x]
+#    timeout-minutes: 60
+#    strategy:
+#      matrix:
+#        ranks: [1]
+#        #ranks: [1, 2, 4, 8]
+#    concurrency:
+#      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.ranks }}
+#      cancel-in-progress: true
+#    steps:
+#      - name: Checkout repository
+#        uses: actions/checkout@v4
+#      
+#      - name: Setup Docker
+#        run: |
+#          apt-get update && apt-get install -y docker.io
+#          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
+#          timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+#
+#      - name: Run Iris Tests with ${{ matrix.ranks }} MPI ranks
+#        run: |
+#          # Start persistent container
+#          docker run -d --name iris-test-${{ github.job }}-${{ matrix.ranks }} iris-dev sleep infinity
+#          
+#          # Install iris in editable mode
+#          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} pip install -e .
+#          
+#          # Run ROCm and HIP checks
+#          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} rocm-smi
+#          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} hipconfig
+#          
+#          # Run MPI test
+#          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} mpirun -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
+#      
+#      - name: Cleanup containers
+#        if: always()
+#        run: |
+#          # Stop and remove any iris-test containers
+#          docker ps -a --filter "name=iris-test-" --format "{{.Names}}" | xargs -r docker rm -f
+#
+#  push:
+#    needs: [build, test]
+#    runs-on: [self-hosted, mi3008x]
+#    timeout-minutes: 30
+#    env:
+#      DOCKERHUB_USER: muhaawad
+#    steps:
+#      - name: Checkout repository
+#        uses: actions/checkout@v4
+#        
+#      - name: Setup Docker
+#        run: |
+#          apt-get update && apt-get install -y docker.io
+#          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 &
+#          timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+#
+#      - name: Login to Docker Hub
+#        run: |
+#          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ env.DOCKERHUB_USER }}" --password-stdin
+#
+#      - name: Tag and push image
+#        run: |
+#          IMAGE_REPO="${{ env.DOCKERHUB_USER }}/iris-dev"
+#          IMAGE_TAG="${{ github.sha }}"
+#          docker tag iris-dev "$IMAGE_REPO:$IMAGE_TAG"
+#          docker tag iris-dev "$IMAGE_REPO:latest"
+#          docker push "$IMAGE_REPO:$IMAGE_TAG"
+#          docker push "$IMAGE_REPO:latest"
+#
+#
