@@ -41,7 +41,7 @@ jobs:
       matrix:
         ranks: [1, 2, 4, 8]
     concurrency:
-      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-${{ matrix.ranks }}
+      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
       cancel-in-progress: true
     steps:
       - name: Checkout repository
