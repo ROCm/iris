@@ -1,0 +1,88 @@
+name: Iris Tests with Apptainer
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Apptainer
+        run: |
+          apt-get update && apt-get install -y apptainer
+          apptainer --version
+
+      - name: Build Iris Apptainer container
+        run: |
+          df -h /
+          # Create persistent Apptainer directory
+          mkdir -p ~/apptainer
+
+          # Build Apptainer image from definition file (only if it doesn't exist)
+          if [ ! -f ~/apptainer/iris-dev.sif ]; then
+            echo "Building new Apptainer image..."
+            apptainer build ~/apptainer/iris-dev.sif apptainer/iris.def
+          else
+            echo "Using existing Apptainer image"
+          fi
+
+          df -h /
+          apptainer image list
+
+      - name: Install Iris in container
+        run: |
+          # Create a writable overlay for development
+          apptainer overlay create ~/apptainer/iris-dev.overlay
+
+          # Install iris in editable mode
+          apptainer exec --overlay ~/apptainer/iris-dev.overlay ~/apptainer/iris-dev.sif pip install -e .
+
+          # Test ROCm and HIP
+          apptainer exec ~/apptainer/iris-dev.sif rocm-smi
+          apptainer exec ~/apptainer/iris-dev.sif hipconfig
+
+  test:
+    needs: build
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        ranks: [1]
+        #ranks: [1, 2, 4, 8]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.ranks }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Apptainer
+        run: |
+          apt-get update && apt-get install -y apptainer
+
+      - name: Run Iris Tests with ${{ matrix.ranks }} MPI ranks
+        run: |
+          # Install iris in editable mode
+          apptainer exec --overlay ~/apptainer/iris-dev.overlay ~/apptainer/iris-dev.sif pip install -e .
+
+          # Run ROCm and HIP checks
+          apptainer exec ~/apptainer/iris-dev.sif rocm-smi
+          apptainer exec ~/apptainer/iris-dev.sif hipconfig
+
+          # Run MPI test
+          apptainer exec ~/apptainer/iris-dev.sif mpirun -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # Clean up overlays but keep the main image
+          rm -f ~/apptainer/iris-dev.overlay
+          echo "Kept persistent image: ~/apptainer/iris-dev.sif"

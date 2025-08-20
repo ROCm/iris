@@ -1,42 +1,42 @@
-name: Iris Tests
-
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: [self-hosted, mi3008x]
-    timeout-minutes: 90
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Docker
-        run: |
-          apt-get update && apt-get install -y docker.io
-          # Kill any existing Docker processes
-          pkill -f dockerd || true
-          pkill -f docker || true
-          rm -f /var/run/docker.pid || true
-          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376  &
-          timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
-
-      - name: Build Iris Docker container
-        run: |
-          df -h /
-          docker build -t iris-dev ./docker
-          df -h /
-          rm -rf /var/lib/docker/vfs/dir/*
-          df -h /
-          docker image ls
-
-
-
-#  test:
+#name: Iris Tests
+#
+#on:
+#  push:
+#    branches: [ main ]
+#  pull_request:
+#    branches: [ main ]
+#  workflow_dispatch:
+#
+#jobs:
+#  build:
+#    runs-on: [self-hosted, mi3008x]
+#    timeout-minutes: 90
+#    steps:
+#      - name: Checkout repository
+#        uses: actions/checkout@v4
+#
+#      - name: Setup Docker
+#        run: |
+#          apt-get update && apt-get install -y docker.io
+#          # Kill any existing Docker processes
+#          pkill -f dockerd || true
+#          pkill -f docker || true
+#          rm -f /var/run/docker.pid || true
+#          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376  &
+#          timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
+#
+#      - name: Build Iris Docker container
+#        run: |
+#          df -h /
+#          docker build -t iris-dev ./docker
+#          df -h /
+#          rm -rf /var/lib/docker/vfs/dir/*
+#          df -h /
+#          docker image ls
+#
+#
+#
+##  test:
 #    needs: build
 #    runs-on: [self-hosted, mi3008x]
 #    timeout-minutes: 60
