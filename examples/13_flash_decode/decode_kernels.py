@@ -1,6 +1,32 @@
 ################################################################################
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+#
 # Part of the code adapted from
 # https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/kernels/nvidia/flash_decode.py
+#
+# Copyright (c) 2025 ByteDance Ltd. and/or its affiliates
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+# TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#
 ################################################################################
 
 import torch
@@ -11,6 +37,8 @@ import triton.language as tl
 from triton.language.extra import libdevice
 import iris
 
+# This kernel will do the attention computation on each local GPU
+# Each GPU will get a shard of the KV and will produce the outputs for their part
 def gqa_local_kernels_fused(
     q, k_cache, v_cache,
     
@@ -33,13 +61,14 @@ def gqa_local_kernels_fused(
     BLOCK_H = 16
     NUM_KV_SPLITS = 32 if kv_split == -1 else kv_split
 
-    # Step 1: Split-K calculation (same as before)
+    # Step 1: Split-K calculation (will produce partial attention outputs)
     grid_split_kv = (batch, triton.cdiv(q_heads, min(BLOCK_H, kv_group_num)), NUM_KV_SPLITS)
     if output_split is None:
         output_split = torch.empty(
             [batch, q_heads, NUM_KV_SPLITS, v_head_dim + 1], dtype=q.dtype, device=q.device
         )
 
+    # Kernel-Split-K
     gqa_local_decode_split_k[grid_split_kv](
         q, k_cache, v_cache, output_split, scale, block_table, kv_lens,
         batch, q.stride(0), q.stride(1),
@@ -52,6 +81,7 @@ def gqa_local_kernels_fused(
     )
 
     # Step 2: Fused Intra-Rank Combine and Inter-Rank Push with tile-level signaling
+    # The communication happens inside the kernel through Iris Stores
     grid_combine_push = (batch, q_heads)
     gqa_local_reduce_fused[grid_combine_push](
         output_split,
@@ -254,7 +284,7 @@ def gqa_local_reduce_fused(
                     my_rank * stride_signal_src +
                     cur_batch * stride_signal_bs +
                     cur_head * stride_signal_h)
-        iris.atomic_xchg(flag_ptr, 1, my_rank, dest_rank_id, heap_bases_ptr, sem="release")        
+        iris.atomic_xchg(flag_ptr, 1, my_rank, dest_rank_id, heap_bases_ptr, sem="release", scope="sys")        
         
 @triton.jit
 def gqa_global_reduce_fused(
@@ -296,7 +326,7 @@ def gqa_global_reduce_fused(
                     cur_batch * stride_signal_bs +
                     cur_head * stride_signal_h)
         
-        while tl.atomic_cas(flag_ptr, 0, 0, sem="acquire") == 0:
+        while tl.atomic_cas(flag_ptr, 0, 0, sem="acquire", scope="sys") == 0:
             pass
 
         effective_kv_len = tl.load(cur_batch_seq_len_ptr + source_rank_id * batch)
