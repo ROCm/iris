@@ -1,72 +1,17 @@
+################################################################################
+# Part of the code adapted from
+# https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/layers/nvidia/sp_flash_decode_layer.py################################################################################
+################################################################################
+
 import torch
 import triton
 import math
 import iris
 
 from decode_kernels import (
-    gqa_local_decode_split_k,
-    gqa_local_reduce_fused_full,
-    gqa_global_reduce_fused_full
+    gqa_local_kernels_fused,
+    gqa_global_reduce_fused
 )
-
-def gqa_local_kernels_fused_full(
-    q, k_cache, v_cache,
-    
-    gathered_buffer, signal_flags, iris_instance,
-
-    q_lens, kv_lens, block_table, scale, soft_cap=0.0,
-    output_split=None, kv_split=-1,
-):
-    batch, q_heads, q_head_dim = q.shape
-    _, page_size, kv_heads, k_head_dim = k_cache.shape
-    v_head_dim = v_cache.shape[-1]
-    rank = iris_instance.get_rank()
-    num_ranks = iris_instance.get_num_ranks()
-
-    BLOCK_N = 64
-    BLOCK_HEAD_DIM = 2**int(math.log2(q_head_dim))
-    BLOCK_DPE = q_head_dim - BLOCK_HEAD_DIM
-    BLOCK_DV = triton.next_power_of_2(v_head_dim)
-    kv_group_num = q_heads // kv_heads
-    BLOCK_H = 16
-    NUM_KV_SPLITS = 32 if kv_split == -1 else kv_split
-
-    # Step 1: Split-K calculation (same as before)
-    grid_split_kv = (batch, triton.cdiv(q_heads, min(BLOCK_H, kv_group_num)), NUM_KV_SPLITS)
-    if output_split is None:
-        output_split = torch.empty(
-            [batch, q_heads, NUM_KV_SPLITS, v_head_dim + 1], dtype=q.dtype, device=q.device
-        )
-
-    gqa_local_decode_split_k[grid_split_kv](
-        q, k_cache, v_cache, output_split, scale, block_table, kv_lens,
-        batch, q.stride(0), q.stride(1),
-        k_cache.stride(-3), k_cache.stride(-2), v_cache.stride(-3), v_cache.stride(-2),
-        output_split.stride(0), output_split.stride(1), output_split.stride(2),
-        block_table.stride(0), kv_group_num, q_heads,
-        BLOCK_HEAD_DIM, BLOCK_DPE, BLOCK_DV, BLOCK_N, BLOCK_H, NUM_KV_SPLITS,
-        page_size, soft_cap, k_head_dim, v_head_dim,
-        num_warps=4, num_stages=2
-    )
-
-    # Step 2: Fused Intra-Rank Combine and Inter-Rank Push with tile-level signaling
-    grid_combine_push = (batch, q_heads)
-    gqa_local_reduce_fused_full[grid_combine_push](
-        output_split,
-        kv_lens,
-        gathered_buffer,
-        signal_flags,
-        signal_flags.stride(0), signal_flags.stride(1), signal_flags.stride(2), signal_flags.stride(3),
-        iris_instance.get_heap_bases(),
-        output_split.stride(0), output_split.stride(1), output_split.stride(2),
-        gathered_buffer.stride(0), gathered_buffer.stride(1), gathered_buffer.stride(2),
-        rank,
-        num_ranks,
-        q_heads,
-        NUM_KV_SPLITS,
-        BLOCK_DV,
-        v_head_dim,
-    )
 
 class FDFusedLayer(torch.nn.Module):
     def __init__(self, iris_instance, rank, node, num_ranks, num_nodes, num_q_heads, num_kv_heads, q_head_dim, v_head_dim, page_size=1,
@@ -94,7 +39,9 @@ class FDFusedLayer(torch.nn.Module):
             (self.num_ranks, self.max_allowed_batch, self.num_q_heads, self.v_head_dim + 1),
             dtype=torch.float16
         )
+        
         # Use per-tile signaling for finer-grained synchronization
+        # This will tell which rank sent the data to which rank, for each batch item and head
         self.signal_flags = self.iris_instance.zeros(
             (self.num_ranks, self.num_ranks, self.max_allowed_batch, self.num_q_heads), dtype=torch.int32
         )
@@ -121,7 +68,7 @@ class FDFusedLayer(torch.nn.Module):
         
         
         # with torch.cuda.stream(self.producer_stream):
-        gqa_local_kernels_fused_full(
+        gqa_local_kernels_fused(
             q, k_cache, v_cache,
             self.gathered_buffer, self.signal_flags, self.iris_instance,
             [1] * batch, global_kv_lens[self.rank], block_table, self.scale,
@@ -130,7 +77,7 @@ class FDFusedLayer(torch.nn.Module):
     
         
         # with torch.cuda.stream(self.consumer_stream):
-        kk3 = gqa_global_reduce_fused_full[(batch, self.num_q_heads)](
+        kk3 = gqa_global_reduce_fused[(batch, self.num_q_heads)](
             self.gathered_buffer,
             final_output,
             global_kv_lens,

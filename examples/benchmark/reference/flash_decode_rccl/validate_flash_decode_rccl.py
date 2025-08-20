@@ -3,7 +3,6 @@
 # https://github.com/ByteDance-Seed/Triton-distributed/blob/main/python/triton_dist/test/nvidia/test_sp_decode_attn.py
 # ################################################################################
 
-
 import sys
 import os
 from pathlib import Path
@@ -12,30 +11,29 @@ project_root = Path(__file__).resolve()
 while not (project_root / 'tests').is_dir() or not (project_root / 'examples').is_dir():
     if project_root == project_root.parent:
         raise FileNotFoundError(
-            "Could not find project root"
+            "Could not find project root. Make sure your 'tests' and 'examples' "
+            "directories are siblings in the project structure."
         )
     project_root = project_root.parent
-print(f"Project Root: {project_root}")
+print(f"Discovered Project Root: {project_root}")
 
 module_dir = project_root / "examples" / "13_flash_decode"
-print(f"Module Directory: {module_dir}")
+print(f"Target Module Directory: {module_dir}")
 
-target_file = module_dir / "fd_fused_layer.py"
+target_file = module_dir / "fd_layer_rccl.py"
 if module_dir.exists():
     sys.path.insert(0, str(module_dir))
     print(f"'{module_dir}' was added to sys.path.")
 else:
-    print("ERROR: Target directory not found")
+    print("ERROR: Target directory not found. Not modifying sys.path.")
 
 import pytest
 from typing import List, Optional
 from argparse import Namespace
 
-import numpy as np
 import torch
-import iris
-
-from fd_fused_layer import FDFusedLayer
+import torch.distributed as dist
+from fd_layer_rccl import FDLayerRCCL
 from utils import print_correctness_report
 
 # ==============================================================================
@@ -47,6 +45,7 @@ def ref_paged_attn(
     query_lens: List[int], kv_lens_per_rank: List[int], block_tables: torch.Tensor,
     scale: float, soft_cap: Optional[float] = None
 ) -> torch.Tensor:
+    # This reference implementation is backend-agnostic and remains unchanged.
     num_seqs = len(query_lens)
     block_tables_cpu = block_tables.cpu().numpy()
     _, block_size, num_kv_heads, head_size = key_cache.shape
@@ -76,17 +75,18 @@ def ref_paged_attn(
         start_idx += query_len
     return torch.cat(outputs, dim=0)
 
-def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, NUM_BLOCKS):
+def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, num_blocks_total):
+    """Creates data on Rank 0 and broadcasts it using torch.distributed."""
     head_dim = cfg['head_dim']
     if args.rank == 0:
-        query = torch.randn(cfg['num_seqs'], num_query_heads, head_dim, dtype=cfg['dtype']) / 10
-        key_value_cache = torch.randn(NUM_BLOCKS, 2, cfg['block_size'], num_kv_heads, head_dim, dtype=cfg['dtype']) / 10
+        query = torch.randn(cfg['num_seqs'], num_query_heads, head_dim, dtype=cfg['dtype'], device="cuda") / 10
+        key_value_cache = torch.randn(num_blocks_total, 2, cfg['block_size'], num_kv_heads, head_dim, dtype=cfg['dtype'], device="cuda") / 10
     else:
-        query = torch.empty(cfg['num_seqs'], num_query_heads, head_dim, dtype=cfg['dtype'])
-        key_value_cache = torch.empty(NUM_BLOCKS, 2, cfg['block_size'], num_kv_heads, head_dim, dtype=cfg['dtype'])
+        query = torch.empty(cfg['num_seqs'], num_query_heads, head_dim, dtype=cfg['dtype'], device="cuda")
+        key_value_cache = torch.empty(num_blocks_total, 2, cfg['block_size'], num_kv_heads, head_dim, dtype=cfg['dtype'], device="cuda")
 
-    query = torch.from_numpy(args.iris_instance.broadcast_tensor(query.cpu().numpy(), source_rank=0)).to(query.device)
-    key_value_cache = torch.from_numpy(args.iris_instance.broadcast_tensor(key_value_cache.cpu().numpy(), source_rank=0)).to(key_value_cache.device)
+    dist.broadcast(query, src=0, group=args.tp_group)
+    dist.broadcast(key_value_cache, src=0, group=args.tp_group)
 
     return {"query": query, "key_value_cache": key_value_cache}
 
@@ -99,18 +99,18 @@ def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, NUM_BLOCK
 @pytest.mark.parametrize("num_seqs", [1, 8])
 @pytest.mark.parametrize("num_heads", [48, 96])
 @pytest.mark.parametrize("kv_len", [4096, 65536])
-def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
+def test_correctness_rccl_fused_full(kv_len, num_heads, num_seqs, head_dim):
     """
-    Tests the correctness of the Iris Fused implementation against the Torch reference.
-    This test is parameterized to run all combinations of the parameters.
+    Tests the correctness of the RCCL Fused implementation against the Torch reference.
     """
-    _iris = iris.iris()
+    if not dist.is_initialized():
+        dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
     args = Namespace()
-    args.rank = _iris.get_rank()
-    args.num_ranks = _iris.get_num_ranks()
-    args.local_num_ranks = _iris.get_num_ranks()
-    args.iris_instance = _iris
+    args.rank = dist.get_rank()
+    args.world_size = dist.get_world_size()
+    args.tp_group = dist.new_group(ranks=range(args.world_size))
 
     config = {
         "kv_len": kv_len,
@@ -119,74 +119,65 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
         "head_dim": head_dim,
         "dtype": torch.float16,
         "block_size": 1,
-        "soft_cap": 0,
+        "soft_cap": 0.0,
     }
 
     # torch.manual_seed(42)
-    torch.set_default_device("cuda")
 
     num_query_heads = num_heads
     num_kv_heads = num_query_heads // 8 if num_query_heads >= 8 else 1
     scale = head_dim**-0.5
-    NUM_BLOCKS_PER_RANK = config['kv_len'] + 1
-    NUM_BLOCKS = NUM_BLOCKS_PER_RANK * args.num_ranks
+    num_blocks_per_rank = (config['kv_len'] + config['block_size'] - 1) // config['block_size']
+    num_blocks_total = num_blocks_per_rank * args.world_size
 
-    tensor_data = prepare_correctness_data(config, args, num_query_heads, num_kv_heads, NUM_BLOCKS)
+    tensor_data = prepare_correctness_data(config, args, num_query_heads, num_kv_heads, num_blocks_total)
     query = tensor_data['query']
     key_value_cache = tensor_data['key_value_cache']
 
-    key_cache = key_value_cache[:, 0, :, :, :].contiguous()
-    value_cache = key_value_cache[:, 1, :, :, :].contiguous()
-    key_cache_this_rank = key_cache[args.rank * NUM_BLOCKS_PER_RANK:(args.rank + 1) * NUM_BLOCKS_PER_RANK].contiguous()
-    value_cache_this_rank = value_cache[args.rank * NUM_BLOCKS_PER_RANK:(args.rank + 1) * NUM_BLOCKS_PER_RANK].contiguous()
+    key_cache = key_value_cache[:, 0].contiguous()
+    value_cache = key_value_cache[:, 1].contiguous()
+    key_cache_this_rank = key_cache[args.rank * num_blocks_per_rank:(args.rank + 1) * num_blocks_per_rank]
+    value_cache_this_rank = value_cache[args.rank * num_blocks_per_rank:(args.rank + 1) * num_blocks_per_rank]
 
-    block_tables_this_rank = torch.arange(NUM_BLOCKS_PER_RANK, dtype=torch.int32).repeat(num_seqs, 1)
-    all_block_tables_numpy = iris._mpi_helpers.mpi_allgather_2(block_tables_this_rank.cpu().numpy())
-    block_tables = torch.from_numpy(all_block_tables_numpy).view(args.num_ranks, num_seqs, -1)
-    ref_block_tables = torch.cat([block_tables[i] + i * NUM_BLOCKS_PER_RANK for i in range(args.num_ranks)], dim=-1)
-
-    common_params = {
-        "num_q_heads": num_query_heads, "num_kv_heads": num_kv_heads, "q_head_dim": head_dim,
-        "v_head_dim": head_dim, "page_size": config['block_size'], "scale": scale, "soft_cap": config['soft_cap'],
-        "max_allowed_batch": num_seqs
-    }
+    block_tables_this_rank = torch.arange(num_blocks_per_rank, dtype=torch.int32).repeat(num_seqs, 1).cuda()
     
-    iris_fd_layer = FDFusedLayer(
-        args.iris_instance, args.rank, args.rank // args.local_num_ranks,
-        args.num_ranks, args.num_ranks // args.local_num_ranks, **common_params
+    gathered_tables_list = [torch.empty_like(block_tables_this_rank) for _ in range(args.world_size)]
+    dist.all_gather(gathered_tables_list, block_tables_this_rank, group=args.tp_group)
+    ref_block_tables = torch.cat([tbl + r * num_blocks_per_rank for r, tbl in enumerate(gathered_tables_list)], dim=-1)
+
+    keyword_params = {
+        "page_size": config['block_size'],
+        "scale": scale,
+        "soft_cap": config['soft_cap'],
+        "max_allowed_batch": config['num_seqs']
+    }
+    fd_layer = FDLayerRCCL(
+        args.rank, args.world_size, num_query_heads, num_kv_heads,
+        head_dim, head_dim, args.tp_group, **keyword_params
     )
-
-    args.iris_instance.barrier()
-    if hasattr(iris_fd_layer, 'clear_flags'):
-        iris_fd_layer.clear_flags()
-    args.iris_instance.barrier()
-
+    dist.barrier(group=args.tp_group)
+    
     kv_lens_per_rank = [config['kv_len']] * num_seqs
-    global_kv_lens = [kv_lens_per_rank[0] * args.num_ranks] * num_seqs
-    kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32, device=query.device)
-    global_kv_lens_tensor = kv_lens_tensor.unsqueeze(0).repeat(args.num_ranks, 1)
+    kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32).cuda()
+    global_kv_lens_tensor = kv_lens_tensor.unsqueeze(0).repeat(args.world_size, 1)
 
-    output = iris_fd_layer(query, key_cache_this_rank, value_cache_this_rank, global_kv_lens_tensor, block_tables_this_rank)
+    output = fd_layer(query, key_cache_this_rank, value_cache_this_rank, global_kv_lens_tensor, block_tables_this_rank)
     torch.cuda.synchronize()
 
     ref_output = ref_paged_attn(
         query=query.clone(), key_cache=key_cache, value_cache=value_cache,
-        query_lens=[1] * num_seqs, kv_lens_per_rank=global_kv_lens,
+        query_lens=[1] * num_seqs, kv_lens_per_rank=[config['kv_len'] * args.world_size] * num_seqs,
         block_tables=ref_block_tables, scale=scale, soft_cap=config['soft_cap']
     )
-    args.iris_instance.barrier()
+    dist.barrier(group=args.tp_group)
 
     error = None
     try:
-        atol = 1e-4
-        rtol = 1e-4
-        torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
+        torch.testing.assert_close(output, ref_output, atol=1e-4, rtol=1e-4)
     except AssertionError as e:
         error = e
-
+    
     print_correctness_report(args.rank, output, ref_output, error)
 
     if error:
         raise error
-
-    args.iris_instance.barrier()
