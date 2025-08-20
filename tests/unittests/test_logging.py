@@ -76,12 +76,12 @@ def test_iris_debug_logging(mock_logger):
 
                                         # Test allocate method debug logging
                                         iris_instance.allocate(100, None)
-                                        
+
                                         # Check that handle was called with a LogRecord containing rank info
                                         mock_logger.handle.assert_called_once()
                                         call_args = mock_logger.handle.call_args[0][0]
-                                        assert hasattr(call_args, 'iris_rank')
-                                        assert hasattr(call_args, 'iris_num_ranks')
+                                        assert hasattr(call_args, "iris_rank")
+                                        assert hasattr(call_args, "iris_num_ranks")
                                         assert call_args.iris_rank == 0
                                         assert call_args.iris_num_ranks == 1
                                         assert "allocate: num_elements = 100, dtype = None" in call_args.msg
@@ -129,13 +129,7 @@ def test_iris_formatter():
 
     # Test record without rank information
     record_no_rank = logging.LogRecord(
-        name="iris",
-        level=logging.INFO,
-        pathname="",
-        lineno=0,
-        msg="Test message without rank",
-        args=(),
-        exc_info=None
+        name="iris", level=logging.INFO, pathname="", lineno=0, msg="Test message without rank", args=(), exc_info=None
     )
 
     formatted_no_rank = formatter.format(record_no_rank)
@@ -143,13 +137,7 @@ def test_iris_formatter():
 
     # Test record with rank information
     record_with_rank = logging.LogRecord(
-        name="iris",
-        level=logging.INFO,
-        pathname="",
-        lineno=0,
-        msg="Test message with rank",
-        args=(),
-        exc_info=None
+        name="iris", level=logging.INFO, pathname="", lineno=0, msg="Test message with rank", args=(), exc_info=None
     )
     record_with_rank.iris_rank = 2
     record_with_rank.iris_num_ranks = 4

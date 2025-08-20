@@ -30,19 +30,20 @@ INFO = logging.INFO
 WARNING = logging.WARNING
 ERROR = logging.ERROR
 
+
 class IrisFormatter(logging.Formatter):
     """Custom formatter that automatically includes rank information when available."""
-    
+
     def __init__(self):
         super().__init__()
-    
+
     def format(self, record):
         # Check if rank information is available in the record
-        if hasattr(record, 'iris_rank') and hasattr(record, 'iris_num_ranks'):
+        if hasattr(record, "iris_rank") and hasattr(record, "iris_num_ranks"):
             prefix = f"[Iris] [{record.iris_rank}/{record.iris_num_ranks}]"
         else:
             prefix = "[Iris]"
-        
+
         # Format the message with the appropriate prefix
         return f"{prefix} {record.getMessage()}"
 
@@ -124,13 +125,7 @@ class Iris:
     def _log_with_rank(self, level, message):
         """Helper method to log with rank information injected into the record."""
         record = logging.LogRecord(
-            name=logger.name,
-            level=level,
-            pathname="",
-            lineno=0,
-            msg=message,
-            args=(),
-            exc_info=None
+            name=logger.name, level=level, pathname="", lineno=0, msg=message, args=(), exc_info=None
         )
         # Inject rank information into the record
         record.iris_rank = self.cur_rank
@@ -206,9 +201,7 @@ class Iris:
             device (torch.device, optional): the desired device of returned tensor.
             requires_grad (bool, optional): If autograd should record operations on the returned tensor. Default: False.
         """
-        self.debug(
-            f"arange: start = {start}, end = {end}, step = {step}, dtype = {dtype}"
-        )
+        self.debug(f"arange: start = {start}, end = {end}, step = {step}, dtype = {dtype}")
 
         # Handle the case where only one argument is provided (end)
         if end is None:
@@ -233,9 +226,7 @@ class Iris:
         return tensor
 
     def zeros(self, *size, dtype=torch.int, device=None, requires_grad=False, **kwargs):
-        self.debug(
-            f"zeros: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
-        )
+        self.debug(f"zeros: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
         size, num_elements = self.parse_size(size)
         tensor = self.allocate(num_elements=num_elements, dtype=dtype)
         tensor.zero_()
@@ -278,9 +269,7 @@ class Iris:
             device (torch.device, optional): the desired device of returned tensor. Default: if None, uses the current device for the default tensor type.
             requires_grad (bool, optional): If autograd should record operations on the returned tensor. Default: False.
         """
-        self.debug(
-            f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
-        )
+        self.debug(f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
 
         # Handle the case where size is provided as a single tuple/list
         if len(size) == 1 and isinstance(size[0], (tuple, list)):
@@ -303,18 +292,14 @@ class Iris:
         return tensor.reshape(size)
 
     def full(self, size, fill_value, dtype=torch.int):
-        self.debug(
-            f"full: size = {size}, fill_value = {fill_value}, dtype = {dtype}"
-        )
+        self.debug(f"full: size = {size}, fill_value = {fill_value}, dtype = {dtype}")
         size, num_elements = self.parse_size(size)
         tensor = self.allocate(num_elements=num_elements, dtype=dtype)
         tensor.fill_(fill_value)
         return tensor.reshape(size)
 
     def uniform(self, size, low=0.0, high=1.0, dtype=torch.float):
-        self.debug(
-            f"uniform: size = {size}, low = {low}, high = {high}, dtype = {dtype}"
-        )
+        self.debug(f"uniform: size = {size}, low = {low}, high = {high}, dtype = {dtype}")
         size, num_elements = self.parse_size(size)
         tensor = self.allocate(num_elements=num_elements, dtype=dtype)
         tensor.uniform_(low, high)
@@ -327,18 +312,14 @@ class Iris:
         return tensor.reshape(size)
 
     def randint(self, size, low, high, dtype=torch.int):
-        self.debug(
-            f"randint: size = {size}, low = {low}, high = {high}, dtype = {dtype}"
-        )
+        self.debug(f"randint: size = {size}, low = {low}, high = {high}, dtype = {dtype}")
         size, num_elements = self.parse_size(size)
         tensor = self.allocate(num_elements=num_elements, dtype=dtype)
         tensor[:] = torch.randint(low, high, size, device="cuda", dtype=dtype)
         return tensor.reshape(size)
 
     def linspace(self, start, end, steps, dtype=torch.float):
-        self.debug(
-            f"linspace: start = {start}, end = {end}, steps = {steps}, dtype = {dtype}"
-        )
+        self.debug(f"linspace: start = {start}, end = {end}, steps = {steps}, dtype = {dtype}")
         size, num_elements = self.parse_size(steps)
         tensor = self.allocate(num_elements=num_elements, dtype=dtype)
         torch.linspace(start, end, size, out=tensor, dtype=dtype, device="cuda")
