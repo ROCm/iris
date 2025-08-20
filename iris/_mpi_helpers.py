@@ -18,7 +18,7 @@ def mpi_allgather(data):
     reshaped = recv_data.reshape(shm_size, len(data))
     return reshaped
 
-def mpi_allgather_2(data):
+def mpi_allgather_multidim(data):
     thread_comm = MPI.COMM_WORLD
     shmcomm = thread_comm.Split_type(MPI.COMM_TYPE_SHARED)
     shm_size = shmcomm.Get_size()

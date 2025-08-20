@@ -35,7 +35,7 @@ from fd_fused_layer import FDFusedLayer
 # ==============================================================================
 
 KV_LEN_SWEEP = [8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
-NUM_HEADS_SWEEP = [96]
+NUM_HEADS_SWEEP = [96, 128]
 HEAD_DIM_SWEEP = [128]
 NUM_SEQS_SWEEP = [1]
 
