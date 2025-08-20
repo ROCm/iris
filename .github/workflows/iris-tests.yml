@@ -29,9 +29,7 @@ jobs:
         run: |
           df -h /
           docker build -t iris-dev ./docker
-          docker builder prune -a --force
           df -h /
-          yes | docker system prune
           rm -rf /var/lib/docker/vfs/dir/*
           df -h /
           docker image ls
