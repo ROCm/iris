@@ -22,7 +22,7 @@ jobs:
           pkill -f dockerd || true
           pkill -f docker || true
           rm -f /var/run/docker.pid || true
-          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376 --storage-driver=overlay2 &
+          dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2376  &
           timeout 1m bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
 
       - name: Build Iris Docker container
@@ -32,7 +32,7 @@ jobs:
           docker builder prune -a --force
           df -h /
           yes | docker system prune
-          #rm -rf /var/lib/docker/vfs/dir/*
+          rm -rf /var/lib/docker/vfs/dir/*
           df -h /
           docker image ls
 
