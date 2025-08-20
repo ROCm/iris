@@ -37,7 +37,7 @@ jobs:
             echo "Using existing Apptainer image"
           fi
   run-tests:
-    name: Test with ${{ matrix.ranks }} ranks
+    name: ${{ matrix.ranks }}-rank Iris Test
     needs: build-apptainer-image
     runs-on: [self-hosted, mi3008x]
     timeout-minutes: 20
