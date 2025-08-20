@@ -74,7 +74,7 @@ jobs:
           apptainer exec ~/apptainer/iris-dev.sif hipconfig
 
           # Run MPI test
-          apptainer exec ~/apptainer/iris-dev.sif mpirun -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
+          apptainer exec ~/apptainer/iris-dev.sif mpirun --allow-run-as-root -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
 
           echo "Running examples tests..."
           apptainer exec --overlay ~/apptainer/iris-dev.overlay ~/apptainer/iris-dev.sif python -m pytest tests/examples -v --tb=short
