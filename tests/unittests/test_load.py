@@ -59,6 +59,8 @@ def test_load_api(dtype, BLOCK_SIZE):
     data = shmem.full((BLOCK_SIZE,), source_rank, dtype=dtype)
     results = shmem.zeros_like(data)
 
+    shmem.barrier()
+
     grid = lambda meta: (1,)
     load_kernel[grid](data, results, source_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()

@@ -74,9 +74,3 @@ jobs:
             echo 'Running unit tests...'
             mpirun-root python -m pytest tests/unittests -v --tb=short
           "
-
-      - name: Cleanup
-        if: always()
-        run: |
-          # Keep the main image
-          echo "Kept persistent image: ~/apptainer/iris-dev.sif"

@@ -51,6 +51,8 @@ def test_load_bench(dtype, buffer_size, heap_size, block_size):
     source_buffer = shmem.ones(buffer_size // element_size_bytes, dtype=dtype)
     result_buffer = shmem.zeros_like(source_buffer)
 
+    shmem.barrier()
+
     for source_rank in range(num_ranks):
         for destination_rank in range(num_ranks):
             bandwidth_gbps = module.bench_load(

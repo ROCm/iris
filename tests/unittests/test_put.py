@@ -60,6 +60,8 @@ def test_put_api(dtype, BLOCK_SIZE):
     data = shmem.ones(BLOCK_SIZE, dtype=dtype)
     results = shmem.zeros_like(data)
 
+    shmem.barrier()
+
     grid = lambda meta: (1,)
     put_kernel[grid](data, results, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()
