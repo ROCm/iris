@@ -20,11 +20,9 @@ jobs:
           apt-get update && apt-get install -y software-properties-common
           add-apt-repository -y ppa:apptainer/ppa
           apt-get update && apt-get install -y apptainer
-          apptainer --version
 
       - name: Build Iris Apptainer container
         run: |
-          df -h /
           # Create persistent Apptainer directory
           mkdir -p ~/apptainer
 
