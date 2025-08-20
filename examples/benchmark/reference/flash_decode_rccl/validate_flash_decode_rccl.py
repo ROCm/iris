@@ -45,7 +45,6 @@ def ref_paged_attn(
     query_lens: List[int], kv_lens_per_rank: List[int], block_tables: torch.Tensor,
     scale: float, soft_cap: Optional[float] = None
 ) -> torch.Tensor:
-    # This reference implementation is backend-agnostic and remains unchanged.
     num_seqs = len(query_lens)
     block_tables_cpu = block_tables.cpu().numpy()
     _, block_size, num_kv_heads, head_size = key_cache.shape

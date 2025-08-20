@@ -84,7 +84,6 @@ def main():
         num_kv_heads = num_query_heads // 8 if num_query_heads >= 8 else 1
         scale = config['head_dim']**-0.5
         
-        # --- Layer Initialization: Corrected argument order ---
         keyword_params = {
             "page_size": PAGE_SIZE,
             "scale": scale,
