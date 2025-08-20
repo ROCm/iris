@@ -23,7 +23,20 @@ jobs:
 
       - name: Build Iris Docker container
         run: |
+          echo "=== Disk space BEFORE build ==="
+          df -h /
+          echo ""
+          echo "=== Building Docker image ==="
           docker build -t iris-dev ./docker
+          echo ""
+          echo "=== Disk space AFTER build ==="
+          df -h /
+          echo ""
+          echo "=== Cleaning up Docker build cache ==="
+          docker builder prune -a --force
+          echo ""
+          echo "=== Disk space AFTER cleanup ==="
+          df -h /
 
   test:
     needs: build
