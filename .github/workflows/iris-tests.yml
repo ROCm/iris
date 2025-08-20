@@ -32,7 +32,7 @@ jobs:
           docker builder prune -a --force
           df -h /
           yes | docker system prune
-          rm -rf /var/lib/docker/vfs/dir/*
+          #rm -rf /var/lib/docker/vfs/dir/*
           df -h /
           docker image ls
 
