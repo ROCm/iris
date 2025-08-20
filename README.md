@@ -3,13 +3,16 @@ SPDX-License-Identifier: MIT
 Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 -->
 
+<p align="center">
+  <img src="images/logo.png" width="300px" />
+</p>
+
 # Iris: First-Class Multi-GPU Programming Experience in Triton
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml)
 
 > [!IMPORTANT]  
 > This project is intended for research purposes only and is provided by AMD Research and Advanced Development team.  This is not a product. Use it at your own risk and discretion.
-
 
 Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton's programmability and performance.
 
@@ -21,43 +24,48 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris
 
 ## Documentation
 
-1. [Peer-to-Peer Communication](examples/README.md)
-2. [Fine-grained GEMM & Communication Overlap](./docs/FINEGRAINED_OVERLAP.md)
+1. [Programming Model](docs/PROGRAMMING_MODEL.md)
+2. [Peer-to-Peer Communication](examples/README.md)
+3. [Fine-grained GEMM & Communication Overlap](docs/FINEGRAINED_OVERLAP.md)
+4. [Setup Alternatives](docs/SETUP_ALTERNATIVES.md)
 
 ## API Example
 
-Iris matches PyTorch APIs on the host side and Triton APIs on the device side:
+
 ```python
 import torch
 import triton
 import triton.language as tl
 import iris
 
+# Device-side APIs.
 @triton.jit
 def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bases_ptr):
-    # Compute start index of this block
+    # Compute start index of this block.
     pid = tl.program_id(0)
     block_start = pid * block_size
     offsets = block_start + tl.arange(0, block_size)
     
-    # Guard for out-of-bounds accesses
+    # Guard for out-of-bounds accesses.
     mask = offsets < buffer_size
 
-    # Store 1 in the target buffer at each offset
+    # Store 1 in the target buffer at each offset.
     source_rank = 0
     target_rank = 1
     iris.store(buffer + offsets, 1,
             source_rank, target_rank,
             heap_bases_ptr, mask=mask)
 
+# Iris symmetric heap setup.
 heap_size = 2**30
 buffer_size = 4096
 block_size = 1024
 iris_ctx = iris.iris(heap_size)
 cur_rank = iris_ctx.get_rank()
 buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
-grid = lambda meta: (triton.cdiv(buffer_size, meta["block_size"]),)
 
+# Launch the kernel on source_rank.
+grid = lambda meta: (triton.cdiv(buffer_size, meta["block_size"]),)
 source_rank = 0
 if cur_rank == source_rank:
     kernel[grid](
@@ -66,7 +74,9 @@ if cur_rank == source_rank:
         block_size,
         iris_ctx.get_heap_bases(),
     )
-iris_ctx.barrier() 
+
+# Synchronize all ranks.
+iris_ctx.barrier()
 ```
 
 ## Quick Start Guide
@@ -94,24 +104,22 @@ Check out our [examples](examples/) directory for ready-to-run scripts and usage
 
 Iris currently supports:
 
-- MI300X
+- MI300X, MI350X & MI355X
 
 > [!NOTE]
-> Iris may work on other AMD GPUs with ROCm compatibility, but has only been tested on MI300X.
+> Iris may work on other AMD GPUs with ROCm compatibility.
 
 ## Roadmap
 
 We plan to extend Iris with the following features:
 
-- **Extended GPU Support**: Testing and optimization for other AMD GPUs beyond MI300X
-- **RDMA Support**: Multi-node support using Remote Direct Memory Access (RDMA) for distributed computing across multiple machines
-- **More Code Examples**: Comprehensive examples covering various use cases and patterns
+- **Extended GPU Support**: Testing and optimization for other AMD GPUs.
+- **RDMA Support**: Multi-node support using Remote Direct Memory Access (RDMA) for distributed computing across multiple machines.
+- **End-to-End Integration**: Comprehensive examples covering various use cases and end-to-end patterns.
 
 # Contributing
 
 We welcome contributions! Please see our [Contributing Guide](docs/CONTRIBUTING.md) for details on how to set up your development environment and contribute to the project.
-
-
 
 ## Support
 

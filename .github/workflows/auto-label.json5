@@ -1,0 +1,10 @@
+{
+  labelsSynonyms: {
+    feature: ["[Feature]"],
+    bug: ["[Issue]"],
+    documentation: ["[Documentation]"]
+  },
+  defaultLabels: ["iris"],   // always add iris
+  includeTitle: true,
+  ignoreComments: true
+}

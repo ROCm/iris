@@ -1,3 +1,10 @@
+<!--
+SPDX-License-Identifier: MIT
+Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+-->
+
+**[README](../README.md)** » **Alternative Setup**
+
 # Alternative Setup Methods for Iris
 
 This document describes alternative ways to set up and run Iris, including manual Docker setup and Apptainer. Use these methods if Docker Compose is not suitable for your workflow.
@@ -16,7 +23,7 @@ If you prefer to build and run Docker containers manually:
 ./docker/run.sh <image-name>
 
 # Install Iris in development mode
-cd iris && pip install -e .
+pip install -e .
 ```
 
 ---
@@ -32,6 +39,6 @@ If you prefer to use Apptainer:
 # Run the container
 ./apptainer/run.sh
 
-# Activate the environment
-source activate.sh
-``` 
+# Install Iris in development mode
+pip install -e .
+```

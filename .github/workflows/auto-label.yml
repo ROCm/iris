@@ -1,0 +1,52 @@
+name: Auto labeling
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  # Label ISSUES using Renato66/auto-label
+  label-issues:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/workflows/auto-label.json5
+          sparse-checkout-cone-mode: false
+      - uses: Renato66/auto-label@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Add ISSUES to ROCm Project #91 so they land in Todo
+  add-issues-to-project:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/orgs/ROCm/projects/91
+          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
+
+  # PRs: label so the project rule moves them to In Progress
+  label-prs:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add iris + in-progress labels to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              labels: ["iris", "in-progress"]
+            });

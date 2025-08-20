@@ -9,7 +9,7 @@ import iris
 
 
 @triton.jit
-def atomic_add_kernel(
+def atomic_max_kernel(
     results,
     sem: tl.constexpr,
     scope: tl.constexpr,
@@ -23,21 +23,10 @@ def atomic_add_kernel(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < BLOCK_SIZE
 
-    acc = tl.full([BLOCK_SIZE], 1, dtype=results.type.element_ty)
+    acc = tl.full([BLOCK_SIZE], cur_rank + 1, dtype=results.type.element_ty)
 
-    # Loop over all ranks, get the stored data.
-    # atomic_add acc into results.
     for target_rank in range(num_ranks):
-        iris.atomic_add(
-            results + offsets,
-            acc,
-            cur_rank,
-            target_rank,
-            heap_bases,
-            mask,
-            sem=sem,
-            scope=scope,
-        )
+        iris.atomic_max(results + offsets, acc, cur_rank, target_rank, heap_bases, mask, sem=sem, scope=scope)
 
 
 @pytest.mark.parametrize(
@@ -45,9 +34,6 @@ def atomic_add_kernel(
     [
         torch.int32,
         torch.int64,
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
     ],
 )
 @pytest.mark.parametrize(
@@ -75,28 +61,31 @@ def atomic_add_kernel(
         32,
     ],
 )
-def test_atomic_add_api(dtype, sem, scope, BLOCK_SIZE):
+def test_atomic_max_api(dtype, sem, scope, BLOCK_SIZE):
     # TODO: Adjust heap size.
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     heap_bases = shmem.get_heap_bases()
     cur_rank = shmem.get_rank()
 
-    results = shmem.zeros(BLOCK_SIZE, dtype=dtype)
+    min_val = torch.iinfo(dtype).min
+    results = shmem.full((BLOCK_SIZE,), min_val, dtype=dtype)
 
     shmem.barrier()
 
     grid = lambda meta: (1,)
-    atomic_add_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
+    atomic_max_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
     shmem.barrier()
 
-    # Verify the results
-    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * num_ranks
+    # All ranks participate in performing the max operation
+    # Each rank performs the atomic operation: max(rank_id + 1)
+    # The result equals the ID of the last rank + 1
+    expected = torch.full((BLOCK_SIZE,), num_ranks, dtype=dtype, device="cuda")
 
     try:
         torch.testing.assert_close(results, expected, rtol=0, atol=0)
     except AssertionError as e:
         print(e)
         print("Expected:", expected)
-        print("Actual:", results)
+        print("Actual  :", results)
         raise

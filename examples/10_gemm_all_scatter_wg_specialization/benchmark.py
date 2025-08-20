@@ -51,7 +51,10 @@ def parse_args():
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K")
     parser.add_argument("--gsize_m", type=int, default=6, help="L2-cache locality swizzle parameter")
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
-    parser.add_argument("--gemm_sms", type=int, default=304, help="Number of SMs for persistent GEMM algorithm")
+    parser.add_argument(
+        "--gemm_sms", type=int, default=256, help="Number of SMs for workgroup-specialized GEMM algorithm"
+    )
+    parser.add_argument("--num_sms", type=int, default=304, help="Number of total SMs for gemm + scatter kernel")
 
     return vars(parser.parse_args())
 
@@ -106,11 +109,14 @@ def main():
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
     total_tiles = total_blocks_M * total_blocks_N
 
+    locks = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int8)
+
     bias = None
 
     gemm_stream = torch.cuda.Stream()
 
     json_writer.add_field("gemm_sms", args["gemm_sms"])
+    json_writer.add_field("num_sms", args["num_sms"])
 
     kernel_timing = {
         "gemm": {
@@ -145,9 +151,11 @@ def main():
                 local_C,
                 global_C,
                 bias,
+                locks,
                 rank,
                 world_size,
                 args["gemm_sms"],
+                args["num_sms"],
                 args["BLK_M"],
                 args["BLK_N"],
                 args["BLK_K"],

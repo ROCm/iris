@@ -5,10 +5,10 @@ import torch
 import triton
 
 # from streamk_kernel import streamk_gemm
-from gemm_all_scatter import persistent_gemm_all_scatter
+from gemm_all_scatter_producer_consumer import persistent_gemm
 from examples.common.utils import is_triton_interpret_set
 
-gemm_kernel = persistent_gemm_all_scatter
+gemm_kernel = persistent_gemm
 
 
 class matmul(torch.autograd.Function):
@@ -39,11 +39,12 @@ class matmul(torch.autograd.Function):
         a: torch.Tensor,
         b: torch.Tensor,
         c: torch.Tensor,
-        c_global: torch.Tensor,
+        # c_global: torch.Tensor,
         bias: torch.Tensor,
+        locks: torch.Tensor,
         rank: int,
         world_size: int,
-        num_sms: int,
+        gemm_sms: int,
         BLK_M: int,
         BLK_N: int,
         BLK_K: int,
@@ -79,12 +80,12 @@ class matmul(torch.autograd.Function):
 
         # compute grid (work to do per SM on the first wave)
         stride_bias = bias.stride(0) if use_bias else 0
-        kk = gemm_kernel[(num_sms,)](
+        kk = gemm_kernel[(gemm_sms,)](
             a,
             b,
             c,
-            c_global,
             bias,
+            locks,
             M,
             N,
             K,
@@ -94,14 +95,12 @@ class matmul(torch.autograd.Function):
             b.stride(1),
             c.stride(0),
             c.stride(1),
-            c_global.stride(0),
-            c_global.stride(1),
             stride_bias,
             BLOCK_SIZE_M=BLK_M,
             BLOCK_SIZE_N=BLK_N,
             BLOCK_SIZE_K=BLK_K,
             GROUP_SIZE_M=gsize_m,
-            NUM_SMS=num_sms,
+            GEMM_SMS=gemm_sms,
             NUM_XCDS=num_xcds,
             BIAS=use_bias,
             EVEN_K=even_k,
@@ -130,11 +129,11 @@ class matmul(torch.autograd.Function):
         a: torch.Tensor,
         b: torch.Tensor,
         c: torch.Tensor,
-        c_global: torch.Tensor,
         bias: torch.Tensor,
+        locks: torch.Tensor,
         rank: int,
         world_size: int,
-        num_sms: int,
+        gemm_sms: int,
         BLK_M: int,
         BLK_N: int,
         BLK_K: int,
@@ -149,11 +148,11 @@ class matmul(torch.autograd.Function):
             a=a,
             b=b,
             c=c,
-            c_global=c_global,
             bias=bias,
+            locks=locks,
             rank=rank,
             world_size=world_size,
-            num_sms=num_sms,
+            gemm_sms=gemm_sms,
             BLK_M=BLK_M,
             BLK_N=BLK_N,
             BLK_K=BLK_K,

@@ -5,10 +5,10 @@ import torch
 import triton
 
 # from streamk_kernel import streamk_gemm
-from gemm_all_scatter import persistent_gemm_all_scatter
+from gemm_all_scatter_wg_specialization import persistent_gemm_all_scatter_wg_specialization
 from examples.common.utils import is_triton_interpret_set
 
-gemm_kernel = persistent_gemm_all_scatter
+gemm_kernel = persistent_gemm_all_scatter_wg_specialization
 
 
 class matmul(torch.autograd.Function):
@@ -41,8 +41,10 @@ class matmul(torch.autograd.Function):
         c: torch.Tensor,
         c_global: torch.Tensor,
         bias: torch.Tensor,
+        locks: torch.Tensor,
         rank: int,
         world_size: int,
+        gemm_sms: int,
         num_sms: int,
         BLK_M: int,
         BLK_N: int,
@@ -85,6 +87,7 @@ class matmul(torch.autograd.Function):
             c,
             c_global,
             bias,
+            locks,
             M,
             N,
             K,
@@ -101,6 +104,7 @@ class matmul(torch.autograd.Function):
             BLOCK_SIZE_N=BLK_N,
             BLOCK_SIZE_K=BLK_K,
             GROUP_SIZE_M=gsize_m,
+            GEMM_SMS=gemm_sms,
             NUM_SMS=num_sms,
             NUM_XCDS=num_xcds,
             BIAS=use_bias,
@@ -132,8 +136,10 @@ class matmul(torch.autograd.Function):
         c: torch.Tensor,
         c_global: torch.Tensor,
         bias: torch.Tensor,
+        locks: torch.Tensor,
         rank: int,
         world_size: int,
+        gemm_sms: int,
         num_sms: int,
         BLK_M: int,
         BLK_N: int,
@@ -151,8 +157,10 @@ class matmul(torch.autograd.Function):
             c=c,
             c_global=c_global,
             bias=bias,
+            locks=locks,
             rank=rank,
             world_size=world_size,
+            gemm_sms=gemm_sms,
             num_sms=num_sms,
             BLK_M=BLK_M,
             BLK_N=BLK_N,

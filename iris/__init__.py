@@ -17,6 +17,11 @@ from .iris import (
     atomic_sub,
     atomic_cas,
     atomic_xchg,
+    atomic_xor,
+    atomic_or,
+    atomic_and,
+    atomic_min,
+    atomic_max,
     set_logger_level,
     logger,
     DEBUG,
@@ -35,7 +40,7 @@ from . import hip
 # Pipe allocations via finegrained allocator
 current_dir = os.path.dirname(__file__)
 # Look for the library in the installed package location
-finegrained_alloc_path = os.path.join(current_dir, "csrc", "finegrained_alloc", "libfinegrained_allocator.so")
+finegrained_alloc_path = os.path.join(current_dir, "..", "csrc", "finegrained_alloc", "libfinegrained_allocator.so")
 
 # Check if the library exists (should be built during pip install)
 if not os.path.exists(finegrained_alloc_path):
@@ -62,6 +67,11 @@ __all__ = [
     "atomic_sub",
     "atomic_cas",
     "atomic_xchg",
+    "atomic_xor",
+    "atomic_or",
+    "atomic_and",
+    "atomic_min",
+    "atomic_max",
     "do_bench",
     "memset_tensor",
     "hip",
