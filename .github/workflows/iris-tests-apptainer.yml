@@ -34,8 +34,6 @@ jobs:
             echo "Using existing Apptainer image"
           fi
 
-          df -h /
-          apptainer image list
 
       - name: Install Iris in container
         run: |
