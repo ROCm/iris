@@ -5,7 +5,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch:  
+  workflow_dispatch:
 
 jobs:
   build:
@@ -14,7 +14,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
+
       - name: Setup Docker
         run: |
           apt-get update && apt-get install -y docker.io
@@ -32,11 +32,16 @@ jobs:
           echo "=== Disk space AFTER build ==="
           df -h /
           echo ""
+          docker system df
           echo "=== Cleaning up Docker build cache ==="
           docker builder prune -a --force
           echo ""
           echo "=== Disk space AFTER cleanup ==="
           df -h /
+          docker system df
+          yes | docker system prune
+          docker system df
+
 
 #  test:
 #    needs: build
@@ -52,7 +57,7 @@ jobs:
 #    steps:
 #      - name: Checkout repository
 #        uses: actions/checkout@v4
-#      
+#
 #      - name: Setup Docker
 #        run: |
 #          apt-get update && apt-get install -y docker.io
@@ -63,17 +68,17 @@ jobs:
 #        run: |
 #          # Start persistent container
 #          docker run -d --name iris-test-${{ github.job }}-${{ matrix.ranks }} iris-dev sleep infinity
-#          
+#
 #          # Install iris in editable mode
 #          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} pip install -e .
-#          
+#
 #          # Run ROCm and HIP checks
 #          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} rocm-smi
 #          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} hipconfig
-#          
+#
 #          # Run MPI test
 #          docker exec iris-test-${{ github.job }}-${{ matrix.ranks }} mpirun -np ${{ matrix.ranks }} echo "MPI working with ${{ matrix.ranks }} rank(s)"
-#      
+#
 #      - name: Cleanup containers
 #        if: always()
 #        run: |
@@ -89,7 +94,7 @@ jobs:
 #    steps:
 #      - name: Checkout repository
 #        uses: actions/checkout@v4
-#        
+#
 #      - name: Setup Docker
 #        run: |
 #          apt-get update && apt-get install -y docker.io
