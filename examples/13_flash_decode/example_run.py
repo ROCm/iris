@@ -35,13 +35,14 @@ DTYPE = torch.float16
 # Helper Function to Create Example Data
 # ==============================================================================
 
+
 def setup_example_data(rank, world_size):
     """Creates a set of random tensors to serve as inputs for the layer."""
 
     num_query_heads = NUM_HEADS
     # Assume an 8:1 Grouped-Query Attention ratio for this example
     num_kv_heads = max(1, NUM_HEADS // 8)
-    block_size = 1 # PagedAttention works with blocks of tokens
+    block_size = 1  # PagedAttention works with blocks of tokens
 
     # Number of blocks needed on this rank to store the KV cache for all sequences
     num_blocks_per_rank = (KV_LEN_PER_RANK + block_size - 1) // block_size
@@ -121,11 +122,11 @@ if __name__ == "__main__":
     if rank == 0:
         print("Calling the forward pass...")
     output = fd_layer(
-        tensor_data['query'],
-        tensor_data['key_cache_this_rank'],
-        tensor_data['value_cache_this_rank'],
-        tensor_data['global_kv_lens_tensor'],
-        tensor_data['block_tables_this_rank']
+        tensor_data["query"],
+        tensor_data["key_cache_this_rank"],
+        tensor_data["value_cache_this_rank"],
+        tensor_data["global_kv_lens_tensor"],
+        tensor_data["block_tables_this_rank"],
     )
 
     # Ensure the computation is finished before printing

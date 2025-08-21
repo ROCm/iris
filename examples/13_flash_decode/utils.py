@@ -9,6 +9,7 @@ import torch
 import os
 import json
 
+
 def dist_print(message: str, rank: int, is_error: bool = False):
     """Prints a message only from rank 0."""
     if rank == 0:
@@ -17,11 +18,9 @@ def dist_print(message: str, rank: int, is_error: bool = False):
         else:
             print(message)
 
+
 def print_correctness_report(
-    rank: int,
-    computed: torch.Tensor,
-    reference: torch.Tensor,
-    error: Optional[Exception] = None
+    rank: int, computed: torch.Tensor, reference: torch.Tensor, error: Optional[Exception] = None
 ):
     """
     Prints a detailed report from rank 0 and the final status from all ranks.

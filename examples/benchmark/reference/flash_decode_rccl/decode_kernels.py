@@ -37,15 +37,28 @@ import triton.language as tl
 from triton.language.extra import libdevice
 import iris
 
-def gqa_local_kernels(q, k_cache, v_cache, workspace, q_lens, kv_lens, block_table, scale, soft_cap=0.0,
-                                    output_split=None, output_combine=None, kv_split=-1):
+
+def gqa_local_kernels(
+    q,
+    k_cache,
+    v_cache,
+    workspace,
+    q_lens,
+    kv_lens,
+    block_table,
+    scale,
+    soft_cap=0.0,
+    output_split=None,
+    output_combine=None,
+    kv_split=-1,
+):
     batch, q_heads, q_head_dim = q.shape
     _, page_size, kv_heads, k_head_dim = k_cache.shape
     assert page_size == v_cache.shape[1] and kv_heads == v_cache.shape[2] and k_head_dim == q_head_dim
     v_head_dim = v_cache.shape[-1]
 
     BLOCK_N = 64
-    BLOCK_HEAD_DIM = 2**int(math.log2(q_head_dim))
+    BLOCK_HEAD_DIM = 2 ** int(math.log2(q_head_dim))
     BLOCK_DPE = q_head_dim - BLOCK_HEAD_DIM
     BLOCK_DV = triton.next_power_of_2(v_head_dim)
 
@@ -57,10 +70,16 @@ def gqa_local_kernels(q, k_cache, v_cache, workspace, q_lens, kv_lens, block_tab
 
     grid_split_kv = (batch, triton.cdiv(q_heads, min(BLOCK_H, kv_group_num)), NUM_KV_SPLITS)
 
-    output_split = torch.empty([batch, q_heads, NUM_KV_SPLITS, v_head_dim +
-                                1], dtype=q.dtype, device=q.device) if output_split is None else output_split
-    output_combine = torch.empty([batch, q_heads, v_head_dim +
-                                  1], dtype=q.dtype, device=q.device) if output_combine is None else output_combine
+    output_split = (
+        torch.empty([batch, q_heads, NUM_KV_SPLITS, v_head_dim + 1], dtype=q.dtype, device=q.device)
+        if output_split is None
+        else output_split
+    )
+    output_combine = (
+        torch.empty([batch, q_heads, v_head_dim + 1], dtype=q.dtype, device=q.device)
+        if output_combine is None
+        else output_combine
+    )
 
     gqa_local_decode_split_k[grid_split_kv](
         q,
@@ -195,8 +214,9 @@ def gqa_local_decode_split_k(
 
     for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
         offs_n = start_n + tl.arange(0, BLOCK_N)
-        kv_page_number = tl.load(block_table_ptr + bid * stride_table_bs + offs_n // PAGE_SIZE, mask=offs_n
-                                 < split_kv_end, other=0)
+        kv_page_number = tl.load(
+            block_table_ptr + bid * stride_table_bs + offs_n // PAGE_SIZE, mask=offs_n < split_kv_end, other=0
+        )
         kv_loc = kv_page_number * PAGE_SIZE + offs_n % PAGE_SIZE
         offs_cache_k = kv_loc[None, :] * stride_k_cache_bs + kv_hid * stride_k_cache_h + offs_d[:, None]
         k = tl.load(k_cache_ptr + offs_cache_k, mask=(offs_n[None, :] < split_kv_end) & mask_d[:, None], other=0.0)
@@ -204,8 +224,9 @@ def gqa_local_decode_split_k(
 
         if BLOCK_DPE > 0:
             offs_cache_kpe = kv_loc[None, :] * stride_k_cache_bs + kv_hid * stride_k_cache_h + offs_dpe[:, None]
-            kpe = tl.load(k_cache_ptr + offs_cache_kpe, mask=(offs_n[None, :] < split_kv_end)
-                          & mask_dpe[:, None], other=0.0)
+            kpe = tl.load(
+                k_cache_ptr + offs_cache_kpe, mask=(offs_n[None, :] < split_kv_end) & mask_dpe[:, None], other=0.0
+            )
             qk += tl.dot(qpe, kpe.to(qpe.dtype))
 
         qk *= sm_scale
@@ -292,6 +313,7 @@ def gqa_reduce_local(
         o + cur_batch * stride_obs + cur_head * stride_oh + Lv,
         e_max + tl.log(e_sum),
     )
+
 
 @triton.jit
 def gqa_reduce_global(

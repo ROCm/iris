@@ -28,14 +28,16 @@ NUM_SEQS_SWEEP = [1, 4, 8, 16]
 CONFIG_SWEEP = []
 param_product = itertools.product(KV_LEN_SWEEP, NUM_HEADS_SWEEP, HEAD_DIM_SWEEP, NUM_SEQS_SWEEP)
 for kv_len, num_heads, head_dim, num_seqs in param_product:
-    CONFIG_SWEEP.append({
-        "kv_len": kv_len,
-        "num_heads": num_heads,
-        "head_dim": head_dim,
-        "num_seqs": num_seqs,
-    })
+    CONFIG_SWEEP.append(
+        {
+            "kv_len": kv_len,
+            "num_heads": num_heads,
+            "head_dim": head_dim,
+            "num_seqs": num_seqs,
+        }
+    )
 
-OUTPUT_DIR="results/fd_rccl"
+OUTPUT_DIR = "results/fd_rccl"
 DATATYPE = torch.float16
 N_WARMUP = 100
 N_REPEAT = 1000
@@ -45,23 +47,32 @@ PAGE_SIZE = 1
 # Helper Functions
 # ==============================================================================
 
+
 def prepare_perf_data(config, num_query_heads, num_kv_heads):
     """Prepares local data for the performance test on the current rank."""
-    num_blocks_per_rank = (config['kv_len'] + PAGE_SIZE - 1) // PAGE_SIZE
+    num_blocks_per_rank = (config["kv_len"] + PAGE_SIZE - 1) // PAGE_SIZE
 
-    query = torch.randn(config['num_seqs'], num_query_heads, config['head_dim'], dtype=DATATYPE).cuda()
-    key_cache_this_rank = torch.randn(num_blocks_per_rank, PAGE_SIZE, num_kv_heads, config['head_dim'], dtype=DATATYPE).cuda()
-    value_cache_this_rank = torch.randn(num_blocks_per_rank, PAGE_SIZE, num_kv_heads, config['head_dim'], dtype=DATATYPE).cuda()
-    block_tables_this_rank = torch.arange(num_blocks_per_rank, dtype=torch.int32).repeat(config['num_seqs'], 1).cuda()
+    query = torch.randn(config["num_seqs"], num_query_heads, config["head_dim"], dtype=DATATYPE).cuda()
+    key_cache_this_rank = torch.randn(
+        num_blocks_per_rank, PAGE_SIZE, num_kv_heads, config["head_dim"], dtype=DATATYPE
+    ).cuda()
+    value_cache_this_rank = torch.randn(
+        num_blocks_per_rank, PAGE_SIZE, num_kv_heads, config["head_dim"], dtype=DATATYPE
+    ).cuda()
+    block_tables_this_rank = torch.arange(num_blocks_per_rank, dtype=torch.int32).repeat(config["num_seqs"], 1).cuda()
 
     return {
-        "query": query, "key_cache_this_rank": key_cache_this_rank,
-        "value_cache_this_rank": value_cache_this_rank, "block_tables_this_rank": block_tables_this_rank
+        "query": query,
+        "key_cache_this_rank": key_cache_this_rank,
+        "value_cache_this_rank": value_cache_this_rank,
+        "block_tables_this_rank": block_tables_this_rank,
     }
+
 
 # ==============================================================================
 # Main Execution Block
 # ==============================================================================
+
 
 def main():
     dist.init_process_group(backend="nccl")
@@ -83,17 +94,17 @@ def main():
     # Loop through configs
     for i, config in enumerate(CONFIG_SWEEP):
         if rank == 0:
-            print(f"\n--- Running Config {i+1}/{len(CONFIG_SWEEP)}: {config} ---")
+            print(f"\n--- Running Config {i + 1}/{len(CONFIG_SWEEP)}: {config} ---")
 
-        num_query_heads = config['num_heads']
+        num_query_heads = config["num_heads"]
         num_kv_heads = num_query_heads // 8 if num_query_heads >= 8 else 1
-        scale = config['head_dim']**-0.5
+        scale = config["head_dim"] ** -0.5
 
         keyword_params = {
             "page_size": PAGE_SIZE,
             "scale": scale,
             "soft_cap": 0.0,
-            "max_allowed_batch": config['num_seqs']
+            "max_allowed_batch": config["num_seqs"],
         }
 
         fd_layer = FDLayerRCCL(
@@ -101,55 +112,51 @@ def main():
             world_size,
             num_query_heads,
             num_kv_heads,
-            config['head_dim'],      # q_head_dim
-            config['head_dim'],      # v_head_dim
+            config["head_dim"],  # q_head_dim
+            config["head_dim"],  # v_head_dim
             tp_group,
-            **keyword_params
+            **keyword_params,
         )
 
         tensor_data = prepare_perf_data(config, num_query_heads, num_kv_heads)
 
-        kv_lens_per_rank = [config['kv_len']] * config['num_seqs']
+        kv_lens_per_rank = [config["kv_len"]] * config["num_seqs"]
         kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32).cuda()
         global_kv_lens_tensor = kv_lens_tensor.unsqueeze(0).repeat(world_size, 1)
 
         def run_experiment():
             return fd_layer(
-                tensor_data['query'], tensor_data['key_cache_this_rank'],
-                tensor_data['value_cache_this_rank'], global_kv_lens_tensor,
-                tensor_data['block_tables_this_rank']
+                tensor_data["query"],
+                tensor_data["key_cache_this_rank"],
+                tensor_data["value_cache_this_rank"],
+                global_kv_lens_tensor,
+                tensor_data["block_tables_this_rank"],
             )
 
         time_ms = iris.do_bench(
-            fn=run_experiment,
-            barrier_fn=dist.barrier,
-            n_warmup=N_WARMUP,
-            n_repeat=N_REPEAT,
-            return_mode="mean"
+            fn=run_experiment, barrier_fn=dist.barrier, n_warmup=N_WARMUP, n_repeat=N_REPEAT, return_mode="mean"
         )
         dist.barrier()
 
         if rank == 0:
-            global_kv_len = config['kv_len'] * world_size
+            global_kv_len = config["kv_len"] * world_size
             print(f"Result -> Global KV Length: {global_kv_len}, Avg. Time: {time_ms:.3f} ms")
 
             result_entry = config.copy()
-            result_entry['global_kv_len'] = global_kv_len
-            result_entry['avg_time_ms'] = time_ms
+            result_entry["global_kv_len"] = global_kv_len
+            result_entry["avg_time_ms"] = time_ms
 
-            filename = (
-                f"h{config['num_heads']}_d{config['head_dim']}_"
-                f"s{config['num_seqs']}_kv{config['kv_len']}.json"
-            )
+            filename = f"h{config['num_heads']}_d{config['head_dim']}_s{config['num_seqs']}_kv{config['kv_len']}.json"
             output_path = os.path.join(OUTPUT_DIR, filename)
 
-            with open(output_path, 'w') as f:
+            with open(output_path, "w") as f:
                 json.dump(result_entry, f, indent=4)
             print(f"Saved result to '{output_path}'")
     print("\nBenchmark sweep complete.")
 
     dist.barrier()
     dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     main()

@@ -37,15 +37,23 @@ import triton.language as tl
 from triton.language.extra import libdevice
 import iris
 
+
 # This kernel will do the attention computation on each local GPU
 # Each GPU will get a shard of the KV and will produce the outputs for their part
 def gqa_local_kernels_fused(
-    q, k_cache, v_cache,
-
-    gathered_buffer, signal_flags, iris_instance,
-
-    q_lens, kv_lens, block_table, scale, soft_cap=0.0,
-    output_split=None, kv_split=-1,
+    q,
+    k_cache,
+    v_cache,
+    gathered_buffer,
+    signal_flags,
+    iris_instance,
+    q_lens,
+    kv_lens,
+    block_table,
+    scale,
+    soft_cap=0.0,
+    output_split=None,
+    kv_split=-1,
 ):
     batch, q_heads, q_head_dim = q.shape
     _, page_size, kv_heads, k_head_dim = k_cache.shape
@@ -54,7 +62,7 @@ def gqa_local_kernels_fused(
     num_ranks = iris_instance.get_num_ranks()
 
     BLOCK_N = 64
-    BLOCK_HEAD_DIM = 2**int(math.log2(q_head_dim))
+    BLOCK_HEAD_DIM = 2 ** int(math.log2(q_head_dim))
     BLOCK_DPE = q_head_dim - BLOCK_HEAD_DIM
     BLOCK_DV = triton.next_power_of_2(v_head_dim)
     kv_group_num = q_heads // kv_heads
@@ -64,20 +72,42 @@ def gqa_local_kernels_fused(
     # Step 1: Split-K calculation (will produce partial attention outputs)
     grid_split_kv = (batch, triton.cdiv(q_heads, min(BLOCK_H, kv_group_num)), NUM_KV_SPLITS)
     if output_split is None:
-        output_split = torch.empty(
-            [batch, q_heads, NUM_KV_SPLITS, v_head_dim + 1], dtype=q.dtype, device=q.device
-        )
+        output_split = torch.empty([batch, q_heads, NUM_KV_SPLITS, v_head_dim + 1], dtype=q.dtype, device=q.device)
 
     # Kernel-Split-K
     gqa_local_decode_split_k[grid_split_kv](
-        q, k_cache, v_cache, output_split, scale, block_table, kv_lens,
-        batch, q.stride(0), q.stride(1),
-        k_cache.stride(-3), k_cache.stride(-2), v_cache.stride(-3), v_cache.stride(-2),
-        output_split.stride(0), output_split.stride(1), output_split.stride(2),
-        block_table.stride(0), kv_group_num, q_heads,
-        BLOCK_HEAD_DIM, BLOCK_DPE, BLOCK_DV, BLOCK_N, BLOCK_H, NUM_KV_SPLITS,
-        page_size, soft_cap, k_head_dim, v_head_dim,
-        num_warps=4, num_stages=2
+        q,
+        k_cache,
+        v_cache,
+        output_split,
+        scale,
+        block_table,
+        kv_lens,
+        batch,
+        q.stride(0),
+        q.stride(1),
+        k_cache.stride(-3),
+        k_cache.stride(-2),
+        v_cache.stride(-3),
+        v_cache.stride(-2),
+        output_split.stride(0),
+        output_split.stride(1),
+        output_split.stride(2),
+        block_table.stride(0),
+        kv_group_num,
+        q_heads,
+        BLOCK_HEAD_DIM,
+        BLOCK_DPE,
+        BLOCK_DV,
+        BLOCK_N,
+        BLOCK_H,
+        NUM_KV_SPLITS,
+        page_size,
+        soft_cap,
+        k_head_dim,
+        v_head_dim,
+        num_warps=4,
+        num_stages=2,
     )
 
     # Step 2: Fused Intra-Rank Combine and Inter-Rank Push with tile-level signaling
@@ -88,10 +118,17 @@ def gqa_local_kernels_fused(
         kv_lens,
         gathered_buffer,
         signal_flags,
-        signal_flags.stride(0), signal_flags.stride(1), signal_flags.stride(2), signal_flags.stride(3),
+        signal_flags.stride(0),
+        signal_flags.stride(1),
+        signal_flags.stride(2),
+        signal_flags.stride(3),
         iris_instance.get_heap_bases(),
-        output_split.stride(0), output_split.stride(1), output_split.stride(2),
-        gathered_buffer.stride(0), gathered_buffer.stride(1), gathered_buffer.stride(2),
+        output_split.stride(0),
+        output_split.stride(1),
+        output_split.stride(2),
+        gathered_buffer.stride(0),
+        gathered_buffer.stride(1),
+        gathered_buffer.stride(2),
         rank,
         num_ranks,
         q_heads,
@@ -99,6 +136,7 @@ def gqa_local_kernels_fused(
         BLOCK_DV,
         v_head_dim,
     )
+
 
 @triton.jit
 def gqa_local_decode_split_k(
@@ -174,8 +212,9 @@ def gqa_local_decode_split_k(
 
     for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
         offs_n = start_n + tl.arange(0, BLOCK_N)
-        kv_page_number = tl.load(block_table_ptr + bid * stride_table_bs + offs_n // PAGE_SIZE, mask=offs_n
-                                 < split_kv_end, other=0)
+        kv_page_number = tl.load(
+            block_table_ptr + bid * stride_table_bs + offs_n // PAGE_SIZE, mask=offs_n < split_kv_end, other=0
+        )
         kv_loc = kv_page_number * PAGE_SIZE + offs_n % PAGE_SIZE
         offs_cache_k = kv_loc[None, :] * stride_k_cache_bs + kv_hid * stride_k_cache_h + offs_d[:, None]
         k = tl.load(k_cache_ptr + offs_cache_k, mask=(offs_n[None, :] < split_kv_end) & mask_d[:, None], other=0.0)
@@ -183,8 +222,9 @@ def gqa_local_decode_split_k(
 
         if BLOCK_DPE > 0:
             offs_cache_kpe = kv_loc[None, :] * stride_k_cache_bs + kv_hid * stride_k_cache_h + offs_dpe[:, None]
-            kpe = tl.load(k_cache_ptr + offs_cache_kpe, mask=(offs_n[None, :] < split_kv_end)
-                          & mask_dpe[:, None], other=0.0)
+            kpe = tl.load(
+                k_cache_ptr + offs_cache_kpe, mask=(offs_n[None, :] < split_kv_end) & mask_dpe[:, None], other=0.0
+            )
             qk += tl.dot(qpe, kpe.to(qpe.dtype))
 
         qk *= sm_scale
@@ -218,13 +258,19 @@ def gqa_local_reduce_fused(
     # Input
     Mid_O,
     B_Seqlen,
-
     gathered_output_ptr,
     signal_flags_ptr,
-    stride_signal_dest, stride_signal_src, stride_signal_bs, stride_signal_h,
+    stride_signal_dest,
+    stride_signal_src,
+    stride_signal_bs,
+    stride_signal_h,
     heap_bases_ptr,
-    stride_mid_ob, stride_mid_oh, stride_mid_os,
-    stride_gathered_rank, stride_gathered_bs, stride_gathered_h,
+    stride_mid_ob,
+    stride_mid_oh,
+    stride_mid_os,
+    stride_gathered_rank,
+    stride_gathered_bs,
+    stride_gathered_h,
     my_rank: tl.constexpr,
     world_size: tl.constexpr,
     q_head_num: tl.constexpr,
@@ -268,10 +314,12 @@ def gqa_local_reduce_fused(
     final_v = tl.where(e_sum == 0.0, 0.0, final_v)
 
     # Write tile result to all other GPUs and signal completion for this specific tile
-    base_write_ptr = (gathered_output_ptr +
-                        my_rank * stride_gathered_rank +
-                        cur_batch * stride_gathered_bs +
-                        cur_head * stride_gathered_h)
+    base_write_ptr = (
+        gathered_output_ptr
+        + my_rank * stride_gathered_rank
+        + cur_batch * stride_gathered_bs
+        + cur_head * stride_gathered_h
+    )
 
     for dest_rank_id in range(0, world_size):
         # Write output vector and log-sum-exp value
@@ -279,12 +327,15 @@ def gqa_local_reduce_fused(
         iris.store(base_write_ptr + Lv, final_logic, my_rank, dest_rank_id, heap_bases_ptr)
 
         # Signal the destination rank that this specific tile is ready
-        flag_ptr = (signal_flags_ptr +
-                    dest_rank_id * stride_signal_dest +
-                    my_rank * stride_signal_src +
-                    cur_batch * stride_signal_bs +
-                    cur_head * stride_signal_h)
+        flag_ptr = (
+            signal_flags_ptr
+            + dest_rank_id * stride_signal_dest
+            + my_rank * stride_signal_src
+            + cur_batch * stride_signal_bs
+            + cur_head * stride_signal_h
+        )
         iris.atomic_xchg(flag_ptr, 1, my_rank, dest_rank_id, heap_bases_ptr, sem="release", scope="sys")
+
 
 @triton.jit
 def gqa_global_reduce_fused(
@@ -292,7 +343,10 @@ def gqa_global_reduce_fused(
     o,
     B_Seqlens,
     signal_flags_ptr,
-    stride_signal_dest, stride_signal_src, stride_signal_bs, stride_signal_h,
+    stride_signal_dest,
+    stride_signal_src,
+    stride_signal_bs,
+    stride_signal_h,
     batch,
     q_heads,
     stride_mid_ob,
@@ -301,7 +355,7 @@ def gqa_global_reduce_fused(
     stride_obs,
     stride_oh,
     my_rank: tl.constexpr,
-    NUM_KV_SPLITS: tl.constexpr, # This is used as num_ranks
+    NUM_KV_SPLITS: tl.constexpr,  # This is used as num_ranks
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
 ):
@@ -318,13 +372,14 @@ def gqa_global_reduce_fused(
 
     # Iterate through all source ranks to gather partial results
     for source_rank_id in range(0, NUM_KV_SPLITS):
-
         # Wait for the specific tile from the source rank to be ready
-        flag_ptr = (signal_flags_ptr +
-                    my_rank * stride_signal_dest +
-                    source_rank_id * stride_signal_src +
-                    cur_batch * stride_signal_bs +
-                    cur_head * stride_signal_h)
+        flag_ptr = (
+            signal_flags_ptr
+            + my_rank * stride_signal_dest
+            + source_rank_id * stride_signal_src
+            + cur_batch * stride_signal_bs
+            + cur_head * stride_signal_h
+        )
 
         while tl.atomic_cas(flag_ptr, 0, 0, sem="acquire", scope="sys") == 0:
             pass

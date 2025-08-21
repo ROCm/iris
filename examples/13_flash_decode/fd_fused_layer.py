@@ -34,14 +34,28 @@ import triton
 import math
 import iris
 
-from decode_kernels import (
-    gqa_local_kernels_fused,
-    gqa_global_reduce_fused
-)
+from decode_kernels import gqa_local_kernels_fused, gqa_global_reduce_fused
+
 
 class FDFusedLayer(torch.nn.Module):
-    def __init__(self, iris_instance, rank, node, num_ranks, num_nodes, num_q_heads, num_kv_heads, q_head_dim, v_head_dim, page_size=1,
-                 scale=1, soft_cap=0, max_allowed_batch=1, thrink_buffer_threshold=500, stages=20):
+    def __init__(
+        self,
+        iris_instance,
+        rank,
+        node,
+        num_ranks,
+        num_nodes,
+        num_q_heads,
+        num_kv_heads,
+        q_head_dim,
+        v_head_dim,
+        page_size=1,
+        scale=1,
+        soft_cap=0,
+        max_allowed_batch=1,
+        thrink_buffer_threshold=500,
+        stages=20,
+    ):
         super().__init__()
         self.iris_instance = iris_instance
         self.rank = rank
@@ -62,8 +76,7 @@ class FDFusedLayer(torch.nn.Module):
         self.BLOCK_DV = triton.next_power_of_2(self.v_head_dim)
 
         self.gathered_buffer = self.iris_instance.empty(
-            (self.num_ranks, self.max_allowed_batch, self.num_q_heads, self.v_head_dim + 1),
-            dtype=torch.float16
+            (self.num_ranks, self.max_allowed_batch, self.num_q_heads, self.v_head_dim + 1), dtype=torch.float16
         )
 
         # Use per-tile signaling for finer-grained synchronization
@@ -74,7 +87,6 @@ class FDFusedLayer(torch.nn.Module):
 
         # self.producer_stream = torch.cuda.Stream()
         # self.consumer_stream = torch.cuda.Stream()
-
 
     def clear_flags(self):
         """Resets synchronization flags for the next iteration."""
@@ -92,15 +104,22 @@ class FDFusedLayer(torch.nn.Module):
         )
         final_output = torch.empty([batch, self.num_q_heads, self.v_head_dim], dtype=q.dtype, device=q.device)
 
-
         # with torch.cuda.stream(self.producer_stream):
         gqa_local_kernels_fused(
-            q, k_cache, v_cache,
-            self.gathered_buffer, self.signal_flags, self.iris_instance,
-            [1] * batch, global_kv_lens[self.rank], block_table, self.scale,
-            soft_cap=self.soft_cap, output_split=output_split, kv_split=self.kv_split
+            q,
+            k_cache,
+            v_cache,
+            self.gathered_buffer,
+            self.signal_flags,
+            self.iris_instance,
+            [1] * batch,
+            global_kv_lens[self.rank],
+            block_table,
+            self.scale,
+            soft_cap=self.soft_cap,
+            output_split=output_split,
+            kv_split=self.kv_split,
         )
-
 
         # with torch.cuda.stream(self.consumer_stream):
         kk3 = gqa_global_reduce_fused[(batch, self.num_q_heads)](
@@ -108,19 +127,19 @@ class FDFusedLayer(torch.nn.Module):
             final_output,
             global_kv_lens,
             self.signal_flags,
-            self.signal_flags.stride(0),    # stride_signal_dest
-            self.signal_flags.stride(1),    # stride_signal_src
-            self.signal_flags.stride(2),    # stride_signal_bs
-            self.signal_flags.stride(3),    # stride_signal_h
+            self.signal_flags.stride(0),  # stride_signal_dest
+            self.signal_flags.stride(1),  # stride_signal_src
+            self.signal_flags.stride(2),  # stride_signal_bs
+            self.signal_flags.stride(3),  # stride_signal_h
             batch,
             self.num_q_heads,
-            self.gathered_buffer.stride(1), # stride_mid_ob
-            self.gathered_buffer.stride(2), # stride_mid_oh
-            self.gathered_buffer.stride(0), # stride_mid_os (now rank stride)
-            final_output.stride(0),         # stride_obs
-            final_output.stride(1),         # stride_oh
+            self.gathered_buffer.stride(1),  # stride_mid_ob
+            self.gathered_buffer.stride(2),  # stride_mid_oh
+            self.gathered_buffer.stride(0),  # stride_mid_os (now rank stride)
+            final_output.stride(0),  # stride_obs
+            final_output.stride(1),  # stride_oh
             self.rank,
-            self.num_ranks,                 # NUM_KV_SPLITS becomes num_ranks
+            self.num_ranks,  # NUM_KV_SPLITS becomes num_ranks
             self.BLOCK_DV,
             self.v_head_dim,
         )

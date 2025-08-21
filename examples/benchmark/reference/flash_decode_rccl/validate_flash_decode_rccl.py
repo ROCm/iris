@@ -41,7 +41,7 @@ import torch.distributed as dist
 from fd_layer_rccl import FDLayerRCCL
 
 project_root = Path(__file__).resolve()
-while not (project_root / 'tests').is_dir() or not (project_root / 'examples').is_dir():
+while not (project_root / "tests").is_dir() or not (project_root / "examples").is_dir():
     if project_root == project_root.parent:
         raise FileNotFoundError(
             "Could not find project root. Make sure your 'tests' and 'examples' "
@@ -60,16 +60,22 @@ if module_dir.exists():
 else:
     print("ERROR: Target directory not found. Not modifying sys.path.")
 
-from utils import print_correctness_report # noqa: E402
+from utils import print_correctness_report  # noqa: E402
 
 # ==============================================================================
 # Reference Implementation & Data Preparation
 # ==============================================================================
 
+
 def ref_paged_attn(
-    query: torch.Tensor, key_cache: torch.Tensor, value_cache: torch.Tensor,
-    query_lens: List[int], kv_lens_per_rank: List[int], block_tables: torch.Tensor,
-    scale: float, soft_cap: Optional[float] = None
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    query_lens: List[int],
+    kv_lens_per_rank: List[int],
+    block_tables: torch.Tensor,
+    scale: float,
+    soft_cap: Optional[float] = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables_cpu = block_tables.cpu().numpy()
@@ -78,7 +84,7 @@ def ref_paged_attn(
     start_idx = 0
     for i in range(num_seqs):
         query_len, kv_len = query_lens[i], kv_lens_per_rank[i]
-        q = query[start_idx:start_idx + query_len]
+        q = query[start_idx : start_idx + query_len]
         q *= scale
         num_kv_blocks = (kv_len + block_size - 1) // block_size
         block_indices = block_tables_cpu[i, :num_kv_blocks]
@@ -100,15 +106,23 @@ def ref_paged_attn(
         start_idx += query_len
     return torch.cat(outputs, dim=0)
 
+
 def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, num_blocks_total):
     """Creates data on Rank 0 and broadcasts it using torch.distributed."""
-    head_dim = cfg['head_dim']
+    head_dim = cfg["head_dim"]
     if args.rank == 0:
-        query = torch.randn(cfg['num_seqs'], num_query_heads, head_dim, dtype=cfg['dtype'], device="cuda") / 10
-        key_value_cache = torch.randn(num_blocks_total, 2, cfg['block_size'], num_kv_heads, head_dim, dtype=cfg['dtype'], device="cuda") / 10
+        query = torch.randn(cfg["num_seqs"], num_query_heads, head_dim, dtype=cfg["dtype"], device="cuda") / 10
+        key_value_cache = (
+            torch.randn(
+                num_blocks_total, 2, cfg["block_size"], num_kv_heads, head_dim, dtype=cfg["dtype"], device="cuda"
+            )
+            / 10
+        )
     else:
-        query = torch.empty(cfg['num_seqs'], num_query_heads, head_dim, dtype=cfg['dtype'], device="cuda")
-        key_value_cache = torch.empty(num_blocks_total, 2, cfg['block_size'], num_kv_heads, head_dim, dtype=cfg['dtype'], device="cuda")
+        query = torch.empty(cfg["num_seqs"], num_query_heads, head_dim, dtype=cfg["dtype"], device="cuda")
+        key_value_cache = torch.empty(
+            num_blocks_total, 2, cfg["block_size"], num_kv_heads, head_dim, dtype=cfg["dtype"], device="cuda"
+        )
 
     dist.broadcast(query, src=0, group=args.tp_group)
     dist.broadcast(key_value_cache, src=0, group=args.tp_group)
@@ -119,6 +133,7 @@ def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, num_block
 # ==============================================================================
 # Pytest Test Case
 # ==============================================================================
+
 
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("num_seqs", [1, 8])
@@ -152,17 +167,17 @@ def test_correctness_rccl_fused_full(kv_len, num_heads, num_seqs, head_dim):
     num_query_heads = num_heads
     num_kv_heads = num_query_heads // 8 if num_query_heads >= 8 else 1
     scale = head_dim**-0.5
-    num_blocks_per_rank = (config['kv_len'] + config['block_size'] - 1) // config['block_size']
+    num_blocks_per_rank = (config["kv_len"] + config["block_size"] - 1) // config["block_size"]
     num_blocks_total = num_blocks_per_rank * args.world_size
 
     tensor_data = prepare_correctness_data(config, args, num_query_heads, num_kv_heads, num_blocks_total)
-    query = tensor_data['query']
-    key_value_cache = tensor_data['key_value_cache']
+    query = tensor_data["query"]
+    key_value_cache = tensor_data["key_value_cache"]
 
     key_cache = key_value_cache[:, 0].contiguous()
     value_cache = key_value_cache[:, 1].contiguous()
-    key_cache_this_rank = key_cache[args.rank * num_blocks_per_rank:(args.rank + 1) * num_blocks_per_rank]
-    value_cache_this_rank = value_cache[args.rank * num_blocks_per_rank:(args.rank + 1) * num_blocks_per_rank]
+    key_cache_this_rank = key_cache[args.rank * num_blocks_per_rank : (args.rank + 1) * num_blocks_per_rank]
+    value_cache_this_rank = value_cache[args.rank * num_blocks_per_rank : (args.rank + 1) * num_blocks_per_rank]
 
     block_tables_this_rank = torch.arange(num_blocks_per_rank, dtype=torch.int32).repeat(num_seqs, 1).cuda()
 
@@ -171,18 +186,17 @@ def test_correctness_rccl_fused_full(kv_len, num_heads, num_seqs, head_dim):
     ref_block_tables = torch.cat([tbl + r * num_blocks_per_rank for r, tbl in enumerate(gathered_tables_list)], dim=-1)
 
     keyword_params = {
-        "page_size": config['block_size'],
+        "page_size": config["block_size"],
         "scale": scale,
-        "soft_cap": config['soft_cap'],
-        "max_allowed_batch": config['num_seqs']
+        "soft_cap": config["soft_cap"],
+        "max_allowed_batch": config["num_seqs"],
     }
     fd_layer = FDLayerRCCL(
-        args.rank, args.world_size, num_query_heads, num_kv_heads,
-        head_dim, head_dim, args.tp_group, **keyword_params
+        args.rank, args.world_size, num_query_heads, num_kv_heads, head_dim, head_dim, args.tp_group, **keyword_params
     )
     dist.barrier(group=args.tp_group)
 
-    kv_lens_per_rank = [config['kv_len']] * num_seqs
+    kv_lens_per_rank = [config["kv_len"]] * num_seqs
     kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32).cuda()
     global_kv_lens_tensor = kv_lens_tensor.unsqueeze(0).repeat(args.world_size, 1)
 
@@ -190,9 +204,14 @@ def test_correctness_rccl_fused_full(kv_len, num_heads, num_seqs, head_dim):
     torch.cuda.synchronize()
 
     ref_output = ref_paged_attn(
-        query=query.clone(), key_cache=key_cache, value_cache=value_cache,
-        query_lens=[1] * num_seqs, kv_lens_per_rank=[config['kv_len'] * args.world_size] * num_seqs,
-        block_tables=ref_block_tables, scale=scale, soft_cap=config['soft_cap']
+        query=query.clone(),
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=[1] * num_seqs,
+        kv_lens_per_rank=[config["kv_len"] * args.world_size] * num_seqs,
+        block_tables=ref_block_tables,
+        scale=scale,
+        soft_cap=config["soft_cap"],
     )
     dist.barrier(group=args.tp_group)
 

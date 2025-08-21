@@ -42,11 +42,9 @@ import torch
 import iris
 
 project_root = Path(__file__).resolve()
-while not (project_root / 'tests').is_dir() or not (project_root / 'examples').is_dir():
+while not (project_root / "tests").is_dir() or not (project_root / "examples").is_dir():
     if project_root == project_root.parent:
-        raise FileNotFoundError(
-            "Could not find project root"
-        )
+        raise FileNotFoundError("Could not find project root")
     project_root = project_root.parent
 print(f"Project Root: {project_root}")
 
@@ -60,17 +58,23 @@ if module_dir.exists():
 else:
     print("ERROR: Target directory not found")
 
-from fd_fused_layer import FDFusedLayer # noqa: E402
-from utils import print_correctness_report # noqa: E402
+from fd_fused_layer import FDFusedLayer  # noqa: E402
+from utils import print_correctness_report  # noqa: E402
 
 # ==============================================================================
 # Reference Implementation & Data Preparation
 # ==============================================================================
 
+
 def ref_paged_attn(
-    query: torch.Tensor, key_cache: torch.Tensor, value_cache: torch.Tensor,
-    query_lens: List[int], kv_lens_per_rank: List[int], block_tables: torch.Tensor,
-    scale: float, soft_cap: Optional[float] = None
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    query_lens: List[int],
+    kv_lens_per_rank: List[int],
+    block_tables: torch.Tensor,
+    scale: float,
+    soft_cap: Optional[float] = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables_cpu = block_tables.cpu().numpy()
@@ -79,7 +83,7 @@ def ref_paged_attn(
     start_idx = 0
     for i in range(num_seqs):
         query_len, kv_len = query_lens[i], kv_lens_per_rank[i]
-        q = query[start_idx:start_idx + query_len]
+        q = query[start_idx : start_idx + query_len]
         q *= scale
         num_kv_blocks = (kv_len + block_size - 1) // block_size
         block_indices = block_tables_cpu[i, :num_kv_blocks]
@@ -101,17 +105,20 @@ def ref_paged_attn(
         start_idx += query_len
     return torch.cat(outputs, dim=0)
 
+
 def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, NUM_BLOCKS):
-    head_dim = cfg['head_dim']
+    head_dim = cfg["head_dim"]
     if args.rank == 0:
-        query = torch.randn(cfg['num_seqs'], num_query_heads, head_dim, dtype=cfg['dtype']) / 10
-        key_value_cache = torch.randn(NUM_BLOCKS, 2, cfg['block_size'], num_kv_heads, head_dim, dtype=cfg['dtype']) / 10
+        query = torch.randn(cfg["num_seqs"], num_query_heads, head_dim, dtype=cfg["dtype"]) / 10
+        key_value_cache = torch.randn(NUM_BLOCKS, 2, cfg["block_size"], num_kv_heads, head_dim, dtype=cfg["dtype"]) / 10
     else:
-        query = torch.empty(cfg['num_seqs'], num_query_heads, head_dim, dtype=cfg['dtype'])
-        key_value_cache = torch.empty(NUM_BLOCKS, 2, cfg['block_size'], num_kv_heads, head_dim, dtype=cfg['dtype'])
+        query = torch.empty(cfg["num_seqs"], num_query_heads, head_dim, dtype=cfg["dtype"])
+        key_value_cache = torch.empty(NUM_BLOCKS, 2, cfg["block_size"], num_kv_heads, head_dim, dtype=cfg["dtype"])
 
     query = torch.from_numpy(args.iris_instance.broadcast_tensor(query.cpu().numpy(), source_rank=0)).to(query.device)
-    key_value_cache = torch.from_numpy(args.iris_instance.broadcast_tensor(key_value_cache.cpu().numpy(), source_rank=0)).to(key_value_cache.device)
+    key_value_cache = torch.from_numpy(
+        args.iris_instance.broadcast_tensor(key_value_cache.cpu().numpy(), source_rank=0)
+    ).to(key_value_cache.device)
 
     return {"query": query, "key_value_cache": key_value_cache}
 
@@ -119,6 +126,7 @@ def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, NUM_BLOCK
 # ==============================================================================
 # Pytest Test Case
 # ==============================================================================
+
 
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("num_seqs", [1, 8])
@@ -153,17 +161,21 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
     num_query_heads = num_heads
     num_kv_heads = num_query_heads // 8 if num_query_heads >= 8 else 1
     scale = head_dim**-0.5
-    NUM_BLOCKS_PER_RANK = config['kv_len'] + 1
+    NUM_BLOCKS_PER_RANK = config["kv_len"] + 1
     NUM_BLOCKS = NUM_BLOCKS_PER_RANK * args.num_ranks
 
     tensor_data = prepare_correctness_data(config, args, num_query_heads, num_kv_heads, NUM_BLOCKS)
-    query = tensor_data['query']
-    key_value_cache = tensor_data['key_value_cache']
+    query = tensor_data["query"]
+    key_value_cache = tensor_data["key_value_cache"]
 
     key_cache = key_value_cache[:, 0, :, :, :].contiguous()
     value_cache = key_value_cache[:, 1, :, :, :].contiguous()
-    key_cache_this_rank = key_cache[args.rank * NUM_BLOCKS_PER_RANK:(args.rank + 1) * NUM_BLOCKS_PER_RANK].contiguous()
-    value_cache_this_rank = value_cache[args.rank * NUM_BLOCKS_PER_RANK:(args.rank + 1) * NUM_BLOCKS_PER_RANK].contiguous()
+    key_cache_this_rank = key_cache[
+        args.rank * NUM_BLOCKS_PER_RANK : (args.rank + 1) * NUM_BLOCKS_PER_RANK
+    ].contiguous()
+    value_cache_this_rank = value_cache[
+        args.rank * NUM_BLOCKS_PER_RANK : (args.rank + 1) * NUM_BLOCKS_PER_RANK
+    ].contiguous()
 
     block_tables_this_rank = torch.arange(NUM_BLOCKS_PER_RANK, dtype=torch.int32).repeat(num_seqs, 1)
     all_block_tables_numpy = iris._mpi_helpers.mpi_allgather_multidim(block_tables_this_rank.cpu().numpy())
@@ -171,33 +183,49 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
     ref_block_tables = torch.cat([block_tables[i] + i * NUM_BLOCKS_PER_RANK for i in range(args.num_ranks)], dim=-1)
 
     common_params = {
-        "num_q_heads": num_query_heads, "num_kv_heads": num_kv_heads, "q_head_dim": head_dim,
-        "v_head_dim": head_dim, "page_size": config['block_size'], "scale": scale, "soft_cap": config['soft_cap'],
-        "max_allowed_batch": num_seqs
+        "num_q_heads": num_query_heads,
+        "num_kv_heads": num_kv_heads,
+        "q_head_dim": head_dim,
+        "v_head_dim": head_dim,
+        "page_size": config["block_size"],
+        "scale": scale,
+        "soft_cap": config["soft_cap"],
+        "max_allowed_batch": num_seqs,
     }
 
     iris_fd_layer = FDFusedLayer(
-        args.iris_instance, args.rank, args.rank // args.local_num_ranks,
-        args.num_ranks, args.num_ranks // args.local_num_ranks, **common_params
+        args.iris_instance,
+        args.rank,
+        args.rank // args.local_num_ranks,
+        args.num_ranks,
+        args.num_ranks // args.local_num_ranks,
+        **common_params,
     )
 
     args.iris_instance.barrier()
-    if hasattr(iris_fd_layer, 'clear_flags'):
+    if hasattr(iris_fd_layer, "clear_flags"):
         iris_fd_layer.clear_flags()
     args.iris_instance.barrier()
 
-    kv_lens_per_rank = [config['kv_len']] * num_seqs
+    kv_lens_per_rank = [config["kv_len"]] * num_seqs
     global_kv_lens = [kv_lens_per_rank[0] * args.num_ranks] * num_seqs
     kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32, device=query.device)
     global_kv_lens_tensor = kv_lens_tensor.unsqueeze(0).repeat(args.num_ranks, 1)
 
-    output = iris_fd_layer(query, key_cache_this_rank, value_cache_this_rank, global_kv_lens_tensor, block_tables_this_rank)
+    output = iris_fd_layer(
+        query, key_cache_this_rank, value_cache_this_rank, global_kv_lens_tensor, block_tables_this_rank
+    )
     torch.cuda.synchronize()
 
     ref_output = ref_paged_attn(
-        query=query.clone(), key_cache=key_cache, value_cache=value_cache,
-        query_lens=[1] * num_seqs, kv_lens_per_rank=global_kv_lens,
-        block_tables=ref_block_tables, scale=scale, soft_cap=config['soft_cap']
+        query=query.clone(),
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=[1] * num_seqs,
+        kv_lens_per_rank=global_kv_lens,
+        block_tables=ref_block_tables,
+        scale=scale,
+        soft_cap=config["soft_cap"],
     )
     args.iris_instance.barrier()
 

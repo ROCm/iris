@@ -18,6 +18,7 @@ def mpi_allgather(data):
     reshaped = recv_data.reshape(shm_size, len(data))
     return reshaped
 
+
 def mpi_allgather_multidim(data):
     thread_comm = MPI.COMM_WORLD
     shmcomm = thread_comm.Split_type(MPI.COMM_TYPE_SHARED)
@@ -26,7 +27,7 @@ def mpi_allgather_multidim(data):
     data_np = np.asarray(data)
     original_dtype_np = data_np.dtype
 
-    if 'float' in original_dtype_np.name or 'bfloat' in original_dtype_np.name:
+    if "float" in original_dtype_np.name or "bfloat" in original_dtype_np.name:
         data_for_mpi = data_np.astype(np.float32)
     else:
         data_for_mpi = data_np
@@ -36,17 +37,18 @@ def mpi_allgather_multidim(data):
     recv_data = np.empty(data_for_mpi.size * shm_size, dtype=data_for_mpi.dtype)
     recv_data_mpi_datatype = _get_mpi_datatype(recv_data.dtype)
 
-    shmcomm.Allgather(sendbuf=[data_for_mpi, data_for_mpi.size, mpi_datatype],
-                      recvbuf=[recv_data, recv_data.size // shm_size, recv_data_mpi_datatype])
+    shmcomm.Allgather(
+        sendbuf=[data_for_mpi, data_for_mpi.size, mpi_datatype],
+        recvbuf=[recv_data, recv_data.size // shm_size, recv_data_mpi_datatype],
+    )
     shmcomm.Free()
 
-    if 'float' in original_dtype_np.name or 'bfloat' in original_dtype_np.name:
+    if "float" in original_dtype_np.name or "bfloat" in original_dtype_np.name:
         reshaped = recv_data.reshape(shm_size, data_np.size).astype(original_dtype_np)
     else:
         reshaped = recv_data.reshape(shm_size, data_np.size)
 
     return reshaped
-
 
 
 def mpi_broadcast_scalar(value=None, root=0):
@@ -81,30 +83,35 @@ def init_mpi():
     world_size = comm.Get_size()
     return comm, rank, world_size
 
+
 _DTYPE_TO_MPI_DTYPE = {
     np.dtype(np.float16): MPI.FLOAT,
     np.dtype(np.float32): MPI.FLOAT,
     np.dtype(np.float64): MPI.DOUBLE,
-    np.dtype(np.int8):   MPI.INT8_T,
-    np.dtype(np.int16):  MPI.INT16_T,
-    np.dtype(np.int32):  MPI.INT32_T,
-    np.dtype(np.int64):  MPI.INT64_T,
-    np.dtype(np.uint8):  MPI.UINT8_T,
+    np.dtype(np.int8): MPI.INT8_T,
+    np.dtype(np.int16): MPI.INT16_T,
+    np.dtype(np.int32): MPI.INT32_T,
+    np.dtype(np.int64): MPI.INT64_T,
+    np.dtype(np.uint8): MPI.UINT8_T,
     np.dtype(np.uint16): MPI.UINT16_T,
     np.dtype(np.uint32): MPI.UINT32_T,
     np.dtype(np.uint64): MPI.UINT64_T,
 }
 
+
 def _get_mpi_datatype(numpy_dtype):
     """Maps a numpy.dtype object to its corresponding mpi4py.MPI.Datatype."""
 
-    if numpy_dtype.name == 'bfloat16':
+    if numpy_dtype.name == "bfloat16":
         return MPI.FLOAT
 
     mpi_dtype = _DTYPE_TO_MPI_DTYPE.get(numpy_dtype)
     if mpi_dtype is None:
-        raise ValueError(f"Unsupported NumPy dtype for MPI: {numpy_dtype}. Name: {numpy_dtype.name}. Please add it to _DTYPE_TO_MPI_DTYPE map.")
+        raise ValueError(
+            f"Unsupported NumPy dtype for MPI: {numpy_dtype}. Name: {numpy_dtype.name}. Please add it to _DTYPE_TO_MPI_DTYPE map."
+        )
     return mpi_dtype
+
 
 def mpi_broadcast_tensor(value_to_broadcast=None, root=0):
     thread_comm = MPI.COMM_WORLD
@@ -127,7 +134,7 @@ def mpi_broadcast_tensor(value_to_broadcast=None, root=0):
         original_dtype_name = np_value_original.dtype.name
         original_shape = np_value_original.shape
 
-        if 'float' in original_dtype_name or 'bfloat' in original_dtype_name:
+        if "float" in original_dtype_name or "bfloat" in original_dtype_name:
             np_value_for_bcast = np_value_original.astype(np.float32)
         else:
             np_value_for_bcast = np_value_original
@@ -138,7 +145,7 @@ def mpi_broadcast_tensor(value_to_broadcast=None, root=0):
         original_dtype_name = shmcomm.bcast(None, root=root)
         original_shape = shmcomm.bcast(None, root=root)
 
-        if 'float' in original_dtype_name or 'bfloat' in original_dtype_name:
+        if "float" in original_dtype_name or "bfloat" in original_dtype_name:
             np_value_for_bcast = np.empty(original_shape, dtype=np.float32)
         else:
             np_value_for_bcast = np.empty(original_shape, dtype=np.dtype(original_dtype_name))
@@ -148,7 +155,7 @@ def mpi_broadcast_tensor(value_to_broadcast=None, root=0):
     shmcomm.Bcast([np_value_for_bcast, np_value_for_bcast.size, mpi_datatype], root=root)
     shmcomm.Free()
 
-    if 'float' in original_dtype_name or 'bfloat' in original_dtype_name:
+    if "float" in original_dtype_name or "bfloat" in original_dtype_name:
         final_np_value = np_value_for_bcast.astype(np.dtype(original_dtype_name))
     else:
         final_np_value = np_value_for_bcast
