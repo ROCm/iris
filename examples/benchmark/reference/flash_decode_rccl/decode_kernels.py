@@ -211,7 +211,7 @@ def gqa_local_decode_split_k(
         qk *= sm_scale
 
         if soft_cap > 0:
-            qk = soft_cap * tanh(qk / soft_cap)
+            qk = soft_cap * libdevice.tanh(qk / soft_cap)
 
         qk = tl.where(mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf"))
 

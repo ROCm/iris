@@ -56,25 +56,25 @@ class FDFusedLayer(torch.nn.Module):
         self.page_size = page_size
         self.soft_cap = soft_cap
         self.scale = scale
-        self.kv_split = 32 
+        self.kv_split = 32
         self.max_allowed_batch = max_allowed_batch
-        
+
         self.BLOCK_DV = triton.next_power_of_2(self.v_head_dim)
 
         self.gathered_buffer = self.iris_instance.empty(
             (self.num_ranks, self.max_allowed_batch, self.num_q_heads, self.v_head_dim + 1),
             dtype=torch.float16
         )
-        
+
         # Use per-tile signaling for finer-grained synchronization
         # This will tell which rank sent the data to which rank, for each batch item and head
         self.signal_flags = self.iris_instance.zeros(
             (self.num_ranks, self.num_ranks, self.max_allowed_batch, self.num_q_heads), dtype=torch.int32
         )
-        
+
         # self.producer_stream = torch.cuda.Stream()
         # self.consumer_stream = torch.cuda.Stream()
-        
+
 
     def clear_flags(self):
         """Resets synchronization flags for the next iteration."""
@@ -86,13 +86,13 @@ class FDFusedLayer(torch.nn.Module):
         assert global_kv_lens.shape[0] == self.num_ranks
         assert global_kv_lens.shape[1] == batch
         assert batch <= self.max_allowed_batch
-    
+
         output_split = torch.empty(
             [batch, self.num_q_heads, self.kv_split, self.v_head_dim + 1], dtype=q.dtype, device=q.device
         )
         final_output = torch.empty([batch, self.num_q_heads, self.v_head_dim], dtype=q.dtype, device=q.device)
-        
-        
+
+
         # with torch.cuda.stream(self.producer_stream):
         gqa_local_kernels_fused(
             q, k_cache, v_cache,
@@ -100,8 +100,8 @@ class FDFusedLayer(torch.nn.Module):
             [1] * batch, global_kv_lens[self.rank], block_table, self.scale,
             soft_cap=self.soft_cap, output_split=output_split, kv_split=self.kv_split
         )
-    
-        
+
+
         # with torch.cuda.stream(self.consumer_stream):
         kk3 = gqa_global_reduce_fused[(batch, self.num_q_heads)](
             self.gathered_buffer,
@@ -128,5 +128,5 @@ class FDFusedLayer(torch.nn.Module):
         # print(f"{kk3.n_regs} registers used third, {kk3.n_spills} spills")
 
         # self.clear_flags()
-        
+
         return final_output

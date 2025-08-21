@@ -10,7 +10,6 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-import os
 
 import iris
 from fd_layer_rccl import FDLayerRCCL
@@ -20,9 +19,9 @@ from fd_layer_rccl import FDLayerRCCL
 # ==============================================================================
 
 KV_LEN_SWEEP = [8192, 16384, 32768, 65536, 131072, 262144, 524288]
-NUM_HEADS_SWEEP = [96, 128]
+NUM_HEADS_SWEEP = [96]
 HEAD_DIM_SWEEP = [128]
-NUM_SEQS_SWEEP = [1, 4]
+NUM_SEQS_SWEEP = [1, 4, 8, 16]
 
 
 # --- Generate configurations (this is a cartesian product to get all configs) ---
@@ -49,7 +48,7 @@ PAGE_SIZE = 1
 def prepare_perf_data(config, num_query_heads, num_kv_heads):
     """Prepares local data for the performance test on the current rank."""
     num_blocks_per_rank = (config['kv_len'] + PAGE_SIZE - 1) // PAGE_SIZE
-    
+
     query = torch.randn(config['num_seqs'], num_query_heads, config['head_dim'], dtype=DATATYPE).cuda()
     key_cache_this_rank = torch.randn(num_blocks_per_rank, PAGE_SIZE, num_kv_heads, config['head_dim'], dtype=DATATYPE).cuda()
     value_cache_this_rank = torch.randn(num_blocks_per_rank, PAGE_SIZE, num_kv_heads, config['head_dim'], dtype=DATATYPE).cuda()
@@ -69,7 +68,7 @@ def main():
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
-    
+
     if rank == 0:
         if not os.path.exists(OUTPUT_DIR):
             os.makedirs(OUTPUT_DIR)
@@ -89,14 +88,14 @@ def main():
         num_query_heads = config['num_heads']
         num_kv_heads = num_query_heads // 8 if num_query_heads >= 8 else 1
         scale = config['head_dim']**-0.5
-        
+
         keyword_params = {
             "page_size": PAGE_SIZE,
             "scale": scale,
             "soft_cap": 0.0,
             "max_allowed_batch": config['num_seqs']
         }
-        
+
         fd_layer = FDLayerRCCL(
             rank,
             world_size,
@@ -107,20 +106,20 @@ def main():
             tp_group,
             **keyword_params
         )
-        
+
         tensor_data = prepare_perf_data(config, num_query_heads, num_kv_heads)
-        
+
         kv_lens_per_rank = [config['kv_len']] * config['num_seqs']
         kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32).cuda()
         global_kv_lens_tensor = kv_lens_tensor.unsqueeze(0).repeat(world_size, 1)
-        
+
         def run_experiment():
             return fd_layer(
-                tensor_data['query'], tensor_data['key_cache_this_rank'], 
-                tensor_data['value_cache_this_rank'], global_kv_lens_tensor, 
+                tensor_data['query'], tensor_data['key_cache_this_rank'],
+                tensor_data['value_cache_this_rank'], global_kv_lens_tensor,
                 tensor_data['block_tables_this_rank']
             )
-        
+
         time_ms = iris.do_bench(
             fn=run_experiment,
             barrier_fn=dist.barrier,
@@ -133,11 +132,11 @@ def main():
         if rank == 0:
             global_kv_len = config['kv_len'] * world_size
             print(f"Result -> Global KV Length: {global_kv_len}, Avg. Time: {time_ms:.3f} ms")
-            
+
             result_entry = config.copy()
             result_entry['global_kv_len'] = global_kv_len
             result_entry['avg_time_ms'] = time_ms
-            
+
             filename = (
                 f"h{config['num_heads']}_d{config['head_dim']}_"
                 f"s{config['num_seqs']}_kv{config['kv_len']}.json"
@@ -147,7 +146,7 @@ def main():
             with open(output_path, 'w') as f:
                 json.dump(result_entry, f, indent=4)
             print(f"Saved result to '{output_path}'")
-    print(f"\nBenchmark sweep complete.")
+    print("\nBenchmark sweep complete.")
 
     dist.barrier()
     dist.destroy_process_group()

@@ -41,7 +41,7 @@ import iris
 # Each GPU will get a shard of the KV and will produce the outputs for their part
 def gqa_local_kernels_fused(
     q, k_cache, v_cache,
-    
+
     gathered_buffer, signal_flags, iris_instance,
 
     q_lens, kv_lens, block_table, scale, soft_cap=0.0,
@@ -190,7 +190,7 @@ def gqa_local_decode_split_k(
         qk *= sm_scale
 
         if soft_cap > 0:
-            qk = soft_cap * tanh(qk / soft_cap)
+            qk = soft_cap * libdevice.tanh(qk / soft_cap)
 
         qk = tl.where(mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf"))
 
@@ -245,20 +245,20 @@ def gqa_local_reduce_fused(
     acc = tl.zeros([BLOCK_DV], dtype=tl.float32)
 
     offs_v_base = cur_batch * stride_mid_ob + cur_head * stride_mid_oh
-    
+
     for split_kv_id in range(0, NUM_KV_SPLITS):
         split_kv_start = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS) * split_kv_id
         if split_kv_start < cur_batch_seq_len:
             offs_v = offs_v_base + split_kv_id * stride_mid_os + offs_d
             offs_logic = offs_v_base + split_kv_id * stride_mid_os + Lv
-            
+
             tv = tl.load(Mid_O + offs_v, mask=mask_d, other=0.0)
             tlogic = tl.load(Mid_O + offs_logic)
-            
+
             n_e_max = tl.maximum(tlogic, e_max)
             old_scale = libdevice.fast_expf(e_max - n_e_max)
             exp_logic = libdevice.fast_expf(tlogic - n_e_max)
-            
+
             acc = acc * old_scale + exp_logic * tv
             e_sum = e_sum * old_scale + exp_logic
             e_max = n_e_max
@@ -272,20 +272,20 @@ def gqa_local_reduce_fused(
                         my_rank * stride_gathered_rank +
                         cur_batch * stride_gathered_bs +
                         cur_head * stride_gathered_h)
-    
+
     for dest_rank_id in range(0, world_size):
         # Write output vector and log-sum-exp value
         iris.store(base_write_ptr + offs_d, final_v, my_rank, dest_rank_id, heap_bases_ptr, mask=mask_d)
         iris.store(base_write_ptr + Lv, final_logic, my_rank, dest_rank_id, heap_bases_ptr)
-        
+
         # Signal the destination rank that this specific tile is ready
         flag_ptr = (signal_flags_ptr +
                     dest_rank_id * stride_signal_dest +
                     my_rank * stride_signal_src +
                     cur_batch * stride_signal_bs +
                     cur_head * stride_signal_h)
-        iris.atomic_xchg(flag_ptr, 1, my_rank, dest_rank_id, heap_bases_ptr, sem="release", scope="sys")        
-        
+        iris.atomic_xchg(flag_ptr, 1, my_rank, dest_rank_id, heap_bases_ptr, sem="release", scope="sys")
+
 @triton.jit
 def gqa_global_reduce_fused(
     All_Ranks_Mid_O,
@@ -307,7 +307,7 @@ def gqa_global_reduce_fused(
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
-    
+
     offs_d = tl.arange(0, BLOCK_DV)
     mask_d = offs_d < Lv
     cur_batch_seq_len_ptr = B_Seqlens + cur_batch
@@ -318,19 +318,19 @@ def gqa_global_reduce_fused(
 
     # Iterate through all source ranks to gather partial results
     for source_rank_id in range(0, NUM_KV_SPLITS):
-        
+
         # Wait for the specific tile from the source rank to be ready
         flag_ptr = (signal_flags_ptr +
                     my_rank * stride_signal_dest +
                     source_rank_id * stride_signal_src +
                     cur_batch * stride_signal_bs +
                     cur_head * stride_signal_h)
-        
+
         while tl.atomic_cas(flag_ptr, 0, 0, sem="acquire", scope="sys") == 0:
             pass
 
         effective_kv_len = tl.load(cur_batch_seq_len_ptr + source_rank_id * batch)
-        
+
         if effective_kv_len > 0:
             # Load the data for the tile from the source rank
             base_ptr = cur_batch * stride_mid_ob + cur_head * stride_mid_oh + source_rank_id * stride_mid_os
@@ -339,12 +339,12 @@ def gqa_global_reduce_fused(
 
             tv = tl.load(All_Ranks_Mid_O + offs_v, mask=mask_d, other=0.0)
             tlogic = tl.load(All_Ranks_Mid_O + offs_logic)
-            
+
             # Combine the partial result using softmax reduction
             n_e_max = tl.maximum(tlogic, e_max)
             old_scale = libdevice.fast_expf(e_max - n_e_max)
             acc *= old_scale
-            
+
             exp_logic = libdevice.fast_expf(tlogic - n_e_max)
             acc += exp_logic * tv
 
@@ -353,7 +353,7 @@ def gqa_global_reduce_fused(
 
     final_out = acc / e_sum
     final_out = tl.where(e_sum == 0, 0.0, final_out)
-    
+
     tl.store(
         o + cur_batch * stride_obs + cur_head * stride_oh + offs_d,
         final_out,

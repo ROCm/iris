@@ -93,8 +93,8 @@ class Iris:
 
     def broadcast(self, value, source_rank):
         return mpi_broadcast_scalar(value, source_rank)
-    
-    def broadcast_tensor(self, value, source_rank=0): 
+
+    def broadcast_tensor(self, value, source_rank=0):
         return mpi_broadcast_tensor(value, root=source_rank)
 
     def allocate(self, num_elements, dtype):

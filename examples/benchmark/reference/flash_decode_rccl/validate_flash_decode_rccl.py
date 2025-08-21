@@ -32,6 +32,13 @@
 import sys
 import os
 from pathlib import Path
+import pytest
+from typing import List, Optional
+from argparse import Namespace
+
+import torch
+import torch.distributed as dist
+from fd_layer_rccl import FDLayerRCCL
 
 project_root = Path(__file__).resolve()
 while not (project_root / 'tests').is_dir() or not (project_root / 'examples').is_dir():
@@ -53,14 +60,7 @@ if module_dir.exists():
 else:
     print("ERROR: Target directory not found. Not modifying sys.path.")
 
-import pytest
-from typing import List, Optional
-from argparse import Namespace
-
-import torch
-import torch.distributed as dist
-from fd_layer_rccl import FDLayerRCCL
-from utils import print_correctness_report
+from utils import print_correctness_report # noqa: E402
 
 # ==============================================================================
 # Reference Implementation & Data Preparation
@@ -165,7 +165,7 @@ def test_correctness_rccl_fused_full(kv_len, num_heads, num_seqs, head_dim):
     value_cache_this_rank = value_cache[args.rank * num_blocks_per_rank:(args.rank + 1) * num_blocks_per_rank]
 
     block_tables_this_rank = torch.arange(num_blocks_per_rank, dtype=torch.int32).repeat(num_seqs, 1).cuda()
-    
+
     gathered_tables_list = [torch.empty_like(block_tables_this_rank) for _ in range(args.world_size)]
     dist.all_gather(gathered_tables_list, block_tables_this_rank, group=args.tp_group)
     ref_block_tables = torch.cat([tbl + r * num_blocks_per_rank for r, tbl in enumerate(gathered_tables_list)], dim=-1)
@@ -181,7 +181,7 @@ def test_correctness_rccl_fused_full(kv_len, num_heads, num_seqs, head_dim):
         head_dim, head_dim, args.tp_group, **keyword_params
     )
     dist.barrier(group=args.tp_group)
-    
+
     kv_lens_per_rank = [config['kv_len']] * num_seqs
     kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32).cuda()
     global_kv_lens_tensor = kv_lens_tensor.unsqueeze(0).repeat(args.world_size, 1)
@@ -201,7 +201,7 @@ def test_correctness_rccl_fused_full(kv_len, num_heads, num_seqs, head_dim):
         torch.testing.assert_close(output, ref_output, atol=1e-4, rtol=1e-4)
     except AssertionError as e:
         error = e
-    
+
     print_correctness_report(args.rank, output, ref_output, error)
 
     if error:

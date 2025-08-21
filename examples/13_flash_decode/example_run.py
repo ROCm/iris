@@ -37,17 +37,17 @@ DTYPE = torch.float16
 
 def setup_example_data(rank, world_size):
     """Creates a set of random tensors to serve as inputs for the layer."""
-    
+
     num_query_heads = NUM_HEADS
     # Assume an 8:1 Grouped-Query Attention ratio for this example
     num_kv_heads = max(1, NUM_HEADS // 8)
     block_size = 1 # PagedAttention works with blocks of tokens
-    
+
     # Number of blocks needed on this rank to store the KV cache for all sequences
     num_blocks_per_rank = (KV_LEN_PER_RANK + block_size - 1) // block_size
 
     print(f"[Rank {rank}] Creating example tensors...")
-    
+
     # 1. Query tensor: The new tokens for which we are calculating attention.
     query = torch.randn(NUM_SEQS, num_query_heads, HEAD_DIM, dtype=DTYPE).cuda()
 
@@ -67,7 +67,7 @@ def setup_example_data(rank, world_size):
     kv_lens_tensor_this_rank = torch.tensor(kv_lens_per_rank, dtype=torch.int32).cuda()
     # Reshape to (1, NUM_SEQS) and repeat for all ranks to get shape (world_size, NUM_SEQS)
     global_kv_lens_tensor = kv_lens_tensor_this_rank.unsqueeze(0).repeat(world_size, 1)
-    
+
     return {
         "query": query,
         "key_cache_this_rank": key_cache_this_rank,
@@ -121,13 +121,13 @@ if __name__ == "__main__":
     if rank == 0:
         print("Calling the forward pass...")
     output = fd_layer(
-        tensor_data['query'], 
+        tensor_data['query'],
         tensor_data['key_cache_this_rank'],
         tensor_data['value_cache_this_rank'],
         tensor_data['global_kv_lens_tensor'],
         tensor_data['block_tables_this_rank']
     )
-    
+
     # Ensure the computation is finished before printing
     torch.cuda.synchronize()
     _iris.barrier()

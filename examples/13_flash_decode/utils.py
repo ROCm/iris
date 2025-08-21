@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 
 import torch
 import os
-import json 
+import json
 
 def dist_print(message: str, rank: int, is_error: bool = False):
     """Prints a message only from rank 0."""
@@ -27,17 +27,17 @@ def print_correctness_report(
     Prints a detailed report from rank 0 and the final status from all ranks.
     """
     if rank == 0:
-        print(f"\n<<<<<<<<<< Correctness Test Report (Impl: FUSED_FULL) >>>>>>>>>>")
+        print("\n<<<<<<<<<< Correctness Test Report (Impl: FUSED_FULL) >>>>>>>>>>")
         print(f"--- Detailed Validation on Rank {rank} ---")
         header = f"{'Index':<8} | {'Computed':<15} | {'Reference':<15} | {'Abs. Diff':<15}"
         print("--- Comparison of First 16 Values (Head 0) ---")
         print(header)
         print("-" * len(header))
-        
+
         comp_slice = computed[0, 0, :16].cpu().float()
         ref_slice = reference[0, 0, :16].cpu().float()
         diff_slice = torch.abs(comp_slice - ref_slice)
-        
+
         for i in range(len(comp_slice)):
             print(f"{i:<8} | {comp_slice[i]:<15.6f} | {ref_slice[i]:<15.6f} | {diff_slice[i]:<15.6f}")
         print("-" * len(header))

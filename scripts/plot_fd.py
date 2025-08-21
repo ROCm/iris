@@ -22,7 +22,7 @@ OUTPUT_DIR = "plots"
 def load_data_from_directory(directory_path: str, backend_name: str) -> pd.DataFrame:
     """Walks a directory, loads all .json files, and returns a pandas DataFrame."""
     all_results = []
-    
+
     if not os.path.isdir(directory_path):
         print(f"Warning: Directory not found: '{directory_path}'. Skipping this backend.")
         return None
@@ -41,7 +41,7 @@ def load_data_from_directory(directory_path: str, backend_name: str) -> pd.DataF
     if not all_results:
         print(f"Warning: No valid .json files found in '{directory_path}'.")
         return None
-        
+
     df = pd.DataFrame(all_results)
     df['backend'] = backend_name
     print(f"Successfully loaded {len(df)} results for backend '{backend_name}'.")
@@ -51,11 +51,11 @@ def load_data_from_directory(directory_path: str, backend_name: str) -> pd.DataF
 def plot_config_group(group_df: pd.DataFrame, config_key: tuple):
     """Creates and saves a bar chart for a specific configuration group."""
     num_heads, head_dim, num_seqs = config_key
-    
+
 
     pivot_df = group_df.pivot(index='kv_len', columns='backend', values='avg_time_ms')
     pivot_df.sort_index(inplace=True)
-    
+
     fig, ax = plt.subplots(figsize=(12, 7))
     x = np.arange(len(pivot_df.index))
     width = 0.35
@@ -69,12 +69,12 @@ def plot_config_group(group_df: pd.DataFrame, config_key: tuple):
     ax.set_title(title, fontsize=16, pad=15)
     ax.set_ylabel('Average Time (ms)', fontsize=12)
     ax.set_xlabel('Local KV Cache Length (per Rank)', fontsize=12)
-    
+
     ax.grid(axis='y', linestyle='--', alpha=0.7, zorder=0)
-    
+
     ax.set_xticks(x)
     ax.set_xticklabels(pivot_df.index, rotation=45, ha="right")
-    
+
     ax.legend(fontsize=12)
     fig.tight_layout()
 
@@ -100,11 +100,11 @@ if __name__ == "__main__":
     if not data_frames:
         print("Error: No valid data loaded from any directory. Exiting.")
         exit()
-        
+
     combined_df = pd.concat(data_frames, ignore_index=True)
 
     config_groups = combined_df.groupby(['num_heads', 'head_dim', 'num_seqs'])
-    
+
     print(f"\nFound {len(config_groups)} unique configurations to plot.")
 
     for config_key, group_df in config_groups:

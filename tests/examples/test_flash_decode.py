@@ -33,6 +33,13 @@
 import sys
 import os
 from pathlib import Path
+import pytest
+from typing import List, Optional
+from argparse import Namespace
+
+import numpy as np
+import torch
+import iris
 
 project_root = Path(__file__).resolve()
 while not (project_root / 'tests').is_dir() or not (project_root / 'examples').is_dir():
@@ -53,16 +60,8 @@ if module_dir.exists():
 else:
     print("ERROR: Target directory not found")
 
-import pytest
-from typing import List, Optional
-from argparse import Namespace
-
-import numpy as np
-import torch
-import iris
-
-from fd_fused_layer import FDFusedLayer
-from utils import print_correctness_report
+from fd_fused_layer import FDFusedLayer # noqa: E402
+from utils import print_correctness_report # noqa: E402
 
 # ==============================================================================
 # Reference Implementation & Data Preparation
@@ -176,7 +175,7 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
         "v_head_dim": head_dim, "page_size": config['block_size'], "scale": scale, "soft_cap": config['soft_cap'],
         "max_allowed_batch": num_seqs
     }
-    
+
     iris_fd_layer = FDFusedLayer(
         args.iris_instance, args.rank, args.rank // args.local_num_ranks,
         args.num_ranks, args.num_ranks // args.local_num_ranks, **common_params
