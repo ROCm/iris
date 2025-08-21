@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 import iris
+import os
 
 # ==============================================================================
 # Path and Module Setup
@@ -34,10 +35,10 @@ from fd_fused_layer import FDFusedLayer
 # Benchmark Configuration Sweep
 # ==============================================================================
 
-KV_LEN_SWEEP = [8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
+KV_LEN_SWEEP = [8192, 16384, 32768, 65536, 131072, 262144, 524288]
 NUM_HEADS_SWEEP = [96, 128]
 HEAD_DIM_SWEEP = [128]
-NUM_SEQS_SWEEP = [1]
+NUM_SEQS_SWEEP = [1, 4]
 
 
 # --- Generate configurations (this is a cartesian product to get all configs) ---
@@ -51,7 +52,7 @@ for kv_len, num_heads, head_dim, num_seqs in param_product:
         "num_seqs": num_seqs,
     })
 
-OUTPUT_FILENAME = "benchmark_results.json"
+OUTPUT_DIR="results/fd_iris"
 DATATYPE = torch.float16
 N_WARMUP = 100
 N_REPEAT = 1000
@@ -82,7 +83,12 @@ def main():
     _iris = iris.iris()
     rank = _iris.get_rank()
     world_size = _iris.get_num_ranks()
-
+    
+    if rank == 0:
+        if not os.path.exists(OUTPUT_DIR):
+            os.makedirs(OUTPUT_DIR)
+            print(f"Created output directory: '{OUTPUT_DIR}'")
+            
     torch.manual_seed(42)
     torch.set_default_device("cuda")
     all_results = []
@@ -106,8 +112,9 @@ def main():
         fd_layer = FDFusedLayer(_iris, rank, rank, world_size, world_size, **common_params)
         
         tensor_data = prepare_perf_data(cfg, num_query_heads, num_kv_heads)
-        kv_lens_tensor = torch.tensor([cfg['kv_len']], dtype=torch.int32).cuda()
-        global_kv_lens_tensor = torch.cat([kv_lens_tensor.view(1, -1) for _ in range(world_size)], dim=0)
+        kv_lens_per_rank = [config['kv_len']] * config['num_seqs']
+        kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32).cuda()
+        global_kv_lens_tensor = kv_lens_tensor.unsqueeze(0).repeat(world_size, 1)
         
         def run_experiment():
             return fd_layer(
@@ -130,12 +137,16 @@ def main():
             result_entry = config.copy()
             result_entry['global_kv_len'] = global_kv_len
             result_entry['avg_time_ms'] = time_ms
-            all_results.append(result_entry)
+            
+            filename = (
+                f"h{config['num_heads']}_d{config['head_dim']}_"
+                f"s{config['num_seqs']}_kv{config['kv_len']}.json"
+            )
+            output_path = os.path.join(OUTPUT_DIR, filename)
 
-            # Overwrite the file
-            with open(OUTPUT_FILENAME, 'w') as f:
-                json.dump(all_results, f, indent=4)
-            print(f"Updated '{OUTPUT_FILENAME}' with {len(all_results)} total result(s).")
+            with open(output_path, 'w') as f:
+                json.dump(result_entry, f, indent=4)
+            print(f"Saved result to '{output_path}'")
             
     if rank == 0:
         print(f"\nBenchmark sweep complete.")

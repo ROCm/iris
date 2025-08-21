@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
+import os
 
 import iris
 from fd_layer_rccl import FDLayerRCCL
@@ -18,10 +19,10 @@ from fd_layer_rccl import FDLayerRCCL
 # Benchmark Configuration Sweep
 # ==============================================================================
 
-KV_LEN_SWEEP = [8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
+KV_LEN_SWEEP = [8192, 16384, 32768, 65536, 131072, 262144, 524288]
 NUM_HEADS_SWEEP = [96, 128]
 HEAD_DIM_SWEEP = [128]
-NUM_SEQS_SWEEP = [1]
+NUM_SEQS_SWEEP = [1, 4]
 
 
 # --- Generate configurations (this is a cartesian product to get all configs) ---
@@ -35,7 +36,7 @@ for kv_len, num_heads, head_dim, num_seqs in param_product:
         "num_seqs": num_seqs,
     })
 
-OUTPUT_FILENAME = "benchmark_results_rccl.json"
+OUTPUT_DIR="results/fd_rccl_2"
 DATATYPE = torch.float16
 N_WARMUP = 100
 N_REPEAT = 1000
@@ -68,6 +69,11 @@ def main():
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    
+    if rank == 0:
+        if not os.path.exists(OUTPUT_DIR):
+            os.makedirs(OUTPUT_DIR)
+            print(f"Created output directory: '{OUTPUT_DIR}'")
 
     tp_group = dist.new_group(ranks=range(world_size))
 
@@ -131,12 +137,17 @@ def main():
             result_entry = config.copy()
             result_entry['global_kv_len'] = global_kv_len
             result_entry['avg_time_ms'] = time_ms
-            all_results.append(result_entry)
+            
+            filename = (
+                f"h{config['num_heads']}_d{config['head_dim']}_"
+                f"s{config['num_seqs']}_kv{config['kv_len']}.json"
+            )
+            output_path = os.path.join(OUTPUT_DIR, filename)
 
-    if rank == 0:
-        with open(OUTPUT_FILENAME, 'w') as f:
-            json.dump(all_results, f, indent=4)
-        print(f"\nBenchmark sweep complete. All results saved to '{OUTPUT_FILENAME}'")
+            with open(output_path, 'w') as f:
+                json.dump(result_entry, f, indent=4)
+            print(f"Saved result to '{output_path}'")
+    print(f"\nBenchmark sweep complete.")
 
     dist.barrier()
     dist.destroy_process_group()
