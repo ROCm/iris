@@ -36,7 +36,7 @@ for kv_len, num_heads, head_dim, num_seqs in param_product:
         "num_seqs": num_seqs,
     })
 
-OUTPUT_DIR="results/fd_rccl_2"
+OUTPUT_DIR="results/fd_rccl"
 DATATYPE = torch.float16
 N_WARMUP = 100
 N_REPEAT = 1000
