@@ -123,7 +123,7 @@ def get_arch_string(device_id=None):
     return arch_name
 
 
-def get_num_xcd(device_id = None):
+def get_num_xcd(device_id=None):
     return 8
 
 
