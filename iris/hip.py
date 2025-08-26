@@ -2,7 +2,6 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import ctypes
-import enum
 import numpy as np
 import sys
 import torch
@@ -10,24 +9,12 @@ import torch
 rt_path = "libamdhip64.so"
 hip_runtime = ctypes.cdll.LoadLibrary(rt_path)
 
-amdsmi_path = "libamd_smi.so"
-amdsmi = ctypes.cdll.LoadLibrary(amdsmi_path)
-
 
 def hip_try(err):
     if err != 0:
         hip_runtime.hipGetErrorString.restype = ctypes.c_char_p
         error_string = hip_runtime.hipGetErrorString(ctypes.c_int(err)).decode("utf-8")
         raise RuntimeError(f"HIP error code {err}: {error_string}")
-
-
-def _amdsmi_try(err):
-    if err != 0:
-        error_string = ctypes.c_char_p()
-        amdsmi.amdsmi_status_code_to_string.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
-        amdsmi.amdsmi_status_code_to_string(ctypes.c_int(err), ctypes.byref(error_string))
-        error_string = error_string.value.decode("utf-8")
-        raise RuntimeError(f"AMDSMI error code {err}: {error_string}")
 
 
 class hipIpcMemHandle_t(ctypes.Structure):
@@ -136,26 +123,8 @@ def get_arch_string(device_id=None):
     return arch_name
 
 
-def _amdsmi_init():
-    AMDSMI_INIT_AMD_GPUS = 2
-    amdsmi.amdsmi_init.argtypes = [ctypes.c_uint64]
-    _amdsmi_try(amdsmi.amdsmi_init(ctypes.c_uint64(AMDSMI_INIT_AMD_GPUS)))
-
-
-def _amdsmi_shutdown():
-    amdsmi.amdsmi_shut_down.argtypes = []
-    _amdsmi_try(amdsmi.amdsmi_shut_down())
-
-
-def get_num_xcd(device_id=None):
-    if device_id is None:
-        device_id = get_device_id()
-    _amdsmi_init()
-    xcd_counter = ctypes.c_uint16(0)
-    amdsmi.rsmi_dev_metrics_xcd_counter_get.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint16)]
-    _amdsmi_try(amdsmi.rsmi_dev_metrics_xcd_counter_get(ctypes.c_uint32(device_id), ctypes.byref(xcd_counter)))
-    _amdsmi_shutdown()
-    return xcd_counter.value
+def get_num_xcd(device_id = None):
+    return 8
 
 
 def malloc_fine_grained(size):
