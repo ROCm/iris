@@ -66,7 +66,7 @@ cur_rank = iris_ctx.get_rank()
 # Iris tensor allocation
 buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
 
-# Launch the kernel on rank 0.
+# Launch the kernel on rank 0
 block_size = 1024
 grid = lambda meta: (triton.cdiv(buffer_size, meta["block_size"]),)
 source_rank = 0
@@ -78,7 +78,7 @@ if cur_rank == source_rank:
         iris_ctx.get_heap_bases(),
     )
 
-# Synchronize all ranks.
+# Synchronize all ranks
 iris_ctx.barrier()
 ```
 
