@@ -39,18 +39,18 @@ import triton
 import triton.language as tl
 import iris
 
-# Device-side APIs.
+# Device-side APIs
 @triton.jit
 def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bases_ptr):
-    # Compute start index of this block.
+    # Compute start index of this block
     pid = tl.program_id(0)
     block_start = pid * block_size
     offsets = block_start + tl.arange(0, block_size)
     
-    # Guard for out-of-bounds accesses.
+    # Guard for out-of-bounds accesses
     mask = offsets < buffer_size
 
-    # Store 1 in the target buffer at each offset.
+    # Store 1 in the target buffer at each offset
     source_rank = 0
     target_rank = 1
     iris.store(buffer + offsets, 1,
