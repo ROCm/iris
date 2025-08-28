@@ -25,12 +25,13 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris
 ## Documentation
 
 1. [Programming Model](docs/PROGRAMMING_MODEL.md)
-2. [Peer-to-Peer Communication](examples/README.md)
+2. [Examples](examples/README.md)
 3. [Fine-grained GEMM & Communication Overlap](docs/FINEGRAINED_OVERLAP.md)
 4. [Setup Alternatives](docs/SETUP_ALTERNATIVES.md)
 
 ## API Example
 
+Here's a simple example showing how to perform remote memory operations between GPUs using Iris:
 
 ```python
 import torch
@@ -56,15 +57,17 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
             source_rank, target_rank,
             heap_bases_ptr, mask=mask)
 
-# Iris symmetric heap setup.
-heap_size = 2**30
-buffer_size = 4096
-block_size = 1024
+# Iris initialization
+heap_size = 2**30   # 1GB symmetric heap for inter-GPU communication
+buffer_size = 4096  # 4KB buffer for demonstration
 iris_ctx = iris.iris(heap_size)
 cur_rank = iris_ctx.get_rank()
+
+# Iris tensor allocation
 buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
 
-# Launch the kernel on source_rank.
+# Launch the kernel on rank 0.
+block_size = 1024
 grid = lambda meta: (triton.cdiv(buffer_size, meta["block_size"]),)
 source_rank = 0
 if cur_rank == source_rank:
