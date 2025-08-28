@@ -58,7 +58,7 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
             heap_bases_ptr, mask=mask)
 
 # Iris initialization
-heap_size = 2**30   # 1GB symmetric heap for inter-GPU communication
+heap_size = 2**30   # 1GiB symmetric heap for inter-GPU communication
 buffer_size = 4096  # 4KB buffer for demonstration
 iris_ctx = iris.iris(heap_size)
 cur_rank = iris_ctx.get_rank()
