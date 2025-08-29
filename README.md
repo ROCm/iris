@@ -59,11 +59,11 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
 
 # Iris initialization
 heap_size = 2**30   # 1GiB symmetric heap for inter-GPU communication
-buffer_size = 4096  # 4KB buffer for demonstration
 iris_ctx = iris.iris(heap_size)
 cur_rank = iris_ctx.get_rank()
 
 # Iris tensor allocation
+buffer_size = 4096  # 4K elements buffer
 buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
 
 # Launch the kernel on rank 0
