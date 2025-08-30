@@ -143,7 +143,7 @@ def main():
     flags = shmem.zeros((num_blocks,), device="cuda", dtype=torch.int32)
 
     if cur_rank == producer_rank:
-        iris.logger.info(f"[{cur_rank}/{world_size}] Rank {cur_rank} is sending data to rank {consumer_rank}.")
+        shmem.info(f"Rank {cur_rank} is sending data to rank {consumer_rank}.")
         kk = producer_kernel[grid](
             source_buffer,
             destination_buffer,
@@ -155,13 +155,13 @@ def main():
             shmem.get_heap_bases(),
         )
     else:
-        iris.logger.info(f"[{cur_rank}/{world_size}] Rank {cur_rank} is receiving data from rank {producer_rank}.")
+        shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank}.")
         kk = consumer_kernel[grid](
             destination_buffer, flags, n_elements, consumer_rank, args["block_size"], shmem.get_heap_bases()
         )
     shmem.barrier()
-    iris.logger.info(f"[{cur_rank}/{world_size}] Rank {cur_rank} has finished sending/receiving data.")
-    iris.logger.info(f"[{cur_rank}/{world_size}] Validating output...")
+    shmem.info(f"Rank {cur_rank} has finished sending/receiving data.")
+    shmem.info(f"Validating output...")
 
     success = True
     if cur_rank == consumer_rank:
@@ -171,21 +171,21 @@ def main():
 
         if not torch.allclose(destination_buffer, expected, atol=1):
             max_diff = (destination_buffer - expected).abs().max().item()
-            iris.logger.info(f"[{cur_rank}/{world_size}] Max absolute difference: {max_diff}")
+            shmem.info(f"Max absolute difference: {max_diff}")
             for idx in breaking_indices:
                 idx = tuple(idx.tolist())
                 computed_val = destination_buffer[idx]
                 expected_val = expected[idx]
-                iris.logger.info(
-                    f"[{cur_rank}/{world_size}] Mismatch at index {idx}: C={computed_val}, expected={expected_val}"
+                shmem.info(
+                    f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}"
                 )
                 success = False
                 break
 
         if success:
-            iris.logger.info(f"[{cur_rank}/{world_size}] Validation successful.")
+            shmem.info(f"Validation successful.")
         else:
-            iris.logger.info(f"[{cur_rank}/{world_size}] Validation failed.")
+            shmem.info(f"Validation failed.")
 
     shmem.barrier()
 

@@ -126,8 +126,8 @@ def bench_load(
         )
     if cur_rank == 0:
         if verbose:
-            iris.logger.info(
-                f"[{cur_rank}/{world_size}] Measuring bandwidth between the ranks {source_rank} and {destination_rank}..."
+            shmem.info(
+                f"Measuring bandwidth between the ranks {source_rank} and {destination_rank}..."
             )
     n_elements = source_buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
