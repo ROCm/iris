@@ -46,6 +46,7 @@ jobs:
     strategy:
       matrix:
         ranks: [1, 2, 4, 8]
+      max-parallel: 1
 
     steps:
       - name: Checkout repository
