@@ -151,7 +151,7 @@ class Iris:
             memory_format (torch.memory_format, optional): the desired memory format of returned Tensor.
                 Default: torch.preserve_format. If preserve_format is provided, input must be contiguous, otherwise it must be torch.contiguous_format.
         """
-        self.log_debug(
+        self.debug(
             f"zeros_like: input_shape = {input.shape}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
         )
 
