@@ -160,8 +160,8 @@ class Iris:
             # If preserving format, check if input is already contiguous
             if not input.is_contiguous():
                 raise RuntimeError(
-                    f"Cannot preserve memory format: input tensor is not contiguous. "
-                    f"Iris only supports torch.contiguous_format."
+                    "Cannot preserve memory format: input tensor is not contiguous. "
+                    "Iris only supports torch.contiguous_format."
                 )
         elif memory_format != torch.contiguous_format:
             raise RuntimeError(
