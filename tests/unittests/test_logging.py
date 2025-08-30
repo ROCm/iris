@@ -158,13 +158,3 @@ def test_api_import():
     except ImportError as e:
         # If iris module can't be imported due to dependencies, skip this test
         pytest.skip(f"Skipping API import test due to dependency issues: {e}")
-
-
-if __name__ == "__main__":
-    # Run basic tests
-    test_logging_constants()
-    test_set_logger_level()
-    test_logger_setup()
-    test_logger_api_usage()
-    test_iris_formatter()
-    print("All basic logging tests passed!")
