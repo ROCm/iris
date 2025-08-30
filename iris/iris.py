@@ -80,33 +80,30 @@ class Iris:
 
     def _log_with_rank(self, level, message):
         """Helper method to log with rank information injected into the record."""
-        record = logging.LogRecord(
-            name=logger.name, level=level, pathname="", lineno=0, msg=message, args=(), exc_info=None
-        )
-        # Inject rank information into the record
-        record.iris_rank = self.cur_rank
-        record.iris_num_ranks = self.num_ranks
-        logger.handle(record)
+        if logger.isEnabledFor(level):
+            record = logging.LogRecord(
+                name=logger.name, level=level, pathname="", lineno=0, msg=message, args=(), exc_info=None
+            )
+            # Inject rank information into the record
+            record.iris_rank = self.cur_rank
+            record.iris_num_ranks = self.num_ranks
+            logger.handle(record)
 
     def debug(self, message):
         """Log a debug message with rank information."""
-        if logger.isEnabledFor(logging.DEBUG):
-            self._log_with_rank(logging.DEBUG, message)
+        self._log_with_rank(logging.DEBUG, message)
 
     def info(self, message):
         """Log an info message with rank information."""
-        if logger.isEnabledFor(logging.INFO):
-            self._log_with_rank(logging.INFO, message)
+        self._log_with_rank(logging.INFO, message)
 
     def warning(self, message):
         """Log a warning message with rank information."""
-        if logger.isEnabledFor(logging.WARNING):
-            self._log_with_rank(logging.WARNING, message)
+        self._log_with_rank(logging.WARNING, message)
 
     def error(self, message):
         """Log an error message with rank information."""
-        if logger.isEnabledFor(logging.ERROR):
-            self._log_with_rank(logging.ERROR, message)
+        self._log_with_rank(logging.ERROR, message)
 
     def broadcast(self, value, source_rank):
         return mpi_broadcast_scalar(value, source_rank)
