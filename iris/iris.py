@@ -119,8 +119,7 @@ class Iris:
         self, input, *, dtype=None, layout=None, device=None, requires_grad=False, memory_format=torch.preserve_format
     ):
         """
-        Returns a tensor filled with the scalar value 0, with the same size as input.
-        The returned tensor is allocated on the Iris symmetric heap for distributed memory access.
+        Returns a tensor filled with the scalar value 0, with the same size as input, allocated on the Iris symmetric heap.
 
         Args:
             input (Tensor): the size of input will determine size of the output tensor.
