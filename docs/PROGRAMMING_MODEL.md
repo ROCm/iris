@@ -11,8 +11,8 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 Iris is an open-source triton-based framework for Remote Memory Access (RMA)[^1] operations written in only a few 100 lines of code. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming.
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../images/iris-model.png">
-  <source media="(prefers-color-scheme: light)" srcset="../images/iris-model-light.png">
-  <img alt="Iris Model" align="right" src="../images/iris-model.png" width="300px">
+<source media="(prefers-color-scheme: light)" srcset="../images/iris-model-light.png">
+<img alt="Iris Model" align="right" src="../images/iris-model.png" width="300px">
 </picture>
 
 1. **Designed by Experts, Built for Scale**
@@ -89,8 +89,8 @@ def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../images/heap.png">
-  <source media="(prefers-color-scheme: light)" srcset="../images/heap-light.png">
-  <img alt="Iris Symmetric Heap" src="../images/heap.png">
+<source media="(prefers-color-scheme: light)" srcset="../images/heap-light.png">
+<img alt="Iris Symmetric Heap" src="../images/heap.png">
 </picture>
 
 Symmetric Heap is a Partitioned Global Address Space (PGAS) abstraction

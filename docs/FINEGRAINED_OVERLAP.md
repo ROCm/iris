@@ -37,7 +37,7 @@ You can run the example code by following these two steps:
 mpirun -np 4 python examples/gemm/benchmark.py --benchmark --validate --algorithm one_shot
 ```
 
-```terminal
+```bash
 python benchmark.py --help
 usage: benchmark.py [-h] [-m M] [-n N] [-k K] [--debug] [--validate] [--benchmark] [--datatype {fp16,fp32,int8,bf16}] [--algorithm {all_reduce,all_scatter,one_shot}]
                     [--output_file OUTPUT_FILE] [--BLK_M BLK_M] [--BLK_N BLK_N] [--BLK_K BLK_K] [--COMMUNICATION_TILE_M COMMUNICATION_TILE_M] [--COMMUNICATION_TILE_N COMMUNICATION_TILE_N]
@@ -92,14 +92,14 @@ options:
 
 ## Reference implementations
 
-There are two reference implementations (`all_gather.py` and `all_reduce.py`) that use RCCL inside the [reference](../examples/gemm/reference/) directory. To run any of them,
+There are several GEMM implementations available in the examples directory. To run any of them,
 
 ```shell
 cd reference
 ./run.sh
 ```
 
-```terminal
+```bash
 (py_3.10) Apptainer> ./run.sh --help
 Usage: ./run.sh [OPTIONS]
 
