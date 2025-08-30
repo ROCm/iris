@@ -29,9 +29,15 @@ put_module = importlib.util.module_from_spec(put_spec)
 put_spec.loader.exec_module(put_module)
 
 
-def run_message_passing_test(module, dtype, buffer_size, heap_size, block_size):
-    """Helper function to run message passing test with given parameters."""
-    shmem = iris.iris(heap_size)
+def create_test_args(dtype_str, buffer_size, heap_size, block_size):
+    """Create args dict that matches what parse_args() returns."""
+    return {"datatype": dtype_str, "buffer_size": buffer_size, "heap_size": heap_size, "block_size": block_size}
+
+
+def run_message_passing_kernels(module, args):
+    """Run the core message passing logic without command line argument parsing."""
+    shmem = iris.iris(args["heap_size"])
+    dtype = module.torch_dtype_from_str(args["datatype"])
     cur_rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
@@ -39,76 +45,58 @@ def run_message_passing_test(module, dtype, buffer_size, heap_size, block_size):
     if world_size != 2:
         pytest.skip("Message passing examples require exactly two processes.")
 
-    # Allocate source and destination buffers on the symmetric heap
-    source_buffer = shmem.zeros(buffer_size, device="cuda", dtype=dtype)
-    destination_buffer = shmem.randn(buffer_size, device="cuda", dtype=dtype)
+    # Allocate source and destination buffers on the symmetric heap - match original examples
+    source_buffer = shmem.zeros(args["buffer_size"], device="cuda", dtype=dtype)
+    destination_buffer = shmem.randn(args["buffer_size"], device="cuda", dtype=dtype)
 
     producer_rank = 0
     consumer_rank = 1
 
     n_elements = source_buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-    num_blocks = triton.cdiv(n_elements, block_size)
+    num_blocks = triton.cdiv(n_elements, args["block_size"])
 
     # Allocate flags on the symmetric heap
     flags = shmem.zeros((num_blocks,), device="cuda", dtype=torch.int32)
 
     if cur_rank == producer_rank:
         # Run producer kernel
-        if module == load_store_module:
-            load_store_module.producer_kernel[grid](
-                source_buffer,
-                destination_buffer,
-                flags,
-                n_elements,
-                producer_rank,
-                consumer_rank,
-                block_size,
-                shmem.get_heap_bases(),
-            )
-        else:  # put_module
-            put_module.producer_kernel[grid](
-                source_buffer,
-                destination_buffer,
-                flags,
-                n_elements,
-                producer_rank,
-                consumer_rank,
-                block_size,
-                shmem.get_heap_bases(),
-            )
+        module.producer_kernel[grid](
+            source_buffer,
+            destination_buffer,
+            flags,
+            n_elements,
+            producer_rank,
+            consumer_rank,
+            args["block_size"],
+            shmem.get_heap_bases(),
+        )
     else:
         # Run consumer kernel
-        if module == load_store_module:
-            load_store_module.consumer_kernel[grid](
-                destination_buffer, flags, n_elements, consumer_rank, block_size, shmem.get_heap_bases()
-            )
-        else:  # put_module
-            put_module.consumer_kernel[grid](
-                destination_buffer, flags, n_elements, consumer_rank, block_size, shmem.get_heap_bases()
-            )
+        module.consumer_kernel[grid](
+            destination_buffer, flags, n_elements, consumer_rank, args["block_size"], shmem.get_heap_bases()
+        )
 
     shmem.barrier()
 
-    # Validation - only consumer rank validates
+    # Validation - only consumer rank validates (matches original examples)
     success = True
     if cur_rank == consumer_rank:
         expected = source_buffer * 2
         if not torch.allclose(destination_buffer, expected, atol=1):
             success = False
 
-    # Both ranks need to agree on success
     shmem.barrier()
     return success
 
 
 @pytest.mark.parametrize(
-    "dtype",
+    "dtype_str",
     [
-        torch.int8,
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
+        "int8",
+        "fp16",
+        "bf16",
+        "fp32",
     ],
 )
 @pytest.mark.parametrize(
@@ -125,19 +113,20 @@ def run_message_passing_test(module, dtype, buffer_size, heap_size, block_size):
         1024,
     ],
 )
-def test_message_passing_load_store(dtype, buffer_size, heap_size, block_size):
+def test_message_passing_load_store(dtype_str, buffer_size, heap_size, block_size):
     """Test message passing with load/store operations."""
-    success = run_message_passing_test(load_store_module, dtype, buffer_size, heap_size, block_size)
+    args = create_test_args(dtype_str, buffer_size, heap_size, block_size)
+    success = run_message_passing_kernels(load_store_module, args)
     assert success, "Message passing load/store validation failed"
 
 
 @pytest.mark.parametrize(
-    "dtype",
+    "dtype_str",
     [
-        torch.int8,
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
+        "int8",
+        "fp16",
+        "bf16",
+        "fp32",
     ],
 )
 @pytest.mark.parametrize(
@@ -154,7 +143,8 @@ def test_message_passing_load_store(dtype, buffer_size, heap_size, block_size):
         1024,
     ],
 )
-def test_message_passing_put(dtype, buffer_size, heap_size, block_size):
+def test_message_passing_put(dtype_str, buffer_size, heap_size, block_size):
     """Test message passing with put operations."""
-    success = run_message_passing_test(put_module, dtype, buffer_size, heap_size, block_size)
+    args = create_test_args(dtype_str, buffer_size, heap_size, block_size)
+    success = run_message_passing_kernels(put_module, args)
     assert success, "Message passing put validation failed"
