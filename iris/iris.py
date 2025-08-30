@@ -130,11 +130,73 @@ class Iris:
         num_elements = math.prod(size)
         return size, num_elements
 
-    def zeros_like(self, tensor):
-        dtype = tensor.dtype
-        num_elements = tensor.numel()
+    def zeros_like(
+        self, input, *, dtype=None, layout=None, device=None, requires_grad=False, memory_format=torch.preserve_format
+    ):
+        """
+        Returns a tensor filled with the scalar value 0, with the same size as input, allocated on the Iris symmetric heap.
+
+        Args:
+            input (Tensor): the size of input will determine size of the output tensor.
+
+        Keyword Arguments:
+            dtype (torch.dtype, optional): the desired data type of returned Tensor.
+                Default: if None, defaults to the dtype of input.
+            layout (torch.layout, optional): the desired layout of returned tensor.
+                Default: if None, defaults to the layout of input.
+            device (torch.device, optional): the desired device of returned tensor.
+                Default: if None, defaults to the device of input.
+            requires_grad (bool, optional): If autograd should record operations on the returned tensor.
+                Default: False.
+            memory_format (torch.memory_format, optional): the desired memory format of returned Tensor.
+                Default: torch.preserve_format. If preserve_format is provided, input must be contiguous, otherwise it must be torch.contiguous_format.
+        """
+        self.log_debug(
+            f"zeros_like: input_shape = {input.shape}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
+        )
+
+        # Use input's properties as defaults if not specified
+        if dtype is None:
+            dtype = input.dtype
+        if layout is None:
+            layout = input.layout
+        if device is None:
+            device = self.device
+
+        if not self.__is_valid_device(device):
+            raise RuntimeError(
+                f"Device mismatch: requested device {device} but Iris instance is on device {self.device}. "
+                f"Iris only supports tensors on its own device."
+            )
+
+        # Verify memory format - Iris only supports contiguous format for now
+        if memory_format == torch.preserve_format:
+            # If preserving format, check if input is already contiguous
+            if not input.is_contiguous():
+                raise RuntimeError(
+                    "Cannot preserve memory format: input tensor is not contiguous. "
+                    "Iris only supports torch.contiguous_format."
+                )
+        elif memory_format != torch.contiguous_format:
+            raise RuntimeError(
+                f"Memory format {memory_format} is not supported. Iris only supports torch.contiguous_format."
+            )
+
+        # Get the size from input tensor
+        size = input.size()
+        num_elements = input.numel()
+
+        # Allocate new tensor with the same size
         new_tensor = self.allocate(num_elements, dtype)
         new_tensor.zero_()
+
+        # Reshape to match input size
+        new_tensor = new_tensor.reshape(size)
+
+        # Set requires_grad if specified
+        if requires_grad:
+            new_tensor.requires_grad_()
+
         return new_tensor
 
     def arange(
@@ -324,6 +386,34 @@ class Iris:
             tensor.data_ptr() >= self.heap_bases[self.cur_rank]
             and tensor.data_ptr() < self.heap_bases[self.cur_rank] + self.heap_size
         )
+
+    def __is_valid_device(self, device) -> bool:
+        """
+        Check if the requested device is compatible with this Iris instance.
+
+        Args:
+            device: The requested device (can be string, torch.device, or None)
+
+        Returns:
+            bool: True if the device is compatible, False otherwise
+        """
+        if device is None:
+            return True  # None means use default device
+
+        # Convert device strings to torch.device objects for proper comparison
+        requested_device = torch.device(device) if isinstance(device, str) else device
+        iris_device = self.get_device()
+
+        # Check if both are CUDA devices
+        if requested_device.type == "cuda" and iris_device.type == "cuda":
+            # Check if index matches or if requested is "cuda" (any index)
+            if requested_device.index is None:
+                return True
+            else:
+                return requested_device.index == iris_device.index
+
+        # For non-CUDA devices, always return False
+        return False
 
 
 @triton.jit

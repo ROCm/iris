@@ -7,13 +7,15 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-apptainer-image:
     runs-on: [self-hosted, mi3008x]
     timeout-minutes: 90
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-build
-      cancel-in-progress: true
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -44,9 +46,8 @@ jobs:
     strategy:
       matrix:
         ranks: [1, 2, 4, 8]
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}-${{ matrix.ranks }}
-      cancel-in-progress: true
+      max-parallel: 1
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -55,7 +56,7 @@ jobs:
         run: |
           apptainer exec ~/apptainer/iris-dev.sif bash -c "
             set -e  # Exit on any error
-            
+
             # Install iris first
             pip install -e .
 
