@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 import torch
 import triton
 import triton.language as tl
@@ -62,6 +65,8 @@ def test_get_api(dtype, BLOCK_SIZE):
 
     data = shmem.ones(BLOCK_SIZE, dtype=dtype)
     results = shmem.zeros_like(data)
+
+    shmem.barrier()
 
     grid = lambda meta: (1,)
     get_kernel[grid](data, results, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)

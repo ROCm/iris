@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 import torch
 import triton
 import triton.language as tl
@@ -54,6 +57,8 @@ def test_atomic_xchg_api(dtype, sem, scope):
     cur_rank = shmem.get_rank()
 
     results = shmem.zeros((1,), dtype=dtype)
+
+    shmem.barrier()
 
     grid = lambda meta: (1,)
     atomic_xchg_kernel[grid](results, sem, scope, cur_rank, num_ranks, heap_bases)

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 import torch
 import triton
 import triton.language as tl
@@ -25,7 +28,16 @@ def atomic_add_kernel(
     # Loop over all ranks, get the stored data.
     # atomic_add acc into results.
     for target_rank in range(num_ranks):
-        iris.atomic_add(results + offsets, acc, cur_rank, target_rank, heap_bases, mask, sem=sem, scope=scope)
+        iris.atomic_add(
+            results + offsets,
+            acc,
+            cur_rank,
+            target_rank,
+            heap_bases,
+            mask,
+            sem=sem,
+            scope=scope,
+        )
 
 
 @pytest.mark.parametrize(
@@ -71,6 +83,8 @@ def test_atomic_add_api(dtype, sem, scope, BLOCK_SIZE):
     cur_rank = shmem.get_rank()
 
     results = shmem.zeros(BLOCK_SIZE, dtype=dtype)
+
+    shmem.barrier()
 
     grid = lambda meta: (1,)
     atomic_add_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
