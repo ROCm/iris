@@ -161,7 +161,7 @@ def main():
         )
     shmem.barrier()
     shmem.info(f"Rank {cur_rank} has finished sending/receiving data.")
-    shmem.info(f"Validating output...")
+    shmem.info("Validating output...")
 
     success = True
     if cur_rank == consumer_rank:
@@ -176,16 +176,14 @@ def main():
                 idx = tuple(idx.tolist())
                 computed_val = destination_buffer[idx]
                 expected_val = expected[idx]
-                shmem.info(
-                    f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}"
-                )
+                shmem.info(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
                 success = False
                 break
 
         if success:
-            shmem.info(f"Validation successful.")
+            shmem.info("Validation successful.")
         else:
-            shmem.info(f"Validation failed.")
+            shmem.info("Validation failed.")
 
     shmem.barrier()
 

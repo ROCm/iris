@@ -255,9 +255,7 @@ def main():
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
         triton_ms = iris.do_bench(run_experiment, shmem.barrier, preamble)
         triton_tflops = perf(triton_ms)
-        shmem.info(
-            f"tile matmul + all_reduce (grid={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
-        )
+        shmem.info(f"tile matmul + all_reduce (grid={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops")
 
         json_writer.add_field("triton_tflops", triton_tflops)
         json_writer.add_field("triton_ms", triton_ms)

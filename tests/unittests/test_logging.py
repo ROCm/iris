@@ -93,6 +93,7 @@ def test_logger_api_usage():
     log_capture = io.StringIO()
     handler = logging.StreamHandler(log_capture)
     from iris.logging import IrisFormatter
+
     handler.setFormatter(IrisFormatter())
 
     # Remove existing handlers and add our capture handler
