@@ -16,6 +16,7 @@ __pycache__/
 *.pftrace
 *.log
 *.txt
+!requirements.txt
 slurm_logs*/
 redo.sh
 
