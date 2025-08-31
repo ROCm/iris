@@ -1,6 +1,28 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
+"""
+Iris: Multi-GPU Communication and Memory Management Framework
+
+Iris is a high-performance framework for multi-GPU communication and memory management,
+providing efficient distributed tensor operations, atomic operations, and memory allocation
+across multiple GPUs in a cluster.
+
+Key Features:
+- Symmetric heap management across multiple GPUs
+- High-performance atomic operations (add, sub, cas, xchg, xor, and, or, min, max)
+- Efficient load/store operations with rank-to-rank communication
+- Memory allocation and deallocation utilities
+- Built-in logging with rank information
+- MPI integration for distributed computing
+
+Example:
+    >>> import iris
+    >>> ctx = iris.iris(heap_size=2**30)  # 1GB heap
+    >>> tensor = ctx.zeros(1024, 1024, dtype=torch.float32)
+    >>> ctx.atomic_add(tensor.data_ptr(), 1.0, 0, 1)
+"""
+
 import triton
 import triton.language as tl
 
@@ -29,6 +51,30 @@ from .logging import logger
 
 
 class Iris:
+    """
+    Main Iris class for multi-GPU communication and memory management.
+
+    This class provides a unified interface for distributed GPU operations including
+    memory allocation, atomic operations, and inter-rank communication.
+
+    Args:
+        heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
+
+    Attributes:
+        comm: MPI communicator for inter-rank communication
+        num_ranks (int): Total number of MPI ranks in the job
+        cur_rank (int): Current rank ID (0-based)
+        gpu_id (int): GPU device ID for this rank
+        heap_size (int): Size of the symmetric heap in bytes
+        device (str): CUDA device string (e.g., "cuda:0")
+        heap_bases (torch.Tensor): Base addresses of all ranks' heaps
+
+    Example:
+        >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap
+        >>> print(f"Rank {ctx.cur_rank} of {ctx.num_ranks}")
+        >>> tensor = ctx.zeros(1000, 1000, dtype=torch.float32)
+    """
+
     def __init__(self, heap_size=1 << 30):
         # Initialize
         comm, cur_rank, num_ranks = init_mpi()

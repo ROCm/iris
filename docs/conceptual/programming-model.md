@@ -2,7 +2,25 @@
 
 Iris is an open-source Triton-based framework for Remote Memory Access (RMA) operations written in only a few hundred lines of code. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming.
 
-![Iris Model](../../images/iris-model.png)
+<div class="theme-switch-wrapper">
+  <img class="dark-theme-img only-dark" src="/images/iris-model.png" alt="Iris Model">
+  <img class="light-theme-img only-light" src="/images/iris-model-light.png" alt="Iris Model">
+</div>
+
+<style>
+.theme-switch-wrapper .dark-theme-img {
+  display: inline !important;
+}
+.theme-switch-wrapper .light-theme-img {
+  display: none !important;
+}
+html[data-theme="light"] .theme-switch-wrapper .dark-theme-img {
+  display: none !important;
+}
+html[data-theme="light"] .theme-switch-wrapper .light-theme-img {
+  display: inline !important;
+}
+</style>
 
 ## Core Design Principles
 
@@ -98,7 +116,10 @@ def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
 
 ## Symmetric Heap Architecture
 
-![Iris Symmetric Heap](../../images/heap.png)
+<div class="theme-switch-wrapper">
+  <img class="dark-theme-img only-dark" src="/images/heap.png" alt="Iris Symmetric Heap">
+  <img class="light-theme-img only-light" src="/images/heap-light.png" alt="Iris Symmetric Heap">
+</div>
 
 The Symmetric Heap is a Partitioned Global Address Space (PGAS) abstraction that enables seamless remote memory access.
 
@@ -352,7 +373,7 @@ print(f"Operation took {end_time - start_time:.4f} seconds")
 Now that you understand the programming model:
 
 1. **Try the examples**: Run the [Examples](../reference/examples.md) to see these patterns in action
-2. **Explore tutorials**: Follow the [Tutorials](../tutorials/basic-operations.md) to learn step-by-step
+2. **Explore examples**: Follow the [Examples](../reference/examples.md) to learn step-by-step
 3. **Build your own**: Start with simple patterns and gradually increase complexity
 4. **Join the community**: Ask questions in GitHub Discussions
 

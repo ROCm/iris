@@ -1,430 +1,113 @@
-# Examples Reference
+# Examples
 
-This document provides a comprehensive overview of all the example programs included with Iris, organized by complexity and use case.
+This directory contains various algorithm implementations for distributed computing and matrix operations using Iris.
 
-## Quick Start Examples
+## Directory Structure
 
-### Basic Load/Store Operations
+### Basic Operations
+- **00_load**: Load operations across multiple GPUs
+- **01_store**: Store operations across multiple GPUs
+- **02_all_load**: Load operations where all GPUs load simultaneously
+- **03_all_store**: Store operations where all GPUs store simultaneously
+- **04_atomic_add**: Atomic add operations across multiple GPUs
+- **05_atomic_xchg**: Atomic exchange operations across multiple GPUs
 
-**File**: `examples/00_load/load_bench.py`
+### Communication Patterns
+- **06_message_passing**: Point-to-point message passing (load/store and put/get operations)
 
-Demonstrates fundamental load/store operations between GPUs.
+### GEMM Operations
+- **07_gemm_all_scatter**: Matrix multiplication with all-scatter communication
+- **08_gemm_atomics_all_reduce**: Matrix multiplication with all-reduce using atomics
+- **09_gemm_one_shot_all_reduce**: Matrix multiplication with one-shot all-reduce
+- **10_gemm_all_scatter_wg_specialization**: Matrix multiplication with all-scatter using workgroup specialization
+- **11_gemm_all_scatter_producer_consumer**: Matrix multiplication with all-scatter using producer-consumer concurrent kernels
+- **12_gemm_all_scatter_bulk_synchronous**: Matrix multiplication with all-scatter using the bulk synchronous parallel approach
 
-**Key Features:**
-- Basic remote memory access
-- Synchronization with barriers
-- Memory allocation in symmetric heap
+### Utilities
+- **benchmark**: Benchmarking utilities and performance testing tools
+- **common**: Common utilities and shared code for examples
 
-**Usage:**
+## Usage
+
+### Basic Operations
 ```bash
-mpirun -np 2 python examples/00_load/load_bench.py
+# Example command to run distributed load operations
+mpirun -np 8 python examples/00_load/load_bench.py  # Load across GPUs
+mpirun -np 8 python examples/02_all_load/all_load_bench.py  # Simultaneous load on all GPUs
+
+# Example command to run distributed store operations
+mpirun -np 8 python examples/01_store/store_bench.py  # Store across GPUs
+mpirun -np 8 python examples/03_all_store/all_store_bench.py  # Simultaneous store on all GPUs
+
+# Example command to run atomic operations
+mpirun -np 8 python examples/04_atomic_add/atomic_add_bench.py  # Atomic add across GPUs
+mpirun -np 8 python examples/05_atomic_xchg/atomic_xchg_bench.py  # Atomic exchange across GPUs
+
+# Example command to run message passing
+python examples/06_message_passing/message_passing_put.py
+python examples/06_message_passing/message_passing_load_store.py
 ```
 
-**What it teaches:**
-- How to initialize Iris
-- Basic load/store patterns
-- Memory management fundamentals
-
-### Store Operations
-
-**File**: `examples/01_store/store_bench.py`
-
-Shows how to store data from one GPU to another.
-
-**Key Features:**
-- Store operations with different data types
-- Performance benchmarking
-- Error handling
-
-**Usage:**
+### GEMM Operations
 ```bash
-mpirun -np 2 python examples/01_store/store_bench.py
-```
-
-## Advanced Operations
-
-### All Load Operations
-
-**File**: `examples/02_all_load/all_load_bench.py`
-
-Demonstrates loading data from all GPUs to a single GPU.
-
-**Key Features:**
-- Multi-GPU data aggregation
-- Collective communication patterns
-- Performance analysis
-
-**Usage:**
-```bash
-mpirun -np 4 python examples/02_all_load/all_load_bench.py
-```
-
-### All Store Operations
-
-**File**: `examples/03_all_store/all_store_bench.py`
-
-Shows how to distribute data from one GPU to all others.
-
-**Key Features:**
-- One-to-many communication
-- Broadcast patterns
-- Memory efficiency
-
-**Usage:**
-```bash
-mpirun -np 4 python examples/03_all_store/all_store_bench.py
-```
-
-## Atomic Operations
-
-### Atomic Add
-
-**File**: `examples/04_atomic_add/atomic_add_bench.py`
-
-Demonstrates atomic addition operations across GPUs.
-
-**Key Features:**
-- Atomic operations for counters
-- Race condition prevention
-- Performance comparison with non-atomic operations
-
-**Usage:**
-```bash
-mpirun -np 4 python examples/04_atomic_add/atomic_add_bench.py
-```
-
-**Example Pattern:**
-```python
-@triton.jit
-def atomic_add_kernel(buffer, heap_bases_ptr):
-    offsets = tl.arange(0, 1024)
-    mask = offsets < 1024
-    
-    # Atomically add 1 to each element
-    iris.atomic_add(buffer + offsets, 1, 0, 1, heap_bases_ptr, mask=mask)
-```
-
-### Atomic Exchange
-
-**File**: `examples/05_atomic_xchg/atomic_xchg_bench.py`
-
-Shows atomic exchange operations for lock-free programming.
-
-**Key Features:**
-- Atomic value swapping
-- Lock-free synchronization
-- Performance benchmarking
-
-**Usage:**
-```bash
-mpirun -np 4 python examples/05_atomic_xchg/atomic_xchg_bench.py
-```
-
-## Communication Patterns
-
-### Message Passing
-
-**File**: `examples/06_message_passing/message_passing_load_store.py`
-
-Demonstrates point-to-point communication using load/store operations.
-
-**Key Features:**
-- Bidirectional communication
-- Message queuing patterns
-- Flow control
-
-**Usage:**
-```bash
-mpirun -np 2 python examples/06_message_passing/message_passing_load_store.py
-```
-
-**File**: `examples/06_message_passing/message_passing_put.py`
-
-Alternative message passing implementation using put operations.
-
-**Key Features:**
-- Put-based communication
-- Performance comparison
-- Different synchronization strategies
-
-## GEMM with Communication
-
-### All-Scatter Pattern
-
-**File**: `examples/07_gemm_all_scatter/`
-
-Complete matrix multiplication example with all-scatter communication.
-
-**Main Files:**
-- `gemm_all_scatter.py`: Core GEMM implementation
-- `benchmark.py`: Performance benchmarking
-- `matmul_wrapper.py`: Utility functions
-
-**Key Features:**
-- Matrix multiplication with communication overlap
-- All-scatter communication pattern
-- Performance optimization techniques
-
-**Usage:**
-```bash
-# Run benchmark
+# Example command to run benchmark with all-scatter algorithm
 mpirun -np 8 python examples/07_gemm_all_scatter/benchmark.py --benchmark --validate
 
-# Run specific GEMM
-mpirun -np 8 python examples/07_gemm_all_scatter/gemm_all_scatter.py
+# Example command to run benchmark with all-reduce algorithm
+mpirun -np 8 python examples/08_gemm_atomics_all_reduce/benchmark.py --benchmark --validate
+
+# Example command to run benchmark with one-shot all-reduce algorithm
+mpirun -np 8 python examples/09_gemm_one_shot_all_reduce/benchmark.py --benchmark --validate
+
+# Example command to run benchmark with all-scatter and workgroup specialization
+mpirun -np 8 python examples/10_gemm_all_scatter_wg_specialization/benchmark.py --benchmark --validate
+
+# Example command to run benchmark with all-scatter producer-consumer pattern
+mpirun -np 8 python examples/11_gemm_all_scatter_producer_consumer/benchmark.py --benchmark --validate
+
+# Example command to run benchmark with all-scatter bulk synchronous approach
+mpirun -np 8 python examples/12_gemm_all_scatter_bulk_synchronous/benchmark.py --benchmark --validate
 ```
 
-### Atomics with All-Reduce
+## Example Outputs
 
-**File**: `examples/08_gemm_atomics_all_reduce/`
-
-GEMM implementation using atomic operations and all-reduce.
-
-**Key Features:**
-- Atomic accumulation
-- All-reduce for final results
-- Alternative to all-scatter pattern
-
-**Usage:**
-```bash
-mpirun -np 8 python examples/08_gemm_atomics_all_reduce/benchmark.py
+### Load Benchmark
+On an MI300X, the load benchmark will run on 8 GPUs and print bandwidth measurements:
+```
+Unidirectional LOAD bandwidth GiB/s [Remote read]
+ SRC\DST      GPU 00    GPU 01    GPU 02    GPU 03    GPU 04    GPU 05    GPU 06    GPU 07
+GPU 00  ->   5563.42     47.73     47.52     47.02     46.94     47.42     46.84     46.43
+GPU 01  ->     47.54   5154.41     47.21     47.62     47.43     47.08     46.91     46.74
+GPU 02  ->     47.54     47.31   5187.24     46.86     46.31     46.57     46.10     45.72
+GPU 03  ->     46.97     47.18     47.30   4803.27     46.97     46.79     45.97     45.71
+GPU 04  ->     47.43     47.27     46.46     46.59   5091.24     47.48     47.38     47.09
+GPU 05  ->     47.34     47.09     46.45     47.11     47.77   5076.19     47.32     47.33
+GPU 06  ->     46.98     46.72     46.04     46.11     47.30     47.36   5332.80     46.99
+GPU 07  ->     46.02     46.90     45.95     45.95     47.45     47.48     47.32   4798.39
 ```
 
-### One-Shot All-Reduce
-
-**File**: `examples/09_gemm_one_shot_all_reduce/`
-
-Optimized GEMM with single all-reduce operation.
-
-**Key Features:**
-- Minimal communication overhead
-- Single synchronization point
-- Memory-efficient implementation
-
-**Usage:**
-```bash
-mpirun -np 8 python examples/09_gemm_one_shot_all_reduce/benchmark.py
+### Atomic Add Benchmark
+The atomic add benchmark shows atomic operation performance:
+```
+Unidirectional ATOMIC_ADD bandwidth GiB/s [Remote atomic add]
+ SRC\DST      GPU 00    GPU 01    GPU 02    GPU 03    GPU 04    GPU 05    GPU 06    GPU 07
+GPU 00  ->    785.72     15.61     15.64     15.48     15.66     15.58     15.33     15.21
+GPU 01  ->     15.68    774.44     15.58     15.65     15.68     15.58     15.32     15.23
+GPU 02  ->     15.66     15.62    775.51     15.57     15.16     15.33     15.08     15.15
+GPU 03  ->     15.42     15.68     15.59    765.87     15.41     15.50     15.13     15.06
+GPU 04  ->     15.58     15.68     15.21     15.32    769.53     15.67     15.58     15.68
+GPU 05  ->     15.59     15.49     15.24     15.50     15.57    773.01     15.67     15.59
+GPU 06  ->     15.41     15.41     15.15     15.06     15.50     15.67    778.30     15.58
+GPU 07  ->     15.22     15.33     15.07     15.06     15.66     15.54     15.56    765.45
 ```
 
-## Advanced Optimization
+## Getting Started
 
-### Workgroup Specialization
+Start with the basic operations to understand Iris fundamentals:
 
-**File**: `examples/10_gemm_all_scatter_wg_specialization/`
+1. **Load/Store**: Begin with `00_load` and `01_store` to learn basic memory operations
+2. **Atomic Operations**: Try `04_atomic_add` to understand atomic operations
+3. **Message Passing**: Explore `06_message_passing` for communication patterns
+4. **GEMM**: Move to the GEMM examples for complex distributed computing patterns
 
-GEMM with specialized workgroup patterns.
-
-**Key Features:**
-- Workgroup-level optimization
-- Specialized communication patterns
-- Performance tuning
-
-**Usage:**
-```bash
-mpirun -np 8 python examples/10_gemm_all_scatter_wg_specialization/benchmark.py
-```
-
-### Producer-Consumer Pattern
-
-**File**: `examples/11_gemm_all_scatter_producer_consumer/`
-
-GEMM using producer-consumer communication pattern.
-
-**Key Features:**
-- Asynchronous communication
-- Producer-consumer queues
-- Overlap computation and communication
-
-**Usage:**
-```bash
-mpirun -np 8 python examples/11_gemm_all_scatter_producer_consumer/benchmark.py
-```
-
-### Bulk Synchronous Pattern
-
-**File**: `examples/12_gemm_all_scatter_bulk_synchronous/`
-
-GEMM with bulk synchronous communication.
-
-**Key Features:**
-- Bulk communication operations
-- Synchronous execution model
-- Simplified synchronization
-
-**Usage:**
-```bash
-mpirun -np 8 python examples/12_gemm_all_scatter_bulk_synchronous/benchmark.py
-```
-
-## Benchmark Suite
-
-### All Shapes Benchmark
-
-**File**: `examples/benchmark/bench_all_shapes.py`
-
-Comprehensive benchmarking across different matrix shapes.
-
-**Key Features:**
-- Multiple matrix dimensions
-- Performance comparison
-- Scalability analysis
-
-**Usage:**
-```bash
-mpirun -np 8 python examples/benchmark/bench_all_shapes.py
-```
-
-### Reference Implementations
-
-**Directory**: `examples/benchmark/reference/`
-
-Reference implementations for comparison.
-
-**Files:**
-- `all_gather.py`: All-gather communication
-- `all_reduce.py`: All-reduce communication
-- `gemm.py`: Basic GEMM implementation
-- `reduce_scatter.py`: Reduce-scatter communication
-- `bench_all_shapes.py`: Benchmarking framework
-
-## Common Utilities
-
-### Utility Functions
-
-**File**: `examples/common/utils.py`
-
-Common utility functions used across examples.
-
-**Key Functions:**
-- Memory allocation helpers
-- Performance timing utilities
-- Validation functions
-
-### Validation
-
-**File**: `examples/common/validation.py`
-
-Validation utilities for checking correctness.
-
-**Key Functions:**
-- Result verification
-- Error checking
-- Performance validation
-
-## Running Examples
-
-### Basic Execution
-
-Most examples can be run with a simple MPI command:
-
-```bash
-# Basic 2-GPU execution
-mpirun -np 2 python examples/00_load/load_bench.py
-
-# 8-GPU execution for GEMM examples
-mpirun -np 8 python examples/07_gemm_all_scatter/benchmark.py
-```
-
-### Command Line Options
-
-Many examples support command line arguments:
-
-```bash
-# Run with benchmarking
-python examples/07_gemm_all_scatter/benchmark.py --benchmark
-
-# Run with validation
-python examples/07_gemm_all_scatter/benchmark.py --validate
-
-# Run with specific parameters
-python examples/07_gemm_all_scatter/benchmark.py --size 2048 --iterations 100
-```
-
-### Environment Variables
-
-Set these for optimal performance:
-
-```bash
-# ROCm environment
-export ROCR_VISIBLE_DEVICES=0,1,2,3
-
-# MPI environment
-export OMPI_ALLOW_RUN_AS_ROOT=1
-
-# Iris environment
-export IRIS_HEAP_SIZE=2147483648  # 2GB
-```
-
-## Learning Path
-
-### Beginner Level
-
-1. **Start with**: `examples/00_load/load_bench.py`
-2. **Learn**: Basic operations and memory management
-3. **Practice**: Modify buffer sizes and data types
-
-### Intermediate Level
-
-1. **Study**: `examples/04_atomic_add/atomic_add_bench.py`
-2. **Learn**: Atomic operations and synchronization
-3. **Practice**: Implement custom atomic patterns
-
-### Advanced Level
-
-1. **Master**: `examples/07_gemm_all_scatter/gemm_all_scatter.py`
-2. **Learn**: Complex communication patterns
-3. **Practice**: Optimize for your specific use case
-
-## Performance Tips
-
-### Memory Management
-
-- **Heap size**: Choose appropriate heap size for your workload
-- **Buffer alignment**: Use aligned buffer sizes for optimal performance
-- **Memory reuse**: Reuse buffers when possible
-
-### Communication Optimization
-
-- **Batch operations**: Group related operations
-- **Overlap**: Overlap computation and communication
-- **Reduce barriers**: Minimize synchronization points
-
-### Kernel Optimization
-
-- **Block size**: Experiment with different block sizes
-- **Grid size**: Optimize grid dimensions for your GPU
-- **Memory access**: Use coalesced memory access patterns
-
-## Troubleshooting
-
-### Common Issues
-
-1. **"CUDA out of memory"**: Reduce heap size or buffer size
-2. **"MPI rank errors"**: Ensure MPI rank count matches GPU count
-3. **"Import errors"**: Verify Iris installation and dependencies
-
-### Debugging Tips
-
-1. **Use logging**: Enable debug logging with `iris_ctx.debug()`
-2. **Check barriers**: Ensure proper synchronization
-3. **Validate results**: Use validation functions to check correctness
-
-## Contributing Examples
-
-### Adding New Examples
-
-1. **Follow structure**: Use existing examples as templates
-2. **Include documentation**: Add comprehensive docstrings
-3. **Add validation**: Include correctness checks
-4. **Benchmark**: Provide performance measurements
-
-### Example Guidelines
-
-1. **Clear naming**: Use descriptive file and function names
-2. **Error handling**: Include proper error handling
-3. **Documentation**: Document all parameters and return values
-4. **Testing**: Test with different configurations
-
----
-
-**Ready to explore these examples? Start with the [Basic Operations Tutorial](../tutorials/basic-operations.md) to understand the fundamentals!**
+Each example includes a README with specific usage instructions and expected outputs.

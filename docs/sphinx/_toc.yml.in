@@ -4,7 +4,6 @@ subtrees:
     entries:
     - file: getting-started/installation.md
     - file: getting-started/quick-start.md
-    - file: getting-started/setup-alternatives.md
   - caption: Tutorials
     entries:
     - file: tutorials/basic-operations.md

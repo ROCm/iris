@@ -4,7 +4,6 @@ subtrees:
     entries:
     - file: getting-started/installation.md
     - file: getting-started/quick-start.md
-    - file: getting-started/setup-alternatives.md
   - caption: Tutorials
     entries:
     - file: tutorials/basic-operations.md
@@ -13,8 +12,8 @@ subtrees:
     - file: tutorials/gemm-examples.md
   - caption: How-to Guides
     entries:
-    - file: how-to/debug-common-issues.md
     - file: how-to/optimize-performance.md
+    - file: how-to/debug-common-issues.md
     - file: how-to/benchmark-applications.md
   - caption: Conceptual
     entries:

@@ -9,18 +9,14 @@ The documentation is organized following the [Diataxis](https://diataxis.fr/) fr
 ### **Getting Started** 🚀
 - **[Installation Guide](getting-started/installation.md)**: Set up Iris on your system
 - **[Quick Start Guide](getting-started/quick-start.md)**: Run your first multi-GPU program
-- **[Setup Alternatives](getting-started/setup-alternatives.md)**: Different installation methods
 
 ### **Tutorials** 🎯
-- **[Basic Operations](tutorials/basic-operations.md)**: Load/store operations between GPUs
-- **[Atomic Operations](tutorials/atomic-operations.md)**: Cross-GPU atomic operations
-- **[Message Passing](tutorials/message-passing.md)**: Point-to-point communication
-- **[GEMM Examples](tutorials/gemm-examples.md)**: Matrix multiplication with communication
+- **[Examples](reference/examples.md)**: Complete working examples for all operations
+- **[API Reference](reference/iris-api.md)**: Auto-generated API documentation
 
-### **How-to Guides** 🔧
-- **[Performance Optimization](how-to/optimize-performance.md)**: Tips and tricks for best performance
-- **[Debugging Common Issues](how-to/debug-common-issues.md)**: Troubleshooting guide
-- **[Benchmarking Applications](how-to/benchmark-applications.md)**: Performance measurement
+### **Examples & API** 🔧
+- **[Examples](reference/examples.md)**: Complete working examples for all operations
+- **[API Reference](reference/iris-api.md)**: Auto-generated API documentation
 
 ### **Conceptual** 🧠
 - **[Programming Model](conceptual/programming-model.md)**: Deep dive into how Iris works
@@ -28,7 +24,7 @@ The documentation is organized following the [Diataxis](https://diataxis.fr/) fr
 - **[Architecture](conceptual/architecture.md)**: System design and internals
 
 ### **Reference** 📖
-- **[API Reference](reference/api-reference.md)**: Complete API documentation
+- **[API Reference](reference/iris-api.md)**: Complete API documentation
 - **[Examples](reference/examples.md)**: Comprehensive example collection
 - **[Contributing](reference/contributing.md)**: How to contribute to Iris
 
@@ -72,7 +68,7 @@ cd docs
    # Option 1: Open in browser
    open _build/html/index.html  # macOS
    xdg-open _build/html/index.html  # Linux
-   
+
    # Option 2: Serve locally
    python3 -m http.server -d _build/html/
    # Then visit http://localhost:8000
@@ -96,20 +92,19 @@ sphinx-autobuild -b html -d _build/doctrees -D language=en . _build/html --ignor
 
 1. **Start with**: [Installation Guide](getting-started/installation.md)
 2. **Then**: [Quick Start Guide](getting-started/quick-start.md)
-3. **Learn**: [Basic Operations Tutorial](tutorials/basic-operations.md)
-4. **Practice**: [Examples](reference/examples.md)
+3. **Practice**: [Examples](reference/examples.md)
 
 ### For Intermediate Users
 
 1. **Study**: [Programming Model](conceptual/programming-model.md)
-2. **Explore**: [Atomic Operations](tutorials/atomic-operations.md)
-3. **Optimize**: [Performance Optimization](how-to/optimize-performance.md)
-4. **Build**: [GEMM Examples](tutorials/gemm-examples.md)
+2. **Explore**: [Examples](reference/examples.md)
+3. **Reference**: [API Reference](reference/iris-api.md)
+4. **Contribute**: [Contributing Guide](reference/contributing.md)
 
 ### For Advanced Users
 
 1. **Master**: [Fine-grained Overlap](conceptual/finegrained-overlap.md)
-2. **Reference**: [API Reference](reference/api-reference.md)
+2. **Reference**: [API Reference](reference/iris-api.md)
 3. **Contribute**: [Contributing Guide](reference/contributing.md)
 4. **Extend**: [Architecture](conceptual/architecture.md)
 
@@ -191,33 +186,6 @@ For local or internal deployment:
 cp -r _build/html/* /var/www/iris-docs/
 ```
 
-## 🐛 Troubleshooting
-
-### Build Issues
-
-1. **Missing dependencies**: Install requirements with `pip install -r sphinx/requirements.txt`
-2. **Import errors**: Ensure you're in the docs directory
-3. **Theme issues**: Verify sphinx-rtd-theme is installed
-
-### Content Issues
-
-1. **Broken links**: Check file paths and TOC configuration
-2. **Missing images**: Verify image files exist and paths are correct
-3. **Formatting problems**: Check Markdown syntax
-
-### Common Commands
-
-```bash
-# Clean build
-rm -rf _build/
-
-# Check for broken links
-python3 -m sphinx -b linkcheck -d _build/doctrees . _build/linkcheck
-
-# Build PDF (if configured)
-python3 -m sphinx -b latex -d _build/doctrees . _build/latex
-```
-
 ## 📚 Additional Resources
 
 ### External Links
@@ -231,20 +199,6 @@ python3 -m sphinx -b latex -d _build/doctrees . _build/latex
 - **[Triton Documentation](https://triton-lang.org/main/)**: GPU programming language
 - **[PyTorch Documentation](https://pytorch.org/docs/)**: Deep learning framework
 - **[MPI Documentation](https://www.mpi-forum.org/docs/)**: Message passing interface
-
-## 🤝 Getting Help
-
-### Documentation Issues
-
-- **Report bugs**: Open an issue on GitHub
-- **Request improvements**: Use GitHub Discussions
-- **Ask questions**: Start a discussion
-
-### Technical Support
-
-- **Installation problems**: Check [Setup Alternatives](getting-started/setup-alternatives.md)
-- **Runtime errors**: See [Debugging Guide](how-to/debug-common-issues.md)
-- **Performance issues**: Review [Optimization Guide](how-to/optimize-performance.md)
 
 ---
 

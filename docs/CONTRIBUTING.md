@@ -22,7 +22,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 -->
 
-**[README](../README.md)** » **Contributing to Iris**
+**[README](../../README.md)** » **Contributing to Iris**
 
 # Contributing to Iris
 
