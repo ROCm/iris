@@ -46,9 +46,6 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          ls -alth
-          apt-get install -y tree
-          tree
           pip install -r docs/sphinx/requirements.txt
           pip install -e .
           
