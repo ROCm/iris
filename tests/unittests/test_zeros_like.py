@@ -129,7 +129,7 @@ def test_zeros_like_device_override():
     # Test that different CUDA device throws error
     if shmem.device.startswith("cuda:"):
         current_device = torch.device(shmem.device)
-        different_cuda = f"cuda:{(current_device.index + 1) % 4}"  # Use next GPU
+        different_cuda = f"cuda:{(current_device.index + 1) % torch.cuda.device_count()}"  # Use next GPU
         with pytest.raises(RuntimeError):
             shmem.zeros_like(input_tensor, device=different_cuda)
 
