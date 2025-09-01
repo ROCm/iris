@@ -102,7 +102,7 @@ def test_zeros_like_device_override():
 
     # Test default behavior
     result = shmem.zeros_like(input_tensor)
-    assert str(result.device) == shmem.device
+    assert str(result.device) == str(input_tensor.device)
     assert torch.all(result == 0)
 
     # Test same device works
@@ -116,9 +116,9 @@ def test_zeros_like_device_override():
         assert str(result.device) == shmem.device
         assert torch.all(result == 0)
 
-    # Test None device defaults to Iris device
+    # Test None device defaults to input tensor's device
     result = shmem.zeros_like(input_tensor, device=None)
-    assert str(result.device) == shmem.device
+    assert str(result.device) == str(input_tensor.device)
     assert torch.all(result == 0)
 
     # Test that different device throws error
@@ -157,14 +157,79 @@ def test_zeros_like_memory_format():
     assert result.shape == input_tensor.shape
     assert torch.all(result == 0)
 
-    # Test that unsupported memory formats throw an error
-    with pytest.raises(RuntimeError):
-        shmem.zeros_like(input_tensor, memory_format=torch.channels_last)
+    # Test channels_last format (should work for 4D tensors)
+    # Create a 4D tensor (NCHW format)
+    input_4d = shmem.full((2, 3, 4, 5), 1, dtype=torch.float32)
+    result_4d = shmem.zeros_like(input_4d, memory_format=torch.channels_last)
 
-    # Test that preserve_format fails if input is not contiguous
+    # For channels_last format, the shape changes from (N, C, H, W) to (N, H, W, C)
+    # Input: (2, 3, 4, 5) -> Output: (2, 4, 5, 3)
+    expected_shape = (input_4d.shape[0], input_4d.shape[2], input_4d.shape[3], input_4d.shape[1])
+    assert result_4d.shape == expected_shape, f"Expected {expected_shape}, got {result_4d.shape}"
+    assert torch.all(result_4d == 0)
+
+    # Compare with PyTorch's channels_last implementation
+    pytorch_input_4d = torch.full((2, 3, 4, 5), 1, dtype=torch.float32, device="cuda")
+    pytorch_result_4d = torch.zeros_like(pytorch_input_4d, memory_format=torch.channels_last)
+
+    # Verify it's actually in channels_last format
+    strides = result_4d.stride()
+    assert strides[0] > strides[2] > strides[3] > strides[1] == 1, (
+        f"Expected channels_last format strides, got {strides}"
+    )
+
+    # Test channels_last_3d format (should work for 5D tensors)
+    input_5d = shmem.full((2, 3, 4, 5, 6), 1, dtype=torch.float32)
+    result_5d = shmem.zeros_like(input_5d, memory_format=torch.channels_last_3d)
+
+    # For channels_last_3d format, the shape changes from (N, C, D, H, W) to (N, D, H, W, C)
+    # Input: (2, 3, 4, 5, 6) -> Output: (2, 4, 5, 6, 3)
+    expected_shape_5d = (input_5d.shape[0], input_5d.shape[2], input_5d.shape[3], input_5d.shape[4], input_5d.shape[1])
+    assert result_5d.shape == expected_shape_5d, f"Expected {expected_shape_5d}, got {result_5d.shape}"
+    assert torch.all(result_5d == 0)
+
+    # Compare with PyTorch's channels_last_3d implementation
+    pytorch_input_5d = torch.full((2, 3, 4, 5, 6), 1, dtype=torch.float32, device="cuda")
+    pytorch_result_5d = torch.zeros_like(pytorch_input_5d, memory_format=torch.channels_last_3d)
+
+    # Verify it's actually in channels_last_3d format
+    strides_5d = result_5d.stride()
+    assert strides_5d[0] > strides_5d[2] > strides_5d[3] > strides_5d[4] > strides_5d[1] == 1, (
+        f"Expected channels_last_3d format strides, got {strides_5d}"
+    )
+
+    # Test preserve_format with contiguous input
+    result_preserve = shmem.zeros_like(input_tensor, memory_format=torch.preserve_format)
+    assert result_preserve.shape == input_tensor.shape
+    assert torch.all(result_preserve == 0)
+
+    # Test preserve_format with non-contiguous input (should now work)
     non_contiguous_tensor = input_tensor.transpose(0, 1)  # This makes it non-contiguous
-    with pytest.raises(RuntimeError):
-        shmem.zeros_like(non_contiguous_tensor, memory_format=torch.preserve_format)
+    result_non_contig = shmem.zeros_like(non_contiguous_tensor, memory_format=torch.preserve_format)
+    assert result_non_contig.shape == non_contiguous_tensor.shape
+    assert torch.all(result_non_contig == 0)
+
+    # Test preserve_format with channels_last input (should copy the format)
+    # Create input tensor directly in channels_last format using Iris
+    input_4d_channels_last = shmem.zeros_like(
+        shmem.full((2, 3, 4, 5), 1, dtype=torch.float32), memory_format=torch.channels_last
+    )
+    result_preserve_channels_last = shmem.zeros_like(input_4d_channels_last, memory_format=torch.preserve_format)
+
+    # Compare with PyTorch's preserve_format behavior
+    pytorch_input_4d_cl = torch.full((2, 3, 4, 5), 1, dtype=torch.float32, device="cuda")
+    pytorch_input_4d_cl = pytorch_input_4d_cl.to(memory_format=torch.channels_last)
+    pytorch_result_preserve = torch.zeros_like(pytorch_input_4d_cl, memory_format=torch.preserve_format)
+
+    # Verify strides match exactly (preserve_format should copy the input's memory format)
+    assert result_preserve_channels_last.stride() == pytorch_result_preserve.stride(), (
+        f"Preserve format strides don't match: {result_preserve_channels_last.stride()} vs {pytorch_result_preserve.stride()}"
+    )
+
+    # Verify all results are on the symmetric heap
+    assert shmem._Iris__on_symmetric_heap(result_4d)
+    assert shmem._Iris__on_symmetric_heap(result_5d)
+    assert shmem._Iris__on_symmetric_heap(result_preserve_channels_last)
 
 
 def test_zeros_like_pytorch_equivalence():
@@ -187,6 +252,16 @@ def test_zeros_like_pytorch_equivalence():
     # Verify values match (both should be all zeros)
     assert torch.all(iris_result == 0)
     assert torch.all(pytorch_result == 0)
+
+    # Test that device defaults work like PyTorch
+    # PyTorch: device=None defaults to input.device
+    # Iris: should do the same
+    iris_result_default = shmem.zeros_like(input_tensor, device=None)
+    pytorch_result_default = torch.zeros_like(pytorch_input, device=None)
+
+    # Both should default to their input tensor's device
+    assert str(iris_result_default.device) == str(input_tensor.device)
+    assert str(pytorch_result_default.device) == str(pytorch_input.device)
 
 
 def test_zeros_like_edge_cases():
@@ -211,6 +286,11 @@ def test_zeros_like_edge_cases():
     assert large_result.shape == (100, 100)
     assert large_result.numel() == 10000
     assert torch.all(large_result == 0)
+
+    # Verify all edge case results are on symmetric heap
+    assert shmem._Iris__on_symmetric_heap(empty_result)
+    assert shmem._Iris__on_symmetric_heap(single_result)
+    assert shmem._Iris__on_symmetric_heap(large_result)
 
 
 @pytest.mark.parametrize(
@@ -243,3 +323,92 @@ def test_zeros_like_parameter_combinations(params):
     # Verify requires_grad if specified
     if "requires_grad" in params:
         assert result.requires_grad == params["requires_grad"]
+
+    # Verify tensor is on symmetric heap
+    assert shmem._Iris__on_symmetric_heap(result)
+
+
+@pytest.mark.parametrize(
+    "shape,dtype",
+    [
+        ((1,), torch.float32),
+        ((5,), torch.int32),
+        ((2, 3), torch.float64),
+        ((3, 4, 5), torch.float16),
+        ((2, 3, 4, 5), torch.float32),  # 4D for channels_last
+        ((2, 3, 4, 5, 6), torch.float32),  # 5D for channels_last_3d
+        ((0,), torch.float32),  # Empty tensor
+        ((100, 100), torch.float32),  # Large tensor
+    ],
+)
+def test_zeros_like_symmetric_heap_shapes_dtypes(shape, dtype):
+    """Test that zeros_like returns tensors on symmetric heap for various shapes and dtypes."""
+    shmem = iris.iris(1 << 20)
+
+    # Create input tensor
+    input_tensor = shmem.full(shape, 5, dtype=dtype)
+
+    # Test all compatible memory formats
+    memory_formats = [
+        torch.contiguous_format,
+        torch.preserve_format,
+    ]
+
+    # Add dimension-specific formats
+    if len(shape) == 4:
+        memory_formats.append(torch.channels_last)
+    elif len(shape) == 5:
+        memory_formats.append(torch.channels_last_3d)
+
+    for memory_format in memory_formats:
+        # Test zeros_like with this memory format
+        result = shmem.zeros_like(input_tensor, memory_format=memory_format)
+
+        # Verify tensor is on symmetric heap
+        assert shmem._Iris__on_symmetric_heap(result), (
+            f"Tensor with shape {shape}, dtype {dtype}, memory_format {memory_format} is NOT on symmetric heap!"
+        )
+
+        # Also verify basic functionality
+        # For memory format conversions, the shape might change
+        if memory_format == torch.channels_last and len(shape) == 4:
+            # channels_last converts (N, C, H, W) to (N, H, W, C)
+            expected_shape = (shape[0], shape[2], shape[3], shape[1])
+            assert result.shape == expected_shape, f"Expected {expected_shape}, got {result.shape}"
+        elif memory_format == torch.channels_last_3d and len(shape) == 5:
+            # channels_last_3d converts (N, C, D, H, W) to (N, D, H, W, C)
+            expected_shape = (shape[0], shape[2], shape[3], shape[4], shape[1])
+            assert result.shape == expected_shape, f"Expected {expected_shape}, got {result.shape}"
+        else:
+            assert result.shape == shape
+        assert result.dtype == dtype
+        assert torch.all(result == 0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64, torch.int32, torch.int64])
+def test_zeros_like_symmetric_heap_dtype_override(dtype):
+    """Test that zeros_like with dtype override returns tensors on symmetric heap."""
+    shmem = iris.iris(1 << 20)
+    input_tensor = shmem.full((3, 3), 1, dtype=torch.float32)
+
+    result = shmem.zeros_like(input_tensor, dtype=dtype)
+    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
+    assert result.dtype == dtype
+
+
+def test_zeros_like_symmetric_heap_other_params():
+    """Test that zeros_like with other parameters returns tensors on symmetric heap."""
+    shmem = iris.iris(1 << 20)
+    input_tensor = shmem.full((3, 3), 1, dtype=torch.float32)
+
+    # Test with requires_grad
+    result = shmem.zeros_like(input_tensor, requires_grad=True)
+    assert shmem._Iris__on_symmetric_heap(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
+
+    # Test with device override
+    result = shmem.zeros_like(input_tensor, device=shmem.device)
+    assert shmem._Iris__on_symmetric_heap(result), "Tensor with device override is NOT on symmetric heap!"
+
+    # Test with layout override (only strided is supported)
+    result = shmem.zeros_like(input_tensor, layout=torch.strided)
+    assert shmem._Iris__on_symmetric_heap(result), "Tensor with layout override is NOT on symmetric heap!"
