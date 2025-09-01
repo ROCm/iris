@@ -315,7 +315,9 @@ def test_full_symmetric_heap_shapes_dtypes(size, fill_value, dtype):
     result = shmem.full(size, fill_value, dtype=dtype)
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with size {size}, fill_value {fill_value}, dtype {dtype} is NOT on symmetric heap!"
+    assert shmem._Iris__on_symmetric_heap(result), (
+        f"Tensor with size {size}, fill_value {fill_value}, dtype {dtype} is NOT on symmetric heap!"
+    )
 
     # Also verify basic functionality
     assert result.shape == size
@@ -407,8 +409,7 @@ def test_full_examples():
 
     # Example: torch.full((2, 3), 3.141592)
     result = shmem.full((2, 3), 3.141592)
-    expected = torch.tensor([[3.141592, 3.141592, 3.141592],
-                            [3.141592, 3.141592, 3.141592]], device=result.device)
+    expected = torch.tensor([[3.141592, 3.141592, 3.141592], [3.141592, 3.141592, 3.141592]], device=result.device)
     assert result.shape == (2, 3)
     assert torch.allclose(result, expected)
     assert shmem._Iris__on_symmetric_heap(result)

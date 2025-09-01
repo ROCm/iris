@@ -418,7 +418,9 @@ class Iris:
             requires_grad (bool, optional): If autograd should record operations on the returned tensor.
                 Default: False.
         """
-        self.debug(f"full: size = {size}, fill_value = {fill_value}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
+        self.debug(
+            f"full: size = {size}, fill_value = {fill_value}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
+        )
 
         # Infer dtype from fill_value if not provided
         if dtype is None:
