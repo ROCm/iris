@@ -315,7 +315,7 @@ def test_randint_symmetric_heap_other_params():
     """Test that randint with other parameters returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
 
-    # Test with requires_grad 
+    # Test with requires_grad
     result = shmem.randint(0, 10, (3, 3), dtype=torch.float32, requires_grad=True)
     assert shmem._Iris__on_symmetric_heap(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
 
