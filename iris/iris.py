@@ -217,7 +217,7 @@ class Iris:
                 be the default dtype, see get_default_dtype(). Otherwise, the dtype is inferred
                 to be torch.int64.
             layout (torch.layout, optional): the desired layout of returned Tensor. Default: torch.strided.
-                Note: Iris tensors are always contiguous in memory regardless of this parameter.
+                Note: Iris tensors always use `torch.strided` regardless of this parameter.
             device (torch.device, optional): the desired device of returned tensor.
                 Default: if None, uses the current device for the default tensor type.
             requires_grad (bool, optional): If autograd should record operations on the returned tensor. Default: False.
