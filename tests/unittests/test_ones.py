@@ -297,9 +297,7 @@ def test_ones_symmetric_heap_shapes_dtypes(size, dtype):
     result = shmem.ones(*size, dtype=dtype)
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result), (
-        f"Tensor with size {size}, dtype {dtype} is NOT on symmetric heap!"
-    )
+    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with size {size}, dtype {dtype} is NOT on symmetric heap!"
 
     # Also verify basic functionality
     assert result.shape == size
@@ -414,15 +412,14 @@ def test_ones_examples():
 
     # Example 1: torch.ones(2, 3)
     result1 = shmem.ones(2, 3)
-    expected1 = torch.tensor([[1., 1., 1.],
-                             [1., 1., 1.]], device=result1.device)
+    expected1 = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], device=result1.device)
     assert result1.shape == (2, 3)
     assert torch.all(result1 == expected1)
     assert shmem._Iris__on_symmetric_heap(result1)
 
     # Example 2: torch.ones(5)
     result2 = shmem.ones(5)
-    expected2 = torch.tensor([1., 1., 1., 1., 1.], device=result2.device)
+    expected2 = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0], device=result2.device)
     assert result2.shape == (5,)
     assert torch.all(result2 == expected2)
     assert shmem._Iris__on_symmetric_heap(result2)
