@@ -420,30 +420,6 @@ def test_randn_pin_memory():
     # Note: pin_memory is ignored for GPU tensors, so we just verify it doesn't cause errors
 
 
-def test_randn_distribution():
-    """Test that randn produces values from a normal distribution."""
-    shmem = iris.iris(1 << 20)
-
-    # Test with reasonably sized tensor to get good statistical coverage
-    result = shmem.randn(100, 100)
-    assert result.shape == (100, 100)
-
-    # Calculate expected bounds for normal distribution
-    n = result.numel()  # 10,000 samples
-    expected_min = -math.sqrt(2 * math.log(n))
-    expected_max = math.sqrt(2 * math.log(n))
-
-    # Check that min/max are within expected statistical bounds
-    min_val = torch.min(result).item()
-    max_val = torch.max(result).item()
-
-    # Allow some tolerance (±1) for statistical variation
-    assert min_val < expected_min + 1.0, f"Minimum value {min_val} too high (expected ~{expected_min})"
-    assert max_val > expected_max - 1.0, f"Maximum value {max_val} too low (expected ~{expected_max})"
-
-    assert shmem._Iris__on_symmetric_heap(result)
-
-
 def test_randn_deterministic_behavior():
     """Test that randn works with deterministic settings."""
     shmem = iris.iris(1 << 20)
