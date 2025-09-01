@@ -178,7 +178,7 @@ class Iris:
         new_tensor = new_tensor.reshape(size)
 
         # Apply the requested memory format
-        new_tensor = self.__apply_memory_format(new_tensor, size, memory_format)
+        new_tensor = self.__apply_memory_format(new_tensor, size, memory_format, input)
 
         # Apply the requested layout
         new_tensor = self.__apply_layout(new_tensor, layout)
@@ -235,9 +235,13 @@ class Iris:
 
         # Validate step direction consistency
         if step > 0 and start >= end:
-            raise ValueError(f"start and end bounds inconsistent with step sign: start={start}, end={end}, step={step}")
+            raise ValueError(
+                f"upper bound and larger bound inconsistent with step sign: start={start}, end={end}, step={step}"
+            )
         elif step < 0 and start <= end:
-            raise ValueError(f"start and end bounds inconsistent with step sign: start={start}, end={end}, step={step}")
+            raise ValueError(
+                f"upper bound and larger bound inconsistent with step sign: start={start}, end={end}, step={step}"
+            )
 
         # Calculate the number of elements
         num_elements = math.ceil((end - start) / step)
@@ -445,7 +449,9 @@ class Iris:
                 f"Iris only supports tensors on its own device."
             )
 
-    def __apply_memory_format(self, tensor: torch.Tensor, size: tuple, memory_format: torch.memory_format):
+    def __apply_memory_format(
+        self, tensor: torch.Tensor, size: tuple, memory_format: torch.memory_format, input_tensor: torch.Tensor = None
+    ):
         """
         Apply the requested memory format to a tensor by setting appropriate strides.
         This keeps the tensor on the symmetric heap while changing how PyTorch interprets the memory layout.
@@ -454,6 +460,7 @@ class Iris:
             tensor: The tensor to modify
             size: The tensor's size/dimensions
             memory_format: The desired memory format
+            input_tensor: The original input tensor (needed for preserve_format detection)
         """
         if memory_format == torch.contiguous_format:
             # Default format, no changes needed
@@ -484,32 +491,36 @@ class Iris:
         elif memory_format == torch.preserve_format:
             # For preserve_format, we need to detect the input tensor's memory format
             # and apply the same format to the output
-            if len(size) == 4:
-                # Check if input tensor is in channels_last format
-                # We can detect this by checking if strides[1] == 1 (channels dimension)
-                # But we need to check the ORIGINAL input tensor, not the newly allocated one
-                # For now, let's check if the size suggests channels_last format
-                # If size is (N, H, W, C) instead of (N, C, H, W), it's likely channels_last
-                if size[1] != size[3]:  # H != C, suggesting channels_last format
-                    # Input appears to be in channels_last format, preserve it
-                    N, H, W, C = size[0], size[1], size[2], size[3]
-                    new_size = (N, H, W, C)
-                    self.debug(f"Preserving channels_last format: size={size} -> {new_size}")
-                    tensor = self.__create_tensor_with_strides(tensor, new_size, (H * W * C, 1, W * C, C))
-                    return tensor
-            elif len(size) == 5:
-                # Check if input tensor is in channels_last_3d format
-                if size[1] != size[4]:  # D != C, suggesting channels_last_3d format
-                    # Input appears to be in channels_last_3d format, preserve it
-                    N, D, H, W, C = size[0], size[1], size[2], size[3], size[4]
-                    new_size = (N, D, H, W, C)
-                    self.debug(f"Preserving channels_last_3d format: size={size} -> {new_size}")
-                    tensor = self.__create_tensor_with_strides(
-                        tensor, new_size, (D * H * W * C, 1, H * W * C, W * C, C)
-                    )
-                    return tensor
-            # If no special format detected, use contiguous format
-            self.debug("Input tensor appears to be in contiguous format, preserving that")
+            if input_tensor is not None:
+                # Check the actual memory format of the input tensor
+                if len(size) == 4:
+                    # Check if input tensor is in channels_last format by examining strides
+                    # channels_last format has strides[1] == 1 (channels dimension is contiguous)
+                    input_strides = input_tensor.stride()
+                    if len(input_strides) == 4 and input_strides[1] == 1:
+                        # Input is in channels_last format, preserve it
+                        # Use the input tensor's actual shape, not the size parameter
+                        input_shape = input_tensor.shape
+                        if len(input_shape) == 4:
+                            # Input is already in channels_last format (N, H, W, C)
+                            new_size = input_shape
+                            # Use the input tensor's strides directly
+                            tensor = self.__create_tensor_with_strides(tensor, new_size, input_strides)
+                            return tensor
+                elif len(size) == 5:
+                    # Check if input tensor is in channels_last_3d format
+                    input_strides = input_tensor.stride()
+                    if len(input_strides) == 5 and input_strides[1] == 1:
+                        # Input is in channels_last_3d format, preserve it
+                        # Use the input tensor's actual shape, not the size parameter
+                        input_shape = input_tensor.shape
+                        if len(input_shape) == 5:
+                            # Input is already in channels_last_3d format (N, D, H, W, C)
+                            new_size = input_shape
+                            # Use the input tensor's strides directly
+                            tensor = self.__create_tensor_with_strides(tensor, new_size, input_strides)
+                            return tensor
+            # If no special format detected or no input tensor provided, use contiguous format
             return tensor
         else:
             # Unsupported format or dimension combination
@@ -531,11 +542,8 @@ class Iris:
         Returns:
             A new tensor with the specified strides, data copied from original, on the same heap
         """
-        # We need to use torch.empty_strided to get the correct strides,
-        # but then copy the data to a heap-allocated tensor to stay on our heap
 
         # First, create a temporary tensor with the correct strides using PyTorch
-        self.debug(f"Creating temporary tensor with size={size}, strides={strides}")
         temp_tensor = torch.empty_strided(size, strides, dtype=original_tensor.dtype, device=original_tensor.device)
 
         # For memory format conversion, we need to permute the data to match the new layout
@@ -557,7 +565,6 @@ class Iris:
 
         # Now allocate a new tensor on our symmetric heap
         num_elements = math.prod(size)
-        self.debug(f"Allocating {num_elements} elements on symmetric heap for final tensor")
         heap_tensor = self.allocate(num_elements, original_tensor.dtype)
 
         # Reshape to the desired size
@@ -574,7 +581,6 @@ class Iris:
         # create a new tensor with the right strides and copy the data again
         final_tensor = torch.as_strided(heap_tensor, size, strides)
 
-        self.debug(f"Final tensor: size={final_tensor.shape}, strides={final_tensor.stride()}")
         return final_tensor
 
     def __apply_layout(self, tensor: torch.Tensor, layout: torch.layout) -> torch.Tensor:
@@ -588,27 +594,23 @@ class Iris:
         Returns:
             Tensor with the requested layout
         """
-        self.debug(f"__apply_layout called with layout: {layout}")
 
         if layout == torch.strided:
             # Strided layout is the default - no changes needed
-            self.debug("Using default strided layout, no changes needed")
             return tensor
         else:
             # Only support strided layout for now
             raise ValueError(f"Layout {layout} not supported. Only torch.strided is currently supported.")
 
     def __tensor_on_device(self, tensor: torch.Tensor):
-        # Get the Iris device from memory_pool.device (which is a torch.device object)
+        # Get the Iris device from memory_pool.device
         iris_device = self.get_device()
         tensor_device = tensor.device
 
         # For CUDA devices, check if they're compatible
         if tensor_device.type == "cuda" and iris_device.type == "cuda":
-            # If iris_device has no specific index, any CUDA device is fine
             if iris_device.index is None:
                 return True
-            # Otherwise, check if indices match
             return tensor_device.index == iris_device.index
 
         # For non-CUDA devices, they must be exactly equal
@@ -624,12 +626,8 @@ class Iris:
         tensor_ptr = int(tensor.data_ptr())
         heap_base = int(self.heap_bases[self.cur_rank])
 
-        # Debug info for troubleshooting
-        self.debug(f"Heap check: tensor_ptr={tensor_ptr}, heap_base={heap_base}, heap_size={self.heap_size}")
-
         result = tensor_ptr >= heap_base and tensor_ptr < heap_base + self.heap_size
 
-        self.debug(f"Heap check result: {result}")
         return result
 
     def __is_valid_device(self, device) -> bool:
