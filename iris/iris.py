@@ -520,14 +520,13 @@ class Iris:
             tensor = tensor.reshape(size)
 
         # Generate random numbers using PyTorch's rand
-        # Use specified device or fall back to current device
-        target_device = device if device is not None else self.device
+        # Use specified device (already validated and set above)
 
         # Handle generator parameter
         if generator is not None:
-            torch.rand(size, generator=generator, out=tensor, dtype=dtype, device=target_device)
+            torch.rand(size, generator=generator, out=tensor, dtype=dtype, device=device)
         else:
-            torch.rand(size, out=tensor, dtype=dtype, device=target_device)
+            torch.rand(size, out=tensor, dtype=dtype, device=device)
 
         # Apply the requested layout
         tensor = self.__apply_layout(tensor, layout)
