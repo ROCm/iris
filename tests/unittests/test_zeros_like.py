@@ -232,6 +232,63 @@ def test_zeros_like_memory_format():
     assert shmem._Iris__on_symmetric_heap(result_preserve_channels_last)
 
 
+def test_channels_last_format_shape_preservation():
+    """Test that channels_last format preserves shape and only changes strides."""
+    shmem = iris.iris(1 << 20)
+
+    # Test 4D tensor
+    input_4d = shmem.full((2, 3, 4, 5), 1, dtype=torch.float32)
+    result_4d = shmem.zeros_like(input_4d, memory_format=torch.channels_last)
+
+    # Verify shape is preserved
+    assert result_4d.shape == input_4d.shape, f"Shape changed: {input_4d.shape} -> {result_4d.shape}"
+    assert result_4d.shape == (2, 3, 4, 5), f"Expected shape (2, 3, 4, 5), got {result_4d.shape}"
+
+    # Verify strides indicate channels_last format
+    strides = result_4d.stride()
+    N, C, H, W = 2, 3, 4, 5
+    expected_strides = (C * H * W, 1, C * W, C)  # (60, 1, 15, 3)
+    assert strides == expected_strides, f"Expected strides {expected_strides}, got {strides}"
+
+    # Verify channels_last format characteristics: strides[1] == 1 (channels dimension is contiguous)
+    assert strides[1] == 1, f"Channels dimension should be contiguous (stride=1), got {strides[1]}"
+
+    # Test 5D tensor
+    input_5d = shmem.full((2, 3, 4, 5, 6), 1, dtype=torch.float32)
+    result_5d = shmem.zeros_like(input_5d, memory_format=torch.channels_last_3d)
+
+    # Verify shape is preserved
+    assert result_5d.shape == input_5d.shape, f"Shape changed: {input_5d.shape} -> {result_5d.shape}"
+    assert result_5d.shape == (2, 3, 4, 5, 6), f"Expected shape (2, 3, 4, 5, 6), got {result_5d.shape}"
+
+    # Verify strides indicate channels_last_3d format
+    strides_5d = result_5d.stride()
+    N, C, D, H, W = 2, 3, 4, 5, 6
+    expected_strides_5d = (C * D * H * W, 1, C * D * W, C * W, C)  # (360, 1, 90, 18, 3)
+    assert strides_5d == expected_strides_5d, f"Expected strides {expected_strides_5d}, got {strides_5d}"
+
+    # Verify channels_last_3d format characteristics: strides[1] == 1 (channels dimension is contiguous)
+    assert strides_5d[1] == 1, f"Channels dimension should be contiguous (stride=1), got {strides_5d[1]}"
+
+    # Compare with PyTorch's behavior to ensure consistency
+    pytorch_input_4d = torch.full((2, 3, 4, 5), 1, dtype=torch.float32, device="cuda")
+    pytorch_result_4d = torch.zeros_like(pytorch_input_4d, memory_format=torch.channels_last)
+
+    # Verify Iris and PyTorch have same shape
+    assert result_4d.shape == pytorch_result_4d.shape, (
+        f"Shape mismatch: Iris {result_4d.shape} vs PyTorch {pytorch_result_4d.shape}"
+    )
+
+    # Verify Iris and PyTorch have same strides
+    assert result_4d.stride() == pytorch_result_4d.stride(), (
+        f"Strides mismatch: Iris {result_4d.stride()} vs PyTorch {pytorch_result_4d.stride()}"
+    )
+
+    # Verify tensors are on symmetric heap
+    assert shmem._Iris__on_symmetric_heap(result_4d)
+    assert shmem._Iris__on_symmetric_heap(result_5d)
+
+
 def test_zeros_like_pytorch_equivalence():
     shmem = iris.iris(1 << 20)
 

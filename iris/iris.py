@@ -581,10 +581,7 @@ class Iris:
                 N, C, H, W = size[0], size[1], size[2], size[3]
                 expected_strides = (C * H * W, 1, C * W, C)
                 if strides == expected_strides:
-                    # This is channels_last format with preserved shape - need to permute data
-                    permuted = original_tensor.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
-                    # Then permute back to (N, C, H, W) to match the target shape
-                    permuted = permuted.permute(0, 3, 1, 2)  # (N, H, W, C) -> (N, C, H, W)
+                    permuted = original_tensor
                 else:
                     permuted = original_tensor
             elif len(size) == 5:
@@ -592,10 +589,7 @@ class Iris:
                 N, C, D, H, W = size[0], size[1], size[2], size[3], size[4]
                 expected_strides = (C * D * H * W, 1, C * D * W, C * W, C)
                 if strides == expected_strides:
-                    # This is channels_last_3d format with preserved shape - need to permute data
-                    permuted = original_tensor.permute(0, 2, 3, 4, 1)  # (N, C, D, H, W) -> (N, D, H, W, C)
-                    # Then permute back to (N, C, D, H, W) to match the target shape
-                    permuted = permuted.permute(0, 4, 1, 2, 3)  # (N, D, H, W, C) -> (N, C, D, H, W)
+                    permuted = original_tensor
                 else:
                     permuted = original_tensor
             else:
