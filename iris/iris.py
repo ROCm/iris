@@ -462,27 +462,18 @@ class Iris:
             # Default format, no changes needed
             return tensor
         elif memory_format == torch.channels_last and len(size) == 4:
-            # For NHWC format: strides[0] > strides[2] > strides[3] > strides[1] == 1
-            # Size is (N, C, H, W) and we want (N, H, W, C)
-            # For NHWC: strides should be [H*W*C, 1, W*C, C] = [60, 1, 20, 5]
-            # This gives us: strides[0] > strides[2] > strides[3] > strides[1] == 1
+            # For channels_last format: preserve shape (N, C, H, W) but change strides
+            # channels_last strides: [C*H*W, 1, C*W, C] for shape (N, C, H, W)
             N, C, H, W = size[0], size[1], size[2], size[3]
-            # Create new tensor with permuted size (N, H, W, C) and correct strides
-            new_size = (N, H, W, C)
-            self.debug(
-                f"Applying channels_last format: size={size} -> {new_size}, strides=({H * W * C}, 1, {W * C}, {C})"
-            )
-            tensor = self.__create_tensor_with_strides(tensor, new_size, (H * W * C, 1, W * C, C))
+            # Keep the original shape (N, C, H, W) but use channels_last strides
+            tensor = self.__create_tensor_with_strides(tensor, size, (C * H * W, 1, C * W, C))
             return tensor
         elif memory_format == torch.channels_last_3d and len(size) == 5:
-            # For NDHWC format: strides[0] > strides[2] > strides[3] > strides[4] > strides[1] == 1
-            # Size is (N, C, D, H, W) and we want (N, D, H, W, C)
-            # For NDHWC: strides should be [D*H*W*C, 1, H*W*C, W*C, C]
-            # This gives us: strides[0] > strides[2] > strides[3] > strides[4] > strides[1] == 1
+            # For channels_last_3d format: preserve shape (N, C, D, H, W) but change strides
+            # channels_last_3d strides: [C*D*H*W, 1, C*D*W, C*W, C] for shape (N, C, D, H, W)
             N, C, D, H, W = size[0], size[1], size[2], size[3], size[4]
-            # Create new tensor with permuted size (N, D, H, W, C) and correct strides
-            new_size = (N, D, H, W, C)
-            tensor = self.__create_tensor_with_strides(tensor, new_size, (D * H * W * C, 1, H * W * C, W * C, C))
+            # Keep the original shape (N, C, D, H, W) but use channels_last_3d strides
+            tensor = self.__create_tensor_with_strides(tensor, size, (C * D * H * W, 1, C * D * W, C * W, C))
             return tensor
         elif memory_format == torch.preserve_format:
             # For preserve_format, we need to detect the input tensor's memory format
@@ -542,19 +533,73 @@ class Iris:
         # First, create a temporary tensor with the correct strides using PyTorch
         temp_tensor = torch.empty_strided(size, strides, dtype=original_tensor.dtype, device=original_tensor.device)
 
-        # For memory format conversion, we need to permute the data to match the new layout
+        # Handle different cases based on whether size changes and what the strides indicate
         if size != original_tensor.shape:
-            # Permute the original tensor to match the new size
-            # For channels_last: (N, C, H, W) -> (N, H, W, C)
-            # For channels_last_3d: (N, C, D, H, W) -> (N, D, H, W, C)
-            if len(size) == 4:  # channels_last
-                permuted = original_tensor.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
-            elif len(size) == 5:  # channels_last_3d
-                permuted = original_tensor.permute(0, 2, 3, 4, 1)  # (N, C, D, H, W) -> (N, D, H, W, C)
+            # Size is different - this might be a format change that requires permutation
+            # Check if this is a channels_last format by comparing strides
+            if len(size) == 4:
+                # For channels_last: expected strides are [H*W*C, 1, W*C, C] for shape (N, H, W, C)
+                N, H, W, C = size[0], size[1], size[2], size[3]
+                expected_strides = (H * W * C, 1, W * C, C)
+                if strides == expected_strides:
+                    permuted = original_tensor.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
+                else:
+                    # If the size differs for other reasons, do not permute; just reshape if possible
+                    try:
+                        permuted = original_tensor.reshape(size)
+                    except Exception:
+                        raise ValueError(
+                            "Cannot safely permute or reshape tensor: size differs from original shape for unknown reason."
+                        )
+            elif len(size) == 5:
+                # For channels_last_3d: expected strides are [D*H*W*C, 1, H*W*C, W*C, C] for shape (N, D, H, W, C)
+                N, D, H, W, C = size[0], size[1], size[2], size[3], size[4]
+                expected_strides = (D * H * W * C, 1, H * W * C, W * C, C)
+                if strides == expected_strides:
+                    permuted = original_tensor.permute(0, 2, 3, 4, 1)  # (N, C, D, H, W) -> (N, D, H, W, C)
+                else:
+                    # If the size differs for other reasons, do not permute; just reshape if possible
+                    try:
+                        permuted = original_tensor.reshape(size)
+                    except Exception:
+                        raise ValueError(
+                            "Cannot safely permute or reshape tensor: size differs from original shape for unknown reason."
+                        )
+            else:
+                # For other dimensions, just try to reshape
+                try:
+                    permuted = original_tensor.reshape(size)
+                except Exception:
+                    raise ValueError(
+                        "Cannot safely permute or reshape tensor: size differs from original shape for unknown reason."
+                    )
+        else:
+            # Size is the same - this is a stride-only change (like channels_last with preserved shape)
+            # We need to reorder the data to match the new stride pattern
+            if len(size) == 4:
+                # Check if this is channels_last format with preserved shape
+                N, C, H, W = size[0], size[1], size[2], size[3]
+                expected_strides = (C * H * W, 1, C * W, C)
+                if strides == expected_strides:
+                    # This is channels_last format with preserved shape - need to permute data
+                    permuted = original_tensor.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
+                    # Then permute back to (N, C, H, W) to match the target shape
+                    permuted = permuted.permute(0, 3, 1, 2)  # (N, H, W, C) -> (N, C, H, W)
+                else:
+                    permuted = original_tensor
+            elif len(size) == 5:
+                # Check if this is channels_last_3d format with preserved shape
+                N, C, D, H, W = size[0], size[1], size[2], size[3], size[4]
+                expected_strides = (C * D * H * W, 1, C * D * W, C * W, C)
+                if strides == expected_strides:
+                    # This is channels_last_3d format with preserved shape - need to permute data
+                    permuted = original_tensor.permute(0, 2, 3, 4, 1)  # (N, C, D, H, W) -> (N, D, H, W, C)
+                    # Then permute back to (N, C, D, H, W) to match the target shape
+                    permuted = permuted.permute(0, 4, 1, 2, 3)  # (N, D, H, W, C) -> (N, C, D, H, W)
+                else:
+                    permuted = original_tensor
             else:
                 permuted = original_tensor
-        else:
-            permuted = original_tensor
 
         # Copy the permuted data to the temporary tensor
         temp_tensor.copy_(permuted)

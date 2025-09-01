@@ -162,9 +162,9 @@ def test_zeros_like_memory_format():
     input_4d = shmem.full((2, 3, 4, 5), 1, dtype=torch.float32)
     result_4d = shmem.zeros_like(input_4d, memory_format=torch.channels_last)
 
-    # For channels_last format, the shape changes from (N, C, H, W) to (N, H, W, C)
-    # Input: (2, 3, 4, 5) -> Output: (2, 4, 5, 3)
-    expected_shape = (input_4d.shape[0], input_4d.shape[2], input_4d.shape[3], input_4d.shape[1])
+    # For channels_last format, the shape remains (N, C, H, W); only the memory layout (strides) changes.
+    # Input: (2, 3, 4, 5) -> Output: (2, 3, 4, 5) with channels_last strides
+    expected_shape = input_4d.shape
     assert result_4d.shape == expected_shape, f"Expected {expected_shape}, got {result_4d.shape}"
     assert torch.all(result_4d == 0)
 
@@ -182,9 +182,9 @@ def test_zeros_like_memory_format():
     input_5d = shmem.full((2, 3, 4, 5, 6), 1, dtype=torch.float32)
     result_5d = shmem.zeros_like(input_5d, memory_format=torch.channels_last_3d)
 
-    # For channels_last_3d format, the shape changes from (N, C, D, H, W) to (N, D, H, W, C)
-    # Input: (2, 3, 4, 5, 6) -> Output: (2, 4, 5, 6, 3)
-    expected_shape_5d = (input_5d.shape[0], input_5d.shape[2], input_5d.shape[3], input_5d.shape[4], input_5d.shape[1])
+    # For channels_last_3d format, the shape remains (N, C, D, H, W); only the memory layout (strides) changes.
+    # Input: (2, 3, 4, 5, 6) -> Output: (2, 3, 4, 5, 6) with channels_last_3d strides
+    expected_shape_5d = input_5d.shape
     assert result_5d.shape == expected_shape_5d, f"Expected {expected_shape_5d}, got {result_5d.shape}"
     assert torch.all(result_5d == 0)
 
@@ -370,17 +370,8 @@ def test_zeros_like_symmetric_heap_shapes_dtypes(shape, dtype):
         )
 
         # Also verify basic functionality
-        # For memory format conversions, the shape might change
-        if memory_format == torch.channels_last and len(shape) == 4:
-            # channels_last converts (N, C, H, W) to (N, H, W, C)
-            expected_shape = (shape[0], shape[2], shape[3], shape[1])
-            assert result.shape == expected_shape, f"Expected {expected_shape}, got {result.shape}"
-        elif memory_format == torch.channels_last_3d and len(shape) == 5:
-            # channels_last_3d converts (N, C, D, H, W) to (N, D, H, W, C)
-            expected_shape = (shape[0], shape[2], shape[3], shape[4], shape[1])
-            assert result.shape == expected_shape, f"Expected {expected_shape}, got {result.shape}"
-        else:
-            assert result.shape == shape
+        # Memory formats preserve the logical shape, only changing the memory layout (strides)
+        assert result.shape == shape
         assert result.dtype == dtype
         assert torch.all(result == 0)
 
