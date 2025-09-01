@@ -438,18 +438,88 @@ class Iris:
         tensor = self.allocate(num_elements=num_elements, dtype=dtype)
         return tensor.reshape(size)
 
-    def randint(self, size, low, high, dtype=torch.int, device=None):
-        self.debug(f"randint: size = {size}, low = {low}, high = {high}, dtype = {dtype}, device = {device}")
+    def randint(
+        self, *args, generator=None, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False
+    ):
+        """
+        Returns a tensor filled with random integers generated uniformly between low (inclusive) and high (exclusive).
+        The shape of the tensor is defined by the variable argument size.
+        The tensor is allocated on the Iris symmetric heap.
 
-        # Validate device
+        Note:
+            With the global dtype default (torch.float32), this function returns a tensor with dtype torch.int64.
+
+        Args:
+            low (int, optional): Lowest integer to be drawn from the distribution. Default: 0.
+            high (int): One above the highest integer to be drawn from the distribution.
+            size (tuple): a tuple defining the shape of the output tensor.
+
+        Keyword Arguments:
+            generator (torch.Generator, optional): a pseudorandom number generator for sampling.
+            out (Tensor, optional): the output tensor.
+            dtype (torch.dtype, optional): if None, this function returns a tensor with dtype torch.int64.
+            layout (torch.layout, optional): the desired layout of returned Tensor. Default: torch.strided.
+            device (torch.device, optional): the desired device of returned tensor. Default: if None, uses the current device.
+            requires_grad (bool, optional): If autograd should record operations on the returned tensor. Default: False.
+        """
+        self.debug(f"randint: args = {args}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
+
+        # Parse arguments to determine low, high, and size
+        # PyTorch randint signatures:
+        # randint(high, size) - where high is the upper bound and size is the shape
+        # randint(low, high, size) - where low and high are bounds, size is the shape
+        if len(args) == 2:
+            # randint(high, size)
+            high, size = args
+            low = 0
+        elif len(args) == 3:
+            # randint(low, high, size)
+            low, high, size = args
+        else:
+            raise ValueError(f"randint expects 2 or 3 positional arguments, got {len(args)}")
+
+        # Use default dtype if None is provided
+        if dtype is None:
+            dtype = torch.int64
+
+        # Use current device if none specified
+        if device is None:
+            device = self.device
+
+        # Validate device compatibility with Iris
         self.__throw_if_invalid_device(device)
 
+        # Parse size and calculate number of elements
         size, num_elements = self.parse_size(size)
-        tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+
+        # If out is provided, use it; otherwise allocate new tensor
+        if out is not None:
+            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            # Create a reshaped view of the out tensor
+            tensor = out.view(size)
+        else:
+            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            # Reshape to the desired size
+            tensor = tensor.reshape(size)
+
+        # Generate random integers using PyTorch's randint
         # Use specified device or fall back to current device
         target_device = device if device is not None else self.device
-        tensor[:] = torch.randint(low, high, size, device=target_device, dtype=dtype)
-        return tensor.reshape(size)
+
+        # Handle generator parameter
+        if generator is not None:
+            torch.randint(low, high, size, generator=generator, out=tensor, dtype=dtype, device=target_device)
+        else:
+            torch.randint(low, high, size, out=tensor, dtype=dtype, device=target_device)
+
+        # Apply the requested layout
+        tensor = self.__apply_layout(tensor, layout)
+
+        # Set requires_grad if specified
+        if requires_grad:
+            tensor.requires_grad_()
+
+        return tensor
 
     def linspace(self, start, end, steps, dtype=torch.float):
         self.debug(f"linspace: start = {start}, end = {end}, steps = {steps}, dtype = {dtype}")
