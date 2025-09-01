@@ -235,9 +235,9 @@ class Iris:
 
         # Validate step direction consistency
         if step > 0 and start >= end:
-            raise ValueError(f"step must be positive, but got step={step}. (start={start}, end={end})")
+            raise ValueError(f"Invalid range: start >= end with positive step (start={start}, end={end}, step={step})")
         elif step < 0 and start <= end:
-            raise ValueError(f"step must be negative, but got step={step}. (start={start}, end={end})")
+            raise ValueError(f"Invalid range: start <= end with negative step (start={start}, end={end}, step={step})")
 
         # Calculate the number of elements
         num_elements = math.ceil((end - start) / step)
