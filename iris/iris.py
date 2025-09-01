@@ -458,6 +458,86 @@ class Iris:
         torch.linspace(start, end, size, out=tensor, dtype=dtype, device="cuda")
         return tensor.reshape(size)
 
+    def rand(
+        self,
+        *size,
+        generator=None,
+        out=None,
+        dtype=None,
+        layout=torch.strided,
+        device=None,
+        requires_grad=False,
+        pin_memory=False,
+    ):
+        """
+        Returns a tensor filled with random numbers from a uniform distribution on the interval [0, 1).
+        The tensor is allocated on the Iris symmetric heap.
+
+        Args:
+            *size (int...): a sequence of integers defining the shape of the output tensor.
+                Can be a variable number of arguments or a collection like a list or tuple.
+
+        Keyword Arguments:
+            generator (torch.Generator, optional): a pseudorandom number generator for sampling.
+            out (Tensor, optional): the output tensor.
+            dtype (torch.dtype, optional): the desired data type of returned tensor.
+                Default: if None, uses a global default (see torch.set_default_dtype()).
+            layout (torch.layout, optional): the desired layout of returned Tensor.
+                Default: torch.strided. Note: Iris tensors always use `torch.strided` regardless of this parameter.
+            device (torch.device, optional): the desired device of returned tensor.
+                Default: if None, uses the current device for the default tensor type.
+            requires_grad (bool, optional): If autograd should record operations on the returned tensor.
+                Default: False.
+            pin_memory (bool, optional): If set, returned tensor would be allocated in the pinned memory.
+                Works only for CPU tensors. Default: False. Note: Iris tensors are always on GPU.
+        """
+        self.debug(
+            f"rand: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}, pin_memory = {pin_memory}"
+        )
+
+        # Use global default dtype if None is provided
+        if dtype is None:
+            dtype = torch.get_default_dtype()
+
+        # Use current device if none specified
+        if device is None:
+            device = self.device
+
+        # Validate device compatibility with Iris
+        self.__throw_if_invalid_device(device)
+
+        # Parse size and calculate number of elements
+        size, num_elements = self.parse_size(size)
+
+        # If out is provided, use it; otherwise allocate new tensor
+        if out is not None:
+            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            # Create a reshaped view of the out tensor
+            tensor = out.view(size)
+        else:
+            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            # Reshape to the desired size
+            tensor = tensor.reshape(size)
+
+        # Generate random numbers using PyTorch's rand
+        # Use specified device or fall back to current device
+        target_device = device if device is not None else self.device
+
+        # Handle generator parameter
+        if generator is not None:
+            torch.rand(size, generator=generator, out=tensor, dtype=dtype, device=target_device)
+        else:
+            torch.rand(size, out=tensor, dtype=dtype, device=target_device)
+
+        # Apply the requested layout
+        tensor = self.__apply_layout(tensor, layout)
+
+        # Set requires_grad if specified
+        if requires_grad:
+            tensor.requires_grad_()
+
+        return tensor
+
     def deallocate(self, pointer):
         pass
 
