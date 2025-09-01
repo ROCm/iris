@@ -236,11 +236,11 @@ class Iris:
         # Validate step direction consistency
         if step > 0 and start >= end:
             raise ValueError(
-                f"upper bound and larger bound inconsistent with step sign: start={start}, end={end}, step={step}"
+                f"start and end bounds inconsistent with step sign: start={start}, end={end}, step={step}"
             )
         elif step < 0 and start <= end:
             raise ValueError(
-                f"upper bound and larger bound inconsistent with step sign: start={start}, end={end}, step={step}"
+                f"start and end bounds inconsistent with step sign: start={start}, end={end}, step={step}"
             )
 
         # Calculate the number of elements
