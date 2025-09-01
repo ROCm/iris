@@ -285,7 +285,9 @@ def test_linspace_symmetric_heap_shapes_dtypes(start, end, steps, dtype):
     result = shmem.linspace(start, end, steps, dtype=dtype)
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with start={start}, end={end}, steps={steps}, dtype={dtype} is NOT on symmetric heap!"
+    assert shmem._Iris__on_symmetric_heap(result), (
+        f"Tensor with start={start}, end={end}, steps={steps}, dtype={dtype} is NOT on symmetric heap!"
+    )
 
     # Also verify basic functionality
     assert result.shape == (steps,)
@@ -420,7 +422,7 @@ def test_linspace_tensor_inputs():
     # Test with 0-dimensional tensor inputs
     start_tensor = torch.tensor(0.0, device="cuda")
     end_tensor = torch.tensor(1.0, device="cuda")
-    
+
     result = shmem.linspace(start_tensor, end_tensor, 5)
     assert result.shape == (5,)
     assert torch.allclose(result[0], torch.tensor(0.0))
@@ -430,7 +432,7 @@ def test_linspace_tensor_inputs():
     # Test with complex tensor inputs
     start_complex = torch.tensor(0.0 + 0.0j, device="cuda")
     end_complex = torch.tensor(1.0 + 1.0j, device="cuda")
-    
+
     result_complex = shmem.linspace(start_complex, end_complex, 5)
     assert result_complex.shape == (5,)
     assert result_complex.dtype == torch.complex64
