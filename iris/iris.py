@@ -451,12 +451,95 @@ class Iris:
         tensor[:] = torch.randint(low, high, size, device=target_device, dtype=dtype)
         return tensor.reshape(size)
 
-    def linspace(self, start, end, steps, dtype=torch.float):
-        self.debug(f"linspace: start = {start}, end = {end}, steps = {steps}, dtype = {dtype}")
-        size, num_elements = self.parse_size(steps)
-        tensor = self.allocate(num_elements=num_elements, dtype=dtype)
-        torch.linspace(start, end, size, out=tensor, dtype=dtype, device="cuda")
-        return tensor.reshape(size)
+    def linspace(self, start, end, steps, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+        """
+        Creates a one-dimensional tensor of size steps whose values are evenly spaced from start to end, inclusive.
+        The tensor is allocated on the Iris symmetric heap.
+
+        The values are:
+        (start, start + (end-start)/(steps-1), ..., start + (steps-2)*(end-start)/(steps-1), end)
+
+        Args:
+            start (float or Tensor): the starting value for the set of points. If Tensor, it must be 0-dimensional.
+            end (float or Tensor): the ending value for the set of points. If Tensor, it must be 0-dimensional.
+            steps (int): size of the constructed tensor.
+
+        Keyword Arguments:
+            out (Tensor, optional): the output tensor.
+            dtype (torch.dtype, optional): the data type to perform the computation in.
+                Default: if None, uses the global default dtype when both start and end are real,
+                and corresponding complex dtype when either is complex.
+            layout (torch.layout, optional): the desired layout of returned Tensor. Default: torch.strided.
+            device (torch.device, optional): the desired device of returned tensor. Default: if None, uses the current device.
+            requires_grad (bool, optional): If autograd should record operations on the returned tensor. Default: False.
+        """
+        self.debug(
+            f"linspace: start = {start}, end = {end}, steps = {steps}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
+        )
+
+        # Use global default dtype if None is provided
+        if dtype is None:
+            # Check if start or end are complex numbers
+            start_is_complex = isinstance(start, complex) or (hasattr(start, "dtype") and torch.is_complex(start))
+            end_is_complex = isinstance(end, complex) or (hasattr(end, "dtype") and torch.is_complex(end))
+
+            if start_is_complex or end_is_complex:
+                # Infer complex dtype based on default dtype
+                dtype = torch.complex64 if torch.get_default_dtype() == torch.float32 else torch.complex128
+            else:
+                dtype = torch.get_default_dtype()
+
+        # Use current device if none specified
+        if device is None:
+            device = self.device
+
+        # Validate device compatibility with Iris
+        self.__throw_if_invalid_device(device)
+
+        # Parse steps and extract the integer value
+        if isinstance(steps, (tuple, list)):
+            if len(steps) == 1:
+                # Single-element tuple/list like (5,) or [5]
+                steps_int = steps[0]
+                # Handle nested tuples like ((5,),)
+                if isinstance(steps_int, (tuple, list)):
+                    steps_int = steps_int[0]
+            else:
+                # Multi-element tuple/list - use parse_size for compatibility
+                size, num_elements = self.parse_size(steps)
+                steps_int = num_elements
+        else:
+            # steps is a single integer
+            steps_int = steps
+
+        # Ensure steps_int is an integer
+        steps_int = int(steps_int)
+        size = (steps_int,)
+        num_elements = steps_int
+
+        # If out is provided, use it; otherwise allocate new tensor
+        if out is not None:
+            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            # Create a reshaped view of the out tensor
+            tensor = out.view(size)
+        else:
+            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            # Reshape to the desired size
+            tensor = tensor.reshape(size)
+
+        # Generate linspace using PyTorch's linspace
+        # Use specified device or fall back to current device
+        target_device = device if device is not None else self.device
+        torch.linspace(start, end, steps_int, out=tensor, dtype=dtype, device=target_device)
+
+        # Apply the requested layout
+        tensor = self.__apply_layout(tensor, layout)
+
+        # Set requires_grad if specified
+        if requires_grad:
+            tensor.requires_grad_()
+
+        return tensor
 
     def deallocate(self, pointer):
         pass
