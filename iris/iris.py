@@ -125,10 +125,8 @@ class Iris:
         return sub_buffer.reshape((num_elements,))
 
     def parse_size(self, size):
-        if len(size) == 1 and isinstance(size[0], (tuple, list)):
-            size = size[0]
-        # Handle nested tuples/lists by flattening them
-        if len(size) == 1 and isinstance(size[0], (tuple, list)):
+        # Handle nested tuples/lists by flattening them recursively
+        while len(size) == 1 and isinstance(size[0], (tuple, list)):
             size = size[0]
         num_elements = math.prod(size)
         return size, num_elements
