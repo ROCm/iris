@@ -432,11 +432,84 @@ class Iris:
         tensor.uniform_(low, high)
         return tensor.reshape(size)
 
-    def empty(self, size, dtype=torch.float):
-        self.debug(f"empty: size = {size}, dtype = {dtype}")
+    def empty(
+        self,
+        *size,
+        out=None,
+        dtype=None,
+        layout=torch.strided,
+        device=None,
+        requires_grad=False,
+        pin_memory=False,
+        memory_format=torch.contiguous_format,
+    ):
+        """
+        Returns a tensor filled with uninitialized data. The shape of the tensor is defined by the variable argument size.
+        The tensor is allocated on the Iris symmetric heap.
+
+        Note:
+            If torch.use_deterministic_algorithms() and torch.utils.deterministic.fill_uninitialized_memory are both set to True,
+            the output tensor is initialized to prevent any possible nondeterministic behavior from using the data as an input to an operation.
+            Floating point and complex tensors are filled with NaN, and integer tensors are filled with the maximum value.
+
+        Args:
+            *size (int...): a sequence of integers defining the shape of the output tensor.
+                Can be a variable number of arguments or a collection like a list or tuple.
+
+        Keyword Arguments:
+            out (Tensor, optional): the output tensor.
+            dtype (torch.dtype, optional): the desired data type of returned tensor.
+                Default: if None, uses a global default (see torch.set_default_dtype()).
+            layout (torch.layout, optional): the desired layout of returned Tensor.
+                Default: torch.strided. Note: Iris tensors always use `torch.strided` regardless of this parameter.
+            device (torch.device, optional): the desired device of returned tensor.
+                Default: if None, uses the current device for the default tensor type.
+            requires_grad (bool, optional): If autograd should record operations on the returned tensor.
+                Default: False.
+            pin_memory (bool, optional): If set, returned tensor would be allocated in the pinned memory.
+                Works only for CPU tensors. Default: False. Note: Iris tensors are always on GPU.
+            memory_format (torch.memory_format, optional): the desired memory format of returned Tensor.
+                Default: torch.contiguous_format.
+        """
+        self.debug(
+            f"empty: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}, pin_memory = {pin_memory}"
+        )
+
+        # Use global default dtype if None is provided
+        if dtype is None:
+            dtype = torch.get_default_dtype()
+
+        # Use current device if none specified
+        if device is None:
+            device = self.device
+
+        # Validate device compatibility with Iris
+        self.__throw_if_invalid_device(device)
+
+        # Parse size and calculate number of elements
         size, num_elements = self.parse_size(size)
-        tensor = self.allocate(num_elements=num_elements, dtype=dtype)
-        return tensor.reshape(size)
+
+        # If out is provided, use it; otherwise allocate new tensor
+        if out is not None:
+            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            # Create a reshaped view of the out tensor
+            tensor = out.view(size)
+        else:
+            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            # Reshape to the desired size
+            tensor = tensor.reshape(size)
+
+        # Apply the requested memory format
+        tensor = self.__apply_memory_format(tensor, size, memory_format)
+
+        # Apply the requested layout
+        tensor = self.__apply_layout(tensor, layout)
+
+        # Set requires_grad if specified
+        if requires_grad:
+            tensor.requires_grad_()
+
+        return tensor
 
     def randint(self, size, low, high, dtype=torch.int, device=None):
         self.debug(f"randint: size = {size}, low = {low}, high = {high}, dtype = {dtype}, device = {device}")
