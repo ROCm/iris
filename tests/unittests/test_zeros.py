@@ -297,9 +297,7 @@ def test_zeros_symmetric_heap_shapes_dtypes(size, dtype):
     result = shmem.zeros(*size, dtype=dtype)
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result), (
-        f"Tensor with size {size}, dtype {dtype} is NOT on symmetric heap!"
-    )
+    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with size {size}, dtype {dtype} is NOT on symmetric heap!"
 
     # Also verify basic functionality
     assert result.shape == size
@@ -406,6 +404,3 @@ def test_zeros_size_parsing():
     assert torch.all(result1 == result2)
     assert torch.all(result2 == result3)
     assert torch.all(result3 == result4)
-
-
-
