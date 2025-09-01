@@ -73,8 +73,9 @@ def test_arange_device_handling():
     assert shmem._Iris__on_symmetric_heap(result_default)
 
     # Test explicit device
-    result_explicit = shmem.arange(3, device="cuda:0")
-    assert str(result_explicit.device) == "cuda:0"
+    iris_device = str(shmem.get_device())
+    result_explicit = shmem.arange(3, device=iris_device)
+    assert str(result_explicit.device) == iris_device
     assert shmem._Iris__on_symmetric_heap(result_explicit)
 
     # Test device=None (should use Iris device)
@@ -256,7 +257,7 @@ def test_arange_parameter_combinations(params):
     [
         {},  # No kwargs
         {"dtype": torch.float64},  # dtype override
-        {"device": "cuda:0"},  # device override
+        {"device": "cuda:0"},  # device override (will be replaced with actual Iris device)
         {"dtype": torch.float32, "requires_grad": True},  # requires_grad True with float dtype
         {"layout": torch.strided},  # strided layout
     ],
@@ -264,6 +265,10 @@ def test_arange_parameter_combinations(params):
 def test_arange_symmetric_heap_verification(arange_args, kwargs):
     """Test that all arange results are on the symmetric heap."""
     shmem = iris.iris(1 << 20)
+
+    # Replace hardcoded device with actual Iris device
+    if "device" in kwargs and kwargs["device"] == "cuda:0":
+        kwargs["device"] = str(shmem.get_device())
 
     # Call arange with the given arguments and kwargs
     result = shmem.arange(*arange_args, **kwargs)
