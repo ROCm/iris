@@ -1008,7 +1008,6 @@ class Iris:
         This first calls ``torch.cuda.synchronize()`` or ``stream.synchronize()``` to ensure the local GPU has
         finished all queued work, then performs a global MPI barrier so that all
         ranks reach the same point before proceeding.
-        
         Args:
             stream: If stream is given: wait only for that stream before MPI_Barrier.
                 If stream is None: legacy behavior (device-wide sync).
