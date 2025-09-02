@@ -1,4 +1,4 @@
-# Initialization and Helpers
+# Iris Class API
 
 ## Factory Function
 
@@ -7,6 +7,8 @@ Prefer using the convenience factory over calling the constructor directly:
 ```{eval-rst}
 .. autofunction:: iris.iris.iris
 ```
+
+## Core Methods
 
 ```{eval-rst}
 .. automethod:: iris.iris.Iris.get_heap_bases

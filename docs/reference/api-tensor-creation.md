@@ -1,6 +1,6 @@
 # Tensor Creation APIs
 
-APIs on `iris.iris.Iris` that create and initialize tensors on the Iris symmetric heap.
+APIs on `Iris` that create and initialize tensors on the Iris symmetric heap.
 
 ```{eval-rst}
 .. automethod:: iris.iris.Iris.zeros
