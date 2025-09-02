@@ -3,25 +3,15 @@ subtrees:
   - caption: Getting Started
     entries:
     - file: getting-started/installation.md
-    - file: getting-started/quick-start.md
-  - caption: Tutorials
-    entries:
-    - file: tutorials/basic-operations.md
-    - file: tutorials/atomic-operations.md
-    - file: tutorials/message-passing.md
-    - file: tutorials/gemm-examples.md
-  - caption: How-to Guides
-    entries:
-    - file: how-to/optimize-performance.md
-    - file: how-to/debug-common-issues.md
-    - file: how-to/benchmark-applications.md
+    - file: reference/examples.md
   - caption: Conceptual
     entries:
     - file: conceptual/programming-model.md
     - file: conceptual/finegrained-overlap.md
-    - file: conceptual/architecture.md
   - caption: Reference
     entries:
     - file: reference/api-reference.md
-    - file: reference/examples.md
+    - file: reference/api-iris-class.md
+    - file: reference/api-tensor-creation.md
+    - file: reference/api-device-functions.md
     - file: reference/contributing.md

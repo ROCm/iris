@@ -60,15 +60,6 @@ class Iris:
     Args:
         heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
 
-    Attributes:
-        comm: MPI communicator for inter-rank communication
-        num_ranks (int): Total number of MPI ranks in the job
-        cur_rank (int): Current rank ID (0-based)
-        gpu_id (int): GPU device ID for this rank
-        heap_size (int): Size of the symmetric heap in bytes
-        device (str): CUDA device string (e.g., "cuda:0")
-        heap_bases (torch.Tensor): Base addresses of all ranks' heaps
-
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap
         >>> print(f"Rank {ctx.cur_rank} of {ctx.num_ranks}")
@@ -136,25 +127,70 @@ class Iris:
             logger.handle(record)
 
     def debug(self, message):
-        """Log a debug message with rank information."""
+        """
+        Log a debug message with rank information.
+
+        Args:
+            message (str): Human-readable message to log at debug level.
+
+        Notes:
+            The log record is enriched with ``iris_rank`` and ``iris_num_ranks`` so
+            formatters can display the originating rank and world size.
+
+        Example:
+            >>> iris_ctx.debug("Allocating buffers")
+        """
         self._log_with_rank(logging.DEBUG, message)
 
     def info(self, message):
-        """Log an info message with rank information."""
+        """
+        Log an info message with rank information.
+
+        Args:
+            message (str): Human-readable message to log at info level.
+
+        Example:
+            >>> iris_ctx.info("Starting iteration 0")
+        """
         self._log_with_rank(logging.INFO, message)
 
     def warning(self, message):
-        """Log a warning message with rank information."""
+        """
+        Log a warning message with rank information.
+
+        Args:
+            message (str): Human-readable message to log at warning level.
+        """
         self._log_with_rank(logging.WARNING, message)
 
     def error(self, message):
-        """Log an error message with rank information."""
+        """
+        Log an error message with rank information.
+
+        Args:
+            message (str): Human-readable message to log at error level.
+        """
         self._log_with_rank(logging.ERROR, message)
 
     def broadcast(self, value, source_rank):
+        """
+        Broadcast a Python scalar or small picklable object from one rank to all ranks.
+
+        Args:
+            value (Any): The value to broadcast. Only the ``source_rank`` value is used;
+                other ranks should pass a placeholder (e.g., ``None``).
+            source_rank (int): Rank id that holds the authoritative value.
+
+        Returns:
+            Any: The value broadcast to all ranks.
+
+        Example:
+            >>> value = 42 if iris_ctx.get_rank() == 0 else None
+            >>> value = iris_ctx.broadcast(value, source_rank=0)
+        """
         return mpi_broadcast_scalar(value, source_rank)
 
-    def allocate(self, num_elements, dtype):
+    def __allocate(self, num_elements, dtype):
         self.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")
 
         element_size = torch.tensor([], dtype=dtype).element_size()
@@ -170,7 +206,7 @@ class Iris:
         sub_buffer = self.memory_pool[start : start + size_in_bytes].view(dtype)
         return sub_buffer.reshape((num_elements,))
 
-    def parse_size(self, size):
+    def __parse_size(self, size):
         # Handle nested tuples/lists by flattening them recursively
         while len(size) == 1 and isinstance(size[0], (tuple, list)):
             size = size[0]
@@ -218,7 +254,7 @@ class Iris:
         num_elements = input.numel()
 
         # Allocate new tensor with the same size
-        new_tensor = self.allocate(num_elements, dtype)
+        new_tensor = self.__allocate(num_elements, dtype)
         new_tensor.zero_()
 
         # Reshape to match input size
@@ -307,7 +343,7 @@ class Iris:
             self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
             tensor = out
         else:
-            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
 
         target_device = tensor.device
         arange_tensor = torch.arange(start, end, step, dtype=dtype, device=target_device)
@@ -355,7 +391,7 @@ class Iris:
         self.__throw_if_invalid_device(device)
 
         # Parse size and calculate number of elements
-        size, num_elements = self.parse_size(size)
+        size, num_elements = self.__parse_size(size)
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
@@ -365,7 +401,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
             # Fill with zeros
             tensor.zero_()
             # Reshape to the desired size
@@ -447,7 +483,7 @@ class Iris:
         self.__throw_if_invalid_device(device)
 
         # Parse size and calculate number of elements
-        size, num_elements = self.parse_size(size)
+        size, num_elements = self.__parse_size(size)
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
@@ -458,7 +494,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
             # Generate random data and copy to tensor
             random_data = torch.randn(num_elements, generator=generator, dtype=dtype, device=device, layout=layout)
             tensor.copy_(random_data)
@@ -508,7 +544,7 @@ class Iris:
         self.__throw_if_invalid_device(device)
 
         # Parse size and calculate number of elements
-        size, num_elements = self.parse_size(size)
+        size, num_elements = self.__parse_size(size)
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
@@ -518,7 +554,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
             # Fill with ones
             tensor.fill_(1)
             # Reshape to the desired size
@@ -576,7 +612,7 @@ class Iris:
         self.__throw_if_invalid_device(device)
 
         # Parse size and calculate number of elements
-        size, num_elements = self.parse_size(size)
+        size, num_elements = self.__parse_size(size)
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
@@ -586,7 +622,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
             # Fill with the specified value
             tensor.fill_(fill_value)
             # Reshape to the desired size
@@ -603,8 +639,8 @@ class Iris:
 
     def uniform(self, size, low=0.0, high=1.0, dtype=torch.float):
         self.debug(f"uniform: size = {size}, low = {low}, high = {high}, dtype = {dtype}")
-        size, num_elements = self.parse_size(size)
-        tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+        size, num_elements = self.__parse_size(size)
+        tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
         tensor.uniform_(low, high)
         return tensor.reshape(size)
 
@@ -663,7 +699,7 @@ class Iris:
         self.__throw_if_invalid_device(device)
 
         # Parse size and calculate number of elements
-        size, num_elements = self.parse_size(size)
+        size, num_elements = self.__parse_size(size)
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
@@ -671,7 +707,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
             # Reshape to the desired size
             tensor = tensor.reshape(size)
 
@@ -739,7 +775,7 @@ class Iris:
         self.__throw_if_invalid_device(device)
 
         # Parse size and calculate number of elements
-        size, num_elements = self.parse_size(size)
+        size, num_elements = self.__parse_size(size)
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
@@ -747,7 +783,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
             # Reshape to the desired size
             tensor = tensor.reshape(size)
 
@@ -824,8 +860,8 @@ class Iris:
                 if isinstance(steps_int, (tuple, list)):
                     steps_int = steps_int[0]
             else:
-                # Multi-element tuple/list - use parse_size for compatibility
-                size, num_elements = self.parse_size(steps)
+                # Multi-element tuple/list - use __parse_size for compatibility
+                size, num_elements = self.__parse_size(steps)
                 steps_int = num_elements
         else:
             # steps is a single integer
@@ -842,7 +878,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
             # Reshape to the desired size
             tensor = tensor.reshape(size)
 
@@ -909,7 +945,7 @@ class Iris:
         self.__throw_if_invalid_device(device)
 
         # Parse size and calculate number of elements
-        size, num_elements = self.parse_size(size)
+        size, num_elements = self.__parse_size(size)
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
@@ -917,7 +953,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.allocate(num_elements=num_elements, dtype=dtype)
+            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
             # Reshape to the desired size
             tensor = tensor.reshape(size)
 
@@ -939,28 +975,67 @@ class Iris:
 
         return tensor
 
-    def deallocate(self, pointer):
+    def __deallocate(self, pointer):
         pass
 
     def get_heap_bases(self):
+        """
+        Return the tensor of symmetric heap base addresses for all ranks.
+
+        Returns:
+            torch.Tensor: A 1D tensor of ``uint64`` heap base addresses of size ``num_ranks``
+            on the Iris device. Pass this to device-side Triton kernels that require
+            heap translation.
+        """
         return self.heap_bases
 
     def barrier(self):
+        """
+        Synchronize all ranks and their CUDA devices.
+
+        This first calls ``torch.cuda.synchronize()`` to ensure the local GPU has
+        finished all queued work, then performs a global MPI barrier so that all
+        ranks reach the same point before proceeding.
+        """
         # Wait for all GPUs to finish work
         torch.cuda.synchronize()
         # MPI barrier
         world_barrier()
 
     def get_device(self):
+        """
+        Get the underlying device where the Iris symmetric heap resides.
+
+        Returns:
+            torch.device: The CUDA device of Iris-managed memory.
+        """
         return self.memory_pool.device
 
     def get_cu_count(self):
+        """
+        Get the number of compute units (CUs) for the current GPU.
+
+        Returns:
+            int: Number of compute units on this rank's GPU.
+        """
         return get_cu_count(self.gpu_id)
 
     def get_rank(self):
+        """
+        Get this process's rank id in the MPI communicator.
+
+        Returns:
+            int: Zero-based rank id of the current process.
+        """
         return self.cur_rank
 
     def get_num_ranks(self):
+        """
+        Get the total number of ranks in the MPI communicator.
+
+        Returns:
+            int: World size (number of ranks).
+        """
         return self.num_ranks
 
     def __throw_if_invalid_output_tensor(self, tensor: torch.Tensor, num_elements: int, dtype: torch.dtype):
@@ -1148,7 +1223,7 @@ class Iris:
 
         # Now allocate a new tensor on our symmetric heap
         num_elements = math.prod(size)
-        heap_tensor = self.allocate(num_elements, original_tensor.dtype)
+        heap_tensor = self.__allocate(num_elements, original_tensor.dtype)
 
         # Reshape to the desired size
         heap_tensor = heap_tensor.reshape(size)

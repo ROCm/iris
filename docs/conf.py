@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.abspath(".."))
 project = "Iris"
 copyright = "2025, Advanced Micro Devices, Inc."
 author = "AMD Research and Advanced Development Team"
-release = "0.1.0"
+# Display "latest" in the docs header instead of a fixed version
+release = "latest"
 version = release
 
 # -- General configuration ---------------------------------------------------
@@ -38,7 +39,19 @@ extensions = [
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", ".venv"]
+exclude_patterns = [
+    "_build",
+    "Thumbs.db",
+    ".DS_Store",
+    ".venv",
+    # Exclude removed sections from build to avoid toctree warnings
+    "how-to/**",
+    "tutorials/**",
+    "PROGRAMMING_MODEL.md",
+    "FINEGRAINED_OVERLAP.md",
+    "SETUP_ALTERNATIVES.md",
+    "CONTRIBUTING.md",
+]
 
 # -- Options for HTML output -------------------------------------------------
 
@@ -56,6 +69,9 @@ html_static_path = ["../images"]
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_extra_path = ["../images"]
 
+# Customize the HTML title shown in the top-left/header
+html_title = "Iris Documentation"
+
 # -- Extension configuration -------------------------------------------------
 
 # Autodoc configuration for generating docs from docstrings
@@ -72,6 +88,19 @@ autodoc_default_options = {
 # Show type hints in documentation
 autodoc_typehints = "description"
 autodoc_typehints_format = "short"
+
+# Render objects without full module path (e.g., show "Iris" instead of "iris.iris.Iris")
+add_module_names = False
+
+# Mock heavy/runtime-only dependencies when building docs
+autodoc_mock_imports = [
+    "torch",
+    "triton",
+    "triton.language",
+    "numpy",
+    "iris._mpi_helpers",
+    "iris.hip",
+]
 
 # Napoleon settings for Google/NumPy docstring parsing
 napoleon_google_docstring = True

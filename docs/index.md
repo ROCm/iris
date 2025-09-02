@@ -38,7 +38,7 @@ docker compose up --build -d
 docker attach iris-dev
 
 # Install Iris in development mode
-pip install -e .
+cd iris && pip install -e .
 ```
 
 ### Run Your First Example
@@ -94,7 +94,7 @@ if cur_rank == source_rank:
 iris_ctx.barrier()
 ```
 
-For more examples, check out the [examples directory](../../examples/) with ready-to-run scripts and usage patterns.
+For more examples, see the [Examples](reference/examples.md) page with ready-to-run scripts and usage patterns.
 
 For other setup methods, see the [Installation Guide](getting-started/installation.md).
 
@@ -102,17 +102,18 @@ For other setup methods, see the [Installation Guide](getting-started/installati
 
 ### 📚 **Getting Started**
 - **[Installation](getting-started/installation.md)**: Set up Iris on your system
-- **[Quick Start](getting-started/quick-start.md)**: Run your first multi-GPU program
+- **[Examples](reference/examples.md)**: Working code examples
+- **[Contributing](reference/contributing.md)**: How to contribute
 
 ### 🧠 **Conceptual**
 - **[Programming Model](conceptual/programming-model.md)**: How Iris works
 - **[Fine-grained Overlap](conceptual/finegrained-overlap.md)**: GEMM & communication overlap
-- **[Architecture](conceptual/architecture.md)**: System design and internals
 
 ### 📖 **Reference**
-- **[API Reference](reference/iris-api.md)**: Auto-generated API documentation
-- **[Examples](reference/examples.md)**: Working code examples
-- **[Contributing](reference/contributing.md)**: How to contribute
+- **[API Reference](reference/api-reference.md)**: Structured API documentation
+- **[Initialization & Helpers](reference/api-iris-class.md)**: Factory and helper methods
+- **[Tensor Creation](reference/api-tensor-creation.md)**: Tensor-like APIs on Iris
+- **[Triton Device Functions](reference/api-device-functions.md)**: Load/store and atomics
 
 ## Supported GPUs
 
@@ -134,6 +135,15 @@ We plan to extend Iris with the following features:
 - **GitHub Discussions**: Ask questions and share ideas
 - **GitHub Issues**: Report bugs and request features
 - **Contributing**: Help make Iris better for everyone
+
+### GitHub Discussions: Ask questions and share ideas
+Join the [GitHub Discussions](https://github.com/ROCm/iris/discussions) to ask questions, share ideas, and connect with the Iris community.
+
+### GitHub Issues: Report bugs and request features
+Found a bug or have a feature request? Report it on [GitHub Issues](https://github.com/ROCm/iris/issues).
+
+### Contributing: Help make Iris better for everyone
+Want to contribute to Iris? Check out the [Contributing Guide](reference/contributing.md) to learn how you can help make Iris better for everyone.
 
 ---
 
