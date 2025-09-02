@@ -8,7 +8,7 @@ myst:
 # Iris
 
 <div style="text-align: center; margin: 2rem 0;">
-  <img src="/images/logo.png" alt="Iris Logo" class="only-dark" style="width: 400px; height: auto;">
+  <img src="images/logo.png" alt="Iris Logo" class="only-dark" style="width: 400px; height: auto;">
   <p style="font-size: 1.2rem; color: #666; margin: 0;">First-Class Multi-GPU Programming Experience in Triton</p>
 </div>
 
