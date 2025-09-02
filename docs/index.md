@@ -8,7 +8,7 @@ myst:
 # Iris
 
 <div style="text-align: center; margin: 2rem 0;">
-  <img src="images/logo.png" alt="Iris Logo" class="only-dark" style="width: 400px; height: auto;">
+  <img src="images/logo.png" alt="Iris Logo" style="width: 400px; height: auto; background: transparent;">
   <p style="font-size: 1.2rem; color: #666; margin: 0;">First-Class Multi-GPU Programming Experience in Triton</p>
 </div>
 
@@ -101,9 +101,9 @@ For other setup methods, see the [Installation Guide](getting-started/installati
 ## Documentation Structure
 
 ### 📚 **Getting Started**
-- **[Installation](getting-started/installation.md)**: Set up Iris on your system
-- **[Examples](reference/examples.md)**: Working code examples
-- **[Contributing](reference/contributing.md)**: How to contribute
+  - **[Installation](getting-started/installation.md)**: Set up Iris on your system
+  - **[Examples](reference/examples.md)**: Working code examples
+  - **[Contributing](reference/contributing.md)**: How to contribute
 
 ### 🧠 **Conceptual**
 - **[Programming Model](conceptual/programming-model.md)**: How Iris works
@@ -132,17 +132,13 @@ We plan to extend Iris with the following features:
 
 ## Community & Support
 
-- **GitHub Discussions**: Ask questions and share ideas
-- **GitHub Issues**: Report bugs and request features
-- **Contributing**: Help make Iris better for everyone
-
-### GitHub Discussions: Ask questions and share ideas
+### GitHub Discussions
 Join the [GitHub Discussions](https://github.com/ROCm/iris/discussions) to ask questions, share ideas, and connect with the Iris community.
 
-### GitHub Issues: Report bugs and request features
+### GitHub Issues
 Found a bug or have a feature request? Report it on [GitHub Issues](https://github.com/ROCm/iris/issues).
 
-### Contributing: Help make Iris better for everyone
+### Contributing
 Want to contribute to Iris? Check out the [Contributing Guide](reference/contributing.md) to learn how you can help make Iris better for everyone.
 
 ---

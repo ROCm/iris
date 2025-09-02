@@ -4,6 +4,7 @@ subtrees:
     entries:
     - file: getting-started/installation.md
     - file: reference/examples.md
+    - file: reference/contributing.md
   - caption: Conceptual
     entries:
     - file: conceptual/programming-model.md
@@ -14,4 +15,3 @@ subtrees:
     - file: reference/api-iris-class.md
     - file: reference/api-tensor-creation.md
     - file: reference/api-device-functions.md
-    - file: reference/contributing.md
