@@ -1005,7 +1005,6 @@ class Iris:
         """
         Synchronize all ranks and their CUDA devices.
 
-                
         This first calls ``torch.cuda.synchronize()`` or ``stream.synchronize()``` to ensure the local GPU has
         finished all queued work, then performs a global MPI barrier so that all
         ranks reach the same point before proceeding.
