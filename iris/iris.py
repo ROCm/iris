@@ -1001,16 +1001,25 @@ class Iris:
         """
         return self.heap_bases
 
-    def barrier(self):
+    def barrier(self, stream: torch.cuda.Stream | None = None):
         """
         Synchronize all ranks and their CUDA devices.
 
-        This first calls ``torch.cuda.synchronize()`` to ensure the local GPU has
+                
+        This first calls ``torch.cuda.synchronize()`` or ``stream.synchronize()``` to ensure the local GPU has
         finished all queued work, then performs a global MPI barrier so that all
         ranks reach the same point before proceeding.
+        
+        Args:
+            stream: If stream is given: wait only for that stream before MPI_Barrier.
+                If stream is None: legacy behavior (device-wide sync).
         """
         # Wait for all GPUs to finish work
-        torch.cuda.synchronize()
+        if stream is None:
+            torch.cuda.synchronize()
+        else:
+            stream.synchronize()
+        
         # MPI barrier
         world_barrier()
 
