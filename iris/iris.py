@@ -638,6 +638,18 @@ class Iris:
         return tensor
 
     def uniform(self, size, low=0.0, high=1.0, dtype=torch.float):
+        """
+        Returns a tensor filled with random numbers from a uniform distribution, allocated on the Iris symmetric heap.
+
+        Args:
+            size (int or tuple of ints): the size of the output tensor.
+            low (float, optional): the lower bound of the uniform distribution. Default: 0.0.
+            high (float, optional): the upper bound of the uniform distribution. Default: 1.0.
+            dtype (torch.dtype, optional): the desired data type of returned tensor. Default: torch.float.
+
+        Returns:
+            Tensor: A tensor filled with random numbers from a uniform distribution.
+        """
         self.debug(f"uniform: size = {size}, low = {low}, high = {high}, dtype = {dtype}")
         size, num_elements = self.__parse_size(size)
         tensor = self.__allocate(num_elements=num_elements, dtype=dtype)

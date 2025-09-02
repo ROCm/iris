@@ -2,11 +2,22 @@
 
 Device-side functions provided by Iris for remote memory operations and atomics.
 
+```{eval-rst}
+.. automodule:: iris.iris
+   :noindex:
+   :no-members:
+   :no-undoc-members:
+   :no-show-inheritance:
+   :no-docstring:
+   :exclude-members: Iris,__allocate,__deallocate,load,store,get,put,atomic_add,atomic_sub,atomic_cas,atomic_xchg,atomic_xor,atomic_and,atomic_or,atomic_min,atomic_max,iris
+```
+
 ### Memory transfer operations
 
 #### load
 ```{eval-rst}
 .. autofunction:: iris.iris.load
+   :noindex:
 ```
 
 #### store
