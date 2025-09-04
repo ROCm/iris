@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
+.venv/
+_build/
+docs-repo-template-main/
 results/
 build/
 rocSHMEM/
@@ -13,6 +16,7 @@ __pycache__/
 *.pftrace
 *.log
 *.txt
+!requirements.txt
 slurm_logs*/
 redo.sh
 

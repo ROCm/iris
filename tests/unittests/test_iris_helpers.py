@@ -37,5 +37,5 @@ def test_device_validation():
     # Test that different CUDA device indices are rejected
     if shmem.device.startswith("cuda:"):
         current_device = torch.device(shmem.device)
-        different_cuda = f"cuda:{(current_device.index + 1) % 4}"  # Use next GPU
+        different_cuda = f"cuda:{(current_device.index + 1) % torch.cuda.device_count()}"  # Use next GPU
         assert not shmem._Iris__is_valid_device(different_cuda)
