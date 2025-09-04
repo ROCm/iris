@@ -4,7 +4,7 @@ subtrees:
     entries:
     - file: getting-started/installation.md
     - file: reference/examples.md
-    - file: reference/contributing.md
+    - file: CONTRIBUTING.md
   - caption: Conceptual
     entries:
     - file: conceptual/programming-model.md
