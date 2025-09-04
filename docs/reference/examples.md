@@ -1,7 +1,5 @@
 # Examples
 
-**Welcome to the Iris Examples Playground!** 
-
 We've curated a growing collection of practical examples that showcase the power and flexibility of Iris for distributed computing and matrix operations. From basic memory operations to sophisticated GEMM implementations, there's something here for everyone. And guess what? We're constantly adding more examples as we discover new patterns and optimizations!
 
 ## Directory Structure
