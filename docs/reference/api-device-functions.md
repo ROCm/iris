@@ -11,72 +11,72 @@ Device-side functions provided by Iris for remote memory operations and atomics.
    :no-docstring:
 ```
 
-### Memory transfer operations
+## Memory transfer operations
 
-#### load
+### load
 ```{eval-rst}
 .. autofunction:: iris.iris.load
    :noindex:
 ```
 
-#### store
+### store
 ```{eval-rst}
 .. autofunction:: iris.iris.store
 ```
 
-#### get
+### get
 ```{eval-rst}
 .. autofunction:: iris.iris.get
 ```
 
-#### put
+### put
 ```{eval-rst}
 .. autofunction:: iris.iris.put
 ```
 
-### Atomic operations
+## Atomic operations
 
-#### atomic_add
+### atomic_add
 ```{eval-rst}
 .. autofunction:: iris.iris.atomic_add
 ```
 
-#### atomic_sub
+### atomic_sub
 ```{eval-rst}
 .. autofunction:: iris.iris.atomic_sub
 ```
 
-#### atomic_cas
+### atomic_cas
 ```{eval-rst}
 .. autofunction:: iris.iris.atomic_cas
 ```
 
-#### atomic_xchg
+### atomic_xchg
 ```{eval-rst}
 .. autofunction:: iris.iris.atomic_xchg
 ```
 
-#### atomic_xor
+### atomic_xor
 ```{eval-rst}
 .. autofunction:: iris.iris.atomic_xor
 ```
 
-#### atomic_or
+### atomic_or
 ```{eval-rst}
 .. autofunction:: iris.iris.atomic_or
 ```
 
-#### atomic_and
+### atomic_and
 ```{eval-rst}
 .. autofunction:: iris.iris.atomic_and
 ```
 
-#### atomic_min
+### atomic_min
 ```{eval-rst}
 .. autofunction:: iris.iris.atomic_min
 ```
 
-#### atomic_max
+### atomic_max
 ```{eval-rst}
 .. autofunction:: iris.iris.atomic_max
 ```

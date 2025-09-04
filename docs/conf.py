@@ -47,10 +47,6 @@ exclude_patterns = [
     # Exclude removed sections from build to avoid toctree warnings
     "how-to/**",
     "tutorials/**",
-    "PROGRAMMING_MODEL.md",
-    "FINEGRAINED_OVERLAP.md",
-    "SETUP_ALTERNATIVES.md",
-    "CONTRIBUTING.md",
 ]
 
 # -- Options for HTML output -------------------------------------------------

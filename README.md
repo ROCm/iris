@@ -24,10 +24,11 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris
 
 ## Documentation
 
-1. [Programming Model](docs/PROGRAMMING_MODEL.md)
-2. [Examples](examples/README.md)
-3. [Fine-grained GEMM & Communication Overlap](docs/FINEGRAINED_OVERLAP.md)
-4. [Setup Alternatives](docs/SETUP_ALTERNATIVES.md)
+- [API Reference](https://rocm.github.io/iris/reference/api-reference.html)
+- [Programming Model](https://rocm.github.io/iris/conceptual/programming-model.html)
+- [Examples](https://rocm.github.io/iris/reference/examples.html)
+- [Fine-grained GEMM & Communication Overlap](https://rocm.github.io/iris/conceptual/finegrained-overlap.html)
+- [Setup Alternatives](https://rocm.github.io/iris/getting-started/installation.html)
 
 ## API Example
 
@@ -97,7 +98,7 @@ docker attach iris-dev
 cd iris && pip install -e .
 ```
 
-For manual Docker or Apptainer setup, see [setup alternatives](docs/SETUP_ALTERNATIVES.md).
+For manual Docker or Apptainer setup, see [setup alternatives](https://rocm.github.io/iris/getting-started/installation.html).
 
 ## Next Steps
 

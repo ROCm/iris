@@ -88,5 +88,3 @@ Once you have Iris running with any of these methods:
 
 - Explore the [Examples](../reference/examples.md) directory
 - Learn about the [Programming Model](../conceptual/programming-model.md)
-
----
