@@ -316,6 +316,11 @@ class Iris:
             device (torch.device, optional): the desired device of returned tensor.
                 Default: if None, uses the current device for the default tensor type.
             requires_grad (bool, optional): If autograd should record operations on the returned tensor. Default: False.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> tensor = iris_ctx.arange(0, 10, 2)  # [0, 2, 4, 6, 8]
+            >>> print(tensor.shape)  # torch.Size([5])
         """
         self.debug(f"arange: start = {start}, end = {end}, step = {step}, dtype = {dtype}, device = {device}")
 
@@ -731,6 +736,11 @@ class Iris:
                 Works only for CPU tensors. Default: False. Note: Iris tensors are always on GPU.
             memory_format (torch.memory_format, optional): the desired memory format of returned Tensor.
                 Default: torch.contiguous_format.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> tensor = iris_ctx.empty(2, 3)
+            >>> print(tensor.shape)  # torch.Size([2, 3])
         """
         self.debug(
             f"empty: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}, pin_memory = {pin_memory}"
@@ -1509,6 +1519,13 @@ def get(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
 
     Returns:
         None
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(remote_ptr, local_ptr, heap_bases):
+        >>>     from_rank = 1
+        >>>     to_rank = 0
+        >>>     iris.get(remote_ptr, local_ptr, from_rank, to_rank, heap_bases)
     """
     translated_from_ptr = __translate(from_ptr, from_rank, to_rank, heap_bases)
 
@@ -1536,6 +1553,13 @@ def put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
 
     Returns:
         None
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(local_ptr, remote_ptr, heap_bases):
+        >>>     from_rank = 0
+        >>>     to_rank = 1
+        >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases)
     """
     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases)
 
@@ -1627,6 +1651,15 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
 
     Returns:
         Block: The value contained at the memory location before the atomic operation attempt.
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(ptr, heap_bases):
+        >>>     rank = 0
+        >>>     expected = 0
+        >>>     new_val = 42
+        >>>     old_val = iris.atomic_cas(ptr, expected, new_val, rank, rank, heap_bases)
+        >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
@@ -1654,6 +1687,13 @@ def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=Non
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(ptr, new_value, heap_bases):
+        >>>     rank = 0
+        >>>     old_val = iris.atomic_xchg(ptr, new_value, rank, rank, heap_bases)
+        >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_xchg(translated_ptr, val, mask=mask, sem=sem, scope=scope)
@@ -1803,5 +1843,10 @@ def iris(heap_size=1 << 30):
 
     Returns:
         Iris: An initialized Iris instance.
+
+    Example:
+        >>> import iris
+        >>> iris_ctx = iris.iris(2**30)  # 1GB heap
+        >>> tensor = iris_ctx.zeros(1024, 1024)
     """
     return Iris(heap_size)

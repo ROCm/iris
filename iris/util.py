@@ -68,6 +68,28 @@ def do_bench(
     quantiles=None,
     return_mode="mean",
 ):
+    """
+    Benchmark a function by timing its execution.
+
+    Args:
+        fn (callable): Function to benchmark.
+        barrier_fn (callable, optional): Function to call for synchronization. Default: no-op.
+        preamble_fn (callable, optional): Function to call before each execution. Default: no-op.
+        n_warmup (int, optional): Number of warmup iterations. Default: 25.
+        n_repeat (int, optional): Number of timing iterations. Default: 100.
+        quantiles (list, optional): Quantiles to return instead of summary statistic. Default: None.
+        return_mode (str, optional): Summary statistic to return ("mean", "min", "max", "median", "all"). Default: "mean".
+
+    Returns:
+        float or list: Timing result(s) in milliseconds.
+
+    Example:
+        >>> import iris
+        >>> iris_ctx = iris.iris(1 << 20)
+        >>> def test_fn():
+        >>>     tensor = iris_ctx.zeros(1000, 1000)
+        >>> time_ms = iris.do_bench(test_fn, barrier_fn=iris_ctx.barrier)
+    """
     # Wait for anything that happened before
     barrier_fn()
     preamble_fn()
@@ -115,6 +137,20 @@ def memset_kernel(ptr, value, n_elements, BLOCK_SIZE: tl.constexpr):
 
 
 def memset_tensor(tensor, value):
+    """
+    Set all elements of a tensor to a specified value using a Triton kernel.
+
+    Args:
+        tensor (torch.Tensor): Contiguous int32 tensor to modify in-place.
+        value (int): Value to set all elements to.
+
+    Example:
+        >>> import iris
+        >>> import torch
+        >>> tensor = torch.zeros(100, dtype=torch.int32, device='cuda')
+        >>> iris.memset_tensor(tensor, 42)
+        >>> assert torch.all(tensor == 42)
+    """
     assert tensor.is_contiguous(), "Tensor must be contiguous"
     assert tensor.dtype == torch.int32, "Only torch.int32 tensors are supported"
     n_elements = tensor.numel()
