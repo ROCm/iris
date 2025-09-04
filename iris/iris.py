@@ -805,6 +805,11 @@ class Iris:
             layout (torch.layout, optional): the desired layout of returned Tensor. Default: torch.strided.
             device (torch.device, optional): the desired device of returned tensor. Default: if None, uses the current device.
             requires_grad (bool, optional): If autograd should record operations on the returned tensor. Default: False.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> tensor = iris_ctx.randint(0, 10, (2, 3))  # Random integers [0, 10)
+            >>> print(tensor.shape)  # torch.Size([2, 3])
         """
         self.debug(f"randint: args = {args}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
 
@@ -886,6 +891,11 @@ class Iris:
             layout (torch.layout, optional): the desired layout of returned Tensor. Default: torch.strided.
             device (torch.device, optional): the desired device of returned tensor. Default: if None, uses the current device.
             requires_grad (bool, optional): If autograd should record operations on the returned tensor. Default: False.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> tensor = iris_ctx.linspace(0, 10, 5)  # [0, 2.5, 5, 7.5, 10]
+            >>> print(tensor.shape)  # torch.Size([5])
         """
         self.debug(
             f"linspace: start = {start}, end = {end}, steps = {steps}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
@@ -987,6 +997,11 @@ class Iris:
                 Default: False.
             pin_memory (bool, optional): If set, returned tensor would be allocated in the pinned memory.
                 Works only for CPU tensors. Default: False. Note: Iris tensors are always on GPU.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> tensor = iris_ctx.rand(2, 3)  # Random values in [0, 1)
+            >>> print(tensor.shape)  # torch.Size([2, 3])
         """
         self.debug(
             f"rand: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}, pin_memory = {pin_memory}"
@@ -1624,6 +1639,13 @@ def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
     Returns:
         Block: The value at the memory location before the atomic subtraction.
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(ptr, decrement, heap_bases):
+        >>>     rank = 0
+        >>>     old_val = iris.atomic_sub(ptr, decrement, rank, rank, heap_bases)
+        >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
