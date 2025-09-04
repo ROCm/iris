@@ -90,6 +90,8 @@ The recommended way to get started is using Docker Compose, which provides a dev
 ```shell
 # Start the development container
 docker compose up --build -d
+or depending on your docker version
+docker-compose up --build -d 
 
 # Attach to the running container
 docker attach iris-dev
