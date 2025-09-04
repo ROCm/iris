@@ -160,6 +160,9 @@ class Iris:
 
         Args:
             message (str): Human-readable message to log at warning level.
+
+        Example:
+            >>> iris_ctx.warning("Memory usage is high")
         """
         self._log_with_rank(logging.WARNING, message)
 
@@ -169,6 +172,9 @@ class Iris:
 
         Args:
             message (str): Human-readable message to log at error level.
+
+        Example:
+            >>> iris_ctx.error("Failed to allocate memory")
         """
         self._log_with_rank(logging.ERROR, message)
 
@@ -233,6 +239,12 @@ class Iris:
                 Default: False.
             memory_format (torch.memory_format, optional): the desired memory format of returned Tensor.
                 Default: torch.preserve_format.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> input_tensor = iris_ctx.ones(2, 3)
+            >>> zeros_tensor = iris_ctx.zeros_like(input_tensor)
+            >>> print(zeros_tensor.shape)  # torch.Size([2, 3])
         """
         self.debug(
             f"zeros_like: input_shape = {input.shape}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
@@ -376,6 +388,11 @@ class Iris:
                 Default: if None, uses the current device for the default tensor type.
             requires_grad (bool, optional): If autograd should record operations on the returned tensor.
                 Default: False.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> tensor = iris_ctx.zeros(2, 3)
+            >>> print(tensor.shape)  # torch.Size([2, 3])
         """
         self.debug(f"zeros: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
 
@@ -466,6 +483,11 @@ class Iris:
                 Default: False.
             pin_memory (bool, optional): If set, returned tensor would be allocated in the pinned memory.
                 Works only for CPU tensors. Default: False.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> tensor = iris_ctx.randn(2, 3)
+            >>> print(tensor.shape)  # torch.Size([2, 3])
         """
         self.debug(
             f"randn: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}, pin_memory = {pin_memory}"
@@ -529,6 +551,11 @@ class Iris:
                 Default: if None, uses the current device for the default tensor type.
             requires_grad (bool, optional): If autograd should record operations on the returned tensor.
                 Default: False.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> tensor = iris_ctx.ones(2, 3)
+            >>> print(tensor.shape)  # torch.Size([2, 3])
         """
         self.debug(f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
 
@@ -588,6 +615,11 @@ class Iris:
                 Default: if None, uses the current device for the default tensor type.
             requires_grad (bool, optional): If autograd should record operations on the returned tensor.
                 Default: False.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> tensor = iris_ctx.full((2, 3), 3.14)
+            >>> print(tensor.shape)  # torch.Size([2, 3])
         """
         self.debug(
             f"full: size = {size}, fill_value = {fill_value}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
@@ -649,6 +681,11 @@ class Iris:
 
         Returns:
             Tensor: A tensor filled with random numbers from a uniform distribution.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> tensor = iris_ctx.uniform((2, 3), low=0.0, high=1.0)
+            >>> print(tensor.shape)  # torch.Size([2, 3])
         """
         self.debug(f"uniform: size = {size}, low = {low}, high = {high}, dtype = {dtype}")
         size, num_elements = self.__parse_size(size)
@@ -998,6 +1035,11 @@ class Iris:
             torch.Tensor: A 1D tensor of ``uint64`` heap base addresses of size ``num_ranks``
             on the Iris device. Pass this to device-side Triton kernels that require
             heap translation.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> heap_bases = iris_ctx.get_heap_bases()
+            >>> print(heap_bases.shape)  # torch.Size([num_ranks])
         """
         return self.heap_bases
 
@@ -1010,6 +1052,10 @@ class Iris:
         ranks reach the same point before proceeding.
         Args:
             stream: If stream is given: wait only for that stream before MPI_Barrier. If stream is None: legacy behavior (device-wide sync).
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> iris_ctx.barrier()  # Synchronize all ranks
         """
         # Wait for all GPUs to finish work
         if stream is None:
@@ -1026,6 +1072,11 @@ class Iris:
 
         Returns:
             torch.device: The CUDA device of Iris-managed memory.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> device = iris_ctx.get_device()
+            >>> print(device)  # cuda:0
         """
         return self.memory_pool.device
 
@@ -1035,6 +1086,11 @@ class Iris:
 
         Returns:
             int: Number of compute units on this rank's GPU.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> cu_count = iris_ctx.get_cu_count()
+            >>> print(f"GPU has {cu_count} CUs")
         """
         return get_cu_count(self.gpu_id)
 
@@ -1044,6 +1100,11 @@ class Iris:
 
         Returns:
             int: Zero-based rank id of the current process.
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> rank = iris_ctx.get_rank()
+            >>> print(f"This is rank {rank}")
         """
         return self.cur_rank
 
@@ -1053,6 +1114,11 @@ class Iris:
 
         Returns:
             int: World size (number of ranks).
+
+        Example:
+            >>> iris_ctx = iris.iris(1 << 20)
+            >>> num_ranks = iris_ctx.get_num_ranks()
+            >>> print(f"Total ranks: {num_ranks}")
         """
         return self.num_ranks
 
@@ -1379,6 +1445,13 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None):
 
     Returns:
         Block: The loaded value from the target memory location.
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(ptr, heap_bases):
+        >>>     rank = 0
+        >>>     data = iris.load(ptr, rank, rank, heap_bases)
+        >>>     return data
     """
     translated_ptr = __translate(pointer, to_rank, from_rank, heap_bases)
     result = tl.load(translated_ptr, mask=mask)
@@ -1405,6 +1478,12 @@ def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
 
     Returns:
         None
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(ptr, data, heap_bases):
+        >>>     rank = 0
+        >>>     iris.store(ptr, data, rank, rank, heap_bases)
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     tl.store(translated_ptr, value, mask=mask)
@@ -1487,6 +1566,13 @@ def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(ptr, increment, heap_bases):
+        >>>     rank = 0
+        >>>     old_val = iris.atomic_add(ptr, increment, rank, rank, heap_bases)
+        >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
