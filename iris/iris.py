@@ -1474,8 +1474,10 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None):
     Example:
         >>> @triton.jit
         >>> def kernel(ptr, heap_bases):
-        >>>     rank = 0
-        >>>     data = iris.load(ptr, rank, rank, heap_bases)
+        >>>     # Load data from rank 1's memory into the current rank
+        >>>     cur_rank = 0      # Current rank
+        >>>     remote_rank = 1   # Remote rank to load from
+        >>>     data = iris.load(ptr, cur_rank, remote_rank, heap_bases)
         >>>     return data
     """
     translated_ptr = __translate(pointer, to_rank, from_rank, heap_bases)
@@ -1506,9 +1508,12 @@ def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
 
     Example:
         >>> @triton.jit
-        >>> def kernel(ptr, data, heap_bases):
-        >>>     rank = 0
-        >>>     iris.store(ptr, data, rank, rank, heap_bases)
+        >>> def kernel(ptr, heap_bases):
+        >>>     # Store value 42 into rank 1's heap from rank 0
+        >>>     cur_rank = 0      # Current rank (source)
+        >>>     remote_rank = 1   # Remote rank (destination)
+        >>>     value = 42
+        >>>     iris.store(ptr, value, cur_rank, remote_rank, heap_bases)
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     tl.store(translated_ptr, value, mask=mask)
@@ -1608,9 +1613,12 @@ def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
     Example:
         >>> @triton.jit
-        >>> def kernel(ptr, increment, heap_bases):
-        >>>     rank = 0
-        >>>     old_val = iris.atomic_add(ptr, increment, rank, rank, heap_bases)
+        >>> def kernel(ptr, heap_bases):
+        >>>     # Atomically add 5 to rank 1's memory from rank 0
+        >>>     cur_rank = 0      # Current rank (source)
+        >>>     remote_rank = 1   # Remote rank (destination)
+        >>>     increment = 5
+        >>>     old_val = iris.atomic_add(ptr, increment, cur_rank, remote_rank, heap_bases)
         >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
@@ -1642,9 +1650,12 @@ def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
     Example:
         >>> @triton.jit
-        >>> def kernel(ptr, decrement, heap_bases):
-        >>>     rank = 0
-        >>>     old_val = iris.atomic_sub(ptr, decrement, rank, rank, heap_bases)
+        >>> def kernel(ptr, heap_bases):
+        >>>     # Atomically subtract 3 from rank 2's memory from rank 0
+        >>>     cur_rank = 0      # Current rank (source)
+        >>>     remote_rank = 2   # Remote rank (destination)
+        >>>     decrement = 3
+        >>>     old_val = iris.atomic_sub(ptr, decrement, cur_rank, remote_rank, heap_bases)
         >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
@@ -1677,10 +1688,12 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
     Example:
         >>> @triton.jit
         >>> def kernel(ptr, heap_bases):
-        >>>     rank = 0
+        >>>     # Compare-and-swap on rank 1's memory from rank 0
+        >>>     cur_rank = 0      # Current rank (source)
+        >>>     remote_rank = 1   # Remote rank (destination)
         >>>     expected = 0
         >>>     new_val = 42
-        >>>     old_val = iris.atomic_cas(ptr, expected, new_val, rank, rank, heap_bases)
+        >>>     old_val = iris.atomic_cas(ptr, expected, new_val, cur_rank, remote_rank, heap_bases)
         >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
@@ -1712,9 +1725,12 @@ def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=Non
 
     Example:
         >>> @triton.jit
-        >>> def kernel(ptr, new_value, heap_bases):
-        >>>     rank = 0
-        >>>     old_val = iris.atomic_xchg(ptr, new_value, rank, rank, heap_bases)
+        >>> def kernel(ptr, heap_bases):
+        >>>     # Exchange value with rank 1's memory from rank 0
+        >>>     cur_rank = 0      # Current rank (source)
+        >>>     remote_rank = 1   # Remote rank (destination)
+        >>>     new_value = 99
+        >>>     old_val = iris.atomic_xchg(ptr, new_value, cur_rank, remote_rank, heap_bases)
         >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
@@ -1743,6 +1759,16 @@ def atomic_xor(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(ptr, heap_bases):
+        >>>     # Atomically XOR with rank 1's memory from rank 0
+        >>>     cur_rank = 0      # Current rank (source)
+        >>>     remote_rank = 1   # Remote rank (destination)
+        >>>     mask_val = 0xFF
+        >>>     old_val = iris.atomic_xor(ptr, mask_val, cur_rank, remote_rank, heap_bases)
+        >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_xor(translated_ptr, val, mask=mask, sem=sem, scope=scope)
@@ -1770,6 +1796,16 @@ def atomic_and(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(ptr, heap_bases):
+        >>>     # Atomically AND with rank 1's memory from rank 0
+        >>>     cur_rank = 0      # Current rank (source)
+        >>>     remote_rank = 1   # Remote rank (destination)
+        >>>     mask_val = 0x0F
+        >>>     old_val = iris.atomic_and(ptr, mask_val, cur_rank, remote_rank, heap_bases)
+        >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_and(translated_ptr, val, mask=mask, sem=sem, scope=scope)
@@ -1797,6 +1833,16 @@ def atomic_or(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None,
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(ptr, heap_bases):
+        >>>     # Atomically OR with rank 1's memory from rank 0
+        >>>     cur_rank = 0      # Current rank (source)
+        >>>     remote_rank = 1   # Remote rank (destination)
+        >>>     mask_val = 0xF0
+        >>>     old_val = iris.atomic_or(ptr, mask_val, cur_rank, remote_rank, heap_bases)
+        >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_or(translated_ptr, val, mask=mask, sem=sem, scope=scope)
@@ -1824,6 +1870,16 @@ def atomic_min(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(ptr, heap_bases):
+        >>>     # Atomically find minimum with rank 1's memory from rank 0
+        >>>     cur_rank = 0      # Current rank (source)
+        >>>     remote_rank = 1   # Remote rank (destination)
+        >>>     new_val = 10
+        >>>     old_val = iris.atomic_min(ptr, new_val, cur_rank, remote_rank, heap_bases)
+        >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_min(translated_ptr, val, mask=mask, sem=sem, scope=scope)
@@ -1851,6 +1907,16 @@ def atomic_max(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(ptr, heap_bases):
+        >>>     # Atomically find maximum with rank 1's memory from rank 0
+        >>>     cur_rank = 0      # Current rank (source)
+        >>>     remote_rank = 1   # Remote rank (destination)
+        >>>     new_val = 100
+        >>>     old_val = iris.atomic_max(ptr, new_val, cur_rank, remote_rank, heap_bases)
+        >>>     return old_val
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
