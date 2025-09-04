@@ -3,7 +3,7 @@ SPDX-License-Identifier: MIT
 Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 -->
 
-**[README](../../README.md)** » **Fine-grained GEMM & Communication Overlap**
+**Fine-grained GEMM & Communication Overlap**
 
 # Fine-grained GEMM & Communication Overlap
 
