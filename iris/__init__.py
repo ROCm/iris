@@ -62,10 +62,7 @@ from .logging import (
     ERROR,
 )
 
-# Import launcher functionality
-from .launcher import (
-    launch_iris,
-)
+# Launcher functionality is now user code - see examples and documentation
 
 # Pipe allocations via finegrained allocator
 current_dir = os.path.dirname(__file__)
@@ -111,5 +108,5 @@ __all__ = [
     "INFO",
     "WARNING",
     "ERROR",
-    "launch_iris",
+
 ]

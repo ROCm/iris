@@ -77,20 +77,10 @@ The only change is how you launch your application (PyTorch distributed instead 
 
 ## Migration Steps
 
-1. **Update launch mechanism**: Replace `mpirun` with PyTorch distributed launcher
+1. **Update launch mechanism**: Replace `mpirun` with PyTorch distributed launcher pattern
 2. **Remove MPI**: No need to install or import `mpi4py`
-3. **Optional**: Use the new `iris.launch_iris()` helper function
 
-### Helper Function
 
-Iris now provides a convenience function for launching:
-
-```python
-import iris
-
-# Launch with 4 processes and 1GB heap per process
-iris.launch_iris(nprocs=4, heap_size_bytes=1 << 30)
-```
 
 ## Backwards Compatibility
 

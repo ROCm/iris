@@ -20,14 +20,6 @@ def test_distributed_helpers_import():
     except ImportError as e:
         pytest.skip(f"Cannot import distributed helpers (expected in non-torch environment): {e}")
 
-def test_launcher_import():
-    """Test that we can import the launcher."""
-    try:
-        import iris.launcher
-        assert hasattr(iris.launcher, 'launch_iris')
-        assert hasattr(iris.launcher, 'create_iris_with_distributed_init')
-    except ImportError as e:
-        pytest.skip(f"Cannot import launcher (expected in non-torch environment): {e}")
 
 def test_main_iris_import():
     """Test that we can still import the main iris module."""
@@ -47,8 +39,7 @@ def test_iris_package_exports():
             'atomic_add', 'atomic_sub', 'atomic_cas', 'atomic_xchg',
             'atomic_xor', 'atomic_or', 'atomic_and', 'atomic_min', 'atomic_max',
             'do_bench', 'memset_tensor', 'hip',
-            'set_logger_level', 'logger', 'DEBUG', 'INFO', 'WARNING', 'ERROR',
-            'launch_iris'
+            'set_logger_level', 'logger', 'DEBUG', 'INFO', 'WARNING', 'ERROR'
         ]
         for export in expected_exports:
             assert hasattr(iris, export), f"Missing export: {export}"
