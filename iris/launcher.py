@@ -13,30 +13,48 @@ import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing import start_processes
 
 
-class Iris:
+def create_iris_with_distributed_init(heap_size_bytes: int):
     """
-    Iris context manager that initializes distributed communication and GPU heap.
+    Create an Iris instance after ensuring distributed is initialized.
     
-    This replaces the MPI-based initialization with PyTorch distributed.
+    This function demonstrates the pattern described in the issue for creating
+    an Iris context with PyTorch distributed.
+    
+    Args:
+        heap_size_bytes: Size of heap to allocate
+        
+    Returns:
+        Iris instance (but using the launcher pattern from issue)
     """
-    def __init__(self, heap_size_bytes: int):
-        if not dist.is_initialized():
-            raise RuntimeError("PyTorch distributed must be initialized before creating Iris instance")
-            
-        self.rank = dist.get_rank()
-        self.world_size = dist.get_world_size()
+    if not dist.is_initialized():
+        raise RuntimeError("PyTorch distributed must be initialized before creating Iris instance")
+        
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
 
-        # Device is cuda:<rank>
-        torch.cuda.set_device(self.rank)
-        self.device = torch.device(f"cuda:{self.rank}")
+    # Device is cuda:<rank>
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
 
-        # Allocate heap and record 64-bit base pointer
-        self.heap = torch.empty(heap_size_bytes, dtype=torch.int8, device=self.device)
-        self.heap_base = int(self.heap.data_ptr())
+    # Allocate heap and record 64-bit base pointer
+    heap = torch.empty(heap_size_bytes, dtype=torch.int8, device=device)
+    heap_base = int(heap.data_ptr())
 
-        # All-gather heap bases
-        self.peer_heap_bases = [0 for _ in range(self.world_size)]
-        dist.all_gather_object(self.peer_heap_bases, self.heap_base)
+    # All-gather heap bases
+    peer_heap_bases = [0 for _ in range(world_size)]
+    dist.all_gather_object(peer_heap_bases, heap_base)
+    
+    # This demonstrates the pattern from the issue but doesn't replace the real Iris class
+    class ExampleIrisContext:
+        def __init__(self):
+            self.rank = rank
+            self.world_size = world_size
+            self.device = device
+            self.heap = heap
+            self.heap_base = heap_base
+            self.peer_heap_bases = peer_heap_bases
+    
+    return ExampleIrisContext()
 
 
 def _worker(local_rank: int, world_size: int, init_url: str, heap_size_bytes: int):
@@ -57,7 +75,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, heap_size_bytes: in
         rank=local_rank
     )
 
-    iris = Iris(heap_size_bytes)
+    # Use the example pattern from the issue
+    iris_ctx = create_iris_with_distributed_init(heap_size_bytes)
+    
+    # For actual use, you would import and use: from iris import iris
+    # iris_instance = iris(heap_size_bytes)
+    
     dist.barrier()
     dist.destroy_process_group()
 

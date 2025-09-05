@@ -6,6 +6,7 @@
 Example showing the new PyTorch distributed API for Iris.
 
 This replaces the previous MPI-based examples with PyTorch distributed.
+This example demonstrates the pattern described in the issue.
 """
 
 import torch
@@ -14,6 +15,12 @@ from torch.distributed.elastic.multiprocessing import start_processes
 
 
 class Iris:
+    """
+    Example Iris class following the pattern from the issue.
+    
+    Note: This is just the example pattern. The real Iris class is in iris.iris
+    and would be imported as: from iris import iris
+    """
     def __init__(self, heap_size_bytes: int):
         self.rank = dist.get_rank()
         self.world_size = dist.get_world_size()
@@ -40,9 +47,14 @@ def _worker(local_rank: int, world_size: int, init_url: str, heap_size_bytes: in
         rank=local_rank
     )
 
+    # This is the example pattern from the issue
     iris = Iris(heap_size_bytes)
     print(f"Rank {iris.rank}/{iris.world_size}: Heap base = {hex(iris.heap_base)}")
     print(f"Rank {iris.rank}: Peer heap bases = {[hex(b) for b in iris.peer_heap_bases]}")
+    
+    # In real usage, you would use:
+    # import iris
+    # iris_instance = iris.iris(heap_size_bytes)
     
     dist.barrier()
     dist.destroy_process_group()
