@@ -62,6 +62,11 @@ from .logging import (
     ERROR,
 )
 
+# Import launcher functionality
+from .launcher import (
+    launch_iris,
+)
+
 # Pipe allocations via finegrained allocator
 current_dir = os.path.dirname(__file__)
 # Look for the library in the installed package location
@@ -106,4 +111,5 @@ __all__ = [
     "INFO",
     "WARNING",
     "ERROR",
+    "launch_iris",
 ]

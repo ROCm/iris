@@ -14,7 +14,7 @@ Key Features:
 - Efficient load/store operations with rank-to-rank communication
 - Memory allocation and deallocation utilities
 - Built-in logging with rank information
-- MPI integration for distributed computing
+- PyTorch distributed integration for distributed computing
 
 Example:
     >>> import iris
@@ -26,11 +26,11 @@ Example:
 import triton
 import triton.language as tl
 
-from iris._mpi_helpers import (
-    init_mpi,
-    mpi_allgather,
-    world_barrier,
-    mpi_broadcast_scalar,
+from iris._distributed_helpers import (
+    init_distributed,
+    distributed_allgather,
+    distributed_barrier,
+    distributed_broadcast_scalar,
 )
 from iris.hip import (
     set_device,
@@ -68,7 +68,7 @@ class Iris:
 
     def __init__(self, heap_size=1 << 30):
         # Initialize
-        comm, cur_rank, num_ranks = init_mpi()
+        comm, cur_rank, num_ranks = init_distributed()
         num_gpus = count_devices()
 
         gpu_id = cur_rank % num_gpus
@@ -92,12 +92,12 @@ class Iris:
         ipc_handles = np.zeros((num_ranks, 64), dtype=np.uint8)
         ipc_handle = get_ipc_handle(heap_base_ptr, cur_rank)
 
-        world_barrier()
+        distributed_barrier()
 
-        all_ipc_handles = mpi_allgather(np.frombuffer(ipc_handle, dtype=np.uint8))
-        all_heap_bases = mpi_allgather(np.array([heap_bases[cur_rank]], dtype=np.uint64))
+        all_ipc_handles = distributed_allgather(np.frombuffer(ipc_handle, dtype=np.uint8))
+        all_heap_bases = distributed_allgather(np.array([heap_bases[cur_rank]], dtype=np.uint64))
 
-        world_barrier()
+        distributed_barrier()
 
         ipc_heap_bases = np.zeros(num_ranks, dtype=np.uintp)
         for rank in range(num_ranks):
@@ -110,10 +110,10 @@ class Iris:
         for i in range(num_ranks):
             self.debug(f"GPU {i}: Heap base {hex(int(ipc_heap_bases[i]))}")
 
-        world_barrier()
+        distributed_barrier()
         self.heap_bases = torch.from_numpy(ipc_heap_bases).to(device=self.device, dtype=torch.uint64)
 
-        world_barrier()
+        distributed_barrier()
 
     def _log_with_rank(self, level, message):
         """Helper method to log with rank information injected into the record."""
@@ -1006,10 +1006,10 @@ class Iris:
         Synchronize all ranks and their CUDA devices.
 
         This first calls ``torch.cuda.synchronize()`` or ``stream.synchronize()`` to ensure the local GPU has
-        finished all queued work, then performs a global MPI barrier so that all
+        finished all queued work, then performs a global distributed barrier so that all
         ranks reach the same point before proceeding.
         Args:
-            stream: If stream is given: wait only for that stream before MPI_Barrier. If stream is None: legacy behavior (device-wide sync).
+            stream: If stream is given: wait only for that stream before barrier. If stream is None: legacy behavior (device-wide sync).
         """
         # Wait for all GPUs to finish work
         if stream is None:
@@ -1017,8 +1017,8 @@ class Iris:
         else:
             stream.synchronize()
 
-        # MPI barrier
-        world_barrier()
+        # Distributed barrier
+        distributed_barrier()
 
     def get_device(self):
         """
@@ -1040,7 +1040,7 @@ class Iris:
 
     def get_rank(self):
         """
-        Get this process's rank id in the MPI communicator.
+        Get this process's rank id in the distributed communicator.
 
         Returns:
             int: Zero-based rank id of the current process.
@@ -1049,7 +1049,7 @@ class Iris:
 
     def get_num_ranks(self):
         """
-        Get the total number of ranks in the MPI communicator.
+        Get the total number of ranks in the distributed communicator.
 
         Returns:
             int: World size (number of ranks).
