@@ -4,6 +4,15 @@
 import torch
 import pytest
 import iris
+import sys
+from pathlib import Path
+
+# Add tests directory to path for test_utils
+current_dir = Path(__file__).parent
+tests_dir = current_dir.parent
+sys.path.insert(0, str(tests_dir))
+
+from test_utils import distributed_test
 
 
 @pytest.mark.parametrize(
@@ -25,19 +34,35 @@ import iris
         (10, 20),
     ],
 )
-def test_rand_basic(dtype, size):
-    shmem = iris.iris(1 << 20)
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_rand_basic(dtype, size, num_ranks):
+    """Test basic rand functionality with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_rand_distributed(local_rank, world_size):
+        shmem = iris.iris(1 << 20)
 
-    # Test basic rand
-    result = shmem.rand(*size, dtype=dtype)
+        # Test basic rand
+        result = shmem.rand(*size, dtype=dtype)
 
-    # Verify shape matches
-    assert result.shape == size
-    assert result.dtype == dtype
+        # Verify shape matches
+        assert result.shape == size
+        assert result.dtype == dtype
 
-    # Verify values are within range [0, 1)
-    assert torch.all(result >= 0)
-    assert torch.all(result < 1)
+        # Verify values are within range [0, 1)
+        assert torch.all(result >= 0)
+        assert torch.all(result < 1)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_rand_distributed()
+    assert result is True
 
     # Verify tensor is on symmetric heap
     assert shmem._Iris__on_symmetric_heap(result)

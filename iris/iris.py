@@ -188,7 +188,7 @@ class Iris:
             >>> value = 42 if iris_ctx.get_rank() == 0 else None
             >>> value = iris_ctx.broadcast(value, source_rank=0)
         """
-        return mpi_broadcast_scalar(value, source_rank)
+        return distributed_broadcast_scalar(value, source_rank)
 
     def __allocate(self, num_elements, dtype):
         self.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")

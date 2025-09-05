@@ -1,10 +1,12 @@
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
-
 import torch
+import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing import start_processes
 import triton
 import torch.cuda.nvtx as nvtx
 
+
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 def main():
     torch.manual_seed(42)

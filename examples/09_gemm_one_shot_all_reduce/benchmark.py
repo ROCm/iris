@@ -1,8 +1,6 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
-
 import torch
+import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing import start_processes
 import triton
 import random
 import sys
@@ -11,15 +9,19 @@ import argparse
 import json
 
 from examples.common.utils import (
-    JSONWriter,
-    Timestamps,
-    is_triton_interpret_set,
-)
-
 import iris
 
 from matmul_wrapper import matmul
 from examples.common.validation import validate_gemm
+
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+    JSONWriter,
+    Timestamps,
+    is_triton_interpret_set,
+)
 
 torch.manual_seed(123)
 random.seed(123)
@@ -69,14 +71,22 @@ def parse_args():
     # For All Scatter, use: 288
     # For One Shot, use: 256
     parser.add_argument("--gemm_sms", type=int, default=288, help="Number of SMs for Stream-K")
-    parser.add_argument("--total_sms", type=int, default=304, help="Total number of SMs")
+    parser.add_argument("--total_sms", type=int, default=304, help="Total number of SMs")    parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
+
     return vars(parser.parse_args())
 
 
-def main():
-    args = parse_args()
+def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
+    """Worker function for PyTorch distributed execution."""
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(
+        backend=backend, 
+        init_method=init_url, 
+        world_size=world_size, 
+        rank=local_rank
+    )
 
-    shmem = iris.iris(args["heap_size"])
+    # Main benchmark logicshmem = iris.iris(args["heap_size"])
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
     cu_count = shmem.get_cu_count()
@@ -278,6 +288,24 @@ def main():
 
     shmem.barrier()
 
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+def main(num_ranks: int = None):
+    args = parse_args()
+    
+    # Use command line argument if provided, otherwise use num_ranks parameter
+    if num_ranks is None:
+        num_ranks = args["num_ranks"]
+    
+    init_url = "tcp://127.0.0.1:29500"
+    start_processes(
+        fn=_worker,
+        args=(num_ranks, init_url, args),
+        nprocs=num_ranks,
+        join=True,
+    )
 
 if __name__ == "__main__":
     main()

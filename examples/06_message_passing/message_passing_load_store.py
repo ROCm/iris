@@ -1,16 +1,18 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
-
 import argparse
 
 import torch
+import torch.distributed as dist
+from torch.distributed.elastic.multiprocessing import start_processes
 import triton
 import triton.language as tl
 import random
 
 import iris
 
+
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 @triton.jit
 def producer_kernel(
@@ -124,15 +126,23 @@ def parse_args():
     parser.add_argument("-s", "--buffer_size", type=int, default=4096, help="Buffer Size")
     parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
 
-    parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
+    parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")    parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
+
 
     return vars(parser.parse_args())
 
 
-def main():
-    args = parse_args()
+def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
+    """Worker function for PyTorch distributed execution."""
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(
+        backend=backend, 
+        init_method=init_url, 
+        world_size=world_size, 
+        rank=local_rank
+    )
 
-    shmem = iris.iris(args["heap_size"])
+    # Main benchmark logicshmem = iris.iris(args["heap_size"])
     dtype = torch_dtype_from_str(args["datatype"])
     cur_rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
@@ -199,6 +209,24 @@ def main():
 
     shmem.barrier()
 
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+def main(num_ranks: int = None):
+    args = parse_args()
+    
+    # Use command line argument if provided, otherwise use num_ranks parameter
+    if num_ranks is None:
+        num_ranks = args["num_ranks"]
+    
+    init_url = "tcp://127.0.0.1:29500"
+    start_processes(
+        fn=_worker,
+        args=(num_ranks, init_url, args),
+        nprocs=num_ranks,
+        join=True,
+    )
 
 if __name__ == "__main__":
     main()

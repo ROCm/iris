@@ -11,6 +11,14 @@ import iris
 
 import importlib.util
 from pathlib import Path
+import sys
+
+# Add tests directory to path for test_utils
+current_dir = Path(__file__).parent
+tests_dir = current_dir.parent
+sys.path.insert(0, str(tests_dir))
+
+from test_utils import distributed_test
 
 current_dir = Path(__file__).parent
 file_path = (current_dir / "../../examples/02_all_load/all_load_bench.py").resolve()
@@ -43,35 +51,52 @@ spec.loader.exec_module(module)
         1024,
     ],
 )
-def test_all_load_bench(dtype, buffer_size, heap_size, block_size):
-    shmem = iris.iris(heap_size)
-    num_ranks = shmem.get_num_ranks()
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+        4,
+    ],
+)
+def test_all_load_bench(dtype, buffer_size, heap_size, block_size, num_ranks):
+    """Test all_load_bench example with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_all_load_bench_distributed(local_rank, world_size):
+        shmem = iris.iris(heap_size)
+        num_ranks = shmem.get_num_ranks()
 
-    element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-    n_elements = buffer_size // element_size_bytes
-    buffer = shmem.zeros(n_elements, dtype=dtype)
+        element_size_bytes = torch.tensor([], dtype=dtype).element_size()
+        n_elements = buffer_size // element_size_bytes
+        buffer = shmem.zeros(n_elements, dtype=dtype)
 
-    # Create arguments similar to what all_load_bench.py expects
-    args = {
-        "datatype": _torch_dtype_to_str(dtype),
-        "block_size": block_size,
-        "active_ranks": num_ranks,
-        "num_warmup": 1,
-        "num_experiments": 2,
-        "verbose": False,
-        "validate": False,
-    }
+        # Create arguments similar to what all_load_bench.py expects
+        args = {
+            "datatype": _torch_dtype_to_str(dtype),
+            "block_size": block_size,
+            "active_ranks": num_ranks,
+            "num_warmup": 1,
+            "num_experiments": 2,
+            "verbose": False,
+            "validate": False,
+        }
 
-    shmem.barrier()
+        shmem.barrier()
 
-    # Run the experiment and measure bandwidth
-    bandwidth_gbps = module.run_experiment(shmem, args, buffer)
+        # Run the experiment and measure bandwidth
+        bandwidth_gbps = module.run_experiment(shmem, args, buffer)
 
-    shmem.barrier()
+        shmem.barrier()
 
-    # Verify that we got a reasonable bandwidth measurement
-    assert isinstance(bandwidth_gbps, float)
-    assert bandwidth_gbps >= 0.0  # Bandwidth should be non-negative
+        # Verify that we got a reasonable bandwidth measurement
+        assert isinstance(bandwidth_gbps, float)
+        assert bandwidth_gbps >= 0.0  # Bandwidth should be non-negative
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_all_load_bench_distributed()
+    assert result is True
 
 
 @pytest.mark.parametrize(
@@ -80,40 +105,55 @@ def test_all_load_bench(dtype, buffer_size, heap_size, block_size):
         torch.float16,  # Test with one dtype for validation
     ],
 )
-def test_all_load_bench_with_validation(dtype):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_all_load_bench_with_validation(dtype, num_ranks):
     """Test all_load_bench with validation enabled to ensure correctness"""
-    heap_size = 1 << 30  # 1 GiB heap
-    buffer_size = 1 << 20  # 1 MiB buffer
-    block_size = 512
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_all_load_bench_validation_distributed(local_rank, world_size):
+        heap_size = 1 << 30  # 1 GiB heap
+        buffer_size = 1 << 20  # 1 MiB buffer
+        block_size = 512
 
-    shmem = iris.iris(heap_size)
-    num_ranks = shmem.get_num_ranks()
+        shmem = iris.iris(heap_size)
+        num_ranks = shmem.get_num_ranks()
 
-    element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-    n_elements = buffer_size // element_size_bytes
-    buffer = shmem.zeros(n_elements, dtype=dtype)
+        element_size_bytes = torch.tensor([], dtype=dtype).element_size()
+        n_elements = buffer_size // element_size_bytes
+        buffer = shmem.zeros(n_elements, dtype=dtype)
 
-    # Create arguments with validation enabled
-    args = {
-        "datatype": _torch_dtype_to_str(dtype),
-        "block_size": block_size,
-        "active_ranks": num_ranks,
-        "num_warmup": 1,
-        "num_experiments": 1,
-        "verbose": False,
-        "validate": True,  # Enable validation
-    }
+        # Create arguments with validation enabled
+        args = {
+            "datatype": _torch_dtype_to_str(dtype),
+            "block_size": block_size,
+            "active_ranks": num_ranks,
+            "num_warmup": 1,
+            "num_experiments": 1,
+            "verbose": False,
+            "validate": True,  # Enable validation
+        }
 
-    shmem.barrier()
+        shmem.barrier()
 
-    # Run the experiment and measure bandwidth
-    bandwidth_gbps = module.run_experiment(shmem, args, buffer)
+        # Run the experiment and measure bandwidth
+        bandwidth_gbps = module.run_experiment(shmem, args, buffer)
 
-    shmem.barrier()
+        shmem.barrier()
 
-    # Verify that we got a reasonable bandwidth measurement
-    assert isinstance(bandwidth_gbps, float)
-    assert bandwidth_gbps >= 0.0  # Bandwidth should be non-negative
+        # Verify that we got a reasonable bandwidth measurement
+        assert isinstance(bandwidth_gbps, float)
+        assert bandwidth_gbps >= 0.0  # Bandwidth should be non-negative
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_all_load_bench_validation_distributed()
+    assert result is True
 
 
 def _torch_dtype_to_str(dtype):

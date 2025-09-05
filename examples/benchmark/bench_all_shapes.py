@@ -1,12 +1,12 @@
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
-
 import subprocess
 import os
 from datetime import datetime
 import argparse
 import json
 
+
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 def launch_sbatch(
     config,
