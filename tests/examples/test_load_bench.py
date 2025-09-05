@@ -50,18 +50,11 @@ spec.loader.exec_module(module)
         1024,
     ],
 )
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-        4,
-    ],
-)
 def test_load_bench(dtype, buffer_size, heap_size, block_size, num_ranks):
     """Test load_bench example with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_load_bench_distributed(local_rank, world_size):
+    @distributed_test
+    def _test_load_bench_distributed(local_rank, world_size, num_ranks):
         shmem = iris.iris(heap_size)
         num_ranks = shmem.get_num_ranks()
 
@@ -84,5 +77,5 @@ def test_load_bench(dtype, buffer_size, heap_size, block_size, num_ranks):
         return True
     
     # Run the distributed test
-    result = _test_load_bench_distributed()
+    result = _test_load_bench_distributed(num_ranks=num_ranks)
     assert result is True

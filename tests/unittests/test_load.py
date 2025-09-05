@@ -48,46 +48,40 @@ def load_kernel(
         32,
     ],
 )
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_load_api(dtype, BLOCK_SIZE, num_ranks):
-    # TODO: Adjust heap size.
-    """Test with distributed setup."""
+    """Test load API with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_load_api_distributed(local_rank, world_size):
-    shmem = iris.iris(1 << 20)
+    @distributed_test
+    def _test_load_api_distributed(local_rank, world_size, num_ranks):
+        shmem = iris.iris(1 << 20)
+        
+        num_ranks = shmem.get_num_ranks()
+        heap_bases = shmem.get_heap_bases()
+        source_rank = shmem.get_rank()
+        partner = int((source_rank + num_ranks // 2) % num_ranks)
+
+        data = shmem.full((BLOCK_SIZE,), source_rank, dtype=dtype)
+        results = shmem.zeros_like(data)
+
+        shmem.barrier()
+
+        grid = lambda meta: (1,)
+        load_kernel[grid](data, results, source_rank, num_ranks, BLOCK_SIZE, heap_bases)
+        shmem.barrier()
+
+        # Verify the result
+        expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * partner
+
+        try:
+            torch.testing.assert_close(results, expected, rtol=0, atol=0)
+        except AssertionError as e:
+            print(e)
+            print("Expected:", expected)
+            print("Actual:", results)
+            raise
         
         return True
     
     # Run the distributed test
-    result = _test_load_api_distributed()
+    result = _test_load_api_distributed(num_ranks=num_ranks)
     assert result is True
-    num_ranks = shmem.get_num_ranks()
-    heap_bases = shmem.get_heap_bases()
-    source_rank = shmem.get_rank()
-    partner = int((source_rank + num_ranks // 2) % num_ranks)
-
-    data = shmem.full((BLOCK_SIZE,), source_rank, dtype=dtype)
-    results = shmem.zeros_like(data)
-
-    shmem.barrier()
-
-    grid = lambda meta: (1,)
-    load_kernel[grid](data, results, source_rank, num_ranks, BLOCK_SIZE, heap_bases)
-    shmem.barrier()
-
-    # Verify the result
-    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * partner
-
-    try:
-        torch.testing.assert_close(results, expected, rtol=0, atol=0)
-    except AssertionError as e:
-        print(e)
-        print("Expected:", expected)
-        print("Actual:", results)
-        raise

@@ -58,44 +58,38 @@ def atomic_add_kernel(
         32,
     ],
 )
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_atomic_add_api(dtype, sem, scope, BLOCK_SIZE, num_ranks):
-    # TODO: Adjust heap size.
-    """Test with distributed setup."""
+    """Test atomic add API with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_atomic_add_api_distributed(local_rank, world_size):
-    shmem = iris.iris(1 << 20)
+    @distributed_test
+    def _test_atomic_add_api_distributed(local_rank, world_size, num_ranks):
+        shmem = iris.iris(1 << 20)
+        
+        num_ranks = shmem.get_num_ranks()
+        heap_bases = shmem.get_heap_bases()
+        cur_rank = shmem.get_rank()
+
+        results = shmem.zeros(BLOCK_SIZE, dtype=dtype)
+
+        shmem.barrier()
+
+        grid = lambda meta: (1,)
+        atomic_add_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
+        shmem.barrier()
+
+        # Verify the results
+        expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * num_ranks
+
+        try:
+            torch.testing.assert_close(results, expected, rtol=0, atol=0)
+        except AssertionError as e:
+            print(e)
+            print("Expected:", expected)
+            print("Actual:", results)
+            raise
         
         return True
     
     # Run the distributed test
-    result = _test_atomic_add_api_distributed()
+    result = _test_atomic_add_api_distributed(num_ranks=num_ranks)
     assert result is True
-    num_ranks = shmem.get_num_ranks()
-    heap_bases = shmem.get_heap_bases()
-    cur_rank = shmem.get_rank()
-
-    results = shmem.zeros(BLOCK_SIZE, dtype=dtype)
-
-    shmem.barrier()
-
-    grid = lambda meta: (1,)
-    atomic_add_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
-    shmem.barrier()
-
-    # Verify the results
-    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * num_ranks
-
-    try:
-        torch.testing.assert_close(results, expected, rtol=0, atol=0)
-    except AssertionError as e:
-        print(e)
-        print("Expected:", expected)
-        print("Actual:", results)
-        raise

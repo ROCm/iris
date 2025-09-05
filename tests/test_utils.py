@@ -56,21 +56,24 @@ def run_distributed_test(test_func: Callable, num_ranks: int = 2, **kwargs) -> A
     return results.get(0)
 
 
-def distributed_test(num_ranks: int = 2):
+def distributed_test(test_func):
     """
     Decorator to mark a test as distributed.
     
+    The number of ranks is now taken from the pytest --num_ranks command line argument
+    or the num_ranks fixture.
+    
     Usage:
-        @distributed_test(num_ranks=4)
-        def test_my_distributed_function(local_rank, world_size):
+        @distributed_test
+        def test_my_distributed_function(local_rank, world_size, num_ranks):
             # Test logic here
             pass
     """
-    def decorator(test_func):
-        def wrapper(*args, **kwargs):
-            return run_distributed_test(test_func, num_ranks, *args, **kwargs)
-        return wrapper
-    return decorator
+    def wrapper(*args, **kwargs):
+        # Extract num_ranks from kwargs (passed by pytest fixture)
+        num_ranks = kwargs.pop('num_ranks', 2)  # Default to 2 if not provided
+        return run_distributed_test(test_func, num_ranks, *args, **kwargs)
+    return wrapper
 
 
 @pytest.fixture
