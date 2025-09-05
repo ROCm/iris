@@ -6,6 +6,15 @@ import triton
 import triton.language as tl
 import pytest
 import iris
+import sys
+from pathlib import Path
+
+# Add tests directory to path for test_utils
+current_dir = Path(__file__).parent
+tests_dir = current_dir.parent
+sys.path.insert(0, str(tests_dir))
+
+from test_utils import distributed_test
 
 
 # TODO: Separate this kernel out in the following categories:
@@ -33,15 +42,6 @@ def put_kernel(
 
 
 @pytest.mark.parametrize(
-    "dtype",
-    [
-        torch.int8,
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
-    ],
-)
-@pytest.mark.parametrize(
     "BLOCK_SIZE",
     [
         1,
@@ -50,9 +50,25 @@ def put_kernel(
         32,
     ],
 )
-def test_put_api(dtype, BLOCK_SIZE):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_put_api(dtype, BLOCK_SIZE, num_ranks):
     # TODO: Adjust heap size.
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_put_api_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_put_api_distributed()
+    assert result is True
     num_ranks = shmem.get_num_ranks()
     heap_bases = shmem.get_heap_bases()
     cur_rank = shmem.get_rank()

@@ -4,6 +4,15 @@
 import torch
 import pytest
 import iris
+import sys
+from pathlib import Path
+
+# Add tests directory to path for test_utils
+current_dir = Path(__file__).parent
+tests_dir = current_dir.parent
+sys.path.insert(0, str(tests_dir))
+
+from test_utils import distributed_test
 
 
 @pytest.mark.parametrize(
@@ -30,8 +39,24 @@ import iris
         (10, 20),
     ],
 )
-def test_zeros_like_basic(dtype, shape):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_zeros_like_basic(dtype, shape, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_zeros_like_basic_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_zeros_like_basic_distributed()
+    assert result is True
 
     # Create input tensor with various shapes and dtypes
     input_tensor = shmem.full(shape, 5, dtype=dtype)
@@ -48,13 +73,6 @@ def test_zeros_like_basic(dtype, shape):
 
 
 @pytest.mark.parametrize(
-    "input_dtype",
-    [
-        torch.int32,
-        torch.float32,
-    ],
-)
-@pytest.mark.parametrize(
     "output_dtype",
     [
         torch.float32,
@@ -62,8 +80,24 @@ def test_zeros_like_basic(dtype, shape):
         torch.int64,
     ],
 )
-def test_zeros_like_dtype_override(input_dtype, output_dtype):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_zeros_like_dtype_override(input_dtype, output_dtype, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_zeros_like_dtype_override_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_zeros_like_dtype_override_distributed()
+    assert result is True
 
     input_tensor = shmem.full((2, 3), 10, dtype=input_dtype)
 
@@ -83,8 +117,24 @@ def test_zeros_like_dtype_override(input_dtype, output_dtype):
         False,
     ],
 )
-def test_zeros_like_requires_grad(requires_grad):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_zeros_like_requires_grad(requires_grad, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_zeros_like_requires_grad_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_zeros_like_requires_grad_distributed()
+    assert result is True
 
     input_tensor = shmem.full((2, 2), 1, dtype=torch.float32)
 
@@ -96,8 +146,24 @@ def test_zeros_like_requires_grad(requires_grad):
     assert torch.all(result == 0)
 
 
-def test_zeros_like_device_override():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_zeros_like_device_override(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_zeros_like_device_override_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_zeros_like_device_override_distributed()
+    assert result is True
     input_tensor = shmem.full((3, 3), 2, dtype=torch.float32)
 
     # Test default behavior
@@ -134,8 +200,24 @@ def test_zeros_like_device_override():
             shmem.zeros_like(input_tensor, device=different_cuda)
 
 
-def test_zeros_like_layout_override():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_zeros_like_layout_override(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_zeros_like_layout_override_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_zeros_like_layout_override_distributed()
+    assert result is True
 
     input_tensor = shmem.full((2, 4), 3, dtype=torch.float32)
 
@@ -147,8 +229,24 @@ def test_zeros_like_layout_override():
     assert torch.all(result == 0)
 
 
-def test_zeros_like_memory_format():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_zeros_like_memory_format(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_zeros_like_memory_format_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_zeros_like_memory_format_distributed()
+    assert result is True
 
     input_tensor = shmem.full((4, 2), 1, dtype=torch.float32)
 
@@ -232,7 +330,13 @@ def test_zeros_like_memory_format():
     assert shmem._Iris__on_symmetric_heap(result_preserve_channels_last)
 
 
-def test_channels_last_format_shape_preservation():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_channels_last_format_shape_preservation(num_ranks):
     """Test that channels_last format preserves shape and only changes strides."""
     shmem = iris.iris(1 << 20)
 
@@ -446,7 +550,17 @@ def test_zeros_like_symmetric_heap_dtype_override(dtype):
 
 def test_zeros_like_symmetric_heap_other_params():
     """Test that zeros_like with other parameters returns tensors on symmetric heap."""
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_channels_last_format_shape_preservation_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_channels_last_format_shape_preservation_distributed()
+    assert result is True
     input_tensor = shmem.full((3, 3), 1, dtype=torch.float32)
 
     # Test with requires_grad

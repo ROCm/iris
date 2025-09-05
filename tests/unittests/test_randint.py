@@ -4,6 +4,15 @@
 import torch
 import pytest
 import iris
+import sys
+from pathlib import Path
+
+# Add tests directory to path for test_utils
+current_dir = Path(__file__).parent
+tests_dir = current_dir.parent
+sys.path.insert(0, str(tests_dir))
+
+from test_utils import distributed_test
 
 
 @pytest.mark.parametrize(
@@ -27,8 +36,24 @@ import iris
         (10, 20),
     ],
 )
-def test_randint_basic(dtype, size):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randint_basic(dtype, size, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randint_basic_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randint_basic_distributed()
+    assert result is True
 
     # Test basic randint with low, high, size
     result = shmem.randint(0, 10, size, dtype=dtype)
@@ -45,8 +70,24 @@ def test_randint_basic(dtype, size):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_randint_default_dtype():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randint_default_dtype(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randint_default_dtype_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randint_default_dtype_distributed()
+    assert result is True
 
     # Test with default dtype (should use torch.int64)
     result = shmem.randint(0, 10, (2, 3))
@@ -61,8 +102,24 @@ def test_randint_default_dtype():
         False,
     ],
 )
-def test_randint_requires_grad(requires_grad):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randint_requires_grad(requires_grad, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randint_requires_grad_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randint_requires_grad_distributed()
+    assert result is True
 
     # Test with requires_grad parameter
     result = shmem.randint(0, 10, (2, 2), dtype=torch.float32, requires_grad=requires_grad)
@@ -72,8 +129,24 @@ def test_randint_requires_grad(requires_grad):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_randint_device_handling():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randint_device_handling(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randint_device_handling_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randint_device_handling_distributed()
+    assert result is True
 
     # Test default behavior (should use Iris device)
     result = shmem.randint(0, 10, (3, 3))
@@ -109,8 +182,24 @@ def test_randint_device_handling():
             shmem.randint(0, 10, (3, 3), device=different_cuda)
 
 
-def test_randint_layout_handling():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randint_layout_handling(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randint_layout_handling_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randint_layout_handling_distributed()
+    assert result is True
 
     # Test with strided layout (default)
     result = shmem.randint(0, 10, (2, 4), layout=torch.strided)
@@ -122,8 +211,24 @@ def test_randint_layout_handling():
         shmem.randint(0, 10, (2, 4), layout=torch.sparse_coo)
 
 
-def test_randint_out_parameter():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randint_out_parameter(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randint_out_parameter_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randint_out_parameter_distributed()
+    assert result is True
 
     # Test with out parameter
     out_tensor = shmem._Iris__allocate(6, torch.int64)
@@ -144,8 +249,24 @@ def test_randint_out_parameter():
     assert shmem._Iris__on_symmetric_heap(result_int32)
 
 
-def test_randint_size_variations():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randint_size_variations(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randint_size_variations_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randint_size_variations_distributed()
+    assert result is True
 
     # Test single dimension
     result1 = shmem.randint(0, 5, (5,))
@@ -176,8 +297,24 @@ def test_randint_size_variations():
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_randint_edge_cases():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randint_edge_cases(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randint_edge_cases_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randint_edge_cases_distributed()
+    assert result is True
 
     # Empty tensor
     empty_result = shmem.randint(0, 5, (0,))
@@ -210,8 +347,24 @@ def test_randint_edge_cases():
     assert shmem._Iris__on_symmetric_heap(scalar_result)
 
 
-def test_randint_pytorch_equivalence():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randint_pytorch_equivalence(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randint_pytorch_equivalence_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randint_pytorch_equivalence_distributed()
+    assert result is True
 
     # Test basic equivalence
     iris_result = shmem.randint(0, 10, (4, 3))
@@ -247,8 +400,24 @@ def test_randint_pytorch_equivalence():
         {},
     ],
 )
-def test_randint_parameter_combinations(params):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randint_parameter_combinations(params, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randint_parameter_combinations_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randint_parameter_combinations_distributed()
+    assert result is True
 
     # Test various combinations of parameters
     result = shmem.randint(0, 10, (3, 3), **params)
@@ -284,7 +453,13 @@ def test_randint_parameter_combinations(params):
         ((), torch.int32),  # Scalar tensor
     ],
 )
-def test_randint_symmetric_heap_shapes_dtypes(size, dtype):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randint_symmetric_heap_shapes_dtypes(size, dtype, num_ranks):
     """Test that randint returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
 
@@ -473,7 +648,17 @@ def test_randint_pytorch_signatures():
 
 def test_randint_deterministic_behavior():
     """Test that randint works with deterministic settings."""
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randint_symmetric_heap_shapes_dtypes_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randint_symmetric_heap_shapes_dtypes_distributed()
+    assert result is True
 
     # Test that randint works regardless of deterministic settings
     result = shmem.randint(0, 10, (2, 3))

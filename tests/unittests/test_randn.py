@@ -5,6 +5,15 @@ import torch
 import pytest
 import math
 import iris
+import sys
+from pathlib import Path
+
+# Add tests directory to path for test_utils
+current_dir = Path(__file__).parent
+tests_dir = current_dir.parent
+sys.path.insert(0, str(tests_dir))
+
+from test_utils import distributed_test
 
 
 @pytest.mark.parametrize(
@@ -26,8 +35,24 @@ import iris
         (10, 20),
     ],
 )
-def test_randn_basic(dtype, size):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randn_basic(dtype, size, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randn_basic_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randn_basic_distributed()
+    assert result is True
 
     # Test basic randn
     result = shmem.randn(*size, dtype=dtype)
@@ -40,8 +65,24 @@ def test_randn_basic(dtype, size):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_randn_default_dtype():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randn_default_dtype(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randn_default_dtype_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randn_default_dtype_distributed()
+    assert result is True
 
     # Test with default dtype (should use torch.get_default_dtype())
     result = shmem.randn(2, 3)
@@ -57,8 +98,24 @@ def test_randn_default_dtype():
         False,
     ],
 )
-def test_randn_requires_grad(requires_grad):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randn_requires_grad(requires_grad, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randn_requires_grad_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randn_requires_grad_distributed()
+    assert result is True
 
     # Test with requires_grad parameter
     result = shmem.randn(2, 2, dtype=torch.float32, requires_grad=requires_grad)
@@ -68,8 +125,24 @@ def test_randn_requires_grad(requires_grad):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_randn_device_handling():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randn_device_handling(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randn_device_handling_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randn_device_handling_distributed()
+    assert result is True
 
     # Test default behavior (should use Iris device)
     result = shmem.randn(3, 3)
@@ -106,8 +179,24 @@ def test_randn_device_handling():
             shmem.randn(3, 3, device=different_cuda)
 
 
-def test_randn_layout_handling():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randn_layout_handling(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randn_layout_handling_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randn_layout_handling_distributed()
+    assert result is True
 
     # Test with strided layout (default)
     result = shmem.randn(2, 4, layout=torch.strided)
@@ -115,8 +204,24 @@ def test_randn_layout_handling():
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_randn_out_parameter():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randn_out_parameter(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randn_out_parameter_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randn_out_parameter_distributed()
+    assert result is True
 
     # Test with out parameter
     out_tensor = shmem._Iris__allocate(6, torch.float32)
@@ -135,8 +240,24 @@ def test_randn_out_parameter():
     assert shmem._Iris__on_symmetric_heap(result_float)
 
 
-def test_randn_size_variations():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randn_size_variations(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randn_size_variations_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randn_size_variations_distributed()
+    assert result is True
 
     # Test single dimension
     result1 = shmem.randn(5)
@@ -159,8 +280,24 @@ def test_randn_size_variations():
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_randn_edge_cases():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randn_edge_cases(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randn_edge_cases_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randn_edge_cases_distributed()
+    assert result is True
 
     # Empty tensor
     empty_result = shmem.randn(0)
@@ -187,8 +324,24 @@ def test_randn_edge_cases():
     assert shmem._Iris__on_symmetric_heap(scalar_result)
 
 
-def test_randn_pytorch_equivalence():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randn_pytorch_equivalence(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randn_pytorch_equivalence_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randn_pytorch_equivalence_distributed()
+    assert result is True
 
     # Test basic equivalence
     iris_result = shmem.randn(4, 3)
@@ -223,8 +376,24 @@ def test_randn_pytorch_equivalence():
         {},
     ],
 )
-def test_randn_parameter_combinations(params):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randn_parameter_combinations(params, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randn_parameter_combinations_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randn_parameter_combinations_distributed()
+    assert result is True
 
     # Test various combinations of parameters
     result = shmem.randn(3, 3, **params)
@@ -258,7 +427,13 @@ def test_randn_parameter_combinations(params):
         ((), torch.float32),  # Scalar tensor
     ],
 )
-def test_randn_symmetric_heap_shapes_dtypes(size, dtype):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_randn_symmetric_heap_shapes_dtypes(size, dtype, num_ranks):
     """Test that randn returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
 
@@ -436,7 +611,17 @@ def test_randn_deterministic_behavior():
 
 def test_randn_examples():
     """Test the examples from PyTorch documentation."""
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_randn_symmetric_heap_shapes_dtypes_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_randn_symmetric_heap_shapes_dtypes_distributed()
+    assert result is True
 
     # Example 1: torch.randn(4)
     result1 = shmem.randn(4)

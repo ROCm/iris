@@ -4,6 +4,15 @@
 import torch
 import pytest
 import iris
+import sys
+from pathlib import Path
+
+# Add tests directory to path for test_utils
+current_dir = Path(__file__).parent
+tests_dir = current_dir.parent
+sys.path.insert(0, str(tests_dir))
+
+from test_utils import distributed_test
 
 
 @pytest.mark.parametrize(
@@ -27,8 +36,24 @@ import iris
         (0.0, 0.0, 5),
     ],
 )
-def test_linspace_basic(dtype, start, end, steps):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_linspace_basic(dtype, start, end, steps, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_linspace_basic_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_linspace_basic_distributed()
+    assert result is True
 
     # Test basic linspace
     result = shmem.linspace(start, end, steps, dtype=dtype)
@@ -45,8 +70,24 @@ def test_linspace_basic(dtype, start, end, steps):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_linspace_default_dtype():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_linspace_default_dtype(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_linspace_default_dtype_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_linspace_default_dtype_distributed()
+    assert result is True
 
     # Test with default dtype (should use torch.get_default_dtype())
     result = shmem.linspace(0.0, 1.0, 5)
@@ -62,8 +103,24 @@ def test_linspace_default_dtype():
         False,
     ],
 )
-def test_linspace_requires_grad(requires_grad):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_linspace_requires_grad(requires_grad, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_linspace_requires_grad_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_linspace_requires_grad_distributed()
+    assert result is True
 
     # Test with requires_grad parameter
     result = shmem.linspace(0.0, 1.0, 5, dtype=torch.float32, requires_grad=requires_grad)
@@ -73,8 +130,24 @@ def test_linspace_requires_grad(requires_grad):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_linspace_device_handling():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_linspace_device_handling(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_linspace_device_handling_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_linspace_device_handling_distributed()
+    assert result is True
 
     # Test default behavior (should use Iris device)
     result = shmem.linspace(0.0, 1.0, 5)
@@ -110,8 +183,24 @@ def test_linspace_device_handling():
             shmem.linspace(0.0, 1.0, 5, device=different_cuda)
 
 
-def test_linspace_layout_handling():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_linspace_layout_handling(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_linspace_layout_handling_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_linspace_layout_handling_distributed()
+    assert result is True
 
     # Test with strided layout (default)
     result = shmem.linspace(0.0, 1.0, 5, layout=torch.strided)
@@ -123,8 +212,24 @@ def test_linspace_layout_handling():
         shmem.linspace(0.0, 1.0, 5, layout=torch.sparse_coo)
 
 
-def test_linspace_out_parameter():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_linspace_out_parameter(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_linspace_out_parameter_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_linspace_out_parameter_distributed()
+    assert result is True
 
     # Test with out parameter
     out_tensor = shmem._Iris__allocate(5, torch.float32)
@@ -145,8 +250,24 @@ def test_linspace_out_parameter():
     assert shmem._Iris__on_symmetric_heap(result_float64)
 
 
-def test_linspace_steps_variations():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_linspace_steps_variations(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_linspace_steps_variations_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_linspace_steps_variations_distributed()
+    assert result is True
 
     # Test single step
     result1 = shmem.linspace(0.0, 1.0, 1)
@@ -172,8 +293,24 @@ def test_linspace_steps_variations():
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_linspace_edge_cases():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_linspace_edge_cases(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_linspace_edge_cases_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_linspace_edge_cases_distributed()
+    assert result is True
 
     # Single step (start == end)
     single_result = shmem.linspace(5.0, 5.0, 1)
@@ -203,8 +340,24 @@ def test_linspace_edge_cases():
     assert shmem._Iris__on_symmetric_heap(neg_result)
 
 
-def test_linspace_pytorch_equivalence():
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_linspace_pytorch_equivalence(num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_linspace_pytorch_equivalence_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_linspace_pytorch_equivalence_distributed()
+    assert result is True
 
     # Test basic equivalence
     iris_result = shmem.linspace(0.0, 1.0, 5)
@@ -242,8 +395,24 @@ def test_linspace_pytorch_equivalence():
         {},
     ],
 )
-def test_linspace_parameter_combinations(params):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_linspace_parameter_combinations(params, num_ranks):
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_linspace_parameter_combinations_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_linspace_parameter_combinations_distributed()
+    assert result is True
 
     # Test various combinations of parameters
     result = shmem.linspace(0.0, 1.0, 5, **params)
@@ -277,7 +446,13 @@ def test_linspace_parameter_combinations(params):
         (1.0, 2.0, 2, torch.complex128),
     ],
 )
-def test_linspace_symmetric_heap_shapes_dtypes(start, end, steps, dtype):
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+    ],
+)
+def test_linspace_symmetric_heap_shapes_dtypes(start, end, steps, dtype, num_ranks):
     """Test that linspace returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
 
@@ -466,7 +641,17 @@ def test_linspace_accuracy():
 
 def test_linspace_deterministic_behavior():
     """Test that linspace works with deterministic settings."""
+    """Test with distributed setup."""
+    
+    @distributed_test(num_ranks=num_ranks)
+    def _test_linspace_symmetric_heap_shapes_dtypes_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
+        
+        return True
+    
+    # Run the distributed test
+    result = _test_linspace_symmetric_heap_shapes_dtypes_distributed()
+    assert result is True
 
     # Test that linspace works regardless of deterministic settings
     result = shmem.linspace(0.0, 1.0, 5)
