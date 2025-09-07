@@ -225,16 +225,16 @@ def main():
         kernel_timing[k]["experiments"] = 0
 
     if args["validate"]:
-        shmem.log("Validating...")
+        shmem.info("Validating...")
         matmul.set_debug(True)
         # Validate global result
         success = validate_gemm(A, B, C, shmem)
         passed_str = "passed" if success else "failed"
-        shmem.log(f"Final C validation {passed_str}.")
+        shmem.info(f"Final C validation {passed_str}.")
 
         # Wait for all to finish validation
         shmem.barrier()
-        shmem.log("Validating local C...")
+        shmem.info("Validating local C...")
 
         json_writer.add_field("success", success)
 
@@ -245,16 +245,16 @@ def main():
             json_writer.add_field("gemm_registers", gemm_registers)
             json_writer.add_field("gemm_spills", gemm_spills)
 
-        shmem.log("Validation completed")
+        shmem.info("Validation completed")
 
     if args["benchmark"]:
         matmul.set_debug(False)
-        shmem.log("Benchmarking...")
+        shmem.info("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
         triton_ms = iris.do_bench(run_experiment, shmem.barrier)
         triton_tflops = perf(triton_ms)
         algo_string = "all_scatter"
-        shmem.log_stats(
+        shmem.info(
             f"tile matmul + {algo_string} (total_tiles={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
         )
 

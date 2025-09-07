@@ -28,7 +28,16 @@ def atomic_add_kernel(
     # Loop over all ranks, get the stored data.
     # atomic_add acc into results.
     for target_rank in range(num_ranks):
-        iris.atomic_add(results + offsets, acc, cur_rank, target_rank, heap_bases, mask, sem=sem, scope=scope)
+        iris.atomic_add(
+            results + offsets,
+            acc,
+            cur_rank,
+            target_rank,
+            heap_bases,
+            mask,
+            sem=sem,
+            scope=scope,
+        )
 
 
 @pytest.mark.parametrize(

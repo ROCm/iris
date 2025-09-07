@@ -1,0 +1,6 @@
+sphinx>=5.0.0
+myst-parser>=1.0.0
+sphinx-copybutton>=0.5.0
+sphinx-autobuild>=2021.3.14
+sphinx_external_toc>=1.0.0
+rocm-docs-core

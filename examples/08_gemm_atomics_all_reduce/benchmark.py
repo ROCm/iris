@@ -237,27 +237,25 @@ def main():
         json_writer.add_field("gemm_spills", gemm_spills)
 
     if args["validate"]:
-        shmem.log("Validating...")
+        shmem.info("Validating...")
 
         matmul.set_debug(False)
         # Validate global result
         success = validate_gemm(A, B, global_C, shmem, atol=2)
         passed_str = "passed" if success else "failed"
-        shmem.log(f"Final C validation {passed_str}.")
+        shmem.info(f"Final C validation {passed_str}.")
 
         # Wait for all to finish validation
         shmem.barrier()
         json_writer.add_field("success", success)
-        shmem.log("Validation completed")
+        shmem.info("Validation completed")
 
     if args["benchmark"]:
-        shmem.log("Benchmarking...")
+        shmem.info("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
         triton_ms = iris.do_bench(run_experiment, shmem.barrier, preamble)
         triton_tflops = perf(triton_ms)
-        shmem.log_stats(
-            f"tile matmul + all_reduce (grid={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
-        )
+        shmem.info(f"tile matmul + all_reduce (grid={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops")
 
         json_writer.add_field("triton_tflops", triton_tflops)
         json_writer.add_field("triton_ms", triton_ms)

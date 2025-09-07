@@ -101,7 +101,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
         )
     if cur_rank == 0:
         if args["verbose"]:
-            shmem.log(f"Measuring bandwidth between the ranks {source_rank} and {destination_rank}...")
+            shmem.info(f"Measuring bandwidth between the ranks {source_rank} and {destination_rank}...")
     n_elements = source_buffer.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
 
@@ -134,15 +134,15 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
         total_bytes = n_elements * element_size_bytes
         bandwidth_gbps = total_bytes / triton_sec / 2**30
         if args["verbose"]:
-            shmem.log(f"Copied {total_bytes / 2**30:.2f} GiB in {triton_sec:.4f} seconds")
-            shmem.log(f"Bandwidth between {source_rank} and {destination_rank} is {bandwidth_gbps:.4f} GiB/s")
+            shmem.info(f"Copied {total_bytes / 2**30:.2f} GiB in {triton_sec:.4f} seconds")
+            shmem.info(f"Bandwidth between {source_rank} and {destination_rank} is {bandwidth_gbps:.4f} GiB/s")
     shmem.barrier()
     bandwidth_gbps = shmem.broadcast(bandwidth_gbps, source_rank)
 
     success = True
     if args["validate"] and cur_rank == destination_rank:
         if args["verbose"]:
-            shmem.log("Validating output...")
+            shmem.info("Validating output...")
 
         expected = torch.arange(n_elements, dtype=dtype, device="cuda")
         diff_mask = ~torch.isclose(result_buffer, expected, atol=1)
@@ -150,19 +150,19 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
 
         if not torch.allclose(result_buffer, expected, atol=1):
             max_diff = (result_buffer - expected).abs().max().item()
-            shmem.log(f"Max absolute difference: {max_diff}")
+            shmem.info(f"Max absolute difference: {max_diff}")
             for idx in breaking_indices:
                 idx = tuple(idx.tolist())
                 computed_val = result_buffer[idx]
                 expected_val = expected[idx]
-                shmem.log(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
+                shmem.error(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
                 success = False
                 break
 
         if success and args["verbose"]:
-            shmem.log("Validation successful.")
+            shmem.info("Validation successful.")
         if not success and args["verbose"]:
-            shmem.log("Validation failed.")
+            shmem.error("Validation failed.")
 
     shmem.barrier()
     return bandwidth_gbps
