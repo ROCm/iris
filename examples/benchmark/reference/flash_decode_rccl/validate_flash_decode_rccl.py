@@ -125,6 +125,7 @@ def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, num_block
 
     return {"query": query, "key_value_cache": key_value_cache}
 
+
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("num_seqs", [1, 8])
 @pytest.mark.parametrize("num_heads", [48, 96])
