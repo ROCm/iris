@@ -10,8 +10,6 @@ import argparse
 import torch
 import iris
 import os
-import argparse
-import json
 
 project_root = Path(__file__).resolve()
 while not (project_root / "tests").is_dir() or not (project_root / "examples").is_dir():
@@ -30,6 +28,7 @@ else:
 
 from flash_decode_fused_layer import flash_decode_fused_layer  # noqa: E402
 
+
 def parse_args():
     """
     Arguments for the benchmark
@@ -42,7 +41,11 @@ def parse_args():
     )
 
     parser.add_argument(
-        "-c", "--config", type=str, default="dataset/flash_decode_config_iris.json", help="Path to the JSON configuration file"
+        "-c",
+        "--config",
+        type=str,
+        default="dataset/flash_decode_config_iris.json",
+        help="Path to the JSON configuration file",
     )
 
     config_args, _ = parser.parse_known_args()
@@ -50,31 +53,32 @@ def parse_args():
     config_defaults = {}
     if os.path.exists(config_args.config):
         try:
-            with open(config_args.config, 'r') as f:
+            with open(config_args.config, "r") as f:
                 config_from_file = json.load(f)
             if config_from_file:
                 print(f"Configuration successfully loaded from '{config_args.config}'")
                 config_defaults = {**config_from_file, **config_from_file.get("sweep_parameters", {})}
-                if 'sweep_parameters' in config_defaults:
-                    del config_defaults['sweep_parameters']
+                if "sweep_parameters" in config_defaults:
+                    del config_defaults["sweep_parameters"]
         except json.JSONDecodeError:
             print(f"Error: Config file '{config_args.config}' is not valid JSON.")
     else:
         print(f"Warning: Config file '{config_args.config}' not found.")
-    
+
     parser.set_defaults(**config_defaults)
 
     parser.add_argument("--output_dir", type=str, help="Directory to save results")
     parser.add_argument("--data_type", type=str, choices=["float16", "bfloat16", "float32"], help="PyTorch data type")
     parser.add_argument("--warmup_iterations", type=int, help="Number of warmup iterations")
     parser.add_argument("--repeat_iterations", type=int, help="Number of benchmark iterations")
-    parser.add_argument("--kv_len", type=int, nargs='+', help="Override KV_LEN_SWEEP")
-    parser.add_argument("--num_heads", type=int, nargs='+', help="Override NUM_HEADS_SWEEP")
-    parser.add_argument("--head_dim", type=int, nargs='+', help="Override HEAD_DIM_SWEEP")
-    parser.add_argument("--num_seqs", type=int, nargs='+', help="Override NUM_SEQS_SWEEP")
+    parser.add_argument("--kv_len", type=int, nargs="+", help="Override KV_LEN_SWEEP")
+    parser.add_argument("--num_heads", type=int, nargs="+", help="Override NUM_HEADS_SWEEP")
+    parser.add_argument("--head_dim", type=int, nargs="+", help="Override HEAD_DIM_SWEEP")
+    parser.add_argument("--num_seqs", type=int, nargs="+", help="Override NUM_SEQS_SWEEP")
 
     final_args = parser.parse_args()
     return final_args
+
 
 def prepare_perf_data(cfg, num_query_heads, num_kv_heads):
     """Prepares local data for the performance test on the current rank."""
@@ -100,7 +104,7 @@ def prepare_perf_data(cfg, num_query_heads, num_kv_heads):
 def run_benchmark(args):
     torch.manual_seed(42)
     torch.set_default_device("cuda")
-    
+
     # Iris setup
     shmem = iris.iris()
     rank = shmem.get_rank()
@@ -108,20 +112,16 @@ def run_benchmark(args):
 
     output_dir = args.output_dir
     datatype = getattr(torch, args.data_type)
-    
+
     if rank == 0:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
             print(f"Created output directory: '{output_dir}'")
-        
+
     config_sweep = []
-    param_product = itertools.product(
-        args.kv_len, args.num_heads, args.head_dim, args.num_seqs
-    )
+    param_product = itertools.product(args.kv_len, args.num_heads, args.head_dim, args.num_seqs)
     for kv_len, num_heads, head_dim, num_seqs in param_product:
-        config_sweep.append({
-            "kv_len": kv_len, "num_heads": num_heads, "head_dim": head_dim, "num_seqs": num_seqs
-        })
+        config_sweep.append({"kv_len": kv_len, "num_heads": num_heads, "head_dim": head_dim, "num_seqs": num_seqs})
 
     # Loop through configs
     for i, config in enumerate(config_sweep):
@@ -143,7 +143,7 @@ def run_benchmark(args):
             "soft_cap": cfg["soft_cap"],
             "max_allowed_batch": cfg["num_seqs"],
         }
-        
+
         fd_layer = flash_decode_fused_layer(shmem, rank, rank, world_size, world_size, **common_params)
 
         tensor_data = prepare_perf_data(cfg, num_query_heads, num_kv_heads)
@@ -168,7 +168,7 @@ def run_benchmark(args):
             n_repeat=args.repeat_iterations,
             return_mode="mean",
         )
-        
+
         shmem.barrier()
 
         if rank == 0:
