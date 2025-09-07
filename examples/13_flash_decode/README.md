@@ -57,13 +57,4 @@ mpirun -np 8 python benchmark/examples/benchmark_flash_decode.py
 torchrun --nproc_per_node=8 examples/benchmark/reference/flash_decode_rccl/benchmark_flash_decode_rccl.py
 ```
 
-### Plotting Results
-
-After running the benchmarks, this script reads the generated `.json` files and creates PNG comparison plots in the `plots/` directory.
-
-```terminal
-python scripts/plot_fd.py
-```
-
-
 
