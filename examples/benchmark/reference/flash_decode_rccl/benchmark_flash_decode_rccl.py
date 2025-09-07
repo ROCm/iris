@@ -15,6 +15,7 @@ import torch.distributed as dist
 import iris
 from examples.benchmark.reference.flash_decode_rccl.flash_decode_layer_rccl import flash_decode_layer_rccl
 
+
 def parse_args():
     """
     Arguments for the benchmark
@@ -27,7 +28,11 @@ def parse_args():
     )
 
     parser.add_argument(
-        "-c", "--config", type=str, default="dataset/flash_decode_config_rccl.json", help="Path to the JSON configuration file"
+        "-c",
+        "--config",
+        type=str,
+        default="dataset/flash_decode_config_rccl.json",
+        help="Path to the JSON configuration file",
     )
 
     config_args, _ = parser.parse_known_args()
@@ -35,18 +40,18 @@ def parse_args():
     config_defaults = {}
     if os.path.exists(config_args.config):
         try:
-            with open(config_args.config, 'r') as f:
+            with open(config_args.config, "r") as f:
                 config_from_file = json.load(f)
             if config_from_file:
                 print(f"Configuration successfully loaded from '{config_args.config}'")
                 config_defaults = {**config_from_file, **config_from_file.get("sweep_parameters", {})}
-                if 'sweep_parameters' in config_defaults:
-                    del config_defaults['sweep_parameters']
+                if "sweep_parameters" in config_defaults:
+                    del config_defaults["sweep_parameters"]
         except json.JSONDecodeError:
             print(f"Error: Config file '{config_args.config}' is not valid JSON.")
     else:
         print(f"Warning: Config file '{config_args.config}' not found.")
-    
+
     parser.set_defaults(**config_defaults)
 
     parser.add_argument("--output_dir", type=str, help="Directory to save results")
@@ -54,11 +59,11 @@ def parse_args():
     parser.add_argument("--warmup_iterations", type=int, help="Number of warmup iterations")
     parser.add_argument("--repeat_iterations", type=int, help="Number of benchmark iterations")
     parser.add_argument("--page_size", type=int, help="Page size for KV cache", default=1)
-    
-    parser.add_argument("--kv_len", type=int, nargs='+', help="Override KV_LEN_SWEEP")
-    parser.add_argument("--num_heads", type=int, nargs='+', help="Override NUM_HEADS_SWEEP")
-    parser.add_argument("--head_dim", type=int, nargs='+', help="Override HEAD_DIM_SWEEP")
-    parser.add_argument("--num_seqs", type=int, nargs='+', help="Override NUM_SEQS_SWEEP")
+
+    parser.add_argument("--kv_len", type=int, nargs="+", help="Override KV_LEN_SWEEP")
+    parser.add_argument("--num_heads", type=int, nargs="+", help="Override NUM_HEADS_SWEEP")
+    parser.add_argument("--head_dim", type=int, nargs="+", help="Override HEAD_DIM_SWEEP")
+    parser.add_argument("--num_seqs", type=int, nargs="+", help="Override NUM_SEQS_SWEEP")
 
     final_args = parser.parse_args()
     return final_args
@@ -84,6 +89,7 @@ def prepare_perf_data(config, num_query_heads, num_kv_heads, page_size, datatype
         "block_tables_this_rank": block_tables_this_rank,
     }
 
+
 def run_benchmark(args):
     dist.init_process_group(backend="nccl")
     rank = int(os.environ["RANK"])
@@ -103,16 +109,16 @@ def run_benchmark(args):
     torch.manual_seed(42)
 
     config_sweep = []
-    param_product = itertools.product(
-        args.kv_len, args.num_heads, args.head_dim, args.num_seqs
-    )
+    param_product = itertools.product(args.kv_len, args.num_heads, args.head_dim, args.num_seqs)
     for kv_len, num_heads, head_dim, num_seqs in param_product:
-        config_sweep.append({
-            "kv_len": kv_len,
-            "num_heads": num_heads,
-            "head_dim": head_dim,
-            "num_seqs": num_seqs,
-        })
+        config_sweep.append(
+            {
+                "kv_len": kv_len,
+                "num_heads": num_heads,
+                "head_dim": head_dim,
+                "num_seqs": num_seqs,
+            }
+        )
 
     # Loop through configs
     for i, config in enumerate(config_sweep):
@@ -131,8 +137,14 @@ def run_benchmark(args):
         }
 
         fd_layer = flash_decode_layer_rccl(
-            rank, world_size, num_query_heads, num_kv_heads,
-            config["head_dim"], config["head_dim"], tp_group, **keyword_params,
+            rank,
+            world_size,
+            num_query_heads,
+            num_kv_heads,
+            config["head_dim"],
+            config["head_dim"],
+            tp_group,
+            **keyword_params,
         )
 
         tensor_data = prepare_perf_data(config, num_query_heads, num_kv_heads, page_size, datatype)
@@ -155,7 +167,7 @@ def run_benchmark(args):
             barrier_fn=dist.barrier,
             n_warmup=args.warmup_iterations,
             n_repeat=args.repeat_iterations,
-            return_mode="mean"
+            return_mode="mean",
         )
         dist.barrier()
 
@@ -184,4 +196,3 @@ def run_benchmark(args):
 if __name__ == "__main__":
     args = parse_args()
     run_benchmark(args)
-

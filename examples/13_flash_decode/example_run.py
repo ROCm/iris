@@ -19,6 +19,7 @@ import iris
 import argparse
 from flash_decode_fused_layer import flash_decode_fused_layer
 
+
 def parse_args():
     """Parses command-line arguments for the example."""
     parser = argparse.ArgumentParser(description="A minimal example for flash_decode_fused_layer.")
@@ -26,8 +27,11 @@ def parse_args():
     parser.add_argument("--num_heads", type=int, default=96, help="Number of attention heads.")
     parser.add_argument("--head_dim", type=int, default=128, help="Dimension of each attention head.")
     parser.add_argument("--num_seqs", type=int, default=4, help="Number of sequences in the batch.")
-    parser.add_argument("--dtype", type=str, default="float16", choices=["float16", "bfloat16"], help="PyTorch data type to use.")
+    parser.add_argument(
+        "--dtype", type=str, default="float16", choices=["float16", "bfloat16"], help="PyTorch data type to use."
+    )
     return parser.parse_args()
+
 
 def setup_example_data(rank, world_size, args, dtype):
     """Creates a set of random tensors to serve as inputs for the layer."""
@@ -48,7 +52,9 @@ def setup_example_data(rank, world_size, args, dtype):
     # 2. Key/Value Caches: Tensors representing the keys and values
     #    The KV is split across ranks
     key_cache_this_rank = torch.randn(num_blocks_per_rank, block_size, num_kv_heads, args.head_dim, dtype=dtype).cuda()
-    value_cache_this_rank = torch.randn(num_blocks_per_rank, block_size, num_kv_heads, args.head_dim, dtype=dtype).cuda()
+    value_cache_this_rank = torch.randn(
+        num_blocks_per_rank, block_size, num_kv_heads, args.head_dim, dtype=dtype
+    ).cuda()
 
     # 3. Block Tables: A mapping that tells the kernel where to find the blocks for each sequence in the KV cache.
     #    Here, we create a simple identity mapping for demonstration.
