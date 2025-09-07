@@ -38,7 +38,7 @@ from argparse import Namespace
 
 import torch
 import torch.distributed as dist
-from fd_layer_rccl import FDLayerRCCL
+from examples.benchmark.reference.flash_decode_rccl.flash_decode_layer_rccl import flash_decode_layer_rccl
 
 project_root = Path(__file__).resolve()
 while not (project_root / "tests").is_dir() or not (project_root / "examples").is_dir():
@@ -191,7 +191,7 @@ def test_correctness_rccl_fused_full(kv_len, num_heads, num_seqs, head_dim):
         "soft_cap": config["soft_cap"],
         "max_allowed_batch": config["num_seqs"],
     }
-    fd_layer = FDLayerRCCL(
+    fd_layer = flash_decode_layer_rccl(
         args.rank, args.world_size, num_query_heads, num_kv_heads, head_dim, head_dim, args.tp_group, **keyword_params
     )
     dist.barrier(group=args.tp_group)

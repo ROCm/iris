@@ -3,67 +3,60 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-A simple, minimal example demonstrating how to use the FDFusedLayer.
+A simple, minimal example demonstrating how to use the flash_decode_fused_layer.
 
 This script initializes the necessary distributed components with Iris,
 creates sample input tensors, instantiates the layer, and calls its
 forward pass once. It then prints the shape and a slice of the output
 tensor to show that the operation completed successfully.
 
-The layer is defined in the fd_fused_layer.py file.
+The layer is defined in the flash_decode_fused_layer.py file.
 All the triton kernels are defined in decode_kernels.py
 """
 
 import torch
 import iris
+import argparse
+from flash_decode_fused_layer import flash_decode_fused_layer
 
-# Since this file is at the same level as the layer file, a direct import works.
-from fd_fused_layer import FDFusedLayer
+def parse_args():
+    """Parses command-line arguments for the example."""
+    parser = argparse.ArgumentParser(description="A minimal example for flash_decode_fused_layer.")
+    parser.add_argument("--kv_len_per_rank", type=int, default=32768, help="KV sequence length per rank.")
+    parser.add_argument("--num_heads", type=int, default=96, help="Number of attention heads.")
+    parser.add_argument("--head_dim", type=int, default=128, help="Dimension of each attention head.")
+    parser.add_argument("--num_seqs", type=int, default=4, help="Number of sequences in the batch.")
+    parser.add_argument("--dtype", type=str, default="float16", choices=["float16", "bfloat16"], help="PyTorch data type to use.")
+    return parser.parse_args()
 
-# ==============================================================================
-# Example Configuration
-# ==============================================================================
-# These parameters define the shape of the problem for this example.
-# They are kept small for a quick and simple run.
-KV_LEN_PER_RANK = 32768
-NUM_HEADS = 96
-HEAD_DIM = 128
-NUM_SEQS = 4
-DTYPE = torch.float16
-
-# ==============================================================================
-# Helper Function to Create Example Data
-# ==============================================================================
-
-
-def setup_example_data(rank, world_size):
+def setup_example_data(rank, world_size, args, dtype):
     """Creates a set of random tensors to serve as inputs for the layer."""
 
-    num_query_heads = NUM_HEADS
+    num_query_heads = args.num_heads
     # Assume an 8:1 Grouped-Query Attention ratio for this example
-    num_kv_heads = max(1, NUM_HEADS // 8)
+    num_kv_heads = max(1, args.num_heads // 8)
     block_size = 1  # PagedAttention works with blocks of tokens
 
     # Number of blocks needed on this rank to store the KV cache for all sequences
-    num_blocks_per_rank = (KV_LEN_PER_RANK + block_size - 1) // block_size
+    num_blocks_per_rank = (args.kv_len_per_rank + block_size - 1) // block_size
 
     print(f"[Rank {rank}] Creating example tensors...")
 
     # 1. Query tensor: The new tokens for which we are calculating attention.
-    query = torch.randn(NUM_SEQS, num_query_heads, HEAD_DIM, dtype=DTYPE).cuda()
+    query = torch.randn(args.num_seqs, num_query_heads, args.head_dim, dtype=dtype).cuda()
 
     # 2. Key/Value Caches: Tensors representing the keys and values
     #    The KV is split across ranks
-    key_cache_this_rank = torch.randn(num_blocks_per_rank, block_size, num_kv_heads, HEAD_DIM, dtype=DTYPE).cuda()
-    value_cache_this_rank = torch.randn(num_blocks_per_rank, block_size, num_kv_heads, HEAD_DIM, dtype=DTYPE).cuda()
+    key_cache_this_rank = torch.randn(num_blocks_per_rank, block_size, num_kv_heads, args.head_dim, dtype=dtype).cuda()
+    value_cache_this_rank = torch.randn(num_blocks_per_rank, block_size, num_kv_heads, args.head_dim, dtype=dtype).cuda()
 
     # 3. Block Tables: A mapping that tells the kernel where to find the blocks for each sequence in the KV cache.
     #    Here, we create a simple identity mapping for demonstration.
-    block_tables_this_rank = torch.arange(num_blocks_per_rank, dtype=torch.int32).repeat(NUM_SEQS, 1).cuda()
+    block_tables_this_rank = torch.arange(num_blocks_per_rank, dtype=torch.int32).repeat(args.num_seqs, 1).cuda()
 
     # 4. Global KV Lengths Tensor: The layer needs to know the sequence length on all ranks.
     # Create a list of lengths for each sequence in the batch on this rank.
-    kv_lens_per_rank = [KV_LEN_PER_RANK] * NUM_SEQS
+    kv_lens_per_rank = [args.kv_len_per_rank] * args.num_seqs
     # Create a 1D tensor from this list. Shape: (NUM_SEQS,)
     kv_lens_tensor_this_rank = torch.tensor(kv_lens_per_rank, dtype=torch.int32).cuda()
     # Reshape to (1, NUM_SEQS) and repeat for all ranks to get shape (world_size, NUM_SEQS)
@@ -78,45 +71,45 @@ def setup_example_data(rank, world_size):
     }
 
 
-# ==============================================================================
-# Main Execution Block
-# ==============================================================================
-
 if __name__ == "__main__":
+    # 0. Parse command-line arguments
+    args = parse_args()
+    dtype = getattr(torch, args.dtype)
+
     # 1. Initialize Iris for distributed communication
-    _iris = iris.iris()
-    rank = _iris.get_rank()
-    world_size = _iris.get_num_ranks()
+    shmem = iris.iris()
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
 
     torch.manual_seed(42)
     torch.set_default_device("cuda")
 
     if rank == 0:
-        print("--- FDFusedLayer Minimal Example ---")
+        print("--- flash_decode_fused_layer Minimal Example ---")
         print(f"Running with {world_size} rank(s).")
 
     # 2. Set up the example input tensors
-    tensor_data = setup_example_data(rank, world_size)
-    _iris.barrier()
+    tensor_data = setup_example_data(rank, world_size, args, dtype)
+    shmem.barrier()
 
     # 3. Define the layer's parameters
-    num_kv_heads = max(1, NUM_HEADS // 8)
-    scale = HEAD_DIM**-0.5
+    num_kv_heads = max(1, args.num_heads // 8)
+    scale = args.head_dim**-0.5
     common_params = {
-        "num_q_heads": NUM_HEADS,
+        "num_q_heads": args.num_heads,
         "num_kv_heads": num_kv_heads,
-        "q_head_dim": HEAD_DIM,
-        "v_head_dim": HEAD_DIM,
+        "q_head_dim": args.head_dim,
+        "v_head_dim": args.head_dim,
         "page_size": 1,
         "scale": scale,
         "soft_cap": 0.0,
-        "max_allowed_batch": NUM_SEQS,
+        "max_allowed_batch": args.num_seqs,
     }
 
     # 4. Instantiate the layer
     if rank == 0:
-        print("\nInstantiating FDFusedLayer...")
-    fd_layer = FDFusedLayer(_iris, rank, rank, world_size, world_size, **common_params)
+        print("\nInstantiating flash_decode_fused_layer...")
+    fd_layer = flash_decode_fused_layer(shmem, rank, rank, world_size, world_size, **common_params)
 
     # 5. Call the forward pass of the layer
     if rank == 0:
@@ -131,7 +124,7 @@ if __name__ == "__main__":
 
     # Ensure the computation is finished before printing
     torch.cuda.synchronize()
-    _iris.barrier()
+    shmem.barrier()
 
     # 6. Print a summary of the output tensor on the main rank
     if rank == 0:
@@ -141,4 +134,4 @@ if __name__ == "__main__":
         print(output[0, 0, :5])
         print("--------------------------")
 
-    _iris.barrier()
+    shmem.barrier()

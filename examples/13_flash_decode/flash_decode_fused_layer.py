@@ -31,16 +31,14 @@
 
 import torch
 import triton
-import math
-import iris
 
 from decode_kernels import gqa_local_kernels_fused, gqa_global_reduce_fused
 
 
-class FDFusedLayer(torch.nn.Module):
+class flash_decode_fused_layer(torch.nn.Module):
     def __init__(
         self,
-        iris_instance,
+        shmem,
         rank,
         node,
         num_ranks,
@@ -57,7 +55,7 @@ class FDFusedLayer(torch.nn.Module):
         stages=20,
     ):
         super().__init__()
-        self.iris_instance = iris_instance
+        self.shmem = shmem
         self.rank = rank
         self.num_ranks = num_ranks
         self.node = node
@@ -75,13 +73,13 @@ class FDFusedLayer(torch.nn.Module):
 
         self.BLOCK_DV = triton.next_power_of_2(self.v_head_dim)
 
-        self.gathered_buffer = self.iris_instance.empty(
+        self.gathered_buffer = self.shmem.empty(
             (self.num_ranks, self.max_allowed_batch, self.num_q_heads, self.v_head_dim + 1), dtype=torch.float16
         )
 
         # Use per-tile signaling for finer-grained synchronization
         # This will tell which rank sent the data to which rank, for each batch item and head
-        self.signal_flags = self.iris_instance.zeros(
+        self.signal_flags = self.shmem.zeros(
             (self.num_ranks, self.num_ranks, self.max_allowed_batch, self.num_q_heads), dtype=torch.int32
         )
 
@@ -91,7 +89,7 @@ class FDFusedLayer(torch.nn.Module):
     def clear_flags(self):
         """Resets synchronization flags for the next iteration."""
         self.signal_flags.zero_()
-        self.iris_instance.barrier()
+        self.shmem.barrier()
 
     def forward(self, q, k_cache, v_cache, global_kv_lens, block_table):
         batch = q.shape[0]
@@ -111,7 +109,7 @@ class FDFusedLayer(torch.nn.Module):
             v_cache,
             self.gathered_buffer,
             self.signal_flags,
-            self.iris_instance,
+            self.shmem,
             [1] * batch,
             global_kv_lens[self.rank],
             block_table,
@@ -145,7 +143,6 @@ class FDFusedLayer(torch.nn.Module):
         )
 
         # print(f"{kk3.n_regs} registers used third, {kk3.n_spills} spills")
-
         # self.clear_flags()
 
         return final_output

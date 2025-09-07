@@ -11,7 +11,7 @@ import numpy as np
 # ==============================================================================
 # Configuration
 # ==============================================================================
-IRIS_RESULTS_DIR = "results/fd_iris"
+IRIS_RESULTS_DIR = "results/flash_decode_iris"
 RCCL_RESULTS_DIR = "results/fd_rccl"
 OUTPUT_DIR = "plots"
 

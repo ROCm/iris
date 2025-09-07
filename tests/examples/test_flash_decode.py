@@ -51,14 +51,14 @@ print(f"Project Root: {project_root}")
 module_dir = project_root / "examples" / "13_flash_decode"
 print(f"Module Directory: {module_dir}")
 
-target_file = module_dir / "fd_fused_layer.py"
+target_file = module_dir / "flash_decode_fused_layer.py"
 if module_dir.exists():
     sys.path.insert(0, str(module_dir))
     print(f"'{module_dir}' was added to sys.path.")
 else:
     print("ERROR: Target directory not found")
 
-from fd_fused_layer import FDFusedLayer  # noqa: E402
+from flash_decode_fused_layer import flash_decode_fused_layer  # noqa: E402
 from utils import print_correctness_report  # noqa: E402
 
 # ==============================================================================
@@ -115,9 +115,9 @@ def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, NUM_BLOCK
         query = torch.empty(cfg["num_seqs"], num_query_heads, head_dim, dtype=cfg["dtype"])
         key_value_cache = torch.empty(NUM_BLOCKS, 2, cfg["block_size"], num_kv_heads, head_dim, dtype=cfg["dtype"])
 
-    query = torch.from_numpy(args.iris_instance.broadcast_tensor(query.cpu().numpy(), source_rank=0)).to(query.device)
+    query = torch.from_numpy(args.shmem.broadcast_tensor(query.cpu().numpy(), source_rank=0)).to(query.device)
     key_value_cache = torch.from_numpy(
-        args.iris_instance.broadcast_tensor(key_value_cache.cpu().numpy(), source_rank=0)
+        args.shmem.broadcast_tensor(key_value_cache.cpu().numpy(), source_rank=0)
     ).to(key_value_cache.device)
 
     return {"query": query, "key_value_cache": key_value_cache}
@@ -137,13 +137,13 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
     Tests the correctness of the Iris Fused implementation against the Torch reference.
     This test is parameterized to run all combinations of the parameters.
     """
-    _iris = iris.iris()
+    shmem = iris.iris()
 
     args = Namespace()
-    args.rank = _iris.get_rank()
-    args.num_ranks = _iris.get_num_ranks()
-    args.local_num_ranks = _iris.get_num_ranks()
-    args.iris_instance = _iris
+    args.rank = shmem.get_rank()
+    args.num_ranks = shmem.get_num_ranks()
+    args.local_num_ranks = shmem.get_num_ranks()
+    args.shmem = shmem
 
     config = {
         "kv_len": kv_len,
@@ -193,8 +193,8 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
         "max_allowed_batch": num_seqs,
     }
 
-    iris_fd_layer = FDFusedLayer(
-        args.iris_instance,
+    iris_fd_layer = flash_decode_fused_layer(
+        args.shmem,
         args.rank,
         args.rank // args.local_num_ranks,
         args.num_ranks,
@@ -202,10 +202,10 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
         **common_params,
     )
 
-    args.iris_instance.barrier()
+    args.shmem.barrier()
     if hasattr(iris_fd_layer, "clear_flags"):
         iris_fd_layer.clear_flags()
-    args.iris_instance.barrier()
+    args.shmem.barrier()
 
     kv_lens_per_rank = [config["kv_len"]] * num_seqs
     global_kv_lens = [kv_lens_per_rank[0] * args.num_ranks] * num_seqs
@@ -227,7 +227,7 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
         scale=scale,
         soft_cap=config["soft_cap"],
     )
-    args.iris_instance.barrier()
+    args.shmem.barrier()
 
     error = None
     try:
@@ -242,4 +242,4 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
     if error:
         raise error
 
-    args.iris_instance.barrier()
+    args.shmem.barrier()

@@ -9,7 +9,7 @@ This is an example for a distributed Flash Decode kernel designed to accelerate 
 
 This is a novel implementation that fuses communication and computation, diminshing the collective kernel launch latencies and the associated waits.
 
-The core layer implementation is in `examples/13_flash_decode/fd_fused_layer.py` while the Triton fused kernels are defined in `examples/13_flash_decode/decode_kernels.py`. 
+The core layer implementation is in `examples/13_flash_decode/flash_decode_fused_layer.py` while the Triton fused kernels are defined in `examples/13_flash_decode/decode_kernels.py`. 
 
 We perform comparisons against the RCCL baseline.
 

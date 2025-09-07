@@ -35,7 +35,7 @@ import torch.distributed as dist
 from decode_kernels import gqa_local_kernels, gqa_reduce_global
 
 
-class FDLayerRCCL(torch.nn.Module):
+class flash_decode_layer_rccl(torch.nn.Module):
     def __init__(
         self,
         rank: int,

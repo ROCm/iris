@@ -46,7 +46,7 @@ def gqa_local_kernels_fused(
     v_cache,
     gathered_buffer,
     signal_flags,
-    iris_instance,
+    shmem,
     q_lens,
     kv_lens,
     block_table,
@@ -58,8 +58,8 @@ def gqa_local_kernels_fused(
     batch, q_heads, q_head_dim = q.shape
     _, page_size, kv_heads, k_head_dim = k_cache.shape
     v_head_dim = v_cache.shape[-1]
-    rank = iris_instance.get_rank()
-    num_ranks = iris_instance.get_num_ranks()
+    rank = shmem.get_rank()
+    num_ranks = shmem.get_num_ranks()
 
     BLOCK_N = 64
     BLOCK_HEAD_DIM = 2 ** int(math.log2(q_head_dim))
@@ -122,7 +122,7 @@ def gqa_local_kernels_fused(
         signal_flags.stride(1),
         signal_flags.stride(2),
         signal_flags.stride(3),
-        iris_instance.get_heap_bases(),
+        shmem.get_heap_bases(),
         output_split.stride(0),
         output_split.stride(1),
         output_split.stride(2),
