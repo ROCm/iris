@@ -61,10 +61,6 @@ else:
 from flash_decode_fused_layer import flash_decode_fused_layer  # noqa: E402
 from utils import print_correctness_report  # noqa: E402
 
-# ==============================================================================
-# Reference Implementation & Data Preparation
-# ==============================================================================
-
 
 def ref_paged_attn(
     query: torch.Tensor,
@@ -121,11 +117,6 @@ def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, NUM_BLOCK
     ).to(key_value_cache.device)
 
     return {"query": query, "key_value_cache": key_value_cache}
-
-
-# ==============================================================================
-# Pytest Test Case
-# ==============================================================================
 
 
 @pytest.mark.parametrize("head_dim", [128])

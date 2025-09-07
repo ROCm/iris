@@ -62,10 +62,6 @@ else:
 
 from utils import print_correctness_report  # noqa: E402
 
-# ==============================================================================
-# Reference Implementation & Data Preparation
-# ==============================================================================
-
 
 def ref_paged_attn(
     query: torch.Tensor,
@@ -128,12 +124,6 @@ def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, num_block
     dist.broadcast(key_value_cache, src=0, group=args.tp_group)
 
     return {"query": query, "key_value_cache": key_value_cache}
-
-
-# ==============================================================================
-# Pytest Test Case
-# ==============================================================================
-
 
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("num_seqs", [1, 8])
