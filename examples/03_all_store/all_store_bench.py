@@ -6,7 +6,7 @@ import argparse
 
 import torch
 import torch.distributed as dist
-from torch.distributed.elastic.multiprocessing import start_processes
+import torch.multiprocessing as mp
 import triton
 import triton.language as tl
 import random
@@ -87,7 +87,8 @@ def parse_args():
     parser.add_argument("-x", "--num_experiments", type=int, default=20, help="Number of experiments")
     parser.add_argument("-w", "--num_warmup", type=int, default=2, help="Number of warmup experiments")
     parser.add_argument("-a", "--active_ranks", type=int, default=8, help="Number of active ranks")
-    parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")    parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
+    parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
+    parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
 
 
     return vars(parser.parse_args())
@@ -252,7 +253,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         rank=local_rank
     )
 
-    # Main benchmark logicheap_size = args["heap_size"]
+    # Main benchmark logic
+    heap_size = args["heap_size"]
     shmem = iris.iris(heap_size)
     num_ranks = shmem.get_num_ranks()
 
@@ -305,7 +307,7 @@ def main(num_ranks: int = None):
         num_ranks = args["num_ranks"]
     
     init_url = "tcp://127.0.0.1:29500"
-    start_processes(
+    mp.spawn(
         fn=_worker,
         args=(num_ranks, init_url, args),
         nprocs=num_ranks,
