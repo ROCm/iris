@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 import argparse
 
 import torch
@@ -10,10 +13,6 @@ import os
 import sys
 
 import iris
-
-
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 @triton.jit
 def producer_kernel(

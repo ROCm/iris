@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 import argparse
 
 import torch
@@ -9,11 +13,6 @@ import random
 import numpy as np
 import json
 import iris
-
-
-#!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 torch.manual_seed(123)
 random.seed(123)

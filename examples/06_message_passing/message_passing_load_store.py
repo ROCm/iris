@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 import argparse
 
 import torch
@@ -8,11 +12,6 @@ import triton.language as tl
 import random
 
 import iris
-
-
-#!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 @triton.jit
 def producer_kernel(

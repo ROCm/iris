@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing import start_processes
@@ -9,18 +13,15 @@ import argparse
 import json
 
 from examples.common.utils import (
+    JSONWriter,
+    Timestamps,
+    is_triton_interpret_set,
+)
+
 import iris
 
 from matmul_wrapper import matmul
 from examples.common.validation import validate_gemm
-
-#!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
-
-    JSONWriter,
-    Timestamps,
-    is_triton_interpret_set,
 )
 
 torch.manual_seed(123)

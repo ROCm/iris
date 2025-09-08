@@ -1,13 +1,13 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+
 import subprocess
 import os
 from datetime import datetime
 import argparse
 import json
-
-
-#!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 
 def launch_sbatch(config, m, k, n, num_gpus, algorithm, hash, sbatch_script_content, dry_run=False):

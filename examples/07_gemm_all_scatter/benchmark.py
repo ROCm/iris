@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
 import torch
 import torch.distributed as dist
 from torch.distributed.elastic.multiprocessing import start_processes
@@ -14,10 +18,6 @@ from examples.common.validation import validate_gemm
 import iris
 
 from matmul_wrapper import matmul
-
-#!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 torch.manual_seed(123)
 random.seed(123)
