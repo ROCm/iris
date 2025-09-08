@@ -25,7 +25,7 @@ From: rocm/pytorch:rocm6.3.1_ubuntu22.04_py3.10_pytorch
     export PYTHONPATH=$TRITON_PATH/python/
     export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
     export ROCM_PATH=/opt/rocm
-    export PATH=/opt/conda/envs/py_3.10/bin:/opt/rocm/bin::$PATH
+    export PATH=/opt/conda/envs/py_3.10/bin:/opt/rocm/bin:$PATH
     export OMPI_MCA_mtl="^ofi"
     export OMPI_MCA_pml="ob1"
 
