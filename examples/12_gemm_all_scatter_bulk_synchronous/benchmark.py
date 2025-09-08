@@ -4,7 +4,7 @@
 
 import torch
 import torch.distributed as dist
-from torch.distributed.elastic.multiprocessing import start_processes
+import torch.multiprocessing as mp
 import triton
 import random
 import sys
@@ -58,12 +58,20 @@ def parse_args():
         "--gemm_sms", type=int, default=256, help="Number of SMs for workgroup-specialized GEMM algorithm"
     )
     parser.add_argument("--comm_sms", type=int, default=256, help="Number of SMs for All-Scatter kernel")
+    parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
 
     return vars(parser.parse_args())
 
 
-def main():
-    args = parse_args()
+def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
+    """Worker function for PyTorch distributed execution."""
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(
+        backend=backend, 
+        init_method=init_url, 
+        world_size=world_size, 
+        rank=local_rank
+    )
 
     shmem = iris.iris(args["heap_size"])
     rank = shmem.get_rank()
@@ -277,7 +285,20 @@ def main():
         timestamps.to_json(filename, gpu_freq)
 
     shmem.barrier()
+    dist.destroy_process_group()
 
+def main():
+    args = parse_args()
+    
+    num_ranks = args["num_ranks"]
+    
+    init_url = "tcp://127.0.0.1:29500"
+    mp.spawn(
+        fn=_worker,
+        args=(num_ranks, init_url, args),
+        nprocs=num_ranks,
+        join=True,
+    )
 
 if __name__ == "__main__":
     main()
