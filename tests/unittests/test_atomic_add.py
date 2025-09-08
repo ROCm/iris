@@ -7,8 +7,6 @@ import triton.language as tl
 import pytest
 import iris
 
-from test_utils import dist_spawn
-
 
 @triton.jit
 def atomic_add_kernel(
@@ -77,12 +75,7 @@ def atomic_add_kernel(
         32,
     ],
 )
-def test_atomic_add_api(request, dtype, sem, scope, BLOCK_SIZE):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_atomic_add_api, num_ranks, dtype, sem, scope, BLOCK_SIZE)
-
-
-def _impl_atomic_add_api(rank, world_size, dtype, sem, scope, BLOCK_SIZE):
+def test_atomic_add_api(dtype, sem, scope, BLOCK_SIZE):
     # TODO: Adjust heap size.
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()

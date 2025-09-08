@@ -6,8 +6,6 @@ import pytest
 import math
 import iris
 
-from test_utils import dist_spawn
-
 
 @pytest.mark.parametrize(
     "dtype",
@@ -28,12 +26,7 @@ from test_utils import dist_spawn
         (10, 20),
     ],
 )
-def test_randn_basic(request, dtype, size):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_basic, num_ranks, dtype, size)
-
-
-def _impl_test_randn_basic(rank, world_size, dtype, size):
+def test_randn_basic(dtype, size):
     shmem = iris.iris(1 << 20)
 
     # Test basic randn
@@ -47,12 +40,7 @@ def _impl_test_randn_basic(rank, world_size, dtype, size):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_randn_default_dtype(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_default_dtype, num_ranks)
-
-
-def _impl_test_randn_default_dtype(rank, world_size):
+def test_randn_default_dtype():
     shmem = iris.iris(1 << 20)
 
     # Test with default dtype (should use torch.get_default_dtype())
@@ -69,12 +57,7 @@ def _impl_test_randn_default_dtype(rank, world_size):
         False,
     ],
 )
-def test_randn_requires_grad(request, requires_grad):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_requires_grad, num_ranks, requires_grad)
-
-
-def _impl_test_randn_requires_grad(rank, world_size, requires_grad):
+def test_randn_requires_grad(requires_grad):
     shmem = iris.iris(1 << 20)
 
     # Test with requires_grad parameter
@@ -85,12 +68,7 @@ def _impl_test_randn_requires_grad(rank, world_size, requires_grad):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_randn_device_handling(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_device_handling, num_ranks)
-
-
-def _impl_test_randn_device_handling(rank, world_size):
+def test_randn_device_handling():
     shmem = iris.iris(1 << 20)
 
     # Test default behavior (should use Iris device)
@@ -128,12 +106,7 @@ def _impl_test_randn_device_handling(rank, world_size):
             shmem.randn(3, 3, device=different_cuda)
 
 
-def test_randn_layout_handling(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_layout_handling, num_ranks)
-
-
-def _impl_test_randn_layout_handling(rank, world_size):
+def test_randn_layout_handling():
     shmem = iris.iris(1 << 20)
 
     # Test with strided layout (default)
@@ -142,12 +115,7 @@ def _impl_test_randn_layout_handling(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_randn_out_parameter(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_out_parameter, num_ranks)
-
-
-def _impl_test_randn_out_parameter(rank, world_size):
+def test_randn_out_parameter():
     shmem = iris.iris(1 << 20)
 
     # Test with out parameter
@@ -167,12 +135,7 @@ def _impl_test_randn_out_parameter(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result_float)
 
 
-def test_randn_size_variations(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_size_variations, num_ranks)
-
-
-def _impl_test_randn_size_variations(rank, world_size):
+def test_randn_size_variations():
     shmem = iris.iris(1 << 20)
 
     # Test single dimension
@@ -196,12 +159,7 @@ def _impl_test_randn_size_variations(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_randn_edge_cases(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_edge_cases, num_ranks)
-
-
-def _impl_test_randn_edge_cases(rank, world_size):
+def test_randn_edge_cases():
     shmem = iris.iris(1 << 20)
 
     # Empty tensor
@@ -229,12 +187,7 @@ def _impl_test_randn_edge_cases(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(scalar_result)
 
 
-def test_randn_pytorch_equivalence(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_pytorch_equivalence, num_ranks)
-
-
-def _impl_test_randn_pytorch_equivalence(rank, world_size):
+def test_randn_pytorch_equivalence():
     shmem = iris.iris(1 << 20)
 
     # Test basic equivalence
@@ -270,12 +223,7 @@ def _impl_test_randn_pytorch_equivalence(rank, world_size):
         {},
     ],
 )
-def test_randn_parameter_combinations(request, params):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_parameter_combinations, num_ranks, params)
-
-
-def _impl_test_randn_parameter_combinations(rank, world_size, params):
+def test_randn_parameter_combinations(params):
     shmem = iris.iris(1 << 20)
 
     # Test various combinations of parameters
@@ -310,12 +258,7 @@ def _impl_test_randn_parameter_combinations(rank, world_size, params):
         ((), torch.float32),  # Scalar tensor
     ],
 )
-def test_randn_symmetric_heap_shapes_dtypes(request, size, dtype):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_symmetric_heap_shapes_dtypes, num_ranks, size, dtype)
-
-
-def _impl_test_randn_symmetric_heap_shapes_dtypes(rank, world_size, size, dtype):
+def test_randn_symmetric_heap_shapes_dtypes(size, dtype):
     """Test that randn returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
 
@@ -331,12 +274,7 @@ def _impl_test_randn_symmetric_heap_shapes_dtypes(rank, world_size, size, dtype)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64])
-def test_randn_symmetric_heap_dtype_override(request, dtype):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_symmetric_heap_dtype_override, num_ranks, dtype)
-
-
-def _impl_test_randn_symmetric_heap_dtype_override(rank, world_size, dtype):
+def test_randn_symmetric_heap_dtype_override(dtype):
     """Test that randn with dtype override returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
 
@@ -345,12 +283,7 @@ def _impl_test_randn_symmetric_heap_dtype_override(rank, world_size, dtype):
     assert result.dtype == dtype
 
 
-def test_randn_symmetric_heap_other_params(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_symmetric_heap_other_params, num_ranks)
-
-
-def _impl_test_randn_symmetric_heap_other_params(rank, world_size):
+def test_randn_symmetric_heap_other_params():
     """Test that randn with other parameters returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
 
@@ -372,12 +305,7 @@ def _impl_test_randn_symmetric_heap_other_params(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result), "Tensor with out parameter is NOT on symmetric heap!"
 
 
-def test_randn_invalid_output_tensor(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_invalid_output_tensor, num_ranks)
-
-
-def _impl_test_randn_invalid_output_tensor(rank, world_size):
+def test_randn_invalid_output_tensor():
     """Test error handling for invalid output tensors."""
     shmem = iris.iris(1 << 20)
 
@@ -397,12 +325,7 @@ def _impl_test_randn_invalid_output_tensor(rank, world_size):
         shmem.randn(3, 3, out=regular_tensor)
 
 
-def test_randn_default_dtype_behavior(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_default_dtype_behavior, num_ranks)
-
-
-def _impl_test_randn_default_dtype_behavior(rank, world_size):
+def test_randn_default_dtype_behavior():
     """Test that randn uses the global default dtype when dtype=None."""
     shmem = iris.iris(1 << 20)
 
@@ -425,12 +348,7 @@ def _impl_test_randn_default_dtype_behavior(rank, world_size):
         torch.set_default_dtype(original_default)
 
 
-def test_randn_size_parsing(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_size_parsing, num_ranks)
-
-
-def _impl_test_randn_size_parsing(rank, world_size):
+def test_randn_size_parsing():
     """Test various ways of specifying size."""
     shmem = iris.iris(1 << 20)
 
@@ -456,12 +374,7 @@ def _impl_test_randn_size_parsing(rank, world_size):
     assert result3.shape == result4.shape
 
 
-def test_randn_generator(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_generator, num_ranks)
-
-
-def _impl_test_randn_generator(rank, world_size):
+def test_randn_generator():
     """Test generator parameter."""
     shmem = iris.iris(1 << 20)
 
@@ -490,12 +403,7 @@ def _impl_test_randn_generator(rank, world_size):
     assert torch.allclose(result3, result4)
 
 
-def test_randn_pin_memory(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_pin_memory, num_ranks)
-
-
-def _impl_test_randn_pin_memory(rank, world_size):
+def test_randn_pin_memory():
     """Test pin_memory parameter (should be ignored for Iris tensors)."""
     shmem = iris.iris(1 << 20)
 
@@ -512,12 +420,7 @@ def _impl_test_randn_pin_memory(rank, world_size):
     # Note: pin_memory is ignored for GPU tensors, so we just verify it doesn't cause errors
 
 
-def test_randn_deterministic_behavior(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_deterministic_behavior, num_ranks)
-
-
-def _impl_test_randn_deterministic_behavior(rank, world_size):
+def test_randn_deterministic_behavior():
     """Test that randn works with deterministic settings."""
     shmem = iris.iris(1 << 20)
 
@@ -531,12 +434,7 @@ def _impl_test_randn_deterministic_behavior(rank, world_size):
         torch.use_deterministic_algorithms(False)
 
 
-def test_randn_examples(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_randn_examples, num_ranks)
-
-
-def _impl_test_randn_examples(rank, world_size):
+def test_randn_examples():
     """Test the examples from PyTorch documentation."""
     shmem = iris.iris(1 << 20)
 

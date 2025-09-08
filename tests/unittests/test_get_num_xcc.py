@@ -4,8 +4,6 @@
 import pytest
 import iris
 
-from test_utils import dist_spawn
-
 
 @pytest.mark.parametrize(
     "num_calls",
@@ -13,12 +11,7 @@ from test_utils import dist_spawn
         10,
     ],
 )
-def test_get_num_xcc_api(request, num_calls):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_get_num_xcc_api, num_ranks, num_calls)
-
-
-def _impl_test_get_num_xcc_api(rank, world_size, num_calls):
+def test_get_num_xcc_api(num_calls):
     first = iris.hip.get_num_xcc()
     assert isinstance(first, int)
     for _ in range(num_calls):

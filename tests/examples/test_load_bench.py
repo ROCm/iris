@@ -4,8 +4,6 @@
 
 import pytest
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 import triton
 import triton.language as tl
 import numpy as np
@@ -20,23 +18,6 @@ module_name = "load_bench"
 spec = importlib.util.spec_from_file_location(module_name, file_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-
-
-def _dist_worker(rank, world_size, fn, *args):
-    dist.init_process_group(
-        backend="nccl",
-        init_method="tcp://127.0.0.1:12357",
-        rank=rank,
-        world_size=world_size,
-    )
-    try:
-        fn(rank, world_size, *args)
-    finally:
-        dist.destroy_process_group()
-
-
-def _run_distributed(fn, num_ranks, *args):
-    mp.spawn(_dist_worker, args=(num_ranks, fn, *args), nprocs=num_ranks, join=True)
 
 
 @pytest.mark.parametrize(
@@ -61,31 +42,21 @@ def _run_distributed(fn, num_ranks, *args):
         1024,
     ],
 )
-def test_load_bench(request, dtype, buffer_size, heap_size, block_size):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    _run_distributed(_test_load_bench_impl, num_ranks, dtype, buffer_size, heap_size, block_size)
-
-
-def _test_load_bench_impl(rank, world_size, dtype, buffer_size, heap_size, block_size):
+def test_load_bench(dtype, buffer_size, heap_size, block_size):
     shmem = iris.iris(heap_size)
+    num_ranks = shmem.get_num_ranks()
 
-    bandwidth_matrix = np.zeros((world_size, world_size), dtype=np.float32)
+    bandwidth_matrix = np.zeros((num_ranks, num_ranks), dtype=np.float32)
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
     source_buffer = shmem.ones(buffer_size // element_size_bytes, dtype=dtype)
     result_buffer = shmem.zeros_like(source_buffer)
 
     shmem.barrier()
 
-    for source_rank in range(world_size):
-        for destination_rank in range(world_size):
+    for source_rank in range(num_ranks):
+        for destination_rank in range(num_ranks):
             bandwidth_gbps = module.bench_load(
-                shmem,
-                source_rank,
-                destination_rank,
-                source_buffer,
-                result_buffer,
-                block_size,
-                dtype,
+                shmem, source_rank, destination_rank, source_buffer, result_buffer, block_size, dtype
             )
             bandwidth_matrix[source_rank, destination_rank] = bandwidth_gbps
             shmem.barrier()

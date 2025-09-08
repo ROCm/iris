@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
@@ -6,18 +5,8 @@ import pytest
 import torch
 import iris
 
-from test_utils import dist_spawn
 
-
-# =============================== tests ===============================
-
-
-def test_arange_basic_functionality(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_arange_basic_functionality, num_ranks)
-
-
-def _impl_arange_basic_functionality(rank, world_size):
+def test_arange_basic_functionality():
     """Test basic arange functionality with various argument combinations."""
     shmem = iris.iris(1 << 20)
 
@@ -49,12 +38,7 @@ def _impl_arange_basic_functionality(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_arange_dtype_inference(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_arange_dtype_inference, num_ranks)
-
-
-def _impl_arange_dtype_inference(rank, world_size):
+def test_arange_dtype_inference():
     """Test dtype inference logic."""
     shmem = iris.iris(1 << 20)
 
@@ -79,12 +63,7 @@ def _impl_arange_dtype_inference(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result_mixed)
 
 
-def test_arange_device_handling(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_arange_device_handling, num_ranks)
-
-
-def _impl_arange_device_handling(rank, world_size):
+def test_arange_device_handling():
     """Test device parameter handling."""
     shmem = iris.iris(1 << 20)
 
@@ -105,12 +84,7 @@ def _impl_arange_device_handling(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result_none)
 
 
-def test_arange_layout_handling(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_arange_layout_handling, num_ranks)
-
-
-def _impl_arange_layout_handling(rank, world_size):
+def test_arange_layout_handling():
     """Test layout parameter handling."""
     shmem = iris.iris(1 << 20)
 
@@ -120,12 +94,7 @@ def _impl_arange_layout_handling(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result_strided)
 
 
-def test_arange_requires_grad(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_arange_requires_grad, num_ranks)
-
-
-def _impl_arange_requires_grad(rank, world_size):
+def test_arange_requires_grad():
     """Test requires_grad parameter."""
     shmem = iris.iris(1 << 20)
 
@@ -145,12 +114,7 @@ def _impl_arange_requires_grad(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result_false)
 
 
-def test_arange_out_parameter(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_arange_out_parameter, num_ranks)
-
-
-def _impl_arange_out_parameter(rank, world_size):
+def test_arange_out_parameter():
     """Test out parameter functionality."""
     shmem = iris.iris(1 << 20)
 
@@ -171,12 +135,7 @@ def _impl_arange_out_parameter(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result_float)
 
 
-def test_arange_error_handling(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_arange_error_handling, num_ranks)
-
-
-def _impl_arange_error_handling(rank, world_size):
+def test_arange_error_handling():
     """Test error handling for invalid inputs."""
     shmem = iris.iris(1 << 20)
 
@@ -189,12 +148,7 @@ def _impl_arange_error_handling(rank, world_size):
         shmem.arange(3, device="cpu")  # Iris only supports CUDA
 
 
-def test_arange_edge_cases(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_arange_edge_cases, num_ranks)
-
-
-def _impl_arange_edge_cases(rank, world_size):
+def test_arange_edge_cases():
     """Test edge cases and boundary conditions."""
     shmem = iris.iris(1 << 20)
 
@@ -228,12 +182,7 @@ def _impl_arange_edge_cases(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result_float)
 
 
-def test_arange_pytorch_equivalence(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_arange_pytorch_equivalence, num_ranks)
-
-
-def _impl_arange_pytorch_equivalence(rank, world_size):
+def test_arange_pytorch_equivalence():
     """Test that Iris arange produces equivalent results to PyTorch arange."""
     shmem = iris.iris(1 << 20)
 
@@ -272,12 +221,7 @@ def _impl_arange_pytorch_equivalence(rank, world_size):
         {"start": 1.0, "end": 2.0, "step": 0.25, "dtype": torch.float32},
     ],
 )
-def test_arange_parameter_combinations(request, params):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_arange_parameter_combinations, num_ranks, params)
-
-
-def _impl_arange_parameter_combinations(rank, world_size, params):
+def test_arange_parameter_combinations(params):
     """Test arange with various parameter combinations."""
     shmem = iris.iris(1 << 20)
 
@@ -318,12 +262,7 @@ def _impl_arange_parameter_combinations(rank, world_size, params):
         {"layout": torch.strided},  # strided layout
     ],
 )
-def test_arange_symmetric_heap_verification(request, arange_args, kwargs):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_arange_symmetric_heap_verification, num_ranks, arange_args, kwargs)
-
-
-def _impl_arange_symmetric_heap_verification(rank, world_size, arange_args, kwargs):
+def test_arange_symmetric_heap_verification(arange_args, kwargs):
     """Test that all arange results are on the symmetric heap."""
     shmem = iris.iris(1 << 20)
 

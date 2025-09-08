@@ -5,8 +5,6 @@ import torch
 import pytest
 import iris
 
-from test_utils import dist_spawn
-
 
 @pytest.mark.parametrize(
     "dtype",
@@ -29,12 +27,7 @@ from test_utils import dist_spawn
         (0.0, 0.0, 5),
     ],
 )
-def test_linspace_basic(request, dtype, start, end, steps):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_basic, num_ranks, dtype, start, end, steps)
-
-
-def _impl_test_linspace_basic(rank, world_size, dtype, start, end, steps):
+def test_linspace_basic(dtype, start, end, steps):
     shmem = iris.iris(1 << 20)
 
     # Test basic linspace
@@ -52,12 +45,7 @@ def _impl_test_linspace_basic(rank, world_size, dtype, start, end, steps):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_linspace_default_dtype(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_default_dtype, num_ranks)
-
-
-def _impl_test_linspace_default_dtype(rank, world_size):
+def test_linspace_default_dtype():
     shmem = iris.iris(1 << 20)
 
     # Test with default dtype (should use torch.get_default_dtype())
@@ -74,12 +62,7 @@ def _impl_test_linspace_default_dtype(rank, world_size):
         False,
     ],
 )
-def test_linspace_requires_grad(request, requires_grad):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_requires_grad, num_ranks, requires_grad)
-
-
-def _impl_test_linspace_requires_grad(rank, world_size, requires_grad):
+def test_linspace_requires_grad(requires_grad):
     shmem = iris.iris(1 << 20)
 
     # Test with requires_grad parameter
@@ -90,12 +73,7 @@ def _impl_test_linspace_requires_grad(rank, world_size, requires_grad):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_linspace_device_handling(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_device_handling, num_ranks)
-
-
-def _impl_test_linspace_device_handling(rank, world_size):
+def test_linspace_device_handling():
     shmem = iris.iris(1 << 20)
 
     # Test default behavior (should use Iris device)
@@ -132,12 +110,7 @@ def _impl_test_linspace_device_handling(rank, world_size):
             shmem.linspace(0.0, 1.0, 5, device=different_cuda)
 
 
-def test_linspace_layout_handling(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_layout_handling, num_ranks)
-
-
-def _impl_test_linspace_layout_handling(rank, world_size):
+def test_linspace_layout_handling():
     shmem = iris.iris(1 << 20)
 
     # Test with strided layout (default)
@@ -150,12 +123,7 @@ def _impl_test_linspace_layout_handling(rank, world_size):
         shmem.linspace(0.0, 1.0, 5, layout=torch.sparse_coo)
 
 
-def test_linspace_out_parameter(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_out_parameter, num_ranks)
-
-
-def _impl_test_linspace_out_parameter(rank, world_size):
+def test_linspace_out_parameter():
     shmem = iris.iris(1 << 20)
 
     # Test with out parameter
@@ -177,12 +145,7 @@ def _impl_test_linspace_out_parameter(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result_float64)
 
 
-def test_linspace_steps_variations(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_steps_variations, num_ranks)
-
-
-def _impl_test_linspace_steps_variations(rank, world_size):
+def test_linspace_steps_variations():
     shmem = iris.iris(1 << 20)
 
     # Test single step
@@ -209,12 +172,7 @@ def _impl_test_linspace_steps_variations(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_linspace_edge_cases(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_edge_cases, num_ranks)
-
-
-def _impl_test_linspace_edge_cases(rank, world_size):
+def test_linspace_edge_cases():
     shmem = iris.iris(1 << 20)
 
     # Single step (start == end)
@@ -245,12 +203,7 @@ def _impl_test_linspace_edge_cases(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(neg_result)
 
 
-def test_linspace_pytorch_equivalence(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_pytorch_equivalence, num_ranks)
-
-
-def _impl_test_linspace_pytorch_equivalence(rank, world_size):
+def test_linspace_pytorch_equivalence():
     shmem = iris.iris(1 << 20)
 
     # Test basic equivalence
@@ -289,12 +242,7 @@ def _impl_test_linspace_pytorch_equivalence(rank, world_size):
         {},
     ],
 )
-def test_linspace_parameter_combinations(request, params):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_parameter_combinations, num_ranks, params)
-
-
-def _impl_test_linspace_parameter_combinations(rank, world_size, params):
+def test_linspace_parameter_combinations(params):
     shmem = iris.iris(1 << 20)
 
     # Test various combinations of parameters
@@ -329,12 +277,7 @@ def _impl_test_linspace_parameter_combinations(rank, world_size, params):
         (1.0, 2.0, 2, torch.complex128),
     ],
 )
-def test_linspace_symmetric_heap_shapes_dtypes(request, start, end, steps, dtype):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_symmetric_heap_shapes_dtypes, num_ranks, start, end, steps, dtype)
-
-
-def _impl_test_linspace_symmetric_heap_shapes_dtypes(rank, world_size, start, end, steps, dtype):
+def test_linspace_symmetric_heap_shapes_dtypes(start, end, steps, dtype):
     """Test that linspace returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
 
@@ -354,12 +297,7 @@ def _impl_test_linspace_symmetric_heap_shapes_dtypes(rank, world_size, start, en
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64, torch.complex64, torch.complex128])
-def test_linspace_symmetric_heap_dtype_override(request, dtype):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_symmetric_heap_dtype_override, num_ranks, dtype)
-
-
-def _impl_test_linspace_symmetric_heap_dtype_override(rank, world_size, dtype):
+def test_linspace_symmetric_heap_dtype_override(dtype):
     """Test that linspace with dtype override returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
 
@@ -368,12 +306,7 @@ def _impl_test_linspace_symmetric_heap_dtype_override(rank, world_size, dtype):
     assert result.dtype == dtype
 
 
-def test_linspace_symmetric_heap_other_params(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_symmetric_heap_other_params, num_ranks)
-
-
-def _impl_test_linspace_symmetric_heap_other_params(rank, world_size):
+def test_linspace_symmetric_heap_other_params():
     """Test that linspace with other parameters returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
 
@@ -395,12 +328,7 @@ def _impl_test_linspace_symmetric_heap_other_params(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result), "Tensor with out parameter is NOT on symmetric heap!"
 
 
-def test_linspace_invalid_output_tensor(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_invalid_output_tensor, num_ranks)
-
-
-def _impl_test_linspace_invalid_output_tensor(rank, world_size):
+def test_linspace_invalid_output_tensor():
     """Test error handling for invalid output tensors."""
     shmem = iris.iris(1 << 20)
 
@@ -420,12 +348,7 @@ def _impl_test_linspace_invalid_output_tensor(rank, world_size):
         shmem.linspace(0.0, 1.0, 5, out=regular_tensor)
 
 
-def test_linspace_default_dtype_behavior(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_default_dtype_behavior, num_ranks)
-
-
-def _impl_test_linspace_default_dtype_behavior(rank, world_size):
+def test_linspace_default_dtype_behavior():
     """Test that linspace uses the global default dtype when dtype=None."""
     shmem = iris.iris(1 << 20)
 
@@ -448,12 +371,7 @@ def _impl_test_linspace_default_dtype_behavior(rank, world_size):
         torch.set_default_dtype(original_default)
 
 
-def test_linspace_steps_parsing(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_steps_parsing, num_ranks)
-
-
-def _impl_test_linspace_steps_parsing(rank, world_size):
+def test_linspace_steps_parsing():
     """Test various ways of specifying steps."""
     shmem = iris.iris(1 << 20)
 
@@ -479,12 +397,7 @@ def _impl_test_linspace_steps_parsing(rank, world_size):
     assert result3.shape == result4.shape
 
 
-def test_linspace_complex_numbers(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_complex_numbers, num_ranks)
-
-
-def _impl_test_linspace_complex_numbers(rank, world_size):
+def test_linspace_complex_numbers():
     """Test linspace with complex numbers."""
     shmem = iris.iris(1 << 20)
 
@@ -502,12 +415,7 @@ def _impl_test_linspace_complex_numbers(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_linspace_tensor_inputs(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_tensor_inputs, num_ranks)
-
-
-def _impl_test_linspace_tensor_inputs(rank, world_size):
+def test_linspace_tensor_inputs():
     """Test linspace with tensor inputs."""
     shmem = iris.iris(1 << 20)
 
@@ -531,12 +439,7 @@ def _impl_test_linspace_tensor_inputs(rank, world_size):
     assert shmem._Iris__on_symmetric_heap(result_complex)
 
 
-def test_linspace_accuracy(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_accuracy, num_ranks)
-
-
-def _impl_test_linspace_accuracy(rank, world_size):
+def test_linspace_accuracy():
     """Test that linspace produces accurate results."""
     shmem = iris.iris(1 << 20)
 
@@ -561,12 +464,7 @@ def _impl_test_linspace_accuracy(rank, world_size):
     assert torch.allclose(step_size, torch.tensor(expected_step), atol=1e-6)
 
 
-def test_linspace_deterministic_behavior(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_linspace_deterministic_behavior, num_ranks)
-
-
-def _impl_test_linspace_deterministic_behavior(rank, world_size):
+def test_linspace_deterministic_behavior():
     """Test that linspace works with deterministic settings."""
     shmem = iris.iris(1 << 20)
 

@@ -7,8 +7,6 @@ import triton.language as tl
 import pytest
 import iris
 
-from test_utils import dist_spawn
-
 
 @triton.jit
 def store_kernel(
@@ -53,12 +51,7 @@ def store_kernel(
         32,
     ],
 )
-def test_store_api(request, dtype, BLOCK_SIZE):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_store_api, num_ranks, dtype, BLOCK_SIZE)
-
-
-def _impl_test_store_api(rank, world_size, dtype, BLOCK_SIZE):
+def test_store_api(dtype, BLOCK_SIZE):
     # TODO: Adjust heap size.
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()

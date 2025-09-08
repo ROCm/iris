@@ -5,15 +5,8 @@ import torch
 import pytest
 import iris
 
-from test_utils import dist_spawn
 
-
-def test_get_device(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_get_device, num_ranks)
-
-
-def _impl_test_get_device(rank, world_size):
+def test_get_device():
     shmem = iris.iris(1 << 20)
 
     # Test that get_device returns the correct device
@@ -25,12 +18,7 @@ def _impl_test_get_device(rank, world_size):
     assert device.index is not None
 
 
-def test_device_validation(request):
-    num_ranks = int(request.config.getoption("--num_ranks"))
-    dist_spawn(_impl_test_device_validation, num_ranks)
-
-
-def _impl_test_device_validation(rank, world_size):
+def test_device_validation():
     shmem = iris.iris(1 << 20)
 
     # Test valid devices
