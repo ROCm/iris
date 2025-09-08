@@ -46,28 +46,28 @@ def main():
     if len(sys.argv) < 2:
         print("Usage: python run_tests_distributed.py [--num_ranks N] [pytest_args...] <test_file>")
         sys.exit(1)
-    
+
     # Get number of ranks from args or default to 2
     num_ranks = 2
     args = sys.argv[1:]
-    
+
     if "--num_ranks" in args:
         idx = args.index("--num_ranks")
         if idx + 1 < len(args):
             num_ranks = int(args[idx + 1])
             # Remove --num_ranks and its value from args
-            args = args[:idx] + args[idx+2:]
-    
+            args = args[:idx] + args[idx + 2 :]
+
     # The last argument should be the test file
     if not args:
         print("Error: No test file specified")
         sys.exit(1)
-    
+
     test_file = args[-1]
     pytest_args = args[:-1]  # Everything except the last argument (test file)
-    
+
     print(f"Running {test_file} with {num_ranks} ranks in single distributed process group")
-    
+
     # Run all tests within a single distributed process group
     mp.spawn(_distributed_worker, args=(num_ranks, test_file, pytest_args), nprocs=num_ranks, join=True)
 
