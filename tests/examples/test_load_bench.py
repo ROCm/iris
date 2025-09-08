@@ -11,14 +11,6 @@ import iris
 
 import importlib.util
 from pathlib import Path
-import sys
-
-# Add tests directory to path for test_utils
-current_dir = Path(__file__).parent
-tests_dir = current_dir.parent
-sys.path.insert(0, str(tests_dir))
-
-from test_utils import distributed_test
 
 current_dir = Path(__file__).parent
 file_path = (current_dir / "../../examples/00_load/load_bench.py").resolve()
@@ -50,32 +42,21 @@ spec.loader.exec_module(module)
         1024,
     ],
 )
-def test_load_bench(dtype, buffer_size, heap_size, block_size, num_ranks):
-    """Test load_bench example with distributed setup."""
-    
-    @distributed_test
-    def _test_load_bench_distributed(local_rank, world_size, num_ranks):
-        shmem = iris.iris(heap_size)
-        num_ranks = shmem.get_num_ranks()
+def test_load_bench(dtype, buffer_size, heap_size, block_size):
+    shmem = iris.iris(heap_size)
+    num_ranks = shmem.get_num_ranks()
 
-        bandwidth_matrix = np.zeros((num_ranks, num_ranks), dtype=np.float32)
-        element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-        source_buffer = shmem.ones(buffer_size // element_size_bytes, dtype=dtype)
-        result_buffer = shmem.zeros_like(source_buffer)
+    bandwidth_matrix = np.zeros((num_ranks, num_ranks), dtype=np.float32)
+    element_size_bytes = torch.tensor([], dtype=dtype).element_size()
+    source_buffer = shmem.ones(buffer_size // element_size_bytes, dtype=dtype)
+    result_buffer = shmem.zeros_like(source_buffer)
 
-        shmem.barrier()
+    shmem.barrier()
 
-        for source_rank in range(num_ranks):
-            for destination_rank in range(num_ranks):
-                bandwidth_gbps = module.bench_load(
-                    shmem, source_rank, destination_rank, source_buffer, result_buffer, block_size, dtype
-                )
-                bandwidth_matrix[source_rank, destination_rank] = bandwidth_gbps
-                shmem.barrier()
-        
-        # Return success indicator
-        return True
-    
-    # Run the distributed test
-    result = _test_load_bench_distributed(num_ranks=num_ranks)
-    assert result is True
+    for source_rank in range(num_ranks):
+        for destination_rank in range(num_ranks):
+            bandwidth_gbps = module.bench_load(
+                shmem, source_rank, destination_rank, source_buffer, result_buffer, block_size, dtype
+            )
+            bandwidth_matrix[source_rank, destination_rank] = bandwidth_gbps
+            shmem.barrier()
