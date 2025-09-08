@@ -31,16 +31,16 @@ def _distributed_worker(rank, world_size, test_file, pytest_args):
         rank=rank,
         world_size=world_size,
     )
-
+    
     try:
-        # Import and run pytest directly instead of subprocess
+        # Import and run pytest directly
         import pytest
         import sys
-
+        
         # Set up sys.argv for pytest
         original_argv = sys.argv[:]
         sys.argv = ["pytest", test_file] + pytest_args
-
+        
         try:
             # Run pytest directly in this process
             exit_code = pytest.main([test_file] + pytest_args)
@@ -48,7 +48,7 @@ def _distributed_worker(rank, world_size, test_file, pytest_args):
         finally:
             # Restore original argv
             sys.argv = original_argv
-
+            
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -70,15 +70,16 @@ def main():
             # Remove --num_ranks and its value from args
             args = args[:idx] + args[idx + 2 :]
 
-    # The last argument should be the test file
+    # The test file is the first argument after --num_ranks, everything else is pytest args
     if not args:
         print("Error: No test file specified")
         sys.exit(1)
+    
+    test_file = args[0]
+    pytest_args = args[1:]  # Everything after the test file
 
-    test_file = args[-1]
-    pytest_args = args[:-1]  # Everything except the last argument (test file)
-
-    print(f"Running {test_file} with {num_ranks} ranks in single distributed process group")
+    print(f"Running {test_file} with {num_ranks} ranks")
+    print(f"args={args}, test_file={test_file}, pytest_args={pytest_args}")
 
     # Run all tests within a single distributed process group
     mp.spawn(_distributed_worker, args=(num_ranks, test_file, pytest_args), nprocs=num_ranks, join=True)
