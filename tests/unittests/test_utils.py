@@ -15,7 +15,7 @@ def _find_free_port():
 
 def _dist_worker(rank, world_size, fn, init_method, *args):
     backend = os.environ.get("TORCH_DIST_BACKEND", "nccl")
-    
+
     # Only initialize if not already initialized
     if not dist.is_initialized():
         dist.init_process_group(
@@ -24,10 +24,10 @@ def _dist_worker(rank, world_size, fn, init_method, *args):
             rank=rank,
             world_size=world_size,
         )
-    
+
     # Run the test function
     fn(rank, world_size, *args)
-    
+
     # Don't destroy here - let pytest handle cleanup
 
 

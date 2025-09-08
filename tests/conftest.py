@@ -33,19 +33,16 @@ def global_dist_setup():
     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
     master_port = os.environ.get("MASTER_PORT", str(_find_free_port()))
     init_method = f"tcp://{master_addr}:{master_port}"
-    
+
     # Store the init method for use by tests
     os.environ["GLOBAL_INIT_METHOD"] = init_method
-    
+
     yield init_method
-    
+
     # Cleanup happens automatically when session ends
 
 
 def pytest_sessionfinish(session, exitstatus):
     """Clean up distributed process groups at the end of the test session."""
-    import torch.distributed as dist
     if dist.is_initialized():
         dist.destroy_process_group()
-
-
