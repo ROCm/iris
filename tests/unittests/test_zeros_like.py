@@ -7,10 +7,9 @@ import iris
 
 from test_utils import dist_spawn
 
+
 def pytest_addoption(parser):
-    parser.addoption(
-        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
-    )
+    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
 
 
 @pytest.mark.parametrize(
@@ -40,6 +39,7 @@ def pytest_addoption(parser):
 def test_zeros_like_basic(request, dtype, shape):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_basic, num_ranks, dtype, shape)
+
 
 def _impl_test_zeros_like_basic(rank, world_size, dtype, shape):
     shmem = iris.iris(1 << 20)
@@ -77,6 +77,7 @@ def test_zeros_like_dtype_override(request, input_dtype, output_dtype):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_dtype_override, num_ranks, input_dtype, output_dtype)
 
+
 def _impl_test_zeros_like_dtype_override(rank, world_size, input_dtype, output_dtype):
     shmem = iris.iris(1 << 20)
 
@@ -102,6 +103,7 @@ def test_zeros_like_requires_grad(request, requires_grad):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_requires_grad, num_ranks, requires_grad)
 
+
 def _impl_test_zeros_like_requires_grad(rank, world_size, requires_grad):
     shmem = iris.iris(1 << 20)
 
@@ -118,6 +120,7 @@ def _impl_test_zeros_like_requires_grad(rank, world_size, requires_grad):
 def test_zeros_like_device_override(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_device_override, num_ranks)
+
 
 def _impl_test_zeros_like_device_override(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -161,6 +164,7 @@ def test_zeros_like_layout_override(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_layout_override, num_ranks)
 
+
 def _impl_test_zeros_like_layout_override(rank, world_size):
     shmem = iris.iris(1 << 20)
 
@@ -177,6 +181,7 @@ def _impl_test_zeros_like_layout_override(rank, world_size):
 def test_zeros_like_memory_format(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_memory_format, num_ranks)
+
 
 def _impl_test_zeros_like_memory_format(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -267,6 +272,7 @@ def test_channels_last_format_shape_preservation(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_channels_last_format_shape_preservation, num_ranks)
 
+
 def _impl_test_channels_last_format_shape_preservation(rank, world_size):
     """Test that channels_last format preserves shape and only changes strides."""
     shmem = iris.iris(1 << 20)
@@ -328,6 +334,7 @@ def test_zeros_like_pytorch_equivalence(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_pytorch_equivalence, num_ranks)
 
+
 def _impl_test_zeros_like_pytorch_equivalence(rank, world_size):
     shmem = iris.iris(1 << 20)
 
@@ -363,6 +370,7 @@ def _impl_test_zeros_like_pytorch_equivalence(rank, world_size):
 def test_zeros_like_edge_cases(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_edge_cases, num_ranks)
+
 
 def _impl_test_zeros_like_edge_cases(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -407,6 +415,7 @@ def test_zeros_like_parameter_combinations(request, params):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_parameter_combinations, num_ranks, params)
 
+
 def _impl_test_zeros_like_parameter_combinations(rank, world_size, params):
     shmem = iris.iris(1 << 20)
 
@@ -449,6 +458,7 @@ def test_zeros_like_symmetric_heap_shapes_dtypes(request, shape, dtype):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_symmetric_heap_shapes_dtypes, num_ranks, shape, dtype)
 
+
 def _impl_test_zeros_like_symmetric_heap_shapes_dtypes(rank, world_size, shape, dtype):
     """Test that zeros_like returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
@@ -489,6 +499,7 @@ def test_zeros_like_symmetric_heap_dtype_override(request, dtype):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_symmetric_heap_dtype_override, num_ranks, dtype)
 
+
 def _impl_test_zeros_like_symmetric_heap_dtype_override(rank, world_size, dtype):
     """Test that zeros_like with dtype override returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
@@ -502,6 +513,7 @@ def _impl_test_zeros_like_symmetric_heap_dtype_override(rank, world_size, dtype)
 def test_zeros_like_symmetric_heap_other_params(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_zeros_like_symmetric_heap_other_params, num_ranks)
+
 
 def _impl_test_zeros_like_symmetric_heap_other_params(rank, world_size):
     """Test that zeros_like with other parameters returns tensors on symmetric heap."""

@@ -8,16 +8,18 @@ import iris
 
 from test_utils import dist_spawn
 
+
 def pytest_addoption(parser):
-    parser.addoption(
-        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
-    )
+    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
+
 
 # =============================== tests ===============================
+
 
 def test_arange_basic_functionality(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_arange_basic_functionality, num_ranks)
+
 
 def _impl_arange_basic_functionality(rank, world_size):
     """Test basic arange functionality with various argument combinations."""
@@ -55,6 +57,7 @@ def test_arange_dtype_inference(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_arange_dtype_inference, num_ranks)
 
+
 def _impl_arange_dtype_inference(rank, world_size):
     """Test dtype inference logic."""
     shmem = iris.iris(1 << 20)
@@ -84,6 +87,7 @@ def test_arange_device_handling(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_arange_device_handling, num_ranks)
 
+
 def _impl_arange_device_handling(rank, world_size):
     """Test device parameter handling."""
     shmem = iris.iris(1 << 20)
@@ -109,6 +113,7 @@ def test_arange_layout_handling(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_arange_layout_handling, num_ranks)
 
+
 def _impl_arange_layout_handling(rank, world_size):
     """Test layout parameter handling."""
     shmem = iris.iris(1 << 20)
@@ -122,6 +127,7 @@ def _impl_arange_layout_handling(rank, world_size):
 def test_arange_requires_grad(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_arange_requires_grad, num_ranks)
+
 
 def _impl_arange_requires_grad(rank, world_size):
     """Test requires_grad parameter."""
@@ -146,6 +152,7 @@ def _impl_arange_requires_grad(rank, world_size):
 def test_arange_out_parameter(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_arange_out_parameter, num_ranks)
+
 
 def _impl_arange_out_parameter(rank, world_size):
     """Test out parameter functionality."""
@@ -172,6 +179,7 @@ def test_arange_error_handling(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_arange_error_handling, num_ranks)
 
+
 def _impl_arange_error_handling(rank, world_size):
     """Test error handling for invalid inputs."""
     shmem = iris.iris(1 << 20)
@@ -188,6 +196,7 @@ def _impl_arange_error_handling(rank, world_size):
 def test_arange_edge_cases(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_arange_edge_cases, num_ranks)
+
 
 def _impl_arange_edge_cases(rank, world_size):
     """Test edge cases and boundary conditions."""
@@ -226,6 +235,7 @@ def _impl_arange_edge_cases(rank, world_size):
 def test_arange_pytorch_equivalence(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_arange_pytorch_equivalence, num_ranks)
+
 
 def _impl_arange_pytorch_equivalence(rank, world_size):
     """Test that Iris arange produces equivalent results to PyTorch arange."""
@@ -269,6 +279,7 @@ def _impl_arange_pytorch_equivalence(rank, world_size):
 def test_arange_parameter_combinations(request, params):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_arange_parameter_combinations, num_ranks, params)
+
 
 def _impl_arange_parameter_combinations(rank, world_size, params):
     """Test arange with various parameter combinations."""
@@ -314,6 +325,7 @@ def _impl_arange_parameter_combinations(rank, world_size, params):
 def test_arange_symmetric_heap_verification(request, arange_args, kwargs):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_arange_symmetric_heap_verification, num_ranks, arange_args, kwargs)
+
 
 def _impl_arange_symmetric_heap_verification(rank, world_size, arange_args, kwargs):
     """Test that all arange results are on the symmetric heap."""

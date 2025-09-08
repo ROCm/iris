@@ -7,10 +7,9 @@ import iris
 
 from test_utils import dist_spawn
 
+
 def pytest_addoption(parser):
-    parser.addoption(
-        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
-    )
+    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
 
 
 @pytest.mark.parametrize(
@@ -41,6 +40,7 @@ def test_ones_basic(request, dtype, size):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_basic, num_ranks, dtype, size)
 
+
 def _impl_test_ones_basic(rank, world_size, dtype, size):
     shmem = iris.iris(1 << 20)
 
@@ -61,6 +61,7 @@ def _impl_test_ones_basic(rank, world_size, dtype, size):
 def test_ones_default_dtype(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_default_dtype, num_ranks)
+
 
 def _impl_test_ones_default_dtype(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -83,6 +84,7 @@ def test_ones_requires_grad(request, requires_grad):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_requires_grad, num_ranks, requires_grad)
 
+
 def _impl_test_ones_requires_grad(rank, world_size, requires_grad):
     shmem = iris.iris(1 << 20)
     # Test with requires_grad parameter
@@ -97,6 +99,7 @@ def _impl_test_ones_requires_grad(rank, world_size, requires_grad):
 def test_ones_device_handling(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_device_handling, num_ranks)
+
 
 def _impl_test_ones_device_handling(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -142,6 +145,7 @@ def test_ones_layout_handling(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_layout_handling, num_ranks)
 
+
 def _impl_test_ones_layout_handling(rank, world_size):
     shmem = iris.iris(1 << 20)
     # Test with strided layout (default)
@@ -158,6 +162,7 @@ def _impl_test_ones_layout_handling(rank, world_size):
 def test_ones_out_parameter(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_out_parameter, num_ranks)
+
 
 def _impl_test_ones_out_parameter(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -183,6 +188,7 @@ def _impl_test_ones_out_parameter(rank, world_size):
 def test_ones_size_variations(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_size_variations, num_ranks)
+
 
 def _impl_test_ones_size_variations(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -214,6 +220,7 @@ def _impl_test_ones_size_variations(rank, world_size):
 def test_ones_edge_cases(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_edge_cases, num_ranks)
+
 
 def _impl_test_ones_edge_cases(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -248,6 +255,7 @@ def _impl_test_ones_edge_cases(rank, world_size):
 def test_ones_pytorch_equivalence(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_pytorch_equivalence, num_ranks)
+
 
 def _impl_test_ones_pytorch_equivalence(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -292,6 +300,7 @@ def test_ones_parameter_combinations(request, params):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_parameter_combinations, num_ranks, params)
 
+
 def _impl_test_ones_parameter_combinations(rank, world_size, params):
     shmem = iris.iris(1 << 20)
     # Test various combinations of parameters
@@ -331,6 +340,7 @@ def test_ones_symmetric_heap_shapes_dtypes(request, size, dtype):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_symmetric_heap_shapes_dtypes, num_ranks, size, dtype)
 
+
 def _impl_test_ones_symmetric_heap_shapes_dtypes(rank, world_size, size, dtype):
     """Test that ones returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
@@ -351,6 +361,7 @@ def test_ones_symmetric_heap_dtype_override(request, dtype):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_symmetric_heap_dtype_override, num_ranks, dtype)
 
+
 def _impl_test_ones_symmetric_heap_dtype_override(rank, world_size, dtype):
     """Test that ones with dtype override returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
@@ -362,6 +373,7 @@ def _impl_test_ones_symmetric_heap_dtype_override(rank, world_size, dtype):
 def test_ones_symmetric_heap_other_params(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_symmetric_heap_other_params, num_ranks)
+
 
 def _impl_test_ones_symmetric_heap_other_params(rank, world_size):
     """Test that ones with other parameters returns tensors on symmetric heap."""
@@ -388,6 +400,7 @@ def test_ones_invalid_output_tensor(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_invalid_output_tensor, num_ranks)
 
+
 def _impl_test_ones_invalid_output_tensor(rank, world_size):
     """Test error handling for invalid output tensors."""
     shmem = iris.iris(1 << 20)
@@ -410,6 +423,7 @@ def _impl_test_ones_invalid_output_tensor(rank, world_size):
 def test_ones_default_dtype_behavior(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_default_dtype_behavior, num_ranks)
+
 
 def _impl_test_ones_default_dtype_behavior(rank, world_size):
     """Test that ones uses the global default dtype when dtype=None."""
@@ -436,6 +450,7 @@ def _impl_test_ones_default_dtype_behavior(rank, world_size):
 def test_ones_size_parsing(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_size_parsing, num_ranks)
+
 
 def _impl_test_ones_size_parsing(rank, world_size):
     """Test various ways of specifying size."""
@@ -465,6 +480,7 @@ def _impl_test_ones_size_parsing(rank, world_size):
 def test_ones_examples(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_ones_examples, num_ranks)
+
 
 def _impl_test_ones_examples(rank, world_size):
     """Test the examples from PyTorch documentation."""

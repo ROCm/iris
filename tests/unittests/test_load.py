@@ -9,10 +9,9 @@ import iris
 
 from test_utils import dist_spawn
 
+
 def pytest_addoption(parser):
-    parser.addoption(
-        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
-    )
+    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
 
 
 @triton.jit
@@ -58,6 +57,7 @@ def load_kernel(
 def test_load_api(request, dtype, BLOCK_SIZE):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_load_api, num_ranks, dtype, BLOCK_SIZE)
+
 
 def _impl_test_load_api(rank, world_size, dtype, BLOCK_SIZE):
     # TODO: Adjust heap size.

@@ -90,7 +90,6 @@ def parse_args():
     parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
     parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
 
-
     return vars(parser.parse_args())
 
 
@@ -246,12 +245,7 @@ def print_bandwidth_matrix(
 def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     """Worker function for PyTorch distributed execution."""
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(
-        backend=backend, 
-        init_method=init_url, 
-        world_size=world_size, 
-        rank=local_rank
-    )
+    dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=local_rank)
 
     # Main benchmark logic
     heap_size = args["heap_size"]
@@ -301,11 +295,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
 def main(num_ranks: int = None):
     args = parse_args()
-    
+
     # Use command line argument if provided, otherwise use num_ranks parameter
     if num_ranks is None:
         num_ranks = args["num_ranks"]
-    
+
     init_url = "tcp://127.0.0.1:29500"
     mp.spawn(
         fn=_worker,
@@ -313,6 +307,7 @@ def main(num_ranks: int = None):
         nprocs=num_ranks,
         join=True,
     )
+
 
 if __name__ == "__main__":
     main()

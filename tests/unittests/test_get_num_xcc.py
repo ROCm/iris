@@ -6,10 +6,9 @@ import iris
 
 from test_utils import dist_spawn
 
+
 def pytest_addoption(parser):
-    parser.addoption(
-        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
-    )
+    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
 
 
 @pytest.mark.parametrize(
@@ -21,6 +20,7 @@ def pytest_addoption(parser):
 def test_get_num_xcc_api(request, num_calls):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_get_num_xcc_api, num_ranks, num_calls)
+
 
 def _impl_test_get_num_xcc_api(rank, world_size, num_calls):
     first = iris.hip.get_num_xcc()

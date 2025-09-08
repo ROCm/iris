@@ -7,10 +7,9 @@ import iris
 
 from test_utils import dist_spawn
 
+
 def pytest_addoption(parser):
-    parser.addoption(
-        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
-    )
+    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
 
 
 @pytest.mark.parametrize(
@@ -42,6 +41,7 @@ def test_full_basic(request, fill_value, size):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_basic, num_ranks, fill_value, size)
 
+
 def _impl_test_full_basic(rank, world_size, fill_value, size):
     shmem = iris.iris(1 << 20)
 
@@ -61,6 +61,7 @@ def _impl_test_full_basic(rank, world_size, fill_value, size):
 def test_full_dtype_inference(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_dtype_inference, num_ranks)
+
 
 def _impl_test_full_dtype_inference(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -95,6 +96,7 @@ def test_full_requires_grad(request, requires_grad):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_requires_grad, num_ranks, requires_grad)
 
+
 def _impl_test_full_requires_grad(rank, world_size, requires_grad):
     shmem = iris.iris(1 << 20)
 
@@ -110,6 +112,7 @@ def _impl_test_full_requires_grad(rank, world_size, requires_grad):
 def test_full_device_handling(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_device_handling, num_ranks)
+
 
 def _impl_test_full_device_handling(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -156,6 +159,7 @@ def test_full_layout_handling(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_layout_handling, num_ranks)
 
+
 def _impl_test_full_layout_handling(rank, world_size):
     shmem = iris.iris(1 << 20)
 
@@ -173,6 +177,7 @@ def _impl_test_full_layout_handling(rank, world_size):
 def test_full_out_parameter(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_out_parameter, num_ranks)
+
 
 def _impl_test_full_out_parameter(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -199,6 +204,7 @@ def _impl_test_full_out_parameter(rank, world_size):
 def test_full_size_variations(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_size_variations, num_ranks)
+
 
 def _impl_test_full_size_variations(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -231,6 +237,7 @@ def _impl_test_full_size_variations(rank, world_size):
 def test_full_edge_cases(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_edge_cases, num_ranks)
+
 
 def _impl_test_full_edge_cases(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -266,6 +273,7 @@ def _impl_test_full_edge_cases(rank, world_size):
 def test_full_pytorch_equivalence(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_pytorch_equivalence, num_ranks)
+
 
 def _impl_test_full_pytorch_equivalence(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -310,6 +318,7 @@ def _impl_test_full_pytorch_equivalence(rank, world_size):
 def test_full_parameter_combinations(request, params):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_parameter_combinations, num_ranks, params)
+
 
 def _impl_test_full_parameter_combinations(rank, world_size, params):
     shmem = iris.iris(1 << 20)
@@ -358,6 +367,7 @@ def test_full_symmetric_heap_shapes_dtypes(request, size, fill_value, dtype):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_symmetric_heap_shapes_dtypes, num_ranks, size, fill_value, dtype)
 
+
 def _impl_test_full_symmetric_heap_shapes_dtypes(rank, world_size, size, fill_value, dtype):
     """Test that full returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
@@ -381,6 +391,7 @@ def test_full_symmetric_heap_dtype_override(request, dtype):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_symmetric_heap_dtype_override, num_ranks, dtype)
 
+
 def _impl_test_full_symmetric_heap_dtype_override(rank, world_size, dtype):
     """Test that full with dtype override returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
@@ -393,6 +404,7 @@ def _impl_test_full_symmetric_heap_dtype_override(rank, world_size, dtype):
 def test_full_symmetric_heap_other_params(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_symmetric_heap_other_params, num_ranks)
+
 
 def _impl_test_full_symmetric_heap_other_params(rank, world_size):
     """Test that full with other parameters returns tensors on symmetric heap."""
@@ -420,6 +432,7 @@ def test_full_invalid_output_tensor(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_invalid_output_tensor, num_ranks)
 
+
 def _impl_test_full_invalid_output_tensor(rank, world_size):
     """Test error handling for invalid output tensors."""
     shmem = iris.iris(1 << 20)
@@ -443,6 +456,7 @@ def _impl_test_full_invalid_output_tensor(rank, world_size):
 def test_full_size_parsing(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_size_parsing, num_ranks)
+
 
 def _impl_test_full_size_parsing(rank, world_size):
     """Test various ways of specifying size."""
@@ -474,6 +488,7 @@ def test_full_examples(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_examples, num_ranks)
 
+
 def _impl_test_full_examples(rank, world_size):
     """Test the examples from PyTorch documentation."""
     shmem = iris.iris(1 << 20)
@@ -489,6 +504,7 @@ def _impl_test_full_examples(rank, world_size):
 def test_full_different_fill_values(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_different_fill_values, num_ranks)
+
 
 def _impl_test_full_different_fill_values(rank, world_size):
     """Test various fill values to ensure they work correctly."""
@@ -517,6 +533,7 @@ def _impl_test_full_different_fill_values(rank, world_size):
 def test_full_dtype_override(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_full_dtype_override, num_ranks)
+
 
 def _impl_test_full_dtype_override(rank, world_size):
     """Test that explicit dtype overrides inference."""

@@ -6,10 +6,12 @@ import socket
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+
 def _find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
+
 
 def _dist_worker(rank, world_size, fn, init_method, *args):
     backend = os.environ.get("TORCH_DIST_BACKEND", "nccl")
@@ -24,6 +26,7 @@ def _dist_worker(rank, world_size, fn, init_method, *args):
     finally:
         dist.destroy_process_group()
 
+
 def dist_spawn(fn, num_ranks, *args):
     """
     Launch `num_ranks` processes via spawn and run `fn(rank, world_size, *args)`.
@@ -32,5 +35,4 @@ def dist_spawn(fn, num_ranks, *args):
     master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
     master_port = os.environ.get("MASTER_PORT", str(_find_free_port()))
     init_method = f"tcp://{master_addr}:{master_port}"
-    mp.spawn(_dist_worker, args=(num_ranks, fn, init_method, *args),
-             nprocs=num_ranks, join=True)
+    mp.spawn(_dist_worker, args=(num_ranks, fn, init_method, *args), nprocs=num_ranks, join=True)

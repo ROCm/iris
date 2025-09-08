@@ -7,15 +7,15 @@ import iris
 
 from test_utils import dist_spawn
 
+
 def pytest_addoption(parser):
-    parser.addoption(
-        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
-    )
+    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
 
 
 def test_get_device(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_get_device, num_ranks)
+
 
 def _impl_test_get_device(rank, world_size):
     shmem = iris.iris(1 << 20)
@@ -32,6 +32,7 @@ def _impl_test_get_device(rank, world_size):
 def test_device_validation(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_device_validation, num_ranks)
+
 
 def _impl_test_device_validation(rank, world_size):
     shmem = iris.iris(1 << 20)

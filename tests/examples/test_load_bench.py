@@ -23,9 +23,7 @@ spec.loader.exec_module(module)
 
 
 def pytest_addoption(parser):
-    parser.addoption(
-        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
-    )
+    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
 
 
 def _dist_worker(rank, world_size, fn, *args):
@@ -43,7 +41,6 @@ def _dist_worker(rank, world_size, fn, *args):
 
 def _run_distributed(fn, num_ranks, *args):
     mp.spawn(_dist_worker, args=(num_ranks, fn, *args), nprocs=num_ranks, join=True)
-
 
 
 @pytest.mark.parametrize(
@@ -70,9 +67,7 @@ def _run_distributed(fn, num_ranks, *args):
 )
 def test_load_bench(request, dtype, buffer_size, heap_size, block_size):
     num_ranks = int(request.config.getoption("--num_ranks"))
-    _run_distributed(
-        _test_load_bench_impl, num_ranks, dtype, buffer_size, heap_size, block_size
-    )
+    _run_distributed(_test_load_bench_impl, num_ranks, dtype, buffer_size, heap_size, block_size)
 
 
 def _test_load_bench_impl(rank, world_size, dtype, buffer_size, heap_size, block_size):

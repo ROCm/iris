@@ -26,17 +26,12 @@ def run_distributed_test(test_func: Callable, num_ranks: int = 2, **kwargs) -> A
         Result from rank 0, or None if test_func doesn't return anything
     """
     results = {}
-    
+
     def _worker(local_rank: int, world_size: int, init_url: str, test_func: Callable, kwargs: Dict):
         backend = "gloo"  # Use gloo backend for CPU testing
         try:
-            dist.init_process_group(
-                backend=backend,
-                init_method=init_url,
-                world_size=world_size,
-                rank=local_rank
-            )
-            
+            dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=local_rank)
+
             result = test_func(local_rank, world_size, **kwargs)
             if local_rank == 0:
                 results[0] = result
@@ -44,7 +39,7 @@ def run_distributed_test(test_func: Callable, num_ranks: int = 2, **kwargs) -> A
             if dist.is_initialized():
                 dist.barrier()
                 dist.destroy_process_group()
-    
+
     init_url = f"tcp://127.0.0.1:{29500 + os.getpid() % 1000}"  # Avoid port conflicts
     start_processes(
         fn=_worker,
@@ -52,7 +47,7 @@ def run_distributed_test(test_func: Callable, num_ranks: int = 2, **kwargs) -> A
         nprocs=num_ranks,
         join=True,
     )
-    
+
     return results.get(0)
 
 
@@ -69,10 +64,12 @@ def distributed_test(test_func):
             # Test logic here
             pass
     """
+
     def wrapper(*args, **kwargs):
         # Extract num_ranks from kwargs (passed by pytest fixture)
-        num_ranks = kwargs.pop('num_ranks', 2)  # Default to 2 if not provided
+        num_ranks = kwargs.pop("num_ranks", 2)  # Default to 2 if not provided
         return run_distributed_test(test_func, num_ranks, *args, **kwargs)
+
     return wrapper
 
 
@@ -83,22 +80,19 @@ def iris_distributed_context():
 
     This handles the distributed setup automatically for simple unit tests.
     """
+
     def create_iris_context(heap_size: int = 1 << 20, num_ranks: int = 2):
         """Create an iris context with distributed setup."""
         result = {}
-        
+
         def _worker(local_rank: int, world_size: int, init_url: str, heap_size: int):
             backend = "gloo"
             try:
-                dist.init_process_group(
-                    backend=backend,
-                    init_method=init_url,
-                    world_size=world_size,
-                    rank=local_rank
-                )
-                
+                dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=local_rank)
+
                 # Mock HIP functions for testing
                 import iris
+
                 ctx = iris.iris(heap_size)
                 if local_rank == 0:
                     result[0] = ctx
@@ -109,7 +103,7 @@ def iris_distributed_context():
                 if dist.is_initialized():
                     dist.barrier()
                     dist.destroy_process_group()
-        
+
         init_url = f"tcp://127.0.0.1:{29500 + os.getpid() % 1000}"
         start_processes(
             fn=_worker,
@@ -117,10 +111,10 @@ def iris_distributed_context():
             nprocs=num_ranks,
             join=True,
         )
-        
+
         ctx = result.get(0)
         if isinstance(ctx, Exception):
             raise ctx
         return ctx
-    
+
     return create_iris_context

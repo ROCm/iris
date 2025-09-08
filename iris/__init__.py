@@ -108,5 +108,4 @@ __all__ = [
     "INFO",
     "WARNING",
     "ERROR",
-
 ]

@@ -95,7 +95,7 @@ def distributed_broadcast_scalar(value=None, root=0):
     if rank == root:
         if value is None:
             raise ValueError("Root must provide a value.")
-        np_val = np.array(value)          # captures dtype
+        np_val = np.array(value)  # captures dtype
         dtype = np_val.dtype
     else:
         np_val = None

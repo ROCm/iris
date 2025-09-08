@@ -7,15 +7,15 @@ import iris
 
 from test_utils import dist_spawn
 
+
 def pytest_addoption(parser):
-    parser.addoption(
-        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
-    )
+    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
 
 
 def test_logging_constants(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_logging_constants, num_ranks)
+
 
 def _impl_test_logging_constants(rank, world_size):
     """Test that logging constants are properly defined."""
@@ -30,6 +30,7 @@ def test_set_logger_level(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_set_logger_level, num_ranks)
 
+
 def _impl_test_set_logger_level(rank, world_size):
     """Test the set_logger_level function."""
     # Test setting different levels
@@ -43,6 +44,7 @@ def _impl_test_set_logger_level(rank, world_size):
 def test_logger_setup(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_logger_setup, num_ranks)
+
 
 def _impl_test_logger_setup(rank, world_size):
     """Test that the iris logger is properly configured."""
@@ -62,6 +64,7 @@ def _impl_test_logger_setup(rank, world_size):
 def test_iris_debug_logging(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_iris_debug_logging, num_ranks)
+
 
 def _impl_test_iris_debug_logging(rank, world_size):
     """Test that Iris debug logging convenience methods work correctly."""
@@ -111,6 +114,7 @@ def test_logger_api_usage(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_logger_api_usage, num_ranks)
 
+
 def _impl_test_logger_api_usage(rank, world_size):
     """Test direct logger API usage."""
     # Capture log output
@@ -148,6 +152,7 @@ def test_iris_formatter(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_iris_formatter, num_ranks)
 
+
 def _impl_test_iris_formatter(rank, world_size):
     """Test the IrisFormatter behavior."""
     from iris.logging import IrisFormatter
@@ -177,6 +182,7 @@ def _impl_test_iris_formatter(rank, world_size):
 def test_api_import(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_api_import, num_ranks)
+
 
 def _impl_test_api_import(rank, world_size):
     """Test that the new API can be imported from the main iris module."""
