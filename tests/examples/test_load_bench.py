@@ -22,10 +22,6 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
-def pytest_addoption(parser):
-    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
-
-
 def _dist_worker(rank, world_size, fn, *args):
     dist.init_process_group(
         backend="nccl",

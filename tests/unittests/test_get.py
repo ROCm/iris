@@ -10,10 +10,6 @@ import iris
 from test_utils import dist_spawn
 
 
-def pytest_addoption(parser):
-    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
-
-
 # TODO: Separate this kernel out in the following categories:
 # 1. for local get.
 # 2. for remote get with one other rank.

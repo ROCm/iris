@@ -8,10 +8,6 @@ import iris
 from test_utils import dist_spawn
 
 
-def pytest_addoption(parser):
-    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
-
-
 @pytest.mark.parametrize(
     "fill_value",
     [

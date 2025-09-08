@@ -8,10 +8,6 @@ import iris
 from test_utils import dist_spawn
 
 
-def pytest_addoption(parser):
-    parser.addoption("--num_ranks", action="store", default="1", help="Number of ranks to spawn")
-
-
 def test_logging_constants(request):
     num_ranks = int(request.config.getoption("--num_ranks"))
     dist_spawn(_impl_test_logging_constants, num_ranks)
