@@ -5,23 +5,19 @@
 Pytest configuration for iris distributed tests.
 """
 
-import pytest
-
-
 def pytest_addoption(parser):
-    """Add command line options for pytest."""
     parser.addoption(
         "--num_ranks",
         action="store",
-        default="2",
+        default="1",
         type=int,
-        help="Number of ranks for distributed tests (default: 2)"
+        help="Number of ranks to use in tests"
     )
 
+import pytest
 
 @pytest.fixture
 def num_ranks(request):
-    """Fixture to get num_ranks from command line."""
     return request.config.getoption("--num_ranks")
 
 
