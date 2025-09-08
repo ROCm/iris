@@ -4,7 +4,7 @@ This guide covers how to install Iris on your system using various methods.
 
 ## Overview
 
-Iris has minimal dependencies including Python, PyTorch, ROCm HIP runtime, MPI, and Triton. This guide will walk you through the installation process using different approaches.
+Iris has minimal dependencies including Python, PyTorch, ROCm HIP runtime, and Triton. This guide will walk you through the installation process using different approaches.
 
 ## Prerequisites
 
@@ -22,7 +22,6 @@ Iris has minimal dependencies including Python, PyTorch, ROCm HIP runtime, MPI, 
 - Python 3.10+
 - PyTorch 2.0+ (ROCm version)
 - ROCm 6.3.1+ HIP runtime
-- OpenMPI
 - Git
 - CMake, Ninja, build-essential
 - Triton (specific commit: [dd5823453bcc7973eabadb65f9d827c43281c434](https://github.com/triton-lang/triton/tree/dd5823453bcc7973eabadb65f9d827c43281c434))
