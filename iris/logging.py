@@ -2,7 +2,7 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Iris logging module - provides logging functionality dependencies.
+Iris logging module - provides logging functionality.
 """
 
 import logging
