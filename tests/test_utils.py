@@ -16,12 +16,12 @@ import os
 def run_distributed_test(test_func: Callable, num_ranks: int = 2, **kwargs) -> Any:
     """
     Run a test function in a distributed environment.
-    
+
     Args:
         test_func: Test function to run. Should accept (local_rank, world_size, **kwargs)
         num_ranks: Number of processes to spawn
         **kwargs: Additional arguments to pass to test_func
-        
+
     Returns:
         Result from rank 0, or None if test_func doesn't return anything
     """
@@ -59,10 +59,10 @@ def run_distributed_test(test_func: Callable, num_ranks: int = 2, **kwargs) -> A
 def distributed_test(test_func):
     """
     Decorator to mark a test as distributed.
-    
+
     The number of ranks is now taken from the pytest --num_ranks command line argument
     or the num_ranks fixture.
-    
+
     Usage:
         @distributed_test
         def test_my_distributed_function(local_rank, world_size, num_ranks):
@@ -80,7 +80,7 @@ def distributed_test(test_func):
 def iris_distributed_context():
     """
     Pytest fixture for creating iris contexts in tests.
-    
+
     This handles the distributed setup automatically for simple unit tests.
     """
     def create_iris_context(heap_size: int = 1 << 20, num_ranks: int = 2):

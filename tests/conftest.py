@@ -5,6 +5,8 @@
 Pytest configuration for iris distributed tests.
 """
 
+import pytest
+
 def pytest_addoption(parser):
     parser.addoption(
         "--num_ranks",
@@ -13,8 +15,6 @@ def pytest_addoption(parser):
         type=int,
         help="Number of ranks to use in tests"
     )
-
-import pytest
 
 @pytest.fixture
 def num_ranks(request):
