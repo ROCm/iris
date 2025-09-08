@@ -293,12 +293,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     dist.destroy_process_group()
 
 
-def main(num_ranks: int = None):
+def main():
     args = parse_args()
 
-    # Use command line argument if provided, otherwise use num_ranks parameter
-    if num_ranks is None:
-        num_ranks = args["num_ranks"]
+    num_ranks = args["num_ranks"]
 
     init_url = "tcp://127.0.0.1:29500"
     mp.spawn(
