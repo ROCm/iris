@@ -39,26 +39,12 @@ from test_utils import distributed_test
         (10, 20),
     ],
 )
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_empty_basic(dtype, size, num_ranks):
     """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_empty_basic_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_empty_basic_distributed()
-    assert result is True
 
-    # Test basic empty
+# Test basic empty
     result = shmem.empty(*size, dtype=dtype)
 
     # Verify shape matches
@@ -71,26 +57,12 @@ def test_empty_basic(dtype, size, num_ranks):
     # Note: We don't check the values since they are uninitialized
 
 
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_empty_default_dtype(num_ranks):
     """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_empty_default_dtype_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_empty_default_dtype_distributed()
-    assert result is True
 
-    # Test with default dtype (should use torch.get_default_dtype())
+# Test with default dtype (should use torch.get_default_dtype())
     result = shmem.empty(2, 3)
     expected_dtype = torch.get_default_dtype()
     assert result.dtype == expected_dtype
@@ -104,26 +76,12 @@ def test_empty_default_dtype(num_ranks):
         False,
     ],
 )
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_empty_requires_grad(requires_grad, num_ranks):
     """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_empty_requires_grad_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_empty_requires_grad_distributed()
-    assert result is True
 
-    # Test with requires_grad parameter
+# Test with requires_grad parameter
     result = shmem.empty(2, 2, dtype=torch.float32, requires_grad=requires_grad)
 
     # Verify requires_grad is set
@@ -131,26 +89,12 @@ def test_empty_requires_grad(requires_grad, num_ranks):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_empty_device_handling(num_ranks):
     """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_empty_device_handling_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_empty_device_handling_distributed()
-    assert result is True
 
-    # Test default behavior (should use Iris device)
+# Test default behavior (should use Iris device)
     result = shmem.empty(3, 3)
     assert str(result.device) == str(shmem.get_device())
     assert shmem._Iris__on_symmetric_heap(result)
@@ -184,26 +128,12 @@ def test_empty_device_handling(num_ranks):
             shmem.empty(3, 3, device=different_cuda)
 
 
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_empty_layout_handling(num_ranks):
     """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_empty_layout_handling_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_empty_layout_handling_distributed()
-    assert result is True
 
-    # Test with strided layout (default)
+# Test with strided layout (default)
     result = shmem.empty(2, 4, layout=torch.strided)
     assert result.layout == torch.strided
     assert shmem._Iris__on_symmetric_heap(result)
@@ -213,26 +143,12 @@ def test_empty_layout_handling(num_ranks):
         shmem.empty(2, 4, layout=torch.sparse_coo)
 
 
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_empty_out_parameter(num_ranks):
     """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_empty_out_parameter_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_empty_out_parameter_distributed()
-    assert result is True
 
-    # Test with out parameter
+# Test with out parameter
     out_tensor = shmem._Iris__allocate(6, torch.float32)
     result = shmem.empty(2, 3, out=out_tensor)
 
@@ -249,26 +165,12 @@ def test_empty_out_parameter(num_ranks):
     assert shmem._Iris__on_symmetric_heap(result_int)
 
 
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_empty_size_variations(num_ranks):
     """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_empty_size_variations_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_empty_size_variations_distributed()
-    assert result is True
 
-    # Test single dimension
+# Test single dimension
     result1 = shmem.empty(5)
     assert result1.shape == (5,)
     assert shmem._Iris__on_symmetric_heap(result1)
@@ -289,26 +191,12 @@ def test_empty_size_variations(num_ranks):
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_empty_edge_cases(num_ranks):
     """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_empty_edge_cases_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_empty_edge_cases_distributed()
-    assert result is True
 
-    # Empty tensor
+# Empty tensor
     empty_result = shmem.empty(0)
     assert empty_result.shape == (0,)
     assert empty_result.numel() == 0
@@ -333,26 +221,12 @@ def test_empty_edge_cases(num_ranks):
     assert shmem._Iris__on_symmetric_heap(scalar_result)
 
 
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_empty_pytorch_equivalence(num_ranks):
     """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_empty_pytorch_equivalence_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_empty_pytorch_equivalence_distributed()
-    assert result is True
 
-    # Test basic equivalence
+# Test basic equivalence
     iris_result = shmem.empty(4, 3)
     pytorch_result = torch.empty(4, 3, device="cuda")
 
@@ -388,26 +262,12 @@ def test_empty_pytorch_equivalence(num_ranks):
         {},
     ],
 )
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_empty_parameter_combinations(params, num_ranks):
     """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_empty_parameter_combinations_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_empty_parameter_combinations_distributed()
-    assert result is True
 
-    # Test various combinations of parameters
+# Test various combinations of parameters
     result = shmem.empty(3, 3, **params)
 
     # Verify basic functionality
@@ -437,12 +297,6 @@ def test_empty_parameter_combinations(params, num_ranks):
         ((0,), torch.float32),  # Empty tensor
         ((100, 100), torch.float32),  # Large tensor
         ((), torch.float32),  # Scalar tensor
-    ],
-)
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
     ],
 )
 def test_empty_symmetric_heap_shapes_dtypes(size, dtype, num_ranks):
@@ -594,19 +448,10 @@ def test_empty_pin_memory():
 
 def test_empty_deterministic_behavior():
     """Test that empty handles deterministic algorithms correctly."""
-    """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_empty_symmetric_heap_shapes_dtypes_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_empty_symmetric_heap_shapes_dtypes_distributed()
-    assert result is True
 
-    # Test that empty works regardless of deterministic settings
+# Test that empty works regardless of deterministic settings
     result = shmem.empty(2, 3)
     assert result.shape == (2, 3)
     assert shmem._Iris__on_symmetric_heap(result)

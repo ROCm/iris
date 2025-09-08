@@ -15,24 +15,9 @@ sys.path.insert(0, str(tests_dir))
 from test_utils import distributed_test
 
 
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_get_device(num_ranks):
     """Test with distributed setup."""
-    
-    @distributed_test(num_ranks=num_ranks)
-    def _test_get_device_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_get_device_distributed()
-    assert result is True
 
     # Test that get_device returns the correct device
     device = shmem.get_device()
@@ -43,24 +28,9 @@ def test_get_device(num_ranks):
     assert device.index is not None
 
 
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_device_validation(num_ranks):
     """Test with distributed setup."""
-    
-    @distributed_test(num_ranks=num_ranks)
-    def _test_device_validation_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_device_validation_distributed()
-    assert result is True
 
     # Test valid devices
     assert shmem._Iris__is_valid_device(None)  # None is always valid

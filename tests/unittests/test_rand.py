@@ -34,12 +34,6 @@ from test_utils import distributed_test
         (10, 20),
     ],
 )
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_rand_basic(dtype, size, num_ranks):
     """Test basic rand functionality with distributed setup."""
     

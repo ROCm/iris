@@ -50,25 +50,12 @@ def put_kernel(
         32,
     ],
 )
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_put_api(dtype, BLOCK_SIZE, num_ranks):
     # TODO: Adjust heap size.
     """Test with distributed setup."""
     
-    @distributed_test(num_ranks=num_ranks)
-    def _test_put_api_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
     
-    # Run the distributed test
-    result = _test_put_api_distributed()
-    assert result is True
     num_ranks = shmem.get_num_ranks()
     heap_bases = shmem.get_heap_bases()
     cur_rank = shmem.get_rank()

@@ -15,12 +15,6 @@ sys.path.insert(0, str(tests_dir))
 from test_utils import distributed_test
 
 
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-    ],
-)
 def test_arange_basic_functionality(num_ranks):
     """Test basic arange functionality with various argument combinations."""
     shmem = iris.iris(1 << 20)
@@ -279,17 +273,7 @@ def test_arange_parameter_combinations(params):
 )
 def test_arange_symmetric_heap_verification(arange_args, kwargs):
     """Test that all arange results are on the symmetric heap."""
-    """Test with distributed setup."""
-    
-    @distributed_test(num_ranks=num_ranks)
-    def _test_arange_basic_functionality_distributed(local_rank, world_size):
     shmem = iris.iris(1 << 20)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_arange_basic_functionality_distributed()
-    assert result is True
 
     # Replace hardcoded device with actual Iris device
     if "device" in kwargs and kwargs["device"] == "cuda:0":
