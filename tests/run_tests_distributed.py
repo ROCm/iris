@@ -31,16 +31,16 @@ def _distributed_worker(rank, world_size, test_file, pytest_args):
         rank=rank,
         world_size=world_size,
     )
-    
+
     try:
         # Import and run pytest directly
         import pytest
         import sys
-        
+
         # Set up sys.argv for pytest
         original_argv = sys.argv[:]
         sys.argv = ["pytest", test_file] + pytest_args
-        
+
         try:
             # Run pytest directly in this process
             exit_code = pytest.main([test_file] + pytest_args)
@@ -48,7 +48,7 @@ def _distributed_worker(rank, world_size, test_file, pytest_args):
         finally:
             # Restore original argv
             sys.argv = original_argv
-            
+
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -74,7 +74,7 @@ def main():
     if not args:
         print("Error: No test file specified")
         sys.exit(1)
-    
+
     test_file = args[0]
     pytest_args = args[1:]  # Everything after the test file
 
