@@ -77,7 +77,7 @@ pytest tests/unittests/
 # Run example tests  
 pytest tests/examples/
 
-# Run specific example (GPU)
+# Run specific example
 python examples/00_load/load_bench.py
 ```
 
