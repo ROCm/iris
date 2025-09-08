@@ -34,7 +34,7 @@ def _distributed_worker(rank, world_size, test_file, pytest_args):
 
     try:
         # All ranks run pytest - they coordinate through the distributed context
-        cmd = [sys.executable, "-m", "pytest", test_file, "--num_ranks", str(world_size), *pytest_args]
+        cmd = [sys.executable, "-m", "pytest", test_file, *pytest_args]
         result = subprocess.run(cmd, capture_output=False)
         return result.returncode
     finally:
@@ -44,21 +44,30 @@ def _distributed_worker(rank, world_size, test_file, pytest_args):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python run_tests_distributed.py <test_file> [pytest_args...]")
+        print("Usage: python run_tests_distributed.py [--num_ranks N] [pytest_args...] <test_file>")
         sys.exit(1)
-
-    test_file = sys.argv[1]
-    pytest_args = sys.argv[2:] if len(sys.argv) > 2 else []
-
-    # Get number of ranks from pytest args or default to 2
+    
+    # Get number of ranks from args or default to 2
     num_ranks = 2
-    if "--num_ranks" in pytest_args:
-        idx = pytest_args.index("--num_ranks")
-        if idx + 1 < len(pytest_args):
-            num_ranks = int(pytest_args[idx + 1])
-
+    args = sys.argv[1:]
+    
+    if "--num_ranks" in args:
+        idx = args.index("--num_ranks")
+        if idx + 1 < len(args):
+            num_ranks = int(args[idx + 1])
+            # Remove --num_ranks and its value from args
+            args = args[:idx] + args[idx+2:]
+    
+    # The last argument should be the test file
+    if not args:
+        print("Error: No test file specified")
+        sys.exit(1)
+    
+    test_file = args[-1]
+    pytest_args = args[:-1]  # Everything except the last argument (test file)
+    
     print(f"Running {test_file} with {num_ranks} ranks in single distributed process group")
-
+    
     # Run all tests within a single distributed process group
     mp.spawn(_distributed_worker, args=(num_ranks, test_file, pytest_args), nprocs=num_ranks, join=True)
 
