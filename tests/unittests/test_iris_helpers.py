@@ -4,19 +4,9 @@
 import torch
 import pytest
 import iris
-import sys
-from pathlib import Path
-
-# Add tests directory to path for test_utils
-current_dir = Path(__file__).parent
-tests_dir = current_dir.parent
-sys.path.insert(0, str(tests_dir))
-
-from test_utils import distributed_test
 
 
-def test_get_device(num_ranks):
-    """Test with distributed setup."""
+def test_get_device():
     shmem = iris.iris(1 << 20)
 
     # Test that get_device returns the correct device
@@ -28,8 +18,7 @@ def test_get_device(num_ranks):
     assert device.index is not None
 
 
-def test_device_validation(num_ranks):
-    """Test with distributed setup."""
+def test_device_validation():
     shmem = iris.iris(1 << 20)
 
     # Test valid devices

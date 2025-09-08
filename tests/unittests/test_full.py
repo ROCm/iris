@@ -4,15 +4,6 @@
 import torch
 import pytest
 import iris
-import sys
-from pathlib import Path
-
-# Add tests directory to path for test_utils
-current_dir = Path(__file__).parent
-tests_dir = current_dir.parent
-sys.path.insert(0, str(tests_dir))
-
-from test_utils import distributed_test
 
 
 @pytest.mark.parametrize(
@@ -40,12 +31,10 @@ from test_utils import distributed_test
         (10, 20),
     ],
 )
-def test_full_basic(fill_value, size, num_ranks):
-    """Test with distributed setup."""
-    
+def test_full_basic(fill_value, size):
     shmem = iris.iris(1 << 20)
 
-# Test basic full
+    # Test basic full
     result = shmem.full(size, fill_value)
 
     # Verify shape matches
@@ -58,12 +47,10 @@ def test_full_basic(fill_value, size, num_ranks):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_full_dtype_inference(num_ranks):
-    """Test with distributed setup."""
-    
+def test_full_dtype_inference():
     shmem = iris.iris(1 << 20)
 
-# Test integer fill_value (should infer int64)
+    # Test integer fill_value (should infer int64)
     result_int = shmem.full((2, 3), 42)
     assert result_int.dtype == torch.int64
     assert torch.all(result_int == 42)
@@ -89,12 +76,10 @@ def test_full_dtype_inference(num_ranks):
         False,
     ],
 )
-def test_full_requires_grad(requires_grad, num_ranks):
-    """Test with distributed setup."""
-    
+def test_full_requires_grad(requires_grad):
     shmem = iris.iris(1 << 20)
 
-# Test with requires_grad parameter
+    # Test with requires_grad parameter
     result = shmem.full((2, 2), 1.5, dtype=torch.float32, requires_grad=requires_grad)
 
     # Verify requires_grad is set
@@ -103,12 +88,10 @@ def test_full_requires_grad(requires_grad, num_ranks):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_full_device_handling(num_ranks):
-    """Test with distributed setup."""
-    
+def test_full_device_handling():
     shmem = iris.iris(1 << 20)
 
-# Test default behavior (should use Iris device)
+    # Test default behavior (should use Iris device)
     result = shmem.full((3, 3), 2.5)
     assert str(result.device) == str(shmem.get_device())
     assert torch.all(result == 2.5)
@@ -146,12 +129,10 @@ def test_full_device_handling(num_ranks):
             shmem.full((3, 3), 2.5, device=different_cuda)
 
 
-def test_full_layout_handling(num_ranks):
-    """Test with distributed setup."""
-    
+def test_full_layout_handling():
     shmem = iris.iris(1 << 20)
 
-# Test with strided layout (default)
+    # Test with strided layout (default)
     result = shmem.full((2, 4), 1.0, layout=torch.strided)
     assert result.layout == torch.strided
     assert torch.all(result == 1.0)
@@ -162,12 +143,10 @@ def test_full_layout_handling(num_ranks):
         shmem.full((2, 4), 1.0, layout=torch.sparse_coo)
 
 
-def test_full_out_parameter(num_ranks):
-    """Test with distributed setup."""
-    
+def test_full_out_parameter():
     shmem = iris.iris(1 << 20)
 
-# Test with out parameter
+    # Test with out parameter
     out_tensor = shmem._Iris__allocate(6, torch.float32)
     result = shmem.full((2, 3), 3.141592, out=out_tensor)
 
@@ -186,12 +165,10 @@ def test_full_out_parameter(num_ranks):
     assert shmem._Iris__on_symmetric_heap(result_int)
 
 
-def test_full_size_variations(num_ranks):
-    """Test with distributed setup."""
-    
+def test_full_size_variations():
     shmem = iris.iris(1 << 20)
 
-# Test single dimension
+    # Test single dimension
     result1 = shmem.full((5,), 2.0)
     assert result1.shape == (5,)
     assert torch.all(result1 == 2.0)
@@ -216,12 +193,10 @@ def test_full_size_variations(num_ranks):
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_full_edge_cases(num_ranks):
-    """Test with distributed setup."""
-    
+def test_full_edge_cases():
     shmem = iris.iris(1 << 20)
 
-# Empty tensor
+    # Empty tensor
     empty_result = shmem.full((0,), 1.0)
     assert empty_result.shape == (0,)
     assert empty_result.numel() == 0
@@ -249,12 +224,10 @@ def test_full_edge_cases(num_ranks):
     assert shmem._Iris__on_symmetric_heap(scalar_result)
 
 
-def test_full_pytorch_equivalence(num_ranks):
-    """Test with distributed setup."""
-    
+def test_full_pytorch_equivalence():
     shmem = iris.iris(1 << 20)
 
-# Test basic equivalence
+    # Test basic equivalence
     iris_result = shmem.full((4, 3), 3.141592)
     pytorch_result = torch.full((4, 3), 3.141592, device="cuda")
 
@@ -291,12 +264,10 @@ def test_full_pytorch_equivalence(num_ranks):
         {},
     ],
 )
-def test_full_parameter_combinations(params, num_ranks):
-    """Test with distributed setup."""
-    
+def test_full_parameter_combinations(params):
     shmem = iris.iris(1 << 20)
 
-# Test various combinations of parameters
+    # Test various combinations of parameters
     result = shmem.full((3, 3), 2.5, **params)
 
     # Verify basic functionality
@@ -336,7 +307,7 @@ def test_full_parameter_combinations(params, num_ranks):
         ((), 2.718, torch.float32),  # Scalar tensor
     ],
 )
-def test_full_symmetric_heap_shapes_dtypes(size, fill_value, dtype, num_ranks):
+def test_full_symmetric_heap_shapes_dtypes(size, fill_value, dtype):
     """Test that full returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
 
@@ -470,10 +441,9 @@ def test_full_different_fill_values():
 
 def test_full_dtype_override():
     """Test that explicit dtype overrides inference."""
-    
     shmem = iris.iris(1 << 20)
 
-# Integer fill_value with float dtype
+    # Integer fill_value with float dtype
     result = shmem.full((2, 2), 42, dtype=torch.float32)
     assert result.dtype == torch.float32
     assert torch.allclose(result, torch.tensor(42.0, dtype=torch.float32))

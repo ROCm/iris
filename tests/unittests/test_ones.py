@@ -4,15 +4,6 @@
 import torch
 import pytest
 import iris
-import sys
-from pathlib import Path
-
-# Add tests directory to path for test_utils
-current_dir = Path(__file__).parent
-tests_dir = current_dir.parent
-sys.path.insert(0, str(tests_dir))
-
-from test_utils import distributed_test
 
 
 @pytest.mark.parametrize(
@@ -39,39 +30,27 @@ from test_utils import distributed_test
         (10, 20),
     ],
 )
-def test_ones_basic(dtype, size, num_ranks):
-    """Test with distributed setup."""
-    
-    @distributed_test(num_ranks=num_ranks)
-    def _test_ones_basic_distributed(local_rank, world_size):
-        shmem = iris.iris(1 << 20)
-        
-        # Test basic ones
-        result = shmem.ones(*size, dtype=dtype)
-
-        # Verify shape matches
-        assert result.shape == size
-        assert result.dtype == dtype
-
-        # Verify all values are one
-        assert torch.all(result == 1)
-
-        # Verify tensor is on symmetric heap
-        assert shmem._Iris__on_symmetric_heap(result)
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_ones_basic_distributed()
-    assert result is True
-
-
-def test_ones_default_dtype(num_ranks):
-    """Test with distributed setup."""
-    
+def test_ones_basic(dtype, size):
     shmem = iris.iris(1 << 20)
 
-# Test with default dtype (should use torch.get_default_dtype())
+    # Test basic ones
+    result = shmem.ones(*size, dtype=dtype)
+
+    # Verify shape matches
+    assert result.shape == size
+    assert result.dtype == dtype
+
+    # Verify all values are one
+    assert torch.all(result == 1)
+
+    # Verify tensor is on symmetric heap
+    assert shmem._Iris__on_symmetric_heap(result)
+
+
+def test_ones_default_dtype():
+    shmem = iris.iris(1 << 20)
+
+    # Test with default dtype (should use torch.get_default_dtype())
     result = shmem.ones(2, 3)
     expected_dtype = torch.get_default_dtype()
     assert result.dtype == expected_dtype
@@ -86,12 +65,10 @@ def test_ones_default_dtype(num_ranks):
         False,
     ],
 )
-def test_ones_requires_grad(requires_grad, num_ranks):
-    """Test with distributed setup."""
-    
+def test_ones_requires_grad(requires_grad):
     shmem = iris.iris(1 << 20)
 
-# Test with requires_grad parameter
+    # Test with requires_grad parameter
     result = shmem.ones(2, 2, dtype=torch.float32, requires_grad=requires_grad)
 
     # Verify requires_grad is set
@@ -100,12 +77,10 @@ def test_ones_requires_grad(requires_grad, num_ranks):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_ones_device_handling(num_ranks):
-    """Test with distributed setup."""
-    
+def test_ones_device_handling():
     shmem = iris.iris(1 << 20)
 
-# Test default behavior (should use Iris device)
+    # Test default behavior (should use Iris device)
     result = shmem.ones(3, 3)
     assert str(result.device) == str(shmem.get_device())
     assert torch.all(result == 1)
@@ -143,12 +118,10 @@ def test_ones_device_handling(num_ranks):
             shmem.ones(3, 3, device=different_cuda)
 
 
-def test_ones_layout_handling(num_ranks):
-    """Test with distributed setup."""
-    
+def test_ones_layout_handling():
     shmem = iris.iris(1 << 20)
 
-# Test with strided layout (default)
+    # Test with strided layout (default)
     result = shmem.ones(2, 4, layout=torch.strided)
     assert result.layout == torch.strided
     assert torch.all(result == 1)
@@ -159,12 +132,10 @@ def test_ones_layout_handling(num_ranks):
         shmem.ones(2, 4, layout=torch.sparse_coo)
 
 
-def test_ones_out_parameter(num_ranks):
-    """Test with distributed setup."""
-    
+def test_ones_out_parameter():
     shmem = iris.iris(1 << 20)
 
-# Test with out parameter
+    # Test with out parameter
     out_tensor = shmem._Iris__allocate(6, torch.float32)
     result = shmem.ones(2, 3, out=out_tensor)
 
@@ -183,12 +154,10 @@ def test_ones_out_parameter(num_ranks):
     assert shmem._Iris__on_symmetric_heap(result_int)
 
 
-def test_ones_size_variations(num_ranks):
-    """Test with distributed setup."""
-    
+def test_ones_size_variations():
     shmem = iris.iris(1 << 20)
 
-# Test single dimension
+    # Test single dimension
     result1 = shmem.ones(5)
     assert result1.shape == (5,)
     assert torch.all(result1 == 1)
@@ -213,12 +182,10 @@ def test_ones_size_variations(num_ranks):
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_ones_edge_cases(num_ranks):
-    """Test with distributed setup."""
-    
+def test_ones_edge_cases():
     shmem = iris.iris(1 << 20)
 
-# Empty tensor
+    # Empty tensor
     empty_result = shmem.ones(0)
     assert empty_result.shape == (0,)
     assert empty_result.numel() == 0
@@ -246,12 +213,10 @@ def test_ones_edge_cases(num_ranks):
     assert shmem._Iris__on_symmetric_heap(scalar_result)
 
 
-def test_ones_pytorch_equivalence(num_ranks):
-    """Test with distributed setup."""
-    
+def test_ones_pytorch_equivalence():
     shmem = iris.iris(1 << 20)
 
-# Test basic equivalence
+    # Test basic equivalence
     iris_result = shmem.ones(4, 3)
     pytorch_result = torch.ones(4, 3, device="cuda")
 
@@ -288,12 +253,10 @@ def test_ones_pytorch_equivalence(num_ranks):
         {},
     ],
 )
-def test_ones_parameter_combinations(params, num_ranks):
-    """Test with distributed setup."""
-    
+def test_ones_parameter_combinations(params):
     shmem = iris.iris(1 << 20)
 
-# Test various combinations of parameters
+    # Test various combinations of parameters
     result = shmem.ones(3, 3, **params)
 
     # Verify basic functionality
@@ -326,7 +289,7 @@ def test_ones_parameter_combinations(params, num_ranks):
         ((), torch.float32),  # Scalar tensor
     ],
 )
-def test_ones_symmetric_heap_shapes_dtypes(size, dtype, num_ranks):
+def test_ones_symmetric_heap_shapes_dtypes(size, dtype):
     """Test that ones returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
 
@@ -445,11 +408,9 @@ def test_ones_size_parsing():
 
 def test_ones_examples():
     """Test the examples from PyTorch documentation."""
-    """Test with distributed setup."""
-    
     shmem = iris.iris(1 << 20)
 
-# Example 1: torch.ones(2, 3)
+    # Example 1: torch.ones(2, 3)
     result1 = shmem.ones(2, 3)
     expected1 = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], device=result1.device)
     assert result1.shape == (2, 3)

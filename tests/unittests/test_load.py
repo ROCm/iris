@@ -6,15 +6,6 @@ import triton
 import triton.language as tl
 import pytest
 import iris
-import sys
-from pathlib import Path
-
-# Add tests directory to path for test_utils
-current_dir = Path(__file__).parent
-tests_dir = current_dir.parent
-sys.path.insert(0, str(tests_dir))
-
-from test_utils import distributed_test
 
 
 @triton.jit
@@ -40,6 +31,15 @@ def load_kernel(
 
 
 @pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.int8,
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ],
+)
+@pytest.mark.parametrize(
     "BLOCK_SIZE",
     [
         1,
@@ -48,40 +48,30 @@ def load_kernel(
         32,
     ],
 )
-def test_load_api(dtype, BLOCK_SIZE, num_ranks):
-    """Test load API with distributed setup."""
-    
-    @distributed_test
-    def _test_load_api_distributed(local_rank, world_size, num_ranks):
-        shmem = iris.iris(1 << 20)
-        
-        num_ranks = shmem.get_num_ranks()
-        heap_bases = shmem.get_heap_bases()
-        source_rank = shmem.get_rank()
-        partner = int((source_rank + num_ranks // 2) % num_ranks)
+def test_load_api(dtype, BLOCK_SIZE):
+    # TODO: Adjust heap size.
+    shmem = iris.iris(1 << 20)
+    num_ranks = shmem.get_num_ranks()
+    heap_bases = shmem.get_heap_bases()
+    source_rank = shmem.get_rank()
+    partner = int((source_rank + num_ranks // 2) % num_ranks)
 
-        data = shmem.full((BLOCK_SIZE,), source_rank, dtype=dtype)
-        results = shmem.zeros_like(data)
+    data = shmem.full((BLOCK_SIZE,), source_rank, dtype=dtype)
+    results = shmem.zeros_like(data)
 
-        shmem.barrier()
+    shmem.barrier()
 
-        grid = lambda meta: (1,)
-        load_kernel[grid](data, results, source_rank, num_ranks, BLOCK_SIZE, heap_bases)
-        shmem.barrier()
+    grid = lambda meta: (1,)
+    load_kernel[grid](data, results, source_rank, num_ranks, BLOCK_SIZE, heap_bases)
+    shmem.barrier()
 
-        # Verify the result
-        expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * partner
+    # Verify the result
+    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * partner
 
-        try:
-            torch.testing.assert_close(results, expected, rtol=0, atol=0)
-        except AssertionError as e:
-            print(e)
-            print("Expected:", expected)
-            print("Actual:", results)
-            raise
-        
-        return True
-    
-    # Run the distributed test
-    result = _test_load_api_distributed(num_ranks=num_ranks)
-    assert result is True
+    try:
+        torch.testing.assert_close(results, expected, rtol=0, atol=0)
+    except AssertionError as e:
+        print(e)
+        print("Expected:", expected)
+        print("Actual:", results)
+        raise

@@ -4,15 +4,6 @@
 import torch
 import pytest
 import iris
-import sys
-from pathlib import Path
-
-# Add tests directory to path for test_utils
-current_dir = Path(__file__).parent
-tests_dir = current_dir.parent
-sys.path.insert(0, str(tests_dir))
-
-from test_utils import distributed_test
 
 
 @pytest.mark.parametrize(
@@ -36,12 +27,10 @@ from test_utils import distributed_test
         (10, 20),
     ],
 )
-def test_randint_basic(dtype, size, num_ranks):
-    """Test with distributed setup."""
-    
+def test_randint_basic(dtype, size):
     shmem = iris.iris(1 << 20)
 
-# Test basic randint with low, high, size
+    # Test basic randint with low, high, size
     result = shmem.randint(0, 10, size, dtype=dtype)
 
     # Verify shape matches
@@ -56,12 +45,10 @@ def test_randint_basic(dtype, size, num_ranks):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_randint_default_dtype(num_ranks):
-    """Test with distributed setup."""
-    
+def test_randint_default_dtype():
     shmem = iris.iris(1 << 20)
 
-# Test with default dtype (should use torch.int64)
+    # Test with default dtype (should use torch.int64)
     result = shmem.randint(0, 10, (2, 3))
     assert result.dtype == torch.int64
     assert shmem._Iris__on_symmetric_heap(result)
@@ -74,12 +61,10 @@ def test_randint_default_dtype(num_ranks):
         False,
     ],
 )
-def test_randint_requires_grad(requires_grad, num_ranks):
-    """Test with distributed setup."""
-    
+def test_randint_requires_grad(requires_grad):
     shmem = iris.iris(1 << 20)
 
-# Test with requires_grad parameter
+    # Test with requires_grad parameter
     result = shmem.randint(0, 10, (2, 2), dtype=torch.float32, requires_grad=requires_grad)
 
     # Verify requires_grad is set
@@ -87,12 +72,10 @@ def test_randint_requires_grad(requires_grad, num_ranks):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_randint_device_handling(num_ranks):
-    """Test with distributed setup."""
-    
+def test_randint_device_handling():
     shmem = iris.iris(1 << 20)
 
-# Test default behavior (should use Iris device)
+    # Test default behavior (should use Iris device)
     result = shmem.randint(0, 10, (3, 3))
     assert str(result.device) == str(shmem.get_device())
     assert shmem._Iris__on_symmetric_heap(result)
@@ -126,12 +109,10 @@ def test_randint_device_handling(num_ranks):
             shmem.randint(0, 10, (3, 3), device=different_cuda)
 
 
-def test_randint_layout_handling(num_ranks):
-    """Test with distributed setup."""
-    
+def test_randint_layout_handling():
     shmem = iris.iris(1 << 20)
 
-# Test with strided layout (default)
+    # Test with strided layout (default)
     result = shmem.randint(0, 10, (2, 4), layout=torch.strided)
     assert result.layout == torch.strided
     assert shmem._Iris__on_symmetric_heap(result)
@@ -141,12 +122,10 @@ def test_randint_layout_handling(num_ranks):
         shmem.randint(0, 10, (2, 4), layout=torch.sparse_coo)
 
 
-def test_randint_out_parameter(num_ranks):
-    """Test with distributed setup."""
-    
+def test_randint_out_parameter():
     shmem = iris.iris(1 << 20)
 
-# Test with out parameter
+    # Test with out parameter
     out_tensor = shmem._Iris__allocate(6, torch.int64)
     result = shmem.randint(0, 10, (2, 3), out=out_tensor)
 
@@ -165,12 +144,10 @@ def test_randint_out_parameter(num_ranks):
     assert shmem._Iris__on_symmetric_heap(result_int32)
 
 
-def test_randint_size_variations(num_ranks):
-    """Test with distributed setup."""
-    
+def test_randint_size_variations():
     shmem = iris.iris(1 << 20)
 
-# Test single dimension
+    # Test single dimension
     result1 = shmem.randint(0, 5, (5,))
     assert result1.shape == (5,)
     assert torch.all(result1 >= 0)
@@ -199,12 +176,10 @@ def test_randint_size_variations(num_ranks):
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_randint_edge_cases(num_ranks):
-    """Test with distributed setup."""
-    
+def test_randint_edge_cases():
     shmem = iris.iris(1 << 20)
 
-# Empty tensor
+    # Empty tensor
     empty_result = shmem.randint(0, 5, (0,))
     assert empty_result.shape == (0,)
     assert empty_result.numel() == 0
@@ -235,12 +210,10 @@ def test_randint_edge_cases(num_ranks):
     assert shmem._Iris__on_symmetric_heap(scalar_result)
 
 
-def test_randint_pytorch_equivalence(num_ranks):
-    """Test with distributed setup."""
-    
+def test_randint_pytorch_equivalence():
     shmem = iris.iris(1 << 20)
 
-# Test basic equivalence
+    # Test basic equivalence
     iris_result = shmem.randint(0, 10, (4, 3))
     pytorch_result = torch.randint(0, 10, (4, 3), device="cuda")
 
@@ -274,12 +247,10 @@ def test_randint_pytorch_equivalence(num_ranks):
         {},
     ],
 )
-def test_randint_parameter_combinations(params, num_ranks):
-    """Test with distributed setup."""
-    
+def test_randint_parameter_combinations(params):
     shmem = iris.iris(1 << 20)
 
-# Test various combinations of parameters
+    # Test various combinations of parameters
     result = shmem.randint(0, 10, (3, 3), **params)
 
     # Verify basic functionality
@@ -313,7 +284,7 @@ def test_randint_parameter_combinations(params, num_ranks):
         ((), torch.int32),  # Scalar tensor
     ],
 )
-def test_randint_symmetric_heap_shapes_dtypes(size, dtype, num_ranks):
+def test_randint_symmetric_heap_shapes_dtypes(size, dtype):
     """Test that randint returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
 
@@ -502,10 +473,9 @@ def test_randint_pytorch_signatures():
 
 def test_randint_deterministic_behavior():
     """Test that randint works with deterministic settings."""
-    
     shmem = iris.iris(1 << 20)
 
-# Test that randint works regardless of deterministic settings
+    # Test that randint works regardless of deterministic settings
     result = shmem.randint(0, 10, (2, 3))
     assert result.shape == (2, 3)
     assert torch.all(result >= 0)

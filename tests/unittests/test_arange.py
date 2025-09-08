@@ -4,18 +4,9 @@
 import pytest
 import torch
 import iris
-import sys
-from pathlib import Path
-
-# Add tests directory to path for test_utils
-current_dir = Path(__file__).parent
-tests_dir = current_dir.parent
-sys.path.insert(0, str(tests_dir))
-
-from test_utils import distributed_test
 
 
-def test_arange_basic_functionality(num_ranks):
+def test_arange_basic_functionality():
     """Test basic arange functionality with various argument combinations."""
     shmem = iris.iris(1 << 20)
 

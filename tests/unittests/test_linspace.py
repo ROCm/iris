@@ -4,15 +4,6 @@
 import torch
 import pytest
 import iris
-import sys
-from pathlib import Path
-
-# Add tests directory to path for test_utils
-current_dir = Path(__file__).parent
-tests_dir = current_dir.parent
-sys.path.insert(0, str(tests_dir))
-
-from test_utils import distributed_test
 
 
 @pytest.mark.parametrize(
@@ -36,12 +27,10 @@ from test_utils import distributed_test
         (0.0, 0.0, 5),
     ],
 )
-def test_linspace_basic(dtype, start, end, steps, num_ranks):
-    """Test with distributed setup."""
-    
+def test_linspace_basic(dtype, start, end, steps):
     shmem = iris.iris(1 << 20)
 
-# Test basic linspace
+    # Test basic linspace
     result = shmem.linspace(start, end, steps, dtype=dtype)
 
     # Verify shape matches
@@ -56,12 +45,10 @@ def test_linspace_basic(dtype, start, end, steps, num_ranks):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_linspace_default_dtype(num_ranks):
-    """Test with distributed setup."""
-    
+def test_linspace_default_dtype():
     shmem = iris.iris(1 << 20)
 
-# Test with default dtype (should use torch.get_default_dtype())
+    # Test with default dtype (should use torch.get_default_dtype())
     result = shmem.linspace(0.0, 1.0, 5)
     expected_dtype = torch.get_default_dtype()
     assert result.dtype == expected_dtype
@@ -75,12 +62,10 @@ def test_linspace_default_dtype(num_ranks):
         False,
     ],
 )
-def test_linspace_requires_grad(requires_grad, num_ranks):
-    """Test with distributed setup."""
-    
+def test_linspace_requires_grad(requires_grad):
     shmem = iris.iris(1 << 20)
 
-# Test with requires_grad parameter
+    # Test with requires_grad parameter
     result = shmem.linspace(0.0, 1.0, 5, dtype=torch.float32, requires_grad=requires_grad)
 
     # Verify requires_grad is set
@@ -88,12 +73,10 @@ def test_linspace_requires_grad(requires_grad, num_ranks):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_linspace_device_handling(num_ranks):
-    """Test with distributed setup."""
-    
+def test_linspace_device_handling():
     shmem = iris.iris(1 << 20)
 
-# Test default behavior (should use Iris device)
+    # Test default behavior (should use Iris device)
     result = shmem.linspace(0.0, 1.0, 5)
     assert str(result.device) == str(shmem.get_device())
     assert shmem._Iris__on_symmetric_heap(result)
@@ -127,12 +110,10 @@ def test_linspace_device_handling(num_ranks):
             shmem.linspace(0.0, 1.0, 5, device=different_cuda)
 
 
-def test_linspace_layout_handling(num_ranks):
-    """Test with distributed setup."""
-    
+def test_linspace_layout_handling():
     shmem = iris.iris(1 << 20)
 
-# Test with strided layout (default)
+    # Test with strided layout (default)
     result = shmem.linspace(0.0, 1.0, 5, layout=torch.strided)
     assert result.layout == torch.strided
     assert shmem._Iris__on_symmetric_heap(result)
@@ -142,12 +123,10 @@ def test_linspace_layout_handling(num_ranks):
         shmem.linspace(0.0, 1.0, 5, layout=torch.sparse_coo)
 
 
-def test_linspace_out_parameter(num_ranks):
-    """Test with distributed setup."""
-    
+def test_linspace_out_parameter():
     shmem = iris.iris(1 << 20)
 
-# Test with out parameter
+    # Test with out parameter
     out_tensor = shmem._Iris__allocate(5, torch.float32)
     result = shmem.linspace(0.0, 1.0, 5, out=out_tensor)
 
@@ -166,12 +145,10 @@ def test_linspace_out_parameter(num_ranks):
     assert shmem._Iris__on_symmetric_heap(result_float64)
 
 
-def test_linspace_steps_variations(num_ranks):
-    """Test with distributed setup."""
-    
+def test_linspace_steps_variations():
     shmem = iris.iris(1 << 20)
 
-# Test single step
+    # Test single step
     result1 = shmem.linspace(0.0, 1.0, 1)
     assert result1.shape == (1,)
     assert torch.allclose(result1[0], torch.tensor(0.0))
@@ -195,12 +172,10 @@ def test_linspace_steps_variations(num_ranks):
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_linspace_edge_cases(num_ranks):
-    """Test with distributed setup."""
-    
+def test_linspace_edge_cases():
     shmem = iris.iris(1 << 20)
 
-# Single step (start == end)
+    # Single step (start == end)
     single_result = shmem.linspace(5.0, 5.0, 1)
     assert single_result.shape == (1,)
     assert torch.allclose(single_result[0], torch.tensor(5.0))
@@ -228,12 +203,10 @@ def test_linspace_edge_cases(num_ranks):
     assert shmem._Iris__on_symmetric_heap(neg_result)
 
 
-def test_linspace_pytorch_equivalence(num_ranks):
-    """Test with distributed setup."""
-    
+def test_linspace_pytorch_equivalence():
     shmem = iris.iris(1 << 20)
 
-# Test basic equivalence
+    # Test basic equivalence
     iris_result = shmem.linspace(0.0, 1.0, 5)
     pytorch_result = torch.linspace(0.0, 1.0, 5, device="cuda")
 
@@ -269,12 +242,10 @@ def test_linspace_pytorch_equivalence(num_ranks):
         {},
     ],
 )
-def test_linspace_parameter_combinations(params, num_ranks):
-    """Test with distributed setup."""
-    
+def test_linspace_parameter_combinations(params):
     shmem = iris.iris(1 << 20)
 
-# Test various combinations of parameters
+    # Test various combinations of parameters
     result = shmem.linspace(0.0, 1.0, 5, **params)
 
     # Verify basic functionality
@@ -306,7 +277,7 @@ def test_linspace_parameter_combinations(params, num_ranks):
         (1.0, 2.0, 2, torch.complex128),
     ],
 )
-def test_linspace_symmetric_heap_shapes_dtypes(start, end, steps, dtype, num_ranks):
+def test_linspace_symmetric_heap_shapes_dtypes(start, end, steps, dtype):
     """Test that linspace returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
 
@@ -495,10 +466,9 @@ def test_linspace_accuracy():
 
 def test_linspace_deterministic_behavior():
     """Test that linspace works with deterministic settings."""
-    
     shmem = iris.iris(1 << 20)
 
-# Test that linspace works regardless of deterministic settings
+    # Test that linspace works regardless of deterministic settings
     result = shmem.linspace(0.0, 1.0, 5)
     assert result.shape == (5,)
     assert torch.allclose(result[0], torch.tensor(0.0))

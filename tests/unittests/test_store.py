@@ -1,22 +1,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
-import sys
-from pathlib import Path
-
-import pytest
 import torch
 import triton
 import triton.language as tl
-
+import pytest
 import iris
-
-# Add tests directory to path for test_utils
-current_dir = Path(__file__).parent
-tests_dir = current_dir.parent
-sys.path.insert(0, str(tests_dir))
-
-from test_utils import distributed_test
 
 
 @triton.jit
@@ -45,6 +34,15 @@ def store_kernel(
 
 
 @pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.int8,
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ],
+)
+@pytest.mark.parametrize(
     "BLOCK_SIZE",
     [
         1,
@@ -53,12 +51,9 @@ def store_kernel(
         32,
     ],
 )
-def test_store_api(dtype, BLOCK_SIZE, num_ranks):
+def test_store_api(dtype, BLOCK_SIZE):
     # TODO: Adjust heap size.
-    """Test with distributed setup."""
-
     shmem = iris.iris(1 << 20)
-
     num_ranks = shmem.get_num_ranks()
     heap_bases = shmem.get_heap_bases()
     destination_rank = shmem.get_rank()
