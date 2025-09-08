@@ -31,12 +31,24 @@ def _distributed_worker(rank, world_size, test_file, pytest_args):
         rank=rank,
         world_size=world_size,
     )
-
+    
     try:
-        # All ranks run pytest - they coordinate through the distributed context
-        cmd = [sys.executable, "-m", "pytest", test_file, *pytest_args]
-        result = subprocess.run(cmd, capture_output=False)
-        return result.returncode
+        # Import and run pytest directly instead of subprocess
+        import pytest
+        import sys
+        
+        # Set up sys.argv for pytest
+        original_argv = sys.argv[:]
+        sys.argv = ["pytest", test_file] + pytest_args
+        
+        try:
+            # Run pytest directly in this process
+            exit_code = pytest.main([test_file] + pytest_args)
+            return exit_code
+        finally:
+            # Restore original argv
+            sys.argv = original_argv
+            
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
