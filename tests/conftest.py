@@ -15,5 +15,3 @@ def pytest_addoption(parser):
 @pytest.fixture
 def num_ranks(request):
     return request.config.getoption("--num_ranks")
-
-
