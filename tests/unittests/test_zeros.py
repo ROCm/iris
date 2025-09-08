@@ -5,6 +5,13 @@ import torch
 import pytest
 import iris
 
+from test_utils import dist_spawn
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
+    )
+
 
 @pytest.mark.parametrize(
     "dtype",
@@ -30,7 +37,11 @@ import iris
         (10, 20),
     ],
 )
-def test_zeros_basic(dtype, size):
+def test_zeros_basic(request, dtype, size):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_basic, num_ranks, dtype, size)
+
+def _impl_test_zeros_basic(rank, world_size, dtype, size):
     shmem = iris.iris(1 << 20)
 
     # Test basic zeros
@@ -47,7 +58,11 @@ def test_zeros_basic(dtype, size):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_zeros_default_dtype():
+def test_zeros_default_dtype(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_default_dtype, num_ranks)
+
+def _impl_test_zeros_default_dtype(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test with default dtype (should use torch.get_default_dtype())
@@ -65,7 +80,11 @@ def test_zeros_default_dtype():
         False,
     ],
 )
-def test_zeros_requires_grad(requires_grad):
+def test_zeros_requires_grad(request, requires_grad):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_requires_grad, num_ranks, requires_grad)
+
+def _impl_test_zeros_requires_grad(rank, world_size, requires_grad):
     shmem = iris.iris(1 << 20)
 
     # Test with requires_grad parameter
@@ -77,7 +96,11 @@ def test_zeros_requires_grad(requires_grad):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_zeros_device_handling():
+def test_zeros_device_handling(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_device_handling, num_ranks)
+
+def _impl_test_zeros_device_handling(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test default behavior (should use Iris device)
@@ -118,7 +141,11 @@ def test_zeros_device_handling():
             shmem.zeros(3, 3, device=different_cuda)
 
 
-def test_zeros_layout_handling():
+def test_zeros_layout_handling(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_layout_handling, num_ranks)
+
+def _impl_test_zeros_layout_handling(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test with strided layout (default)
@@ -132,7 +159,11 @@ def test_zeros_layout_handling():
         shmem.zeros(2, 4, layout=torch.sparse_coo)
 
 
-def test_zeros_out_parameter():
+def test_zeros_out_parameter(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_out_parameter, num_ranks)
+
+def _impl_test_zeros_out_parameter(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test with out parameter
@@ -154,7 +185,11 @@ def test_zeros_out_parameter():
     assert shmem._Iris__on_symmetric_heap(result_int)
 
 
-def test_zeros_size_variations():
+def test_zeros_size_variations(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_size_variations, num_ranks)
+
+def _impl_test_zeros_size_variations(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test single dimension
@@ -182,7 +217,11 @@ def test_zeros_size_variations():
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_zeros_edge_cases():
+def test_zeros_edge_cases(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_edge_cases, num_ranks)
+
+def _impl_test_zeros_edge_cases(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Empty tensor
@@ -213,7 +252,11 @@ def test_zeros_edge_cases():
     assert shmem._Iris__on_symmetric_heap(scalar_result)
 
 
-def test_zeros_pytorch_equivalence():
+def test_zeros_pytorch_equivalence(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_pytorch_equivalence, num_ranks)
+
+def _impl_test_zeros_pytorch_equivalence(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test basic equivalence
@@ -253,7 +296,11 @@ def test_zeros_pytorch_equivalence():
         {},
     ],
 )
-def test_zeros_parameter_combinations(params):
+def test_zeros_parameter_combinations(request, params):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_parameter_combinations, num_ranks, params)
+
+def _impl_test_zeros_parameter_combinations(rank, world_size, params):
     shmem = iris.iris(1 << 20)
 
     # Test various combinations of parameters
@@ -289,7 +336,11 @@ def test_zeros_parameter_combinations(params):
         ((), torch.float32),  # Scalar tensor
     ],
 )
-def test_zeros_symmetric_heap_shapes_dtypes(size, dtype):
+def test_zeros_symmetric_heap_shapes_dtypes(request, size, dtype):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_symmetric_heap_shapes_dtypes, num_ranks, size, dtype)
+
+def _impl_test_zeros_symmetric_heap_shapes_dtypes(rank, world_size, size, dtype):
     """Test that zeros returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
 
@@ -306,7 +357,11 @@ def test_zeros_symmetric_heap_shapes_dtypes(size, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64, torch.int32, torch.int64])
-def test_zeros_symmetric_heap_dtype_override(dtype):
+def test_zeros_symmetric_heap_dtype_override(request, dtype):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_symmetric_heap_dtype_override, num_ranks, dtype)
+
+def _impl_test_zeros_symmetric_heap_dtype_override(rank, world_size, dtype):
     """Test that zeros with dtype override returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
 
@@ -315,7 +370,11 @@ def test_zeros_symmetric_heap_dtype_override(dtype):
     assert result.dtype == dtype
 
 
-def test_zeros_symmetric_heap_other_params():
+def test_zeros_symmetric_heap_other_params(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_symmetric_heap_other_params, num_ranks)
+
+def _impl_test_zeros_symmetric_heap_other_params(rank, world_size):
     """Test that zeros with other parameters returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
 
@@ -337,7 +396,11 @@ def test_zeros_symmetric_heap_other_params():
     assert shmem._Iris__on_symmetric_heap(result), "Tensor with out parameter is NOT on symmetric heap!"
 
 
-def test_zeros_invalid_output_tensor():
+def test_zeros_invalid_output_tensor(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_invalid_output_tensor, num_ranks)
+
+def _impl_test_zeros_invalid_output_tensor(rank, world_size):
     """Test error handling for invalid output tensors."""
     shmem = iris.iris(1 << 20)
 
@@ -357,7 +420,11 @@ def test_zeros_invalid_output_tensor():
         shmem.zeros(3, 3, out=regular_tensor)
 
 
-def test_zeros_default_dtype_behavior():
+def test_zeros_default_dtype_behavior(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_default_dtype_behavior, num_ranks)
+
+def _impl_test_zeros_default_dtype_behavior(rank, world_size):
     """Test that zeros uses the global default dtype when dtype=None."""
     shmem = iris.iris(1 << 20)
 
@@ -380,7 +447,11 @@ def test_zeros_default_dtype_behavior():
         torch.set_default_dtype(original_default)
 
 
-def test_zeros_size_parsing():
+def test_zeros_size_parsing(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_zeros_size_parsing, num_ranks)
+
+def _impl_test_zeros_size_parsing(rank, world_size):
     """Test various ways of specifying size."""
     shmem = iris.iris(1 << 20)
 

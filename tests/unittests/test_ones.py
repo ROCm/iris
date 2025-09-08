@@ -5,6 +5,13 @@ import torch
 import pytest
 import iris
 
+from test_utils import dist_spawn
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
+    )
+
 
 @pytest.mark.parametrize(
     "dtype",
@@ -30,7 +37,11 @@ import iris
         (10, 20),
     ],
 )
-def test_ones_basic(dtype, size):
+def test_ones_basic(request, dtype, size):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_basic, num_ranks, dtype, size)
+
+def _impl_test_ones_basic(rank, world_size, dtype, size):
     shmem = iris.iris(1 << 20)
 
     # Test basic ones
@@ -47,9 +58,12 @@ def test_ones_basic(dtype, size):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_ones_default_dtype():
-    shmem = iris.iris(1 << 20)
+def test_ones_default_dtype(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_default_dtype, num_ranks)
 
+def _impl_test_ones_default_dtype(rank, world_size):
+    shmem = iris.iris(1 << 20)
     # Test with default dtype (should use torch.get_default_dtype())
     result = shmem.ones(2, 3)
     expected_dtype = torch.get_default_dtype()
@@ -65,9 +79,12 @@ def test_ones_default_dtype():
         False,
     ],
 )
-def test_ones_requires_grad(requires_grad):
-    shmem = iris.iris(1 << 20)
+def test_ones_requires_grad(request, requires_grad):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_requires_grad, num_ranks, requires_grad)
 
+def _impl_test_ones_requires_grad(rank, world_size, requires_grad):
+    shmem = iris.iris(1 << 20)
     # Test with requires_grad parameter
     result = shmem.ones(2, 2, dtype=torch.float32, requires_grad=requires_grad)
 
@@ -77,9 +94,12 @@ def test_ones_requires_grad(requires_grad):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_ones_device_handling():
-    shmem = iris.iris(1 << 20)
+def test_ones_device_handling(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_device_handling, num_ranks)
 
+def _impl_test_ones_device_handling(rank, world_size):
+    shmem = iris.iris(1 << 20)
     # Test default behavior (should use Iris device)
     result = shmem.ones(3, 3)
     assert str(result.device) == str(shmem.get_device())
@@ -118,9 +138,12 @@ def test_ones_device_handling():
             shmem.ones(3, 3, device=different_cuda)
 
 
-def test_ones_layout_handling():
-    shmem = iris.iris(1 << 20)
+def test_ones_layout_handling(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_layout_handling, num_ranks)
 
+def _impl_test_ones_layout_handling(rank, world_size):
+    shmem = iris.iris(1 << 20)
     # Test with strided layout (default)
     result = shmem.ones(2, 4, layout=torch.strided)
     assert result.layout == torch.strided
@@ -132,9 +155,12 @@ def test_ones_layout_handling():
         shmem.ones(2, 4, layout=torch.sparse_coo)
 
 
-def test_ones_out_parameter():
-    shmem = iris.iris(1 << 20)
+def test_ones_out_parameter(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_out_parameter, num_ranks)
 
+def _impl_test_ones_out_parameter(rank, world_size):
+    shmem = iris.iris(1 << 20)
     # Test with out parameter
     out_tensor = shmem._Iris__allocate(6, torch.float32)
     result = shmem.ones(2, 3, out=out_tensor)
@@ -154,9 +180,12 @@ def test_ones_out_parameter():
     assert shmem._Iris__on_symmetric_heap(result_int)
 
 
-def test_ones_size_variations():
-    shmem = iris.iris(1 << 20)
+def test_ones_size_variations(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_size_variations, num_ranks)
 
+def _impl_test_ones_size_variations(rank, world_size):
+    shmem = iris.iris(1 << 20)
     # Test single dimension
     result1 = shmem.ones(5)
     assert result1.shape == (5,)
@@ -182,9 +211,12 @@ def test_ones_size_variations():
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_ones_edge_cases():
-    shmem = iris.iris(1 << 20)
+def test_ones_edge_cases(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_edge_cases, num_ranks)
 
+def _impl_test_ones_edge_cases(rank, world_size):
+    shmem = iris.iris(1 << 20)
     # Empty tensor
     empty_result = shmem.ones(0)
     assert empty_result.shape == (0,)
@@ -213,9 +245,12 @@ def test_ones_edge_cases():
     assert shmem._Iris__on_symmetric_heap(scalar_result)
 
 
-def test_ones_pytorch_equivalence():
-    shmem = iris.iris(1 << 20)
+def test_ones_pytorch_equivalence(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_pytorch_equivalence, num_ranks)
 
+def _impl_test_ones_pytorch_equivalence(rank, world_size):
+    shmem = iris.iris(1 << 20)
     # Test basic equivalence
     iris_result = shmem.ones(4, 3)
     pytorch_result = torch.ones(4, 3, device="cuda")
@@ -253,9 +288,12 @@ def test_ones_pytorch_equivalence():
         {},
     ],
 )
-def test_ones_parameter_combinations(params):
-    shmem = iris.iris(1 << 20)
+def test_ones_parameter_combinations(request, params):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_parameter_combinations, num_ranks, params)
 
+def _impl_test_ones_parameter_combinations(rank, world_size, params):
+    shmem = iris.iris(1 << 20)
     # Test various combinations of parameters
     result = shmem.ones(3, 3, **params)
 
@@ -289,10 +327,13 @@ def test_ones_parameter_combinations(params):
         ((), torch.float32),  # Scalar tensor
     ],
 )
-def test_ones_symmetric_heap_shapes_dtypes(size, dtype):
+def test_ones_symmetric_heap_shapes_dtypes(request, size, dtype):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_symmetric_heap_shapes_dtypes, num_ranks, size, dtype)
+
+def _impl_test_ones_symmetric_heap_shapes_dtypes(rank, world_size, size, dtype):
     """Test that ones returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
-
     # Test ones with this size and dtype
     result = shmem.ones(*size, dtype=dtype)
 
@@ -306,19 +347,25 @@ def test_ones_symmetric_heap_shapes_dtypes(size, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64, torch.int32, torch.int64])
-def test_ones_symmetric_heap_dtype_override(dtype):
+def test_ones_symmetric_heap_dtype_override(request, dtype):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_symmetric_heap_dtype_override, num_ranks, dtype)
+
+def _impl_test_ones_symmetric_heap_dtype_override(rank, world_size, dtype):
     """Test that ones with dtype override returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
-
     result = shmem.ones(3, 3, dtype=dtype)
     assert shmem._Iris__on_symmetric_heap(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
     assert result.dtype == dtype
 
 
-def test_ones_symmetric_heap_other_params():
+def test_ones_symmetric_heap_other_params(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_symmetric_heap_other_params, num_ranks)
+
+def _impl_test_ones_symmetric_heap_other_params(rank, world_size):
     """Test that ones with other parameters returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
-
     # Test with requires_grad
     result = shmem.ones(3, 3, dtype=torch.float32, requires_grad=True)
     assert shmem._Iris__on_symmetric_heap(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
@@ -337,10 +384,13 @@ def test_ones_symmetric_heap_other_params():
     assert shmem._Iris__on_symmetric_heap(result), "Tensor with out parameter is NOT on symmetric heap!"
 
 
-def test_ones_invalid_output_tensor():
+def test_ones_invalid_output_tensor(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_invalid_output_tensor, num_ranks)
+
+def _impl_test_ones_invalid_output_tensor(rank, world_size):
     """Test error handling for invalid output tensors."""
     shmem = iris.iris(1 << 20)
-
     # Test with wrong size output tensor
     wrong_size_tensor = shmem._Iris__allocate(4, torch.float32)  # Wrong size for (3, 3)
     with pytest.raises(RuntimeError):
@@ -357,10 +407,13 @@ def test_ones_invalid_output_tensor():
         shmem.ones(3, 3, out=regular_tensor)
 
 
-def test_ones_default_dtype_behavior():
+def test_ones_default_dtype_behavior(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_default_dtype_behavior, num_ranks)
+
+def _impl_test_ones_default_dtype_behavior(rank, world_size):
     """Test that ones uses the global default dtype when dtype=None."""
     shmem = iris.iris(1 << 20)
-
     # Save original default dtype
     original_default = torch.get_default_dtype()
 
@@ -380,10 +433,13 @@ def test_ones_default_dtype_behavior():
         torch.set_default_dtype(original_default)
 
 
-def test_ones_size_parsing():
+def test_ones_size_parsing(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_size_parsing, num_ranks)
+
+def _impl_test_ones_size_parsing(rank, world_size):
     """Test various ways of specifying size."""
     shmem = iris.iris(1 << 20)
-
     # Test individual arguments
     result1 = shmem.ones(2, 3, 4)
     assert result1.shape == (2, 3, 4)
@@ -406,10 +462,13 @@ def test_ones_size_parsing():
     assert torch.all(result3 == result4)
 
 
-def test_ones_examples():
+def test_ones_examples(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_ones_examples, num_ranks)
+
+def _impl_test_ones_examples(rank, world_size):
     """Test the examples from PyTorch documentation."""
     shmem = iris.iris(1 << 20)
-
     # Example 1: torch.ones(2, 3)
     result1 = shmem.ones(2, 3)
     expected1 = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], device=result1.device)

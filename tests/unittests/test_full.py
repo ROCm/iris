@@ -5,6 +5,13 @@ import torch
 import pytest
 import iris
 
+from test_utils import dist_spawn
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
+    )
+
 
 @pytest.mark.parametrize(
     "fill_value",
@@ -31,7 +38,11 @@ import iris
         (10, 20),
     ],
 )
-def test_full_basic(fill_value, size):
+def test_full_basic(request, fill_value, size):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_basic, num_ranks, fill_value, size)
+
+def _impl_test_full_basic(rank, world_size, fill_value, size):
     shmem = iris.iris(1 << 20)
 
     # Test basic full
@@ -47,7 +58,11 @@ def test_full_basic(fill_value, size):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_full_dtype_inference():
+def test_full_dtype_inference(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_dtype_inference, num_ranks)
+
+def _impl_test_full_dtype_inference(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test integer fill_value (should infer int64)
@@ -76,7 +91,11 @@ def test_full_dtype_inference():
         False,
     ],
 )
-def test_full_requires_grad(requires_grad):
+def test_full_requires_grad(request, requires_grad):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_requires_grad, num_ranks, requires_grad)
+
+def _impl_test_full_requires_grad(rank, world_size, requires_grad):
     shmem = iris.iris(1 << 20)
 
     # Test with requires_grad parameter
@@ -88,7 +107,11 @@ def test_full_requires_grad(requires_grad):
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_full_device_handling():
+def test_full_device_handling(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_device_handling, num_ranks)
+
+def _impl_test_full_device_handling(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test default behavior (should use Iris device)
@@ -129,7 +152,11 @@ def test_full_device_handling():
             shmem.full((3, 3), 2.5, device=different_cuda)
 
 
-def test_full_layout_handling():
+def test_full_layout_handling(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_layout_handling, num_ranks)
+
+def _impl_test_full_layout_handling(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test with strided layout (default)
@@ -143,7 +170,11 @@ def test_full_layout_handling():
         shmem.full((2, 4), 1.0, layout=torch.sparse_coo)
 
 
-def test_full_out_parameter():
+def test_full_out_parameter(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_out_parameter, num_ranks)
+
+def _impl_test_full_out_parameter(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test with out parameter
@@ -165,7 +196,11 @@ def test_full_out_parameter():
     assert shmem._Iris__on_symmetric_heap(result_int)
 
 
-def test_full_size_variations():
+def test_full_size_variations(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_size_variations, num_ranks)
+
+def _impl_test_full_size_variations(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test single dimension
@@ -193,7 +228,11 @@ def test_full_size_variations():
     assert shmem._Iris__on_symmetric_heap(result4)
 
 
-def test_full_edge_cases():
+def test_full_edge_cases(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_edge_cases, num_ranks)
+
+def _impl_test_full_edge_cases(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Empty tensor
@@ -224,7 +263,11 @@ def test_full_edge_cases():
     assert shmem._Iris__on_symmetric_heap(scalar_result)
 
 
-def test_full_pytorch_equivalence():
+def test_full_pytorch_equivalence(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_pytorch_equivalence, num_ranks)
+
+def _impl_test_full_pytorch_equivalence(rank, world_size):
     shmem = iris.iris(1 << 20)
 
     # Test basic equivalence
@@ -264,7 +307,11 @@ def test_full_pytorch_equivalence():
         {},
     ],
 )
-def test_full_parameter_combinations(params):
+def test_full_parameter_combinations(request, params):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_parameter_combinations, num_ranks, params)
+
+def _impl_test_full_parameter_combinations(rank, world_size, params):
     shmem = iris.iris(1 << 20)
 
     # Test various combinations of parameters
@@ -307,7 +354,11 @@ def test_full_parameter_combinations(params):
         ((), 2.718, torch.float32),  # Scalar tensor
     ],
 )
-def test_full_symmetric_heap_shapes_dtypes(size, fill_value, dtype):
+def test_full_symmetric_heap_shapes_dtypes(request, size, fill_value, dtype):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_symmetric_heap_shapes_dtypes, num_ranks, size, fill_value, dtype)
+
+def _impl_test_full_symmetric_heap_shapes_dtypes(rank, world_size, size, fill_value, dtype):
     """Test that full returns tensors on symmetric heap for various shapes and dtypes."""
     shmem = iris.iris(1 << 20)
 
@@ -326,7 +377,11 @@ def test_full_symmetric_heap_shapes_dtypes(size, fill_value, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64, torch.int32, torch.int64])
-def test_full_symmetric_heap_dtype_override(dtype):
+def test_full_symmetric_heap_dtype_override(request, dtype):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_symmetric_heap_dtype_override, num_ranks, dtype)
+
+def _impl_test_full_symmetric_heap_dtype_override(rank, world_size, dtype):
     """Test that full with dtype override returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
 
@@ -335,7 +390,11 @@ def test_full_symmetric_heap_dtype_override(dtype):
     assert result.dtype == dtype
 
 
-def test_full_symmetric_heap_other_params():
+def test_full_symmetric_heap_other_params(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_symmetric_heap_other_params, num_ranks)
+
+def _impl_test_full_symmetric_heap_other_params(rank, world_size):
     """Test that full with other parameters returns tensors on symmetric heap."""
     shmem = iris.iris(1 << 20)
 
@@ -357,7 +416,11 @@ def test_full_symmetric_heap_other_params():
     assert shmem._Iris__on_symmetric_heap(result), "Tensor with out parameter is NOT on symmetric heap!"
 
 
-def test_full_invalid_output_tensor():
+def test_full_invalid_output_tensor(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_invalid_output_tensor, num_ranks)
+
+def _impl_test_full_invalid_output_tensor(rank, world_size):
     """Test error handling for invalid output tensors."""
     shmem = iris.iris(1 << 20)
 
@@ -377,7 +440,11 @@ def test_full_invalid_output_tensor():
         shmem.full((3, 3), 1.5, out=regular_tensor)
 
 
-def test_full_size_parsing():
+def test_full_size_parsing(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_size_parsing, num_ranks)
+
+def _impl_test_full_size_parsing(rank, world_size):
     """Test various ways of specifying size."""
     shmem = iris.iris(1 << 20)
 
@@ -403,7 +470,11 @@ def test_full_size_parsing():
     assert torch.all(result3 == result4)
 
 
-def test_full_examples():
+def test_full_examples(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_examples, num_ranks)
+
+def _impl_test_full_examples(rank, world_size):
     """Test the examples from PyTorch documentation."""
     shmem = iris.iris(1 << 20)
 
@@ -415,7 +486,11 @@ def test_full_examples():
     assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_full_different_fill_values():
+def test_full_different_fill_values(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_different_fill_values, num_ranks)
+
+def _impl_test_full_different_fill_values(rank, world_size):
     """Test various fill values to ensure they work correctly."""
     shmem = iris.iris(1 << 20)
 
@@ -439,7 +514,11 @@ def test_full_different_fill_values():
         assert shmem._Iris__on_symmetric_heap(result)
 
 
-def test_full_dtype_override():
+def test_full_dtype_override(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_full_dtype_override, num_ranks)
+
+def _impl_test_full_dtype_override(rank, world_size):
     """Test that explicit dtype overrides inference."""
     shmem = iris.iris(1 << 20)
 

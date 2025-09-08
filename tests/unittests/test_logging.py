@@ -5,8 +5,19 @@ import logging
 import pytest
 import iris
 
+from test_utils import dist_spawn
 
-def test_logging_constants():
+def pytest_addoption(parser):
+    parser.addoption(
+        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
+    )
+
+
+def test_logging_constants(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_logging_constants, num_ranks)
+
+def _impl_test_logging_constants(rank, world_size):
     """Test that logging constants are properly defined."""
     # Verify constants match Python logging levels
     assert iris.DEBUG == logging.DEBUG
@@ -15,7 +26,11 @@ def test_logging_constants():
     assert iris.ERROR == logging.ERROR
 
 
-def test_set_logger_level():
+def test_set_logger_level(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_set_logger_level, num_ranks)
+
+def _impl_test_set_logger_level(rank, world_size):
     """Test the set_logger_level function."""
     # Test setting different levels
     iris.set_logger_level(iris.DEBUG)
@@ -25,7 +40,11 @@ def test_set_logger_level():
     assert iris.logger.level == logging.INFO
 
 
-def test_logger_setup():
+def test_logger_setup(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_logger_setup, num_ranks)
+
+def _impl_test_logger_setup(rank, world_size):
     """Test that the iris logger is properly configured."""
     # Verify logger name
     assert iris.logger.name == "iris"
@@ -40,7 +59,11 @@ def test_logger_setup():
     assert isinstance(iris.logger.handlers[0], logging.StreamHandler)
 
 
-def test_iris_debug_logging():
+def test_iris_debug_logging(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_iris_debug_logging, num_ranks)
+
+def _impl_test_iris_debug_logging(rank, world_size):
     """Test that Iris debug logging convenience methods work correctly."""
     import logging
 
@@ -84,7 +107,11 @@ def test_iris_debug_logging():
             iris.logger.addHandler(handler)
 
 
-def test_logger_api_usage():
+def test_logger_api_usage(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_logger_api_usage, num_ranks)
+
+def _impl_test_logger_api_usage(rank, world_size):
     """Test direct logger API usage."""
     # Capture log output
     import io
@@ -117,7 +144,11 @@ def test_logger_api_usage():
     assert hidden_debug_count == 0
 
 
-def test_iris_formatter():
+def test_iris_formatter(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_iris_formatter, num_ranks)
+
+def _impl_test_iris_formatter(rank, world_size):
     """Test the IrisFormatter behavior."""
     from iris.logging import IrisFormatter
     import logging
@@ -143,7 +174,11 @@ def test_iris_formatter():
     assert formatted_with_rank == "[Iris] [2/4] Test message with rank"
 
 
-def test_api_import():
+def test_api_import(request):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_api_import, num_ranks)
+
+def _impl_test_api_import(rank, world_size):
     """Test that the new API can be imported from the main iris module."""
     # This test verifies the __init__.py exports work correctly
     try:

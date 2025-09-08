@@ -7,6 +7,13 @@ import triton.language as tl
 import pytest
 import iris
 
+from test_utils import dist_spawn
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--num_ranks", action="store", default="1", help="Number of ranks to spawn"
+    )
+
 
 # TODO: Separate this kernel out in the following categories:
 # 1. for local get.
@@ -56,7 +63,11 @@ def get_kernel(
         32,
     ],
 )
-def test_get_api(dtype, BLOCK_SIZE):
+def test_get_api(request, dtype, BLOCK_SIZE):
+    num_ranks = int(request.config.getoption("--num_ranks"))
+    dist_spawn(_impl_test_get_api, num_ranks, dtype, BLOCK_SIZE)
+
+def _impl_test_get_api(rank, world_size, dtype, BLOCK_SIZE):
     # TODO: Adjust heap size.
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
