@@ -94,7 +94,7 @@ autodoc_mock_imports = [
     "triton",
     "triton.language",
     "numpy",
-    "iris._distributed_helpers",
+    "iris._mpi_helpers",
     "iris.hip",
 ]
 

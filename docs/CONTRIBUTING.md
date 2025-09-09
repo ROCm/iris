@@ -20,12 +20,8 @@ git checkout -b $USER/your-feature-name
 ruff check .
 ruff format .
 
-# Run tests 
-python tests/run_tests_distributed.py tests/examples/test_all_load_bench.py --num_ranks 2 -v
-python tests/run_tests_distributed.py tests/unittests/ --num_ranks 2 -v
-
-# Or run individual test files
-python tests/run_tests_distributed.py tests/examples/test_load_bench.py --num_ranks 2 -v
+# Run tests
+pytest
 ```
 
 ### 4. Commit and Push

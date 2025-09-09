@@ -10,7 +10,7 @@ All-Store benchmark using Iris.
 ## Usage
 
 ```terminal
-python examples/03_all_store/all_store_bench.py --num_ranks 8
+mpirun -np 8 python examples/03_all_store/all_store_bench.py
 ```
 On an MI300X, this example will run on 8 GPUs. It prints:
 

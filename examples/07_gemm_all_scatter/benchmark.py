@@ -2,21 +2,20 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
-import argparse
-import json
-import os
+import torch
+import triton
 import random
 import sys
+import os
+import argparse
+import json
 
-import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
-import triton
-from matmul_wrapper import matmul
-
-import iris
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set
 from examples.common.validation import validate_gemm
+
+import iris
+
+from matmul_wrapper import matmul
 
 torch.manual_seed(123)
 random.seed(123)
@@ -53,17 +52,13 @@ def parse_args():
     parser.add_argument("--gsize_m", type=int, default=6, help="L2-cache locality swizzle parameter")
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument("--gemm_sms", type=int, default=304, help="Number of SMs for persistent GEMM algorithm")
-    parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
 
     return vars(parser.parse_args())
 
 
-def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
-    """Worker function for PyTorch distributed execution."""
-    backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=local_rank)
+def main():
+    args = parse_args()
 
-    # Main benchmark logic
     shmem = iris.iris(args["heap_size"])
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
@@ -242,24 +237,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         timestamps.to_json(filename, gpu_freq)
 
     shmem.barrier()
-
-    dist.barrier()
-    dist.destroy_process_group()
-
-
-def main():
-    args = parse_args()
-
-    # Use command line argument if provided, otherwise use num_ranks parameter
-    num_ranks = args["num_ranks"]
-
-    init_url = "tcp://127.0.0.1:29500"
-    mp.spawn(
-        fn=_worker,
-        args=(num_ranks, init_url, args),
-        nprocs=num_ranks,
-        join=True,
-    )
 
 
 if __name__ == "__main__":

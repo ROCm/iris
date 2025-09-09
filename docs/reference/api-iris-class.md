@@ -33,7 +33,7 @@ Use Iris-aware logging that automatically annotates each message with the curren
 
 ## Broadcast Helper
 
-Broadcast a Python scalar or small object from a source rank to all ranks. This is a convenience wrapper over the internal Torch Distributed helper.
+Broadcast a Python scalar or small object from a source rank to all ranks. This is a convenience wrapper over the internal MPI helper.
 
 ```{eval-rst}
 .. automethod:: iris.iris.Iris.broadcast
