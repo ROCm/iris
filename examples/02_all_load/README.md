@@ -10,7 +10,7 @@ All-Load benchmark using Iris.
 ## Usage
 
 ```terminal
-mpirun -np 8 python examples/02_all_load/all_load_bench.py
+python examples/02_all_load/all_load_bench.py --num_ranks 8
 ```
 On an MI300X, this example will run on 8 GPUs. It prints:
 

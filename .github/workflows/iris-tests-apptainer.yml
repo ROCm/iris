@@ -52,7 +52,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run Iris Tests with ${{ matrix.ranks }} MPI ranks
+      - name: Run Iris Tests with ${{ matrix.ranks }} ranks
         run: |
           apptainer exec ~/apptainer/iris-dev.sif bash -c "
             set -e  # Exit on any error
@@ -60,20 +60,17 @@ jobs:
             # Install iris first
             pip install -e .
 
-            # Create function for mpirun with root permissions
-            mpirun-root() { mpirun --allow-run-as-root \"\$@\"; }
-
-            # Run examples tests one at a time
+            # Run examples tests one at a time using distributed wrapper
             echo 'Running examples tests one at a time...'
             for test_file in tests/examples/test_*.py; do
-              echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
-              mpirun-root -np ${{ matrix.ranks }} python -m pytest \"\$test_file\" -v --tb=short
+              echo \"Testing: \$test_file with ${{ matrix.ranks }} ranks\"
+              python tests/run_tests_distributed.py --num_ranks ${{ matrix.ranks }} \"\$test_file\" -v --tb=short
             done
 
-            # Run unit tests one at a time
+            # Run unit tests one at a time using distributed wrapper
             echo 'Running unit tests one at a time...'
             for test_file in tests/unittests/test_*.py; do
-              echo \"Testing: \$test_file with ${{ matrix.ranks }} MPI ranks\"
-              mpirun-root -np ${{ matrix.ranks }} python -m pytest \"\$test_file\" -v --tb=short
+              echo \"Testing: \$test_file with ${{ matrix.ranks }} ranks\"
+              python tests/run_tests_distributed.py --num_ranks ${{ matrix.ranks }} \"\$test_file\" -v --tb=short
             done
           "

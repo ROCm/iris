@@ -25,7 +25,7 @@ html[data-theme="light"] .theme-switch-wrapper .light-theme-img {
 
 1. **Designed by Experts, Built for Scale**
     - Written from scratch by GPU and distributed computing experts
-    - Minimal dependencies: only Triton, PyTorch, HIP runtime and mpi4py (for initialization)
+    - Minimal dependencies: only Triton, PyTorch, and HIP runtime
     - No external frameworks or heavyweight runtimes beyond core stack
 
 2. **Clean Abstractions**
