@@ -2,7 +2,7 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Iris logging module - provides logging functionality without MPI dependencies.
+Iris logging module - provides logging functionality.
 """
 
 import logging

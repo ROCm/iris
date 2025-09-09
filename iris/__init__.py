@@ -62,6 +62,8 @@ from .logging import (
     ERROR,
 )
 
+# Launcher functionality is now user code - see examples and documentation
+
 # Pipe allocations via finegrained allocator
 current_dir = os.path.dirname(__file__)
 # Look for the library in the installed package location

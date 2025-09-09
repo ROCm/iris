@@ -5,6 +5,8 @@
 import argparse
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import triton
 import triton.language as tl
 import random
@@ -82,6 +84,7 @@ def parse_args():
     parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
     parser.add_argument("-n", "--num_experiments", type=int, default=10, help="Number of experiments")
     parser.add_argument("-w", "--num_warmup", type=int, default=1, help="Number of warmup iterations")
+    parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
     return vars(parser.parse_args())
 
 
@@ -202,9 +205,12 @@ def print_bandwidth_matrix(matrix, label="Unidirectional STORE bandwidth GiB/s [
             raise ValueError(f"Unsupported output file extension: {output_file}")
 
 
-def main():
-    args = parse_args()
+def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
+    """Worker function for PyTorch distributed execution."""
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=local_rank)
 
+    # Main benchmark logic
     shmem = iris.iris(args["heap_size"])
     num_ranks = shmem.get_num_ranks()
     bandwidth_matrix = np.zeros((num_ranks, num_ranks), dtype=np.float32)
@@ -221,6 +227,23 @@ def main():
 
     if shmem.get_rank() == 0:
         print_bandwidth_matrix(bandwidth_matrix, output_file=args["output_file"])
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+def main():
+    args = parse_args()
+
+    num_ranks = args["num_ranks"]
+
+    init_url = "tcp://127.0.0.1:29500"
+    mp.spawn(
+        fn=_worker,
+        args=(num_ranks, init_url, args),
+        nprocs=num_ranks,
+        join=True,
+    )
 
 
 if __name__ == "__main__":

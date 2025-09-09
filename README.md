@@ -35,7 +35,10 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris
 Here's a simple example showing how to perform remote memory operations between GPUs using Iris:
 
 ```python
+import os
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import triton
 import triton.language as tl
 import iris
@@ -47,7 +50,7 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
     pid = tl.program_id(0)
     block_start = pid * block_size
     offsets = block_start + tl.arange(0, block_size)
-    
+
     # Guard for out-of-bounds accesses
     mask = offsets < buffer_size
 
@@ -58,29 +61,40 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
             source_rank, target_rank,
             heap_bases_ptr, mask=mask)
 
-# Iris initialization
-heap_size = 2**30   # 1GiB symmetric heap for inter-GPU communication
-iris_ctx = iris.iris(heap_size)
-cur_rank = iris_ctx.get_rank()
+def _worker(rank, world_size):
+    # Torch distributed initialization
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29500")
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-# Iris tensor allocation
-buffer_size = 4096  # 4K elements buffer
-buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
+    # Iris initialization
+    heap_size = 2**30   # 1GiB symmetric heap for inter-GPU communication
+    iris_ctx = iris.iris(heap_size)
+    cur_rank = iris_ctx.get_rank()
 
-# Launch the kernel on rank 0
-block_size = 1024
-grid = lambda meta: (triton.cdiv(buffer_size, meta["block_size"]),)
-source_rank = 0
-if cur_rank == source_rank:
-    kernel[grid](
-        buffer,
-        buffer_size,
-        block_size,
-        iris_ctx.get_heap_bases(),
-    )
+    # Iris tensor allocation
+    buffer_size = 4096  # 4K elements buffer
+    buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
 
-# Synchronize all ranks
-iris_ctx.barrier()
+    # Launch the kernel on rank 0
+    block_size = 1024
+    grid = lambda meta: (triton.cdiv(buffer_size, meta["block_size"]),)
+    source_rank = 0
+    if cur_rank == source_rank:
+        kernel[grid](
+            buffer,
+            buffer_size,
+            block_size,
+            iris_ctx.get_heap_bases(),
+        )
+
+    # Synchronize all ranks
+    iris_ctx.barrier()
+    dist.destroy_process_group()
+
+if __name__ == "__main__":
+    world_size = 2  # Using two ranks
+    mp.spawn(_worker, args=(world_size,), nprocs=world_size, join=True)
 ```
 
 ## Quick Start Guide

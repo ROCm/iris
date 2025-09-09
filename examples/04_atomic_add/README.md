@@ -10,7 +10,7 @@ Load benchmark using Iris.
 ## Usage
 
 ```terminal
-mpirun -np 8 python examples/04_atomic_add/atomic_add_bench.py
+python examples/04_atomic_add/atomic_add_bench.py --num_ranks 8
 ```
 On an MI300X, this example will run on 8 GPUs. It prints:
 ```terminal
