@@ -51,5 +51,10 @@ def set_logger_level(level):
 
     Args:
         level: Logging level (iris.DEBUG, iris.INFO, iris.WARNING, iris.ERROR)
+
+    Example:
+        >>> ctx = iris.iris()
+        >>> iris.set_logger_level(iris.DEBUG)
+        >>> ctx.debug("This will now be visible")  # [Iris] [0/1] This will now be visible
     """
     logger.setLevel(level)
