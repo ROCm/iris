@@ -4,13 +4,13 @@
 """
 Iris: Multi-GPU Communication and Memory Management Framework
 
-Iris is a high-performance framework for multi-GPU communication and memory management,
-providing efficient distributed tensor operations, atomic operations, and memory allocation
-across multiple GPUs in a cluster.
+Iris is a high-performance framework that enables seamless multi-GPU programming in Triton,
+enabling fine-grained communication and compute overlap natively in Triton
+across multiple GPUs with SHMEM-like Remote Memory Access (RMA) capabilities.
 
 Key Features:
 - Symmetric heap management across multiple GPUs
-- High-performance atomic operations (add, sub, cas, xchg, xor, and, or, min, max)
+- High-performance atomic operations (add, cas, xchg, xor, and, or, min, max)
 - Efficient load/store operations with rank-to-rank communication
 - Memory allocation and deallocation utilities
 - Built-in logging with rank information
