@@ -4,7 +4,7 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 -->
 
 <p align="center">
-  <img src="images/logo.png" width="300px" />
+  <img src="docs/images/logo.png" width="300px" />
 </p>
 
 # Iris: First-Class Multi-GPU Programming Experience in Triton
