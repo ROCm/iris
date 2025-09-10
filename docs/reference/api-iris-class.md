@@ -32,6 +32,12 @@ Use Iris-aware logging that automatically annotates each message with the curren
 ```
 
 
+## Utility Functions
+
+```{eval-rst}
+.. autofunction:: iris.util.do_bench
+```
+
 ## Broadcast Helper
 
 Broadcast a Python scalar or small object from a source rank to all ranks. This is a convenience wrapper over the internal Torch Distributed helper.

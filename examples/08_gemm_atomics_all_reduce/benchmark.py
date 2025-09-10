@@ -167,7 +167,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     def preamble():
         shmem.barrier()
-        iris.memset_tensor(tile_completed, 0)
+        tile_completed.zero_()
         shmem.barrier()
 
     def run_experiment():

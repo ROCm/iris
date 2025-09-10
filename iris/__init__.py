@@ -12,7 +12,7 @@ This package provides:
 - Iris: Main class for multi-GPU operations
 - Atomic operations: add, sub, cas, xchg, xor, and, or, min, max
 - Memory operations: load, store, get, put
-- Utility functions: do_bench, memset_tensor
+- Utility functions: do_bench
 - HIP integration for AMD GPU support
 - Logging utilities with rank information
 
@@ -46,7 +46,6 @@ from .iris import (
 
 from .util import (
     do_bench,
-    memset_tensor,
 )
 
 from . import hip
@@ -98,7 +97,6 @@ __all__ = [
     "atomic_min",
     "atomic_max",
     "do_bench",
-    "memset_tensor",
     "hip",
     "set_logger_level",
     "logger",

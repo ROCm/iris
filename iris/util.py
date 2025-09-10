@@ -1,6 +1,28 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
+# Copyright 2018-2020 Philippe Tillet
+# Copyright 2020-2022 OpenAI
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files
+# (the "Software"), to deal in the Software without restriction,
+# including without limitation the rights to use, copy, modify, merge,
+# publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+# TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 import statistics
 import math
 import triton
@@ -124,41 +146,3 @@ def do_bench(
 
     times = [s.elapsed_time(e) for s, e in zip(start_event, end_event)]
     return _summarize_statistics(times, quantiles, return_mode)
-
-
-@triton.jit
-def memset_kernel(ptr, value, n_elements, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    v = tl.full([BLOCK_SIZE], value, dtype=tl.int32)
-    tl.store(ptr + offsets, v, mask=mask)
-
-
-def memset_tensor(tensor, value):
-    """
-    Set all elements of a tensor to a specified value using a Triton kernel.
-
-    Args:
-        tensor (torch.Tensor): Contiguous int32 tensor to modify in-place.
-        value (int): Value to set all elements to.
-
-    Example:
-        >>> import iris
-        >>> import torch
-        >>> tensor = torch.zeros(100, dtype=torch.int32, device='cuda')
-        >>> iris.memset_tensor(tensor, 42)
-        >>> assert torch.all(tensor == 42)
-    """
-    assert tensor.is_contiguous(), "Tensor must be contiguous"
-    assert tensor.dtype == torch.int32, "Only torch.int32 tensors are supported"
-    n_elements = tensor.numel()
-    BLOCK_SIZE = 1024
-    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-    memset_kernel[grid](
-        tensor,
-        value,
-        n_elements,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
