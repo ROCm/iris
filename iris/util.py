@@ -31,8 +31,6 @@ import torch
 
 
 def get_empty_cache_for_benchmark():
-    import torch
-
     cache_size = 256 * 1024 * 1024
     return torch.empty(int(cache_size // 4), dtype=torch.int, device="cuda")
 
@@ -42,8 +40,6 @@ def clear_cache(cache):
 
 
 def create_timing_event():
-    import torch
-
     return torch.cuda.Event(enable_timing=True)
 
 
