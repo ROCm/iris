@@ -1493,33 +1493,6 @@ def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
 
 @triton.jit
-def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
-    """
-    Atomically subtracts data from the specified rank's memory location.
-
-    This function performs an atomic subtraction operation by translating the pointer
-    from the from_rank's address space to the to_rank's address space and atomically
-    subtracting the provided data from the to_rank memory location. If the from_rank and to_rank are the same,
-    this function performs a local atomic subtraction operation.
-
-    Args:
-        pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's address space that will be translated to the to_rank's address space. Must be the current rank where the pointer is local.
-        val (Block): The tensor of elements to be subtracted atomically.
-        from_rank (int): The rank ID from which the pointer originates. Must be the current rank where the pointer is local.
-        to_rank (int): The rank ID to which the atomic operation will be performed.
-        heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
-        mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
-        sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". Defaults to "acq_rel".
-        scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
-
-    Returns:
-        Block: The value at the memory location before the atomic subtraction.
-    """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
-    return tl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
-@triton.jit
 def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scope=None):
     """
     Atomically compares and exchanges the specified rank's memory location.
