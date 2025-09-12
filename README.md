@@ -71,7 +71,6 @@ def _worker(rank, world_size):
         device_id=torch.device(f"cuda:{device_id}")
     )
 
-
     # Iris initialization
     heap_size = 2**30   # 1GiB symmetric heap for inter-GPU communication
     iris_ctx = iris.iris(heap_size)
