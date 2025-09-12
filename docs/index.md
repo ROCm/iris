@@ -46,7 +46,6 @@ cd iris && pip install -e .
 Here's a simple example showing how to perform remote memory operations between GPUs using Iris:
 
 ```python
-import os
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -74,9 +73,15 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
 
 def _worker(rank, world_size):
     # Torch distributed initialization
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29500")
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    device_id = rank % torch.cuda.device_count()
+    dist.init_process_group(
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
+        init_method="tcp://127.0.0.1:29500",
+        device_id=torch.device(f"cuda:{device_id}")
+    )
+
 
     # Iris initialization
     heap_size = 2**30   # 1GiB symmetric heap for inter-GPU communication

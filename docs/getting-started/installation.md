@@ -24,15 +24,22 @@ Iris has minimal dependencies including Python, PyTorch, ROCm HIP runtime, and T
 - ROCm 6.3.1+ HIP runtime
 - Git
 - CMake, Ninja, build-essential
-- Triton (specific commit: [dd5823453bcc7973eabadb65f9d827c43281c434](https://github.com/triton-lang/triton/tree/dd5823453bcc7973eabadb65f9d827c43281c434))
+- Triton (suggested commit: [dd5823453bcc7973eabadb65f9d827c43281c434](https://github.com/triton-lang/triton/tree/dd5823453bcc7973eabadb65f9d827c43281c434))
 
 **Note**: These versions represent the minimum working configuration. Using different versions may cause compatibility issues.
 
 ## Installation Methods
+### 1. Direct Installation from Git
 
-### 1. Using Docker Compose (Recommended)
+For a quick installation directly from the repository:
 
-The easiest way to get started is using Docker Compose:
+```shell
+pip install git+https://github.com/ROCm/iris.git
+```
+
+### 2. Using Docker Compose
+
+The easiest way to get started if you don't have the dependencies installed is using Docker Compose:
 
 ```shell
 # Clone the repository
@@ -49,7 +56,7 @@ docker attach iris-dev
 cd iris && pip install -e .
 ```
 
-### 2. Manual Docker Setup
+### 3. Manual Docker Setup
 
 If you prefer to build and run Docker containers manually:
 
@@ -65,7 +72,7 @@ pip install -e .
 ```
 
 
-### 3. Apptainer/Singularity
+### 4. Apptainer/Singularity
 
 For HPC environments or systems where Docker is not available:
 

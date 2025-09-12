@@ -11,7 +11,7 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml) [![Iris Tests](https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml/badge.svg)](https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml)
 
-> [!IMPORTANT]  
+> [!IMPORTANT]
 > This project is intended for research purposes only and is provided by AMD Research and Advanced Development team.  This is not a product. Use it at your own risk and discretion.
 
 Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton's programmability and performance.
@@ -35,7 +35,6 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris
 Here's a simple example showing how to perform remote memory operations between GPUs using Iris:
 
 ```python
-import os
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -63,9 +62,15 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
 
 def _worker(rank, world_size):
     # Torch distributed initialization
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ.setdefault("MASTER_PORT", "29500")
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    device_id = rank % torch.cuda.device_count()
+    dist.init_process_group(
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
+        init_method="tcp://127.0.0.1:29500",
+        device_id=torch.device(f"cuda:{device_id}")
+    )
+
 
     # Iris initialization
     heap_size = 2**30   # 1GiB symmetric heap for inter-GPU communication
@@ -106,7 +111,7 @@ The recommended way to get started is using Docker Compose, which provides a dev
 docker compose up --build -d
 
 # or depending on your docker version
-docker-compose up --build -d 
+docker-compose up --build -d
 
 # Attach to the running container
 docker attach iris-dev
@@ -119,7 +124,7 @@ For manual Docker or Apptainer setup, see [setup alternatives](https://rocm.gith
 
 ## Next Steps
 
-Check out our [examples](examples/) directory for ready-to-run scripts and usage patterns, including peer-to-peer communication and GEMM benchmarks. 
+Check out our [examples](examples/) directory for ready-to-run scripts and usage patterns, including peer-to-peer communication and GEMM benchmarks.
 
 ## Supported GPUs
 
