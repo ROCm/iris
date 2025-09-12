@@ -58,12 +58,12 @@ html_theme = "rocm_docs_theme"
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ["../images"]
+html_static_path = ["images"]
 
 # Add any paths that contain extra files (such as images) here,
 # relative to this directory. These files are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_extra_path = ["../images"]
+html_extra_path = ["images"]
 
 # Customize the HTML title shown in the top-left/header
 html_title = "Iris Documentation"
