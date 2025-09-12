@@ -119,7 +119,7 @@ docker attach iris-dev
 cd iris && pip install -e .
 ```
 
-For manual Docker or Apptainer setup, see [setup alternatives](https://rocm.github.io/iris/getting-started/installation.html).
+For baremetal install, Docker or Apptainer setup, see [Installation](https://rocm.github.io/iris/getting-started/installation.html).
 
 ## Next Steps
 

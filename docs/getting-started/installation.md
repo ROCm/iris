@@ -12,8 +12,6 @@ Iris has minimal dependencies including Python, PyTorch, ROCm HIP runtime, and T
 
 - Linux operating system (Ubuntu 22.04+)
 - AMD GPU with ROCm 6.3.1+ support (MI300X, MI350X, MI355X, or other ROCm-compatible GPUs)
-- Python 3.10+
-- ROCm 6.3.1+ HIP runtime
 
 ### Required Software
 
@@ -23,7 +21,6 @@ Iris has minimal dependencies including Python, PyTorch, ROCm HIP runtime, and T
 - PyTorch 2.0+ (ROCm version)
 - ROCm 6.3.1+ HIP runtime
 - Git
-- CMake, Ninja, build-essential
 - Triton (suggested commit: [dd5823453bcc7973eabadb65f9d827c43281c434](https://github.com/triton-lang/triton/tree/dd5823453bcc7973eabadb65f9d827c43281c434))
 
 **Note**: These versions represent the minimum working configuration. Using different versions may cause compatibility issues.
