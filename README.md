@@ -103,6 +103,19 @@ if __name__ == "__main__":
 
 ## Quick Start Guide
 
+### Quick Installation
+
+> [!NOTE]
+> **Requirements**: Python 3.10+, PyTorch 2.0+ (ROCm version), ROCm 6.3.1+ HIP runtime, and Triton
+
+For a quick installation directly from the repository:
+
+```shell
+pip install git+https://github.com/ROCm/iris.git
+```
+
+### Docker Compose (Recommended for Development)
+
 The recommended way to get started is using Docker Compose, which provides a development environment with the Iris directory mounted inside the container. This allows you to make changes to the code outside the container and see them reflected inside.
 
 ```shell
