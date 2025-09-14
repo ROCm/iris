@@ -2,21 +2,12 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=61", "wheel", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.dynamic]
-version = {attr = "iris.__version__"}
-
-[tool.setuptools]
-package-dir = { "" = "." }
-
-[tool.setuptools.packages.find]
-include = ["iris"]
-
 [project]
-name = "Iris"
-version = "0.1.0"
+name = "iris"
+dynamic = ["version"]
 description = "Python- and Triton-based library that provide SHMEM-like RDMA support in Triton."
 authors = [
     { name = "Muhammad Awad", email = "muhaawad@amd.com" },
@@ -39,6 +30,18 @@ dev = [
     "black",
     "mypy",
 ]
+
+[tool.setuptools]
+package-dir = { "" = "." }
+
+[tool.setuptools.packages.find]
+include = ["iris"]
+
+# ---- setuptools-scm versioning ----
+[tool.setuptools_scm]
+version_scheme = "post-release"   # .postN after last tag
+local_scheme = "node-and-date"    # add commit hash (e.g. +gabc1234) and date (e.g. +20250914)
+fallback_version = "0.0.0"        # used if git metadata unavailable
 
 [tool.ruff]
 line-length = 120
