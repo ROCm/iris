@@ -70,10 +70,10 @@ class matmul(torch.autograd.Function):
         total_tiles = total_blocks_M * total_blocks_N
         even_k = K % BLK_K == 0
 
-        if total_programs_streamk > 0:  # Stream-K
+        if total_programs_streamk > 0:  # GEMM
             # last wave may occupy less than total_programs_streamk SMs
             total_tiles_streamk = total_tiles % total_programs_streamk
-            # for two-tile Stream-K + data-parallel from original paper
+            # for two-tile GEMM + data-parallel from original paper
             #            if two_tiles and total_tiles - total_tiles_streamk > total_programs_streamk:
             #                total_tiles_streamk += total_programs_streamk
             # remaining tiles are computed using classical blocking

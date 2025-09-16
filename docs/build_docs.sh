@@ -46,7 +46,7 @@ python3 -m sphinx -b html -d _build/doctrees -D language=en . _build/html
 # Copy images to build directory
 echo "🖼️ Copying images to build directory..."
 mkdir -p _build/html/images
-cp ../images/*.png _build/html/images/ 2>/dev/null || echo "Warning: Could not copy images automatically"
+cp images/*.png _build/html/images/ 2>/dev/null || echo "Warning: Could not copy images automatically"
 
 # Check if build was successful
 if [ $? -eq 0 ]; then

@@ -10,6 +10,8 @@ import argparse
 import torch
 import iris
 import os
+import torch.multiprocessing as mp
+import torch.distributed as dist
 
 project_root = Path(__file__).resolve()
 while not (project_root / "tests").is_dir() or not (project_root / "examples").is_dir():
@@ -75,6 +77,7 @@ def parse_args():
     parser.add_argument("--num_heads", type=int, nargs="+", help="Override NUM_HEADS_SWEEP")
     parser.add_argument("--head_dim", type=int, nargs="+", help="Override HEAD_DIM_SWEEP")
     parser.add_argument("--num_seqs", type=int, nargs="+", help="Override NUM_SEQS_SWEEP")
+    parser.add_argument("--num_ranks", type=int, default=8, help="Number of GPUs to run on")
 
     final_args = parser.parse_args()
     return final_args
@@ -101,10 +104,18 @@ def prepare_perf_data(cfg, num_query_heads, num_kv_heads):
     }
 
 
-def run_benchmark(args):
-    torch.manual_seed(42)
-    torch.set_default_device("cuda")
+def run_benchmark(rank, world_size, init_url, args):
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(
+        backend=backend,
+        init_method=init_url,
+        world_size=world_size,
+        rank=rank
+    )
+    # Set the correct GPU for this specific process
+    torch.cuda.set_device(rank)
 
+    torch.manual_seed(42 + rank)
     # Iris setup
     shmem = iris.iris()
     rank = shmem.get_rank()
@@ -190,8 +201,18 @@ def run_benchmark(args):
         print("\nBenchmark sweep complete.")
 
     shmem.barrier()
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
+
     args = parse_args()
-    run_benchmark(args)
+    num_ranks = args.num_ranks
+    init_url = "tcp://127.0.0.1:29500"
+
+    mp.spawn(
+        fn=run_benchmark,
+        args=(num_ranks, init_url, args),
+        nprocs=num_ranks,
+        join=True,
+    )

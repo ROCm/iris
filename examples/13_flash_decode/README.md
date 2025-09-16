@@ -21,9 +21,9 @@ We perform comparisons against the RCCL baseline.
 
 To simply do a test run of the code, run:
 ```terminal
-mpirun -np 8 python examples/13_flash_decode/example_run.py
+python examples/13_flash_decode/example_run.py
 ```
-This example will run on 8 GPUs. 
+This example will run by default on 8 GPUs. Use the `--num_ranks` flag to select the number of GPUs.
 
 ### Validation
 
@@ -32,13 +32,13 @@ These scripts use `pytest` to verify the numerical correctness of each implement
 **Iris**
 
 ```terminal
-mpirun -np 8 python -m pytest tests/examples/test_flash_decode.py
+python tests/run_tests_distributed.py tests/examples/test_flash_decode.py --num_ranks 8
 ```
 
 **RCCL**
 
 ```terminal
-torchrun --nproc_per_node=8 -m pytest examples/benchmark/reference/flash_decode_rccl/validate_flash_decode_rccl.py
+python tests/run_tests_distributed.py examples/benchmark/reference/flash_decode_rccl/validate_flash_decode_rccl.py --num_ranks 8
 ```
 
 ### Benchmarking
@@ -48,7 +48,7 @@ These scripts run a sweep of configurations and save performance results as `.js
 **Iris**
 
 ```terminal
-mpirun -np 8 python benchmark/examples/benchmark_flash_decode.py
+python benchmark/examples/benchmark_flash_decode.py --num_ranks 8
 ```
 
 **RCCL**

@@ -7,7 +7,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations on AM
 - Clean abstractions with full symmetric heap implementation
 - Pythonic PyTorch-like host APIs for tensor operations  
 - Triton-style device APIs for load, store, and atomic operations
-- Minimal dependencies (Triton, PyTorch, HIP runtime, mpi4py)
+- Minimal dependencies (Triton, PyTorch, HIP runtime)
 - Comprehensive examples showing communication/computation overlap
 
 **FOLLOW THESE INSTRUCTIONS EXACTLY. Reference these instructions first before using search or bash commands.**
@@ -17,7 +17,6 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations on AM
 - **GPU**: AMD GPUs with ROCm compatibility (tested on MI300X, MI350X & MI355X)
   > **Note**: See below for instructions on development without AMD GPU access
 - **ROCm/HIP Toolkit**: Required for building C++/HIP components
-- **MPI**: Required for multi-GPU operations
 - **Docker/Apptainer**: Recommended for containerized development
 
 ## Build
@@ -78,8 +77,8 @@ pytest tests/unittests/
 # Run example tests  
 pytest tests/examples/
 
-# Run specific example (requires MPI and GPU)
-mpirun -np 8 python examples/00_load/load_bench.py
+# Run specific example
+python examples/00_load/load_bench.py
 ```
 
 ### Code Quality

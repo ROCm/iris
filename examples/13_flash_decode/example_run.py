@@ -15,6 +15,8 @@ All the triton kernels are defined in decode_kernels.py
 """
 
 import torch
+import torch.multiprocessing as mp
+import torch.distributed as dist
 import iris
 import argparse
 from flash_decode_fused_layer import flash_decode_fused_layer
@@ -27,6 +29,7 @@ def parse_args():
     parser.add_argument("--num_heads", type=int, default=96, help="Number of attention heads.")
     parser.add_argument("--head_dim", type=int, default=128, help="Dimension of each attention head.")
     parser.add_argument("--num_seqs", type=int, default=4, help="Number of sequences in the batch.")
+    parser.add_argument("--num_ranks", type=int, default=8, help="Number of GPUs to run the example on.")
     parser.add_argument(
         "--dtype", type=str, default="float16", choices=["float16", "bfloat16"], help="PyTorch data type to use."
     )
@@ -77,18 +80,16 @@ def setup_example_data(rank, world_size, args, dtype):
     }
 
 
-if __name__ == "__main__":
-    # 0. Parse command-line arguments
-    args = parse_args()
-    dtype = getattr(torch, args.dtype)
-
+def example_run(rank: int, world_size: int, init_url: str, args: dict):
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=rank)
+    
     # 1. Initialize Iris for distributed communication
     shmem = iris.iris()
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
 
     torch.manual_seed(42)
     torch.set_default_device("cuda")
+    dtype = getattr(torch, args.dtype)
 
     if rank == 0:
         print("--- flash_decode_fused_layer Minimal Example ---")
@@ -141,3 +142,19 @@ if __name__ == "__main__":
         print("--------------------------")
 
     shmem.barrier()
+    dist.destroy_process_group()
+
+
+def main():
+    args = parse_args()
+    num_ranks = args.num_ranks
+    init_url = "tcp://127.0.0.1:29500"
+    mp.spawn(
+        fn=example_run,
+        args=(num_ranks, init_url, args),
+        nprocs=num_ranks,
+        join=True,
+    )
+
+if __name__ == "__main__":
+    main()

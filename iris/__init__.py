@@ -12,7 +12,7 @@ This package provides:
 - Iris: Main class for multi-GPU operations
 - Atomic operations: add, sub, cas, xchg, xor, and, or, min, max
 - Memory operations: load, store, get, put
-- Utility functions: do_bench, memset_tensor
+- Utility functions: do_bench
 - HIP integration for AMD GPU support
 - Logging utilities with rank information
 
@@ -35,7 +35,6 @@ from .iris import (
     get,
     put,
     atomic_add,
-    atomic_sub,
     atomic_cas,
     atomic_xchg,
     atomic_xor,
@@ -47,7 +46,6 @@ from .iris import (
 
 from .util import (
     do_bench,
-    memset_tensor,
 )
 
 from . import hip
@@ -62,10 +60,12 @@ from .logging import (
     ERROR,
 )
 
+# Launcher functionality is now user code - see examples and documentation
+
 # Pipe allocations via finegrained allocator
 current_dir = os.path.dirname(__file__)
 # Look for the library in the installed package location
-finegrained_alloc_path = os.path.join(current_dir, "..", "csrc", "finegrained_alloc", "libfinegrained_allocator.so")
+finegrained_alloc_path = os.path.join(current_dir, "csrc", "finegrained_alloc", "libfinegrained_allocator.so")
 
 # Check if the library exists (should be built during pip install)
 if not os.path.exists(finegrained_alloc_path):
@@ -89,7 +89,6 @@ __all__ = [
     "get",
     "put",
     "atomic_add",
-    "atomic_sub",
     "atomic_cas",
     "atomic_xchg",
     "atomic_xor",
@@ -98,7 +97,6 @@ __all__ = [
     "atomic_min",
     "atomic_max",
     "do_bench",
-    "memset_tensor",
     "hip",
     "set_logger_level",
     "logger",

@@ -134,9 +134,8 @@ def test_correctness_rccl_fused_full(kv_len, num_heads, num_seqs, head_dim):
     """
     Tests the correctness of the RCCL Fused implementation against the Torch reference.
     """
-    if not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
-        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    rank = dist.get_rank()
+    torch.cuda.set_device(rank)
 
     args = Namespace()
     args.rank = dist.get_rank()

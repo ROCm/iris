@@ -41,11 +41,6 @@ Device-side functions provided by Iris for remote memory operations and atomics.
 .. autofunction:: iris.iris.atomic_add
 ```
 
-### atomic_sub
-```{eval-rst}
-.. autofunction:: iris.iris.atomic_sub
-```
-
 ### atomic_cas
 ```{eval-rst}
 .. autofunction:: iris.iris.atomic_cas
