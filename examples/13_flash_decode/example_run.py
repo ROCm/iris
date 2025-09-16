@@ -83,7 +83,7 @@ def setup_example_data(rank, world_size, args, dtype):
 def example_run(rank: int, world_size: int, init_url: str, args: dict):
     backend = "nccl" if torch.cuda.is_available() else "gloo"
     dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=rank)
-    
+
     # 1. Initialize Iris for distributed communication
     shmem = iris.iris()
 
@@ -155,6 +155,7 @@ def main():
         nprocs=num_ranks,
         join=True,
     )
+
 
 if __name__ == "__main__":
     main()

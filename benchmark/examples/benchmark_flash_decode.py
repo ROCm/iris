@@ -106,12 +106,7 @@ def prepare_perf_data(cfg, num_query_heads, num_kv_heads):
 
 def run_benchmark(rank, world_size, init_url, args):
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(
-        backend=backend,
-        init_method=init_url,
-        world_size=world_size,
-        rank=rank
-    )
+    dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=rank)
     # Set the correct GPU for this specific process
     torch.cuda.set_device(rank)
 
@@ -205,7 +200,6 @@ def run_benchmark(rank, world_size, init_url, args):
 
 
 if __name__ == "__main__":
-
     args = parse_args()
     num_ranks = args.num_ranks
     init_url = "tcp://127.0.0.1:29500"

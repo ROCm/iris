@@ -72,6 +72,7 @@ def distributed_allgather(data):
     # Ensure uniform shapes and stack
     return np.stack(obj_list, axis=0)
 
+
 def distributed_allgather_multidim(data):
     """
     All-gather operation for multi-dimensional tensors using PyTorch distributed.
@@ -90,58 +91,8 @@ def distributed_allgather_multidim(data):
 
     stacked_tensor = torch.stack(tensor_list, dim=0)
     reshaped_tensor = stacked_tensor.view(world_size, -1)
-    
+
     return reshaped_tensor.cpu().numpy()
-
-
-def distributed_broadcast_scalar(value=None, root=0):
-    """
-    Broadcast a scalar value from root to all ranks.
-
-    Args:
-        value: Value to broadcast (only used on root rank)
-        root: Root rank to broadcast from
-
-    Returns:
-        Broadcasted value
-    """
-    if not dist.is_initialized():
-        raise RuntimeError("PyTorch distributed is not initialized")
-
-    rank = dist.get_rank()
-    device = _infer_device()
-    backend = str(dist.get_backend()).lower()
-
-    # First agree on dtype (numpy dtype object)
-    if rank == root:
-        if value is None:
-            raise ValueError("Root must provide a value.")
-        np_val = np.array(value)  # captures dtype
-        dtype = np_val.dtype
-    else:
-        np_val = None
-        dtype = None
-
-    dtype_obj = [dtype]
-    dist.broadcast_object_list(dtype_obj, src=root)
-    dtype = dtype_obj[0]
-
-    # If NCCL can't handle this dtype, just broadcast the object directly.
-    if backend == "nccl":
-        # Try a quick check using a tiny tensor of the dtype
-        torch_dtype = torch.from_numpy(np.array(0, dtype=dtype)).dtype
-        dummy = torch.empty((), dtype=torch_dtype)
-        if not _nccl_dtype_supported(dummy):
-            obj = [value if rank == root else None]
-            dist.broadcast_object_list(obj, src=root)
-            return obj[0]
-
-    # Tensor path: create a 0-D tensor, broadcast on the selected device
-    if rank != root:
-        np_val = np.empty((), dtype=dtype)
-    val_t = torch.from_numpy(np_val).to(device)
-    dist.broadcast(val_t, src=root)
-    return val_t.to("cpu").item()
 
 
 def distributed_broadcast_scalar(value=None, root=0):
@@ -212,11 +163,9 @@ def distributed_broadcast_tensor(value_to_broadcast=None, root=0):
     device = _infer_device()
     backend = str(dist.get_backend()).lower()
 
-    # Step 1: Broadcast metadata (shape and dtype) from root
     if rank == root:
         if value_to_broadcast is None:
             raise ValueError("Root must provide a value to broadcast.")
-        # Use as_tensor to handle both numpy arrays and torch tensors gracefully
         tensor = torch.as_tensor(value_to_broadcast)
         metadata = [tensor.shape, tensor.dtype]
     else:
@@ -226,11 +175,9 @@ def distributed_broadcast_tensor(value_to_broadcast=None, root=0):
     dist.broadcast_object_list(metadata, src=root)
     shape, dtype = metadata
 
-    # Step 2: Prepare tensor for broadcast
     if rank != root:
         tensor = torch.empty(shape, dtype=dtype)
 
-    # Step 3: Decide on broadcast strategy (tensor vs. object)
     use_tensor_collective = backend != "nccl" or _nccl_dtype_supported(tensor)
 
     if use_tensor_collective:
@@ -238,9 +185,7 @@ def distributed_broadcast_tensor(value_to_broadcast=None, root=0):
         dist.broadcast(tensor, src=root)
         return tensor.to("cpu").numpy()
     else:
-        # Fallback for NCCL-unsupported dtypes
         if rank == root:
-            # The object to broadcast is the original value
             obj = [np.asarray(value_to_broadcast)]
         else:
             obj = [None]
