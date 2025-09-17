@@ -1,0 +1,87 @@
+name: Iris Pip Install Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build-apptainer-image:
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Apptainer
+        run: |
+          apt-get update && apt-get install -y software-properties-common
+          add-apt-repository -y ppa:apptainer/ppa
+          apt-get update && apt-get install -y apptainer
+
+      - name: Build Iris Apptainer container
+        run: |
+          # Create persistent Apptainer directory
+          mkdir -p ~/apptainer
+
+          # Build Apptainer image from definition file (only if it doesn't exist)
+          if [ ! -f ~/apptainer/iris-dev.sif ]; then
+            echo "Building new Apptainer image..."
+            apptainer build ~/apptainer/iris-dev.sif apptainer/iris.def
+          else
+            echo "Using existing Apptainer image"
+          fi
+
+  pip-install-test:
+    name: ${{ matrix.ranks }}-rank Pip Install Test
+    needs: build-apptainer-image
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        ranks: [1, 2, 4, 8]
+      max-parallel: 1
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
+
+      - name: Run Pip Install Test with Apptainer
+        run: |
+          apptainer exec ~/apptainer/iris-dev.sif bash -c "
+            set -e  # Exit on any error
+
+            # Setup Python
+            python3 -m pip install --upgrade pip
+            pip install pytest
+
+            # Uninstall any existing Iris installations
+            echo 'Uninstalling any existing Iris packages...'
+            pip uninstall -y Iris iris || echo 'No existing Iris packages found or uninstall failed'
+
+            # Install iris from the current repository
+            pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
+
+            # Run examples tests one at a time using distributed wrapper
+            echo 'Running examples tests one at a time...'
+            for test_file in tests/examples/test_*.py; do
+              echo \"Testing: \$test_file with ${{ matrix.ranks }} ranks\"
+              python tests/run_tests_distributed.py --num_ranks ${{ matrix.ranks }} \"\$test_file\" -v --tb=short
+            done
+
+            # Run unit tests one at a time using distributed wrapper
+            echo 'Running unit tests one at a time...'
+            for test_file in tests/unittests/test_*.py; do
+              echo \"Testing: \$test_file with ${{ matrix.ranks }} ranks\"
+              python tests/run_tests_distributed.py --num_ranks ${{ matrix.ranks }} \"\$test_file\" -v --tb=short
+            done
+          "
