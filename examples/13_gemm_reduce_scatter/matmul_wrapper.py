@@ -26,7 +26,7 @@ class matmul_reduce_scatter(torch.autograd.Function):
         a: torch.Tensor,
         b: torch.Tensor,
         c: torch.Tensor,
-        c_local: torch.Tensor,  # 修改：本地输出而不是全局输出
+        c_local: torch.Tensor,
         bias: torch.Tensor,
         P: torch.Tensor,
         locks: torch.Tensor,
@@ -54,13 +54,11 @@ class matmul_reduce_scatter(torch.autograd.Function):
         M, K = a.shape
         _, N = b.shape
 
-        # 关键修改：计算每个rank负责的输出分区大小
         rows_per_rank = (M + world_size - 1) // world_size
         local_M = rows_per_rank
-        if rank == world_size - 1:  # 最后一个rank处理剩余的行
+        if rank == world_size - 1:
             local_M = M - rank * rows_per_rank
         
-        # 验证本地输出缓冲区大小是否正确
         assert c_local.shape[0] == local_M, f"c_local shape mismatch: expected {local_M}, got {c_local.shape[0]}"
         assert c_local.shape[1] == N, f"c_local shape mismatch: expected {N}, got {c_local.shape[1]}"
 
@@ -97,13 +95,12 @@ class matmul_reduce_scatter(torch.autograd.Function):
         use_bias = False
         stride_bias = bias.stride(0) if use_bias else 0
 
-        # 关键修改：使用ReduceScatter内核
         grids = total_programs_streamk
         kk = gemm_kernel[(grids,)](
             a,
             b,
             c,
-            c_local,  # 修改：传递本地输出缓冲区
+            c_local,
             bias,
             P,
             locks,
@@ -117,7 +114,7 @@ class matmul_reduce_scatter(torch.autograd.Function):
             b.stride(1),
             c.stride(0),
             c.stride(1),
-            c_local.stride(0),  # 修改：本地输出的stride
+            c_local.stride(0),
             c_local.stride(1),
             stride_bias,
             BLOCK_SIZE_M=BLK_M,
@@ -147,7 +144,7 @@ class matmul_reduce_scatter(torch.autograd.Function):
             matmul_reduce_scatter.streamk_spills = kk.n_spills
             print(f"{kk.n_regs} registers used, {kk.n_spills} spills")
 
-        return c_local  # 修改：返回本地输出
+        return c_local
 
     @staticmethod
     def forward(
@@ -155,7 +152,7 @@ class matmul_reduce_scatter(torch.autograd.Function):
         a: torch.Tensor,
         b: torch.Tensor,
         c: torch.Tensor,
-        c_local: torch.Tensor,  # 修改：本地输出缓冲区
+        c_local: torch.Tensor,
         bias: torch.Tensor,
         P: torch.Tensor,
         locks: torch.Tensor,
@@ -183,7 +180,7 @@ class matmul_reduce_scatter(torch.autograd.Function):
             a=a,
             b=b,
             c=c,
-            c_local=c_local,  # 修改：传递本地输出
+            c_local=c_local,
             bias=bias,
             P=P,
             locks=locks,
@@ -207,47 +204,4 @@ class matmul_reduce_scatter(torch.autograd.Function):
             mm_begin_timestamp=mm_begin_timestamp,
             mm_end_timestamp=mm_end_timestamp,
         )
-        return result  # 修改：返回本地输出结果
-
-
-# 使用示例函数
-# def gemm_reduce_scatter_example():
-#     # 初始化参数
-#     M, N, K = 1024, 1024, 1024
-#     world_size = 4
-#     rank = 0  # 在实际中需要根据当前rank设置
-    
-#     # 计算每个rank负责的行数
-#     rows_per_rank = (M + world_size - 1) // world_size
-#     local_M = rows_per_rank
-#     if rank == world_size - 1:
-#         local_M = M - rank * rows_per_rank
-    
-#     # 创建输入张量
-#     a = torch.randn(M, K, device='cuda')
-#     b = torch.randn(K, N, device='cuda')
-    
-#     # 创建中间缓冲区和输出缓冲区
-#     c = torch.zeros(M, N, device='cuda')  # 中间结果缓冲区
-#     c_local = torch.zeros(local_M, N, device='cuda')  # 本地输出缓冲区
-    
-#     # 创建同步所需的张量
-#     total_tiles = (M + 127) // 128 * (N + 127) // 128
-#     tile_completed = torch.zeros(total_tiles, dtype=torch.int32, device='cuda')
-#     locks = torch.zeros(1024, dtype=torch.int32, device='cuda')  # 锁缓冲区
-#     P = torch.zeros(1, dtype=torch.int32, device='cuda')  # 占位符
-    
-#     # 调用ReduceScatter GEMM
-#     result = matmul_reduce_scatter.apply(
-#         a, b, c, c_local, None, P, locks, tile_completed,
-#         rank, world_size, 256,  # grid size = 256
-#         128, 128, 32  # BLK_M, BLK_N, BLK_K
-#     )
-    
-#     return result
-
-
-# if __name__ == "__main__":
-#     # 测试代码
-#     result = gemm_reduce_scatter_example()
-#     print(f"ReduceScatter result shape: {result.shape}")
+        return result
