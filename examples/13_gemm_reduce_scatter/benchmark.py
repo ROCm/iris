@@ -123,12 +123,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     for key, value in args.items():
         json_writer.add_field(key, value)
 
-    # global_C = shmem.zeros((args["M"], args["N"]), device="cuda", dtype=A.dtype)
     global_C = None
-    # local_C = shmem.zeros((args["m"] // world_size, args["n"]), device="cuda", dtype=A.dtype)
-    # 中间计算缓冲区（全尺寸）
     compute_buffer = shmem.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
-    # 本地输出缓冲区（分区尺寸）
     local_output = shmem.zeros((args["m"] // world_size, args["n"]), device="cuda", dtype=A.dtype)
     
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
