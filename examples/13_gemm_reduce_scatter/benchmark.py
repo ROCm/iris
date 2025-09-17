@@ -52,8 +52,7 @@ def parse_args():
         default="log.json",
         help="Output file",
     )
-    # For All Scatter, use: 256x64x64
-    # For One Shot, use: 256x256x64
+
     parser.add_argument("--BLK_M", type=int, default=256, help="Block size M")
     parser.add_argument("--BLK_N", type=int, default=64, help="Block size N")
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K")
@@ -123,7 +122,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     for key, value in args.items():
         json_writer.add_field(key, value)
 
-    global_C = None
     compute_buffer = shmem.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
     local_output = shmem.zeros((args["m"] // world_size, args["n"]), device="cuda", dtype=A.dtype)
     

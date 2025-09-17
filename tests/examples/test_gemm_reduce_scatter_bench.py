@@ -155,7 +155,7 @@ def test_gemm_reduce_scatter(dtype, m, n, k, BLK_M, BLK_N, BLK_K):
     
     shmem.info("Validating...")
 
-    matmul_reduce_scatter.set_debug(False)
+    matmul_module.matmul_reduce_scatter.set_debug(False)
     # Validate global result
     success = validation_module.validate_gemm_reduce_scatter(A, B, local_output, rank, world_size, shmem, atol=2)
     assert success, (
