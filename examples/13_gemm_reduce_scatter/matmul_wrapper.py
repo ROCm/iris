@@ -210,44 +210,44 @@ class matmul_reduce_scatter(torch.autograd.Function):
         return result  # 修改：返回本地输出结果
 
 
-# # 使用示例函数
-# def gemm_reduce_scatter_example():
-#     # 初始化参数
-#     M, N, K = 1024, 1024, 1024
-#     world_size = 4
-#     rank = 0  # 在实际中需要根据当前rank设置
+# 使用示例函数
+def gemm_reduce_scatter_example():
+    # 初始化参数
+    M, N, K = 1024, 1024, 1024
+    world_size = 4
+    rank = 0  # 在实际中需要根据当前rank设置
     
-#     # 计算每个rank负责的行数
-#     rows_per_rank = (M + world_size - 1) // world_size
-#     local_M = rows_per_rank
-#     if rank == world_size - 1:
-#         local_M = M - rank * rows_per_rank
+    # 计算每个rank负责的行数
+    rows_per_rank = (M + world_size - 1) // world_size
+    local_M = rows_per_rank
+    if rank == world_size - 1:
+        local_M = M - rank * rows_per_rank
     
-#     # 创建输入张量
-#     a = torch.randn(M, K, device='cuda')
-#     b = torch.randn(K, N, device='cuda')
+    # 创建输入张量
+    a = torch.randn(M, K, device='cuda')
+    b = torch.randn(K, N, device='cuda')
     
-#     # 创建中间缓冲区和输出缓冲区
-#     c = torch.zeros(M, N, device='cuda')  # 中间结果缓冲区
-#     c_local = torch.zeros(local_M, N, device='cuda')  # 本地输出缓冲区
+    # 创建中间缓冲区和输出缓冲区
+    c = torch.zeros(M, N, device='cuda')  # 中间结果缓冲区
+    c_local = torch.zeros(local_M, N, device='cuda')  # 本地输出缓冲区
     
-#     # 创建同步所需的张量
-#     total_tiles = (M + 127) // 128 * (N + 127) // 128
-#     tile_completed = torch.zeros(total_tiles, dtype=torch.int32, device='cuda')
-#     locks = torch.zeros(1024, dtype=torch.int32, device='cuda')  # 锁缓冲区
-#     P = torch.zeros(1, dtype=torch.int32, device='cuda')  # 占位符
+    # 创建同步所需的张量
+    total_tiles = (M + 127) // 128 * (N + 127) // 128
+    tile_completed = torch.zeros(total_tiles, dtype=torch.int32, device='cuda')
+    locks = torch.zeros(1024, dtype=torch.int32, device='cuda')  # 锁缓冲区
+    P = torch.zeros(1, dtype=torch.int32, device='cuda')  # 占位符
     
-#     # 调用ReduceScatter GEMM
-#     result = matmul_reduce_scatter.apply(
-#         a, b, c, c_local, None, P, locks, tile_completed,
-#         rank, world_size, 256,  # grid size = 256
-#         128, 128, 32  # BLK_M, BLK_N, BLK_K
-#     )
+    # 调用ReduceScatter GEMM
+    result = matmul_reduce_scatter.apply(
+        a, b, c, c_local, None, P, locks, tile_completed,
+        rank, world_size, 256,  # grid size = 256
+        128, 128, 32  # BLK_M, BLK_N, BLK_K
+    )
     
-#     return result
+    return result
 
 
-# if __name__ == "__main__":
-#     # 测试代码
-#     result = gemm_reduce_scatter_example()
-#     print(f"ReduceScatter result shape: {result.shape}")
+if __name__ == "__main__":
+    # 测试代码
+    result = gemm_reduce_scatter_example()
+    print(f"ReduceScatter result shape: {result.shape}")
