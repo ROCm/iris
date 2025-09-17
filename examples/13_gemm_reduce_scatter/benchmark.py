@@ -98,7 +98,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         print("Unknown datatype.")
         exit(1)
 
-    assert args["n"] % world_size == 0, f"N ({args['n']}) must be divisible by world size ({world_size})."
+    assert args["m"] % world_size == 0, f"M ({args['m']}) must be divisible by world size ({world_size})."
     assert args["k"] % world_size == 0, f"K ({args['k']}) must be divisible by world size ({world_size})."
 
     A = shmem.randn(args["m"], args["k"], device="cuda", dtype=datatype)
@@ -125,8 +125,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     # global_C = shmem.zeros((args["M"], args["N"]), device="cuda", dtype=A.dtype)
     global_C = None
-    local_C = shmem.zeros((args["m"] // world_size, args["n"]), device="cuda", dtype=A.dtype)
-
+    # local_C = shmem.zeros((args["m"] // world_size, args["n"]), device="cuda", dtype=A.dtype)
+    # 中间计算缓冲区（全尺寸）
+    compute_buffer = shmem.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
+    # 本地输出缓冲区（分区尺寸）
+    local_output = shmem.zeros((args["m"] // world_size, args["n"]), device="cuda", dtype=A.dtype)
+    
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
     total_tiles = total_blocks_M * total_blocks_N
@@ -181,11 +185,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         torch.cuda.nvtx.range_push("GEMM + Communication")
         with torch.cuda.stream(gemm_stream):
             kernel_timing["gemm"]["start_event"].record()
-            local_C = matmul_reduce_scatter.apply(
+            local_output = matmul_reduce_scatter.apply(
                 local_A,
                 local_B,
-                local_C,
-                local_C,
+                compute_buffer,
+                local_output,
                 bias,
                 P,
                 locks,

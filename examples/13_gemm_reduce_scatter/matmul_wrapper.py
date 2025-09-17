@@ -7,7 +7,7 @@ import random
 import sys
 import os
 
-from gemm__reduce_scatter import persistent_gemm_reduce_scatter
+from gemm_reduce_scatter import persistent_gemm_reduce_scatter
 
 from examples.common.utils import is_triton_interpret_set
 
