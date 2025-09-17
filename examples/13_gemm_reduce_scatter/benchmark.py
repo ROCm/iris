@@ -172,8 +172,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.barrier()
 
     def run_experiment():
-        nonlocal local_C
-        nonlocal global_C
+        nonlocal local_output
+        nonlocal compute_buffer
         nonlocal kernel_timing
 
         shmem.barrier()

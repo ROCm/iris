@@ -209,6 +209,7 @@ def persistent_gemm_reduce_scatter(
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         c_mask = (rm[:, None] < M) & (rn[None, :] < N)
+        # C和C_都是full size buffer
         C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_, c, c_mask)
 
@@ -271,32 +272,47 @@ def persistent_gemm_reduce_scatter(
             # 关键修改：检查这个sub-tile是否属于当前rank的负责区域
             global_row_start = rm_start + start_row_sub
 
-            # 只处理属于当前rank分区的数据
+            # 在存储部分使用block指针
             if global_row_start < end_row and (global_row_start + BLOCK_SIZE_M) > start_row:
-                # 计算在sub-tile内的有效行范围
                 tile_start_row = max(0, start_row - global_row_start)
                 tile_end_row = min(BLOCK_SIZE_M, end_row - global_row_start)
-                
-                # 计算在本地缓冲区中的起始行
                 local_start_row = max(global_row_start, start_row) - start_row
                 
-                # 创建行掩码
-                row_indices = tl.arange(0, BLOCK_SIZE_M)
-                row_mask = (row_indices >= tile_start_row) & (row_indices < tile_end_row)
-                write_mask = row_mask[:, None] & (tl.arange(0, BLOCK_SIZE_N)[None, :] < BLOCK_SIZE_N)
-                
-                # 归约所有rank的数据
+                # 归约数据
                 acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
                 for remote_rank in range(world_size):
                     remote_data = iris.load(C + sub_offset, cur_rank, remote_rank, heap_bases, mask=sub_mask)
                     acc += remote_data
                 
-                # 计算本地偏移
-                local_offset = (local_start_row * stride_cm_local + 
-                            (rn_start + start_col_sub) * stride_cn_local)
+                # 创建block指针
+                row_idx = tl.arange(0, BLOCK_SIZE_M)
+                col_idx = tl.arange(0, BLOCK_SIZE_N)
                 
-                tl.store(c_local + local_offset, acc, mask=write_mask, cache_modifier=".wt")
-            
+                # 计算每个元素的本地偏移
+                local_offsets = (local_start_row + row_idx[:, None]) * stride_cm_local + \
+                            (rn_start + start_col_sub + col_idx[None, :]) * stride_cn_local
+                
+                # 创建block指针
+                local_ptr_block = c_local + local_offsets
+                
+                # 创建写入掩码
+                valid_mask = (row_idx[:, None] >= tile_start_row) & \
+                            (row_idx[:, None] < tile_end_row) & \
+                            (col_idx[None, :] < BLOCK_SIZE_N) & \
+                            sub_mask
+                
+                # 存储block数据
+                tl.store(local_ptr_block, acc, mask=valid_mask, cache_modifier=".wt")                # for remote_rank in range(world_size):
+                #     # C为full size buffer
+                #     remote_data = iris.load(C + sub_offset, cur_rank, remote_rank, heap_bases, mask=sub_mask)
+                #     acc += remote_data
+                
+                # # 计算本地偏移
+                # local_offset = (local_start_row * stride_cm_local + 
+                #             (rn_start + start_col_sub) * stride_cn_local)
+                
+                # tl.store(c_local + local_offset, acc, mask=write_mask, cache_modifier=".wt")
+
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
