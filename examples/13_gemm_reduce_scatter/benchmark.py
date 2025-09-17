@@ -249,7 +249,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
         matmul_reduce_scatter.set_debug(False)
         # Validate global result
-        success = validate_gemm_reduce_scatter(A, B, local_C, rank, world_size, shmem, atol=2)
+        success = validate_gemm_reduce_scatter(A, B, local_output, rank, world_size, shmem, atol=2)
         passed_str = "passed" if success else "failed"
         shmem.info(f"Final C validation {passed_str}.")
 
