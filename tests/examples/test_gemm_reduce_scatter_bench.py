@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
+import sys
 import pytest
 import torch
 import triton
@@ -15,7 +16,6 @@ from examples.common.utils import (
     Timestamps,
 )
 current_dir = Path(__file__).parent
-import sys
 sys.path.append(str(current_dir / "../../examples/13_gemm_reduce_scatter/"))
 sys.path.append(str(current_dir / "../../"))
 # Import the matmul wrapper
@@ -41,15 +41,15 @@ validation_spec.loader.exec_module(validation_module)
 @pytest.mark.parametrize(
     "m, n, k",
     [
-        (64, 64, 64),  # Very small for quick testing
-        (128, 128, 128),  # Small
-        (256, 256, 256),  # Medium
+        (512, 512, 512),  # Very small for quick testing
+        (1024, 1024, 1024),  # Small
+        (2048, 2048, 2048),  # Medium
     ],
 )
 @pytest.mark.parametrize(
     "BLK_M, BLK_N, BLK_K",
     [
-        (32, 32, 16),  # Small blocks
+        (32, 32, 32),  # Small blocks
         (64, 64, 32),  # Medium blocks
     ],
 )
