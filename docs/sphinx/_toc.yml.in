@@ -1,0 +1,17 @@
+root: index.md
+subtrees:
+  - caption: Getting Started
+    entries:
+    - file: getting-started/installation.md
+    - file: reference/examples.md
+    - file: reference/contributing.md
+  - caption: Conceptual
+    entries:
+    - file: conceptual/programming-model.md
+    - file: conceptual/finegrained-overlap.md
+  - caption: Reference
+    entries:
+    - file: reference/api-reference.md
+    - file: reference/api-iris-class.md
+    - file: reference/api-tensor-creation.md
+    - file: reference/api-device-functions.md

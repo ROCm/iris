@@ -4,14 +4,14 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 -->
 
 <p align="center">
-  <img src="images/logo.png" width="300px" />
+  <img src="docs/images/logo.png" width="300px" />
 </p>
 
 # Iris: First-Class Multi-GPU Programming Experience in Triton
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml) [![Iris Tests](https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml/badge.svg)](https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml)
 
-> [!IMPORTANT]  
+> [!IMPORTANT]
 > This project is intended for research purposes only and is provided by AMD Research and Advanced Development team.  This is not a product. Use it at your own risk and discretion.
 
 Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton's programmability and performance.
@@ -24,68 +24,106 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris
 
 ## Documentation
 
-1. [Programming Model](docs/PROGRAMMING_MODEL.md)
-2. [Peer-to-Peer Communication](examples/README.md)
-3. [Fine-grained GEMM & Communication Overlap](docs/FINEGRAINED_OVERLAP.md)
-4. [Setup Alternatives](docs/SETUP_ALTERNATIVES.md)
+- [API Reference](https://rocm.github.io/iris/reference/api-reference.html)
+- [Programming Model](https://rocm.github.io/iris/conceptual/programming-model.html)
+- [Examples](https://rocm.github.io/iris/reference/examples.html)
+- [Fine-grained GEMM & Communication Overlap](https://rocm.github.io/iris/conceptual/finegrained-overlap.html)
+- [Setup Alternatives](https://rocm.github.io/iris/getting-started/installation.html)
 
 ## API Example
 
+Here's a simple example showing how to perform remote memory operations between GPUs using Iris:
 
 ```python
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import triton
 import triton.language as tl
 import iris
 
-# Device-side APIs.
+# Device-side APIs
 @triton.jit
 def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bases_ptr):
-    # Compute start index of this block.
+    # Compute start index of this block
     pid = tl.program_id(0)
     block_start = pid * block_size
     offsets = block_start + tl.arange(0, block_size)
-    
-    # Guard for out-of-bounds accesses.
+
+    # Guard for out-of-bounds accesses
     mask = offsets < buffer_size
 
-    # Store 1 in the target buffer at each offset.
+    # Store 1 in the target buffer at each offset
     source_rank = 0
     target_rank = 1
     iris.store(buffer + offsets, 1,
             source_rank, target_rank,
             heap_bases_ptr, mask=mask)
 
-# Iris symmetric heap setup.
-heap_size = 2**30
-buffer_size = 4096
-block_size = 1024
-iris_ctx = iris.iris(heap_size)
-cur_rank = iris_ctx.get_rank()
-buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
-
-# Launch the kernel on source_rank.
-grid = lambda meta: (triton.cdiv(buffer_size, meta["block_size"]),)
-source_rank = 0
-if cur_rank == source_rank:
-    kernel[grid](
-        buffer,
-        buffer_size,
-        block_size,
-        iris_ctx.get_heap_bases(),
+def _worker(rank, world_size):
+    # Torch distributed initialization
+    device_id = rank % torch.cuda.device_count()
+    dist.init_process_group(
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
+        init_method="tcp://127.0.0.1:29500",
+        device_id=torch.device(f"cuda:{device_id}")
     )
 
-# Synchronize all ranks.
-iris_ctx.barrier()
+    # Iris initialization
+    heap_size = 2**30   # 1GiB symmetric heap for inter-GPU communication
+    iris_ctx = iris.iris(heap_size)
+    cur_rank = iris_ctx.get_rank()
+
+    # Iris tensor allocation
+    buffer_size = 4096  # 4K elements buffer
+    buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
+
+    # Launch the kernel on rank 0
+    block_size = 1024
+    grid = lambda meta: (triton.cdiv(buffer_size, meta["block_size"]),)
+    source_rank = 0
+    if cur_rank == source_rank:
+        kernel[grid](
+            buffer,
+            buffer_size,
+            block_size,
+            iris_ctx.get_heap_bases(),
+        )
+
+    # Synchronize all ranks
+    iris_ctx.barrier()
+    dist.destroy_process_group()
+
+if __name__ == "__main__":
+    world_size = 2  # Using two ranks
+    mp.spawn(_worker, args=(world_size,), nprocs=world_size, join=True)
 ```
 
 ## Quick Start Guide
+
+### Quick Installation
+
+> [!NOTE]
+> **Requirements**: Python 3.10+, PyTorch 2.0+ (ROCm version), ROCm 6.3.1+ HIP runtime, and Triton
+
+For a quick installation directly from the repository:
+
+```shell
+pip install git+https://github.com/ROCm/iris.git
+```
+
+### Docker Compose (Recommended for Development)
 
 The recommended way to get started is using Docker Compose, which provides a development environment with the Iris directory mounted inside the container. This allows you to make changes to the code outside the container and see them reflected inside.
 
 ```shell
 # Start the development container
 docker compose up --build -d
+
+# or depending on your docker version
+docker-compose up --build -d
 
 # Attach to the running container
 docker attach iris-dev
@@ -94,11 +132,11 @@ docker attach iris-dev
 cd iris && pip install -e .
 ```
 
-For manual Docker or Apptainer setup, see [setup alternatives](docs/SETUP_ALTERNATIVES.md).
+For baremetal install, Docker or Apptainer setup, see [Installation](https://rocm.github.io/iris/getting-started/installation.html).
 
 ## Next Steps
 
-Check out our [examples](examples/) directory for ready-to-run scripts and usage patterns, including peer-to-peer communication and GEMM benchmarks. 
+Check out our [examples](examples/) directory for ready-to-run scripts and usage patterns, including peer-to-peer communication and GEMM benchmarks.
 
 ## Supported GPUs
 

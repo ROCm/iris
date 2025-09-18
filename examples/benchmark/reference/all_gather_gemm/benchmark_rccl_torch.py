@@ -4,6 +4,7 @@
 
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 import random
 import sys
 import os
@@ -33,24 +34,16 @@ def parse_args():
     parser.add_argument(
         "--output_file", type=str, default="rccl_torch_matmul_log.json", help="Base name for output files"
     )
-
-    parser.add_argument("-m", type=int, default=1024, help="Number of rows in matrix A (M)")
-    parser.add_argument("-n", type=int, default=3584, help="Total number of columns in matrix B (N)")
-    parser.add_argument("-k", type=int, default=8192, help="Common dimension between matrices A and B (K)")
-
-    parser.add_argument(
-        "--datatype", type=str, default="fp16", choices=["fp16", "bf16", "fp32"], help="Datatype of computation"
-    )
-
+    parser.add_argument("--num_ranks", type=int, default=8, help="Number of GPUs to run on.")
+    parser.add_argument("-m", type=int, default=1024)
+    parser.add_argument("-n", type=int, default=3584)
+    parser.add_argument("-k", type=int, default=8192)
+    parser.add_argument("--datatype", type=str, default="fp16", choices=["fp16", "bf16", "fp32"])
     return parser.parse_args()
 
 
-def main():
-    default_args = parse_args()
-
-    dist.init_process_group(backend="nccl")
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
+def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
+    dist.init_process_group(backend="nccl", init_method=init_url, world_size=world_size, rank=rank)
     torch.cuda.set_device(rank)
 
     output_dir = "results/rccl_torch_matmul"
@@ -58,14 +51,14 @@ def main():
         os.makedirs(output_dir, exist_ok=True)
     dist.barrier()
 
-    with open(default_args.config_file, "r") as f:
+    with open(args.config_file, "r") as f:
         configs_to_run = json.load(f)
 
     if rank == 0:
-        print(f"Loaded {len(configs_to_run)} configurations from {default_args.config_file}")
+        print(f"Loaded {len(configs_to_run)} configurations from {args.config_file}")
 
     for config in configs_to_run:
-        run_args = vars(default_args).copy()
+        run_args = vars(args).copy()
         run_args.update(config)
 
         dtype_map = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
@@ -76,7 +69,7 @@ def main():
             print(f"\n--- Running Benchmark for M={M}, N={N}, K={K} ---")
             sys.stdout.flush()
 
-        base_name, extension = os.path.splitext(default_args.output_file)
+        base_name, extension = os.path.splitext(args.output_file)
         unique_filename = f"{base_name}_m_{M}{extension}"
         full_output_path = os.path.join(output_dir, unique_filename)
 
@@ -91,9 +84,7 @@ def main():
             A_global = torch.randn((M, K), dtype=datatype, device="cuda")
         else:
             A_global = torch.empty((M, K), dtype=datatype, device="cuda")
-
         dist.broadcast(A_global, src=0)
-        dist.barrier()
 
         A_local = A_global[:, rank * K_local : (rank + 1) * K_local].contiguous()
 
@@ -101,16 +92,12 @@ def main():
             B = torch.randn((K, N), device="cuda", dtype=datatype)
         else:
             B = torch.empty((K, N), device="cuda", dtype=datatype)
-
         dist.broadcast(B, src=0)
-        dist.barrier()
 
         C = torch.empty((M, N), device="cuda", dtype=datatype)
-
         all_a_shards = [torch.empty_like(A_local) for _ in range(world_size)]
 
         main_stream = torch.cuda.Stream()
-
         kernel_timing = {
             "rccl_all_gather": {
                 "start_event": torch.cuda.Event(enable_timing=True),
@@ -126,10 +113,8 @@ def main():
             },
         }
 
-        A_gathered = torch.empty((M, K), dtype=datatype, device="cuda")
-
         def run_experiment():
-            nonlocal kernel_timing, A_gathered
+            nonlocal kernel_timing
             with torch.cuda.stream(main_stream):
                 kernel_timing["rccl_all_gather"]["start_event"].record()
                 dist.all_gather(all_a_shards, A_local)
@@ -150,17 +135,16 @@ def main():
             )
             kernel_timing["torch_matmul"]["experiments"] += 1
 
-        run_experiment()  # Warmup
+        run_experiment()
         dist.barrier()
 
         for key in kernel_timing:
             kernel_timing[key]["ms"] = 0
             kernel_timing[key]["experiments"] = 0
 
-        if default_args.benchmark:
+        if args.benchmark:
             total_ms = iris.do_bench(run_experiment, barrier_fn=dist.barrier)
             tflops = 2 * M * N * K * 1e-12 / (total_ms * 1e-3)
-
             if rank == 0:
                 print(f"Result (iris.do_bench): {total_ms:.3f} ms, {tflops:.3f} TFLOPS")
                 json_writer.add_field("total_ms", total_ms)
@@ -173,8 +157,8 @@ def main():
                     if rank == 0:
                         print(f"Result (CUDA Events) - {key}: {avg_kernel_ms:.3f} ms")
 
-        if default_args.validate:
-            if not default_args.benchmark:
+        if args.validate:
+            if not args.benchmark:
                 run_experiment()
                 dist.barrier()
 
@@ -183,9 +167,7 @@ def main():
 
             C_ref = torch.matmul(A_global, B)
             success = torch.allclose(C, C_ref, atol=1.0, rtol=0.05)
-
             passed_str = "passed" if success else "failed"
-
             print(f"Final C validation for rank {rank} is {passed_str}.")
             json_writer.add_field("validation_passed", success)
 
@@ -196,8 +178,20 @@ def main():
 
     if rank == 0:
         print("\nBenchmark sweep complete.")
+
     dist.barrier()
     dist.destroy_process_group()
+
+
+def main():
+    args = parse_args()
+    if not args.validate and not args.benchmark:
+        print("Error: You must specify a mode to run. Use -v or -b.", file=sys.stderr)
+        sys.exit(1)
+
+    num_ranks = args.num_ranks
+    init_url = "tcp://127.0.0.1:29505"
+    mp.spawn(fn=worker, args=(num_ranks, init_url, args), nprocs=num_ranks, join=True)
 
 
 if __name__ == "__main__":

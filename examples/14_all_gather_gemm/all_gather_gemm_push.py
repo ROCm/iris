@@ -65,7 +65,7 @@ def push_shards_kernel(
 
 
 @triton.jit
-def wait_and_compute_gemm_kernel(
+def gemm_push_kernel(
     A_inbox,
     B,
     C,

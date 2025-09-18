@@ -12,8 +12,8 @@ ENV TRITON_PATH=/opt/triton \
     OMPI_MCA_mtl="^ofi" \
     OMPI_MCA_pml="ob1"
 
-ENV LD_LIBRARY_PATH=$ROCM_PATH/lib:/usr/lib/openmpi/lib:$LD_LIBRARY_PATH \
-    PATH="$ROCM_PATH/bin:/usr/lib/openmpi/bin:$PATH"
+ENV LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH \
+    PATH="$ROCM_PATH/bin:$PATH"
 
 ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
     OMPI_ALLOW_RUN_AS_ROOT=1
@@ -21,18 +21,12 @@ ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
 # Install system packages
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    git wget ninja-build cmake python3-pip python3-dev build-essential \
-    openmpi-bin libopenmpi-dev && \
+    git wget ninja-build cmake python3-pip python3-dev build-essential && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Python packages with pip
 RUN pip3 install --upgrade pip && \
     pip3 install wheel jupyter
-
-# This needs sudo, I can only get it to install with sudo
-# or using conda, but conda runs into issues with too many requests.
-#  https://stackoverflow.com/a/54052470/5729690
-RUN sudo pip3 install mpi4py
 
 # Clone and install Triton
 WORKDIR $TRITON_PATH

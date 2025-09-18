@@ -10,7 +10,7 @@ From: rocm/pytorch:rocm6.3.1_ubuntu22.04_py3.10_pytorch
     export TRITON_PATH=/workspace/triton
     conda env list
     source /opt/conda/bin/activate py_3.10
-    conda install -y -n py_3.10 -c conda-forge mpi4py openmpi jupyter ninja cmake wheel
+    conda install -y -n py_3.10 -c conda-forge jupyter ninja cmake wheel
     git clone https://github.com/triton-lang/triton.git \$TRITON_PATH
     cd \$TRITON_PATH
     git checkout dd5823453bcc7973eabadb65f9d827c43281c434
@@ -23,9 +23,9 @@ From: rocm/pytorch:rocm6.3.1_ubuntu22.04_py3.10_pytorch
     # Define environment variables
     export TRITON_PATH=/workspace/triton
     export PYTHONPATH=$TRITON_PATH/python/
-    export LD_LIBRARY_PATH=/opt/rocm/lib:/usr/lib/openmpi/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
     export ROCM_PATH=/opt/rocm
-    export PATH=/opt/conda/envs/py_3.10/bin:/opt/rocm/bin:/usr/lib/openmpi/bin:$PATH
+    export PATH=/opt/conda/envs/py_3.10/bin:/opt/rocm/bin:$PATH
     export OMPI_MCA_mtl="^ofi"
     export OMPI_MCA_pml="ob1"
 

@@ -3,6 +3,8 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import triton
 import random
 import sys
@@ -15,11 +17,10 @@ from examples.common.validation import validate_gemm
 import importlib
 import iris
 
-# Import the new pipelined push-based kernels
-module_path = "examples.14_all_gather_gemm.all_gather_gemm_push_tile"  # Assuming new module name
+module_path = "examples.14_all_gather_gemm.all_gather_gemm_push"
 ag_gemm_kernels_module = importlib.import_module(module_path)
 push_shards_kernel = ag_gemm_kernels_module.push_shards_kernel
-wait_and_compute_gemm_kernel = ag_gemm_kernels_module.wait_and_compute_gemm_kernel
+gemm_push_kernel = ag_gemm_kernels_module.gemm_push_kernel
 
 
 torch.manual_seed(123)
@@ -28,7 +29,7 @@ random.seed(123)
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run a sweep of Iris Pipelined Push All-Gather GEMM benchmarks from a config file.",
+        description="Run a sweep of Iris Push All-Gather GEMM benchmarks from a config file.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode.")
@@ -39,9 +40,7 @@ def parse_args():
         default="dataset/ag_gemm.json",
         help="Path to the JSON file with benchmark configurations.",
     )
-    parser.add_argument(
-        "--output_file", type=str, default="ag_gemm_pipelined_push_log.json", help="Base name for output files"
-    )
+    parser.add_argument("--output_file", type=str, default="ag_gemm_push.json", help="Base name for output files")
 
     parser.add_argument("-m", type=int, default=1024, help="Number of rows in matrix A (M)")
     parser.add_argument("-n", type=int, default=3584, help="Total number of columns in matrix B (N)")
@@ -57,38 +56,44 @@ def parse_args():
     parser.add_argument("--gsize_m", type=int, default=6, help="Group size in M dimension")
     parser.add_argument("--num_sms", type=int, default=304, help="Number of SMs for the kernel")
 
+    parser.add_argument("--num_ranks", type=int, default=8, help="Number of GPUs to run the example on.")
+
     return parser.parse_args()
 
 
-def main():
-    default_args = parse_args()
+def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
+    """
+    This function will be executed by each spawned process.
+    """
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=rank)
 
-    shmem = iris.iris(default_args.heap_size)
-    rank = shmem.get_rank()
+    shmem = iris.iris(args.heap_size)
+    torch.cuda.set_device(rank)
     world_size = shmem.get_num_ranks()
     torch.cuda.set_device(rank)
 
-    output_dir = "results/ag_gemm_push_tile"
+    output_dir = "results/ag_gemm_push"
     if rank == 0:
         os.makedirs(output_dir, exist_ok=True)
     shmem.barrier()
 
-    with open(default_args.config_file, "r") as f:
+    with open(args.config_file, "r") as f:
         configs_to_run = json.load(f)
 
-    shmem.log(f"Loaded {len(configs_to_run)} configurations from {default_args.config_file}")
+    print(f"Loaded {len(configs_to_run)} configurations from {args.config_file}")
 
     for config in configs_to_run:
-        run_args = vars(default_args).copy()
+        run_args = vars(args).copy()
         run_args.update(config)
 
         dtype_map = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
         datatype = dtype_map.get(run_args["datatype"])
 
         M, N, K = run_args["m"], run_args["n"], run_args["k"]
-        shmem.log(f"\n--- Running Benchmark for M={M}, N={N}, K={K} ---")
+        print(f"\n--- Running Benchmark for M={M}, N={N}, K={K} ---")
 
-        base_name, extension = os.path.splitext(default_args.output_file)
+        base_name, extension = os.path.splitext(args.output_file)
         unique_filename = f"{base_name}_m_{M}{extension}"
         full_output_path = os.path.join(output_dir, unique_filename)
 
@@ -139,7 +144,7 @@ def main():
                 "ms": 0,
                 "experiments": 0,
             },
-            "wait_and_compute_kernel": {
+            "compute_kernel": {
                 "start_event": torch.cuda.Event(enable_timing=True),
                 "end_event": torch.cuda.Event(enable_timing=True),
                 "ms": 0,
@@ -179,8 +184,8 @@ def main():
                 )
                 kernel_timing["push_kernel"]["end_event"].record()
 
-                kernel_timing["wait_and_compute_kernel"]["start_event"].record()
-                wait_and_compute_gemm_kernel[(num_sms,)](
+                kernel_timing["compute_kernel"]["start_event"].record()
+                gemm_push_kernel[(num_sms,)](
                     A_inbox_iris,
                     B,
                     C,
@@ -209,17 +214,17 @@ def main():
                     rank,
                     world_size,
                 )
-                kernel_timing["wait_and_compute_kernel"]["end_event"].record()
+                kernel_timing["compute_kernel"]["end_event"].record()
 
             torch.cuda.synchronize()
             kernel_timing["push_kernel"]["ms"] += kernel_timing["push_kernel"]["start_event"].elapsed_time(
                 kernel_timing["push_kernel"]["end_event"]
             )
             kernel_timing["push_kernel"]["experiments"] += 1
-            kernel_timing["wait_and_compute_kernel"]["ms"] += kernel_timing["wait_and_compute_kernel"][
-                "start_event"
-            ].elapsed_time(kernel_timing["wait_and_compute_kernel"]["end_event"])
-            kernel_timing["wait_and_compute_kernel"]["experiments"] += 1
+            kernel_timing["compute_kernel"]["ms"] += kernel_timing["compute_kernel"]["start_event"].elapsed_time(
+                kernel_timing["compute_kernel"]["end_event"]
+            )
+            kernel_timing["compute_kernel"]["experiments"] += 1
 
         run_experiment()
         shmem.barrier()
@@ -228,11 +233,11 @@ def main():
             kernel_timing[key]["ms"] = 0
             kernel_timing[key]["experiments"] = 0
 
-        if default_args.benchmark:
+        if args.benchmark:
             triton_ms = iris.do_bench(run_experiment, barrier_fn=shmem.barrier)
             tflops = 2 * M * N * K * 1e-12 / (triton_ms * 1e-3)
 
-            shmem.log_stats(f"Result (iris.do_bench): {triton_ms:.3f} ms, {tflops:.3f} TFLOPS")
+            print(f"Result (iris.do_bench): {triton_ms:.3f} ms, {tflops:.3f} TFLOPS")
             json_writer.add_field("total_ms", triton_ms)
             json_writer.add_field("tflops", tflops)
 
@@ -240,29 +245,43 @@ def main():
                 if kernel_timing[key]["experiments"] > 0:
                     avg_kernel_ms = kernel_timing[key]["ms"] / kernel_timing[key]["experiments"]
                     json_writer.add_field(key + "_ms", avg_kernel_ms)
-                    shmem.log_stats(f"Result (CUDA Events) - {key}: {avg_kernel_ms:.3f} ms")
+                    print(f"Result (CUDA Events) - {key}: {avg_kernel_ms:.3f} ms")
 
-        if default_args.validate:
-            if not default_args.benchmark:
+        if args.validate:
+            if not args.benchmark:
                 run_experiment()
                 shmem.barrier()
-
-            zero_count = torch.sum(A_global_broadcasted == 0).item()
-            shmem.log(f"Number of zeros {rank} in A_global: {zero_count}")
-            shmem.log("Validating...")
 
             success = validate_gemm(A_global_broadcasted, B, C, shmem, atol=1.0)
 
             passed_str = "passed" if success else "failed"
-            shmem.log(f"Final C validation {passed_str}.")
+            print(f"Final C validation {passed_str}.")
             json_writer.add_field("validation_passed", success)
 
         if rank == 0:
             json_writer.flush()
-            shmem.log(f"Saved results to {full_output_path}")
+            print(f"Saved results to {full_output_path}")
 
-    shmem.log("\nBenchmark sweep complete.")
+    print("\nBenchmark sweep complete.")
+
     shmem.barrier()
+    dist.destroy_process_group()
+
+
+def main():
+    args = parse_args()
+    if not args.validate and not args.benchmark:
+        print("Error: You must specify a mode to run.")
+        print("Please use -v for validation or -b for benchmarking.")
+        sys.exit(1)
+    num_ranks = args.num_ranks
+    init_url = "tcp://127.0.0.1:29501"
+    mp.spawn(
+        fn=worker,
+        args=(num_ranks, init_url, args),
+        nprocs=num_ranks,
+        join=True,
+    )
 
 
 if __name__ == "__main__":
