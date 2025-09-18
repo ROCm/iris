@@ -59,88 +59,9 @@ jobs:
             echo 'Installing iris from current repository...'
             pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
 
-            # Create test script
-            cat > test_iris_distributed.py << 'EOF'
-            import torch
-            import torch.distributed as dist
-            import torch.multiprocessing as mp
-            import triton
-            import triton.language as tl
-            import iris
-            
-            # Device-side APIs
-            @triton.jit
-            def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bases_ptr):
-                # Compute start index of this block
-                pid = tl.program_id(0)
-                block_start = pid * block_size
-                offsets = block_start + tl.arange(0, block_size)
-            
-                # Guard for out-of-bounds accesses
-                mask = offsets < buffer_size
-            
-                # Store 1 in the target buffer at each offset
-                source_rank = 0
-                target_rank = 1
-                iris.store(buffer + offsets, 1, source_rank, target_rank, heap_bases_ptr, mask=mask)
-            
-            def _worker(rank, world_size):
-                # Torch distributed initialization
-                device_id = rank % torch.cuda.device_count()
-                dist.init_process_group(
-                    backend=\"nccl\",
-                    rank=rank,
-                    world_size=world_size,
-                    init_method=\"tcp://127.0.0.1:29500\",
-                    device_id=torch.device(f\"cuda:{device_id}\"),
-                )
-            
-                # Iris initialization
-                heap_size = 2**30  # 1GiB symmetric heap for inter-GPU communication
-                iris_ctx = iris.iris(heap_size)
-                cur_rank = iris_ctx.get_rank()
-            
-                # Iris tensor allocation
-                buffer_size = 4096  # 4K elements buffer
-                buffer = iris_ctx.zeros(buffer_size, device=\"cuda\", dtype=torch.float32)
-            
-                # Launch the kernel on rank 0
-                block_size = 1024
-                grid = lambda meta: (triton.cdiv(buffer_size, meta[\"block_size\"]),)
-                source_rank = 0
-                if cur_rank == source_rank:
-                    kernel[grid](
-                        buffer,
-                        buffer_size,
-                        block_size,
-                        iris_ctx.get_heap_bases(),
-                    )
-            
-                # Synchronize all ranks
-                iris_ctx.barrier()
-                
-                # Validation: Check that the data was correctly stored
-                if cur_rank == target_rank:
-                    # Convert iris tensor to torch tensor for validation
-                    buffer_torch = buffer.to_torch()
-                    expected_values = torch.ones(buffer_size, device=f\"cuda:{device_id}\", dtype=torch.float32)
-                    
-                    # Check if all values are 1 (as expected from the store operation)
-                    if torch.allclose(buffer_torch, expected_values, atol=1e-6):
-                        print(f\"✓ Rank {cur_rank}: Validation passed - all values are 1\")
-                    else:
-                        print(f\"✗ Rank {cur_rank}: Validation failed - values don't match expected\")
-                        print(f\"  Expected: all 1s, Got: {buffer_torch[:10]}... (showing first 10 values)\")
-                        raise AssertionError(f\"Validation failed on rank {cur_rank}\")
-                else:
-                    print(f\"✓ Rank {cur_rank}: Skipping validation (not target rank)\")
-                
-                dist.destroy_process_group()
-            
-            if __name__ == \"__main__\":
-                world_size = 2  # Using two ranks
-                mp.spawn(_worker, args=(world_size,), nprocs=world_size, join=True)
-            EOF
+            # Download test script from gist
+            echo 'Downloading test script from gist...'
+            wget -O test_iris_distributed.py https://gist.githubusercontent.com/mawad-amd/6375dc078e39e256828f379e03310ec7/raw/67d2364368dc09d020ee73e8c4ef900f7201a791/test_iris_distributed.py
 
             # Run the external validation test
             echo 'Running iris external validation test...'
