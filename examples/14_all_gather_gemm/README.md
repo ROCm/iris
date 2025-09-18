@@ -1,12 +1,8 @@
-Of course. Here is the updated README with the new "Simple Example Run" section and the corrected file paths.
-
------
-
 # Fused All-Gather + GEMM
 
-This project provides an example of a distributed All-Gather + GEMM kernel, a fundamental building block in many large AI models. It explores two distinct architectural patterns for fusing communication and computation: a **Pull model** and a **Push model**.
+This folder provides an example of a distributed All-Gather + GEMM kernel,  It explores two distinct patterns for fusing communication and computation: a **Pull model** and a **Push model**.
 
-These novel implementations are designed to hide communication latency and reduce the overheads associated with standard, non-fused library calls. The core kernel implementations are located in `examples/14_all_gather_gemm/`.
+The core kernel implementations are located in `examples/14_all_gather_gemm/`.
 
 Comparisons are performed against a baseline using the RCCL All-Gather collective and `torch.matmul`.
 
@@ -57,13 +53,13 @@ To verify the numerical correctness of an implementation against a PyTorch refer
 **Pull Model:**
 
 ```terminal
-python benchmark/examples/benchmark_all_gather_gemm_pull.py --num_ranks 8 --validate
+python benchmark/examples/benchmark_all_gather_gemm_pull.py --num_ranks 8 -v
 ```
 
 **Push Model:**
 
 ```terminal
-python benchmark/examples/benchmark_all_gather_gemm_push.py --num_ranks 8 --validate
+python benchmark/examples/benchmark_all_gather_gemm_push.py --num_ranks 8 -v
 ```
 
 #### Benchmarking (-b)
@@ -73,11 +69,19 @@ To run the full performance benchmark sweep and save the results as `.json` file
 **Pull Model:**
 
 ```terminal
-python benchmark/examples/benchmark_all_gather_gemm_pull.py --num_ranks 8 --benchmark
+python benchmark/examples/benchmark_all_gather_gemm_pull.py --num_ranks 8 -b
 ```
 
 **Push Model:**
 
 ```terminal
-python benchmark/examples/benchmark_all_gather_gemm_push.py --num_ranks 8 --benchmark
+python benchmark/examples/benchmark_all_gather_gemm_push.py --num_ranks 8 -b
+```
+
+#### RCCL + Torch
+
+To validate and benchmark the RCCL + `torch.matmul` implementation, follow the same steps as the pull/push versions.
+
+```terminal
+python examples/benchmark/reference/all_gather_gemm/benchmark_rccl_torch.py --num_ranks 8 -b
 ```
