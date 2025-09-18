@@ -12,7 +12,12 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  external-validation-test:
+    uses: ./.github/workflows/iris-external-validation-test.yml
+    secrets: inherit
+
   build-apptainer-image:
+    needs: external-validation-test
     runs-on: [self-hosted, mi3008x]
     timeout-minutes: 90
 
@@ -41,7 +46,7 @@ jobs:
 
   pip-install-test:
     name: ${{ matrix.ranks }}-rank Pip Install Test
-    needs: build-apptainer-image
+    needs: [external-validation-test, build-apptainer-image]
     runs-on: [self-hosted, mi3008x]
     timeout-minutes: 30
     strategy:
