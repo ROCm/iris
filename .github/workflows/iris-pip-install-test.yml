@@ -67,7 +67,8 @@ jobs:
             # Uninstall any existing Iris installations
             echo 'Uninstalling any existing Iris packages...'
             pip uninstall -y Iris iris || echo 'No existing Iris packages found or uninstall failed'
-
+            rm -rf build dist *.egg-info
+            
             # Install iris from the current repository
             pip install --force-reinstall --no-deps git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
 

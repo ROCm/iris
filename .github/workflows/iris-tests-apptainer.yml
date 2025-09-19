@@ -59,7 +59,8 @@ jobs:
 
             # Uninstall any existing Iris installations
             pip uninstall -y Iris iris
-
+            rm -rf build dist *.egg-info
+        
             # Install iris first
             pip install -e . --force-reinstall --no-deps
 
