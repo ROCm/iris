@@ -14,14 +14,19 @@ import json
 
 from examples.common.utils import JSONWriter
 from examples.common.validation import validate_gemm
-import importlib
+import importlib.util
+from pathlib import Path
 import iris
 
-module_path = "examples.14_all_gather_gemm.all_gather_gemm_push"
-ag_gemm_kernels_module = importlib.import_module(module_path)
-push_shards_kernel = ag_gemm_kernels_module.push_shards_kernel
-gemm_push_kernel = ag_gemm_kernels_module.gemm_push_kernel
+current_dir = Path(__file__).parent
+file_path = (current_dir / "../../examples/14_all_gather_gemm/all_gather_gemm_push.py").resolve()
+module_name = "all_gather_gemm_push"
 
+spec = importlib.util.spec_from_file_location(module_name, file_path)
+ag_gemm_kernels_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ag_gemm_kernels_module)
+gemm_push_kernel = ag_gemm_kernels_module.gemm_push_kernel
+push_shards_kernel = ag_gemm_kernels_module.push_shards_kernel
 
 torch.manual_seed(123)
 random.seed(123)
@@ -41,6 +46,7 @@ def parse_args():
         help="Path to the JSON file with benchmark configurations.",
     )
     parser.add_argument("--output_file", type=str, default="ag_gemm_push.json", help="Base name for output files")
+    parser.add_argument("--output_dir", type=str, default="results/all_gather_gemm_push", help="Name of the output directory")
 
     parser.add_argument("-m", type=int, default=1024, help="Number of rows in matrix A (M)")
     parser.add_argument("-n", type=int, default=3584, help="Total number of columns in matrix B (N)")
@@ -73,7 +79,7 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
     world_size = shmem.get_num_ranks()
     torch.cuda.set_device(rank)
 
-    output_dir = "results/ag_gemm_push"
+    output_dir = args.output_dir
     if rank == 0:
         os.makedirs(output_dir, exist_ok=True)
     shmem.barrier()
@@ -91,7 +97,7 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
         datatype = dtype_map.get(run_args["datatype"])
 
         M, N, K = run_args["m"], run_args["n"], run_args["k"]
-        print(f"\n--- Running Benchmark for M={M}, N={N}, K={K} ---")
+        shmem.info(f"\n--- Running Benchmark for M={M}, N={N}, K={K} ---")
 
         base_name, extension = os.path.splitext(args.output_file)
         unique_filename = f"{base_name}_m_{M}{extension}"
@@ -209,7 +215,7 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
                     run_args["BLK_K"],
                     run_args["gsize_m"],
                     num_sms,
-                    1,
+                    1, # NUM_XCDs
                     (K_local % run_args["BLK_K"] == 0),
                     rank,
                     world_size,
@@ -237,7 +243,7 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
             triton_ms = iris.do_bench(run_experiment, barrier_fn=shmem.barrier)
             tflops = 2 * M * N * K * 1e-12 / (triton_ms * 1e-3)
 
-            print(f"Result (iris.do_bench): {triton_ms:.3f} ms, {tflops:.3f} TFLOPS")
+            shmem.info(f"Result (iris.do_bench): {triton_ms:.3f} ms, {tflops:.3f} TFLOPS")
             json_writer.add_field("total_ms", triton_ms)
             json_writer.add_field("tflops", tflops)
 
@@ -245,7 +251,7 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
                 if kernel_timing[key]["experiments"] > 0:
                     avg_kernel_ms = kernel_timing[key]["ms"] / kernel_timing[key]["experiments"]
                     json_writer.add_field(key + "_ms", avg_kernel_ms)
-                    print(f"Result (CUDA Events) - {key}: {avg_kernel_ms:.3f} ms")
+                    shmem.info(f"Result (CUDA Events) - {key}: {avg_kernel_ms:.3f} ms")
 
         if args.validate:
             if not args.benchmark:
@@ -255,14 +261,14 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
             success = validate_gemm(A_global_broadcasted, B, C, shmem, atol=1.0)
 
             passed_str = "passed" if success else "failed"
-            print(f"Final C validation {passed_str}.")
+            shmem.info(f"Final C validation {passed_str}.")
             json_writer.add_field("validation_passed", success)
 
         if rank == 0:
             json_writer.flush()
-            print(f"Saved results to {full_output_path}")
+            shmem.info(f"Saved results to {full_output_path}")
 
-    print("\nBenchmark sweep complete.")
+    shmem.info("\nBenchmark sweep complete.")
 
     shmem.barrier()
     dist.destroy_process_group()
