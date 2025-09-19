@@ -1,0 +1,12 @@
+{
+  "output_dir": "results/flash_decode_iris",
+  "data_type": "float16",
+  "warmup_iterations": 100,
+  "repeat_iterations": 1000,
+  "sweep_parameters": {
+    "kv_len": [8192, 16384, 32768, 65536, 131072, 262144, 524288],
+    "num_heads": [96],
+    "head_dim": [128],
+    "num_seqs": [1, 4, 8, 16]
+  }
+}

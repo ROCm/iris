@@ -30,6 +30,7 @@ from iris._distributed_helpers import (
     distributed_allgather,
     distributed_barrier,
     distributed_broadcast_scalar,
+    distributed_broadcast_tensor,
 )
 from iris.hip import (
     set_device,
@@ -200,6 +201,9 @@ class Iris:
             >>> value = ctx.broadcast(value, source_rank=0)  # All ranks get 42
         """
         return distributed_broadcast_scalar(value, source_rank)
+
+    def broadcast_tensor(self, value, source_rank=0):
+        return distributed_broadcast_tensor(value, root=source_rank)
 
     def __allocate(self, num_elements, dtype):
         self.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")

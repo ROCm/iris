@@ -73,6 +73,28 @@ def distributed_allgather(data):
     return np.stack(obj_list, axis=0)
 
 
+def distributed_allgather_multidim(data):
+    """
+    All-gather operation for multi-dimensional tensors using PyTorch distributed.
+    """
+    if not dist.is_initialized():
+        raise RuntimeError("PyTorch distributed is not initialized")
+
+    world_size = dist.get_world_size()
+    device = _infer_device()
+
+    input_tensor = torch.as_tensor(data).to(device)
+
+    tensor_list = [torch.empty_like(input_tensor) for _ in range(world_size)]
+
+    dist.all_gather(tensor_list, input_tensor)
+
+    stacked_tensor = torch.stack(tensor_list, dim=0)
+    reshaped_tensor = stacked_tensor.view(world_size, -1)
+
+    return reshaped_tensor.cpu().numpy()
+
+
 def distributed_broadcast_scalar(value=None, root=0):
     """
     Broadcast a scalar value from root to all ranks.
@@ -121,6 +143,54 @@ def distributed_broadcast_scalar(value=None, root=0):
     val_t = torch.from_numpy(np_val).to(device)
     dist.broadcast(val_t, src=root)
     return val_t.to("cpu").item()
+
+
+def distributed_broadcast_tensor(value_to_broadcast=None, root=0):
+    """
+    Broadcast a tensor/array from root to all ranks.
+
+    Args:
+        value_to_broadcast: Tensor or array to broadcast (only used on root rank)
+        root: Root rank to broadcast from
+
+    Returns:
+        Broadcasted numpy array
+    """
+    if not dist.is_initialized():
+        raise RuntimeError("PyTorch distributed is not initialized")
+
+    rank = dist.get_rank()
+    device = _infer_device()
+    backend = str(dist.get_backend()).lower()
+
+    if rank == root:
+        if value_to_broadcast is None:
+            raise ValueError("Root must provide a value to broadcast.")
+        tensor = torch.as_tensor(value_to_broadcast)
+        metadata = [tensor.shape, tensor.dtype]
+    else:
+        metadata = [None, None]
+        tensor = None
+
+    dist.broadcast_object_list(metadata, src=root)
+    shape, dtype = metadata
+
+    if rank != root:
+        tensor = torch.empty(shape, dtype=dtype)
+
+    use_tensor_collective = backend != "nccl" or _nccl_dtype_supported(tensor)
+
+    if use_tensor_collective:
+        tensor = tensor.to(device)
+        dist.broadcast(tensor, src=root)
+        return tensor.to("cpu").numpy()
+    else:
+        if rank == root:
+            obj = [np.asarray(value_to_broadcast)]
+        else:
+            obj = [None]
+        dist.broadcast_object_list(obj, src=root)
+        return obj[0]
 
 
 def distributed_barrier():
