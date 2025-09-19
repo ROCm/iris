@@ -57,6 +57,9 @@ jobs:
           apptainer exec ~/apptainer/iris-dev.sif bash -c "
             set -e  # Exit on any error
 
+            # Uninstall any existing Iris installations
+            pip uninstall -y Iris iris
+
             # Install iris first
             pip install -e .
 
