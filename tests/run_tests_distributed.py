@@ -59,9 +59,7 @@ def _distributed_worker(rank, world_size, test_file, pytest_args):
 
 def main():
     if len(sys.argv) < 2:
-        print(
-            "Usage: python run_tests_distributed.py [--num_ranks N] [pytest_args...] <test_file>"
-        )
+        print("Usage: python run_tests_distributed.py [--num_ranks N] [pytest_args...] <test_file>")
         sys.exit(1)
 
     # Get number of ranks from args or default to 2
