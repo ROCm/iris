@@ -46,7 +46,9 @@ def parse_args():
         help="Path to the JSON file with benchmark configurations.",
     )
     parser.add_argument("--output_file", type=str, default="ag_gemm_pull.json", help="Base name for output files")
-    parser.add_argument("--output_dir", type=str, default="results/all_gather_gemm_pull", help="Name of the output directory")
+    parser.add_argument(
+        "--output_dir", type=str, default="results/all_gather_gemm_pull", help="Name of the output directory"
+    )
 
     parser.add_argument("-m", type=int, default=1024, help="Number of rows in matrix A (M)")
     parser.add_argument("-n", type=int, default=3584, help="Total number of columns in matrix B (N)")
@@ -170,7 +172,7 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
                     run_args["BLK_K"],
                     run_args["gsize_m"],
                     run_args["num_sms"],
-                    1, #NUM_XCDs
+                    1,  # NUM_XCDs
                     (K % run_args["BLK_K"] == 0),
                     shmem.get_heap_bases(),
                     rank,

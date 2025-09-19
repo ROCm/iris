@@ -34,7 +34,9 @@ def parse_args():
     parser.add_argument(
         "--output_file", type=str, default="rccl_torch_matmul_log.json", help="Base name for output files"
     )
-    parser.add_argument("--output_dir", type=str, default="results/all_gather_gemmn_rccl", help="Name of the output directory")
+    parser.add_argument(
+        "--output_dir", type=str, default="results/all_gather_gemmn_rccl", help="Name of the output directory"
+    )
     parser.add_argument("--num_ranks", type=int, default=8, help="Number of GPUs to run on.")
     parser.add_argument("-m", type=int, default=1024)
     parser.add_argument("-n", type=int, default=3584)
