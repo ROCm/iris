@@ -61,7 +61,7 @@ jobs:
             pip uninstall -y Iris iris
 
             # Install iris first
-            pip install -e . --force-reinstall
+            pip install -e . --force-reinstall --no-deps
 
             # Run examples tests one at a time using distributed wrapper
             echo 'Running examples tests one at a time...'

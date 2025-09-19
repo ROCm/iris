@@ -57,7 +57,7 @@ jobs:
 
             # Install iris from the current repository
             echo 'Installing iris from current repository...'
-            pip install --force-reinstall git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
+            pip install --force-reinstall --no-deps git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
 
             # Download test script from gist
             echo 'Downloading test script from gist...'

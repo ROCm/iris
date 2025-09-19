@@ -69,7 +69,7 @@ jobs:
             pip uninstall -y Iris iris || echo 'No existing Iris packages found or uninstall failed'
 
             # Install iris from the current repository
-            pip install --force-reinstall git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
+            pip install --force-reinstall --no-deps git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
 
             # Run examples tests one at a time using distributed wrapper
             echo 'Running examples tests one at a time...'
