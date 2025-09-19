@@ -61,7 +61,7 @@ jobs:
 
             # Download test script from gist
             echo 'Downloading test script from gist...'
-            wget -O test_iris_distributed.py https://gist.githubusercontent.com/mawad-amd/6375dc078e39e256828f379e03310ec7/raw/c7fbe961a05cf884111761169a14e2532710c34c/test_iris_distributed.py
+            wget -O test_iris_distributed.py https://gist.githubusercontent.com/mawad-amd/6375dc078e39e256828f379e03310ec7/raw/a527c3192bee4615292769e340b1c73676f6945a/test_iris_distributed.py
 
             # Run the external validation test
             echo 'Running iris external validation test...'
