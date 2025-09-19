@@ -68,7 +68,7 @@ def test_store_api(dtype, BLOCK_SIZE):
     shmem.barrier()
 
     # Verify the result
-    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda")
+    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * 2
 
     try:
         torch.testing.assert_close(results, expected, rtol=0, atol=0)
