@@ -202,88 +202,91 @@ def persistent_gemm_reduce_scatter(
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         c_mask = (rm[:, None] < M) & (rn[None, :] < N)
-        C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        tl.store(C_, c, c_mask)
+        if world_size == 1:
+            C_ = c_local + rm[:, None] * stride_cm + rn[None, :] * stride_cn           
+            tl.store(C_, c, c_mask)
+        else:
+            C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+            tl.store(C_, c, c_mask)
+            for remote in range(world_size):
+                if remote != cur_rank:
+                    iris.atomic_add(
+                        tile_completed + tile_id,
+                        1,
+                        cur_rank,
+                        remote,
+                        heap_bases,
+                        sem="release",
+                        scope="sys",
+                    )
 
-        for remote in range(world_size):
-            if remote != cur_rank:
-                iris.atomic_add(
+            result = 0
+            while result < (world_size - 1):
+                compare = world_size - 1
+                value = 0
+                result = iris.atomic_cas(
                     tile_completed + tile_id,
-                    1,
+                    compare,
+                    value,
                     cur_rank,
-                    remote,
+                    cur_rank,
                     heap_bases,
-                    sem="release",
+                    sem="acquire",
                     scope="sys",
                 )
 
-        result = 0
-        while result < (world_size - 1):
-            compare = world_size - 1
-            value = 0
-            result = iris.atomic_cas(
-                tile_completed + tile_id,
-                compare,
-                value,
-                cur_rank,
-                cur_rank,
-                heap_bases,
-                sem="acquire",
-                scope="sys",
-            )
+            rm, rn, mask, rm_start, rn_start = offset_for_tile(tile_id, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M, M, N)
 
-        rm, rn, mask, rm_start, rn_start = offset_for_tile(tile_id, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M, M, N)
+            num_sub_tiles_m = tl.cdiv(BLOCK_SIZE_M, BLOCK_SIZE_M)
+            num_sub_tiles_n = tl.cdiv(BLOCK_SIZE_N, BLOCK_SIZE_N)
+            total_sub_tiles = num_sub_tiles_m * num_sub_tiles_n
 
-        num_sub_tiles_m = tl.cdiv(BLOCK_SIZE_M, BLOCK_SIZE_M)
-        num_sub_tiles_n = tl.cdiv(BLOCK_SIZE_N, BLOCK_SIZE_N)
-        total_sub_tiles = num_sub_tiles_m * num_sub_tiles_n
+            for sub_tile_idx in range(0, total_sub_tiles):
+                start_row_sub = (sub_tile_idx // num_sub_tiles_n) * BLOCK_SIZE_M
+                start_col_sub = (sub_tile_idx % num_sub_tiles_n) * BLOCK_SIZE_N
 
-        for sub_tile_idx in range(0, total_sub_tiles):
-            start_row_sub = (sub_tile_idx // num_sub_tiles_n) * BLOCK_SIZE_M
-            start_col_sub = (sub_tile_idx % num_sub_tiles_n) * BLOCK_SIZE_N
+                sub_mask, sub_offset = extract_submask_and_offset(
+                    rm,
+                    rn,
+                    mask,
+                    rm_start,
+                    rn_start,
+                    start_row_sub,
+                    start_col_sub,
+                    BLOCK_SIZE_M,
+                    BLOCK_SIZE_N,
+                    BLOCK_SIZE_M,
+                    BLOCK_SIZE_N,
+                    stride_cm,
+                    stride_cn,
+                )
 
-            sub_mask, sub_offset = extract_submask_and_offset(
-                rm,
-                rn,
-                mask,
-                rm_start,
-                rn_start,
-                start_row_sub,
-                start_col_sub,
-                BLOCK_SIZE_M,
-                BLOCK_SIZE_N,
-                BLOCK_SIZE_M,
-                BLOCK_SIZE_N,
-                stride_cm,
-                stride_cn,
-            )
+                global_row_start = rm_start + start_row_sub
 
-            global_row_start = rm_start + start_row_sub
-
-            if global_row_start < end_row and (global_row_start + BLOCK_SIZE_M) > start_row:
-                tile_start_row = max(0, start_row - global_row_start)
-                tile_end_row = min(BLOCK_SIZE_M, end_row - global_row_start)
-                local_start_row = max(global_row_start, start_row) - start_row
-                
-                acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-                for remote_rank in range(world_size):
-                    remote_data = iris.load(C + sub_offset, cur_rank, remote_rank, heap_bases, mask=sub_mask)
-                    acc += remote_data
-                
-                row_idx = tl.arange(0, BLOCK_SIZE_M)
-                col_idx = tl.arange(0, BLOCK_SIZE_N)
-                
-                local_offsets = (local_start_row + row_idx[:, None]) * stride_cm_local + \
-                            (rn_start + start_col_sub + col_idx[None, :]) * stride_cn_local
-                
-                local_ptr_block = c_local + local_offsets
-                
-                valid_mask = (row_idx[:, None] >= tile_start_row) & \
-                            (row_idx[:, None] < tile_end_row) & \
-                            (col_idx[None, :] < BLOCK_SIZE_N) & \
-                            sub_mask
-                
-                tl.store(local_ptr_block, acc, mask=valid_mask, cache_modifier=".wt")                # for remote_rank in range(world_size):
+                if global_row_start < end_row and (global_row_start + BLOCK_SIZE_M) > start_row:
+                    tile_start_row = max(0, start_row - global_row_start)
+                    tile_end_row = min(BLOCK_SIZE_M, end_row - global_row_start)
+                    local_start_row = max(global_row_start, start_row) - start_row
+                    
+                    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+                    for remote_rank in range(world_size):
+                        remote_data = iris.load(C + sub_offset, cur_rank, remote_rank, heap_bases, mask=sub_mask)
+                        acc += remote_data
+                    
+                    row_idx = tl.arange(0, BLOCK_SIZE_M)
+                    col_idx = tl.arange(0, BLOCK_SIZE_N)
+                    
+                    local_offsets = (local_start_row + row_idx[:, None]) * stride_cm_local + \
+                                (rn_start + start_col_sub + col_idx[None, :]) * stride_cn_local
+                    
+                    local_ptr_block = c_local + local_offsets
+                    
+                    valid_mask = (row_idx[:, None] >= tile_start_row) & \
+                                (row_idx[:, None] < tile_end_row) & \
+                                (col_idx[None, :] < BLOCK_SIZE_N) & \
+                                sub_mask
+                    
+                    tl.store(local_ptr_block, acc, mask=valid_mask, cache_modifier=".wt")
 
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
