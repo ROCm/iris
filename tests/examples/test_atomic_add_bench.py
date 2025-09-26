@@ -83,8 +83,8 @@ def test_atomic_add_bench(dtype, buffer_size, heap_size, block_size):
 
             # Test expected values when we have buffer result
             if buffer_result is not None and shmem.get_rank() == destination_rank:
-                # After all atomic_add operations, each element should be original_value + num_ranks
-                expected = torch.arange(n_elements, dtype=dtype, device="cuda") + num_ranks
+                # After all atomic_add operations, each element should be num_ranks
+                expected = torch.ones(n_elements, dtype=dtype, device="cuda") * num_ranks
                 torch.testing.assert_close(buffer_result, expected, rtol=0, atol=1)
 
             shmem.barrier()

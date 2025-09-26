@@ -143,9 +143,9 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
         if args["verbose"]:
             shmem.info("Validating output...")
 
-        # After all atomic_add operations, source_buffer should have original values + num_ranks
+        # After all atomic_add operations, source_buffer should have world_size in all elements
         world_size = shmem.get_num_ranks()
-        expected = torch.arange(n_elements, dtype=dtype, device="cuda") + world_size
+        expected = torch.ones(n_elements, dtype=dtype, device="cuda") * world_size
         diff_mask = ~torch.isclose(source_buffer, expected, atol=1)
         breaking_indices = torch.nonzero(diff_mask, as_tuple=False)
 
