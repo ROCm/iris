@@ -22,7 +22,6 @@ random.seed(123)
 @triton.jit
 def atomic_add_kernel(
     source_buffer,  # tl.tensor: pointer to source data
-    result_buffer,  # tl.tensor: pointer to result data
     buffer_size,  # int32: total number of elements
     source_rank: tl.constexpr,
     destination_rank: tl.constexpr,
@@ -74,7 +73,7 @@ def parse_args():
     parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-d", "--validate", action="store_true", help="Enable validation output")
-
+    parser.add_argument("-s", "--benchmark", action="store_true", help="Enable benchmark output")
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
 
@@ -85,7 +84,7 @@ def parse_args():
     return vars(parser.parse_args())
 
 
-def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, result_buffer):
+def run_experiment(shmem, args, source_rank, destination_rank, source_buffer):
     dtype = torch_dtype_from_str(args["datatype"])
     cur_rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
@@ -108,7 +107,6 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
         if cur_rank == source_rank:
             atomic_add_kernel[grid](
                 source_buffer,
-                result_buffer,
                 n_elements,
                 source_rank,
                 destination_rank,
@@ -116,11 +114,18 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
                 shmem.get_heap_bases(),
             )
 
+    def preamble():
+        source_buffer.fill_(0)
+
     # Warmup
     run_atomic_add()
     shmem.barrier()
     atomic_add_ms = iris.do_bench(
-        run_atomic_add, shmem.barrier, n_repeat=args["num_experiments"], n_warmup=args["num_warmup"]
+        run_atomic_add,
+        barrier_fn=shmem.barrier,
+        preamble_fn=preamble,
+        n_repeat=args["num_experiments"],
+        n_warmup=args["num_warmup"],
     )
 
     # Subtract overhead
@@ -167,11 +172,7 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
 
     shmem.barrier()
 
-    # Return both bandwidth and source_buffer state for testing
-    if args.get("return_result", False):
-        return bandwidth_gbps, source_buffer.clone() if cur_rank == destination_rank else None
-    else:
-        return bandwidth_gbps
+    return bandwidth_gbps, source_buffer.clone()
 
 
 def print_bandwidth_matrix(
@@ -225,11 +226,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     dtype = torch_dtype_from_str(args["datatype"])
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
     source_buffer = shmem.arange(args["buffer_size"] // element_size_bytes, device="cuda", dtype=dtype)
-    result_buffer = shmem.zeros_like(source_buffer)
 
     for source_rank in range(num_ranks):
         for destination_rank in range(num_ranks):
-            bandwidth_gbps = run_experiment(shmem, args, source_rank, destination_rank, source_buffer, result_buffer)
+            bandwidth_gbps, _ = run_experiment(shmem, args, source_rank, destination_rank, source_buffer)
             bandwidth_matrix[source_rank, destination_rank] = bandwidth_gbps
             shmem.barrier()
 
