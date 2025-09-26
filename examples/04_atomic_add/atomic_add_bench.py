@@ -42,6 +42,9 @@ def atomic_add_kernel(
         source_buffer + offsets, 1, source_rank, destination_rank, heap_bases_ptr, mask=mask, sem="relaxed", scope="sys"
     )
 
+    # Store data to result buffer
+    tl.store(result_buffer + offsets, result, mask=mask)
+
 
 def torch_dtype_from_str(datatype: str) -> torch.dtype:
     dtype_map = {
@@ -139,29 +142,56 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
     bandwidth_gbps = shmem.broadcast(bandwidth_gbps, source_rank)
 
     success = True
-    if args["validate"] and cur_rank == destination_rank:
-        if args["verbose"]:
-            shmem.info("Validating output...")
+    if args["validate"]:
+        shmem.barrier()
 
-        expected = torch.arange(n_elements, dtype=dtype, device="cuda")
-        diff_mask = ~torch.isclose(result_buffer, expected, atol=1)
-        breaking_indices = torch.nonzero(diff_mask, as_tuple=False)
+        # Reset buffers for validation
+        if cur_rank == destination_rank:
+            # Reset source buffer to arange pattern on destination rank
+            element_size_bytes = torch.tensor([], dtype=dtype).element_size()
+            source_buffer.copy_(torch.arange(n_elements, dtype=dtype, device="cuda"))
+            result_buffer.zero_()
 
-        if not torch.allclose(result_buffer, expected, atol=1):
-            max_diff = (result_buffer - expected).abs().max().item()
-            shmem.info(f"Max absolute difference: {max_diff}")
-            for idx in breaking_indices:
-                idx = tuple(idx.tolist())
-                computed_val = result_buffer[idx]
-                expected_val = expected[idx]
-                shmem.error(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
-                success = False
-                break
+        shmem.barrier()
 
-        if success and args["verbose"]:
-            shmem.info("Validation successful.")
-        if not success and args["verbose"]:
-            shmem.error("Validation failed.")
+        # Perform single atomic_add operation for validation
+        if cur_rank == source_rank:
+            atomic_add_kernel[grid](
+                source_buffer,
+                result_buffer,
+                n_elements,
+                source_rank,
+                destination_rank,
+                args["block_size"],
+                shmem.get_heap_bases(),
+            )
+
+        shmem.barrier()
+
+        # Validate on destination rank
+        if cur_rank == destination_rank:
+            if args["verbose"]:
+                shmem.info("Validating output...")
+
+            expected = torch.arange(n_elements, dtype=dtype, device="cuda")
+            diff_mask = ~torch.isclose(result_buffer, expected, atol=1)
+            breaking_indices = torch.nonzero(diff_mask, as_tuple=False)
+
+            if not torch.allclose(result_buffer, expected, atol=1):
+                max_diff = (result_buffer - expected).abs().max().item()
+                shmem.info(f"Max absolute difference: {max_diff}")
+                for idx in breaking_indices:
+                    idx = tuple(idx.tolist())
+                    computed_val = result_buffer[idx]
+                    expected_val = expected[idx]
+                    shmem.error(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
+                    success = False
+                    break
+
+            if success and args["verbose"]:
+                shmem.info("Validation successful.")
+            if not success and args["verbose"]:
+                shmem.error("Validation failed.")
 
     shmem.barrier()
     return bandwidth_gbps
