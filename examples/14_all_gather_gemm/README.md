@@ -1,6 +1,6 @@
 # Fused All-Gather + GEMM
 
-This folder provides an example of a distributed All-Gather + GEMM kernel,  It explores two distinct patterns for fusing communication and computation: a **Pull model** and a **Push model**.
+This folder provides an example of a distributed All-Gather + GEMM kernel. It explores two distinct patterns for fusing communication and computation: a **Pull model** and a **Push model**.
 
 The core kernel implementations are located in `examples/14_all_gather_gemm/`.
 
