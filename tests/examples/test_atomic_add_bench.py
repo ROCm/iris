@@ -49,12 +49,13 @@ def test_atomic_add_bench(dtype, buffer_size, heap_size, block_size):
 
     bandwidth_matrix = np.zeros((num_ranks, num_ranks), dtype=np.float32)
     element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-    source_buffer = shmem.arange(buffer_size // element_size_bytes, dtype=dtype)
+    n_elements = buffer_size // element_size_bytes
+    source_buffer = shmem.arange(n_elements, dtype=dtype)
     result_buffer = shmem.zeros_like(source_buffer)
 
     shmem.barrier()
 
-    # Test with validation enabled
+    # Test with validation enabled and return_result flag
     args = {
         "datatype": "fp32" if dtype == torch.float32 else "fp16",
         "block_size": block_size,
@@ -62,20 +63,34 @@ def test_atomic_add_bench(dtype, buffer_size, heap_size, block_size):
         "validate": True,
         "num_experiments": 1,
         "num_warmup": 1,
+        "return_result": True,
     }
 
     for source_rank in range(num_ranks):
         for destination_rank in range(num_ranks):
-            bandwidth_gbps = module.run_experiment(
-                shmem, args, source_rank, destination_rank, source_buffer, result_buffer
-            )
+            result = module.run_experiment(shmem, args, source_rank, destination_rank, source_buffer, result_buffer)
+
+            # Unpack result based on return format
+            if isinstance(result, tuple):
+                bandwidth_gbps, buffer_result = result
+            else:
+                bandwidth_gbps = result
+                buffer_result = None
+
             # Bandwidth should be positive
-            assert bandwidth_gbps >= 0, f"Bandwidth should be non-negative, got {bandwidth_gbps}"
+            assert bandwidth_gbps > 0, f"Bandwidth should be positive, got {bandwidth_gbps}"
             bandwidth_matrix[source_rank, destination_rank] = bandwidth_gbps
+
+            # Test expected values when we have buffer result
+            if buffer_result is not None and shmem.get_rank() == destination_rank:
+                # After all atomic_add operations, each element should be original_value + num_ranks
+                expected = torch.arange(n_elements, dtype=dtype, device="cuda") + num_ranks
+                torch.testing.assert_close(buffer_result, expected, rtol=0, atol=1)
+
             shmem.barrier()
 
     # All bandwidth measurements should be positive
-    assert np.all(bandwidth_matrix >= 0), "All bandwidth measurements should be non-negative"
+    assert np.all(bandwidth_matrix > 0), "All bandwidth measurements should be positive"
 
 
 def test_atomic_add_kernel_stores_result():

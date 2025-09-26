@@ -42,9 +42,6 @@ def atomic_add_kernel(
         source_buffer + offsets, 1, source_rank, destination_rank, heap_bases_ptr, mask=mask, sem="relaxed", scope="sys"
     )
 
-    # Store data to result buffer
-    tl.store(result_buffer + offsets, result, mask=mask)
-
 
 def torch_dtype_from_str(datatype: str) -> torch.dtype:
     dtype_map = {
@@ -142,59 +139,39 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer, re
     bandwidth_gbps = shmem.broadcast(bandwidth_gbps, source_rank)
 
     success = True
-    if args["validate"]:
-        shmem.barrier()
+    if args["validate"] and cur_rank == destination_rank:
+        if args["verbose"]:
+            shmem.info("Validating output...")
 
-        # Reset buffers for validation
-        if cur_rank == destination_rank:
-            # Reset source buffer to arange pattern on destination rank
-            element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-            source_buffer.copy_(torch.arange(n_elements, dtype=dtype, device="cuda"))
-            result_buffer.zero_()
+        # After all atomic_add operations, source_buffer should have original values + num_ranks
+        world_size = shmem.get_num_ranks()
+        expected = torch.arange(n_elements, dtype=dtype, device="cuda") + world_size
+        diff_mask = ~torch.isclose(source_buffer, expected, atol=1)
+        breaking_indices = torch.nonzero(diff_mask, as_tuple=False)
 
-        shmem.barrier()
+        if not torch.allclose(source_buffer, expected, atol=1):
+            max_diff = (source_buffer - expected).abs().max().item()
+            shmem.info(f"Max absolute difference: {max_diff}")
+            for idx in breaking_indices:
+                idx = tuple(idx.tolist())
+                computed_val = source_buffer[idx]
+                expected_val = expected[idx]
+                shmem.error(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
+                success = False
+                break
 
-        # Perform single atomic_add operation for validation
-        if cur_rank == source_rank:
-            atomic_add_kernel[grid](
-                source_buffer,
-                result_buffer,
-                n_elements,
-                source_rank,
-                destination_rank,
-                args["block_size"],
-                shmem.get_heap_bases(),
-            )
-
-        shmem.barrier()
-
-        # Validate on destination rank
-        if cur_rank == destination_rank:
-            if args["verbose"]:
-                shmem.info("Validating output...")
-
-            expected = torch.arange(n_elements, dtype=dtype, device="cuda")
-            diff_mask = ~torch.isclose(result_buffer, expected, atol=1)
-            breaking_indices = torch.nonzero(diff_mask, as_tuple=False)
-
-            if not torch.allclose(result_buffer, expected, atol=1):
-                max_diff = (result_buffer - expected).abs().max().item()
-                shmem.info(f"Max absolute difference: {max_diff}")
-                for idx in breaking_indices:
-                    idx = tuple(idx.tolist())
-                    computed_val = result_buffer[idx]
-                    expected_val = expected[idx]
-                    shmem.error(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
-                    success = False
-                    break
-
-            if success and args["verbose"]:
-                shmem.info("Validation successful.")
-            if not success and args["verbose"]:
-                shmem.error("Validation failed.")
+        if success and args["verbose"]:
+            shmem.info("Validation successful.")
+        if not success and args["verbose"]:
+            shmem.error("Validation failed.")
 
     shmem.barrier()
-    return bandwidth_gbps
+
+    # Return both bandwidth and source_buffer state for testing
+    if args.get("return_result", False):
+        return bandwidth_gbps, source_buffer.clone() if cur_rank == destination_rank else None
+    else:
+        return bandwidth_gbps
 
 
 def print_bandwidth_matrix(
