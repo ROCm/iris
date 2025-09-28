@@ -15,6 +15,7 @@ import triton.language as tl
 import sys
 
 import iris
+from examples.common.utils import torch_dtype_from_str
 
 torch.manual_seed(123)
 random.seed(123)
@@ -41,21 +42,6 @@ def atomic_add_kernel(
     result = iris.atomic_add(
         source_buffer + offsets, 1, source_rank, destination_rank, heap_bases_ptr, mask=mask, sem="relaxed", scope="sys"
     )
-
-
-def torch_dtype_from_str(datatype: str) -> torch.dtype:
-    dtype_map = {
-        "fp16": torch.float16,
-        "fp32": torch.float32,
-        "bf16": torch.bfloat16,
-        "int32": torch.int32,
-        "int64": torch.int64,
-    }
-    try:
-        return dtype_map[datatype]
-    except KeyError:
-        print(f"Unknown datatype: {datatype}")
-        exit(1)
 
 
 def parse_args():
@@ -149,7 +135,6 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer):
         if args["verbose"]:
             shmem.info("Validating output...")
 
-        num_ranks = shmem.get_num_ranks()
         expected = torch.ones(n_elements, dtype=dtype, device="cuda")
 
         diff_mask = ~torch.isclose(source_buffer, expected)

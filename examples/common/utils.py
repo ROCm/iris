@@ -24,6 +24,8 @@ dtype_map = {
     "fp16": torch.float16,
     "bf16": torch.bfloat16,
     "int8": torch.int8,
+    "int32": torch.int32,
+    "int64": torch.int64,
 }
 
 
