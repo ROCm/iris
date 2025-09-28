@@ -150,11 +150,10 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer):
 
         num_ranks = shmem.get_num_ranks()
         expected = torch.ones(n_elements, dtype=dtype, device="cuda")
-        tolerance = 0.1 if dtype == torch.float16 else 1e-6
 
-        diff_mask = ~torch.isclose(source_buffer, expected, atol=tolerance)
+        diff_mask = ~torch.isclose(source_buffer, expected)
 
-        if not torch.allclose(source_buffer, expected, atol=tolerance):
+        if not torch.allclose(source_buffer, expected):
             max_diff = (source_buffer - expected).abs().max().item()
             shmem.info(f"Max absolute difference: {max_diff}")
 
@@ -171,7 +170,6 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer):
             shmem.error("Validation failed.")
 
     success = shmem.broadcast(success, source_rank)
-    shmem.info(f"success: {success}")
 
     shmem.barrier()
 
