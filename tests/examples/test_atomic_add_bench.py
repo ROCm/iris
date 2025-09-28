@@ -119,7 +119,7 @@ def test_atomic_correctness(dtype, buffer_size, heap_size, block_size):
     _, result_buffer = module.run_experiment(shmem, args, source_rank, destination_rank, source_buffer)
 
     if shmem.get_rank() == destination_rank:
-        expected = torch.ones(n_elements, dtype=dtype, device="cuda") * num_ranks
+        expected = torch.ones(n_elements, dtype=dtype, device="cuda")
 
         tolerance = 1e-7 if dtype == torch.float16 else 1e-6
         assert torch.allclose(result_buffer, expected, atol=tolerance), "Result buffer should be equal to expected"

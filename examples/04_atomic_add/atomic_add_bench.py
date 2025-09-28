@@ -12,6 +12,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import triton
 import triton.language as tl
+import sys
 
 import iris
 
@@ -73,7 +74,6 @@ def parse_args():
     parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("-d", "--validate", action="store_true", help="Enable validation output")
-    parser.add_argument("-s", "--benchmark", action="store_true", help="Enable benchmark output")
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument("-o", "--output_file", type=str, default="", help="Output file")
 
@@ -148,29 +148,36 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer):
         if args["verbose"]:
             shmem.info("Validating output...")
 
-        # After all atomic_add operations, source_buffer should have world_size in all elements
-        world_size = shmem.get_num_ranks()
-        expected = torch.ones(n_elements, dtype=dtype, device="cuda") * world_size
-        diff_mask = ~torch.isclose(source_buffer, expected, atol=1)
-        breaking_indices = torch.nonzero(diff_mask, as_tuple=False)
+        num_ranks = shmem.get_num_ranks()
+        expected = torch.ones(n_elements, dtype=dtype, device="cuda")
+        tolerance = 0.1 if dtype == torch.float16 else 1e-6
 
-        if not torch.allclose(source_buffer, expected, atol=1):
+        diff_mask = ~torch.isclose(source_buffer, expected, atol=tolerance)
+
+        if not torch.allclose(source_buffer, expected, atol=tolerance):
             max_diff = (source_buffer - expected).abs().max().item()
             shmem.info(f"Max absolute difference: {max_diff}")
-            for idx in breaking_indices:
-                idx = tuple(idx.tolist())
-                computed_val = source_buffer[idx]
-                expected_val = expected[idx]
-                shmem.error(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
+
+            if torch.any(diff_mask):
+                first_mismatch_idx = torch.argmax(diff_mask.float()).item()
+                computed_val = source_buffer[first_mismatch_idx]
+                expected_val = expected[first_mismatch_idx]
+                shmem.error(f"First mismatch at index {first_mismatch_idx}: C={computed_val}, expected={expected_val}")
                 success = False
-                break
 
         if success and args["verbose"]:
             shmem.info("Validation successful.")
         if not success and args["verbose"]:
             shmem.error("Validation failed.")
 
+    success = shmem.broadcast(success, source_rank)
+    shmem.info(f"success: {success}")
+
     shmem.barrier()
+
+    if not success:
+        dist.destroy_process_group()
+        sys.exit(1)
 
     return bandwidth_gbps, source_buffer.clone()
 
