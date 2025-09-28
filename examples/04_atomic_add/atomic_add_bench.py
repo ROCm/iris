@@ -47,8 +47,9 @@ def torch_dtype_from_str(datatype: str) -> torch.dtype:
     dtype_map = {
         "fp16": torch.float16,
         "fp32": torch.float32,
-        "int8": torch.int8,
         "bf16": torch.bfloat16,
+        "int32": torch.int32,
+        "int64": torch.int64,
     }
     try:
         return dtype_map[datatype]
@@ -67,7 +68,7 @@ def parse_args():
         "--datatype",
         type=str,
         default="fp16",
-        choices=["fp16", "fp32", "int8", "bf16"],
+        choices=["fp16", "fp32", "bf16", "int32", "int64"],
         help="Datatype of computation",
     )
     parser.add_argument("-z", "--buffer_size", type=int, default=1 << 32, help="Buffer Size")
