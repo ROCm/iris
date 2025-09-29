@@ -5,6 +5,9 @@
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.dynamic]
+version = {attr = "iris.__version__"}
+
 [tool.setuptools]
 package-dir = { "" = "." }
 
@@ -13,7 +16,6 @@ include = ["iris"]
 
 [project]
 name = "Iris"
-version = "0.1.0"
 description = "Python- and Triton-based library that provide SHMEM-like RDMA support in Triton."
 authors = [
     { name = "Muhammad Awad", email = "muhaawad@amd.com" },
