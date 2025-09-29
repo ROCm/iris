@@ -12,6 +12,7 @@ import os
 from gemm_atomics_all_reduce import persistent_gemm_all_reduce
 
 from examples.common.utils import is_triton_interpret_set
+import iris
 
 gemm_kernel = persistent_gemm_all_reduce
 
@@ -60,9 +61,7 @@ class matmul(torch.autograd.Function):
         M, K = a.shape
         _, N = b.shape
 
-        num_xcds = 1
-        if cu_count == 304:
-            num_xcds = 8
+        num_xcds = iris.hip.get_num_xcc()
 
         total_blocks_M = triton.cdiv(M, BLK_M)
         total_blocks_N = triton.cdiv(N, BLK_N)
