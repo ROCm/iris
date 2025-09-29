@@ -139,16 +139,15 @@ def run_experiment(shmem, args, source_rank, destination_rank, source_buffer):
 
         diff_mask = ~torch.isclose(source_buffer, expected)
 
-        if not torch.allclose(source_buffer, expected):
+        if torch.any(diff_mask):
             max_diff = (source_buffer - expected).abs().max().item()
             shmem.info(f"Max absolute difference: {max_diff}")
 
-            if torch.any(diff_mask):
-                first_mismatch_idx = torch.argmax(diff_mask.float()).item()
-                computed_val = source_buffer[first_mismatch_idx]
-                expected_val = expected[first_mismatch_idx]
-                shmem.error(f"First mismatch at index {first_mismatch_idx}: C={computed_val}, expected={expected_val}")
-                success = False
+            first_mismatch_idx = torch.argmax(diff_mask.float()).item()
+            computed_val = source_buffer[first_mismatch_idx]
+            expected_val = expected[first_mismatch_idx]
+            shmem.error(f"First mismatch at index {first_mismatch_idx}: C={computed_val}, expected={expected_val}")
+            success = False
 
         if success and args["verbose"]:
             shmem.info("Validation successful.")
