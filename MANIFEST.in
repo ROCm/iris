@@ -1,7 +1,3 @@
-# Include C++ source files
-include csrc/finegrained_alloc/*.hip
-include csrc/finegrained_alloc/build.sh
-
 # Include documentation
 include README.md
 include LICENSE
