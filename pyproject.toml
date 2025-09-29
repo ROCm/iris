@@ -5,9 +5,6 @@
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.dynamic]
-version = {attr = "iris.__version__"}
-
 [tool.setuptools]
 package-dir = { "" = "." }
 

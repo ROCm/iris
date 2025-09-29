@@ -4,5 +4,4 @@ include LICENSE
 include iris/README.md
 
 # Include build configuration
-include pyproject.toml
-include setup.py 
+include pyproject.toml 
