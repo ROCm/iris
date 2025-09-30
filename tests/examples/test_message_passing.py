@@ -47,7 +47,11 @@ def run_message_passing_kernels(module, args):
 
     # Allocate source and destination buffers on the symmetric heap - match original examples
     source_buffer = shmem.zeros(args["buffer_size"], device="cuda", dtype=dtype)
-    destination_buffer = shmem.randn(args["buffer_size"], device="cuda", dtype=dtype)
+    if dtype.is_floating_point:
+        destination_buffer = shmem.randn(args["buffer_size"], device="cuda", dtype=dtype)
+    else:
+        ii = torch.iinfo(dtype)
+        destination_buffer = shmem.randint(ii.min, ii.max, (args["buffer_size"],), device="cuda", dtype=dtype)
 
     producer_rank = 0
     consumer_rank = 1
