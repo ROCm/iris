@@ -15,11 +15,26 @@ This package provides:
 - Utility functions: do_bench
 - HIP integration for AMD GPU support
 - Logging utilities with rank information
+- iris_gluon: Gluon-based implementation with @aggregate backend
 
-Quick Start:
+Quick Start (Traditional API):
     >>> import iris
     >>> ctx = iris.iris(heap_size=2**30)
     >>> tensor = ctx.zeros(1000, 1000, dtype=torch.float32)
+    >>> 
+    >>> @triton.jit
+    >>> def kernel(buffer, heap_bases):
+    >>>     iris.load(buffer, 0, 1, heap_bases)
+
+Quick Start (Gluon API):
+    >>> import iris.iris_gluon as iris_gl
+    >>> ctx = iris_gl.iris(heap_size=2**30)
+    >>> backend = ctx.get_backend()
+    >>> tensor = ctx.zeros(1000, 1000, dtype=torch.float32)
+    >>> 
+    >>> @triton.jit
+    >>> def kernel(buffer, backend: iris_gl.IrisBackend):
+    >>>     backend.load(buffer, 0, 1)
 """
 
 # __init__.py
@@ -49,6 +64,9 @@ from .util import (
 )
 
 from . import hip
+
+# Import Gluon-based implementation (optional, for users who want the aggregate API)
+from . import iris_gluon
 
 # Import logging functionality
 from .logging import (
@@ -98,6 +116,7 @@ __all__ = [
     "atomic_max",
     "do_bench",
     "hip",
+    "iris_gluon",  # Gluon-based implementation
     "set_logger_level",
     "logger",
     "DEBUG",
