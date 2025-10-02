@@ -57,13 +57,13 @@ def my_kernel(buffer, backend: iris_gl.IrisBackend):
     remote_rank = 1
     
     # Load from remote rank using backend
-    data = backend.load(buffer, cur_rank, remote_rank)
+    data = backend.load(buffer, remote_rank)
     
     # Store to remote rank using backend
-    backend.store(buffer, data * 2, cur_rank, remote_rank)
+    backend.store(buffer, data * 2, remote_rank)
     
     # Atomic operations using backend
-    old_val = backend.atomic_add(buffer, 1, cur_rank, remote_rank)
+    old_val = backend.atomic_add(buffer, 1, remote_rank)
 ```
 
 ## Comparison with Original Iris
@@ -90,10 +90,10 @@ def kernel(buffer, backend: iris_gl.IrisBackend):
     cur_rank = 0
     remote_rank = 1
     
-    # Backend encapsulates heap_bases
-    data = backend.load(buffer, cur_rank, remote_rank)
-    backend.store(buffer, data * 2, cur_rank, remote_rank)
-    backend.atomic_add(buffer, 1, cur_rank, remote_rank)
+    # Backend encapsulates heap_bases and cur_rank
+    data = backend.load(buffer, remote_rank)
+    backend.store(buffer, data * 2, remote_rank)
+    backend.atomic_add(buffer, 1, remote_rank)
 ```
 
 ## Benefits

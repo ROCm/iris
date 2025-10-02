@@ -101,75 +101,86 @@ class IrisBackend:
         translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
         return translated_ptr
 
-    def load(self, pointer, to_rank, from_rank, mask=None):
+    def load(self, pointer, from_rank, mask=None):
         """
-        Loads a value from the specified rank's memory location.
+        Loads a value from the specified rank's memory location to the current rank.
         
         Args:
             pointer: Pointer in the from_rank's address space
-            to_rank: The rank ID to which the pointer will be translated
             from_rank: The rank ID from which to read the data
             mask: Optional mask for conditional loading
             
         Returns:
             The loaded value from the target memory location
+            
+        Example:
+            >>> # Load from rank 1 to current rank
+            >>> data = backend.load(buffer + offsets, 1, mask=mask)
         """
-        translated_ptr = self._translate(pointer, to_rank, from_rank)
+        translated_ptr = self._translate(pointer, self.cur_rank, from_rank)
         result = tl.load(translated_ptr, mask=mask)
         return result
 
-    def store(self, pointer, value, from_rank, to_rank, mask=None):
+    def store(self, pointer, value, to_rank, mask=None):
         """
-        Writes data to the specified rank's memory location.
+        Writes data from the current rank to the specified rank's memory location.
         
         Args:
-            pointer: Pointer in the from_rank's address space
+            pointer: Pointer in the current rank's address space
             value: The value to store
-            from_rank: The rank ID from which the pointer originates
             to_rank: The rank ID to which the data will be written
             mask: Optional mask for conditional storing
+            
+        Example:
+            >>> # Store from current rank to rank 1
+            >>> backend.store(buffer + offsets, values, 1, mask=mask)
         """
-        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         tl.store(translated_ptr, value, mask=mask)
 
-    def get(self, from_ptr, to_ptr, from_rank, to_rank, mask=None):
+    def get(self, from_ptr, to_ptr, from_rank, mask=None):
         """
         Copies data from the specified rank's memory to the current rank's local memory.
         
         Args:
-            from_ptr: Pointer in the current rank's address space
-            to_ptr: Pointer in the current rank's local memory
+            from_ptr: Pointer to remote memory in from_rank's address space
+            to_ptr: Pointer to local memory in current rank
             from_rank: The rank ID from which to read the data
-            to_rank: The current rank ID where the data will be stored
             mask: Optional mask for conditional operations
+            
+        Example:
+            >>> # Copy from rank 1 to current rank's local memory
+            >>> backend.get(remote_ptr + offsets, local_ptr + offsets, 1, mask=mask)
         """
-        translated_from_ptr = self._translate(from_ptr, from_rank, to_rank)
+        translated_from_ptr = self._translate(from_ptr, from_rank, self.cur_rank)
         data = tl.load(translated_from_ptr, mask=mask)
         tl.store(to_ptr, data, mask=mask)
 
-    def put(self, from_ptr, to_ptr, from_rank, to_rank, mask=None):
+    def put(self, from_ptr, to_ptr, to_rank, mask=None):
         """
         Copies data from the current rank's local memory to the specified rank's memory.
         
         Args:
-            from_ptr: Pointer in the current rank's local memory
-            to_ptr: Pointer in the current rank's address space
-            from_rank: The current rank ID from which to read the data
+            from_ptr: Pointer to local memory in current rank
+            to_ptr: Pointer to remote memory in to_rank's address space
             to_rank: The rank ID to which the data will be written
             mask: Optional mask for conditional operations
+            
+        Example:
+            >>> # Copy from current rank's local memory to rank 1
+            >>> backend.put(local_ptr + offsets, remote_ptr + offsets, 1, mask=mask)
         """
-        translated_to_ptr = self._translate(to_ptr, from_rank, to_rank)
+        translated_to_ptr = self._translate(to_ptr, self.cur_rank, to_rank)
         data = tl.load(from_ptr, mask=mask)
         tl.store(translated_to_ptr, data, mask=mask)
 
-    def atomic_add(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+    def atomic_add(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic add at the specified rank's memory location.
         
         Args:
-            pointer: The memory location in the from_rank's address space
+            pointer: The memory location in the current rank's address space
             val: The value to add
-            from_rank: The rank ID from which the pointer originates
             to_rank: The rank ID to which the atomic operation will be performed
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
@@ -177,18 +188,21 @@ class IrisBackend:
             
         Returns:
             The value at the memory location before the atomic operation
+            
+        Example:
+            >>> # Atomically add to rank 1's memory
+            >>> old_val = backend.atomic_add(buffer, 5, 1)
         """
-        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    def atomic_sub(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+    def atomic_sub(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Atomically subtracts data from the specified rank's memory location.
         
         Args:
-            pointer: Pointer in the from_rank's address space
+            pointer: Pointer in the current rank's address space
             val: The value to subtract
-            from_rank: The rank ID from which the pointer originates
             to_rank: The rank ID to which the atomic operation will be performed
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
@@ -196,37 +210,43 @@ class IrisBackend:
             
         Returns:
             The value at the memory location before the atomic operation
+            
+        Example:
+            >>> # Atomically subtract from rank 1's memory
+            >>> old_val = backend.atomic_sub(buffer, 3, 1)
         """
-        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         return tl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    def atomic_cas(self, pointer, cmp, val, from_rank, to_rank, sem=None, scope=None):
+    def atomic_cas(self, pointer, cmp, val, to_rank, sem=None, scope=None):
         """
         Atomically compares and exchanges the specified rank's memory location.
         
         Args:
-            pointer: Pointer in the from_rank's address space
+            pointer: Pointer in the current rank's address space
             cmp: The expected value to compare
             val: The new value to write if comparison succeeds
-            from_rank: The rank ID from which the pointer originates
             to_rank: The rank ID to which the atomic operation will be performed
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
             scope: Scope of synchronization (gpu, cta, sys)
             
         Returns:
             The value at the memory location before the atomic operation
+            
+        Example:
+            >>> # Compare-and-swap on rank 1's memory
+            >>> old_val = backend.atomic_cas(flag + pid, 0, 1, 1, sem="release", scope="sys")
         """
-        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
 
-    def atomic_xchg(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+    def atomic_xchg(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic exchange at the specified rank's memory location.
         
         Args:
-            pointer: The memory location in the from_rank's address space
+            pointer: The memory location in the current rank's address space
             val: The value to exchange
-            from_rank: The rank ID from which the pointer originates
             to_rank: The rank ID to which the atomic operation will be performed
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
@@ -234,18 +254,21 @@ class IrisBackend:
             
         Returns:
             The value at the memory location before the atomic operation
+            
+        Example:
+            >>> # Exchange value with rank 1's memory
+            >>> old_val = backend.atomic_xchg(buffer, 99, 1)
         """
-        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         return tl.atomic_xchg(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    def atomic_xor(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+    def atomic_xor(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic xor at the specified rank's memory location.
         
         Args:
-            pointer: The memory location in the from_rank's address space
+            pointer: The memory location in the current rank's address space
             val: The value to xor
-            from_rank: The rank ID from which the pointer originates
             to_rank: The rank ID to which the atomic operation will be performed
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
@@ -253,18 +276,21 @@ class IrisBackend:
             
         Returns:
             The value at the memory location before the atomic operation
+            
+        Example:
+            >>> # Atomically XOR with rank 1's memory
+            >>> old_val = backend.atomic_xor(buffer, 0xFF, 1)
         """
-        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         return tl.atomic_xor(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    def atomic_and(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+    def atomic_and(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic and at the specified rank's memory location.
         
         Args:
-            pointer: The memory location in the from_rank's address space
+            pointer: The memory location in the current rank's address space
             val: The value to and
-            from_rank: The rank ID from which the pointer originates
             to_rank: The rank ID to which the atomic operation will be performed
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
@@ -272,18 +298,21 @@ class IrisBackend:
             
         Returns:
             The value at the memory location before the atomic operation
+            
+        Example:
+            >>> # Atomically AND with rank 1's memory
+            >>> old_val = backend.atomic_and(buffer, 0x0F, 1)
         """
-        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         return tl.atomic_and(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    def atomic_or(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+    def atomic_or(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic or at the specified rank's memory location.
         
         Args:
-            pointer: The memory location in the from_rank's address space
+            pointer: The memory location in the current rank's address space
             val: The value to or
-            from_rank: The rank ID from which the pointer originates
             to_rank: The rank ID to which the atomic operation will be performed
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
@@ -291,18 +320,21 @@ class IrisBackend:
             
         Returns:
             The value at the memory location before the atomic operation
+            
+        Example:
+            >>> # Atomically OR with rank 1's memory
+            >>> old_val = backend.atomic_or(buffer, 0xF0, 1)
         """
-        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         return tl.atomic_or(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    def atomic_min(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+    def atomic_min(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic min at the specified rank's memory location.
         
         Args:
-            pointer: The memory location in the from_rank's address space
+            pointer: The memory location in the current rank's address space
             val: The value to compare and potentially store
-            from_rank: The rank ID from which the pointer originates
             to_rank: The rank ID to which the atomic operation will be performed
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
@@ -310,18 +342,21 @@ class IrisBackend:
             
         Returns:
             The value at the memory location before the atomic operation
+            
+        Example:
+            >>> # Atomically compute minimum with rank 1's memory
+            >>> old_val = backend.atomic_min(buffer, 10, 1)
         """
-        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         return tl.atomic_min(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    def atomic_max(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+    def atomic_max(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic max at the specified rank's memory location.
         
         Args:
-            pointer: The memory location in the from_rank's address space
+            pointer: The memory location in the current rank's address space
             val: The value to compare and potentially store
-            from_rank: The rank ID from which the pointer originates
             to_rank: The rank ID to which the atomic operation will be performed
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
@@ -329,8 +364,12 @@ class IrisBackend:
             
         Returns:
             The value at the memory location before the atomic operation
+            
+        Example:
+            >>> # Atomically compute maximum with rank 1's memory
+            >>> old_val = backend.atomic_max(buffer, 100, 1)
         """
-        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
 

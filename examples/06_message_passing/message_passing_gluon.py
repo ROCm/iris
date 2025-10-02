@@ -42,19 +42,18 @@ def producer_kernel(
     mask = offsets < buffer_size
 
     # Load chunk from source buffer using backend
-    values = backend.load(source_buffer + offsets, producer_rank, producer_rank, mask=mask)
+    values = backend.load(source_buffer + offsets, producer_rank, mask=mask)
 
     # Store chunk to target buffer using backend
     backend.store(
         target_buffer + offsets,
         values,
-        producer_rank,
         consumer_rank,
         mask=mask,
     )
 
     # Set flag to signal completion using backend
-    backend.atomic_cas(flag + pid, 0, 1, producer_rank, consumer_rank, sem="release", scope="sys")
+    backend.atomic_cas(flag + pid, 0, 1, consumer_rank, sem="release", scope="sys")
 
 
 @triton.jit
@@ -76,11 +75,11 @@ def consumer_kernel(
     done = 0
     while done == 0:
         done = backend.atomic_cas(
-            flag + pid, 1, 0, consumer_rank, consumer_rank, sem="acquire", scope="sys"
+            flag + pid, 1, 0, consumer_rank, sem="acquire", scope="sys"
         )
 
     # Read from the target buffer (written by producer) using backend
-    values = backend.load(buffer + offsets, consumer_rank, consumer_rank, mask=mask)
+    values = backend.load(buffer + offsets, consumer_rank, mask=mask)
 
     # Do something with values...
     values = values * 2
@@ -89,7 +88,6 @@ def consumer_kernel(
     backend.store(
         buffer + offsets,
         values,
-        consumer_rank,
         consumer_rank,
         mask=mask,
     )

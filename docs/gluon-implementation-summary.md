@@ -83,9 +83,9 @@ my_kernel[grid](buffer, backend)
 @triton.jit
 def my_kernel(buffer, backend: iris_gl.IrisBackend):
     # Use backend methods
-    data = backend.load(buffer, 0, 1)
-    backend.store(buffer, data * 2, 0, 1)
-    backend.atomic_add(buffer, 1, 0, 1)
+    data = backend.load(buffer, 1)
+    backend.store(buffer, data * 2, 1)
+    backend.atomic_add(buffer, 1, 1)
 ```
 
 ## Files Created

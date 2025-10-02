@@ -136,10 +136,10 @@ def kernel(buffer, heap_bases):
 ```python
 @triton.jit
 def kernel(buffer, backend: iris_gl.IrisBackend):
-    # Backend encapsulates state
-    backend.load(buffer, 0, 1)
-    backend.store(buffer, val, 0, 1)
-    backend.atomic_add(buffer, 1, 0, 1)
+    # Backend encapsulates state and cur_rank
+    backend.load(buffer, 1)
+    backend.store(buffer, val, 1)
+    backend.atomic_add(buffer, 1, 1)
 ```
 
 ### Benefits
@@ -187,13 +187,13 @@ def my_kernel(buffer, backend: iris_gl.IrisBackend):
     offsets = pid * 64 + tl.arange(0, 64)
     
     # Load from remote rank
-    data = backend.load(buffer + offsets, 0, 1)
+    data = backend.load(buffer + offsets, 1)
     
     # Process
     result = data * 2
     
     # Store back to remote rank
-    backend.store(buffer + offsets, result, 0, 1)
+    backend.store(buffer + offsets, result, 1)
 ```
 
 ### Launch

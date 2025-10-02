@@ -123,7 +123,7 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr,
     # Store 1 in the target buffer - no need to pass heap_bases separately!
     source_rank = 0
     target_rank = 1
-    backend.store(buffer + offsets, 1, source_rank, target_rank, mask=mask)
+    backend.store(buffer + offsets, 1, target_rank, mask=mask)
 
 def _worker(rank, world_size):
     # Initialize as before...
