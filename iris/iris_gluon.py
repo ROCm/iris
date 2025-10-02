@@ -1,0 +1,646 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+"""
+Iris Gluon: Gluon-based Multi-GPU Communication Framework
+
+This module provides a Gluon-based implementation of Iris that uses the
+`@aggregate` decorator to encapsulate the Iris backend struct, eliminating
+the need to pass heap_bases around manually.
+
+Key Features:
+- Uses Gluon's @aggregate decorator for cleaner API
+- Encapsulates heap_bases in IrisBackend aggregate
+- Provides same functionality as original Iris with improved ergonomics
+
+Example:
+    >>> import iris.iris_gluon as iris_gl
+    >>> ctx = iris_gl.iris(heap_size=2**30)  # 1GB heap
+    >>> backend = ctx.get_backend()  # Get the Gluon aggregate
+    >>> 
+    >>> @gluon.jit
+    >>> def kernel(buffer, backend: iris_gl.IrisBackend):
+    >>>     # Use backend methods directly
+    >>>     data = backend.load(buffer, 0, 1)
+"""
+
+from triton.language.core import _aggregate as aggregate
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+import triton
+import triton.language as tl
+
+from iris._distributed_helpers import (
+    init_distributed,
+    distributed_allgather,
+    distributed_barrier,
+    distributed_broadcast_scalar,
+    distributed_broadcast_tensor,
+)
+from iris.hip import (
+    set_device,
+    get_cu_count,
+    count_devices,
+    get_ipc_handle,
+    open_ipc_handle,
+    get_wall_clock_rate,
+)
+import numpy as np
+import math
+import torch
+import ctypes
+import logging
+
+# Import logging functionality from the separate logging module
+from .logging import logger
+
+
+@aggregate
+class IrisBackend:
+    """
+    Gluon aggregate struct containing Iris backend state.
+    
+    This aggregate encapsulates the heap_bases pointer and provides
+    device-side methods for memory operations and atomics.
+    
+    Attributes:
+        heap_bases: Pointer to array of heap base addresses for all ranks
+        cur_rank: Current rank ID
+        num_ranks: Total number of ranks
+    """
+    heap_bases: gl.tensor
+    cur_rank: gl.constexpr
+    num_ranks: gl.constexpr
+
+    def __init__(self, heap_bases, cur_rank, num_ranks):
+        self.heap_bases = heap_bases
+        self.cur_rank = gl.constexpr(cur_rank)
+        self.num_ranks = gl.constexpr(num_ranks)
+
+    @gluon.jit
+    def _translate(self, ptr, from_rank, to_rank):
+        """
+        Internal function to translate a pointer from one rank's address space to another.
+        
+        Args:
+            ptr: Pointer in the from_rank's address space
+            from_rank: Source rank ID
+            to_rank: Target rank ID
+            
+        Returns:
+            Translated pointer in the to_rank's address space
+        """
+        from_base = gl.load(self.heap_bases + from_rank)
+        to_base = gl.load(self.heap_bases + to_rank)
+        # convert to int to compute difference
+        ptr_int = gl.cast(ptr, gl.uint64)
+        # Find the offset from from_rank heap
+        offset = ptr_int - from_base
+        # Byte cast for byte offset addition
+        to_base_byte = gl.cast(to_base, gl.pointer_type(gl.int8))
+        # Find the offset into the to_rank heap
+        translated_ptr_byte = to_base_byte + offset
+        # Cast to_base back to pointer type
+        translated_ptr = gl.cast(translated_ptr_byte, ptr.dtype)
+        return translated_ptr
+
+    @gluon.jit
+    def load(self, pointer, to_rank, from_rank, mask=None):
+        """
+        Loads a value from the specified rank's memory location.
+        
+        Args:
+            pointer: Pointer in the from_rank's address space
+            to_rank: The rank ID to which the pointer will be translated
+            from_rank: The rank ID from which to read the data
+            mask: Optional mask for conditional loading
+            
+        Returns:
+            The loaded value from the target memory location
+        """
+        translated_ptr = self._translate(pointer, to_rank, from_rank)
+        result = gl.load(translated_ptr, mask=mask)
+        return result
+
+    @gluon.jit
+    def store(self, pointer, value, from_rank, to_rank, mask=None):
+        """
+        Writes data to the specified rank's memory location.
+        
+        Args:
+            pointer: Pointer in the from_rank's address space
+            value: The value to store
+            from_rank: The rank ID from which the pointer originates
+            to_rank: The rank ID to which the data will be written
+            mask: Optional mask for conditional storing
+        """
+        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        gl.store(translated_ptr, value, mask=mask)
+
+    @gluon.jit
+    def get(self, from_ptr, to_ptr, from_rank, to_rank, mask=None):
+        """
+        Copies data from the specified rank's memory to the current rank's local memory.
+        
+        Args:
+            from_ptr: Pointer in the current rank's address space
+            to_ptr: Pointer in the current rank's local memory
+            from_rank: The rank ID from which to read the data
+            to_rank: The current rank ID where the data will be stored
+            mask: Optional mask for conditional operations
+        """
+        translated_from_ptr = self._translate(from_ptr, from_rank, to_rank)
+        data = gl.load(translated_from_ptr, mask=mask)
+        gl.store(to_ptr, data, mask=mask)
+
+    @gluon.jit
+    def put(self, from_ptr, to_ptr, from_rank, to_rank, mask=None):
+        """
+        Copies data from the current rank's local memory to the specified rank's memory.
+        
+        Args:
+            from_ptr: Pointer in the current rank's local memory
+            to_ptr: Pointer in the current rank's address space
+            from_rank: The current rank ID from which to read the data
+            to_rank: The rank ID to which the data will be written
+            mask: Optional mask for conditional operations
+        """
+        translated_to_ptr = self._translate(to_ptr, from_rank, to_rank)
+        data = gl.load(from_ptr, mask=mask)
+        gl.store(translated_to_ptr, data, mask=mask)
+
+    @gluon.jit
+    def atomic_add(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+        """
+        Performs an atomic add at the specified rank's memory location.
+        
+        Args:
+            pointer: The memory location in the from_rank's address space
+            val: The value to add
+            from_rank: The rank ID from which the pointer originates
+            to_rank: The rank ID to which the atomic operation will be performed
+            mask: Optional mask for conditional operations
+            sem: Memory semantics (acquire, release, acq_rel, relaxed)
+            scope: Scope of synchronization (gpu, cta, sys)
+            
+        Returns:
+            The value at the memory location before the atomic operation
+        """
+        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        return gl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+    @gluon.jit
+    def atomic_sub(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+        """
+        Atomically subtracts data from the specified rank's memory location.
+        
+        Args:
+            pointer: Pointer in the from_rank's address space
+            val: The value to subtract
+            from_rank: The rank ID from which the pointer originates
+            to_rank: The rank ID to which the atomic operation will be performed
+            mask: Optional mask for conditional operations
+            sem: Memory semantics (acquire, release, acq_rel, relaxed)
+            scope: Scope of synchronization (gpu, cta, sys)
+            
+        Returns:
+            The value at the memory location before the atomic operation
+        """
+        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        return gl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+    @gluon.jit
+    def atomic_cas(self, pointer, cmp, val, from_rank, to_rank, sem=None, scope=None):
+        """
+        Atomically compares and exchanges the specified rank's memory location.
+        
+        Args:
+            pointer: Pointer in the from_rank's address space
+            cmp: The expected value to compare
+            val: The new value to write if comparison succeeds
+            from_rank: The rank ID from which the pointer originates
+            to_rank: The rank ID to which the atomic operation will be performed
+            sem: Memory semantics (acquire, release, acq_rel, relaxed)
+            scope: Scope of synchronization (gpu, cta, sys)
+            
+        Returns:
+            The value at the memory location before the atomic operation
+        """
+        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        return gl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
+
+    @gluon.jit
+    def atomic_xchg(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+        """
+        Performs an atomic exchange at the specified rank's memory location.
+        
+        Args:
+            pointer: The memory location in the from_rank's address space
+            val: The value to exchange
+            from_rank: The rank ID from which the pointer originates
+            to_rank: The rank ID to which the atomic operation will be performed
+            mask: Optional mask for conditional operations
+            sem: Memory semantics (acquire, release, acq_rel, relaxed)
+            scope: Scope of synchronization (gpu, cta, sys)
+            
+        Returns:
+            The value at the memory location before the atomic operation
+        """
+        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        return gl.atomic_xchg(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+    @gluon.jit
+    def atomic_xor(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+        """
+        Performs an atomic xor at the specified rank's memory location.
+        
+        Args:
+            pointer: The memory location in the from_rank's address space
+            val: The value to xor
+            from_rank: The rank ID from which the pointer originates
+            to_rank: The rank ID to which the atomic operation will be performed
+            mask: Optional mask for conditional operations
+            sem: Memory semantics (acquire, release, acq_rel, relaxed)
+            scope: Scope of synchronization (gpu, cta, sys)
+            
+        Returns:
+            The value at the memory location before the atomic operation
+        """
+        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        return gl.atomic_xor(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+    @gluon.jit
+    def atomic_and(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+        """
+        Performs an atomic and at the specified rank's memory location.
+        
+        Args:
+            pointer: The memory location in the from_rank's address space
+            val: The value to and
+            from_rank: The rank ID from which the pointer originates
+            to_rank: The rank ID to which the atomic operation will be performed
+            mask: Optional mask for conditional operations
+            sem: Memory semantics (acquire, release, acq_rel, relaxed)
+            scope: Scope of synchronization (gpu, cta, sys)
+            
+        Returns:
+            The value at the memory location before the atomic operation
+        """
+        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        return gl.atomic_and(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+    @gluon.jit
+    def atomic_or(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+        """
+        Performs an atomic or at the specified rank's memory location.
+        
+        Args:
+            pointer: The memory location in the from_rank's address space
+            val: The value to or
+            from_rank: The rank ID from which the pointer originates
+            to_rank: The rank ID to which the atomic operation will be performed
+            mask: Optional mask for conditional operations
+            sem: Memory semantics (acquire, release, acq_rel, relaxed)
+            scope: Scope of synchronization (gpu, cta, sys)
+            
+        Returns:
+            The value at the memory location before the atomic operation
+        """
+        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        return gl.atomic_or(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+    @gluon.jit
+    def atomic_min(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+        """
+        Performs an atomic min at the specified rank's memory location.
+        
+        Args:
+            pointer: The memory location in the from_rank's address space
+            val: The value to compare and potentially store
+            from_rank: The rank ID from which the pointer originates
+            to_rank: The rank ID to which the atomic operation will be performed
+            mask: Optional mask for conditional operations
+            sem: Memory semantics (acquire, release, acq_rel, relaxed)
+            scope: Scope of synchronization (gpu, cta, sys)
+            
+        Returns:
+            The value at the memory location before the atomic operation
+        """
+        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        return gl.atomic_min(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+    @gluon.jit
+    def atomic_max(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
+        """
+        Performs an atomic max at the specified rank's memory location.
+        
+        Args:
+            pointer: The memory location in the from_rank's address space
+            val: The value to compare and potentially store
+            from_rank: The rank ID from which the pointer originates
+            to_rank: The rank ID to which the atomic operation will be performed
+            mask: Optional mask for conditional operations
+            sem: Memory semantics (acquire, release, acq_rel, relaxed)
+            scope: Scope of synchronization (gpu, cta, sys)
+            
+        Returns:
+            The value at the memory location before the atomic operation
+        """
+        translated_ptr = self._translate(pointer, from_rank, to_rank)
+        return gl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+
+class IrisGluon:
+    """
+    Gluon-based Iris class for multi-GPU communication and memory management.
+    
+    This class provides the same functionality as the original Iris class but
+    uses Gluon's @aggregate decorator to encapsulate the backend state.
+    
+    Args:
+        heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
+        
+    Example:
+        >>> ctx = iris_gluon.iris(heap_size=2**31)  # 2GB heap
+        >>> backend = ctx.get_backend()  # Get Gluon aggregate
+        >>> tensor = ctx.zeros(1000, 1000, dtype=torch.float32)
+    """
+
+    def __init__(self, heap_size=1 << 30):
+        # Initialize (same as original Iris)
+        comm, cur_rank, num_ranks = init_distributed()
+        num_gpus = count_devices()
+
+        gpu_id = cur_rank % num_gpus
+        set_device(gpu_id)
+
+        self.comm = comm
+        self.num_ranks = num_ranks
+        self.cur_rank = cur_rank
+        self.gpu_id = gpu_id
+        self.heap_size = heap_size
+        self.heap_offset = 0
+        self.alignment = 1024
+        self.device = f"cuda:{gpu_id}"
+        self.memory_pool = torch.empty(heap_size, device=self.device, dtype=torch.int8)
+
+        heap_base = self.memory_pool.data_ptr()
+        heap_base_ptr = ctypes.c_void_p(heap_base)
+
+        heap_bases = np.zeros(num_ranks, dtype=np.uint64)
+        heap_bases[cur_rank] = heap_base
+        ipc_handles = np.zeros((num_ranks, 64), dtype=np.uint8)
+        ipc_handle = get_ipc_handle(heap_base_ptr, cur_rank)
+
+        distributed_barrier()
+
+        all_ipc_handles = distributed_allgather(np.frombuffer(ipc_handle, dtype=np.uint8))
+        all_heap_bases = distributed_allgather(np.array([heap_bases[cur_rank]], dtype=np.uint64))
+
+        distributed_barrier()
+
+        ipc_heap_bases = np.zeros(num_ranks, dtype=np.uintp)
+        for rank in range(num_ranks):
+            if rank != cur_rank:
+                handle = open_ipc_handle(all_ipc_handles[rank], cur_rank)
+                ipc_heap_bases[rank] = int(handle)
+            else:
+                ipc_heap_bases[rank] = heap_bases[rank]
+
+        for i in range(num_ranks):
+            self.debug(f"GPU {i}: Heap base {hex(int(ipc_heap_bases[i]))}")
+
+        distributed_barrier()
+        self.heap_bases = torch.from_numpy(ipc_heap_bases).to(device=self.device, dtype=torch.uint64)
+
+        distributed_barrier()
+
+    def _log_with_rank(self, level, message):
+        """Helper method to log with rank information injected into the record."""
+        extra = {"iris_rank": self.cur_rank, "iris_num_ranks": self.num_ranks}
+        logger.log(level, message, extra=extra)
+
+    def debug(self, message):
+        """Log a debug message with rank information."""
+        self._log_with_rank(logging.DEBUG, message)
+
+    def info(self, message):
+        """Log an info message with rank information."""
+        self._log_with_rank(logging.INFO, message)
+
+    def warning(self, message):
+        """Log a warning message with rank information."""
+        self._log_with_rank(logging.WARNING, message)
+
+    def error(self, message):
+        """Log an error message with rank information."""
+        self._log_with_rank(logging.ERROR, message)
+
+    def get_backend(self):
+        """
+        Get the Gluon IrisBackend aggregate.
+        
+        Returns:
+            IrisBackend: The Gluon aggregate containing heap_bases and device methods
+            
+        Example:
+            >>> ctx = iris_gluon.iris()
+            >>> backend = ctx.get_backend()
+            >>> 
+            >>> @gluon.jit
+            >>> def kernel(buffer, backend: IrisBackend):
+            >>>     data = backend.load(buffer, 0, 1)
+        """
+        return IrisBackend(self.heap_bases, self.cur_rank, self.num_ranks)
+
+    def get_heap_bases(self):
+        """
+        Return the tensor of symmetric heap base addresses for all ranks.
+        
+        Returns:
+            torch.Tensor: A 1D tensor of uint64 heap base addresses
+        """
+        return self.heap_bases
+
+    def barrier(self):
+        """
+        Synchronize all ranks using a distributed barrier.
+        """
+        distributed_barrier()
+
+    def get_device(self):
+        """
+        Get the underlying device where the Iris symmetric heap resides.
+        
+        Returns:
+            torch.device: The CUDA device of Iris-managed memory
+        """
+        return self.memory_pool.device
+
+    def get_cu_count(self):
+        """
+        Get the number of compute units (CUs) for the current GPU.
+        
+        Returns:
+            int: Number of compute units on this rank's GPU
+        """
+        return get_cu_count(self.gpu_id)
+
+    def get_rank(self):
+        """
+        Get the current rank ID.
+        
+        Returns:
+            int: The current rank ID
+        """
+        return self.cur_rank
+
+    def get_num_ranks(self):
+        """
+        Get the total number of ranks.
+        
+        Returns:
+            int: The total number of ranks in the distributed system
+        """
+        return self.num_ranks
+
+    def broadcast(self, data, src_rank=0):
+        """
+        Broadcast data from source rank to all ranks.
+        
+        Args:
+            data: Data to broadcast (scalar or tensor)
+            src_rank: Source rank for broadcast (default: 0)
+            
+        Returns:
+            The broadcasted data
+        """
+        if isinstance(data, torch.Tensor):
+            return distributed_broadcast_tensor(data, src_rank)
+        else:
+            return distributed_broadcast_scalar(data, src_rank)
+
+    def __allocate(self, num_elements, dtype):
+        """Internal method to allocate memory from the symmetric heap."""
+        self.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")
+
+        element_size = torch.tensor([], dtype=dtype).element_size()
+        size_in_bytes = num_elements * element_size
+        aligned_size = math.ceil(size_in_bytes / self.alignment) * self.alignment
+
+        if self.heap_offset + aligned_size > self.heap_size:
+            raise MemoryError("Heap out of memory")
+
+        start = self.heap_offset
+        self.heap_offset += aligned_size
+
+        sub_buffer = self.memory_pool[start : start + size_in_bytes].view(dtype)
+        return sub_buffer.reshape((num_elements,))
+
+    def __parse_size(self, size):
+        """Parse size parameter and calculate number of elements."""
+        # Handle nested tuples/lists by flattening them recursively
+        while len(size) == 1 and isinstance(size[0], (tuple, list)):
+            size = size[0]
+        num_elements = math.prod(size)
+        return size, num_elements
+
+    def __throw_if_invalid_device(self, device):
+        """Check if the requested device is compatible with this Iris instance."""
+        if not self.__is_valid_device(device):
+            raise ValueError(
+                f"Requested device {device} does not match Iris device {self.get_device()}. "
+                f"All Iris tensors must be on the same device as the Iris symmetric heap."
+            )
+
+    def __is_valid_device(self, device) -> bool:
+        """Check if the requested device is compatible with this Iris instance."""
+        if device is None:
+            return True  # None means use default device
+
+        # Convert device strings to torch.device objects for proper comparison
+        requested_device = torch.device(device) if isinstance(device, str) else device
+        iris_device = self.get_device()
+
+        # Check if both are CUDA devices
+        if requested_device.type == "cuda" and iris_device.type == "cuda":
+            # Check if index matches or if requested is "cuda" (any index)
+            if requested_device.index is None:
+                return True
+            else:
+                return requested_device.index == iris_device.index
+
+        # For non-CUDA devices, always return False
+        return False
+
+    def __apply_layout(self, tensor, layout):
+        """Apply the requested layout to the tensor."""
+        if layout == torch.strided:
+            return tensor
+        else:
+            raise ValueError(f"Unsupported layout: {layout}")
+
+    def zeros(self, *size, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+        """
+        Create a tensor filled with zeros on the symmetric heap.
+        
+        Args:
+            size: Shape of the tensor
+            dtype: Data type (default: torch.float32)
+            device: Device (must match Iris device)
+            layout: Layout (default: torch.strided)
+            requires_grad: Whether to track gradients
+            
+        Returns:
+            torch.Tensor: Zero-initialized tensor on the symmetric heap
+        """
+        # Use global default dtype if None is provided
+        if dtype is None:
+            dtype = torch.get_default_dtype()
+
+        # Use current device if none specified
+        if device is None:
+            device = self.device
+
+        # Validate device compatibility with Iris
+        self.__throw_if_invalid_device(device)
+
+        # Parse size and calculate number of elements
+        size, num_elements = self.__parse_size(size)
+
+        # Allocate memory from symmetric heap
+        tensor = self.__allocate(num_elements, dtype)
+
+        # Zero-initialize
+        tensor.zero_()
+
+        # Reshape to the desired size
+        tensor = tensor.reshape(size)
+
+        # Apply the requested layout
+        tensor = self.__apply_layout(tensor, layout)
+
+        # Set requires_grad if specified
+        if requires_grad:
+            tensor.requires_grad_()
+
+        return tensor
+
+
+def iris(heap_size=1 << 30):
+    """
+    Create and return a Gluon-based Iris instance with the specified heap size.
+    
+    Args:
+        heap_size (int): Size of the heap in bytes. Defaults to 1GB.
+        
+    Returns:
+        IrisGluon: An initialized Gluon-based Iris instance
+        
+    Example:
+        >>> import iris.iris_gluon as iris_gl
+        >>> ctx = iris_gl.iris(2**30)  # 1GB heap
+        >>> backend = ctx.get_backend()
+        >>> tensor = ctx.zeros(1024, 1024)
+    """
+    return IrisGluon(heap_size)
