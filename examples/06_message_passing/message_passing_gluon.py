@@ -15,29 +15,28 @@ import random
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from triton.experimental import gluon
-from triton.experimental.gluon import language as gl
 import triton
+import triton.language as tl
 
 import iris.iris_gluon as iris_gl
 
 
-@gluon.jit
+@triton.jit
 def producer_kernel(
-    source_buffer,  # gl.tensor: pointer to source data
-    target_buffer,  # gl.tensor: pointer to target data
-    flag,  # gl.tensor: pointer to flags
+    source_buffer,  # tl.tensor: pointer to source data
+    target_buffer,  # tl.tensor: pointer to target data
+    flag,  # tl.tensor: pointer to flags
     buffer_size,  # int32: total number of elements
-    producer_rank: gl.constexpr,
-    consumer_rank: gl.constexpr,
-    BLOCK_SIZE: gl.constexpr,
+    producer_rank: tl.constexpr,
+    consumer_rank: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
     backend: iris_gl.IrisBackend,  # IrisBackend aggregate
 ):
-    pid = gl.program_id(0)
+    pid = tl.program_id(0)
 
     # Compute start index of this block
     block_start = pid * BLOCK_SIZE
-    offsets = block_start + gl.arange(0, BLOCK_SIZE)
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
 
     # Guard for out-of-bounds accesses
     mask = offsets < buffer_size
@@ -58,19 +57,19 @@ def producer_kernel(
     backend.atomic_cas(flag + pid, 0, 1, producer_rank, consumer_rank, sem="release", scope="sys")
 
 
-@gluon.jit
+@triton.jit
 def consumer_kernel(
-    buffer,  # gl.tensor: pointer to shared buffer (read from target_rank)
-    flag,  # gl.tensor: sync flag per block
+    buffer,  # tl.tensor: pointer to shared buffer (read from target_rank)
+    flag,  # tl.tensor: sync flag per block
     buffer_size,  # int32: total number of elements
-    consumer_rank: gl.constexpr,
-    BLOCK_SIZE: gl.constexpr,
+    consumer_rank: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
     backend: iris_gl.IrisBackend,  # IrisBackend aggregate
 ):
-    pid = gl.program_id(0)
+    pid = tl.program_id(0)
 
     block_start = pid * BLOCK_SIZE
-    offsets = block_start + gl.arange(0, BLOCK_SIZE)
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < buffer_size
 
     # Spin-wait until writer sets flag[pid] = 1 using backend
@@ -96,7 +95,7 @@ def consumer_kernel(
     )
 
     # Reset the flag for next iteration
-    gl.store(flag + pid, 0)
+    tl.store(flag + pid, 0)
 
 
 torch.manual_seed(123)
@@ -181,7 +180,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     if cur_rank == producer_rank:
         shmem.info(f"Rank {cur_rank} is sending data to rank {consumer_rank} (Gluon version).")
-        kk = producer_kernel[grid](
+        producer_kernel[grid](
             source_buffer,
             destination_buffer,
             flags,
@@ -190,12 +189,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             consumer_rank,
             args["block_size"],
             iris_backend,  # Pass the Gluon aggregate
-            num_warps=1,
         )
     else:
         shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank} (Gluon version).")
-        kk = consumer_kernel[grid](
-            destination_buffer, flags, n_elements, consumer_rank, args["block_size"], iris_backend, num_warps=1
+        consumer_kernel[grid](
+            destination_buffer, flags, n_elements, consumer_rank, args["block_size"], iris_backend
         )
     shmem.barrier()
     shmem.info(f"Rank {cur_rank} has finished sending/receiving data.")

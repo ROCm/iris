@@ -18,15 +18,13 @@ Example:
     >>> ctx = iris_gl.iris(heap_size=2**30)  # 1GB heap
     >>> backend = ctx.get_backend()  # Get the Gluon aggregate
     >>> 
-    >>> @gluon.jit
+    >>> @triton.jit
     >>> def kernel(buffer, backend: iris_gl.IrisBackend):
     >>>     # Use backend methods directly
     >>>     data = backend.load(buffer, 0, 1)
 """
 
 from triton.language.core import _aggregate as aggregate
-from triton.experimental import gluon
-from triton.experimental.gluon import language as gl
 import triton
 import triton.language as tl
 
@@ -68,16 +66,15 @@ class IrisBackend:
         cur_rank: Current rank ID
         num_ranks: Total number of ranks
     """
-    heap_bases: gl.tensor
-    cur_rank: gl.constexpr
-    num_ranks: gl.constexpr
+    heap_bases: tl.tensor
+    cur_rank: tl.constexpr
+    num_ranks: tl.constexpr
 
     def __init__(self, heap_bases, cur_rank, num_ranks):
         self.heap_bases = heap_bases
-        self.cur_rank = gl.constexpr(cur_rank)
-        self.num_ranks = gl.constexpr(num_ranks)
+        self.cur_rank = tl.constexpr(cur_rank)
+        self.num_ranks = tl.constexpr(num_ranks)
 
-    @gluon.jit
     def _translate(self, ptr, from_rank, to_rank):
         """
         Internal function to translate a pointer from one rank's address space to another.
@@ -90,21 +87,20 @@ class IrisBackend:
         Returns:
             Translated pointer in the to_rank's address space
         """
-        from_base = gl.load(self.heap_bases + from_rank)
-        to_base = gl.load(self.heap_bases + to_rank)
+        from_base = tl.load(self.heap_bases + from_rank)
+        to_base = tl.load(self.heap_bases + to_rank)
         # convert to int to compute difference
-        ptr_int = gl.cast(ptr, gl.uint64)
+        ptr_int = tl.cast(ptr, tl.uint64)
         # Find the offset from from_rank heap
         offset = ptr_int - from_base
         # Byte cast for byte offset addition
-        to_base_byte = gl.cast(to_base, gl.pointer_type(gl.int8))
+        to_base_byte = tl.cast(to_base, tl.pointer_type(tl.int8))
         # Find the offset into the to_rank heap
         translated_ptr_byte = to_base_byte + offset
         # Cast to_base back to pointer type
-        translated_ptr = gl.cast(translated_ptr_byte, ptr.dtype)
+        translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
         return translated_ptr
 
-    @gluon.jit
     def load(self, pointer, to_rank, from_rank, mask=None):
         """
         Loads a value from the specified rank's memory location.
@@ -119,10 +115,9 @@ class IrisBackend:
             The loaded value from the target memory location
         """
         translated_ptr = self._translate(pointer, to_rank, from_rank)
-        result = gl.load(translated_ptr, mask=mask)
+        result = tl.load(translated_ptr, mask=mask)
         return result
 
-    @gluon.jit
     def store(self, pointer, value, from_rank, to_rank, mask=None):
         """
         Writes data to the specified rank's memory location.
@@ -135,9 +130,8 @@ class IrisBackend:
             mask: Optional mask for conditional storing
         """
         translated_ptr = self._translate(pointer, from_rank, to_rank)
-        gl.store(translated_ptr, value, mask=mask)
+        tl.store(translated_ptr, value, mask=mask)
 
-    @gluon.jit
     def get(self, from_ptr, to_ptr, from_rank, to_rank, mask=None):
         """
         Copies data from the specified rank's memory to the current rank's local memory.
@@ -150,10 +144,9 @@ class IrisBackend:
             mask: Optional mask for conditional operations
         """
         translated_from_ptr = self._translate(from_ptr, from_rank, to_rank)
-        data = gl.load(translated_from_ptr, mask=mask)
-        gl.store(to_ptr, data, mask=mask)
+        data = tl.load(translated_from_ptr, mask=mask)
+        tl.store(to_ptr, data, mask=mask)
 
-    @gluon.jit
     def put(self, from_ptr, to_ptr, from_rank, to_rank, mask=None):
         """
         Copies data from the current rank's local memory to the specified rank's memory.
@@ -166,10 +159,9 @@ class IrisBackend:
             mask: Optional mask for conditional operations
         """
         translated_to_ptr = self._translate(to_ptr, from_rank, to_rank)
-        data = gl.load(from_ptr, mask=mask)
-        gl.store(translated_to_ptr, data, mask=mask)
+        data = tl.load(from_ptr, mask=mask)
+        tl.store(translated_to_ptr, data, mask=mask)
 
-    @gluon.jit
     def atomic_add(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic add at the specified rank's memory location.
@@ -187,9 +179,8 @@ class IrisBackend:
             The value at the memory location before the atomic operation
         """
         translated_ptr = self._translate(pointer, from_rank, to_rank)
-        return gl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+        return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    @gluon.jit
     def atomic_sub(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
         """
         Atomically subtracts data from the specified rank's memory location.
@@ -207,9 +198,8 @@ class IrisBackend:
             The value at the memory location before the atomic operation
         """
         translated_ptr = self._translate(pointer, from_rank, to_rank)
-        return gl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+        return tl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    @gluon.jit
     def atomic_cas(self, pointer, cmp, val, from_rank, to_rank, sem=None, scope=None):
         """
         Atomically compares and exchanges the specified rank's memory location.
@@ -227,9 +217,8 @@ class IrisBackend:
             The value at the memory location before the atomic operation
         """
         translated_ptr = self._translate(pointer, from_rank, to_rank)
-        return gl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
+        return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
 
-    @gluon.jit
     def atomic_xchg(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic exchange at the specified rank's memory location.
@@ -247,9 +236,8 @@ class IrisBackend:
             The value at the memory location before the atomic operation
         """
         translated_ptr = self._translate(pointer, from_rank, to_rank)
-        return gl.atomic_xchg(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+        return tl.atomic_xchg(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    @gluon.jit
     def atomic_xor(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic xor at the specified rank's memory location.
@@ -267,9 +255,8 @@ class IrisBackend:
             The value at the memory location before the atomic operation
         """
         translated_ptr = self._translate(pointer, from_rank, to_rank)
-        return gl.atomic_xor(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+        return tl.atomic_xor(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    @gluon.jit
     def atomic_and(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic and at the specified rank's memory location.
@@ -287,9 +274,8 @@ class IrisBackend:
             The value at the memory location before the atomic operation
         """
         translated_ptr = self._translate(pointer, from_rank, to_rank)
-        return gl.atomic_and(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+        return tl.atomic_and(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    @gluon.jit
     def atomic_or(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic or at the specified rank's memory location.
@@ -307,9 +293,8 @@ class IrisBackend:
             The value at the memory location before the atomic operation
         """
         translated_ptr = self._translate(pointer, from_rank, to_rank)
-        return gl.atomic_or(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+        return tl.atomic_or(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    @gluon.jit
     def atomic_min(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic min at the specified rank's memory location.
@@ -327,9 +312,8 @@ class IrisBackend:
             The value at the memory location before the atomic operation
         """
         translated_ptr = self._translate(pointer, from_rank, to_rank)
-        return gl.atomic_min(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+        return tl.atomic_min(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
-    @gluon.jit
     def atomic_max(self, pointer, val, from_rank, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic max at the specified rank's memory location.
@@ -347,7 +331,7 @@ class IrisBackend:
             The value at the memory location before the atomic operation
         """
         translated_ptr = self._translate(pointer, from_rank, to_rank)
-        return gl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+        return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
 
 class IrisGluon:
