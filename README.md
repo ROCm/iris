@@ -21,6 +21,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris
 - **SHMEM-like RMA**: Iris provides SHMEM-like RMA support in Triton.
 - **Simple and Intuitive API**: Iris provides simple and intuitive RMA APIs. Writing multi-GPU programs is as easy as writing single-GPU programs.
 - **Triton-based**: Iris is built on top of Triton and inherits Triton's performance and capabilities.
+- **Gluon-style Aggregate API**: Optional cleaner API using Triton's `@aggregate` decorator for better encapsulation.
 
 ## Documentation
 
@@ -29,6 +30,8 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris
 - [Examples](https://rocm.github.io/iris/reference/examples.html)
 - [Fine-grained GEMM & Communication Overlap](https://rocm.github.io/iris/conceptual/finegrained-overlap.html)
 - [Setup Alternatives](https://rocm.github.io/iris/getting-started/installation.html)
+- [Gluon Port Documentation](docs/gluon-port-readme.md) - **NEW!** Aggregate-based API
+- [API Comparison](docs/api-comparison.md) - Original vs Gluon API comparison
 
 ## API Example
 
@@ -100,6 +103,40 @@ if __name__ == "__main__":
     world_size = 2  # Using two ranks
     mp.spawn(_worker, args=(world_size,), nprocs=world_size, join=True)
 ```
+
+### Alternative: Gluon-style Aggregate API
+
+Iris also provides a cleaner API using Triton's `@aggregate` decorator:
+
+```python
+import iris.iris_gluon as iris_gl
+
+# Device-side APIs - backend encapsulates heap_bases
+@triton.jit
+def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, 
+          backend: iris_gl.IrisBackend):
+    pid = tl.program_id(0)
+    block_start = pid * block_size
+    offsets = block_start + tl.arange(0, block_size)
+    mask = offsets < buffer_size
+
+    # Store 1 in the target buffer - no need to pass heap_bases separately!
+    source_rank = 0
+    target_rank = 1
+    backend.store(buffer + offsets, 1, source_rank, target_rank, mask=mask)
+
+def _worker(rank, world_size):
+    # Initialize as before...
+    iris_ctx = iris_gl.iris(heap_size)
+    backend = iris_ctx.get_backend()  # Get aggregate instead of heap_bases
+    
+    buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
+    
+    if cur_rank == source_rank:
+        kernel[grid](buffer, buffer_size, block_size, backend)  # Pass backend
+```
+
+See [docs/api-comparison.md](docs/api-comparison.md) for a complete comparison.
 
 ## Quick Start Guide
 
