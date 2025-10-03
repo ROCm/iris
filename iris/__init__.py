@@ -21,7 +21,7 @@ Quick Start (Traditional API):
     >>> import iris
     >>> ctx = iris.iris(heap_size=2**30)
     >>> tensor = ctx.zeros(1000, 1000, dtype=torch.float32)
-    >>> 
+    >>>
     >>> @triton.jit
     >>> def kernel(buffer, heap_bases):
     >>>     iris.load(buffer, 0, 1, heap_bases)
@@ -31,7 +31,7 @@ Quick Start (Gluon API):
     >>> ctx = iris_gl.iris(heap_size=2**30)
     >>> backend = ctx.get_backend()
     >>> tensor = ctx.zeros(1000, 1000, dtype=torch.float32)
-    >>> 
+    >>>
     >>> @triton.jit
     >>> def kernel(buffer, backend: iris_gl.IrisBackend):
     >>>     backend.load(buffer, 0, 1)
