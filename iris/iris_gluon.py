@@ -17,7 +17,7 @@ Example:
     >>> import iris.iris_gluon as iris_gl
     >>> ctx = iris_gl.iris(heap_size=2**30)  # 1GB heap
     >>> context_tensor = ctx.get_device_context()  # Get context tensor
-    >>> 
+    >>>
     >>> @gluon.jit
     >>> def kernel(IrisDeviceCtx: gl.constexpr, context_tensor):
     >>>     ctx = IrisDeviceCtx.initialize(context_tensor)
@@ -59,10 +59,10 @@ from .logging import logger
 class IrisDeviceCtx:
     """
     Gluon device-side context that decodes the tensor from Iris.get_device_context().
-    
+
     This aggregate encapsulates the heap_bases pointer and provides
     device-side methods for memory operations and atomics using Gluon.
-    
+
     Attributes:
         cur_rank: Current rank ID
         num_ranks: Total number of ranks
@@ -81,34 +81,34 @@ class IrisDeviceCtx:
     def initialize(context_tensor):
         """
         Initialize IrisDeviceCtx from the encoded tensor.
-        
+
         The context tensor has the format: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
-        
+
         Args:
             context_tensor: Pointer to encoded context data
-            
+
         Returns:
             IrisDeviceCtx: Initialized device context
         """
         # Decode the tensor: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
         cur_rank = gl.load(context_tensor + 0)
         num_ranks = gl.load(context_tensor + 1)
-        
+
         # Extract heap bases (from index 2 onwards)
         heap_bases = context_tensor + 2  # Offset pointer to start at heap bases
-        
+
         return IrisDeviceCtx(cur_rank, num_ranks, heap_bases)
 
     @gluon.jit
     def _translate(self, ptr, from_rank, to_rank):
         """
         Internal function to translate a pointer from one rank's address space to another.
-        
+
         Args:
             ptr: Pointer in the from_rank's address space
             from_rank: Source rank ID
             to_rank: Target rank ID
-            
+
         Returns:
             Translated pointer in the to_rank's address space
         """
@@ -130,15 +130,15 @@ class IrisDeviceCtx:
     def load(self, pointer, from_rank, mask=None):
         """
         Loads a value from the specified rank's memory location to the current rank.
-        
+
         Args:
             pointer: Pointer in the from_rank's address space
             from_rank: The rank ID from which to read the data
             mask: Optional mask for conditional loading
-            
+
         Returns:
             The loaded value from the target memory location
-            
+
         Example:
             >>> # Load from rank 1 to current rank
             >>> data = ctx.load(buffer + offsets, 1, mask=mask)
@@ -151,13 +151,13 @@ class IrisDeviceCtx:
     def store(self, pointer, value, to_rank, mask=None):
         """
         Writes data from the current rank to the specified rank's memory location.
-        
+
         Args:
             pointer: Pointer in the current rank's address space
             value: The value to store
             to_rank: The rank ID to which the data will be written
             mask: Optional mask for conditional storing
-            
+
         Example:
             >>> # Store from current rank to rank 1
             >>> ctx.store(buffer + offsets, values, 1, mask=mask)
@@ -169,13 +169,13 @@ class IrisDeviceCtx:
     def get(self, from_ptr, to_ptr, from_rank, mask=None):
         """
         Copies data from the specified rank's memory to the current rank's local memory.
-        
+
         Args:
             from_ptr: Pointer to remote memory in from_rank's address space
             to_ptr: Pointer to local memory in current rank
             from_rank: The rank ID from which to read the data
             mask: Optional mask for conditional operations
-            
+
         Example:
             >>> # Copy from rank 1 to current rank's local memory
             >>> ctx.get(remote_ptr + offsets, local_ptr + offsets, 1, mask=mask)
@@ -188,13 +188,13 @@ class IrisDeviceCtx:
     def put(self, from_ptr, to_ptr, to_rank, mask=None):
         """
         Copies data from the current rank's local memory to the specified rank's memory.
-        
+
         Args:
             from_ptr: Pointer to local memory in current rank
             to_ptr: Pointer to remote memory in to_rank's address space
             to_rank: The rank ID to which the data will be written
             mask: Optional mask for conditional operations
-            
+
         Example:
             >>> # Copy from current rank's local memory to rank 1
             >>> ctx.put(local_ptr + offsets, remote_ptr + offsets, 1, mask=mask)
@@ -207,7 +207,7 @@ class IrisDeviceCtx:
     def atomic_add(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic add at the specified rank's memory location.
-        
+
         Args:
             pointer: The memory location in the current rank's address space
             val: The value to add
@@ -215,10 +215,10 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
             scope: Scope of synchronization (gpu, cta, sys)
-            
+
         Returns:
             The value at the memory location before the atomic operation
-            
+
         Example:
             >>> # Atomically add to rank 1's memory
             >>> old_val = ctx.atomic_add(buffer, 5, 1)
@@ -230,7 +230,7 @@ class IrisDeviceCtx:
     def atomic_sub(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Atomically subtracts data from the specified rank's memory location.
-        
+
         Args:
             pointer: Pointer in the current rank's address space
             val: The value to subtract
@@ -238,10 +238,10 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
             scope: Scope of synchronization (gpu, cta, sys)
-            
+
         Returns:
             The value at the memory location before the atomic operation
-            
+
         Example:
             >>> # Atomically subtract from rank 1's memory
             >>> old_val = ctx.atomic_sub(buffer, 3, 1)
@@ -253,7 +253,7 @@ class IrisDeviceCtx:
     def atomic_cas(self, pointer, cmp, val, to_rank, sem=None, scope=None):
         """
         Atomically compares and exchanges the specified rank's memory location.
-        
+
         Args:
             pointer: Pointer in the current rank's address space
             cmp: The expected value to compare
@@ -261,10 +261,10 @@ class IrisDeviceCtx:
             to_rank: The rank ID to which the atomic operation will be performed
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
             scope: Scope of synchronization (gpu, cta, sys)
-            
+
         Returns:
             The value at the memory location before the atomic operation
-            
+
         Example:
             >>> # Compare-and-swap on rank 1's memory
             >>> old_val = ctx.atomic_cas(flag + pid, 0, 1, 1, sem="release", scope="sys")
@@ -276,7 +276,7 @@ class IrisDeviceCtx:
     def atomic_xchg(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic exchange at the specified rank's memory location.
-        
+
         Args:
             pointer: The memory location in the current rank's address space
             val: The value to exchange
@@ -284,10 +284,10 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
             scope: Scope of synchronization (gpu, cta, sys)
-            
+
         Returns:
             The value at the memory location before the atomic operation
-            
+
         Example:
             >>> # Exchange value with rank 1's memory
             >>> old_val = ctx.atomic_xchg(buffer, 99, 1)
@@ -299,7 +299,7 @@ class IrisDeviceCtx:
     def atomic_xor(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic xor at the specified rank's memory location.
-        
+
         Args:
             pointer: The memory location in the current rank's address space
             val: The value to xor
@@ -307,10 +307,10 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
             scope: Scope of synchronization (gpu, cta, sys)
-            
+
         Returns:
             The value at the memory location before the atomic operation
-            
+
         Example:
             >>> # Atomically XOR with rank 1's memory
             >>> old_val = ctx.atomic_xor(buffer, 0xFF, 1)
@@ -322,7 +322,7 @@ class IrisDeviceCtx:
     def atomic_and(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic and at the specified rank's memory location.
-        
+
         Args:
             pointer: The memory location in the current rank's address space
             val: The value to and
@@ -330,10 +330,10 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
             scope: Scope of synchronization (gpu, cta, sys)
-            
+
         Returns:
             The value at the memory location before the atomic operation
-            
+
         Example:
             >>> # Atomically AND with rank 1's memory
             >>> old_val = ctx.atomic_and(buffer, 0x0F, 1)
@@ -345,7 +345,7 @@ class IrisDeviceCtx:
     def atomic_or(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic or at the specified rank's memory location.
-        
+
         Args:
             pointer: The memory location in the current rank's address space
             val: The value to or
@@ -353,10 +353,10 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
             scope: Scope of synchronization (gpu, cta, sys)
-            
+
         Returns:
             The value at the memory location before the atomic operation
-            
+
         Example:
             >>> # Atomically OR with rank 1's memory
             >>> old_val = ctx.atomic_or(buffer, 0xF0, 1)
@@ -368,7 +368,7 @@ class IrisDeviceCtx:
     def atomic_min(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic min at the specified rank's memory location.
-        
+
         Args:
             pointer: The memory location in the current rank's address space
             val: The value to compare and potentially store
@@ -376,10 +376,10 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
             scope: Scope of synchronization (gpu, cta, sys)
-            
+
         Returns:
             The value at the memory location before the atomic operation
-            
+
         Example:
             >>> # Atomically compute minimum with rank 1's memory
             >>> old_val = ctx.atomic_min(buffer, 10, 1)
@@ -391,7 +391,7 @@ class IrisDeviceCtx:
     def atomic_max(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic max at the specified rank's memory location.
-        
+
         Args:
             pointer: The memory location in the current rank's address space
             val: The value to compare and potentially store
@@ -399,10 +399,10 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional operations
             sem: Memory semantics (acquire, release, acq_rel, relaxed)
             scope: Scope of synchronization (gpu, cta, sys)
-            
+
         Returns:
             The value at the memory location before the atomic operation
-            
+
         Example:
             >>> # Atomically compute maximum with rank 1's memory
             >>> old_val = ctx.atomic_max(buffer, 100, 1)
@@ -414,13 +414,13 @@ class IrisDeviceCtx:
 class IrisGluon:
     """
     Gluon-based Iris class for multi-GPU communication and memory management.
-    
+
     This class provides the same functionality as the original Iris class but
     uses Gluon's @aggregate decorator to encapsulate the backend state.
-    
+
     Args:
         heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
-        
+
     Example:
         >>> ctx = iris_gluon.iris(heap_size=2**31)  # 2GB heap
         >>> backend = ctx.get_backend()  # Get Gluon aggregate
@@ -500,16 +500,16 @@ class IrisGluon:
     def get_device_context(self):
         """
         Get the device context tensor for Gluon kernels.
-        
+
         Returns a tensor encoding: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
-        
+
         Returns:
             torch.Tensor: Encoded context data as int64 tensor on device
-            
+
         Example:
             >>> ctx = iris_gluon.iris()
             >>> context_tensor = ctx.get_device_context()
-            >>> 
+            >>>
             >>> @gluon.jit
             >>> def kernel(IrisDeviceCtx: gl.constexpr, context_tensor):
             >>>     ctx = IrisDeviceCtx.initialize(context_tensor)
@@ -517,18 +517,18 @@ class IrisGluon:
         """
         # Convert heap_bases to a list for concatenation
         heap_bases_list = self.heap_bases.tolist()
-        
+
         # Create context tensor: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
         context_data = [self.cur_rank, self.num_ranks] + heap_bases_list
         context_tensor = torch.tensor(context_data, dtype=torch.int64, device=self.device)
-        
+
         return context_tensor
 
     def get_backend(self):
         """
         Legacy method for backward compatibility.
         Use get_device_context() for Gluon kernels.
-        
+
         Returns:
             torch.Tensor: Device context tensor
         """
@@ -537,7 +537,7 @@ class IrisGluon:
     def get_heap_bases(self):
         """
         Return the tensor of symmetric heap base addresses for all ranks.
-        
+
         Returns:
             torch.Tensor: A 1D tensor of uint64 heap base addresses
         """
@@ -552,7 +552,7 @@ class IrisGluon:
     def get_device(self):
         """
         Get the underlying device where the Iris symmetric heap resides.
-        
+
         Returns:
             torch.device: The CUDA device of Iris-managed memory
         """
@@ -561,7 +561,7 @@ class IrisGluon:
     def get_cu_count(self):
         """
         Get the number of compute units (CUs) for the current GPU.
-        
+
         Returns:
             int: Number of compute units on this rank's GPU
         """
@@ -570,7 +570,7 @@ class IrisGluon:
     def get_rank(self):
         """
         Get the current rank ID.
-        
+
         Returns:
             int: The current rank ID
         """
@@ -579,7 +579,7 @@ class IrisGluon:
     def get_num_ranks(self):
         """
         Get the total number of ranks.
-        
+
         Returns:
             int: The total number of ranks in the distributed system
         """
@@ -588,11 +588,11 @@ class IrisGluon:
     def broadcast(self, data, src_rank=0):
         """
         Broadcast data from source rank to all ranks.
-        
+
         Args:
             data: Data to broadcast (scalar or tensor)
             src_rank: Source rank for broadcast (default: 0)
-            
+
         Returns:
             The broadcasted data
         """
@@ -664,7 +664,7 @@ class IrisGluon:
     def zeros(self, *size, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
         """
         Create a tensor filled with zeros on the symmetric heap.
-        
+
         Args:
             size: Shape of the tensor
             dtype: Data type (default: torch.float32)
