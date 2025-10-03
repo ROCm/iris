@@ -671,7 +671,7 @@ class IrisGluon:
             device: Device (must match Iris device)
             layout: Layout (default: torch.strided)
             requires_grad: Whether to track gradients
-            
+
         Returns:
             torch.Tensor: Zero-initialized tensor on the symmetric heap
         """
@@ -711,13 +711,10 @@ class IrisGluon:
 def iris(heap_size=1 << 30):
     """
     Create and return a Gluon-based Iris instance with the specified heap size.
-    
     Args:
         heap_size (int): Size of the heap in bytes. Defaults to 1GB.
-        
     Returns:
         IrisGluon: An initialized Gluon-based Iris instance
-        
     Example:
         >>> import iris.iris_gluon as iris_gl
         >>> ctx = iris_gl.iris(2**30)  # 1GB heap
