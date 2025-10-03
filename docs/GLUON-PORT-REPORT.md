@@ -11,8 +11,7 @@ Successfully implemented a Gluon-style API for Iris using Triton's `@aggregate` 
 - **examples/06_message_passing/message_passing_gluon.py** (245 lines) - Complete example
 - **tests/unittests/test_iris_gluon.py** (158 lines) - Unit tests
 
-### Documentation (814 lines)
-- **docs/gluon-implementation-summary.md** (291 lines) - Technical deep dive
+### Documentation (523 lines)
 - **docs/api-comparison.md** (402 lines) - Side-by-side comparison with migration guide
 - **docs/gluon-port-readme.md** (121 lines) - Quick start guide
 
@@ -20,7 +19,7 @@ Successfully implemented a Gluon-style API for Iris using Triton's `@aggregate` 
 - **iris/__init__.py** - Exposed iris_gluon module
 - **README.md** - Added Gluon section with example
 
-**Total: 1,847 lines of new code and documentation**
+**Total: 1,556 lines of new code and documentation**
 
 ## What Was Implemented
 
@@ -235,7 +234,6 @@ The implementation is **fully backward compatible**:
 ## Documentation Quality
 
 ### Comprehensive Coverage
-- **291 lines** of technical implementation details
 - **402 lines** of side-by-side API comparison
 - **121 lines** of quick start guide
 - **37 lines** added to main README
@@ -263,13 +261,12 @@ Commits in chronological order:
 iris/iris_gluon.py                                  | 630 lines (new)
 examples/06_message_passing/message_passing_gluon.py | 245 lines (new)
 tests/unittests/test_iris_gluon.py                   | 158 lines (new)
-docs/gluon-implementation-summary.md                 | 291 lines (new)
 docs/api-comparison.md                               | 402 lines (new)
 docs/gluon-port-readme.md                            | 121 lines (new)
 iris/__init__.py                                     |   5 lines (modified)
 README.md                                            |  37 lines (modified)
 -------------------------------------------------------------------
-Total: 1,847 lines added/modified
+Total: 1,556 lines added/modified
 ```
 
 ## Success Criteria
@@ -345,5 +342,4 @@ The implementation is ready for:
 
 For questions about this implementation:
 - See [docs/gluon-port-readme.md](docs/gluon-port-readme.md) for quick start
-- See [docs/api-comparison.md](docs/api-comparison.md) for examples
-- See [docs/gluon-implementation-summary.md](docs/gluon-implementation-summary.md) for technical details
+- See [docs/api-comparison.md](docs/api-comparison.md) for examples and technical details
