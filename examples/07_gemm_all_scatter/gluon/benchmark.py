@@ -14,7 +14,7 @@ import torch.multiprocessing as mp
 import triton
 from matmul_wrapper import matmul
 
-import iris.iris_gluon as iris_gl
+import iris.experimental.iris_gluon as iris_gl
 import iris.hip
 from iris.util import do_bench
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set

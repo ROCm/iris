@@ -19,7 +19,7 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 import triton
 
-import iris.iris_gluon as iris_gl
+import iris.experimental.iris_gluon as iris_gl
 
 
 @gluon.jit

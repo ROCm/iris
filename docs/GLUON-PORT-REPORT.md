@@ -167,7 +167,7 @@ def kernel(buffer, backend: iris_gl.IrisBackend):
 
 ### Initialization
 ```python
-import iris.iris_gluon as iris_gl
+import iris.experimental.iris_gluon as iris_gl
 
 # Initialize with 1GB heap
 ctx = iris_gl.iris(heap_size=2**30)
@@ -206,7 +206,7 @@ my_kernel[grid](buffer, backend)
 
 To migrate from original Iris to Gluon API:
 
-1. Change import: `import iris.iris_gluon as iris_gl`
+1. Change import: `import iris.experimental.iris_gluon as iris_gl`
 2. Update initialization: `backend = ctx.get_backend()`
 3. Update kernel signature: `def kernel(..., backend: iris_gl.IrisBackend)`
 4. Update function calls: `backend.load()` instead of `iris.load()`

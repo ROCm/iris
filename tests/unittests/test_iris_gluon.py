@@ -21,19 +21,19 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 def test_iris_gluon_imports():
     """Test that iris_gluon module can be imported."""
     try:
-        import iris.iris_gluon as iris_gl
+        import iris.experimental.iris_gluon as iris_gl
 
-        print("✓ Successfully imported iris.iris_gluon")
+        print("✓ Successfully imported iris.experimental.iris_gluon")
         return True
     except ImportError as e:
-        print(f"✗ Failed to import iris.iris_gluon: {e}")
+        print(f"✗ Failed to import iris.experimental.iris_gluon: {e}")
         return False
 
 
 def test_iris_gluon_aggregate():
     """Test that IrisBackend aggregate is defined."""
     try:
-        import iris.iris_gluon as iris_gl
+        import iris.experimental.iris_gluon as iris_gl
 
         # Check that IrisBackend exists
         assert hasattr(iris_gl, "IrisBackend")
@@ -59,7 +59,7 @@ def test_iris_gluon_aggregate():
 def test_iris_gluon_backend_methods():
     """Test that IrisBackend has all required methods."""
     try:
-        import iris.iris_gluon as iris_gl
+        import iris.experimental.iris_gluon as iris_gl
 
         backend_class = iris_gl.IrisBackend
 

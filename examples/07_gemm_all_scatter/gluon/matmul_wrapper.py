@@ -6,7 +6,7 @@ import triton
 
 from gemm_all_scatter import persistent_gemm_all_scatter_gluon
 from examples.common.utils import is_triton_interpret_set
-import iris.iris_gluon as iris_gl
+import iris.experimental.iris_gluon as iris_gl
 
 gemm_kernel = persistent_gemm_all_scatter_gluon
 

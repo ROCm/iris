@@ -106,7 +106,7 @@ if __name__ == "__main__":
 Iris also provides a cleaner API using Triton's `@aggregate` decorator:
 
 ```python
-import iris.iris_gluon as iris_gl
+import iris.experimental.iris_gluon as iris_gl
 
 # Device-side APIs - backend encapsulates heap_bases
 @triton.jit

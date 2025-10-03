@@ -38,7 +38,7 @@ kernel[grid](buffer, heap_bases)
 import torch
 import triton
 import triton.language as tl
-import iris.iris_gluon as iris_gl
+import iris.experimental.iris_gluon as iris_gl
 
 # Host code
 ctx = iris_gl.iris(heap_size=2**30)
@@ -118,7 +118,7 @@ consumer_kernel[grid](buffer, flag, 1, heap_bases)
 ### Gluon API
 
 ```python
-import iris.iris_gluon as iris_gl
+import iris.experimental.iris_gluon as iris_gl
 
 @triton.jit
 def producer_kernel(source, target, flag, producer_rank: tl.constexpr, 
@@ -307,7 +307,7 @@ heap_bases = ctx.get_heap_bases()
 ### Gluon API
 
 ```python
-import iris.iris_gluon as iris_gl
+import iris.experimental.iris_gluon as iris_gl
 
 # Initialize
 ctx = iris_gl.iris(heap_size=2**30)
@@ -358,7 +358,7 @@ To migrate from Original API to Gluon API:
    import iris
    
    # After
-   import iris.iris_gluon as iris_gl
+   import iris.experimental.iris_gluon as iris_gl
    ```
 
 2. **Update initialization:**

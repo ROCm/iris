@@ -18,7 +18,7 @@ from examples.common.utils import read_realtime
 import sys
 import os
 
-import iris.iris_gluon as iris_gl
+import iris.experimental.iris_gluon as iris_gl
 
 
 @gluon.jit()

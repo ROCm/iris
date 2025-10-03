@@ -32,7 +32,7 @@ The host-side class that manages:
 ### Host Code
 
 ```python
-import iris.iris_gluon as iris_gl
+import iris.experimental.iris_gluon as iris_gl
 
 # Initialize Iris with 1GB heap
 ctx = iris_gl.iris(heap_size=2**30)
@@ -49,7 +49,7 @@ buffer = ctx.zeros(1024, device="cuda", dtype=torch.float32)
 ```python
 import triton
 import triton.language as tl
-import iris.iris_gluon as iris_gl
+import iris.experimental.iris_gluon as iris_gl
 
 @triton.jit
 def my_kernel(buffer, backend: iris_gl.IrisBackend):
