@@ -18,7 +18,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 - **SHMEM-like RMA**: Iris provides SHMEM-like RMA support in Triton.
 - **Simple and Intuitive API**: Iris provides simple and intuitive RMA APIs. Writing multi-GPU programs is as easy as writing single-GPU programs.
 - **Triton-based**: Iris is built on top of Triton and inherits Triton's performance and capabilities.
-- **Gluon-style Aggregate API**: Optional cleaner API using Triton's `@aggregate` decorator for better encapsulation.
+- **Gluon-style Aggregate API (Experimental)**: Optional cleaner API using Triton's `@aggregate` decorator for better encapsulation.
 
 ## Documentation
 
@@ -27,7 +27,6 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 - [Examples](https://rocm.github.io/iris/reference/examples.html)
 - [Fine-grained GEMM & Communication Overlap](https://rocm.github.io/iris/conceptual/finegrained-overlap.html)
 - [Setup Alternatives](https://rocm.github.io/iris/getting-started/installation.html)
-- [Gluon Port Documentation](docs/gluon-port-readme.md) - **NEW!** Aggregate-based API
 - [API Comparison](docs/api-comparison.md) - Original vs Gluon API comparison
 
 ## API Example
@@ -101,36 +100,42 @@ if __name__ == "__main__":
     mp.spawn(_worker, args=(world_size,), nprocs=world_size, join=True)
 ```
 
-### Alternative: Gluon-style Aggregate API
+### Alternative: Gluon-style Aggregate API (Experimental)
 
-Iris also provides a cleaner API using Triton's `@aggregate` decorator:
+Iris also provides an experimental cleaner API using Triton's Gluon with `@gluon.jit` decorator:
 
 ```python
 import iris.experimental.iris_gluon as iris_gl
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
 
-# Device-side APIs - backend encapsulates heap_bases
-@triton.jit
-def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, 
-          backend: iris_gl.IrisBackend):
-    pid = tl.program_id(0)
+# Device-side APIs - context encapsulates heap_bases
+@gluon.jit
+def kernel(IrisDeviceCtx: gl.constexpr, context_tensor,
+          buffer, buffer_size: gl.constexpr, block_size: gl.constexpr):
+    # Initialize device context from tensor
+    ctx = IrisDeviceCtx.initialize(context_tensor)
+    
+    pid = gl.program_id(0)
     block_start = pid * block_size
-    offsets = block_start + tl.arange(0, block_size)
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    offsets = block_start + gl.arange(0, block_size, layout=layout)
     mask = offsets < buffer_size
 
     # Store 1 in the target buffer - no need to pass heap_bases separately!
-    source_rank = 0
     target_rank = 1
-    backend.store(buffer + offsets, 1, target_rank, mask=mask)
+    ctx.store(buffer + offsets, 1, target_rank, mask=mask)
 
 def _worker(rank, world_size):
     # Initialize as before...
     iris_ctx = iris_gl.iris(heap_size)
-    backend = iris_ctx.get_backend()  # Get aggregate instead of heap_bases
+    context_tensor = iris_ctx.get_device_context()  # Get encoded context
     
     buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
     
     if cur_rank == source_rank:
-        kernel[grid](buffer, buffer_size, block_size, backend)  # Pass backend
+        kernel[(grid,)](iris_gl.IrisDeviceCtx, context_tensor, 
+                       buffer, buffer_size, block_size, num_warps=1)
 ```
 
 See [docs/api-comparison.md](docs/api-comparison.md) for a complete comparison.
