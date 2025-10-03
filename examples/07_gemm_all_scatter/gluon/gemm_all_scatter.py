@@ -58,7 +58,7 @@ def persistent_gemm_all_scatter_gluon(
     # Initialize device context from tensor
     ctx = IrisDeviceCtx.initialize(context_tensor)
     cur_rank = ctx.cur_rank
-    
+
     pid = gl.program_id(0)
 
     if NUM_XCDS != 1:
