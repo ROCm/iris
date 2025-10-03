@@ -36,7 +36,7 @@ def producer_kernel(
 ):
     # Initialize device context from tensor
     ctx = IrisDeviceCtx.initialize(context_tensor)
-    
+
     pid = gl.program_id(0)
 
     # Compute start index of this block
@@ -75,7 +75,7 @@ def consumer_kernel(
 ):
     # Initialize device context from tensor
     ctx = IrisDeviceCtx.initialize(context_tensor)
-    
+
     pid = gl.program_id(0)
 
     block_start = pid * BLOCK_SIZE
@@ -87,9 +87,7 @@ def consumer_kernel(
     # Spin-wait until writer sets flag[pid] = 1 using context
     done = 0
     while done == 0:
-        done = ctx.atomic_cas(
-            flag + pid, 1, 0, consumer_rank, sem="acquire", scope="sys"
-        )
+        done = ctx.atomic_cas(flag + pid, 1, 0, consumer_rank, sem="acquire", scope="sys")
 
     # Read from the target buffer (written by producer) using context
     values = ctx.load(buffer + offsets, consumer_rank, mask=mask)

@@ -68,6 +68,7 @@ class IrisDeviceCtx:
         num_ranks: Total number of ranks
         heap_bases: Pointer to array of heap base addresses for all ranks
     """
+
     cur_rank: gl.tensor
     num_ranks: gl.tensor
     heap_bases: gl.tensor
