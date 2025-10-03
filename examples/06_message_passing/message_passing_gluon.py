@@ -41,7 +41,9 @@ def producer_kernel(
 
     # Compute start index of this block
     block_start = pid * BLOCK_SIZE
-    offsets = block_start + gl.arange(0, BLOCK_SIZE)
+    # Create a simple 1D layout for the arange operation (64 threads per warp for AMD)
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
 
     # Guard for out-of-bounds accesses
     mask = offsets < buffer_size
@@ -77,7 +79,9 @@ def consumer_kernel(
     pid = gl.program_id(0)
 
     block_start = pid * BLOCK_SIZE
-    offsets = block_start + gl.arange(0, BLOCK_SIZE)
+    # Create a simple 1D layout for the arange operation (64 threads per warp for AMD)
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < buffer_size
 
     # Spin-wait until writer sets flag[pid] = 1 using context

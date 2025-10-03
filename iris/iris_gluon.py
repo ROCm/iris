@@ -28,6 +28,7 @@ from triton.language.core import _aggregate as aggregate
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 import triton
+import triton.language as tl
 
 from iris._distributed_helpers import (
     init_distributed,
@@ -114,15 +115,15 @@ class IrisDeviceCtx:
         from_base = gl.load(self.heap_bases + from_rank)
         to_base = gl.load(self.heap_bases + to_rank)
         # convert to int to compute difference
-        ptr_int = gl.cast(ptr, gl.uint64)
+        ptr_int = tl.cast(ptr, gl.uint64)
         # Find the offset from from_rank heap
         offset = ptr_int - from_base
         # Byte cast for byte offset addition
-        to_base_byte = gl.cast(to_base, gl.pointer_type(gl.int8))
+        to_base_byte = tl.cast(to_base, gl.pointer_type(gl.int8))
         # Find the offset into the to_rank heap
         translated_ptr_byte = to_base_byte + offset
         # Cast to_base back to pointer type
-        translated_ptr = gl.cast(translated_ptr_byte, ptr.dtype)
+        translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
         return translated_ptr
 
     @gluon.jit
