@@ -19,6 +19,28 @@ ONE_SHOT_V2 = tl.constexpr(5)
 ALL_GATHER = tl.constexpr(6)
 
 
+dtype_map = {
+    "fp32": torch.float32,
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+    "int8": torch.int8,
+    "int32": torch.int32,
+    "int64": torch.int64,
+}
+
+
+def torch_dtype_from_str(datatype: str) -> torch.dtype:
+    try:
+        return dtype_map[datatype]
+    except KeyError:
+        print(f"Unknown datatype: {datatype}")
+        exit(1)
+
+
+def torch_dtype_to_str(dtype: torch.dtype) -> str:
+    return list(dtype_map.keys())[list(dtype_map.values()).index(dtype)]
+
+
 class JSONWriter:
     def __init__(self, file_path):
         self.file_path = file_path
