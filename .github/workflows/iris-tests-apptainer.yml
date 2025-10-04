@@ -61,7 +61,7 @@ jobs:
 
       - name: Run Iris Tests with ${{ matrix.ranks }} ranks
         run: |
-          export ROCR_VISIBLE_DEVICES="${{ matrix.gpu_devices }}"
+          export HIP_VISIBLE_DEVICES="${{ matrix.gpu_devices }}"
           apptainer exec ~/apptainer/iris-dev.sif bash .github/scripts/run_tests.sh ${{ matrix.ranks }}
 
   run-tests-8-ranks:
@@ -76,5 +76,5 @@ jobs:
 
       - name: Run Iris Tests with 8 ranks
         run: |
-          export ROCR_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+          export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
           apptainer exec ~/apptainer/iris-dev.sif bash .github/scripts/run_tests.sh 8
