@@ -1536,6 +1536,57 @@ def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
 
 
 @triton.jit
+def copy(src_ptr, dst_ptr, from_rank, to_rank, cur_rank, heap_bases, mask=None):
+    """
+    Copies data from the specified rank's memory into the destination rank's memory.
+    This function performs the transfer by translating src_ptr from the from_rank's address
+    space to the to_rank's address space, performing a masked load from the translated
+    source, and storing the loaded data to dst_ptr in the to_rank memory location.
+    If from_rank and to_rank are the same, this function performs a local copy operation.
+    It is undefined behaviour if neither from_rank nor to_rank is the cur_rank.
+
+    Args:
+        src_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's local memory from which to read data.
+        dst_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the to_rank's local memory where the data will be written.
+        from_rank (int): The rank ID that owns src_ptr (source rank).
+        to_rank (int): The rank ID that will receive the data (destination rank).
+        cur_rank (int): The rank ID issuing the copy operation. Must be either from_rank or to_rank.
+        heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
+        mask (Block of triton.int1, optional): If mask[idx] is false, do not load from the translated src_ptr[idx] and do not store to dst_ptr[idx]. Defaults to None.
+
+    Returns:
+        None
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(remote_ptr, local_ptr, heap_bases):
+        >>>     from_rank = 1
+        >>>     to_rank = 0
+        >>>     iris.copy(remote_ptr, local_ptr, from_rank, to_rank, to_rank, heap_bases)
+    """
+
+    cur_base = tl.load(heap_bases + cur_rank)
+
+    from_base = tl.load(heap_bases + from_rank)
+    to_base = tl.load(heap_bases + to_rank)
+
+    src_ptr_int = tl.cast(src_ptr, tl.uint64)
+    src_offset = src_ptr_int - cur_base
+
+    dst_ptr_int = tl.cast(dst_ptr, tl.uint64)
+    dst_offset = dst_ptr_int - cur_base
+
+    from_base_byte = tl.cast(from_base, tl.pointer_type(tl.int8))
+    to_base_byte = tl.cast(to_base, tl.pointer_type(tl.int8))
+
+    translated_src = tl.cast(from_base_byte + src_offset, src_ptr.dtype)
+    translated_dst = tl.cast(to_base_byte + dst_offset, src_ptr.dtype)
+
+    data = tl.load(translated_src, mask=mask)
+    tl.store(translated_dst, data, mask=mask)
+
+
+@triton.jit
 def get(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
     """
     Copies data from the specified rank's memory to the current rank's local memory.
