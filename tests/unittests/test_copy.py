@@ -45,7 +45,7 @@ def copy_put_kernel(
     mask = offsets < BLOCK_SIZE
 
     for target_rank in range(num_ranks):
-        src_data = data + BLOCK_SIZE * cur_rank  
+        src_data = data + BLOCK_SIZE * cur_rank
         dest_data = results + BLOCK_SIZE * cur_rank
         iris.copy(src_data + offsets, dest_data + offsets, cur_rank, target_rank, cur_rank, heap_bases, mask)
 
