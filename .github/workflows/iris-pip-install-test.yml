@@ -57,9 +57,10 @@ jobs:
 
       - name: Run Pip Install Test with Apptainer
         run: |
-          tmpimg=$(mktemp /tmp/overlay_XXXX.img) && \
-          apptainer overlay create --size 8192 "$tmpimg" && \
-          apptainer exec --no-home --no-cwd --bind "$GITHUB_WORKSPACE:/workspace" --overlay "$tmpimg" ~/apptainer/iris-dev.sif bash -c "
+          timestamp=$(date +%s)
+          tmpimg="/tmp/overlay_${timestamp}.img"
+          apptainer overlay create --size 8192 "$tmpimg"
+          apptainer exec --cleanenv --no-home --no-cwd --bind "$GITHUB_WORKSPACE:/workspace" --overlay "$tmpimg" ~/apptainer/iris-dev.sif bash -c "
             set -e  # Exit on any error
             cd /workspace
 
@@ -88,5 +89,5 @@ jobs:
               echo \"Testing: \$test_file with ${{ matrix.ranks }} ranks\"
               python tests/run_tests_distributed.py --num_ranks ${{ matrix.ranks }} \"\$test_file\" -v --tb=short
             done
-          " && \
+          "
           rm -f "$tmpimg"
