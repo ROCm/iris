@@ -7,7 +7,7 @@ import sys
 import torch
 import subprocess
 import os
-    
+
 rt_path = "libamdhip64.so"
 hip_runtime = ctypes.cdll.LoadLibrary(rt_path)
 
@@ -95,21 +95,18 @@ def get_rocm_version():
 
     # Try hipconfig --path first
     try:
-        result = subprocess.run(['hipconfig', '--path'],
-                              capture_output=True,
-                              text=True,
-                              check=True)
+        result = subprocess.run(["hipconfig", "--path"], capture_output=True, text=True, check=True)
         rocm_path = result.stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         # Then look for $ROCM_PATH environment variable
-        rocm_path = os.environ.get('ROCM_PATH')
+        rocm_path = os.environ.get("ROCM_PATH")
         if not rocm_path:
             # Finally, try default location
-            rocm_path = '/opt/rocm'
+            rocm_path = "/opt/rocm"
 
     # Try to read version from .info/version file
     try:
-        version_file_path = os.path.join(rocm_path, '.info', 'version')
+        version_file_path = os.path.join(rocm_path, ".info", "version")
         with open(version_file_path, "r") as version_file:
             version = version_file.readline().strip()
             major = int(version.split(".")[0])
