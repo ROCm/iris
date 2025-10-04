@@ -48,7 +48,7 @@ jobs:
           timestamp=$(date +%s)
           tmpimg="/tmp/overlay_${timestamp}.img"
           apptainer overlay create --size 8192 "$tmpimg"
-          apptainer exec --cleanenv --no-home --no-cwd --bind "$GITHUB_WORKSPACE:/workspace" --overlay "$tmpimg" ~/apptainer/iris-dev.sif bash -c "
+          apptainer exec --cleanenv --no-home --bind "$GITHUB_WORKSPACE:/workspace" --overlay "$tmpimg" ~/apptainer/iris-dev.sif bash -c "
             set -e  # Exit on any error
             cd /workspace
 
