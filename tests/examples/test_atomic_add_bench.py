@@ -10,9 +10,16 @@ import numpy as np
 import iris
 
 import importlib.util
+import sys
 from pathlib import Path
 
 current_dir = Path(__file__).parent
+
+# Add examples directory to sys.path so that example files can import from examples.common
+# Note: Examples use "from examples.common.utils import ..." which requires examples/ in sys.path
+examples_dir = (current_dir / "../..").resolve()
+if str(examples_dir) not in sys.path:
+    sys.path.insert(0, str(examples_dir))
 
 # Load utils module from file path (not package import)
 # Note: We use path-based imports instead of "from examples.common.utils import ..."
