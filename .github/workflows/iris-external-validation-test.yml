@@ -45,8 +45,11 @@ jobs:
     steps:
       - name: Run External Validation Test with Apptainer
         run: |
-          apptainer exec ~/apptainer/iris-dev.sif bash -c "
+          tmpimg=$(mktemp /tmp/overlay_XXXX.img) && \
+          apptainer overlay create --size 8192 "$tmpimg" && \
+          apptainer exec --no-home --no-cwd --bind "$GITHUB_WORKSPACE:/workspace" --overlay "$tmpimg" ~/apptainer/iris-dev.sif bash -c "
             set -e  # Exit on any error
+            cd /workspace
 
             # Setup Python
             python3 -m pip install --upgrade pip
@@ -55,10 +58,10 @@ jobs:
             echo 'Uninstalling any existing Iris packages...'
             pip uninstall -y Iris iris || echo 'No existing Iris packages found or uninstall failed'
             rm -rf build dist *.egg-info
-            
+
             # Install iris from the current repository
             echo 'Installing iris from current repository...'
-            pip install --force-reinstall --no-deps git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
+            pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
 
             # Download test script from gist
             echo 'Downloading test script from gist...'
@@ -67,6 +70,7 @@ jobs:
             # Run the external validation test
             echo 'Running iris external validation test...'
             python test_iris_distributed.py
-            
+
             echo 'External validation test completed successfully!'
-          "
+          " && \
+          rm -f "$tmpimg"
