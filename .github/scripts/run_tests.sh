@@ -13,9 +13,6 @@ if [ -z "$NUM_RANKS" ]; then
     exit 1
 fi
 
-# Install iris first
-pip install -e .
-
 # Run examples tests one at a time using distributed wrapper
 echo 'Running examples tests one at a time...'
 for test_file in tests/examples/test_*.py; do

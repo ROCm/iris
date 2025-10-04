@@ -17,6 +17,9 @@ jobs:
     timeout-minutes: 90
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Setup Apptainer
         run: |
           apt-get update && apt-get install -y software-properties-common
@@ -43,35 +46,31 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Run External Validation Test with Apptainer
         run: |
-          timestamp=$(date +%s)
-          tmpimg="/tmp/overlay_${timestamp}.img"
-          apptainer overlay create --size 8192 "$tmpimg"
-          apptainer exec --cleanenv --no-home --bind "$GITHUB_WORKSPACE:/workspace" --overlay "$tmpimg" ~/apptainer/iris-dev.sif bash -c "
-            set -e  # Exit on any error
-            cd /workspace
+          # Create unique overlay image for isolation
+          OVERLAY="/tmp/iris_overlay_$(whoami)_external_$(date +%s%N).img"
 
-            # Setup Python
-            python3 -m pip install --upgrade pip
+          echo "::group::Creating overlay image"
+          apptainer overlay create --size 1024 --create-dir /var/cache/iris "${OVERLAY}"
+          echo "::endgroup::"
 
-            # Uninstall any existing Iris installations
-            echo 'Uninstalling any existing Iris packages...'
-            pip uninstall -y Iris iris || echo 'No existing Iris packages found or uninstall failed'
-            rm -rf build dist *.egg-info
+          echo "::group::Running external validation test"
+          apptainer exec --overlay "${OVERLAY}" --no-home --cleanenv \
+            --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
+            ~/apptainer/iris-dev.sif bash -c "
+              pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
+              wget -O test_iris_distributed.py https://gist.githubusercontent.com/mawad-amd/6375dc078e39e256828f379e03310ec7/raw/a527c3192bee4615292769e340b1c73676f6945a/test_iris_distributed.py
+              python test_iris_distributed.py
+            "
+          echo "::endgroup::"
 
-            # Install iris from the current repository
-            echo 'Installing iris from current repository...'
-            pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
+          # Cleanup overlay image
+          echo "::group::Cleaning up overlay image"
+          rm -f "${OVERLAY}"
+          echo "::endgroup::"
 
-            # Download test script from gist
-            echo 'Downloading test script from gist...'
-            wget -O test_iris_distributed.py https://gist.githubusercontent.com/mawad-amd/6375dc078e39e256828f379e03310ec7/raw/a527c3192bee4615292769e340b1c73676f6945a/test_iris_distributed.py
-
-            # Run the external validation test
-            echo 'Running iris external validation test...'
-            python test_iris_distributed.py
-
-            echo 'External validation test completed successfully!'
-          "
-          rm -f "$tmpimg"
+          echo "✅ External validation test passed!"

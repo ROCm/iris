@@ -50,11 +50,6 @@ jobs:
 
       - name: Run 1, 2, 4 rank tests in parallel
         run: |
-          # Run tests in parallel with different GPU assignments
-          # Note: Each test gets 2+ GPUs even if it only uses some of them.
-          # This allows tests like test_empty_device_handling to verify that
-          # allocating on a different device correctly raises an error.
-
           # Create unique overlay images for isolation
           OVERLAY_1="/tmp/iris_overlay_$(whoami)_1rank_$(date +%s%N).img"
           OVERLAY_2="/tmp/iris_overlay_$(whoami)_2rank_$(date +%s%N).img"
@@ -70,19 +65,28 @@ jobs:
           echo "Starting 1-rank test on GPUs 0,1..."
           apptainer exec --overlay "${OVERLAY_1}" --no-home --cleanenv --env HIP_VISIBLE_DEVICES="0,1" \
             --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
-            ~/apptainer/iris-dev.sif bash .github/scripts/run_tests.sh 1 &
+            ~/apptainer/iris-dev.sif bash -c "
+              pip install -e .
+              bash .github/scripts/run_tests.sh 1
+            " &
           PID1=$!
 
           echo "Starting 2-rank test on GPUs 2,3..."
           apptainer exec --overlay "${OVERLAY_2}" --no-home --cleanenv --env HIP_VISIBLE_DEVICES="2,3" \
             --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
-            ~/apptainer/iris-dev.sif bash .github/scripts/run_tests.sh 2 &
+            ~/apptainer/iris-dev.sif bash -c "
+              pip install -e .
+              bash .github/scripts/run_tests.sh 2
+            " &
           PID2=$!
 
           echo "Starting 4-rank test on GPUs 4,5,6,7..."
           apptainer exec --overlay "${OVERLAY_4}" --no-home --cleanenv --env HIP_VISIBLE_DEVICES="4,5,6,7" \
             --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
-            ~/apptainer/iris-dev.sif bash .github/scripts/run_tests.sh 4 &
+            ~/apptainer/iris-dev.sif bash -c "
+              pip install -e .
+              bash .github/scripts/run_tests.sh 4
+            " &
           PID4=$!
           echo "::endgroup::"
 
@@ -130,7 +134,10 @@ jobs:
           echo "::group::Running 8-rank test on all GPUs"
           apptainer exec --overlay "${OVERLAY_8}" --no-home --cleanenv --env HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
             --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
-            ~/apptainer/iris-dev.sif bash .github/scripts/run_tests.sh 8
+            ~/apptainer/iris-dev.sif bash -c "
+              pip install -e .
+              bash .github/scripts/run_tests.sh 8
+            "
           echo "::endgroup::"
 
           # Cleanup overlay image
