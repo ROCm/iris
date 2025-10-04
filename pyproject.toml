@@ -43,7 +43,6 @@ dev = [
 [tool.ruff]
 line-length = 120
 exclude = [
-    "csrc/finegrained_alloc/**",  # explicitly exclude all contents
     "**/*.ipynb"                  # match notebooks anywhere
 ]
 
