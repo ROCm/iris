@@ -16,6 +16,7 @@ include = ["iris"]
 
 [project]
 name = "Iris"
+version = "0.1.0"
 description = "Python- and Triton-based library that provide SHMEM-like RDMA support in Triton."
 authors = [
     { name = "Muhammad Awad", email = "muhaawad@amd.com" },
@@ -25,7 +26,6 @@ authors = [
 license = "MIT"
 readme = "README.md"
 requires-python = ">=3.8"
-dynamic = ["version"]
 
 dependencies = [
     "numpy",
