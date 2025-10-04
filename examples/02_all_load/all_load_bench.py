@@ -36,7 +36,7 @@ def store_kernel(
     # Simple data to store (similar to what we accumulate)
     data = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
 
-    tl.store(target_buffer + offsets, data, mask=mask)
+    tl.store(target_buffer + offsets, data, mask=mask, cache_modifier=".wt")
 
 
 @triton.jit
@@ -61,19 +61,19 @@ def all_read_kernel(
     # Initialize accumulator in registers
     if world_size == 1:
         data = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
-        tl.store(target_buffer + offsets, data, mask=mask)
+        tl.store(target_buffer + offsets, data, mask=mask, cache_modifier=".wt")
     elif world_size == 2:
         data_0 = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
         data_1 = iris.load(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
         sum = data_0 + data_1
-        tl.store(target_buffer + offsets, sum, mask=mask)
+        tl.store(target_buffer + offsets, sum, mask=mask, cache_modifier=".wt")
     elif world_size == 4:
         data_0 = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
         data_1 = iris.load(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
         data_2 = iris.load(source_buffer + offsets, cur_rank, 2, heap_bases_ptr, mask=mask)
         data_3 = iris.load(source_buffer + offsets, cur_rank, 3, heap_bases_ptr, mask=mask)
         sum = data_0 + data_1 + data_2 + data_3
-        tl.store(target_buffer + offsets, sum, mask=mask)
+        tl.store(target_buffer + offsets, sum, mask=mask, cache_modifier=".wt")
     else:
         data_0 = iris.load(source_buffer + offsets, cur_rank, 0, heap_bases_ptr, mask=mask)
         data_1 = iris.load(source_buffer + offsets, cur_rank, 1, heap_bases_ptr, mask=mask)
@@ -84,7 +84,7 @@ def all_read_kernel(
         data_6 = iris.load(source_buffer + offsets, cur_rank, 6, heap_bases_ptr, mask=mask)
         data_7 = iris.load(source_buffer + offsets, cur_rank, 7, heap_bases_ptr, mask=mask)
         sum = data_0 + data_1 + data_2 + data_3 + data_4 + data_5 + data_6 + data_7
-        tl.store(target_buffer + offsets, sum, mask=mask)
+        tl.store(target_buffer + offsets, sum, mask=mask, cache_modifier=".wt")
 
 
 def torch_dtype_from_str(datatype: str) -> torch.dtype:
