@@ -56,8 +56,8 @@ def test_all_load_bench(dtype, buffer_size, heap_size, block_size):
         "datatype": _torch_dtype_to_str(dtype),
         "block_size": block_size,
         "active_ranks": num_ranks,
-        "num_warmup": 1,
-        "num_experiments": 2,
+        "num_warmup": 4,
+        "num_experiments": 8,
         "verbose": False,
         "validate": False,
     }
