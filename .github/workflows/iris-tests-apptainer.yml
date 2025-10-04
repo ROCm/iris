@@ -38,11 +38,11 @@ jobs:
           else
             echo "Using existing Apptainer image"
           fi
-  run-all-tests:
-    name: Run All Iris Tests
+  test-1-2-4-ranks:
+    name: Test 1/2/4 Ranks (Parallel)
     needs: build-apptainer-image
     runs-on: [self-hosted, mi3008x]
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -87,6 +87,16 @@ jobs:
           fi
 
           echo "✅ All parallel tests (1, 2, 4 ranks) passed!"
+
+  test-8-ranks:
+    name: Test 8 Ranks
+    needs: build-apptainer-image
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Run 8-rank test
         run: |
