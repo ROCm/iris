@@ -23,6 +23,13 @@ def _find_free_port():
 
 def _distributed_worker(rank, world_size, test_file, pytest_args, init_method):
     """Worker function that runs pytest within a distributed process group."""
+    # Set the correct GPU for this specific process
+    # When ROCR_VISIBLE_DEVICES is set, devices are remapped, so rank 0 should use device 0, etc.
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(rank)
+
     # Initialize distributed once for all tests
     dist.init_process_group(
         backend="nccl",
