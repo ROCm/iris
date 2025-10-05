@@ -11,7 +11,7 @@ across multiple GPUs in a cluster.
 This package provides:
 - Iris: Main class for multi-GPU operations
 - Atomic operations: add, sub, cas, xchg, xor, and, or, min, max
-- Memory operations: load, store, get, put
+- Memory operations: load, store, copy, get, put
 - Utility functions: do_bench
 - HIP integration for AMD GPU support
 - Logging utilities with rank information
