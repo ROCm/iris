@@ -17,12 +17,12 @@ fi
 echo 'Running examples tests one at a time...'
 for test_file in tests/examples/test_*.py; do
   echo "Testing: $test_file with $NUM_RANKS ranks"
-  python tests/run_tests_distributed.py --num_ranks $NUM_RANKS "$test_file" -v --tb=short
+  python tests/run_tests_distributed.py --num_ranks $NUM_RANKS "$test_file" -v --tb=short --durations=10
 done
 
 # Run unit tests one at a time using distributed wrapper
 echo 'Running unit tests one at a time...'
 for test_file in tests/unittests/test_*.py; do
   echo "Testing: $test_file with $NUM_RANKS ranks"
-  python tests/run_tests_distributed.py --num_ranks $NUM_RANKS "$test_file" -v --tb=short
+  python tests/run_tests_distributed.py --num_ranks $NUM_RANKS "$test_file" -v --tb=short --durations=10
 done
