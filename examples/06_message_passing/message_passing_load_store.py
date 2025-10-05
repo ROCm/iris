@@ -48,7 +48,7 @@ def producer_kernel(
     )
 
     # Set flag to signal completion
-    tl.store(flag + pid, 1)
+    iris.atomic_cas(flag + pid, 0, 1, producer_rank, consumer_rank, heap_bases_ptr, sem="release", scope="sys")
 
 
 @triton.jit
@@ -67,9 +67,11 @@ def consumer_kernel(
     mask = offsets < buffer_size
 
     # Spin-wait until writer sets flag[pid] = 1
-    done = tl.load(flag + pid)
+    done = 0
     while done == 0:
-        done = tl.load(flag + pid)
+        done = iris.atomic_cas(
+            flag + pid, 1, 0, consumer_rank, consumer_rank, heap_bases_ptr, sem="acquire", scope="sys"
+        )
 
     # Read from the target buffer (written by producer)
     values = iris.load(buffer + offsets, consumer_rank, consumer_rank, heap_bases_ptr, mask=mask)
@@ -145,7 +147,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     # Allocate source and destination buffers on the symmetric heap
     source_buffer = shmem.zeros(args["buffer_size"], device="cuda", dtype=dtype)
-    destination_buffer = shmem.randn(args["buffer_size"], device="cuda", dtype=dtype)
+    if dtype.is_floating_point:
+        destination_buffer = shmem.randn(args["buffer_size"], device="cuda", dtype=dtype)
+    else:
+        ii = torch.iinfo(dtype)
+        destination_buffer = shmem.randint(ii.min, ii.max, (args["buffer_size"],), device="cuda", dtype=dtype)
 
     if world_size != 2:
         raise ValueError("This example requires exactly two processes.")

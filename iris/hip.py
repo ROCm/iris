@@ -5,6 +5,8 @@ import ctypes
 import numpy as np
 import sys
 import torch
+import subprocess
+import os
 
 rt_path = "libamdhip64.so"
 hip_runtime = ctypes.cdll.LoadLibrary(rt_path)
@@ -90,10 +92,29 @@ def get_cu_count(device_id=None):
 
 def get_rocm_version():
     major, minor = -1, -1
-    with open("/opt/rocm/.info/version", "r") as version_file:
-        version = version_file.readline().strip()
-        major = int(version.split(".")[0])
-        minor = int(version.split(".")[1])
+
+    # Try hipconfig --path first
+    try:
+        result = subprocess.run(["hipconfig", "--path"], capture_output=True, text=True, check=True)
+        rocm_path = result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Then look for $ROCM_PATH environment variable
+        rocm_path = os.environ.get("ROCM_PATH")
+        if not rocm_path:
+            # Finally, try default location
+            rocm_path = "/opt/rocm"
+
+    # Try to read version from .info/version file
+    try:
+        version_file_path = os.path.join(rocm_path, ".info", "version")
+        with open(version_file_path, "r") as version_file:
+            version = version_file.readline().strip()
+            major = int(version.split(".")[0])
+            minor = int(version.split(".")[1])
+    except (FileNotFoundError, IOError, ValueError, IndexError):
+        # If we can't read the version file, return -1, -1
+        pass
+
     return (major, minor)
 
 

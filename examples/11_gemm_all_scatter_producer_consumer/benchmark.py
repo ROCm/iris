@@ -118,10 +118,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     bias = None
 
-    num_xcds = 1
-    arch = "gfx942"
-    if arch == "gfx942" or arch == "gfx950":
-        num_xcds = 8
+    num_xcds = iris.hip.get_num_xcc()
 
     gemm_stream = torch.cuda.Stream()
     comm_stream = torch.cuda.Stream()

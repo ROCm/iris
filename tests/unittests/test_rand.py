@@ -101,7 +101,7 @@ def test_rand_device_handling():
         shmem.rand(3, 3, device=different_device)
 
     # Test that different CUDA device throws error
-    if shmem.device.startswith("cuda:"):
+    if shmem.device.startswith("cuda:") and torch.cuda.device_count() >= 2:
         current_device = torch.device(shmem.device)
         different_cuda = f"cuda:{(current_device.index + 1) % torch.cuda.device_count()}"  # Use next GPU
         with pytest.raises(RuntimeError):

@@ -21,10 +21,16 @@ def _find_free_port():
         return s.getsockname()[1]
 
 
-def _distributed_worker(rank, world_size, test_file, pytest_args):
+def _distributed_worker(rank, world_size, test_file, pytest_args, init_method):
     """Worker function that runs pytest within a distributed process group."""
+    # Set the correct GPU for this specific process
+    # When ROCR_VISIBLE_DEVICES is set, devices are remapped, so rank 0 should use device 0, etc.
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(rank)
+
     # Initialize distributed once for all tests
-    init_method = "tcp://127.0.0.1:12355"
     dist.init_process_group(
         backend="nccl",
         init_method=init_method,
@@ -44,6 +50,9 @@ def _distributed_worker(rank, world_size, test_file, pytest_args):
         try:
             # Run pytest directly in this process
             exit_code = pytest.main([test_file] + pytest_args)
+            # If tests failed, exit with the failure code
+            if exit_code != 0:
+                sys.exit(exit_code)
             return exit_code
         finally:
             # Restore original argv
@@ -81,8 +90,25 @@ def main():
     print(f"Running {test_file} with {num_ranks} ranks")
     print(f"args={args}, test_file={test_file}, pytest_args={pytest_args}")
 
+    # Find a free port for this test run to avoid conflicts with parallel runs
+    free_port = _find_free_port()
+    init_method = f"tcp://127.0.0.1:{free_port}"
+    print(f"Using init_method: {init_method}")
+
     # Run all tests within a single distributed process group
-    mp.spawn(_distributed_worker, args=(num_ranks, test_file, pytest_args), nprocs=num_ranks, join=True)
+    try:
+        mp.spawn(
+            _distributed_worker,
+            args=(num_ranks, test_file, pytest_args, init_method),
+            nprocs=num_ranks,
+            join=True,
+        )
+    except SystemExit as e:
+        # Catch sys.exit() from worker and return same exit code
+        sys.exit(e.code if isinstance(e.code, int) else 1)
+    except Exception:
+        # Any other unhandled exception = failure
+        sys.exit(1)
 
 
 if __name__ == "__main__":
