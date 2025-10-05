@@ -111,8 +111,8 @@ def prepare_correctness_data(cfg, args, num_query_heads, num_kv_heads, NUM_BLOCK
         query = torch.empty(cfg["num_seqs"], num_query_heads, head_dim, dtype=cfg["dtype"])
         key_value_cache = torch.empty(NUM_BLOCKS, 2, cfg["block_size"], num_kv_heads, head_dim, dtype=cfg["dtype"])
 
-    query = torch.from_numpy(args.shmem.broadcast_tensor(query.cpu().numpy(), source_rank=0)).to(query.device)
-    key_value_cache = torch.from_numpy(args.shmem.broadcast_tensor(key_value_cache.cpu().numpy(), source_rank=0)).to(
+    query = torch.from_numpy(args.shmem.broadcast(query.cpu().numpy(), source_rank=0)).to(query.device)
+    key_value_cache = torch.from_numpy(args.shmem.broadcast(key_value_cache.cpu().numpy(), source_rank=0)).to(
         key_value_cache.device
     )
 
