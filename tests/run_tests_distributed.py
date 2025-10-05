@@ -36,6 +36,7 @@ def _distributed_worker(rank, world_size, test_file, pytest_args, init_method):
         init_method=init_method,
         rank=rank,
         world_size=world_size,
+        device_id=torch.device(f"cuda:{rank}"),
     )
 
     try:
