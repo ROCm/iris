@@ -69,4 +69,3 @@ def test_broadcast_tensor_shape(shape):
 
     assert isinstance(result, np.ndarray)
     assert result.shape == shape
-
