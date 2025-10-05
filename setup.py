@@ -8,5 +8,4 @@ from setuptools import setup
 setup(
     url="https://rocm.github.io/iris/",
     author="Muhammad Awad, Muhammad Osama, Brandon Potter",
-    license="MIT",
 )
