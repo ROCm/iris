@@ -12,12 +12,14 @@ import iris
     [
         (42, 42),
         (3.14159, 3.14159),
+        (True, True),
+        (False, False),
         ("Hello, Iris!", "Hello, Iris!"),
         ({"key": "value", "num": 42}, {"key": "value", "num": 42}),
     ],
 )
 def test_broadcast_scalar(value, expected):
-    """Test broadcasting scalar values (int, float, string, dict)."""
+    """Test broadcasting scalar values (int, float, bool, string, dict)."""
     shmem = iris.iris(1 << 20)
     rank = shmem.get_rank()
 
