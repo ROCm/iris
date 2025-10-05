@@ -118,7 +118,7 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
             A_global = torch.empty((M, K), dtype=datatype, device="cuda")
 
         A_global_broadcasted = (
-            torch.from_numpy(shmem.broadcast_tensor(A_global.cpu().numpy(), source_rank=0)).to(datatype).to("cuda")
+            torch.from_numpy(shmem.broadcast(A_global.cpu().numpy(), source_rank=0)).to(datatype).to("cuda")
         )
         shmem.barrier()
 
@@ -129,7 +129,7 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
         else:
             B = torch.empty((K, N), device="cuda", dtype=datatype)
 
-        B = torch.from_numpy(shmem.broadcast_tensor(B.cpu().numpy(), source_rank=0)).to(datatype).to("cuda")
+        B = torch.from_numpy(shmem.broadcast(B.cpu().numpy(), source_rank=0)).to(datatype).to("cuda")
         shmem.barrier()
 
         C = torch.empty((M, N), device="cuda", dtype=datatype)

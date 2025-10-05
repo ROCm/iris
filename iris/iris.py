@@ -185,25 +185,74 @@ class Iris:
 
     def broadcast(self, value, source_rank):
         """
-        Broadcast a Python scalar or small picklable object from one rank to all ranks.
+        Broadcast a value from one rank to all ranks.
+
+        This method automatically detects the type of value and uses the appropriate
+        broadcast mechanism:
+        - For tensors and arrays: uses efficient PyTorch distributed tensor collectives
+        - For scalars and other objects: uses object broadcast
 
         Args:
-            value (Any): The value to broadcast. Only the ``source_rank`` value is used;
+            value (Any): The value to broadcast. Can be a scalar, tensor, numpy array,
+                or any picklable object. Only the ``source_rank`` value is used;
                 other ranks should pass a placeholder (e.g., ``None``).
             source_rank (int): Rank id that holds the authoritative value.
 
         Returns:
-            Any: The value broadcast to all ranks.
+            Any: The value broadcast to all ranks. Tensors and arrays are returned as
+                numpy arrays; scalars and objects are returned in their original type.
 
-        Example:
+        Examples:
             >>> ctx = iris.iris()
+            >>> # Broadcasting a scalar
             >>> value = 42 if ctx.cur_rank == 0 else None
             >>> value = ctx.broadcast(value, source_rank=0)  # All ranks get 42
+            >>>
+            >>> # Broadcasting a tensor
+            >>> if ctx.cur_rank == 0:
+            >>>     data = torch.randn(10, 10)
+            >>> else:
+            >>>     data = None
+            >>> data = ctx.broadcast(data, source_rank=0)  # All ranks get the same array
         """
-        return distributed_broadcast_scalar(value, source_rank)
+        # Check if the value on source_rank is a tensor or array-like
+        if self.cur_rank == source_rank and value is not None:
+            # Explicitly exclude strings and non-numeric types
+            if isinstance(value, (str, dict, bool)):
+                is_tensor = False
+            elif isinstance(value, torch.Tensor):
+                is_tensor = True
+            elif isinstance(value, np.ndarray):
+                is_tensor = True
+            elif isinstance(value, (list, tuple)):
+                # Try to convert list/tuple to tensor to check if it's numeric
+                try:
+                    torch.as_tensor(value)
+                    is_tensor = True
+                except (TypeError, ValueError):
+                    is_tensor = False
+            else:
+                # For other types, try to convert and check
+                try:
+                    test_array = np.asarray(value)
+                    # Check if it's a numeric dtype that torch can handle
+                    if np.issubdtype(test_array.dtype, np.number):
+                        torch.as_tensor(test_array)
+                        is_tensor = True
+                    else:
+                        is_tensor = False
+                except (TypeError, ValueError):
+                    is_tensor = False
+        else:
+            is_tensor = False
 
-    def broadcast_tensor(self, value, source_rank=0):
-        return distributed_broadcast_tensor(value, root=source_rank)
+        # Broadcast the type decision to all ranks
+        is_tensor = distributed_broadcast_scalar(is_tensor, source_rank)
+
+        if is_tensor:
+            return distributed_broadcast_tensor(value, root=source_rank)
+        else:
+            return distributed_broadcast_scalar(value, source_rank)
 
     def __allocate(self, num_elements, dtype):
         self.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")

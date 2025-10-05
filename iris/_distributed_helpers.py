@@ -130,9 +130,15 @@ def distributed_broadcast_scalar(value=None, root=0):
     # If NCCL can't handle this dtype, just broadcast the object directly.
     if backend == "nccl":
         # Try a quick check using a tiny tensor of the dtype
-        torch_dtype = torch.from_numpy(np.array(0, dtype=dtype)).dtype
-        dummy = torch.empty((), dtype=torch_dtype)
-        if not _nccl_dtype_supported(dummy):
+        try:
+            torch_dtype = torch.from_numpy(np.array(0, dtype=dtype)).dtype
+            dummy = torch.empty((), dtype=torch_dtype)
+            if not _nccl_dtype_supported(dummy):
+                obj = [value if rank == root else None]
+                dist.broadcast_object_list(obj, src=root)
+                return obj[0]
+        except (TypeError, ValueError):
+            # Dtype not supported by torch (e.g., str, object), use object broadcast
             obj = [value if rank == root else None]
             dist.broadcast_object_list(obj, src=root)
             return obj[0]

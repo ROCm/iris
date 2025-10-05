@@ -24,6 +24,11 @@ Device-side functions provided by Iris for remote memory operations and atomics.
 .. autofunction:: iris.iris.store
 ```
 
+### copy
+```{eval-rst}
+.. autofunction:: iris.iris.copy
+```
+
 ### get
 ```{eval-rst}
 .. autofunction:: iris.iris.get
