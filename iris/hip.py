@@ -66,7 +66,7 @@ _backend = _detect_backend()
 # Load the appropriate backend module directly without triggering __init__.py
 _module_dir = os.path.dirname(__file__)
 if _backend == "cuda":
-    _module_path = os.path.join(_module_dir, "cuda.py")
+    _module_path = os.path.join(_module_dir, "_cuda.py")
     _spec = importlib.util.spec_from_file_location("iris._cuda_backend", _module_path)
 else:
     _module_path = os.path.join(_module_dir, "_hip.py")
