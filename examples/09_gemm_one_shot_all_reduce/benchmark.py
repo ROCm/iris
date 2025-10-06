@@ -19,7 +19,7 @@ from examples.common.utils import (
 )
 
 import iris
-from iris.hip import get_cu_count, get_default_gemm_sms
+from iris.hip import get_cu_count
 
 from matmul_wrapper import matmul
 from examples.common.validation import validate_gemm
@@ -89,7 +89,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     if args["total_sms"] is None:
         args["total_sms"] = cu_count
     if args["gemm_sms"] is None:
-        args["gemm_sms"] = get_default_gemm_sms(algorithm="all_reduce")
+        # For all_reduce: reserve ~1/3 of leftover CUs for communication
+        import math
+
+        next_pow2 = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
+        leftover = cu_count - next_pow2
+        args["gemm_sms"] = cu_count - leftover // 3
 
     # GEMM
     datatype = torch.float32

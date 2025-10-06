@@ -16,7 +16,7 @@ from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_se
 from examples.common.validation import validate_gemm
 
 import iris
-from iris.hip import get_cu_count, get_default_gemm_sms
+from iris.hip import get_cu_count
 
 from matmul_wrapper import matmul
 
@@ -55,9 +55,17 @@ def parse_args():
     parser.add_argument("--gsize_m", type=int, default=6, help="L2-cache locality swizzle parameter")
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument(
-        "--gemm_sms", type=int, default=None, help="Number of SMs for workgroup-specialized GEMM algorithm (default: auto-detected)"
+        "--gemm_sms",
+        type=int,
+        default=None,
+        help="Number of SMs for workgroup-specialized GEMM algorithm (default: auto-detected)",
     )
-    parser.add_argument("--num_sms", type=int, default=None, help="Number of total SMs for gemm + scatter kernel (default: auto-detected)")
+    parser.add_argument(
+        "--num_sms",
+        type=int,
+        default=None,
+        help="Number of total SMs for gemm + scatter kernel (default: auto-detected)",
+    )
     parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
 
     return vars(parser.parse_args())
@@ -77,7 +85,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     if args["num_sms"] is None:
         args["num_sms"] = cu_count
     if args["gemm_sms"] is None:
-        args["gemm_sms"] = get_default_gemm_sms(algorithm="wg_specialized")
+        # For wg_specialized: use next smaller power of 2
+        import math
+
+        args["gemm_sms"] = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
 
     # GEMM
     datatype = torch.float32

@@ -17,7 +17,7 @@ from examples.common.validation import validate_gemm
 import importlib.util
 from pathlib import Path
 import iris
-from iris.hip import get_cu_count, get_default_gemm_sms
+from iris.hip import get_cu_count
 
 current_dir = Path(__file__).parent
 file_path = (current_dir / "../../examples/14_all_gather_gemm/all_gather_gemm_push.py").resolve()
@@ -63,7 +63,9 @@ def parse_args():
     parser.add_argument("--BLK_N", type=int, default=64, help="Block size N for GEMM computation")
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K for tiling")
     parser.add_argument("--gsize_m", type=int, default=6, help="Group size in M dimension")
-    parser.add_argument("--num_sms", type=int, default=None, help="Number of SMs for the kernel (default: auto-detected)")
+    parser.add_argument(
+        "--num_sms", type=int, default=None, help="Number of SMs for the kernel (default: auto-detected)"
+    )
 
     parser.add_argument("--num_ranks", type=int, default=8, help="Number of GPUs to run the example on.")
 

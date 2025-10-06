@@ -90,42 +90,6 @@ def get_cu_count(device_id=None):
     return cu_count.value
 
 
-def get_default_gemm_sms(device_id=None, algorithm="all_scatter"):
-    """
-    Compute the default number of SMs to use for GEMM operations.
-
-    Args:
-        device_id: Device ID to query (default: current device)
-        algorithm: Algorithm type - "all_scatter", "all_reduce", or "wg_specialized"
-
-    Returns:
-        int: Recommended number of SMs for GEMM
-
-    For "all_scatter": Returns total CU count
-    For "wg_specialized": Returns next smaller power of 2
-    For "all_reduce": Returns total - (total - next_pow2) // 3
-    """
-    import math
-
-    cu_count = get_cu_count(device_id)
-
-    if algorithm == "all_scatter":
-        return cu_count
-
-    # Compute next smaller power of 2
-    next_pow2 = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
-
-    if algorithm == "wg_specialized":
-        return next_pow2
-    elif algorithm == "all_reduce":
-        # Reserve ~1/3 of leftover CUs for communication
-        leftover = cu_count - next_pow2
-        return cu_count - leftover // 3
-    else:
-        # Default to all_scatter behavior
-        return cu_count
-
-
 def get_rocm_version():
     major, minor = -1, -1
 
