@@ -97,36 +97,6 @@ def get_cu_count(device_id=None):
     return cu_count.value
 
 
-def get_rocm_version():
-    # Return CUDA version instead
-    major, minor = -1, -1
-
-    # Try nvcc --version
-    try:
-        result = subprocess.run(["nvcc", "--version"], capture_output=True, text=True, check=True)
-        # Parse version from output like "release 12.0, V12.0.76"
-        for line in result.stdout.split("\n"):
-            if "release" in line.lower():
-                version_part = line.split("release")[1].strip().split(",")[0]
-                parts = version_part.split(".")
-                if len(parts) >= 2:
-                    major = int(parts[0])
-                    minor = int(parts[1])
-                    break
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError, IndexError):
-        # If we can't get CUDA version, try environment variable
-        cuda_version = os.environ.get("CUDA_VERSION")
-        if cuda_version:
-            try:
-                parts = cuda_version.split(".")
-                major = int(parts[0])
-                minor = int(parts[1]) if len(parts) > 1 else 0
-            except (ValueError, IndexError):
-                pass
-
-    return (major, minor)
-
-
 def get_wall_clock_rate(device_id):
     cudaDevAttrMemoryClockRate = 36
     wall_clock_rate = ctypes.c_int()
