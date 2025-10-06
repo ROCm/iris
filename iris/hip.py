@@ -23,17 +23,16 @@ import importlib.util
 def _detect_backend():
     """Detect which backend to use based on build-time config, environment, and available libraries."""
     # 1. Check for build-time configuration file first
-    config_file = os.path.join(os.path.dirname(__file__), ".config", "backend.txt")
-    if os.path.exists(config_file):
-        try:
-            with open(config_file, "r") as f:
-                backend_config = f.read().strip().lower()
-                if backend_config in ("cuda", "nvidia"):
-                    return "cuda"
-                elif backend_config in ("hip", "amd", "rocm"):
-                    return "hip"
-        except (IOError, OSError):
-            pass
+    try:
+        from . import _backend_selected
+
+        backend_config = _backend_selected.BACKEND.lower()
+        if backend_config in ("cuda", "nvidia"):
+            return "cuda"
+        elif backend_config in ("hip", "amd", "rocm"):
+            return "hip"
+    except (ImportError, AttributeError):
+        pass
 
     # 2. Check environment variable
     backend_env = os.environ.get("IRIS_BACKEND", "").lower()

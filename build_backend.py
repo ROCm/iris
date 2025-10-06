@@ -34,23 +34,15 @@ def _write_backend_config(config_settings):
     else:
         backend = None  # Auto-detect at runtime
 
-    # Also set environment variable as suggested in setup.py
+    # Write backend selection to a Python file
     if backend:
-        os.environ["IRIS_BACKEND"] = backend
-
-    # Write configuration file
-    config_dir = os.path.join("iris", ".config")
-    os.makedirs(config_dir, exist_ok=True)
-
-    config_file = os.path.join(config_dir, "backend.txt")
-    if backend:
-        with open(config_file, "w") as f:
-            f.write(backend)
+        with open("iris/_backend_selected.py", "w") as f:
+            f.write(f'BACKEND = "{backend}"\n')
         print(f"Iris: Configured to use {backend} backend")
     else:
-        # Remove config file if it exists (auto-detect mode)
-        if os.path.exists(config_file):
-            os.remove(config_file)
+        # Remove file if it exists (auto-detect mode)
+        if os.path.exists("iris/_backend_selected.py"):
+            os.remove("iris/_backend_selected.py")
         print("Iris: No backend specified, will auto-detect at runtime")
 
 

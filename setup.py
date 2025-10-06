@@ -15,7 +15,7 @@ def build(setup_kwargs, config_settings=None):
     if config_settings is None:
         config_settings = {}
 
-    backend = config_settings.get("backend", "amd")
+    backend = config_settings.get("backend", "hip")
 
     # Normalize backend names
     if backend.lower() in ("nvidia", "cuda"):
@@ -25,7 +25,9 @@ def build(setup_kwargs, config_settings=None):
     else:
         backend = "hip"  # Default to hip
 
-    os.environ["IRIS_BACKEND"] = backend
+    # Write backend selection to a Python file
+    with open("iris/_backend_selected.py", "w") as f:
+        f.write(f'BACKEND = "{backend}"\n')
     print(f"Building Iris with backend={backend}")
 
     return setup_kwargs
