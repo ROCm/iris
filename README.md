@@ -103,26 +103,12 @@ if __name__ == "__main__":
 ### Quick Installation
 
 > [!NOTE]
-> **Requirements**: Python 3.10+, PyTorch 2.0+, and Triton
-> - For AMD GPUs: ROCm 6.3.1+ HIP runtime and PyTorch ROCm version
-> - For NVIDIA GPUs: CUDA 11.0+ runtime and PyTorch CUDA version
+> **Requirements**: Python 3.10+, PyTorch 2.0+ (ROCm version), ROCm 6.3.1+ HIP runtime, and Triton
 
 For a quick installation directly from the repository:
 
 ```shell
 pip install git+https://github.com/ROCm/iris.git
-```
-
-To use Iris with NVIDIA GPUs, install with the CUDA backend:
-
-```shell
-pip install git+https://github.com/ROCm/iris.git --config-settings backend=nvidia
-```
-
-To use Iris with AMD GPUs (default):
-
-```shell
-pip install git+https://github.com/ROCm/iris.git --config-settings backend=hip
 ```
 
 ### Docker Compose (Recommended for Development)
@@ -153,28 +139,10 @@ Check out our [examples](examples/) directory for ready-to-run scripts and usage
 
 Iris currently supports:
 
-### AMD GPUs (HIP Backend)
 - MI300X, MI350X & MI355X
-
-### NVIDIA GPUs (CUDA Backend)
-- All CUDA-capable GPUs with compute capability 7.0+
 
 > [!NOTE]
 > Iris may work on other AMD GPUs with ROCm compatibility.
-
-### Backend Selection
-
-Iris supports backend selection at build time using `--config-settings`:
-
-```bash
-# For NVIDIA GPUs
-pip install git+https://github.com/ROCm/iris.git --config-settings backend=nvidia
-
-# For AMD GPUs
-pip install git+https://github.com/ROCm/iris.git --config-settings backend=hip
-```
-
-If no backend is specified at build time, Iris will auto-detect the appropriate backend based on available GPU libraries (libamdhip64.so for AMD, libcudart.so for NVIDIA), defaulting to HIP if neither is found.
 
 ## Roadmap
 
