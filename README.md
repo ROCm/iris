@@ -113,18 +113,20 @@ For a quick installation directly from the repository:
 pip install git+https://github.com/ROCm/iris.git
 ```
 
-To use Iris with NVIDIA GPUs, set the backend before importing:
-
-```bash
-export IRIS_BACKEND=cuda
-```
-
-Or install with the backend specified:
+To use Iris with NVIDIA GPUs, install with the CUDA backend:
 
 ```shell
-# Note: Backend selection is via environment variable, not install-time config
-IRIS_BACKEND=cuda pip install git+https://github.com/ROCm/iris.git
+pip install git+https://github.com/ROCm/iris.git --config-settings backend=nvidia
 ```
+
+To use Iris with AMD GPUs (default):
+
+```shell
+pip install git+https://github.com/ROCm/iris.git --config-settings backend=hip
+```
+
+> [!NOTE]
+> The backend can also be controlled at runtime via the `IRIS_BACKEND` environment variable if not set at build time.
 
 ### Docker Compose (Recommended for Development)
 
@@ -165,7 +167,23 @@ Iris currently supports:
 
 ### Backend Selection
 
-Iris automatically detects the available GPU backend at runtime. You can also explicitly select the backend using the `IRIS_BACKEND` environment variable:
+Iris supports two methods for backend selection:
+
+#### 1. Build-time Configuration (Recommended)
+
+Install Iris with the desired backend using `--config-settings`:
+
+```bash
+# For NVIDIA GPUs
+pip install git+https://github.com/ROCm/iris.git --config-settings backend=nvidia
+
+# For AMD GPUs
+pip install git+https://github.com/ROCm/iris.git --config-settings backend=hip
+```
+
+#### 2. Runtime Environment Variable
+
+If no backend was specified at build time, you can control it via the `IRIS_BACKEND` environment variable:
 
 ```bash
 # Use CUDA backend for NVIDIA GPUs
@@ -179,7 +197,7 @@ export IRIS_BACKEND=hip
 export IRIS_BACKEND=amd
 ```
 
-Alternatively, set the environment variable in your Python script:
+Or set it in your Python script:
 
 ```python
 import os
@@ -188,9 +206,10 @@ import iris
 ```
 
 The backend detection priority is:
-1. `IRIS_BACKEND` environment variable
-2. Auto-detection based on available GPU libraries
-3. Default to HIP for backward compatibility
+1. Build-time configuration (set via `--config-settings`)
+2. `IRIS_BACKEND` environment variable
+3. Auto-detection based on available GPU libraries
+4. Default to HIP for backward compatibility
 
 ## Roadmap
 

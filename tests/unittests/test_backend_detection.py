@@ -6,6 +6,12 @@ Unit tests for backend detection and runtime module selection.
 
 These tests verify that the backend detection logic works correctly
 and that the appropriate backend module is selected based on configuration.
+
+Backend selection priority:
+1. Build-time configuration (--config-settings backend=nvidia)
+2. IRIS_BACKEND environment variable
+3. Auto-detection based on available libraries
+4. Default to HIP
 """
 
 import os
@@ -231,3 +237,143 @@ if __name__ == "__main__":
     # Run tests
     pytest.main([__file__, "-v"])
 
+
+
+def test_build_time_config_cuda():
+    """Test that build-time configuration for CUDA is respected."""
+    import tempfile
+    import shutil
+
+    # Create a temporary config
+    config_dir = os.path.join(os.path.dirname(__file__), "../../iris/.config")
+    os.makedirs(config_dir, exist_ok=True)
+    config_file = os.path.join(config_dir, "backend.txt")
+
+    old_env = os.environ.get("IRIS_BACKEND")
+
+    try:
+        # Write CUDA config
+        with open(config_file, "w") as f:
+            f.write("cuda")
+
+        # Clear environment variable to test config priority
+        os.environ.pop("IRIS_BACKEND", None)
+
+        # Load hip.py
+        spec = importlib.util.spec_from_file_location(
+            "hip_test_buildtime_cuda",
+            os.path.join(os.path.dirname(__file__), "../../iris/hip.py"),
+        )
+        hip_module = importlib.util.module_from_spec(spec)
+
+        try:
+            spec.loader.exec_module(hip_module)
+        except OSError:
+            # Expected - GPU library not found
+            pass
+
+        # Check that backend was set to 'cuda' from config file
+        assert hasattr(hip_module, "_backend")
+        assert hip_module._backend == "cuda", "Build-time config should set backend to 'cuda'"
+
+    finally:
+        # Clean up
+        if os.path.exists(config_file):
+            os.remove(config_file)
+        if os.path.exists(config_dir) and not os.listdir(config_dir):
+            os.rmdir(config_dir)
+        # Restore environment
+        if old_env is not None:
+            os.environ["IRIS_BACKEND"] = old_env
+        else:
+            os.environ.pop("IRIS_BACKEND", None)
+
+
+def test_build_time_config_priority():
+    """Test that build-time configuration takes priority over environment variable."""
+    config_dir = os.path.join(os.path.dirname(__file__), "../../iris/.config")
+    os.makedirs(config_dir, exist_ok=True)
+    config_file = os.path.join(config_dir, "backend.txt")
+
+    old_env = os.environ.get("IRIS_BACKEND")
+
+    try:
+        # Write HIP config
+        with open(config_file, "w") as f:
+            f.write("hip")
+
+        # Set environment to CUDA (should be overridden by config)
+        os.environ["IRIS_BACKEND"] = "cuda"
+
+        # Load hip.py
+        spec = importlib.util.spec_from_file_location(
+            "hip_test_priority",
+            os.path.join(os.path.dirname(__file__), "../../iris/hip.py"),
+        )
+        hip_module = importlib.util.module_from_spec(spec)
+
+        try:
+            spec.loader.exec_module(hip_module)
+        except OSError:
+            # Expected - GPU library not found
+            pass
+
+        # Check that config takes priority
+        assert hasattr(hip_module, "_backend")
+        assert hip_module._backend == "hip", "Build-time config should take priority over env var"
+
+    finally:
+        # Clean up
+        if os.path.exists(config_file):
+            os.remove(config_file)
+        if os.path.exists(config_dir) and not os.listdir(config_dir):
+            os.rmdir(config_dir)
+        # Restore environment
+        if old_env is not None:
+            os.environ["IRIS_BACKEND"] = old_env
+        else:
+            os.environ.pop("IRIS_BACKEND", None)
+
+
+def test_build_backend_module():
+    """Test that the build_backend module can write configuration correctly."""
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+
+    try:
+        from build_backend import _write_backend_config
+
+        config_dir = os.path.join(os.path.dirname(__file__), "../../iris/.config")
+        config_file = os.path.join(config_dir, "backend.txt")
+
+        # Test nvidia alias
+        _write_backend_config({"backend": "nvidia"})
+        assert os.path.exists(config_file), "Config file should be created"
+        with open(config_file, "r") as f:
+            assert f.read() == "cuda", "nvidia should map to cuda"
+
+        # Test hip
+        _write_backend_config({"backend": "hip"})
+        with open(config_file, "r") as f:
+            assert f.read() == "hip", "hip should stay as hip"
+
+        # Test amd alias
+        _write_backend_config({"backend": "amd"})
+        with open(config_file, "r") as f:
+            assert f.read() == "hip", "amd should map to hip"
+
+        # Test no config (should remove file)
+        _write_backend_config({})
+        assert not os.path.exists(config_file), "Config file should be removed for auto-detect"
+
+    finally:
+        # Clean up
+        if os.path.exists(config_file):
+            os.remove(config_file)
+        if os.path.exists(config_dir) and not os.listdir(config_dir):
+            os.rmdir(config_dir)
+
+
+if __name__ == "__main__":
+    # Run tests
+    pytest.main([__file__, "-v"])

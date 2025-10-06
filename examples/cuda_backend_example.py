@@ -5,18 +5,28 @@
 """
 Example demonstrating how to use Iris with CUDA backend for NVIDIA GPUs.
 
-This script shows how to set the backend and verify it's correctly loaded.
+This script shows how to use the CUDA backend and verify it's correctly loaded.
+
+Backend can be configured in two ways:
+1. Build-time (recommended):
+   pip install git+https://github.com/ROCm/iris.git --config-settings backend=nvidia
+
+2. Runtime (if not set at build time):
+   export IRIS_BACKEND=cuda
+   python cuda_backend_example.py
 """
 
 import os
 import sys
 
-# Set CUDA backend before importing iris
+# Set CUDA backend if not configured at build time
 # This must be done before importing iris to take effect
-os.environ["IRIS_BACKEND"] = "cuda"
+if "IRIS_BACKEND" not in os.environ:
+    os.environ["IRIS_BACKEND"] = "cuda"
 
 # Now import iris - it will use the CUDA backend
 import iris
+
 
 def main():
     """
