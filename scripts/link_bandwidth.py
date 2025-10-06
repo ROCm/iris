@@ -3,6 +3,13 @@
 
 import json
 
+try:
+    from iris.hip import get_cu_count
+
+    cu_count = get_cu_count()
+except Exception:
+    cu_count = 304  # Default for MI300
+
 # Sample input (replace with file read if needed)
 config = {
     "world_size": 8,
@@ -26,7 +33,7 @@ config = {
     "kpack": 2,
     "heap_size": 8589934592,
     "gemm_sms": 48,
-    "total_sms": 304,
+    "total_sms": cu_count,
     "communication_block_size": 256,
     "communication_sms_multiplier": 1,
     "M": 8192,

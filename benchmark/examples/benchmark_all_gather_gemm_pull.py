@@ -17,6 +17,7 @@ from examples.common.validation import validate_gemm
 import importlib.util
 from pathlib import Path
 import iris
+from iris.hip import get_cu_count, get_default_gemm_sms
 
 current_dir = Path(__file__).parent
 file_path = (current_dir / "../../examples/14_all_gather_gemm/all_gather_gemm_pull.py").resolve()
@@ -63,7 +64,7 @@ def parse_args():
     parser.add_argument("--BLK_N", type=int, default=64, help="Block size N for the kernel")
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K for the kernel")
     parser.add_argument("--gsize_m", type=int, default=6, help="Group size in M dimension")
-    parser.add_argument("--num_sms", type=int, default=304, help="Number of SMs for the kernel")
+    parser.add_argument("--num_sms", type=int, default=None, help="Number of SMs for the kernel (default: auto-detected)")
 
     parser.add_argument("--num_ranks", type=int, default=8, help="Number of GPUs to run the example on.")
 
@@ -138,7 +139,11 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
         A_local_iris = shmem.empty((M, K_local), dtype=datatype)
         A_local_iris.copy_(A_local)
 
-        num_sms = torch.cuda.get_device_properties(rank).multi_processor_count
+        # Use provided num_sms or auto-detect
+        if run_args["num_sms"] is None:
+            num_sms = torch.cuda.get_device_properties(rank).multi_processor_count
+        else:
+            num_sms = run_args["num_sms"]
 
         main_stream = torch.cuda.Stream()
         kernel_timing = {

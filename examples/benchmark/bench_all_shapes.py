@@ -7,6 +7,13 @@ from datetime import datetime
 import argparse
 import json
 
+try:
+    from iris.hip import get_cu_count
+
+    CU_COUNT_AVAILABLE = True
+except Exception:
+    CU_COUNT_AVAILABLE = False
+
 
 def launch_sbatch(
     config,
@@ -110,16 +117,28 @@ def main(hashes, config, sbatch_script_content, input_json, tiling_json, dry_run
         if mkn not in mkn_gemm_tiles:
             mkn_gemm_tiles[mkn] = {key: entry[key] for key in optional_keys if key in entry}
 
-    if config["partition"] is not None:
-        if "mi300" in config["partition"]:
-            print("Running on MI300")
-            gemm_sms = 304
-        elif "mi250" in config["partition"]:
-            print("Running on MI250")
-            gemm_sms = 104
+    # Determine gemm_sms based on available GPU or partition name
+    if CU_COUNT_AVAILABLE:
+        try:
+            gemm_sms = get_cu_count()
+            print(f"Auto-detected CU count: {gemm_sms}")
+        except Exception:
+            # Fall back to partition-based detection
+            gemm_sms = None
     else:
-        print("Assuming MI300")
-        gemm_sms = 304
+        gemm_sms = None
+
+    if gemm_sms is None:
+        if config["partition"] is not None:
+            if "mi300" in config["partition"]:
+                print("Running on MI300 (partition-based)")
+                gemm_sms = 304
+            elif "mi250" in config["partition"]:
+                print("Running on MI250 (partition-based)")
+                gemm_sms = 104
+        else:
+            print("Assuming MI300 (default)")
+            gemm_sms = 304
 
     enable_algorithms = False
     enable_mkn = True

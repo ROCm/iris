@@ -15,6 +15,7 @@ import triton
 from matmul_wrapper import matmul
 
 import iris
+from iris.hip import get_cu_count, get_default_gemm_sms
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set
 from examples.common.validation import validate_gemm
 
@@ -52,7 +53,7 @@ def parse_args():
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K")
     parser.add_argument("--gsize_m", type=int, default=6, help="L2-cache locality swizzle parameter")
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
-    parser.add_argument("--gemm_sms", type=int, default=304, help="Number of SMs for persistent GEMM algorithm")
+    parser.add_argument("--gemm_sms", type=int, default=None, help="Number of SMs for persistent GEMM algorithm (default: auto-detected)")
     parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
 
     return vars(parser.parse_args())
@@ -68,6 +69,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
     cu_count = shmem.get_cu_count()
+
+    # Set default SM values if not provided
+    if args["gemm_sms"] is None:
+        args["gemm_sms"] = get_default_gemm_sms(algorithm="all_scatter")
 
     # GEMM
     datatype = torch.float32
