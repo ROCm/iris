@@ -15,6 +15,8 @@ The backend is selected based on:
 
 import os
 import sys
+import importlib.util
+
 
 # Detect backend
 def _detect_backend():
@@ -24,32 +26,45 @@ def _detect_backend():
         return "cuda"
     elif backend_env in ("hip", "amd", "rocm"):
         return "hip"
-    
+
     # Auto-detect by trying to load libraries
     import ctypes
+
     try:
         ctypes.cdll.LoadLibrary("libamdhip64.so")
         return "hip"
     except (OSError, FileNotFoundError):
         pass
-    
+
     try:
         ctypes.cdll.LoadLibrary("libcudart.so")
         return "cuda"
     except (OSError, FileNotFoundError):
         pass
-    
+
     # Default to hip for backward compatibility
     return "hip"
 
 
 _backend = _detect_backend()
 
-# Import from the appropriate backend module
+# Load the appropriate backend module directly without triggering __init__.py
+_module_dir = os.path.dirname(__file__)
 if _backend == "cuda":
-    from iris.cuda import *
+    _module_path = os.path.join(_module_dir, "cuda.py")
+    _spec = importlib.util.spec_from_file_location("iris._cuda_backend", _module_path)
 else:
-    from iris._hip import *
+    _module_path = os.path.join(_module_dir, "_hip.py")
+    _spec = importlib.util.spec_from_file_location("iris._hip_backend", _module_path)
+
+_runtime_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_runtime_module)
+
+# Export all public symbols from the backend module
+for _name in dir(_runtime_module):
+    if not _name.startswith("_"):
+        globals()[_name] = getattr(_runtime_module, _name)
+
 
 # Make backend information available
 def get_backend():
