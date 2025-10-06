@@ -125,9 +125,6 @@ To use Iris with AMD GPUs (default):
 pip install git+https://github.com/ROCm/iris.git --config-settings backend=hip
 ```
 
-> [!NOTE]
-> The backend can also be controlled at runtime via the `IRIS_BACKEND` environment variable if not set at build time.
-
 ### Docker Compose (Recommended for Development)
 
 The recommended way to get started is using Docker Compose, which provides a development environment with the Iris directory mounted inside the container. This allows you to make changes to the code outside the container and see them reflected inside.
@@ -167,11 +164,7 @@ Iris currently supports:
 
 ### Backend Selection
 
-Iris supports two methods for backend selection:
-
-#### 1. Build-time Configuration (Recommended)
-
-Install Iris with the desired backend using `--config-settings`:
+Iris supports backend selection at build time using `--config-settings`:
 
 ```bash
 # For NVIDIA GPUs
@@ -181,35 +174,7 @@ pip install git+https://github.com/ROCm/iris.git --config-settings backend=nvidi
 pip install git+https://github.com/ROCm/iris.git --config-settings backend=hip
 ```
 
-#### 2. Runtime Environment Variable
-
-If no backend was specified at build time, you can control it via the `IRIS_BACKEND` environment variable:
-
-```bash
-# Use CUDA backend for NVIDIA GPUs
-export IRIS_BACKEND=cuda
-# or
-export IRIS_BACKEND=nvidia
-
-# Use HIP backend for AMD GPUs (default)
-export IRIS_BACKEND=hip
-# or
-export IRIS_BACKEND=amd
-```
-
-Or set it in your Python script:
-
-```python
-import os
-os.environ["IRIS_BACKEND"] = "cuda"  # Must be set before importing iris
-import iris
-```
-
-The backend detection priority is:
-1. Build-time configuration (set via `--config-settings`)
-2. `IRIS_BACKEND` environment variable
-3. Auto-detection based on available GPU libraries
-4. Default to HIP for backward compatibility
+If no backend is specified at build time, Iris will auto-detect the appropriate backend based on available GPU libraries (libamdhip64.so for AMD, libcudart.so for NVIDIA), defaulting to HIP if neither is found.
 
 ## Roadmap
 

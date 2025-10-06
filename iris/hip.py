@@ -6,20 +6,19 @@ HIP-compatible API facade for Iris.
 
 This module provides a HIP-compatible interface that transparently redirects
 to either the HIP backend (AMD GPUs) or CUDA backend (NVIDIA GPUs) based on
-build-time configuration, runtime detection, or auto-detection.
+build-time configuration or auto-detection.
 
 The backend is selected based on (in priority order):
 1. Build-time configuration (set via pip install --config-settings backend=nvidia)
-2. IRIS_BACKEND environment variable (set to 'cuda' or 'hip')
-3. Auto-detection based on available libraries
+2. Auto-detection based on available libraries
 """
 
-import os
+import ctypes
 
 
 # Detect backend
 def _detect_backend():
-    """Detect which backend to use based on build-time config, environment, and available libraries."""
+    """Detect which backend to use based on build-time config and available libraries."""
     # 1. Check for build-time configuration file first
     try:
         from . import _backend_selected
@@ -32,16 +31,7 @@ def _detect_backend():
     except (ImportError, AttributeError):
         pass
 
-    # 2. Check environment variable
-    backend_env = os.environ.get("IRIS_BACKEND", "").lower()
-    if backend_env in ("cuda", "nvidia"):
-        return "cuda"
-    elif backend_env in ("hip", "amd", "rocm"):
-        return "hip"
-
-    # 3. Auto-detect by trying to load libraries
-    import ctypes
-
+    # 2. Auto-detect by trying to load libraries
     try:
         ctypes.cdll.LoadLibrary("libamdhip64.so")
         return "hip"
