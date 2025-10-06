@@ -118,17 +118,3 @@ def get_arch_string(device_id=None):
 def get_num_xcc(device_id=None):
     # XCC is AMD-specific, return 1 for CUDA
     return 1
-
-
-def malloc_fine_grained(size):
-    return hip_malloc(size)
-
-
-def hip_malloc(size):
-    ptr = ctypes.c_void_p()
-    hip_try(cuda_runtime.cudaMalloc(ctypes.byref(ptr), size))
-    return ptr
-
-
-def hip_free(ptr):
-    hip_try(cuda_runtime.cudaFree(ptr))

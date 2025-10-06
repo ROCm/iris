@@ -15,8 +15,6 @@ The backend is selected based on (in priority order):
 """
 
 import os
-import sys
-import importlib.util
 
 
 # Detect backend
@@ -62,22 +60,11 @@ def _detect_backend():
 
 _backend = _detect_backend()
 
-# Load the appropriate backend module directly without triggering __init__.py
-_module_dir = os.path.dirname(__file__)
+# Import all public symbols from the appropriate backend module
 if _backend == "cuda":
-    _module_path = os.path.join(_module_dir, "_cuda.py")
-    _spec = importlib.util.spec_from_file_location("iris._cuda_backend", _module_path)
+    from iris._cuda import *  # noqa: F403, F401
 else:
-    _module_path = os.path.join(_module_dir, "_hip.py")
-    _spec = importlib.util.spec_from_file_location("iris._hip_backend", _module_path)
-
-_runtime_module = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_runtime_module)
-
-# Export all public symbols from the backend module
-for _name in dir(_runtime_module):
-    if not _name.startswith("_"):
-        globals()[_name] = getattr(_runtime_module, _name)
+    from iris._hip import *  # noqa: F403, F401
 
 
 # Make backend information available
