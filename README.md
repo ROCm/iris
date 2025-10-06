@@ -103,12 +103,27 @@ if __name__ == "__main__":
 ### Quick Installation
 
 > [!NOTE]
-> **Requirements**: Python 3.10+, PyTorch 2.0+ (ROCm version), ROCm 6.3.1+ HIP runtime, and Triton
+> **Requirements**: Python 3.10+, PyTorch 2.0+, and Triton
+> - For AMD GPUs: ROCm 6.3.1+ HIP runtime and PyTorch ROCm version
+> - For NVIDIA GPUs: CUDA 11.0+ runtime and PyTorch CUDA version
 
 For a quick installation directly from the repository:
 
 ```shell
 pip install git+https://github.com/ROCm/iris.git
+```
+
+To use Iris with NVIDIA GPUs, set the backend before importing:
+
+```bash
+export IRIS_BACKEND=cuda
+```
+
+Or install with the backend specified:
+
+```shell
+# Note: Backend selection is via environment variable, not install-time config
+IRIS_BACKEND=cuda pip install git+https://github.com/ROCm/iris.git
 ```
 
 ### Docker Compose (Recommended for Development)
@@ -139,10 +154,43 @@ Check out our [examples](examples/) directory for ready-to-run scripts and usage
 
 Iris currently supports:
 
+### AMD GPUs (HIP Backend)
 - MI300X, MI350X & MI355X
+
+### NVIDIA GPUs (CUDA Backend)
+- All CUDA-capable GPUs with compute capability 7.0+
 
 > [!NOTE]
 > Iris may work on other AMD GPUs with ROCm compatibility.
+
+### Backend Selection
+
+Iris automatically detects the available GPU backend at runtime. You can also explicitly select the backend using the `IRIS_BACKEND` environment variable:
+
+```bash
+# Use CUDA backend for NVIDIA GPUs
+export IRIS_BACKEND=cuda
+# or
+export IRIS_BACKEND=nvidia
+
+# Use HIP backend for AMD GPUs (default)
+export IRIS_BACKEND=hip
+# or
+export IRIS_BACKEND=amd
+```
+
+Alternatively, set the environment variable in your Python script:
+
+```python
+import os
+os.environ["IRIS_BACKEND"] = "cuda"  # Must be set before importing iris
+import iris
+```
+
+The backend detection priority is:
+1. `IRIS_BACKEND` environment variable
+2. Auto-detection based on available GPU libraries
+3. Default to HIP for backward compatibility
 
 ## Roadmap
 
