@@ -34,6 +34,10 @@ def _write_backend_config(config_settings):
     else:
         backend = None  # Auto-detect at runtime
 
+    # Also set environment variable as suggested in setup.py
+    if backend:
+        os.environ["IRIS_BACKEND"] = backend
+
     # Write configuration file
     config_dir = os.path.join("iris", ".config")
     os.makedirs(config_dir, exist_ok=True)
