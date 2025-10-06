@@ -39,6 +39,7 @@ from iris.hip import (
     get_ipc_handle,
     open_ipc_handle,
     get_wall_clock_rate,
+    get_ipc_handle_size,
 )
 import numpy as np
 import math
@@ -89,7 +90,8 @@ class Iris:
 
         heap_bases = np.zeros(num_ranks, dtype=np.uint64)
         heap_bases[cur_rank] = heap_base
-        ipc_handles = np.zeros((num_ranks, 64), dtype=np.uint8)
+        ipc_handle_size = get_ipc_handle_size()
+        ipc_handles = np.zeros((num_ranks, ipc_handle_size), dtype=np.uint8)
         ipc_handle = get_ipc_handle(heap_base_ptr, cur_rank)
 
         distributed_barrier()

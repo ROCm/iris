@@ -1,165 +1,57 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
-import ctypes
-import numpy as np
-import sys
-import torch
-import subprocess
+"""
+HIP-compatible API facade for Iris.
+
+This module provides a HIP-compatible interface that transparently redirects
+to either the HIP backend (AMD GPUs) or CUDA backend (NVIDIA GPUs) based on
+runtime detection or configuration.
+
+The backend is selected based on:
+1. IRIS_BACKEND environment variable (set to 'cuda' or 'hip')
+2. Auto-detection based on available libraries
+"""
+
 import os
+import sys
 
-rt_path = "libamdhip64.so"
-hip_runtime = ctypes.cdll.LoadLibrary(rt_path)
-
-
-def hip_try(err):
-    if err != 0:
-        hip_runtime.hipGetErrorString.restype = ctypes.c_char_p
-        error_string = hip_runtime.hipGetErrorString(ctypes.c_int(err)).decode("utf-8")
-        raise RuntimeError(f"HIP error code {err}: {error_string}")
-
-
-class hipIpcMemHandle_t(ctypes.Structure):
-    _fields_ = [("reserved", ctypes.c_char * 64)]
-
-
-def open_ipc_handle(ipc_handle_data, rank):
-    ptr = ctypes.c_void_p()
-    hipIpcMemLazyEnablePeerAccess = ctypes.c_uint(1)
-    hip_runtime.hipIpcOpenMemHandle.argtypes = [
-        ctypes.POINTER(ctypes.c_void_p),
-        hipIpcMemHandle_t,
-        ctypes.c_uint,
-    ]
-    if isinstance(ipc_handle_data, np.ndarray):
-        if ipc_handle_data.dtype != np.uint8 or ipc_handle_data.size != 64:
-            raise ValueError("ipc_handle_data must be a 64-element uint8 numpy array")
-        ipc_handle_bytes = ipc_handle_data.tobytes()
-        ipc_handle_data = (ctypes.c_char * 64).from_buffer_copy(ipc_handle_bytes)
-    else:
-        raise TypeError("ipc_handle_data must be a numpy.ndarray of dtype uint8 with 64 elements")
-
-    raw_memory = ctypes.create_string_buffer(64)
-    ctypes.memset(raw_memory, 0x00, 64)
-    ipc_handle_struct = hipIpcMemHandle_t.from_buffer(raw_memory)
-    ipc_handle_data_bytes = bytes(ipc_handle_data)
-    ctypes.memmove(raw_memory, ipc_handle_data_bytes, 64)
-
-    hip_try(
-        hip_runtime.hipIpcOpenMemHandle(
-            ctypes.byref(ptr),
-            ipc_handle_struct,
-            hipIpcMemLazyEnablePeerAccess,
-        )
-    )
-
-    return ptr.value
-
-
-def get_ipc_handle(ptr, rank):
-    ipc_handle = hipIpcMemHandle_t()
-    hip_try(hip_runtime.hipIpcGetMemHandle(ctypes.byref(ipc_handle), ptr))
-    return ipc_handle
-
-
-def count_devices():
-    device_count = ctypes.c_int()
-    hip_try(hip_runtime.hipGetDeviceCount(ctypes.byref(device_count)))
-    return device_count.value
-
-
-def set_device(gpu_id):
-    hip_try(hip_runtime.hipSetDevice(gpu_id))
-
-
-def get_device_id():
-    device_id = ctypes.c_int()
-    hip_try(hip_runtime.hipGetDevice(ctypes.byref(device_id)))
-    return device_id.value
-
-
-def get_cu_count(device_id=None):
-    if device_id is None:
-        device_id = get_device_id()
-
-    hipDeviceAttributeMultiprocessorCount = 63
-    cu_count = ctypes.c_int()
-
-    hip_try(hip_runtime.hipDeviceGetAttribute(ctypes.byref(cu_count), hipDeviceAttributeMultiprocessorCount, device_id))
-
-    return cu_count.value
-
-
-def get_rocm_version():
-    major, minor = -1, -1
-
-    # Try hipconfig --path first
+# Detect backend
+def _detect_backend():
+    """Detect which backend to use based on environment and available libraries."""
+    backend_env = os.environ.get("IRIS_BACKEND", "").lower()
+    if backend_env in ("cuda", "nvidia"):
+        return "cuda"
+    elif backend_env in ("hip", "amd", "rocm"):
+        return "hip"
+    
+    # Auto-detect by trying to load libraries
+    import ctypes
     try:
-        result = subprocess.run(["hipconfig", "--path"], capture_output=True, text=True, check=True)
-        rocm_path = result.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        # Then look for $ROCM_PATH environment variable
-        rocm_path = os.environ.get("ROCM_PATH")
-        if not rocm_path:
-            # Finally, try default location
-            rocm_path = "/opt/rocm"
-
-    # Try to read version from .info/version file
-    try:
-        version_file_path = os.path.join(rocm_path, ".info", "version")
-        with open(version_file_path, "r") as version_file:
-            version = version_file.readline().strip()
-            major = int(version.split(".")[0])
-            minor = int(version.split(".")[1])
-    except (FileNotFoundError, IOError, ValueError, IndexError):
-        # If we can't read the version file, return -1, -1
+        ctypes.cdll.LoadLibrary("libamdhip64.so")
+        return "hip"
+    except (OSError, FileNotFoundError):
         pass
-
-    return (major, minor)
-
-
-def get_wall_clock_rate(device_id):
-    hipDeviceAttributeWallClockRate = 10017
-    wall_clock_rate = ctypes.c_int()
-    status = hip_runtime.hipDeviceGetAttribute(
-        ctypes.byref(wall_clock_rate), hipDeviceAttributeWallClockRate, device_id
-    )
-    hip_try(status)
-    return wall_clock_rate.value
+    
+    try:
+        ctypes.cdll.LoadLibrary("libcudart.so")
+        return "cuda"
+    except (OSError, FileNotFoundError):
+        pass
+    
+    # Default to hip for backward compatibility
+    return "hip"
 
 
-def get_arch_string(device_id=None):
-    if device_id is None:
-        device_id = get_device_id()
-    arch_full = torch.cuda.get_device_properties(device_id).gcnArchName
-    arch_name = arch_full.split(":")[0]
-    return arch_name
+_backend = _detect_backend()
 
+# Import from the appropriate backend module
+if _backend == "cuda":
+    from iris.cuda import *
+else:
+    from iris._hip import *
 
-def get_num_xcc(device_id=None):
-    if device_id is None:
-        device_id = get_device_id()
-    rocm_major, _ = get_rocm_version()
-    if rocm_major < 7:
-        return 8
-    hipDeviceAttributeNumberOfXccs = 10018
-    xcc_count = ctypes.c_int()
-    hip_try(hip_runtime.hipDeviceGetAttribute(ctypes.byref(xcc_count), hipDeviceAttributeNumberOfXccs, device_id))
-    return xcc_count.value
-
-
-def malloc_fine_grained(size):
-    hipDeviceMallocFinegrained = 0x1
-    ptr = ctypes.c_void_p()
-    hip_try(hip_runtime.hipExtMallocWithFlags(ctypes.byref(ptr), size, hipDeviceMallocFinegrained))
-    return ptr
-
-
-def hip_malloc(size):
-    ptr = ctypes.c_void_p()
-    hip_try(hip_runtime.hipMalloc(ctypes.byref(ptr), size))
-    return ptr
-
-
-def hip_free(ptr):
-    hip_try(hip_runtime.hipFree(ptr))
+# Make backend information available
+def get_backend():
+    """Get the currently active backend name ('hip' or 'cuda')."""
+    return _backend
