@@ -29,5 +29,4 @@ slurm*.out
 examples/gemm/results/*
 asm/
 
-# Backend configuration (generated at build time)
-iris/_backend_selected.py
+# Backend configuration (generated
