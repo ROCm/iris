@@ -74,7 +74,9 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
     This function will be executed by each spawned process.
     """
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=rank)
+    dist.init_process_group(
+        backend=backend, init_method=init_url, world_size=world_size, rank=rank, device_id=torch.device(f"cuda:{rank}")
+    )
 
     shmem = iris.iris(args.heap_size)
     torch.cuda.set_device(rank)

@@ -91,7 +91,8 @@ def prepare_perf_data(config, num_query_heads, num_kv_heads, page_size, datatype
 
 
 def run_benchmark(args):
-    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))

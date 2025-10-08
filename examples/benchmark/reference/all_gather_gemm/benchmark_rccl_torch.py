@@ -46,7 +46,9 @@ def parse_args():
 
 
 def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
-    dist.init_process_group(backend="nccl", init_method=init_url, world_size=world_size, rank=rank)
+    dist.init_process_group(
+        backend="nccl", init_method=init_url, world_size=world_size, rank=rank, device_id=torch.device(f"cuda:{rank}")
+    )
     torch.cuda.set_device(rank)
 
     output_dir = args.output_dir
