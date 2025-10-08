@@ -17,7 +17,6 @@ from examples.common.validation import validate_gemm
 import importlib.util
 from pathlib import Path
 import iris
-from iris.hip import get_cu_count
 
 current_dir = Path(__file__).parent
 file_path = (current_dir / "../../examples/14_all_gather_gemm/all_gather_gemm_push.py").resolve()
