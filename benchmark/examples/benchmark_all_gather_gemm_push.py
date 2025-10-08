@@ -148,6 +148,7 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
         # Use provided num_sms or auto-detect
         if run_args["num_sms"] is None:
             num_sms = torch.cuda.get_device_properties(rank).multi_processor_count
+            run_args["num_sms"] = num_sms
         else:
             num_sms = run_args["num_sms"]
 
