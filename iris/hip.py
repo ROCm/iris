@@ -39,6 +39,7 @@ def get_ipc_handle_size():
     """Return the IPC handle size for the current backend."""
     return 64 if _is_amd_backend else 128
 
+
 class gpuIpcMemHandle_t(ctypes.Structure):
     _fields_ = [("reserved", ctypes.c_char * get_ipc_handle_size())]
 
@@ -46,7 +47,7 @@ class gpuIpcMemHandle_t(ctypes.Structure):
 def open_ipc_handle(ipc_handle_data, rank):
     ptr = ctypes.c_void_p()
     handle_size = get_ipc_handle_size()
-    
+
     if _is_amd_backend:
         hipIpcMemLazyEnablePeerAccess = ctypes.c_uint(1)
         gpu_runtime.hipIpcOpenMemHandle.argtypes = [
@@ -61,7 +62,7 @@ def open_ipc_handle(ipc_handle_data, rank):
             ctypes.c_uint,
         ]
         cudaIpcMemLazyEnablePeerAccess = ctypes.c_uint(1)
-    
+
     if isinstance(ipc_handle_data, np.ndarray):
         if ipc_handle_data.dtype != np.uint8 or ipc_handle_data.size != handle_size:
             raise ValueError(f"ipc_handle_data must be a {handle_size}-element uint8 numpy array")
@@ -135,10 +136,12 @@ def get_cu_count(device_id=None):
         device_id = get_device_id()
 
     cu_count = ctypes.c_int()
-    
+
     if _is_amd_backend:
         hipDeviceAttributeMultiprocessorCount = 63
-        gpu_try(gpu_runtime.hipDeviceGetAttribute(ctypes.byref(cu_count), hipDeviceAttributeMultiprocessorCount, device_id))
+        gpu_try(
+            gpu_runtime.hipDeviceGetAttribute(ctypes.byref(cu_count), hipDeviceAttributeMultiprocessorCount, device_id)
+        )
     else:
         cudaDevAttrMultiProcessorCount = 16
         gpu_try(gpu_runtime.cudaDeviceGetAttribute(ctypes.byref(cu_count), cudaDevAttrMultiProcessorCount, device_id))
@@ -150,7 +153,7 @@ def get_rocm_version():
     if not _is_amd_backend:
         # Not applicable for CUDA
         return (-1, -1)
-    
+
     major, minor = -1, -1
 
     # Try hipconfig --path first
@@ -180,7 +183,7 @@ def get_rocm_version():
 
 def get_wall_clock_rate(device_id):
     wall_clock_rate = ctypes.c_int()
-    
+
     if _is_amd_backend:
         hipDeviceAttributeWallClockRate = 10017
         status = gpu_runtime.hipDeviceGetAttribute(
@@ -188,10 +191,8 @@ def get_wall_clock_rate(device_id):
         )
     else:
         cudaDevAttrClockRate = 13
-        status = gpu_runtime.cudaDeviceGetAttribute(
-            ctypes.byref(wall_clock_rate), cudaDevAttrClockRate, device_id
-        )
-    
+        status = gpu_runtime.cudaDeviceGetAttribute(ctypes.byref(wall_clock_rate), cudaDevAttrClockRate, device_id)
+
     gpu_try(status)
     return wall_clock_rate.value
 
@@ -199,7 +200,7 @@ def get_wall_clock_rate(device_id):
 def get_arch_string(device_id=None):
     if device_id is None:
         device_id = get_device_id()
-    
+
     if _is_amd_backend:
         arch_full = torch.cuda.get_device_properties(device_id).gcnArchName
         arch_name = arch_full.split(":")[0]
@@ -213,11 +214,11 @@ def get_arch_string(device_id=None):
 def get_num_xcc(device_id=None):
     if device_id is None:
         device_id = get_device_id()
-    
+
     if not _is_amd_backend:
         # XCC is AMD-specific, return 1 for CUDA
         return 1
-    
+
     rocm_major, _ = get_rocm_version()
     if rocm_major < 7:
         return 8
@@ -229,14 +230,14 @@ def get_num_xcc(device_id=None):
 
 def malloc_fine_grained(size):
     ptr = ctypes.c_void_p()
-    
+
     if _is_amd_backend:
         hipDeviceMallocFinegrained = 0x1
         gpu_try(gpu_runtime.hipExtMallocWithFlags(ctypes.byref(ptr), size, hipDeviceMallocFinegrained))
     else:
         # CUDA doesn't have direct equivalent, use regular malloc
         gpu_try(gpu_runtime.cudaMalloc(ctypes.byref(ptr), size))
-    
+
     return ptr
 
 
