@@ -80,12 +80,14 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     # Set default SM values if not provided
     cu_count = torch.cuda.get_device_properties(rank).multi_processor_count
+    next_pow2 = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
+
     if args["gemm_sms"] is None:
         # For wg_specialized: use next smaller power of 2
-        args["gemm_sms"] = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
+        args["gemm_sms"] = next_pow2
     if args["comm_sms"] is None:
         # For bulk synchronous, use same as gemm_sms
-        args["comm_sms"] = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
+        args["comm_sms"] = next_pow2
 
     # GEMM
     datatype = torch.float32
