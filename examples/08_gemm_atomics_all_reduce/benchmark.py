@@ -11,6 +11,7 @@ import sys
 import os
 import argparse
 import json
+import math
 
 from examples.common.utils import (
     JSONWriter,
@@ -19,7 +20,6 @@ from examples.common.utils import (
 )
 
 import iris
-from iris.hip import get_cu_count
 
 from matmul_wrapper import matmul
 from examples.common.validation import validate_gemm
@@ -85,15 +85,13 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     shmem = iris.iris(args["heap_size"])
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
-    cu_count = shmem.get_cu_count()
 
     # Set default SM values if not provided
+    cu_count = torch.cuda.get_device_properties(rank).multi_processor_count
     if args["total_sms"] is None:
         args["total_sms"] = cu_count
     if args["gemm_sms"] is None:
         # For all_reduce: use next smaller power of 2, rest for communication
-        import math
-
         args["gemm_sms"] = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
 
     # GEMM

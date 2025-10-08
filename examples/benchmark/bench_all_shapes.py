@@ -6,13 +6,7 @@ import os
 from datetime import datetime
 import argparse
 import json
-
-try:
-    from iris.hip import get_cu_count
-
-    CU_COUNT_AVAILABLE = True
-except Exception:
-    CU_COUNT_AVAILABLE = False
+import torch
 
 
 def launch_sbatch(
@@ -118,14 +112,14 @@ def main(hashes, config, sbatch_script_content, input_json, tiling_json, dry_run
             mkn_gemm_tiles[mkn] = {key: entry[key] for key in optional_keys if key in entry}
 
     # Determine gemm_sms based on available GPU or partition name
-    if CU_COUNT_AVAILABLE:
-        try:
-            gemm_sms = get_cu_count()
+    try:
+        if torch.cuda.is_available():
+            gemm_sms = torch.cuda.get_device_properties(0).multi_processor_count
             print(f"Auto-detected CU count: {gemm_sms}")
-        except Exception:
-            # Fall back to partition-based detection
+        else:
             gemm_sms = None
-    else:
+    except Exception:
+        # Fall back to partition-based detection
         gemm_sms = None
 
     if gemm_sms is None:

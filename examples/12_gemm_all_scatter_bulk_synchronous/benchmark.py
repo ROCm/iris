@@ -11,12 +11,12 @@ import sys
 import os
 import argparse
 import json
+import math
 
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set
 from examples.common.validation import validate_gemm
 
 import iris
-from iris.hip import get_cu_count
 
 from matmul_wrapper import matmul
 from gemm_all_scatter_bulk_synchronous import persistent_all_scatter
@@ -77,18 +77,14 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     shmem = iris.iris(args["heap_size"])
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
-    cu_count = shmem.get_cu_count()
 
     # Set default SM values if not provided
+    cu_count = torch.cuda.get_device_properties(rank).multi_processor_count
     if args["gemm_sms"] is None:
         # For wg_specialized: use next smaller power of 2
-        import math
-
         args["gemm_sms"] = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
     if args["comm_sms"] is None:
         # For bulk synchronous, use same as gemm_sms
-        import math
-
         args["comm_sms"] = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
 
     # GEMM

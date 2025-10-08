@@ -15,7 +15,6 @@ import triton
 from matmul_wrapper import matmul
 
 import iris
-from iris.hip import get_cu_count
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set
 from examples.common.validation import validate_gemm
 
@@ -73,11 +72,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     shmem = iris.iris(args["heap_size"])
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
-    cu_count = shmem.get_cu_count()
 
     # Set default SM values if not provided
     if args["gemm_sms"] is None:
         # For all_scatter: use total CU count
+        cu_count = torch.cuda.get_device_properties(rank).multi_processor_count
         args["gemm_sms"] = cu_count
 
     # GEMM

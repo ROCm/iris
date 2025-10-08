@@ -2,11 +2,13 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import json
+import torch
 
 try:
-    from iris.hip import get_cu_count
-
-    cu_count = get_cu_count()
+    if torch.cuda.is_available():
+        cu_count = torch.cuda.get_device_properties(0).multi_processor_count
+    else:
+        cu_count = 304  # Default for MI300
 except Exception:
     cu_count = 304  # Default for MI300
 
