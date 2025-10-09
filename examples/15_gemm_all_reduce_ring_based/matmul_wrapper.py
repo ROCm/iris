@@ -27,7 +27,7 @@ class matmul(torch.autograd.Function):
     @staticmethod
     def set_debug(debug: bool):
         matmul._debug = debug
-        
+
     @staticmethod
     def get_matmul_registers():
         if matmul._debug:
