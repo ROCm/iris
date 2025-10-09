@@ -32,7 +32,7 @@ from iris._distributed_helpers import (
     distributed_broadcast_scalar,
     distributed_broadcast_tensor,
 )
-from iris.hip import (
+from iris.backend import (
     set_device,
     get_cu_count,
     count_devices,

@@ -16,7 +16,7 @@ class matmul(torch.autograd.Function):
     _debug = False
     _registers = None
     _spills = None
-    _num_xcds = iris.hip.get_num_xcc()
+    _num_xcds = iris.backend.get_num_xcc()
 
     @staticmethod
     def set_debug(debug: bool):

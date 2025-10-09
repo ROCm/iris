@@ -12,8 +12,8 @@ import iris
     ],
 )
 def test_get_num_xcc_api(num_calls):
-    first = iris.hip.get_num_xcc()
+    first = iris.backend.get_num_xcc()
     assert isinstance(first, int)
     for _ in range(num_calls):
-        result = iris.hip.get_num_xcc()
+        result = iris.backend.get_num_xcc()
         assert result == first, f"get_num_xcc changed between calls. Expected {first} but got {result}."

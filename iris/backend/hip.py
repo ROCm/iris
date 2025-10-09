@@ -90,7 +90,8 @@ def get_cu_count(device_id=None):
     return cu_count.value
 
 
-def get_rocm_version():
+def get_runtime_version():
+    """Return (major, minor) for ROCm runtime."""
     major, minor = -1, -1
 
     # Try hipconfig --path first
@@ -118,6 +119,10 @@ def get_rocm_version():
     return (major, minor)
 
 
+# Backwards compatibility alias
+get_rocm_version = get_runtime_version
+
+
 def get_wall_clock_rate(device_id):
     hipDeviceAttributeWallClockRate = 10017
     wall_clock_rate = ctypes.c_int()
@@ -139,7 +144,7 @@ def get_arch_string(device_id=None):
 def get_num_xcc(device_id=None):
     if device_id is None:
         device_id = get_device_id()
-    rocm_major, _ = get_rocm_version()
+    rocm_major, _ = get_runtime_version()
     if rocm_major < 7:
         return 8
     hipDeviceAttributeNumberOfXccs = 10018

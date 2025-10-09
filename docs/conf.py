@@ -95,7 +95,7 @@ autodoc_mock_imports = [
     "triton.language",
     "numpy",
     "iris._distributed_helpers",
-    "iris.hip",
+    "iris.backend",
 ]
 
 # Napoleon settings for Google/NumPy docstring parsing

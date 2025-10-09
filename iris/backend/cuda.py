@@ -14,9 +14,7 @@ try:
     cuda_runtime = ctypes.cdll.LoadLibrary(rt_path)
     cuda_runtime.cudaGetErrorString.restype = ctypes.c_char_p  # Readable errors
 except OSError as e:
-    raise RuntimeError(
-        f"Could not load CUDA runtime '{rt_path}'. Is CUDA installed?\n{e}"
-    )
+    raise RuntimeError(f"Could not load CUDA runtime '{rt_path}'. Is CUDA installed?\n{e}")
 
 
 def cuda_try(err):
@@ -35,26 +33,15 @@ def open_ipc_handle(ipc_handle_data, rank):
     cudaIpcMemLazyEnablePeerAccess = ctypes.c_uint(1)
 
     if isinstance(ipc_handle_data, np.ndarray):
-        if (
-            ipc_handle_data.dtype != np.uint8
-            or ipc_handle_data.size != _CUDA_IPC_HANDLE_SIZE
-        ):
-            raise ValueError(
-                f"ipc_handle_data must be a {_CUDA_IPC_HANDLE_SIZE}-element uint8 numpy array"
-            )
+        if ipc_handle_data.dtype != np.uint8 or ipc_handle_data.size != _CUDA_IPC_HANDLE_SIZE:
+            raise ValueError(f"ipc_handle_data must be a {_CUDA_IPC_HANDLE_SIZE}-element uint8 numpy array")
         if not ipc_handle_data.flags.c_contiguous:
             ipc_handle_data = np.ascontiguousarray(ipc_handle_data)
         ipc_handle_struct = cudaIpcMemHandle_t.from_buffer_copy(ipc_handle_data)
     else:
-        raise TypeError(
-            "ipc_handle_data must be a numpy.ndarray of dtype uint8 with 64 elements"
-        )
+        raise TypeError("ipc_handle_data must be a numpy.ndarray of dtype uint8 with 64 elements")
 
-    cuda_try(
-        cuda_runtime.cudaIpcOpenMemHandle(
-            ctypes.byref(ptr), ipc_handle_struct, cudaIpcMemLazyEnablePeerAccess
-        )
-    )
+    cuda_try(cuda_runtime.cudaIpcOpenMemHandle(ctypes.byref(ptr), ipc_handle_struct, cudaIpcMemLazyEnablePeerAccess))
     return ptr.value
 
 
@@ -88,15 +75,11 @@ def get_cu_count(device_id=None):
     if device_id is None:
         device_id = get_device_id()
     val = ctypes.c_int()
-    cuda_try(
-        cuda_runtime.cudaDeviceGetAttribute(
-            ctypes.byref(val), _CUDA_DEV_ATTR_MULTI_PROCESSOR_COUNT, device_id
-        )
-    )
+    cuda_try(cuda_runtime.cudaDeviceGetAttribute(ctypes.byref(val), _CUDA_DEV_ATTR_MULTI_PROCESSOR_COUNT, device_id))
     return val.value
 
 
-def get_cuda_version():
+def get_runtime_version():
     """Return (major, minor) for CUDA runtime."""
     ver = ctypes.c_int()
     cuda_try(cuda_runtime.cudaRuntimeGetVersion(ctypes.byref(ver)))
@@ -104,14 +87,14 @@ def get_cuda_version():
     return (v // 1000, (v % 1000) // 10)
 
 
+# Backwards compatibility alias
+get_cuda_version = get_runtime_version
+
+
 def get_wall_clock_rate(device_id):
     """Device core clock rate in kHz (cudaDevAttrClockRate)."""
     val = ctypes.c_int()
-    cuda_try(
-        cuda_runtime.cudaDeviceGetAttribute(
-            ctypes.byref(val), _CUDA_DEV_ATTR_CLOCK_RATE, device_id
-        )
-    )
+    cuda_try(cuda_runtime.cudaDeviceGetAttribute(ctypes.byref(val), _CUDA_DEV_ATTR_CLOCK_RATE, device_id))
     return val.value
 
 
@@ -136,9 +119,7 @@ def malloc_fine_grained(size):
     """Use managed (Unified) memory as closest analogue to HIP fine-grained."""
     ptr = ctypes.c_void_p()
     cudaMemAttachGlobal = 0x1
-    cuda_try(
-        cuda_runtime.cudaMallocManaged(ctypes.byref(ptr), size, cudaMemAttachGlobal)
-    )
+    cuda_try(cuda_runtime.cudaMallocManaged(ctypes.byref(ptr), size, cudaMemAttachGlobal))
     return ptr
 
 
@@ -154,8 +135,8 @@ def free(ptr):
     cuda_try(cuda_runtime.cudaFree(ptr))
 
 
-## HIP-compatible aliases
+## Backend-agnostic aliases (for compatibility with both CUDA and HIP)
 hip_try = cuda_try
 hip_malloc = malloc
 hip_free = free
-get_rocm_version = get_cuda_version
+get_rocm_version = get_runtime_version

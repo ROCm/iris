@@ -46,7 +46,7 @@ from .util import (
     do_bench,
 )
 
-from . import backends
+from . import backend
 
 # Import logging functionality
 from .logging import (
@@ -77,7 +77,7 @@ __all__ = [
     "atomic_min",
     "atomic_max",
     "do_bench",
-    "backends",
+    "backend",
     "set_logger_level",
     "logger",
     "DEBUG",

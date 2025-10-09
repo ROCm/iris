@@ -20,7 +20,7 @@ gemm_kernel = persistent_gemm_all_reduce
 class matmul(torch.autograd.Function):
     _debug = True
 
-    _num_xcds = iris.hip.get_num_xcc()
+    _num_xcds = iris.backend.get_num_xcc()
 
     @staticmethod
     def set_debug(debug: bool):

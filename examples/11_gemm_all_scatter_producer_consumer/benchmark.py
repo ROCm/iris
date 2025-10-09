@@ -118,7 +118,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     bias = None
 
-    num_xcds = iris.hip.get_num_xcc()
+    num_xcds = iris.backend.get_num_xcc()
 
     gemm_stream = torch.cuda.Stream()
     comm_stream = torch.cuda.Stream()
@@ -275,7 +275,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         json_writer.display()
 
     if args["trace_tiles"] and rank == 0:
-        gpu_freq = iris.hip.get_wall_clock_rate(rank) * 1e-3
+        gpu_freq = iris.backend.get_wall_clock_rate(rank) * 1e-3
         algo_string = "all_scatter"
         filename = f"gemm_tiles_{algo_string}_trace_rank{rank}.json"
         timestamps.to_json(filename, gpu_freq)
