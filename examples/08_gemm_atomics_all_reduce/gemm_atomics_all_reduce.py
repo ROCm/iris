@@ -191,17 +191,17 @@ def persistent_gemm_all_reduce(
 
         # Accumulator registers with C results
         c = acc.to(C.type.element_ty)
-        
+
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        
+
         # Add compiler hints
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        
+
         # Define the C-mask (BLOCK_SIZE_M, 1) x (1, BLOCK_SIZE_N)
         sub_mask = (rm[:, None] < M) & (rn[None, :] < N)
-        
+
         # Calculate the "global" offset of C based on the rank.
         # Note how each GPU is producing the entire output but partial-K.
         global_offset = rm[:, None] * stride_cm_global + rn[None, :] * stride_cn_global
