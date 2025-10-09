@@ -146,6 +146,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     # Timestamps
     timestamps = Timestamps(num_tiles=total_tiles)
+    
+    def preamble():
+        shmem.barrier()
+        locks.zero_()
+        ring_buffer.zero_()
+        shmem.barrier()
 
     def run_experiment():
         nonlocal local_C
@@ -199,6 +205,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     run_experiment()
 
     shmem.barrier()
+    preamble()
+    shmem.barrier()
 
     for k in ["gemm"]:
         kernel_timing[k]["ms"] = 0
@@ -229,7 +237,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         matmul.set_debug(False)
         shmem.info("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
-        triton_ms = iris.do_bench(run_experiment, shmem.barrier)
+        triton_ms = iris.do_bench(run_experiment, shmem.barrier, preamble)
         triton_tflops = perf(triton_ms)
         algo_string = "all_reduce"
         shmem.info(f"tile matmul + {algo_string} (grid={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops")
