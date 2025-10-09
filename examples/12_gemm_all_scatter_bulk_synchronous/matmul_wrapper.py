@@ -16,6 +16,7 @@ class matmul(torch.autograd.Function):
     _debug = False
     _registers = None
     _spills = None
+    _num_xcds = iris.hip.get_num_xcc()
 
     @staticmethod
     def set_debug(debug: bool):
@@ -59,7 +60,7 @@ class matmul(torch.autograd.Function):
         M, K = a.shape
         _, N = b.shape
 
-        num_xcds = iris.hip.get_num_xcc()
+        num_xcds = matmul._num_xcds
 
         # TODO: Use arch-specific values.
         num_stages = 2
