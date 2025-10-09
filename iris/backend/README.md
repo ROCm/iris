@@ -1,8 +1,30 @@
 # Backend Interface
 
-To implement a new backend, create a module that implements these functions:
+The backend provides two ways to work with GPU platforms:
 
-## Required Functions
+For portable code, use the unified API that works across all backends:
+
+```python
+import iris.backend as backend
+
+num_gpus = backend.count_devices()
+backend.set_device(0)
+ptr = backend.malloc(size)
+```
+
+For platform-specific code, import directly:
+
+```python
+from iris.backend import hip
+ptr = hip.malloc_fine_grained(size)  # HIP-only: cache-coherent shared memory
+
+from iris.backend import cuda
+ptr = cuda.malloc_managed(size)  # CUDA-only: unified memory with page migration
+```
+
+## Implementing a New Backend
+
+Backends must implement these functions:
 
 ```python
 def set_device(gpu_id: int) -> None
@@ -17,7 +39,6 @@ def get_runtime_version() -> tuple[int, int]  # (major, minor)
 def get_ipc_handle(ptr: int | ctypes.c_void_p, rank: int) -> Any
 def open_ipc_handle(ipc_handle_data: np.ndarray, rank: int) -> int
 
-def malloc_fine_grained(size: int) -> ctypes.c_void_p
 def malloc(size: int) -> ctypes.c_void_p
 def free(ptr: int | ctypes.c_void_p) -> None
 ```

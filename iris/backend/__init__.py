@@ -71,7 +71,6 @@ get_wall_clock_rate = _backend.module.get_wall_clock_rate
 get_device_id = _backend.module.get_device_id
 get_arch_string = _backend.module.get_arch_string
 get_num_xcc = _backend.module.get_num_xcc
-malloc_fine_grained = _backend.module.malloc_fine_grained
 malloc = _backend.module.malloc
 free = _backend.module.free
 get_runtime_version = _backend.module.get_runtime_version

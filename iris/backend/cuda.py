@@ -111,17 +111,17 @@ def get_num_xcc(device_id=None):
     return 1
 
 
-def malloc_fine_grained(size):
-    """Use managed (Unified) memory as closest analogue to HIP fine-grained."""
-    ptr = ctypes.c_void_p()
-    cudaMemAttachGlobal = 0x1
-    cuda_try(cuda_runtime.cudaMallocManaged(ctypes.byref(ptr), size, cudaMemAttachGlobal))
-    return ptr
-
-
 def malloc(size):
     ptr = ctypes.c_void_p()
     cuda_try(cuda_runtime.cudaMalloc(ctypes.byref(ptr), size))
+    return ptr
+
+
+def malloc_managed(size):
+    """Allocate unified/managed memory accessible from both host and device."""
+    ptr = ctypes.c_void_p()
+    cudaMemAttachGlobal = 0x1
+    cuda_try(cuda_runtime.cudaMallocManaged(ctypes.byref(ptr), size, cudaMemAttachGlobal))
     return ptr
 
 
