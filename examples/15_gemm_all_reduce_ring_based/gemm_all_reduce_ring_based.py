@@ -163,6 +163,7 @@ def persistent_gemm_all_reduce_ring_based(
                 next_rank,
                 heap_bases,
             ) # TODO: may need cache_modifier
+            tl.debug_barrier()
 
             # 2) Wait for PREV rank to signal our local flag for this tile
             #    Spin; single-lane uniform load is fine here.                
@@ -175,11 +176,6 @@ def persistent_gemm_all_reduce_ring_based(
 
             # 4) Reset our local flag to 0 (done consuming this step)
             tl.store(locks + tile_id, 0, cache_modifier=".wt")
-
-        # Optional timestamp just before final store
-        if COLLECT_TIMESTAMPS:
-            timestamp = read_realtime()
-            tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
         # Write fully-reduced tile to local result buffer (no remote writes)
         c = acc.to(C.type.element_ty)
