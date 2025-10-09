@@ -146,7 +146,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     # Timestamps
     timestamps = Timestamps(num_tiles=total_tiles)
-    
+
     def preamble():
         shmem.barrier()
         locks.zero_()

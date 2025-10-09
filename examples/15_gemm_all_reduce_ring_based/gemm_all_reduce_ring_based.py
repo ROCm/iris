@@ -155,16 +155,8 @@ def persistent_gemm_all_reduce_ring_based(
             tl.debug_barrier()
 
             # Signal "ready" by setting NEXT rank's flag for this tile to 1
-            iris.atomic_xchg(
-                locks + tile_id, 
-                1, 
-                cur_rank, 
-                next_rank, 
-                heap_bases, 
-                sem="release", 
-                scope="sys"
-            )
-            
+            iris.atomic_xchg(locks + tile_id, 1, cur_rank, next_rank, heap_bases, sem="release", scope="sys")
+
             tl.debug_barrier()
 
             # 2) Wait for PREV rank to signal our local flag for this tile
