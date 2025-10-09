@@ -1,0 +1,82 @@
+name: Iris Performance Regression Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build-apptainer-image:
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Apptainer
+        run: |
+          apt-get update && apt-get install -y software-properties-common
+          add-apt-repository -y ppa:apptainer/ppa
+          apt-get update && apt-get install -y apptainer
+
+      - name: Build Iris Apptainer container
+        run: |
+          # Create persistent Apptainer directory
+          mkdir -p ~/apptainer
+
+          # Build Apptainer image from definition file (only if it doesn't exist)
+          if [ ! -f ~/apptainer/iris-dev.sif ]; then
+            echo "Building new Apptainer image..."
+            apptainer build ~/apptainer/iris-dev.sif apptainer/iris.def
+          else
+            echo "Using existing Apptainer image"
+          fi
+
+  performance-test:
+    name: ${{ matrix.example_name }}
+    needs: build-apptainer-image
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Performance baselines measured on AMD Instinct MI325X (8 GPUs)
+        include:
+          - example_name: "GEMM All-Scatter WG Specialization"
+            example_path: "10_gemm_all_scatter_wg_specialization"
+            tflops_threshold: 1600  # Actual: ~2182 TFLOPs
+            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
+
+          - example_name: "GEMM All-Scatter"
+            example_path: "07_gemm_all_scatter"
+            tflops_threshold: 1000  # Actual: ~1407 TFLOPs
+            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 256 --BLK_N 64 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
+
+          - example_name: "GEMM All-Scatter Producer-Consumer"
+            example_path: "11_gemm_all_scatter_producer_consumer"
+            tflops_threshold: 1600  # Actual: ~2190 TFLOPs
+            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256 --comm_sms 48"
+
+          - example_name: "GEMM All-Scatter Bulk Synchronous"
+            example_path: "12_gemm_all_scatter_bulk_synchronous"
+            tflops_threshold: 900  # Actual: ~1262 TFLOPs
+            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run ${{ matrix.example_name }} Benchmark (8 ranks)
+        run: |
+          bash .github/scripts/run_perf_benchmark.sh \
+            "${{ matrix.example_path }}" \
+            "${{ matrix.tflops_threshold }}" \
+            ${{ matrix.benchmark_args }}
+

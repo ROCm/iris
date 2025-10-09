@@ -51,6 +51,8 @@ jobs:
 
       - name: Run External Validation Test with Apptainer
         run: |
+          set -e
+
           # Create unique overlay image for isolation
           OVERLAY="/tmp/iris_overlay_$(whoami)_external_$(date +%s%N).img"
 
@@ -62,6 +64,7 @@ jobs:
           apptainer exec --overlay "${OVERLAY}" --no-home --cleanenv \
             --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
             ~/apptainer/iris-dev.sif bash -c "
+              set -e
               pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
               wget -O test_iris_distributed.py https://gist.githubusercontent.com/mawad-amd/6375dc078e39e256828f379e03310ec7/raw/a527c3192bee4615292769e340b1c73676f6945a/test_iris_distributed.py
               python test_iris_distributed.py
