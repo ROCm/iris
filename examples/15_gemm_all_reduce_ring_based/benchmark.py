@@ -54,7 +54,7 @@ def parse_args():
     )
     # For All Scatter, use: 256x64x64
     # For One Shot, use: 256x256x64
-    parser.add_argument("--BLK_M", type=int, default=256, help="Block size M")
+    parser.add_argument("--BLK_M", type=int, default=128, help="Block size M")
     parser.add_argument("--BLK_N", type=int, default=128, help="Block size N")
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K")
 
@@ -227,8 +227,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         json_writer.add_field("success", success)
 
         if not is_triton_interpret_set():
-            gemm_registers = matmul.streamk_registers
-            gemm_spills = matmul.streamk_spills
+            gemm_registers = matmul.get_matmul_registers()
+            gemm_spills = matmul.get_matmul_spills()
 
             json_writer.add_field("gemm_registers", gemm_registers)
             json_writer.add_field("gemm_spills", gemm_spills)
