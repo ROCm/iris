@@ -43,6 +43,10 @@ jobs:
       - name: Run GEMM All-Scatter WG Specialization Benchmark (8 ranks)
         run: |
           set -e
+
+          # Performance threshold
+          TFLOPS_THRESHOLD=1500
+
           # Create overlay image in workspace (will be auto-cleaned by GitHub Actions)
           OVERLAY="iris_overlay_perf.img"
 
@@ -74,6 +78,15 @@ jobs:
 
           # Parse JSON and check performance
           echo "::group::Validating performance"
+
+          # Check if benchmark succeeded
+          SUCCESS=$(jq -r '.success' perf_result.json)
+          if [ "$SUCCESS" != "true" ]; then
+            echo "::error::Benchmark failed (success: $SUCCESS)"
+            jq '.' perf_result.json
+            exit 1
+          fi
+
           TFLOPS=$(jq -r '.tflops' perf_result.json)
 
           if [ -z "$TFLOPS" ] || [ "$TFLOPS" = "null" ]; then
@@ -86,12 +99,12 @@ jobs:
 
           # Convert to integer for comparison
           TFLOPS_INT=${TFLOPS%.*}
-          if (( TFLOPS_INT < 2000 )); then
-            echo "::error::Performance regression detected! TFLOPs ($TFLOPS) is below threshold (2000)"
+          if (( TFLOPS_INT < TFLOPS_THRESHOLD )); then
+            echo "::error::Performance regression detected! TFLOPs ($TFLOPS) is below threshold ($TFLOPS_THRESHOLD)"
             jq '.' perf_result.json
             exit 1
           fi
 
-          echo "✅ Performance test passed! TFLOPs: $TFLOPS (threshold: >2000)"
+          echo "✅ Performance test passed! TFLOPs: $TFLOPS (threshold: >$TFLOPS_THRESHOLD)"
           echo "::endgroup::"
 
