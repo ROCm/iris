@@ -63,7 +63,7 @@ def persistent_gemm_all_reduce_ring_based(
     tl.assume(stride_cn > 0)
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
-    
+
     # Ring topology
     next_rank = (cur_rank + 1) % world_size
     prev_rank = (cur_rank + world_size - 1) % world_size
@@ -115,7 +115,6 @@ def persistent_gemm_all_reduce_ring_based(
             b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
             acc += tl.dot(a, b)
 
-        
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
 
@@ -141,7 +140,7 @@ def persistent_gemm_all_reduce_ring_based(
         # Rank 1:       ──send→────────wait──────────add───────
         # Rank 2:            ──send→────────wait────────add────
         # Rank 3:                 ──send→────────wait────────add
-                
+
         # Step loop: send to next, wait/recv from prev, add.
         for _step in range(0, world_size - 1):
             # 1) Send our current accumulator tile to NEXT rank's ring buffer
@@ -154,7 +153,7 @@ def persistent_gemm_all_reduce_ring_based(
                 mask=sub_mask,
             )
             tl.debug_barrier()
-            
+
             # Signal "ready" by setting NEXT rank's flag for this tile to 1
             iris.store(
                 locks + tile_id,
@@ -162,11 +161,11 @@ def persistent_gemm_all_reduce_ring_based(
                 cur_rank,
                 next_rank,
                 heap_bases,
-            ) # TODO: may need cache_modifier
+            )  # TODO: may need cache_modifier
             tl.debug_barrier()
 
             # 2) Wait for PREV rank to signal our local flag for this tile
-            #    Spin; single-lane uniform load is fine here.                
+            #    Spin; single-lane uniform load is fine here.
             while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
                 pass
 
@@ -179,7 +178,7 @@ def persistent_gemm_all_reduce_ring_based(
 
         # Write fully-reduced tile to local result buffer (no remote writes)
         c = acc.to(C.type.element_ty)
-        
+
         tl.store(c_global + global_offset, c, mask=sub_mask)
 
         if COLLECT_TIMESTAMPS:

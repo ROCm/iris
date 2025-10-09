@@ -125,7 +125,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
     total_tiles = total_blocks_M * total_blocks_N
-    
+
     bias = None
 
     gemm_stream = torch.cuda.Stream()
@@ -143,7 +143,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     # Timestamps
     timestamps = Timestamps(num_tiles=total_tiles)
-    
+
     def run_experiment():
         nonlocal local_C
         nonlocal global_C
@@ -210,9 +210,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         # Wait for all to finish validation
         shmem.barrier()
         shmem.info("Validation completed")
-        
+
         json_writer.add_field("success", success)
-        
+
         if not is_triton_interpret_set():
             gemm_registers = matmul.streamk_registers
             gemm_spills = matmul.streamk_spills

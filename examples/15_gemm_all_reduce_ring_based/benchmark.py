@@ -125,10 +125,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
     total_tiles = total_blocks_M * total_blocks_N
-    
+
     locks = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int32)
     ring_buffer = shmem.zeros_like(global_C, dtype=torch.float32)
-    
+
     bias = None
 
     gemm_stream = torch.cuda.Stream()

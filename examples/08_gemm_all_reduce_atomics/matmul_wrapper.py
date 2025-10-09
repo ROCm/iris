@@ -53,7 +53,7 @@ class matmul(torch.autograd.Function):
         _, N = b.shape
 
         num_xcds = iris.hip.get_num_xcc()
-        
+
         # TODO: Use arch-specific values.
         num_stages = 2
         num_warps = 8
