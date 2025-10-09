@@ -155,26 +155,37 @@ def persistent_gemm_all_reduce_ring_based(
             tl.debug_barrier()
 
             # Signal "ready" by setting NEXT rank's flag for this tile to 1
-            iris.store(
+            # Use atomic_add with release semantics to ensure data write completes
+            # before flag is visible to remote rank
+            iris.atomic_add(
                 locks + tile_id,
                 1,
                 cur_rank,
                 next_rank,
                 heap_bases,
-            )  # TODO: may need cache_modifier
+                sem="release",
+                scope="sys",
+            )
             tl.debug_barrier()
 
             # 2) Wait for PREV rank to signal our local flag for this tile
-            #    Spin; single-lane uniform load is fine here.
-            while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
-                pass
+            #    Use atomic_cas with acquire semantics to ensure data is visible
+            result = 0
+            while result != 1:
+                result = iris.atomic_cas(
+                    locks + tile_id,
+                    1,
+                    0,
+                    cur_rank,
+                    cur_rank,
+                    heap_bases,
+                    sem="acquire",
+                    scope="sys",
+                )
 
             # 3) Consume the received tile from our LOCAL ring buffer (prev wrote here)
             recv_tile = tl.load(ring_buffer + global_offset, mask=sub_mask, other=tl.zeros_like(acc))
             acc += recv_tile
-
-            # 4) Reset our local flag to 0 (done consuming this step)
-            tl.store(locks + tile_id, 0, cache_modifier=".wt")
 
         # Write fully-reduced tile to local result buffer (no remote writes)
         c = acc.to(C.type.element_ty)
