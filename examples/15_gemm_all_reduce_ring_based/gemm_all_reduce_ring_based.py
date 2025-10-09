@@ -143,7 +143,12 @@ def persistent_gemm_all_reduce_ring_based(
 
         # Step loop: send to next, wait/recv from prev, add.
         for _step in range(0, world_size - 1):
-            # 1) Send our current accumulator tile to NEXT rank's ring buffer
+            # 1a) Wait for NEXT rank to be ready (its lock should be 0, meaning it finished previous step)
+            # This prevents overwriting data that hasn't been consumed yet
+            while iris.atomic_cas(locks + tile_id, 0, 0, cur_rank, next_rank, heap_bases, sem="acquire", scope="sys") != 0:
+                pass
+            
+            # 1b) Send our current accumulator tile to NEXT rank's ring buffer
             iris.store(
                 ring_buffer + global_offset,
                 acc,
@@ -154,7 +159,7 @@ def persistent_gemm_all_reduce_ring_based(
             )
             tl.debug_barrier()
 
-            # Signal "ready" by atomically setting NEXT rank's flag for this tile to 1
+            # 1c) Signal "ready" by atomically setting NEXT rank's flag for this tile to 1
             # Use atomic exchange to ensure proper memory ordering and visibility
             iris.atomic_xchg(locks + tile_id, 1, cur_rank, next_rank, heap_bases, sem="release", scope="sys")
             tl.debug_barrier()
