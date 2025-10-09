@@ -10,6 +10,7 @@ import triton.language as tl
 
 import iris  # type: ignore
 
+
 # Inline AITer RMSNorm kernel (forward only)
 @triton.jit
 def aiter_rmsnorm(
@@ -47,9 +48,7 @@ def aiter_rmsnorm(
             mask = cols < n_cols
             input_ptrs = row_input_ptr + cols
             input_ptrs = tl.multiple_of(input_ptrs, (16,))
-            x = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(
-                tl.float32
-            )
+            x = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
             sum_squares += tl.sum(x * x, axis=0)
 
             mean_square = sum_squares / n_cols
@@ -70,9 +69,7 @@ def aiter_rmsnorm(
             cols = n_cols_blks * BLOCK_SIZE + col_offsets
             mask = cols < n_cols
             input_ptrs = row_input_ptr + cols
-            x = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(
-                tl.float32
-            )
+            x = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
             g_ptrs = g_ptr + cols
             g = tl.load(g_ptrs, mask=mask, other=0.0).to(tl.float32)
             rms_norm = x * norm_factor * g
@@ -83,9 +80,7 @@ def aiter_rmsnorm(
         for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=2):
             input_ptrs = input_ptr + row_idx * input_row_stride + col_offsets
             input_ptrs = tl.multiple_of(input_ptrs, (16,))
-            row = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(
-                tl.float32
-            )
+            row = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
             g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
             row_norm = row * row
             row_norm = tl.sum(row_norm, axis=-1)
@@ -97,15 +92,12 @@ def aiter_rmsnorm(
             tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
 
 
-    
-
-
 @triton.jit
 def gemm_all_scatter(
-    A,                # input: *[M, K_shard]
-    B,                # weight shard: *[K_shard, N]
-    C_local,          # local partial result: *[M, N]
-    C_global,         # distributed result buffer: *[M, N]
+    A,  # input: *[M, K_shard]
+    B,  # weight shard: *[K_shard, N]
+    C_local,  # local partial result: *[M, N]
+    C_global,  # distributed result buffer: *[M, N]
     M,
     K_shard,
     N,
@@ -130,11 +122,11 @@ def gemm_all_scatter(
     rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     rk = tl.arange(0, BLOCK_K)
-    
+
     rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_M), BLOCK_M)
     rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_N), BLOCK_N)
     rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_K), BLOCK_K)
-    
+
     mask_m = rm < M
     mask_n = rn < N
     mask_k = rk < K_shard
@@ -184,8 +176,8 @@ def gemm_all_scatter(
 
 @triton.jit
 def all_gather_push(
-    shard_ptr,    # *[M, N_shard]
-    out_ptr,      # *[M, N_total]
+    shard_ptr,  # *[M, N_shard]
+    out_ptr,  # *[M, N_total]
     M,
     N_total,
     N_shard,
@@ -270,7 +262,7 @@ def main():
 
     # Phase 1: Create input tensor (sharded along K dimension)
     x_input = torch.randn(M, K_shard, device=device, dtype=dtype)  # [M, K/TP]
-    
+
     # Create weight shard
     weight_shard = torch.randn(K_shard, N, device=device, dtype=dtype)  # [K/TP, N]
 
@@ -280,7 +272,7 @@ def main():
     # Phase 2: GEMM + All-Scatter (no atomic operations)
     # Local partial result buffer
     partial_result = torch.empty(M, N, device=device, dtype=dtype)
-    
+
     # Distributed result buffer (each rank will have the complete [M, N] result)
     distributed_result = torch.empty(M, N, device=device, dtype=dtype)
 
@@ -288,19 +280,29 @@ def main():
     BLOCK_N = 128
     BLOCK_K = 128
     grid_gemm = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
-    
+
     gemm_all_scatter[grid_gemm](
-        x_input,           # [M, K_shard]
-        weight_shard,      # [K_shard, N]
-        partial_result,    # [M, N] - local partial
-        distributed_result, # [M, N] - distributed result
-        M, K_shard, N,
-        x_input.stride(0), x_input.stride(1),
-        weight_shard.stride(0), weight_shard.stride(1),
-        partial_result.stride(0), partial_result.stride(1),
-        distributed_result.stride(0), distributed_result.stride(1),
-        cur_rank, world_size, heap_bases,
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        x_input,  # [M, K_shard]
+        weight_shard,  # [K_shard, N]
+        partial_result,  # [M, N] - local partial
+        distributed_result,  # [M, N] - distributed result
+        M,
+        K_shard,
+        N,
+        x_input.stride(0),
+        x_input.stride(1),
+        weight_shard.stride(0),
+        weight_shard.stride(1),
+        partial_result.stride(0),
+        partial_result.stride(1),
+        distributed_result.stride(0),
+        distributed_result.stride(1),
+        cur_rank,
+        world_size,
+        heap_bases,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
         num_warps=4,
     )
 
@@ -308,7 +310,7 @@ def main():
     gamma = torch.ones(N, device=device, dtype=dtype)
     rmsnorm_output = torch.empty_like(distributed_result)
     rsigma = torch.empty(M, device=device, dtype=dtype)
-    
+
     BLOCK = 128
     USE_BLOCKED = False
     NUM_PRGMS = 1
@@ -319,7 +321,8 @@ def main():
         rsigma,
         distributed_result.stride(0),
         rmsnorm_output.stride(0),
-        M, N,
+        M,
+        N,
         args.eps,
         BLOCK_SIZE=BLOCK,
         USE_BLOCKED=USE_BLOCKED,
@@ -334,19 +337,25 @@ def main():
     if args.all_gather:
         # All-gather to ensure all ranks have the complete result
         out_dtype = (
-            torch.float8_e4m3fn if (args.fp8_out and hasattr(torch, "float8_e4m3fn")) 
-            else rmsnorm_output_q.dtype
+            torch.float8_e4m3fn if (args.fp8_out and hasattr(torch, "float8_e4m3fn")) else rmsnorm_output_q.dtype
         )
         final_output = torch.empty(M, N, device=device, dtype=out_dtype)
         grid_ag = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
         all_gather_push[grid_ag](
             rmsnorm_output_q,
             final_output,
-            M, N, N,  # Note: N_shard = N since we're all-gathering the complete result
-            rmsnorm_output_q.stride(0), rmsnorm_output_q.stride(1),
-            final_output.stride(0), final_output.stride(1),
-            cur_rank, world_size, heap_bases,
-            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+            M,
+            N,
+            N,  # Note: N_shard = N since we're all-gathering the complete result
+            rmsnorm_output_q.stride(0),
+            rmsnorm_output_q.stride(1),
+            final_output.stride(0),
+            final_output.stride(1),
+            cur_rank,
+            world_size,
+            heap_bases,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
             num_warps=4,
         )
         result = final_output
@@ -361,5 +370,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
