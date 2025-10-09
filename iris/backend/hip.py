@@ -119,10 +119,6 @@ def get_runtime_version():
     return (major, minor)
 
 
-# Backwards compatibility alias
-get_rocm_version = get_runtime_version
-
-
 def get_wall_clock_rate(device_id):
     hipDeviceAttributeWallClockRate = 10017
     wall_clock_rate = ctypes.c_int()
@@ -160,11 +156,13 @@ def malloc_fine_grained(size):
     return ptr
 
 
-def hip_malloc(size):
+def malloc(size):
     ptr = ctypes.c_void_p()
     hip_try(hip_runtime.hipMalloc(ctypes.byref(ptr), size))
     return ptr
 
 
-def hip_free(ptr):
+def free(ptr):
+    if isinstance(ptr, int):
+        ptr = ctypes.c_void_p(ptr)
     hip_try(hip_runtime.hipFree(ptr))

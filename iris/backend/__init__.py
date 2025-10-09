@@ -72,16 +72,9 @@ get_device_id = _backend.module.get_device_id
 get_arch_string = _backend.module.get_arch_string
 get_num_xcc = _backend.module.get_num_xcc
 malloc_fine_grained = _backend.module.malloc_fine_grained
-gpu_malloc = _backend.module.hip_malloc
-gpu_free = _backend.module.hip_free
-gpu_try = _backend.module.hip_try
-get_runtime_version = _backend.module.get_rocm_version
-
-# Backwards compatibility aliases
-hip_malloc = gpu_malloc
-hip_free = gpu_free
-hip_try = gpu_try
-get_rocm_version = get_runtime_version
+malloc = _backend.module.malloc
+free = _backend.module.free
+get_runtime_version = _backend.module.get_runtime_version
 
 
 __all__ = [
@@ -96,13 +89,7 @@ __all__ = [
     "get_arch_string",
     "get_num_xcc",
     "malloc_fine_grained",
-    "gpu_malloc",
-    "gpu_free",
-    "gpu_try",
+    "malloc",
+    "free",
     "get_runtime_version",
-    # Backwards compatibility
-    "hip_malloc",
-    "hip_free",
-    "hip_try",
-    "get_rocm_version",
 ]

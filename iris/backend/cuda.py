@@ -87,10 +87,6 @@ def get_runtime_version():
     return (v // 1000, (v % 1000) // 10)
 
 
-# Backwards compatibility alias
-get_cuda_version = get_runtime_version
-
-
 def get_wall_clock_rate(device_id):
     """Device core clock rate in kHz (cudaDevAttrClockRate)."""
     val = ctypes.c_int()
@@ -133,10 +129,3 @@ def free(ptr):
     if isinstance(ptr, int):
         ptr = ctypes.c_void_p(ptr)
     cuda_try(cuda_runtime.cudaFree(ptr))
-
-
-## Backend-agnostic aliases (for compatibility with both CUDA and HIP)
-hip_try = cuda_try
-hip_malloc = malloc
-hip_free = free
-get_rocm_version = get_runtime_version
