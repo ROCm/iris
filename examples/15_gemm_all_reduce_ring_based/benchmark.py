@@ -152,6 +152,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         nonlocal global_C
         nonlocal kernel_timing
 
+        # Reset locks and ring_buffer for clean state
+        locks.zero_()
+        ring_buffer.zero_()
         shmem.barrier()
 
         if args["trace_tiles"]:
