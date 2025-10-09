@@ -20,6 +20,8 @@ gemm_kernel = persistent_gemm_all_reduce
 class matmul(torch.autograd.Function):
     _debug = True
 
+    _num_xcds = iris.hip.get_num_xcc()
+
     @staticmethod
     def set_debug(debug: bool):
         matmul._debug = debug
@@ -61,7 +63,7 @@ class matmul(torch.autograd.Function):
         M, K = a.shape
         _, N = b.shape
 
-        num_xcds = iris.hip.get_num_xcc()
+        num_xcds = matmul._num_xcds
 
         total_blocks_M = triton.cdiv(M, BLK_M)
         total_blocks_N = triton.cdiv(N, BLK_N)
