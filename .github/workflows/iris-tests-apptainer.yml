@@ -50,6 +50,8 @@ jobs:
 
       - name: Run 1, 2, 4 rank tests in parallel
         run: |
+          set -e
+
           # Run tests in parallel with different GPU assignments
           # Note: Each test gets 2+ GPUs even if it only uses some of them.
           # This allows tests like test_empty_device_handling to verify that
@@ -71,6 +73,7 @@ jobs:
           apptainer exec --overlay "${OVERLAY_1}" --no-home --cleanenv --env HIP_VISIBLE_DEVICES="0,1" \
             --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
             ~/apptainer/iris-dev.sif bash -c "
+              set -e
               pip install -e .
               bash .github/scripts/run_tests.sh 1
             " &
@@ -80,6 +83,7 @@ jobs:
           apptainer exec --overlay "${OVERLAY_2}" --no-home --cleanenv --env HIP_VISIBLE_DEVICES="2,3" \
             --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
             ~/apptainer/iris-dev.sif bash -c "
+              set -e
               pip install -e .
               bash .github/scripts/run_tests.sh 2
             " &
@@ -89,6 +93,7 @@ jobs:
           apptainer exec --overlay "${OVERLAY_4}" --no-home --cleanenv --env HIP_VISIBLE_DEVICES="4,5,6,7" \
             --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
             ~/apptainer/iris-dev.sif bash -c "
+              set -e
               pip install -e .
               bash .github/scripts/run_tests.sh 4
             " &
@@ -129,6 +134,8 @@ jobs:
 
       - name: Run 8-rank test
         run: |
+          set -e
+
           # Create unique overlay image for isolation
           OVERLAY_8="/tmp/iris_overlay_$(whoami)_8rank_$(date +%s%N).img"
 
@@ -140,6 +147,7 @@ jobs:
           apptainer exec --overlay "${OVERLAY_8}" --no-home --cleanenv --env HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
             --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
             ~/apptainer/iris-dev.sif bash -c "
+              set -e
               pip install -e .
               bash .github/scripts/run_tests.sh 8
             "

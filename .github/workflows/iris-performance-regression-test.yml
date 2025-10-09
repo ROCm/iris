@@ -42,6 +42,7 @@ jobs:
 
       - name: Run GEMM All-Scatter WG Specialization Benchmark (8 ranks)
         run: |
+          set -e
           # Create overlay image in workspace (will be auto-cleaned by GitHub Actions)
           OVERLAY="iris_overlay_perf.img"
 
@@ -53,6 +54,7 @@ jobs:
           apptainer exec --overlay "${OVERLAY}" --no-home --cleanenv --env HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
             --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
             ~/apptainer/iris-dev.sif bash -c "
+              set -e
               pip install -e .
               python examples/10_gemm_all_scatter_wg_specialization/benchmark.py \
                 --benchmark \
@@ -73,7 +75,7 @@ jobs:
           # Parse JSON and check performance
           echo "::group::Validating performance"
           TFLOPS=$(jq -r '.tflops' perf_result.json)
-          
+
           if [ -z "$TFLOPS" ] || [ "$TFLOPS" = "null" ]; then
             echo "::error::Failed to extract tflops from benchmark output"
             jq '.' perf_result.json
@@ -82,7 +84,9 @@ jobs:
 
           echo "::notice::Achieved TFLOPs: $TFLOPS"
 
-          if (( $(echo "$TFLOPS < 2000" | bc -l) )); then
+          # Convert to integer for comparison
+          TFLOPS_INT=${TFLOPS%.*}
+          if (( TFLOPS_INT < 2000 )); then
             echo "::error::Performance regression detected! TFLOPs ($TFLOPS) is below threshold (2000)"
             jq '.' perf_result.json
             exit 1
