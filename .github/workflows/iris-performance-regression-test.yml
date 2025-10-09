@@ -1,0 +1,93 @@
+name: Iris Performance Regression Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  performance-test:
+    name: GEMM All-Scatter Performance Test
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Apptainer
+        run: |
+          apt-get update && apt-get install -y software-properties-common
+          add-apt-repository -y ppa:apptainer/ppa
+          apt-get update && apt-get install -y apptainer
+
+      - name: Build Iris Apptainer container
+        run: |
+          # Create persistent Apptainer directory
+          mkdir -p ~/apptainer
+
+          # Build Apptainer image from definition file (only if it doesn't exist)
+          if [ ! -f ~/apptainer/iris-dev.sif ]; then
+            echo "Building new Apptainer image..."
+            apptainer build ~/apptainer/iris-dev.sif apptainer/iris.def
+          else
+            echo "Using existing Apptainer image"
+          fi
+
+      - name: Run GEMM All-Scatter WG Specialization Benchmark (8 ranks)
+        run: |
+          # Create overlay image in workspace (will be auto-cleaned by GitHub Actions)
+          OVERLAY="iris_overlay_perf.img"
+
+          echo "::group::Creating overlay image"
+          apptainer overlay create --size 1024 --create-dir /var/cache/iris "${OVERLAY}"
+          echo "::endgroup::"
+
+          echo "::group::Running performance benchmark"
+          apptainer exec --overlay "${OVERLAY}" --no-home --cleanenv --env HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
+            --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
+            ~/apptainer/iris-dev.sif bash -c "
+              pip install -e .
+              python examples/10_gemm_all_scatter_wg_specialization/benchmark.py \
+                --benchmark \
+                -m 16384 \
+                -n 16384 \
+                -k 16384 \
+                --BLK_M 128 \
+                --BLK_N 128 \
+                --BLK_K 64 \
+                --gsize_m 6 \
+                --gemm_sms 256 \
+                --validate \
+                -r 8 \
+                -o perf_result.json
+            "
+          echo "::endgroup::"
+
+          # Parse JSON and check performance
+          echo "::group::Validating performance"
+          TFLOPS=$(jq -r '.tflops' perf_result.json)
+          
+          if [ -z "$TFLOPS" ] || [ "$TFLOPS" = "null" ]; then
+            echo "::error::Failed to extract tflops from benchmark output"
+            jq '.' perf_result.json
+            exit 1
+          fi
+
+          echo "::notice::Achieved TFLOPs: $TFLOPS"
+
+          if (( $(echo "$TFLOPS < 2000" | bc -l) )); then
+            echo "::error::Performance regression detected! TFLOPs ($TFLOPS) is below threshold (2000)"
+            jq '.' perf_result.json
+            exit 1
+          fi
+
+          echo "✅ Performance test passed! TFLOPs: $TFLOPS (threshold: >2000)"
+          echo "::endgroup::"
+
