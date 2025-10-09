@@ -11,93 +11,15 @@ import os
 import iris
 
 
-@triton.jit
-def tile_id_to_index_range(
-    tile_id,
-    M,
-    N,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-):
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-
-    group_id = tile_id // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-
-    tile_in_group = tile_id % num_pid_in_group
-    pid_m = first_pid_m + (tile_in_group % group_size_m)
-    pid_n = tile_in_group // group_size_m
-
-    rm_start = pid_m * BLOCK_SIZE_M
-    rn_start = pid_n * BLOCK_SIZE_N
-
-    # clamp to the maximum valid index (M-1, N-1)
-    max_m = M - 1
-    max_n = N - 1
-
-    # generate indices
-    rm = rm_start + tl.arange(0, BLOCK_SIZE_M)
-    rn = rn_start + tl.arange(0, BLOCK_SIZE_N)
-
-    rm = tl.minimum(rm, max_m)
-    rn = tl.minimum(rn, max_n)
-
-    return rm, rn, rm_start, rn_start
-
-
-@triton.jit
-def offset_for_tile(local_tile_id, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M, M_local, N_local):
-    rm, rn, rm_start, rn_start = tile_id_to_index_range(
-        local_tile_id, M_local, N_local, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M
-    )
-    c_mask = (rm[:, None] < M_local) & (rn[None, :] < N_local)
-    return rm, rn, c_mask, rm_start, rn_start
-
-
-@triton.jit
-def extract_submask_and_offset(
-    rm,
-    rn,
-    mask,
-    rm_start,
-    rn_start,
-    start_row,
-    start_col,
-    SUB_BLOCK_SIZE_M: tl.constexpr,
-    SUB_BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    stride_cm_local: tl.constexpr,
-    stride_cn_local: tl.constexpr,
-):
-    # Create indices for the sub-block
-    sub_rm = tl.arange(0, SUB_BLOCK_SIZE_M) + start_row
-    sub_rn = tl.arange(0, SUB_BLOCK_SIZE_N) + start_col
-
-    # Create a 2D grid of indices for the sub-block
-    sub_rm_2d = sub_rm[:, None]  # Shape: (SUB_BLOCK_SIZE_M, 1)
-    sub_rn_2d = sub_rn[None, :]  # Shape: (1, SUB_BLOCK_SIZE_N)
-
-    # Compute the sub-mask
-    sub_mask = (sub_rm_2d < BLOCK_SIZE_M) & (sub_rn_2d < BLOCK_SIZE_N)
-
-    # Compute the sub-offset relative to the start of the tile
-    sub_offset = ((rm_start + sub_rm_2d) * stride_cm_local) + ((rn_start + sub_rn_2d) * stride_cn_local)
-
-    return sub_mask, sub_offset
-
-
 @triton.jit()
-def persistent_gemm_all_reduce(
+def persistent_gemm_all_reduce_ring_based(
     A,
     B,
     C,
     c_global,
     bias_ptr,
+    ring_buffer,
+    locks,
     M,
     N,
     K,
@@ -141,6 +63,10 @@ def persistent_gemm_all_reduce(
     tl.assume(stride_cn > 0)
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
+    
+    # Ring topology
+    next_rank = (cur_rank + 1) % world_size
+    prev_rank = (cur_rank + world_size - 1) % world_size
 
     for tile_id in range(pid, total_tiles, NUM_SMS):
         if COLLECT_TIMESTAMPS:
@@ -189,9 +115,7 @@ def persistent_gemm_all_reduce(
             b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
             acc += tl.dot(a, b)
 
-        # Accumulator registers with C results
-        c = acc.to(C.type.element_ty)
-
+        
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
 
@@ -211,20 +135,56 @@ def persistent_gemm_all_reduce(
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
-        # Store data to the global result using puts
-        for remote_rank in range(world_size):
-            if remote_rank == cur_rank:
-                # For the current rank, we can use store
-                tl.atomic_add(c_global + global_offset, c, mask=sub_mask)
-            else:
-                iris.atomic_add(
-                    c_global + global_offset,
-                    c,
-                    cur_rank,
-                    remote_rank,
-                    heap_bases,
-                    mask=sub_mask,
-                )
+        # Ring All-Reduce (p-1 steps), lock synchronized
+        # Time →
+        # Rank 0:  ──send→────────wait(←flag)────────add───────
+        # Rank 1:       ──send→────────wait──────────add───────
+        # Rank 2:            ──send→────────wait────────add────
+        # Rank 3:                 ──send→────────wait────────add
+                
+        # Step loop: send to next, wait/recv from prev, add.
+        for _step in range(0, world_size - 1):
+            # 1) Send our current accumulator tile to NEXT rank's ring buffer
+            iris.store(
+                ring_buffer + global_offset,
+                acc,
+                cur_rank,
+                next_rank,
+                heap_bases,
+                mask=sub_mask,
+            )
+            tl.debug_barrier()
+            
+            # Signal "ready" by setting NEXT rank's flag for this tile to 1
+            iris.store(
+                locks + tile_id,
+                1,
+                cur_rank,
+                next_rank,
+                heap_bases,
+            ) # TODO: may need cache_modifier
+
+            # 2) Wait for PREV rank to signal our local flag for this tile
+            #    Spin; single-lane uniform load is fine here.                
+            while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
+                pass
+
+            # 3) Consume the received tile from our LOCAL ring buffer (prev wrote here)
+            recv_tile = tl.load(ring_buffer + global_offset, mask=sub_mask, other=tl.zeros_like(acc))
+            acc += recv_tile
+
+            # 4) Reset our local flag to 0 (done consuming this step)
+            tl.store(locks + tile_id, 0, cache_modifier=".wt")
+
+        # Optional timestamp just before final store
+        if COLLECT_TIMESTAMPS:
+            timestamp = read_realtime()
+            tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
+
+        # Write fully-reduced tile to local result buffer (no remote writes)
+        c = acc.to(C.type.element_ty)
+        
+        tl.store(c_global + global_offset, c, mask=sub_mask)
 
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
