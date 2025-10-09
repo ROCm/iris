@@ -1,6 +1,25 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
+"""
+Ring-based All-Reduce GEMM Implementation
+
+This kernel implements distributed GEMM using a ring-based all-reduce algorithm.
+The implementation uses atomic operations with memory ordering semantics to ensure
+correct cross-GPU synchronization:
+
+1. Data writes use iris.store() to send accumulator tiles to the next rank
+2. Flag writes use iris.atomic_add() with release semantics to signal completion
+3. Flag reads use iris.atomic_cas() with acquire semantics to wait for data
+
+Memory Ordering:
+- Release semantics on flag write ensures data writes are visible before flag
+- Acquire semantics on flag read ensures data is visible after flag is seen
+- System scope ensures visibility across all GPUs in the system
+
+See README.md for more details on the algorithm and synchronization requirements.
+"""
+
 import triton
 import triton.language as tl
 from examples.common.utils import read_realtime
