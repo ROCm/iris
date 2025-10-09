@@ -12,10 +12,9 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  performance-test:
-    name: GEMM All-Scatter Performance Test
+  build-apptainer-image:
     runs-on: [self-hosted, mi3008x]
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -40,71 +39,44 @@ jobs:
             echo "Using existing Apptainer image"
           fi
 
-      - name: Run GEMM All-Scatter WG Specialization Benchmark (8 ranks)
+  performance-test:
+    name: ${{ matrix.example_name }}
+    needs: build-apptainer-image
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Performance baselines measured on AMD Instinct MI325X (8 GPUs)
+        include:
+          - example_name: "GEMM All-Scatter WG Specialization"
+            example_path: "10_gemm_all_scatter_wg_specialization"
+            tflops_threshold: 1600  # Actual: ~2182 TFLOPs
+            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
+
+          - example_name: "GEMM All-Scatter"
+            example_path: "07_gemm_all_scatter"
+            tflops_threshold: 1000  # Actual: ~1407 TFLOPs
+            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 256 --BLK_N 64 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
+
+          - example_name: "GEMM All-Scatter Producer-Consumer"
+            example_path: "11_gemm_all_scatter_producer_consumer"
+            tflops_threshold: 1600  # Actual: ~2190 TFLOPs
+            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256 --comm_sms 48"
+
+          - example_name: "GEMM All-Scatter Bulk Synchronous"
+            example_path: "12_gemm_all_scatter_bulk_synchronous"
+            tflops_threshold: 900  # Actual: ~1262 TFLOPs
+            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run ${{ matrix.example_name }} Benchmark (8 ranks)
         run: |
-          set -e
-
-          # Performance threshold
-          TFLOPS_THRESHOLD=1500
-
-          # Create overlay image in workspace (will be auto-cleaned by GitHub Actions)
-          OVERLAY="iris_overlay_perf.img"
-
-          echo "::group::Creating overlay image"
-          apptainer overlay create --size 1024 --create-dir /var/cache/iris "${OVERLAY}"
-          echo "::endgroup::"
-
-          echo "::group::Running performance benchmark"
-          apptainer exec --overlay "${OVERLAY}" --no-home --cleanenv --env HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7" \
-            --bind "${PWD}:/iris_workspace" --cwd /iris_workspace \
-            ~/apptainer/iris-dev.sif bash -c "
-              set -e
-              pip install -e .
-              python examples/10_gemm_all_scatter_wg_specialization/benchmark.py \
-                --benchmark \
-                -m 16384 \
-                -n 16384 \
-                -k 16384 \
-                --BLK_M 128 \
-                --BLK_N 128 \
-                --BLK_K 64 \
-                --gsize_m 6 \
-                --gemm_sms 256 \
-                --validate \
-                -r 8 \
-                --output_file perf_result.json
-            "
-          echo "::endgroup::"
-
-          # Parse JSON and check performance
-          echo "::group::Validating performance"
-
-          # Check if benchmark succeeded
-          SUCCESS=$(jq -r '.success' perf_result.json)
-          if [ "$SUCCESS" != "true" ]; then
-            echo "::error::Benchmark failed (success: $SUCCESS)"
-            jq '.' perf_result.json
-            exit 1
-          fi
-
-          TFLOPS=$(jq -r '.tflops' perf_result.json)
-
-          if [ -z "$TFLOPS" ] || [ "$TFLOPS" = "null" ]; then
-            echo "::error::Failed to extract tflops from benchmark output"
-            jq '.' perf_result.json
-            exit 1
-          fi
-
-          echo "::notice::Achieved TFLOPs: $TFLOPS"
-
-          # Convert to integer for comparison
-          TFLOPS_INT=${TFLOPS%.*}
-          if (( TFLOPS_INT < TFLOPS_THRESHOLD )); then
-            echo "::error::Performance regression detected! TFLOPs ($TFLOPS) is below threshold ($TFLOPS_THRESHOLD)"
-            jq '.' perf_result.json
-            exit 1
-          fi
-
-          echo "✅ Performance test passed! TFLOPs: $TFLOPS (threshold: >$TFLOPS_THRESHOLD)"
-          echo "::endgroup::"
+          bash .github/scripts/run_perf_benchmark.sh \
+            "${{ matrix.example_path }}" \
+            "${{ matrix.tflops_threshold }}" \
+            ${{ matrix.benchmark_args }}
 
