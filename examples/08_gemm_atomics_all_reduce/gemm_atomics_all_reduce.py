@@ -98,9 +98,6 @@ def persistent_gemm_all_reduce(
     C,
     c_global,
     bias_ptr,
-    P,
-    locks,
-    tile_completed,
     M,
     N,
     K,
@@ -118,14 +115,12 @@ def persistent_gemm_all_reduce(
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     NUM_SMS: tl.constexpr,
-    STREAMK_TILES: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
-    NOTIFY_REMOTES: tl.constexpr = False,
     COLLECT_TIMESTAMPS: tl.constexpr = False,
     mm_begin_timestamp_ptr: tl.tensor = None,
     mm_end_timestamp_ptr: tl.tensor = None,
@@ -194,58 +189,42 @@ def persistent_gemm_all_reduce(
             b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
             acc += tl.dot(a, b)
 
+        # Accumulator registers with C results
         c = acc.to(C.type.element_ty)
-        # rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        # rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        # rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        # rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        # c_mask = (rm[:, None] < M) & (rn[None, :] < N)
-        # C_ = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        # tl.store(C_, c, c_mask)
+        
+        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        
+        # Add compiler hints
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        
+        # Define the C-mask (BLOCK_SIZE_M, 1) x (1, BLOCK_SIZE_N)
+        sub_mask = (rm[:, None] < M) & (rn[None, :] < N)
+        
+        # Calculate the "global" offset of C based on the rank.
+        # Note how each GPU is producing the entire output but partial-K.
+        global_offset = rm[:, None] * stride_cm_global + rn[None, :] * stride_cn_global
 
-        rm, rn, mask, rm_start, rn_start = offset_for_tile(tile_id, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M, M, N)
+        # Timestamp for GEMM before store
+        if COLLECT_TIMESTAMPS:
+            timestamp = read_realtime()
+            tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
-        # Calculate the number of sub-tiles in each dimension
-        num_sub_tiles_m = tl.cdiv(BLOCK_SIZE_M, BLOCK_SIZE_M)
-        num_sub_tiles_n = tl.cdiv(BLOCK_SIZE_N, BLOCK_SIZE_N)
-        total_sub_tiles = num_sub_tiles_m * num_sub_tiles_n
-
-        for sub_tile_idx in range(0, total_sub_tiles):
-            # Calculate start_row and start_col for the current sub-tile
-            start_row = (sub_tile_idx // num_sub_tiles_n) * BLOCK_SIZE_M
-            start_col = (sub_tile_idx % num_sub_tiles_n) * BLOCK_SIZE_N
-
-            # Translate to global
-            sub_mask, global_offset = extract_submask_and_offset(
-                rm,
-                rn,
-                mask,
-                rm_start,
-                rn_start,
-                start_row,
-                start_col,
-                BLOCK_SIZE_M,
-                BLOCK_SIZE_N,
-                BLOCK_SIZE_M,
-                BLOCK_SIZE_N,
-                stride_cm_global,
-                stride_cn_global,
-            )
-
-            # Store data to the global result using puts
-            for remote_rank in range(world_size):
-                if remote_rank == cur_rank:
-                    # For the current rank, we can use store
-                    tl.atomic_add(c_global + global_offset, c, mask=sub_mask)
-                else:
-                    iris.atomic_add(
-                        c_global + global_offset,
-                        c,
-                        cur_rank,
-                        remote_rank,
-                        heap_bases,
-                        mask=sub_mask,
-                    )
+        # Store data to the global result using puts
+        for remote_rank in range(world_size):
+            if remote_rank == cur_rank:
+                # For the current rank, we can use store
+                tl.atomic_add(c_global + global_offset, c, mask=sub_mask)
+            else:
+                iris.atomic_add(
+                    c_global + global_offset,
+                    c,
+                    cur_rank,
+                    remote_rank,
+                    heap_bases,
+                    mask=sub_mask,
+                )
 
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
