@@ -264,16 +264,19 @@ def persistent_all_reduce(
                 # 8) Reset our local flag to 0 (ready for next iteration)
                 tl.atomic_xchg(flags + tile_id, 0, sem="release", scope="sys")
 
-        # After reduce-scatter phase, acc contains the fully reduced tile
-        # Now broadcast it to all other ranks (all-gather phase)
-        
-        # All-gather phase: broadcast our reduced tile to all other ranks
+        # After reduce-scatter phase, all ranks have computed the fully reduced tile
+        # In a traditional reduce-scatter, each rank would have a DIFFERENT tile,
+        # but in this implementation, all ranks process the same tiles and end up
+        # with the same results. The ring pattern with cross-rank loads ensures
+        # efficient pipelining of the reduction across ranks.
+        #
+        # Write result to all ranks' C buffers to ensure visibility (all-gather phase)
+        c = acc.to(C.type.element_ty)
         for remote_rank in range(world_size):
             if remote_rank != cur_rank:
                 # Store our fully reduced tile to the remote rank's C buffer
-                iris.store(C + global_offset, acc.to(C.type.element_ty), cur_rank, remote_rank, heap_bases, mask=sub_mask)
+                iris.store(C + global_offset, c, cur_rank, remote_rank, heap_bases, mask=sub_mask)
         
         # Store to our local C buffer
-        c = acc.to(C.type.element_ty)
         tl.store(C + global_offset, c, mask=sub_mask)
 
