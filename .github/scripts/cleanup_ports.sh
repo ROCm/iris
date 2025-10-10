@@ -7,6 +7,17 @@ set -e
 # Script to clean up any lingering test processes and ports
 # This is useful when tests segfault and leave processes/ports open
 
+echo "========================================"
+echo "Port Cleanup Script - Starting"
+echo "========================================"
+
+# Show initial state of listening ports
+echo ""
+echo "Initial state - Listening TCP ports:"
+echo "------------------------------------"
+ss -tulpn 2>/dev/null | grep LISTEN | grep -E "python|pt_main_thread" || echo "No Python/PyTorch processes listening on ports"
+echo ""
+
 echo "Cleaning up lingering test processes and ports..."
 
 # Clean up Python test processes that might be stuck
@@ -53,4 +64,15 @@ if [ -n "$LISTENING_PIDS" ]; then
     done
 fi
 
+echo ""
+echo "========================================"
+echo "Port Cleanup Script - Completed"
+echo "========================================"
+
+# Show final state of listening ports
+echo ""
+echo "Final state - Listening TCP ports:"
+echo "------------------------------------"
+ss -tulpn 2>/dev/null | grep LISTEN | grep -E "python|pt_main_thread" || echo "No Python/PyTorch processes listening on ports"
+echo ""
 echo "Port cleanup complete."
