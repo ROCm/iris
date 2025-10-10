@@ -136,10 +136,10 @@ def persistent_gemm_all_reduce_ring_based(
 
         # Each rank sends its LOCAL partial result (not accumulated) around the ring
         # while accumulating received partial results from other ranks.
-        # 
+        #
         # Initial: Each rank has computed a partial-K GEMM result in 'acc'
         # Goal: Sum all partial results from all ranks
-        # 
+        #
         # Algorithm: Use ring_buffer to pass data around, accumulate locally
         # - send_data: What we send (starts as our partial result)
         # - acc: Running sum of all partial results received so far
@@ -151,7 +151,9 @@ def persistent_gemm_all_reduce_ring_based(
         for _step in range(0, world_size - 1):
             # 1a) Wait for NEXT rank to be ready (its lock should be 0, meaning it finished previous step)
             # This prevents overwriting data that hasn't been consumed yet
-            while iris.atomic_cas(locks + tile_id, 0, 0, cur_rank, next_rank, heap_bases, sem="acquire", scope="sys") != 0:
+            while (
+                iris.atomic_cas(locks + tile_id, 0, 0, cur_rank, next_rank, heap_bases, sem="acquire", scope="sys") != 0
+            ):
                 pass
 
             # 1b) Send our current accumulator tile to NEXT rank's ring buffer
@@ -172,11 +174,13 @@ def persistent_gemm_all_reduce_ring_based(
                 pass
 
             # 3) Consume the received tile from our LOCAL ring buffer (prev wrote here)
-            recv_tile = tl.load(ring_buffer + global_offset, mask=sub_mask, other=tl.zeros_like(acc), cache_modifier=".cv")
-            
+            recv_tile = tl.load(
+                ring_buffer + global_offset, mask=sub_mask, other=tl.zeros_like(acc), cache_modifier=".cv"
+            )
+
             # 4) Accumulate received data and prepare to forward it in next iteration
             acc += recv_tile
-            send_data = recv_tile # Forward what we just received (not the accumulated sum)
+            send_data = recv_tile  # Forward what we just received (not the accumulated sum)
 
             # 5) Reset our local flag to 0 (done consuming this step)
             tl.atomic_xchg(locks + tile_id, 0, sem="release", scope="sys")
