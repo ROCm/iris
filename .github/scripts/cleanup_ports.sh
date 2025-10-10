@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
+set -e
+
 # Script to clean up any lingering test processes and ports
 # This is useful when tests segfault and leave processes/ports open
 
