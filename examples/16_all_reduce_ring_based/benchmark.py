@@ -20,8 +20,6 @@ from examples.common.utils import (
 
 import iris
 
-from matmul_wrapper import matmul
-# from examples.common.validation import validate_gemm
 from all_reduce_ring_based import persistent_all_reduce
 
 torch.manual_seed(123)
@@ -110,7 +108,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     for key, value in args.items():
         json_writer.add_field(key, value)
 
+    # Initialize partial with random data for each rank
+    # In all_reduce, each rank has a partial result that needs to be summed across all ranks
+    torch.manual_seed(123 + rank)  # Different seed per rank for different data
     partial = shmem.zeros((args["M"], args["N"]), device="cuda", dtype=datatype)
+    partial.copy_(torch.randn((args["M"], args["N"]), device="cuda", dtype=datatype))
+
     output = shmem.zeros((args["M"], args["N"]), device="cuda", dtype=datatype)
 
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
@@ -118,7 +121,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     total_tiles = total_blocks_M * total_blocks_N
 
     flags = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int32)
-    ring_buffer = shmem.zeros_like(C, dtype=torch.float32)
+    ring_buffer = shmem.zeros_like(partial, dtype=torch.float32)
     comm_stream = torch.cuda.Stream()
 
     json_writer.add_field("num_sms", args["num_sms"])
@@ -183,8 +186,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             ms = kernel_timing[k]["start_event"].elapsed_time(kernel_timing[k]["end_event"])
             kernel_timing[k]["ms"] += ms
 
-        torch.cuda.nvtx.range_pop()
-
     # Synchronize across all GPUs
     shmem.barrier()
 
@@ -201,12 +202,27 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     if args["validate"]:
         shmem.info("Validating...")
-        matmul.set_debug(True)
-        # Validate global result
-        # success = validate_reduce(partial)
-        success = True
-        passed_str = "passed" if success else "failed"
-        shmem.info(f"Final validation {passed_str}.")
+
+        # Run the experiment once to populate output
+        run_experiment()
+        shmem.barrier()
+
+        # Create a reference result using torch.distributed.all_reduce
+        # Save original partial values for reference computation
+        partial_copy = partial.clone()
+        expected_output = partial_copy.clone()
+
+        # Use NCCL all_reduce to compute the expected result
+        dist.all_reduce(expected_output, op=dist.ReduceOp.SUM)
+
+        # Compare the output from our kernel with the expected result
+        success = torch.allclose(output, expected_output, atol=2)
+        max_diff = torch.max(torch.abs(output - expected_output)).item()
+
+        if success:
+            shmem.info(f"Final validation passed. Max difference: {max_diff}")
+        else:
+            shmem.info(f"Final validation failed. Max difference: {max_diff}")
 
         # Wait for all to finish validation
         shmem.barrier()
@@ -215,15 +231,21 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         json_writer.add_field("success", success)
 
     if args["benchmark"]:
-        matmul.set_debug(False)
         shmem.info("Benchmarking...")
-        perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
+        # Calculate bandwidth instead of FLOPS since there's no GEMM
+        # All-reduce moves 2 * (world_size - 1) / world_size * data_size bytes
+        data_size_bytes = (
+            args["M"] * args["N"] * 2
+            if datatype == torch.float16 or datatype == torch.bfloat16
+            else args["M"] * args["N"] * 4
+        )
+        perf = lambda ms: (2 * (world_size - 1) / world_size * data_size_bytes * 1e-9) / (ms * 1e-3)  # GB/s
         triton_ms = iris.do_bench(run_experiment, shmem.barrier, preamble)
-        triton_tflops = perf(triton_ms)
+        bandwidth_gbps = perf(triton_ms)
         algo_string = "all_reduce"
-        shmem.info(f"tile matmul + {algo_string} (grid={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops")
+        shmem.info(f"{algo_string} (grid={total_tiles}): {triton_ms:.3f} ms  {bandwidth_gbps:.3f} GB/s")
 
-        json_writer.add_field("tflops", triton_tflops)
+        json_writer.add_field("bandwidth_gbps", bandwidth_gbps)
         json_writer.add_field("total_ms", triton_ms)
 
         for k in ["communication"]:
