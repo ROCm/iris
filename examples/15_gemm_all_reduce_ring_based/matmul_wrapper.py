@@ -9,12 +9,12 @@ import os
 
 # from streamk_kernel import streamk_gemm
 # from streamk_kernel_atomic import streamk_gemm
-from gemm_all_reduce_ring_based import persistent_gemm_all_reduce_ring_based
+from gemm_all_reduce_ring_based import persistent_gemm
 
 from examples.common.utils import is_triton_interpret_set
 import iris
 
-gemm_kernel = persistent_gemm_all_reduce_ring_based
+gemm_kernel = persistent_gemm
 
 
 class matmul(torch.autograd.Function):
@@ -46,10 +46,8 @@ class matmul(torch.autograd.Function):
     def _call(
         a: torch.Tensor,
         b: torch.Tensor,
-        c: torch.Tensor,
-        c_global: torch.Tensor,
-        bias: torch.Tensor,
         ring_buffer: torch.Tensor,
+        bias: torch.Tensor,
         locks: torch.Tensor,
         rank: int,
         world_size: int,
@@ -91,10 +89,8 @@ class matmul(torch.autograd.Function):
         kk = gemm_kernel[(num_sms,)](
             a,
             b,
-            c,
-            c_global,
-            bias,
             ring_buffer,
+            bias,
             locks,
             M,
             N,
@@ -103,10 +99,8 @@ class matmul(torch.autograd.Function):
             a.stride(1),
             b.stride(0),
             b.stride(1),
-            c.stride(0),
-            c.stride(1),
-            c_global.stride(0),
-            c_global.stride(1),
+            ring_buffer.stride(0),
+            ring_buffer.stride(1),
             stride_bias,
             BLOCK_SIZE_M=BLK_M,
             BLOCK_SIZE_N=BLK_N,
@@ -133,17 +127,15 @@ class matmul(torch.autograd.Function):
         matmul._registers = kk.n_regs
         matmul._spills = kk.n_spills
 
-        return c
+        return ring_buffer
 
     @staticmethod
     def forward(
         ctx,
         a: torch.Tensor,
         b: torch.Tensor,
-        c: torch.Tensor,
-        c_global: torch.Tensor,
-        bias: torch.Tensor,
         ring_buffer: torch.Tensor,
+        bias: torch.Tensor,
         locks: torch.Tensor,
         rank: int,
         world_size: int,
@@ -161,10 +153,8 @@ class matmul(torch.autograd.Function):
         matmul._call(
             a=a,
             b=b,
-            c=c,
-            c_global=c_global,
-            bias=bias,
             ring_buffer=ring_buffer,
+            bias=bias,
             locks=locks,
             rank=rank,
             world_size=world_size,
@@ -179,4 +169,4 @@ class matmul(torch.autograd.Function):
             mm_begin_timestamp=mm_begin_timestamp,
             mm_end_timestamp=mm_end_timestamp,
         )
-        return c
+        return ring_buffer
