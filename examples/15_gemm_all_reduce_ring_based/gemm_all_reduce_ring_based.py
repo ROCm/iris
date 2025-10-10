@@ -215,9 +215,9 @@ def persistent_all_reduce(
         # Step 2: GPU 0 sends (a2+c2)→GPU1, recv (c1+b1)←GPU2, loads rank 1 data, acc=(a1+b1+c1)
         #         GPU 1 sends (b0+a0)→GPU2, recv (a2+c2)←GPU0, loads rank 2 data, acc=(b2+a2+c2)
         #         GPU 2 sends (c1+b1)→GPU0, recv (b0+a0)←GPU1, loads rank 0 data, acc=(c0+a0+b0)
-        
+
         acc = None
-        
+
         # Reduce-scatter phase: world_size steps
         for step in range(0, world_size):
             # Determine which rank's data to load in this step
@@ -227,16 +227,17 @@ def persistent_all_reduce(
             # Pattern: rank r at step s loads from rank (r - s + world_size) % world_size
             # This is equivalent to: (r + world_size - s) % world_size
             source_rank = (cur_rank + world_size - step) % world_size
-            
+
             if step == 0:
                 # Initial load: load tile from our own local_C
                 acc = tl.load(local_C + global_offset, mask=sub_mask).to(acc_dtype)
             else:
                 # Subsequent steps: send, receive, load, accumulate
-                
+
                 # 1) Wait for next rank to be ready (its flag should be 0)
                 while (
-                    iris.atomic_cas(flags + tile_id, 0, 0, cur_rank, next_rank, heap_bases, sem="acquire", scope="sys") != 0
+                    iris.atomic_cas(flags + tile_id, 0, 0, cur_rank, next_rank, heap_bases, sem="acquire", scope="sys")
+                    != 0
                 ):
                     pass
 
@@ -244,7 +245,7 @@ def persistent_all_reduce(
                 iris.store(ring_buffer + global_offset, acc, cur_rank, next_rank, heap_bases, mask=sub_mask)
 
                 tl.debug_barrier()
-                
+
                 # 3) Signal next rank that data is ready
                 iris.atomic_xchg(flags + tile_id, 1, cur_rank, next_rank, heap_bases, sem="release", scope="sys")
 
@@ -253,11 +254,13 @@ def persistent_all_reduce(
                     pass
 
                 # 5) Load tile from source_rank's local_C (cross-rank read)
-                next_tile = iris.load(local_C + global_offset, cur_rank, source_rank, heap_bases, mask=sub_mask, other=0.0)
-                
+                next_tile = iris.load(
+                    local_C + global_offset, cur_rank, source_rank, heap_bases, mask=sub_mask, other=0.0
+                )
+
                 # 6) Load received data from our local ring_buffer (sent by prev rank)
                 recv_tile = tl.load(ring_buffer + global_offset, mask=sub_mask, other=0.0)
-                
+
                 # 7) Accumulate: new_acc = next_tile + recv_tile
                 acc = next_tile.to(acc_dtype) + recv_tile.to(acc_dtype)
 
@@ -276,7 +279,6 @@ def persistent_all_reduce(
             if remote_rank != cur_rank:
                 # Store our fully reduced tile to the remote rank's C buffer
                 iris.store(C + global_offset, c, cur_rank, remote_rank, heap_bases, mask=sub_mask)
-        
+
         # Store to our local C buffer
         tl.store(C + global_offset, c, mask=sub_mask)
-
