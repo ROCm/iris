@@ -134,41 +134,51 @@ def persistent_gemm_all_reduce_ring_based(
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
-        # Ring All-Reduce (p-1 steps), lock synchronized
-        # Time →
-        # Rank 0:  ──send→────────wait(←flag)────────add───────
-        # Rank 1:       ──send→────────wait──────────add───────
-        # Rank 2:            ──send→────────wait────────add────
-        # Rank 3:                 ──send→────────wait────────add
+        # Each rank sends its LOCAL partial result (not accumulated) around the ring
+        # while accumulating received partial results from other ranks.
+        # 
+        # Initial: Each rank has computed a partial-K GEMM result in 'acc'
+        # Goal: Sum all partial results from all ranks
+        # 
+        # Algorithm: Use ring_buffer to pass data around, accumulate locally
+        # - send_data: What we send (starts as our partial result)
+        # - acc: Running sum of all partial results received so far
+
+        # Initialize: First, write our partial result to ring_buffer for sending
+        send_data = acc
 
         # Step loop: send to next, wait/recv from prev, add.
         for _step in range(0, world_size - 1):
-            # 1) Send our current accumulator tile to NEXT rank's ring buffer
+            # 1a) Wait for NEXT rank to be ready (its lock should be 0, meaning it finished previous step)
+            # This prevents overwriting data that hasn't been consumed yet
+            while iris.atomic_cas(locks + tile_id, 0, 0, cur_rank, next_rank, heap_bases, sem="acquire", scope="sys") != 0:
+                pass
+
+            # 1b) Send our current accumulator tile to NEXT rank's ring buffer
             iris.store(
                 ring_buffer + global_offset,
-                acc,
+                send_data,
                 cur_rank,
                 next_rank,
                 heap_bases,
                 mask=sub_mask,
             )
             tl.debug_barrier()
-
             # Signal "ready" by setting NEXT rank's flag for this tile to 1
             iris.atomic_xchg(locks + tile_id, 1, cur_rank, next_rank, heap_bases, sem="release", scope="sys")
 
-            tl.debug_barrier()
-
             # 2) Wait for PREV rank to signal our local flag for this tile
-            #    Spin; single-lane uniform load is fine here.
             while tl.atomic_cas(locks + tile_id, 0, 0, sem="acquire", scope="sys") != 1:
                 pass
 
             # 3) Consume the received tile from our LOCAL ring buffer (prev wrote here)
-            recv_tile = tl.load(ring_buffer + global_offset, mask=sub_mask, other=tl.zeros_like(acc))
+            recv_tile = tl.load(ring_buffer + global_offset, mask=sub_mask, other=tl.zeros_like(acc), cache_modifier=".cv")
+            
+            # 4) Accumulate received data and prepare to forward it in next iteration
             acc += recv_tile
+            send_data = recv_tile # Forward what we just received (not the accumulated sum)
 
-            # 4) Reset our local flag to 0 (done consuming this step)
+            # 5) Reset our local flag to 0 (done consuming this step)
             tl.atomic_xchg(locks + tile_id, 0, sem="release", scope="sys")
 
         # Write fully-reduced tile to local result buffer (no remote writes)
