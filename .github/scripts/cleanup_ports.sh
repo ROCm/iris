@@ -32,9 +32,9 @@ if [ -n "$PYTHON_TEST_PIDS" ]; then
     echo "Cleaned up Python test processes"
 fi
 
-# Clean up pt_main_thread processes (PyTorch processes)
-echo "Checking for lingering PyTorch processes (pt_main_thread)..."
-PT_PIDS=$(pgrep -f "pt_main_thread" 2>/dev/null || true)
+# Clean up pt_main_thread processes (PyTorch multiprocessing spawned processes)
+echo "Checking for lingering PyTorch processes (multiprocessing.spawn)..."
+PT_PIDS=$(pgrep -f "multiprocessing.spawn" 2>/dev/null || true)
 
 if [ -n "$PT_PIDS" ]; then
     echo "Found PyTorch processes: $PT_PIDS"
