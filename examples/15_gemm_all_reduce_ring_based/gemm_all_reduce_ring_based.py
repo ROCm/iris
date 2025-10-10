@@ -125,7 +125,7 @@ def persistent_gemm(
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
-            
+
         # Write fully-reduced tile to local result buffer (no remote writes)
         tl.store(ring_buffer + global_offset, acc, mask=sub_mask, cache_modifier=".wt")
         tl.debug_barrier()
@@ -134,6 +134,7 @@ def persistent_gemm(
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
+
 
 @triton.jit()
 def persistent_all_reduce(
@@ -152,20 +153,20 @@ def persistent_all_reduce(
     NUM_XCDS: tl.constexpr,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
-    world_size: tl.constexpr
+    world_size: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    
+
     if NUM_XCDS != 1:
         pid = (pid % NUM_XCDS) * (COMM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
-    
+
     # Ring topology
     next_rank = (cur_rank + 1) % world_size
     prev_rank = (cur_rank + world_size - 1) % world_size
-    
+
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
@@ -178,7 +179,7 @@ def persistent_all_reduce(
 
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
-        
+
         # Begin: See the if segment for explanation:
         rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
         rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
@@ -187,12 +188,12 @@ def persistent_all_reduce(
         sub_mask = (rm[:, None] < M) & (rn[None, :] < N)
         global_offset = rm[:, None] * stride_cm_global + rn[None, :] * stride_cn_global
         # End: masks/offset calculations.
-        
+
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-        
+
         while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
             pass
-        
+
         # Each rank sends its LOCAL partial result (not accumulated) around the ring
         # while accumulating received partial results from other ranks.
         #
@@ -202,7 +203,7 @@ def persistent_all_reduce(
         # Algorithm: Use ring_buffer to pass data around, accumulate locally
         # - send_data: What we send (starts as our partial result)
         # - acc: Running sum of all partial results received so far
-        
+
         # Initialize: First, write our partial result to ring_buffer for sending
         # send_data = acc
 
@@ -210,12 +211,16 @@ def persistent_all_reduce(
         for _step in range(0, world_size - 1):
             # 1a) Wait for NEXT rank to be ready (its lock should be 0, meaning it finished previous step)
             # This prevents overwriting data that hasn't been consumed yet
-            while iris.atomic_cas(flags + tile_id, 0, 0, cur_rank, next_rank, heap_bases, sem="acquire", scope="sys") != 0:
+            while (
+                iris.atomic_cas(flags + tile_id, 0, 0, cur_rank, next_rank, heap_bases, sem="acquire", scope="sys") != 0
+            ):
                 pass
 
-            # 1b) Send our current accumulator tile to NEXT rank's ring buffer            
-            iris.put(ring_buffer + global_offset, ring_buffer + global_offset, cur_rank, next_rank, heap_bases, mask=sub_mask)
-            
+            # 1b) Send our current accumulator tile to NEXT rank's ring buffer
+            iris.put(
+                ring_buffer + global_offset, ring_buffer + global_offset, cur_rank, next_rank, heap_bases, mask=sub_mask
+            )
+
             tl.debug_barrier()
             # Signal "ready" by setting NEXT rank's flag for this tile to 1
             iris.atomic_xchg(flags + tile_id, 1, cur_rank, next_rank, heap_bases, sem="release", scope="sys")
@@ -226,7 +231,7 @@ def persistent_all_reduce(
 
             # 3) Consume the received tile from our LOCAL ring buffer (prev wrote here)
             # recv_tile = tl.load(ring_buffer + global_offset, mask=sub_mask, other=tl.zeros_like(acc), cache_modifier=".cv")
-            
+
             # 4) Accumulate received data and prepare to forward it in next iteration
             acc += tl.load(ring_buffer + global_offset, mask=sub_mask)
             # send_data = recv_tile # Forward what we just received (not the accumulated sum)
