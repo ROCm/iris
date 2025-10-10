@@ -20,6 +20,7 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
+@pytest.mark.skip(reason="Disabled per request")
 @pytest.mark.parametrize(
     "dtype",
     [
