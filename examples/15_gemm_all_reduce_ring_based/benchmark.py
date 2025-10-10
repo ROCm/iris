@@ -188,10 +188,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         torch.cuda.nvtx.range_push("GEMM")
         with torch.cuda.stream(gemm_stream):
             kernel_timing["gemm"]["start_event"].record()
-            ring_buffer = matmul.apply(
+            local_C = matmul.apply(
                 local_A,
                 local_B,
-                ring_buffer,
+                local_C,
                 bias,
                 locks,
                 rank,
@@ -216,6 +216,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             kernel_timing["communication"]["start_event"].record()
             ar = persistent_all_reduce[(args["comm_sms"],)](
                 C,
+                local_C,
                 ring_buffer,
                 locks,
                 flags,

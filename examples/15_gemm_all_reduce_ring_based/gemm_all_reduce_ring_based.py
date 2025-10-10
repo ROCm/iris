@@ -15,7 +15,7 @@ import iris
 def persistent_gemm(
     A,
     B,
-    ring_buffer,
+    local_C,
     bias_ptr,
     locks,
     M,
@@ -58,7 +58,7 @@ def persistent_gemm(
     tl.assume(stride_cm > 0)
     tl.assume(stride_cn > 0)
 
-    acc_dtype = tl.float32 if ring_buffer.type.element_ty != tl.int8 else tl.int32
+    acc_dtype = tl.float32 if local_C.type.element_ty != tl.int8 else tl.int32
 
     for tile_id in range(pid, total_tiles, NUM_SMS):
         if COLLECT_TIMESTAMPS:
@@ -115,11 +115,11 @@ def persistent_gemm(
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
         # Define the C-mask (BLOCK_SIZE_M, 1) x (1, BLOCK_SIZE_N)
-        sub_mask = (rm[:, None] < M) & (rn[None, :] < N)
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
 
         # Calculate the "global" offset of C based on the rank.
         # Note how each GPU is producing the entire output but partial-K.
-        global_offset = rm[:, None] * stride_cm + rn[None, :] * stride_cn
+        offset = rm[:, None] * stride_cm + rn[None, :] * stride_cn
 
         # Timestamp for GEMM before store
         if COLLECT_TIMESTAMPS:
@@ -127,7 +127,7 @@ def persistent_gemm(
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
         # Write fully-reduced tile to local result buffer (no remote writes)
-        tl.store(ring_buffer + global_offset, acc, mask=sub_mask, cache_modifier=".wt")
+        tl.store(local_C + offset, acc, mask=mask, cache_modifier=".wt")
         tl.debug_barrier()
         tl.store(locks + tile_id, 1, cache_modifier=".wt")
 
@@ -139,6 +139,7 @@ def persistent_gemm(
 @triton.jit()
 def persistent_all_reduce(
     C,
+    local_C,
     ring_buffer,
     locks,
     flags,
@@ -193,7 +194,7 @@ def persistent_all_reduce(
             pass
 
         # Initialize accumulator with local partial result from ring_buffer
-        acc = tl.load(ring_buffer + global_offset, mask=sub_mask).to(acc_dtype)
+        acc = tl.load(local_C + global_offset, mask=sub_mask).to(acc_dtype)
 
         # Each rank sends its LOCAL partial result (not accumulated) around the ring
         # while accumulating received partial results from other ranks.
@@ -206,7 +207,7 @@ def persistent_all_reduce(
         # - acc: Running sum of all partial results received so far
 
         # Initialize: First, write our partial result to ring_buffer for sending
-        # send_data = acc
+        send_data = acc
 
         # Step loop: send to next, wait/recv from prev, add.
         for _step in range(0, world_size - 1):
@@ -218,8 +219,8 @@ def persistent_all_reduce(
                 pass
 
             # 1b) Send our current accumulator tile to NEXT rank's ring buffer
-            iris.put(
-                ring_buffer + global_offset, ring_buffer + global_offset, cur_rank, next_rank, heap_bases, mask=sub_mask
+            iris.store(
+                ring_buffer + global_offset, send_data, cur_rank, next_rank, heap_bases, mask=sub_mask
             )
 
             tl.debug_barrier()
@@ -231,11 +232,11 @@ def persistent_all_reduce(
                 pass
 
             # 3) Consume the received tile from our LOCAL ring buffer (prev wrote here)
-            # recv_tile = tl.load(ring_buffer + global_offset, mask=sub_mask, other=tl.zeros_like(acc), cache_modifier=".cv")
+            recv_tile = tl.load(ring_buffer + global_offset, mask=sub_mask, other=tl.zeros_like(acc))
 
             # 4) Accumulate received data and prepare to forward it in next iteration
-            acc += tl.load(ring_buffer + global_offset, mask=sub_mask)
-            # send_data = recv_tile # Forward what we just received (not the accumulated sum)
+            acc += recv_tile # tl.load(ring_buffer + global_offset, mask=sub_mask)
+            send_data = recv_tile # Forward what we just received (not the accumulated sum)
 
             # 5) Reset our local flag to 0 (done consuming this step)
             tl.atomic_xchg(flags + tile_id, 0, sem="release", scope="sys")
