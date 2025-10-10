@@ -189,10 +189,11 @@ def persistent_all_reduce(
         global_offset = rm[:, None] * stride_cm_global + rn[None, :] * stride_cn_global
         # End: masks/offset calculations.
 
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-
         while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
             pass
+
+        # Initialize accumulator with local partial result from ring_buffer
+        acc = tl.load(ring_buffer + global_offset, mask=sub_mask).to(acc_dtype)
 
         # Each rank sends its LOCAL partial result (not accumulated) around the ring
         # while accumulating received partial results from other ranks.
