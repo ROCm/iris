@@ -49,6 +49,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Cleanup lingering ports before tests
+        run: |
+          bash .github/scripts/cleanup_ports.sh
+
       - name: Run External Validation Test with Apptainer
         run: |
           set -e

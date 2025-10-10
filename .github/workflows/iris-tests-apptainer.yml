@@ -48,6 +48,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Cleanup lingering ports before tests
+        run: |
+          bash .github/scripts/cleanup_ports.sh
+
       - name: Run 1, 2, 4 rank tests in parallel
         run: |
           set -e
@@ -136,6 +140,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Cleanup lingering ports before tests
+        run: |
+          bash .github/scripts/cleanup_ports.sh
 
       - name: Run 8-rank test
         run: |

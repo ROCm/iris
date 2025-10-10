@@ -50,6 +50,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Cleanup lingering ports before tests
+        run: |
+          bash .github/scripts/cleanup_ports.sh
+
       - name: Run pip install tests for 1, 2, 4 ranks in parallel
         run: |
           set -e
@@ -140,6 +144,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Cleanup lingering ports before tests
+        run: |
+          bash .github/scripts/cleanup_ports.sh
 
       - name: Run 8-rank pip install test
         run: |
