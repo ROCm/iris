@@ -84,8 +84,3 @@ jobs:
             "${{ matrix.tflops_threshold }}" \
             ${{ matrix.benchmark_args }}
 
-      - name: Cleanup lingering ports
-        if: always()
-        run: |
-          bash .github/scripts/cleanup_ports.sh
-

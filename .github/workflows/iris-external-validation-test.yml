@@ -81,8 +81,3 @@ jobs:
           echo "::endgroup::"
 
           echo "✅ External validation test passed!"
-
-      - name: Cleanup lingering ports
-        if: always()
-        run: |
-          bash .github/scripts/cleanup_ports.sh
