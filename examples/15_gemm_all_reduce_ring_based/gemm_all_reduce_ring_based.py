@@ -219,9 +219,7 @@ def persistent_all_reduce(
                 pass
 
             # 1b) Send our current accumulator tile to NEXT rank's ring buffer
-            iris.store(
-                ring_buffer + global_offset, send_data, cur_rank, next_rank, heap_bases, mask=sub_mask
-            )
+            iris.store(ring_buffer + global_offset, send_data, cur_rank, next_rank, heap_bases, mask=sub_mask)
 
             tl.debug_barrier()
             # Signal "ready" by setting NEXT rank's flag for this tile to 1
@@ -235,8 +233,8 @@ def persistent_all_reduce(
             recv_tile = tl.load(ring_buffer + global_offset, mask=sub_mask, other=tl.zeros_like(acc))
 
             # 4) Accumulate received data and prepare to forward it in next iteration
-            acc += recv_tile # tl.load(ring_buffer + global_offset, mask=sub_mask)
-            send_data = recv_tile # Forward what we just received (not the accumulated sum)
+            acc += recv_tile  # tl.load(ring_buffer + global_offset, mask=sub_mask)
+            send_data = recv_tile  # Forward what we just received (not the accumulated sum)
 
             # 5) Reset our local flag to 0 (done consuming this step)
             tl.atomic_xchg(flags + tile_id, 0, sem="release", scope="sys")
