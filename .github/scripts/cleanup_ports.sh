@@ -21,19 +21,31 @@ if [ -n "$PYTHON_TEST_PIDS" ]; then
     echo "Cleaned up Python test processes"
 fi
 
+# Clean up pt_main_thread processes (PyTorch processes)
+echo "Checking for lingering PyTorch processes (pt_main_thread)..."
+PT_PIDS=$(pgrep -f "pt_main_thread" 2>/dev/null || true)
+
+if [ -n "$PT_PIDS" ]; then
+    echo "Found PyTorch processes: $PT_PIDS"
+    echo "Killing PyTorch processes..."
+    echo "$PT_PIDS" | xargs kill -9 2>/dev/null || true
+    echo "Cleaned up PyTorch processes"
+fi
+
 # Clean up any processes listening on TCP ports in the common test range
 # PyTorch distributed typically uses ports in the 29500+ range, but can use any available port
 echo "Checking for processes using TCP ports..."
 LISTENING_PIDS=$(lsof -ti tcp -sTCP:LISTEN 2>/dev/null | sort -u || true)
 
 if [ -n "$LISTENING_PIDS" ]; then
-    # Filter to only Python processes to avoid killing system services
+    # Filter to only Python/PyTorch processes to avoid killing system services
     for PID in $LISTENING_PIDS; do
         PROCESS_NAME=$(ps -p $PID -o comm= 2>/dev/null || true)
-        if [[ "$PROCESS_NAME" == *"python"* ]]; then
+        # Check for python or pt_main_thread processes
+        if [[ "$PROCESS_NAME" == *"python"* ]] || [[ "$PROCESS_NAME" == *"pt_main_thread"* ]]; then
             PORT=$(lsof -Pan -p $PID -i tcp -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $9}' | cut -d':' -f2 | head -1)
             if [ -n "$PORT" ]; then
-                echo "Found Python process $PID listening on port $PORT"
+                echo "Found process $PROCESS_NAME (PID $PID) listening on port $PORT"
                 kill -9 $PID 2>/dev/null || true
                 echo "Cleaned up process $PID on port $PORT"
             fi
