@@ -2,24 +2,41 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
-# Script to clean up any lingering processes using common test ports
-# This is useful when tests segfault and leave ports open
+# Script to clean up any lingering test processes and ports
+# This is useful when tests segfault and leave processes/ports open
 
-echo "Cleaning up lingering processes on test ports..."
+echo "Cleaning up lingering test processes and ports..."
 
-# Common ports used by distributed tests
-PORTS=(29500 29501 29502 29503 29504 29505)
+# Clean up Python test processes that might be stuck
+# Look for processes related to run_tests_distributed.py, pytest, and torch distributed tests
+echo "Checking for lingering Python test processes..."
+PYTHON_TEST_PIDS=$(pgrep -f "run_tests_distributed.py|pytest.*test_|torch.distributed" 2>/dev/null || true)
 
-for PORT in "${PORTS[@]}"; do
-    # Find processes listening on the port
-    PIDS=$(lsof -ti tcp:$PORT 2>/dev/null || true)
-    
-    if [ -n "$PIDS" ]; then
-        echo "Found processes using port $PORT: $PIDS"
-        echo "Killing processes: $PIDS"
-        kill -9 $PIDS 2>/dev/null || true
-        echo "Cleaned up port $PORT"
-    fi
-done
+if [ -n "$PYTHON_TEST_PIDS" ]; then
+    echo "Found Python test processes: $PYTHON_TEST_PIDS"
+    echo "Killing Python test processes..."
+    echo "$PYTHON_TEST_PIDS" | xargs kill -9 2>/dev/null || true
+    echo "Cleaned up Python test processes"
+fi
+
+# Clean up any processes listening on TCP ports in the common test range
+# PyTorch distributed typically uses ports in the 29500+ range, but can use any available port
+echo "Checking for processes using TCP ports..."
+LISTENING_PIDS=$(lsof -ti tcp -sTCP:LISTEN 2>/dev/null | sort -u || true)
+
+if [ -n "$LISTENING_PIDS" ]; then
+    # Filter to only Python processes to avoid killing system services
+    for PID in $LISTENING_PIDS; do
+        PROCESS_NAME=$(ps -p $PID -o comm= 2>/dev/null || true)
+        if [[ "$PROCESS_NAME" == *"python"* ]]; then
+            PORT=$(lsof -Pan -p $PID -i tcp -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $9}' | cut -d':' -f2 | head -1)
+            if [ -n "$PORT" ]; then
+                echo "Found Python process $PID listening on port $PORT"
+                kill -9 $PID 2>/dev/null || true
+                echo "Cleaned up process $PID on port $PORT"
+            fi
+        fi
+    done
+fi
 
 echo "Port cleanup complete."
