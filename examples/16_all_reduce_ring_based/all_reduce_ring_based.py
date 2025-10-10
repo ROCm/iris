@@ -41,7 +41,7 @@ def persistent_all_reduce(
     next_rank = (cur_rank + 1) % world_size
     prev_rank = (cur_rank + world_size - 1) % world_size
 
-    acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
+    acc_dtype = tl.float32 if output.type.element_ty != tl.int8 else tl.int32
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
