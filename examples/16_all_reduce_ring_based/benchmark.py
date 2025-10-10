@@ -113,7 +113,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     torch.manual_seed(123 + rank)  # Different seed per rank for different data
     partial = shmem.zeros((args["M"], args["N"]), device="cuda", dtype=datatype)
     partial.copy_(torch.randn((args["M"], args["N"]), device="cuda", dtype=datatype))
-    
+
     output = shmem.zeros((args["M"], args["N"]), device="cuda", dtype=datatype)
 
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
@@ -202,23 +202,23 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     if args["validate"]:
         shmem.info("Validating...")
-        
+
         # Run the experiment once to populate output
         run_experiment()
         shmem.barrier()
-        
+
         # Create a reference result using torch.distributed.all_reduce
         # Save original partial values for reference computation
         partial_copy = partial.clone()
         expected_output = partial_copy.clone()
-        
+
         # Use NCCL all_reduce to compute the expected result
         dist.all_reduce(expected_output, op=dist.ReduceOp.SUM)
-        
+
         # Compare the output from our kernel with the expected result
         success = torch.allclose(output, expected_output, atol=2)
         max_diff = torch.max(torch.abs(output - expected_output)).item()
-        
+
         if success:
             shmem.info(f"Final validation passed. Max difference: {max_diff}")
         else:
@@ -234,7 +234,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.info("Benchmarking...")
         # Calculate bandwidth instead of FLOPS since there's no GEMM
         # All-reduce moves 2 * (world_size - 1) / world_size * data_size bytes
-        data_size_bytes = args["M"] * args["N"] * 2 if datatype == torch.float16 or datatype == torch.bfloat16 else args["M"] * args["N"] * 4
+        data_size_bytes = (
+            args["M"] * args["N"] * 2
+            if datatype == torch.float16 or datatype == torch.bfloat16
+            else args["M"] * args["N"] * 4
+        )
         perf = lambda ms: (2 * (world_size - 1) / world_size * data_size_bytes * 1e-9) / (ms * 1e-3)  # GB/s
         triton_ms = iris.do_bench(run_experiment, shmem.barrier, preamble)
         bandwidth_gbps = perf(triton_ms)
