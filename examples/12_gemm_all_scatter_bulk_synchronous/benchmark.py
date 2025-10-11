@@ -11,6 +11,7 @@ import sys
 import os
 import argparse
 import json
+import math
 
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set
 from examples.common.validation import validate_gemm
@@ -55,9 +56,14 @@ def parse_args():
     parser.add_argument("--gsize_m", type=int, default=6, help="L2-cache locality swizzle parameter")
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument(
-        "--gemm_sms", type=int, default=256, help="Number of SMs for workgroup-specialized GEMM algorithm"
+        "--gemm_sms",
+        type=int,
+        default=None,
+        help="Number of SMs for workgroup-specialized GEMM algorithm (default: auto-detected)",
     )
-    parser.add_argument("--comm_sms", type=int, default=256, help="Number of SMs for All-Scatter kernel")
+    parser.add_argument(
+        "--comm_sms", type=int, default=None, help="Number of SMs for All-Scatter kernel (default: auto-detected)"
+    )
     parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
 
     return vars(parser.parse_args())
@@ -66,12 +72,28 @@ def parse_args():
 def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     """Worker function for PyTorch distributed execution."""
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=local_rank)
+    dist.init_process_group(
+        backend=backend,
+        init_method=init_url,
+        world_size=world_size,
+        rank=local_rank,
+        device_id=torch.device(f"cuda:{local_rank}"),
+    )
 
     shmem = iris.iris(args["heap_size"])
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
-    cu_count = shmem.get_cu_count()
+
+    # Set default SM values if not provided
+    cu_count = torch.cuda.get_device_properties(rank).multi_processor_count
+    next_pow2 = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
+
+    if args["gemm_sms"] is None:
+        # For wg_specialized: use next smaller power of 2
+        args["gemm_sms"] = next_pow2
+    if args["comm_sms"] is None:
+        # For bulk synchronous, use same as gemm_sms
+        args["comm_sms"] = next_pow2
 
     # GEMM
     datatype = torch.float32
@@ -116,10 +138,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     bias = None
 
-    num_xcds = 1
-    arch = "gfx942"
-    if arch == "gfx942" or arch == "gfx950":
-        num_xcds = 8
+    num_xcds = iris.hip.get_num_xcc()
 
     # This is one after another.
     main_stream = torch.cuda.Stream()

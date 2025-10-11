@@ -22,6 +22,8 @@ We've curated a growing collection of practical examples that showcase the power
 - **[10_gemm_all_scatter_wg_specialization](https://github.com/ROCm/iris/tree/main/examples/10_gemm_all_scatter_wg_specialization)**: Matrix multiplication with all-scatter using workgroup specialization
 - **[11_gemm_all_scatter_producer_consumer](https://github.com/ROCm/iris/tree/main/examples/11_gemm_all_scatter_producer_consumer)**: Matrix multiplication with all-scatter using producer-consumer concurrent kernels
 - **[12_gemm_all_scatter_bulk_synchronous](https://github.com/ROCm/iris/tree/main/examples/12_gemm_all_scatter_bulk_synchronous)**: Matrix multiplication with all-scatter using the bulk synchronous parallel approach
+- **[13_flash_decode](https://github.com/ROCm/iris/tree/main/examples/13_flash_decode)**: Fused Flash Decode Attention for accelerating LLM inference
+- **[14_all_gather_gemm](https://github.com/ROCm/iris/tree/main/examples/14_all_gather_gemm)**: Fused All-Gather + GEMM with Pull and Push models
 
 ### Utilities
 - **[benchmark](https://github.com/ROCm/iris/tree/main/examples/benchmark)**: Benchmarking utilities and performance testing tools

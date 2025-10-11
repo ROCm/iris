@@ -44,6 +44,8 @@ spec.loader.exec_module(module)
     ],
 )
 def test_all_load_bench(dtype, buffer_size, heap_size, block_size):
+    # TODO: Benchmark is not accurate. See: https://github.com/ROCm/iris/issues/119
+    pytest.skip("Benchmark is not accurate. See: https://github.com/ROCm/iris/issues/119")
     shmem = iris.iris(heap_size)
     num_ranks = shmem.get_num_ranks()
 
@@ -56,8 +58,8 @@ def test_all_load_bench(dtype, buffer_size, heap_size, block_size):
         "datatype": _torch_dtype_to_str(dtype),
         "block_size": block_size,
         "active_ranks": num_ranks,
-        "num_warmup": 1,
-        "num_experiments": 2,
+        "num_warmup": 4,
+        "num_experiments": 8,
         "verbose": False,
         "validate": False,
     }

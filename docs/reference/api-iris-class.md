@@ -40,7 +40,7 @@ Use Iris-aware logging that automatically annotates each message with the curren
 
 ## Broadcast Helper
 
-Broadcast a Python scalar or small object from a source rank to all ranks. This is a convenience wrapper over the internal Torch Distributed helper.
+Broadcast data from a source rank to all ranks. This method automatically detects whether the value is a tensor/array or a scalar and uses the appropriate broadcast mechanism.
 
 ```{eval-rst}
 .. automethod:: iris.iris.Iris.broadcast

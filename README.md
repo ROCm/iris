@@ -11,10 +11,7 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml) [![Iris Tests](https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml/badge.svg)](https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml)
 
-> [!IMPORTANT]
-> This project is intended for research purposes only and is provided by AMD Research and Advanced Development team.  This is not a product. Use it at your own risk and discretion.
-
-Iris is a Triton-based framework for Remote Memory Access (RMA) operations. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton's programmability and performance.
+Iris is a Triton-based framework for Remote Memory Access (RMA) operations developed by AMD's Research and Advanced Development team. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton's programmability and performance.
 
 ## Key Features
 
@@ -106,7 +103,7 @@ if __name__ == "__main__":
 ### Quick Installation
 
 > [!NOTE]
-> **Requirements**: Python 3.10+, PyTorch 2.0+ (ROCm version), ROCm 6.3.1+ HIP runtime, and Triton
+> **Requirements**: Python 3.10+, PyTorch 2.0+ (ROCm version), ROCm 6.3.1+ HIP runtime, Triton, and setuptools>=61
 
 For a quick installation directly from the repository:
 

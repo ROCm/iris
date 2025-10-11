@@ -8,6 +8,7 @@ import torch.distributed as dist
 import random
 import iris
 import argparse
+import os
 
 from examples.common.utils import JSONWriter
 
@@ -43,7 +44,8 @@ def main():
     m, n, k = args["m"], args["n"], args["k"]
     validate, benchmark = args["validate"], args["benchmark"]
 
-    dist.init_process_group("nccl")
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    dist.init_process_group("nccl", device_id=torch.device(f"cuda:{local_rank}"))
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     torch.cuda.set_device(rank)

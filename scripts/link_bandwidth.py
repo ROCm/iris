@@ -2,6 +2,15 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import json
+import torch
+
+try:
+    if torch.cuda.is_available():
+        cu_count = torch.cuda.get_device_properties(0).multi_processor_count
+    else:
+        cu_count = 304  # Default for MI300
+except Exception:
+    cu_count = 304  # Default for MI300
 
 # Sample input (replace with file read if needed)
 config = {
@@ -26,7 +35,7 @@ config = {
     "kpack": 2,
     "heap_size": 8589934592,
     "gemm_sms": 48,
-    "total_sms": 304,
+    "total_sms": cu_count,
     "communication_block_size": 256,
     "communication_sms_multiplier": 1,
     "M": 8192,

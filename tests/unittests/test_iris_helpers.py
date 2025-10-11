@@ -35,7 +35,7 @@ def test_device_validation():
     assert not shmem._Iris__is_valid_device("mps")  # MPS is always invalid
 
     # Test that different CUDA device indices are rejected
-    if shmem.device.startswith("cuda:"):
+    if shmem.device.startswith("cuda:") and torch.cuda.device_count() >= 2:
         current_device = torch.device(shmem.device)
         different_cuda = f"cuda:{(current_device.index + 1) % torch.cuda.device_count()}"  # Use next GPU
         assert not shmem._Iris__is_valid_device(different_cuda)

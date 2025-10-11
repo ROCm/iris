@@ -7,6 +7,7 @@ import triton
 # from streamk_kernel import streamk_gemm
 from gemm_all_scatter_bulk_synchronous import persistent_gemm
 from examples.common.utils import is_triton_interpret_set
+import iris
 
 gemm_kernel = persistent_gemm
 
@@ -15,6 +16,7 @@ class matmul(torch.autograd.Function):
     _debug = False
     _registers = None
     _spills = None
+    _num_xcds = iris.hip.get_num_xcc()
 
     @staticmethod
     def set_debug(debug: bool):
@@ -58,9 +60,7 @@ class matmul(torch.autograd.Function):
         M, K = a.shape
         _, N = b.shape
 
-        num_xcds = 1
-        if arch == "gfx942" or arch == "gfx950":
-            num_xcds = 8
+        num_xcds = matmul._num_xcds
 
         # TODO: Use arch-specific values.
         num_stages = 2

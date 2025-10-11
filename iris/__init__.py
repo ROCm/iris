@@ -11,7 +11,7 @@ across multiple GPUs in a cluster.
 This package provides:
 - Iris: Main class for multi-GPU operations
 - Atomic operations: add, sub, cas, xchg, xor, and, or, min, max
-- Memory operations: load, store, get, put
+- Memory operations: load, store, copy, get, put
 - Utility functions: do_bench
 - HIP integration for AMD GPU support
 - Logging utilities with rank information
@@ -24,14 +24,12 @@ Quick Start:
 
 # __init__.py
 
-import os
-import torch
-
 from .iris import (
     Iris,
     iris,
     load,
     store,
+    copy,
     get,
     put,
     atomic_add,
@@ -62,30 +60,12 @@ from .logging import (
 
 # Launcher functionality is now user code - see examples and documentation
 
-# Pipe allocations via finegrained allocator
-current_dir = os.path.dirname(__file__)
-# Look for the library in the installed package location
-finegrained_alloc_path = os.path.join(current_dir, "csrc", "finegrained_alloc", "libfinegrained_allocator.so")
-
-# Check if the library exists (should be built during pip install)
-if not os.path.exists(finegrained_alloc_path):
-    raise RuntimeError(
-        f"Fine-grained allocator library not found at {finegrained_alloc_path}. "
-        "Please ensure the package was installed correctly."
-    )
-
-finegrained_allocator = torch.cuda.memory.CUDAPluggableAllocator(
-    finegrained_alloc_path,
-    "finegrained_hipMalloc",
-    "finegrained_hipFree",
-)
-torch.cuda.memory.change_current_allocator(finegrained_allocator)
-
 __all__ = [
     "Iris",
     "iris",
     "load",
     "store",
+    "copy",
     "get",
     "put",
     "atomic_add",
