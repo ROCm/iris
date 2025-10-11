@@ -21,3 +21,14 @@ def validate_gemm(A, B, C, shmem, atol=1):
         return False
 
     return True
+
+def validate_gemm_reduce_scatter(A, B, local_C, rank, world_size, shmem, atol=1):
+    full_result = torch.mm(A, B)
+    
+    rows_per_gpu = A.shape[0] // world_size
+    start_row = rank * rows_per_gpu
+    end_row = start_row + local_C.shape[0]
+    
+    expected_local = full_result[start_row:end_row, :]
+    
+    return torch.allclose(local_C, expected_local, atol=atol)
