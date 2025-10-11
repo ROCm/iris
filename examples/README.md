@@ -24,6 +24,8 @@ This directory contains various algorithm implementations for distributed comput
 - [`10_gemm_all_scatter_wg_specialization`](10_gemm_all_scatter_wg_specialization): Matrix multiplication with all-scatter using workgroup specialization
 - [`11_gemm_all_scatter_producer_consumer`](11_gemm_all_scatter_producer_consumer): Matrix multiplication with all-scatter using producer-consumer concurrent kernels
 - [`12_gemm_all_scatter_bulk_synchronous`](12_gemm_all_scatter_bulk_synchronous): Matrix multiplication with all-scatter using the bulk synchronous parallel approach
+- [`13_flash_decode`](13_flash_decode): Fused Flash Decode Attention for accelerating LLM inference
+- [`14_all_gather_gemm`](14_all_gather_gemm): Fused All-Gather + GEMM with Pull and Push models
 
 ### Utilities
 - [`benchmark`](benchmark): Benchmarking utilities and performance testing tools
@@ -69,4 +71,13 @@ python examples/11_gemm_all_scatter_producer_consumer/benchmark.py --benchmark -
 
 # Example command to run benchmark with all-scatter bulk synchronous approach
 python examples/12_gemm_all_scatter_bulk_synchronous/benchmark.py --benchmark --validate --num_ranks 8
+
+# Flash Decode Attention - simple example run
+python examples/13_flash_decode/example_run.py --num_ranks 8
+
+# All-Gather + GEMM - Pull model
+python examples/14_all_gather_gemm/example_run_pull.py --num_ranks 8
+
+# All-Gather + GEMM - Push model
+python examples/14_all_gather_gemm/example_run_push.py --num_ranks 8
 ```

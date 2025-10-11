@@ -145,7 +145,7 @@ See [docs/api-comparison.md](docs/api-comparison.md) for a complete comparison.
 ### Quick Installation
 
 > [!NOTE]
-> **Requirements**: Python 3.10+, PyTorch 2.0+ (ROCm version), ROCm 6.3.1+ HIP runtime, and Triton
+> **Requirements**: Python 3.10+, PyTorch 2.0+ (ROCm version), ROCm 6.3.1+ HIP runtime, Triton, and setuptools>=61
 
 For a quick installation directly from the repository:
 

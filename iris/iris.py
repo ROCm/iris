@@ -39,6 +39,7 @@ from iris.hip import (
     get_ipc_handle,
     open_ipc_handle,
     get_wall_clock_rate,
+    get_ipc_handle_size,
 )
 import numpy as np
 import math
@@ -89,13 +90,16 @@ class Iris:
 
         heap_bases = np.zeros(num_ranks, dtype=np.uint64)
         heap_bases[cur_rank] = heap_base
-        ipc_handles = np.zeros((num_ranks, 64), dtype=np.uint8)
+        ipc_handle_size = get_ipc_handle_size()
+        ipc_handles = np.zeros((num_ranks, ipc_handle_size), dtype=np.uint8)
         ipc_handle = get_ipc_handle(heap_base_ptr, cur_rank)
 
         distributed_barrier()
 
-        all_ipc_handles = distributed_allgather(np.frombuffer(ipc_handle, dtype=np.uint8))
-        all_heap_bases = distributed_allgather(np.array([heap_bases[cur_rank]], dtype=np.uint64))
+        all_ipc_handles = distributed_allgather(np.frombuffer(ipc_handle, dtype=np.uint8).copy())
+        heap_base_bytes = np.array([heap_bases[cur_rank]], dtype=np.uint64).tobytes()
+        all_heap_bases_bytes = distributed_allgather(np.frombuffer(heap_base_bytes, dtype=np.uint8).copy())
+        all_heap_bases = np.frombuffer(all_heap_bases_bytes.tobytes(), dtype=np.uint64).reshape(num_ranks, -1)
 
         distributed_barrier()
 
@@ -185,25 +189,74 @@ class Iris:
 
     def broadcast(self, value, source_rank):
         """
-        Broadcast a Python scalar or small picklable object from one rank to all ranks.
+        Broadcast a value from one rank to all ranks.
+
+        This method automatically detects the type of value and uses the appropriate
+        broadcast mechanism:
+        - For tensors and arrays: uses efficient PyTorch distributed tensor collectives
+        - For scalars and other objects: uses object broadcast
 
         Args:
-            value (Any): The value to broadcast. Only the ``source_rank`` value is used;
+            value (Any): The value to broadcast. Can be a scalar, tensor, numpy array,
+                or any picklable object. Only the ``source_rank`` value is used;
                 other ranks should pass a placeholder (e.g., ``None``).
             source_rank (int): Rank id that holds the authoritative value.
 
         Returns:
-            Any: The value broadcast to all ranks.
+            Any: The value broadcast to all ranks. Tensors and arrays are returned as
+                numpy arrays; scalars and objects are returned in their original type.
 
-        Example:
+        Examples:
             >>> ctx = iris.iris()
+            >>> # Broadcasting a scalar
             >>> value = 42 if ctx.cur_rank == 0 else None
             >>> value = ctx.broadcast(value, source_rank=0)  # All ranks get 42
+            >>>
+            >>> # Broadcasting a tensor
+            >>> if ctx.cur_rank == 0:
+            >>>     data = torch.randn(10, 10)
+            >>> else:
+            >>>     data = None
+            >>> data = ctx.broadcast(data, source_rank=0)  # All ranks get the same array
         """
-        return distributed_broadcast_scalar(value, source_rank)
+        # Check if the value on source_rank is a tensor or array-like
+        if self.cur_rank == source_rank and value is not None:
+            # Explicitly exclude strings and non-numeric types
+            if isinstance(value, (str, dict, bool)):
+                is_tensor = False
+            elif isinstance(value, torch.Tensor):
+                is_tensor = True
+            elif isinstance(value, np.ndarray):
+                is_tensor = True
+            elif isinstance(value, (list, tuple)):
+                # Try to convert list/tuple to tensor to check if it's numeric
+                try:
+                    torch.as_tensor(value)
+                    is_tensor = True
+                except (TypeError, ValueError):
+                    is_tensor = False
+            else:
+                # For other types, try to convert and check
+                try:
+                    test_array = np.asarray(value)
+                    # Check if it's a numeric dtype that torch can handle
+                    if np.issubdtype(test_array.dtype, np.number):
+                        torch.as_tensor(test_array)
+                        is_tensor = True
+                    else:
+                        is_tensor = False
+                except (TypeError, ValueError):
+                    is_tensor = False
+        else:
+            is_tensor = False
 
-    def broadcast_tensor(self, value, source_rank=0):
-        return distributed_broadcast_tensor(value, root=source_rank)
+        # Broadcast the type decision to all ranks
+        is_tensor = distributed_broadcast_scalar(is_tensor, source_rank)
+
+        if is_tensor:
+            return distributed_broadcast_tensor(value, root=source_rank)
+        else:
+            return distributed_broadcast_scalar(value, source_rank)
 
     def __allocate(self, num_elements, dtype):
         self.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")
@@ -1533,6 +1586,57 @@ def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     tl.store(translated_ptr, value, mask=mask)
+
+
+@triton.jit
+def copy(src_ptr, dst_ptr, from_rank, to_rank, cur_rank, heap_bases, mask=None):
+    """
+    Copies data from the specified rank's memory into the destination rank's memory.
+    This function performs the transfer by translating src_ptr from the from_rank's address
+    space to the to_rank's address space, performing a masked load from the translated
+    source, and storing the loaded data to dst_ptr in the to_rank memory location.
+    If from_rank and to_rank are the same, this function performs a local copy operation.
+    It is undefined behaviour if neither from_rank nor to_rank is the cur_rank.
+
+    Args:
+        src_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the from_rank's local memory from which to read data.
+        dst_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the to_rank's local memory where the data will be written.
+        from_rank (int): The rank ID that owns src_ptr (source rank).
+        to_rank (int): The rank ID that will receive the data (destination rank).
+        cur_rank (int): The rank ID issuing the copy operation. Must be either from_rank or to_rank.
+        heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
+        mask (Block of triton.int1, optional): If mask[idx] is false, do not load from the translated src_ptr[idx] and do not store to dst_ptr[idx]. Defaults to None.
+
+    Returns:
+        None
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(remote_ptr, local_ptr, heap_bases):
+        >>>     from_rank = 1
+        >>>     to_rank = 0
+        >>>     iris.copy(remote_ptr, local_ptr, from_rank, to_rank, to_rank, heap_bases)
+    """
+
+    cur_base = tl.load(heap_bases + cur_rank)
+
+    from_base = tl.load(heap_bases + from_rank)
+    to_base = tl.load(heap_bases + to_rank)
+
+    src_ptr_int = tl.cast(src_ptr, tl.uint64)
+    src_offset = src_ptr_int - cur_base
+
+    dst_ptr_int = tl.cast(dst_ptr, tl.uint64)
+    dst_offset = dst_ptr_int - cur_base
+
+    from_base_byte = tl.cast(from_base, tl.pointer_type(tl.int8))
+    to_base_byte = tl.cast(to_base, tl.pointer_type(tl.int8))
+
+    translated_src = tl.cast(from_base_byte + src_offset, src_ptr.dtype)
+    translated_dst = tl.cast(to_base_byte + dst_offset, src_ptr.dtype)
+
+    data = tl.load(translated_src, mask=mask)
+    tl.store(translated_dst, data, mask=mask)
 
 
 @triton.jit

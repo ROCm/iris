@@ -98,7 +98,7 @@ def test_randn_device_handling():
         shmem.randn(3, 3, device=different_device)
 
     # Test that different CUDA device throws error
-    if shmem.device.startswith("cuda:"):
+    if shmem.device.startswith("cuda:") and torch.cuda.device_count() >= 2:
         current_device = torch.device(shmem.device)
         num_devices = torch.cuda.device_count()
         different_cuda = f"cuda:{(current_device.index + 1) % num_devices}"  # Use next GPU
