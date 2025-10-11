@@ -160,125 +160,82 @@ def persistent_all_reduce(
 
     if NUM_XCDS != 1:
         pid = (pid % NUM_XCDS) * (COMM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+
+    # Precompute once
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
+    num_groups  = tl.cdiv(total_tiles, world_size)
 
-    # Ring topology
     next_rank = (cur_rank + 1) % world_size
     prev_rank = (cur_rank + world_size - 1) % world_size
-
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
-    for tile_id in range(pid, total_tiles, COMM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+    # Persistent across *groups* now (not individual tiles):
+    for g in range(pid, num_groups, COMM_SMS):
+        group_base  = g * world_size
+        group_size  = tl.minimum(world_size, total_tiles - group_base)  # tail-safe
 
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
+        # ---- Reduce-Scatter over this group of up to 'group_size' tiles ----
+        for s in range(0, group_size):
+            # Tile index this rank handles at step s
+            idx = group_base + ((cur_rank + group_size - s) % group_size)
 
-        # Begin: masks/offset calculations
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        sub_mask = (rm[:, None] < M) & (rn[None, :] < N)
-        global_offset = rm[:, None] * stride_cm_global + rn[None, :] * stride_cn_global
-        # End: masks/offset calculations.
+            # Map linear tile idx -> (pid_m, pid_n) using your existing swizzle
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id    = idx // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((idx % num_pid_in_group) % group_size_m)
+            pid_n = (idx % num_pid_in_group) // group_size_m
 
-        while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
-            pass
+            # Offsets/masks for this tile
+            rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+            rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+            rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+            sub_mask = (rm[:, None] < M) & (rn[None, :] < N)
+            goff = rm[:, None] * stride_cm_global + rn[None, :] * stride_cn_global
 
-        # ============================================================
-        # NEW ALGORITHM: Ring-based Reduce-Scatter + All-Gather
-        # ============================================================
-        # Ring all-reduce optimized for parallel tile reduction.
-        #
-        # Phase 1: Reduce-Scatter (world_size steps)
-        # - Each rank starts with a unique tile from its local partial result
-        # - In each step, ranks send accumulated data to next neighbor and receive from previous
-        # - Each rank loads the next tile and accumulates received data
-        # - After world_size steps, each rank has fully reduced one tile
-        #
-        # Phase 2: All-Gather
-        # - Each rank broadcasts its fully-reduced tile to all other ranks
-        #
-        # Example for 3 GPUs processing the same tile_id:
-        # Step 0: GPU 0 loads from rank 0 (a0), GPU 1 from rank 1 (b1), GPU 2 from rank 2 (c2)
-        # Step 1: GPU 0 sends a0→GPU1, recv c2←GPU2, loads rank 2 data, acc=(a2+c2)
-        #         GPU 1 sends b1→GPU2, recv a0←GPU0, loads rank 0 data, acc=(b0+a0)
-        #         GPU 2 sends c2→GPU0, recv b1←GPU1, loads rank 1 data, acc=(c1+b1)
-        # Step 2: GPU 0 sends (a2+c2)→GPU1, recv (c1+b1)←GPU2, loads rank 1 data, acc=(a1+b1+c1)
-        #         GPU 1 sends (b0+a0)→GPU2, recv (a2+c2)←GPU0, loads rank 2 data, acc=(b2+a2+c2)
-        #         GPU 2 sends (c1+b1)→GPU0, recv (b0+a0)←GPU1, loads rank 0 data, acc=(c0+a0+b0)
+            if s == 0:
+                # First touch of this traveling tile on this rank:
+                # wait for local GEMM, seed acc from local partial, and forward.
+                while tl.atomic_cas(locks + idx, 0, 0, sem="acquire", scope="gpu") != 1:
+                    pass
+                acc = tl.load(local_C + goff, mask=sub_mask, other=0).to(acc_dtype)
 
-        acc = None
-
-        # Reduce-scatter phase: world_size steps
-        for step in range(0, world_size):
-            # Determine which rank's data to load in this step
-            # Step 0: rank r loads from rank r (its own initial data)
-            # Step 1: rank r loads from rank (r - 1 + world_size) % world_size
-            # Step 2: rank r loads from rank (r - 2 + world_size) % world_size
-            # Pattern: rank r at step s loads from rank (r - s + world_size) % world_size
-            # This is equivalent to: (r + world_size - s) % world_size
-            source_rank = (cur_rank + world_size - step) % world_size
-
-            if step == 0:
-                # Initial load: load tile from our own local_C
-                acc = tl.load(local_C + global_offset, mask=sub_mask).to(acc_dtype)
+                if group_size > 1:
+                    # Send to NEXT and signal that tile 'idx' is ready for neighbor
+                    iris.store(ring_buffer + goff, acc, cur_rank, next_rank, heap_bases, mask=sub_mask)
+                    iris.atomic_xchg(flags + idx, 1, cur_rank, next_rank, heap_bases,
+                                    sem="release", scope="sys")
             else:
-                # Subsequent steps: send, receive, load, accumulate
-
-                # 1) Wait for next rank to be ready (its flag should be 0)
-                while (
-                    iris.atomic_cas(flags + tile_id, 0, 0, cur_rank, next_rank, heap_bases, sem="acquire", scope="sys")
-                    != 0
-                ):
+                # Receive the traveling accumulator for this tile from PREV
+                while tl.atomic_cas(flags + idx, 0, 0, sem="acquire", scope="sys") != 1:
                     pass
+                recv = tl.load(ring_buffer + goff, mask=sub_mask, other=0).to(acc_dtype)
+                tl.atomic_xchg(flags + idx, 0, sem="release", scope="sys")  # clear local flag
 
-                # 2) Send current accumulator to next rank's ring buffer
-                iris.store(ring_buffer + global_offset, acc, cur_rank, next_rank, heap_bases, mask=sub_mask)
-
-                tl.debug_barrier()
-
-                # 3) Signal next rank that data is ready
-                iris.atomic_xchg(flags + tile_id, 1, cur_rank, next_rank, heap_bases, sem="release", scope="sys")
-
-                # 4) Wait for prev rank to send us data (our flag should become 1)
-                while tl.atomic_cas(flags + tile_id, 0, 0, sem="acquire", scope="sys") != 1:
+                # Fold in our local partial (wait if GEMM not done yet)
+                while tl.atomic_cas(locks + idx, 0, 0, sem="acquire", scope="gpu") != 1:
                     pass
+                part = tl.load(local_C + goff, mask=sub_mask, other=0).to(acc_dtype)
+                acc  = recv + part
 
-                # 5) Load tile from source_rank's local_C (cross-rank read)
-                next_tile = iris.load(
-                    local_C + global_offset, cur_rank, source_rank, heap_bases, mask=sub_mask, other=0.0
-                )
+                # Forward unless this is the last hop for this tile
+                if s < group_size - 1:
+                    iris.store(ring_buffer + goff, acc, cur_rank, next_rank, heap_bases, mask=sub_mask)
+                    iris.atomic_xchg(flags + idx, 1, cur_rank, next_rank, heap_bases,
+                                    sem="release", scope="sys")
+                else:
+                    # Last hop for tile idx on this rank: we own the fully reduced acc
+                    c = acc.to(C.type.element_ty)
 
-                # 6) Load received data from our local ring_buffer (sent by prev rank)
-                recv_tile = tl.load(ring_buffer + global_offset, mask=sub_mask, other=0.0)
+                    # All-scatter when the results are ready.
+                    # TODO: Technically, we commonly use an all-gather operation at the end as a separate loop?
+                    for rank in range(world_size):
+                        if rank == cur_rank:
+                            tl.store(C + goff, c, mask=sub_mask)
+                        else:
+                            iris.store(C + goff, c, cur_rank, rank, heap_bases, mask=sub_mask)
 
-                # 7) Accumulate: new_acc = next_tile + recv_tile
-                acc = next_tile.to(acc_dtype) + recv_tile.to(acc_dtype)
-
-                # 8) Reset our local flag to 0 (ready for next iteration)
-                tl.atomic_xchg(flags + tile_id, 0, sem="release", scope="sys")
-
-        # After reduce-scatter phase, all ranks have computed the fully reduced tile
-        # In a traditional reduce-scatter, each rank would have a DIFFERENT tile,
-        # but in this implementation, all ranks process the same tiles and end up
-        # with the same results. The ring pattern with cross-rank loads ensures
-        # efficient pipelining of the reduction across ranks.
-        #
-        # Write result to all ranks' C buffers to ensure visibility (all-gather phase)
-        c = acc.to(C.type.element_ty)
-        for remote_rank in range(world_size):
-            if remote_rank != cur_rank:
-                # Store our fully reduced tile to the remote rank's C buffer
-                iris.store(C + global_offset, c, cur_rank, remote_rank, heap_bases, mask=sub_mask)
-
-        # Store to our local C buffer
-        tl.store(C + global_offset, c, mask=sub_mask)

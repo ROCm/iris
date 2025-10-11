@@ -319,7 +319,7 @@ def main():
 
     num_ranks = args["num_ranks"]
 
-    init_url = "tcp://127.0.0.1:29501"
+    init_url = "tcp://127.0.0.1:29500"
     mp.spawn(
         fn=_worker,
         args=(num_ranks, init_url, args),
