@@ -205,6 +205,12 @@ def persistent_all_reduce(
                 acc = tl.load(local_C + goff, mask=sub_mask, other=0).to(acc_dtype)
 
                 if group_size > 1:
+                    # Wait for NEXT rank to be ready (its flag should be 0, meaning it finished previous step)
+                    while (
+                        iris.atomic_cas(flags + idx, 0, 0, cur_rank, next_rank, heap_bases, sem="acquire", scope="sys")
+                        != 0
+                    ):
+                        pass
                     # Send to NEXT and signal that tile 'idx' is ready for neighbor
                     iris.store(ring_buffer + goff, acc, cur_rank, next_rank, heap_bases, mask=sub_mask)
                     iris.atomic_xchg(flags + idx, 1, cur_rank, next_rank, heap_bases, sem="release", scope="sys")
@@ -223,6 +229,12 @@ def persistent_all_reduce(
 
                 # Forward unless this is the last hop for this tile
                 if s < group_size - 1:
+                    # Wait for NEXT rank to be ready (its flag should be 0, meaning it finished previous step)
+                    while (
+                        iris.atomic_cas(flags + idx, 0, 0, cur_rank, next_rank, heap_bases, sem="acquire", scope="sys")
+                        != 0
+                    ):
+                        pass
                     iris.store(ring_buffer + goff, acc, cur_rank, next_rank, heap_bases, mask=sub_mask)
                     iris.atomic_xchg(flags + idx, 1, cur_rank, next_rank, heap_bases, sem="release", scope="sys")
                 else:
