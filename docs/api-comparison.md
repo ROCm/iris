@@ -251,6 +251,38 @@ def transfer_kernel(remote_ptr, local_ptr, backend: iris_gl.IrisBackend):
 
 ---
 
+## Copy Between Ranks
+
+The `copy` function enables direct copying between any two ranks (where current rank must be either source or destination).
+
+### Original API
+
+```python
+@triton.jit
+def copy_kernel(src_ptr, dst_ptr, cur_rank, heap_bases):
+    offsets = tl.arange(0, 64)
+    
+    # Copy from rank 1 to rank 2 (when cur_rank is either 1 or 2)
+    iris.copy(src_ptr + offsets, dst_ptr + offsets, 1, 2, cur_rank, heap_bases)
+```
+
+### Gluon API
+
+```python
+@triton.jit
+def copy_kernel(src_ptr, dst_ptr, backend: iris_gl.IrisBackend):
+    offsets = tl.arange(0, 64)
+    
+    # Copy from rank 1 to rank 2 (cur_rank automatically from backend)
+    backend.copy(src_ptr + offsets, dst_ptr + offsets, 1, 2)
+```
+
+**Key Differences:**
+- ✅ No need to pass `cur_rank` explicitly - it's in the backend
+- ✅ More flexible than get/put for rank-to-rank copies
+
+---
+
 ## Memory Semantics and Scope
 
 Both APIs support the same memory semantics and scope parameters:

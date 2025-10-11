@@ -205,6 +205,47 @@ class IrisDeviceCtx:
         gl.store(translated_to_ptr, data, mask=mask)
 
     @gluon.jit
+    def copy(self, src_ptr, dst_ptr, from_rank, to_rank, mask=None):
+        """
+        Copies data from the specified rank's memory into the destination rank's memory.
+        
+        This function performs the transfer by translating src_ptr from the from_rank's address
+        space to the to_rank's address space, performing a masked load from the translated
+        source, and storing the loaded data to dst_ptr in the to_rank memory location.
+        If from_rank and to_rank are the same, this function performs a local copy operation.
+        It is undefined behaviour if neither from_rank nor to_rank is the cur_rank.
+
+        Args:
+            src_ptr: Pointer in the from_rank's local memory from which to read data
+            dst_ptr: Pointer in the to_rank's local memory where the data will be written
+            from_rank: The rank ID that owns src_ptr (source rank)
+            to_rank: The rank ID that will receive the data (destination rank)
+            mask: Optional mask for conditional operations
+
+        Example:
+            >>> # Copy from rank 1 to rank 0 (current rank must be either 1 or 0)
+            >>> ctx.copy(remote_ptr + offsets, local_ptr + offsets, 1, 0, mask=mask)
+        """
+        cur_base = gl.load(self.heap_bases + self.cur_rank)
+        from_base = gl.load(self.heap_bases + from_rank)
+        to_base = gl.load(self.heap_bases + to_rank)
+
+        src_ptr_int = tl.cast(src_ptr, gl.uint64)
+        src_offset = src_ptr_int - cur_base
+
+        dst_ptr_int = tl.cast(dst_ptr, gl.uint64)
+        dst_offset = dst_ptr_int - cur_base
+
+        from_base_byte = tl.cast(from_base, gl.pointer_type(gl.int8))
+        to_base_byte = tl.cast(to_base, gl.pointer_type(gl.int8))
+
+        translated_src = tl.cast(from_base_byte + src_offset, src_ptr.dtype)
+        translated_dst = tl.cast(to_base_byte + dst_offset, src_ptr.dtype)
+
+        data = gl.load(translated_src, mask=mask)
+        gl.store(translated_dst, data, mask=mask)
+
+    @gluon.jit
     def atomic_add(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
         """
         Performs an atomic add at the specified rank's memory location.
