@@ -13,7 +13,7 @@ import argparse
 import json
 
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set
-from examples.common.validation import validate_gemm
+from examples.common.validation import validate_gemm, validate_all_scatter
 
 import iris
 
@@ -29,9 +29,15 @@ def parse_args():
         description="Parse matrix dimensions and configuration.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-m", type=int, default=8192, help="Number of rows in matrix A")
-    parser.add_argument("-n", type=int, default=4608, help="Number of columns in matrix B")
-    parser.add_argument("-k", type=int, default=36864, help="Common dimension between matrices A and B")
+    parser.add_argument("-m", type=int, default=8192, help="Number of rows in matrix A (GEMM)")
+    parser.add_argument("-n", type=int, default=4608, help="Number of columns in matrix B (GEMM)")
+    parser.add_argument("-k", type=int, default=36864, help="Common dimension between matrices A and B (GEMM)")
+    parser.add_argument(
+        "--m_comm", type=int, default=None, help="Number of rows for communication tensor (defaults to m)"
+    )
+    parser.add_argument(
+        "--n_comm", type=int, default=None, help="Total number of columns for communication tensor (defaults to n)"
+    )
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
     parser.add_argument("-t", "--trace_tiles", action="store_true", help="Enable tile-tracing mode")
@@ -95,6 +101,20 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     assert args["n"] % world_size == 0, f"N ({args['n']}) must be divisible by world size ({world_size})."
     assert args["k"] % world_size == 0, f"K ({args['k']}) must be divisible by world size ({world_size})."
 
+    # Set default values for communication dimensions if not provided
+    if args["m_comm"] is None:
+        args["m_comm"] = args["m"]
+    if args["n_comm"] is None:
+        args["n_comm"] = args["n"]
+
+    # Validate communication dimensions
+    assert args["n_comm"] % world_size == 0, (
+        f"Communication N ({args['n_comm']}) must be divisible by world size ({world_size})"
+    )
+
+    # Calculate per-rank communication columns
+    n_comm_local = args["n_comm"] // world_size
+
     A = shmem.randn(args["m"], args["k"], device="cuda", dtype=datatype)
     B = shmem.randn(args["n"], args["k"], device="cuda", dtype=datatype).T
 
@@ -108,7 +128,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         json_writer.add_field(key, value)
 
     C = shmem.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
-    C_comm = shmem.randn(args["m"], args["n"], device="cuda", dtype=datatype)
+    # Create global communication tensor that will hold scattered results from all ranks
+    C_comm_global = shmem.zeros((args["m_comm"], args["n_comm"]), device="cuda", dtype=datatype)
+    # Initialize this rank's portion in the global tensor with rank-specific data
+    C_comm_global[:, rank * n_comm_local : (rank + 1) * n_comm_local].fill_(rank + 1.0)
+    # Local communication tensor - this rank's portion (view for validation)
+    C_comm = C_comm_global[:, rank * n_comm_local : (rank + 1) * n_comm_local].clone()
 
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
@@ -146,6 +171,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     def run_experiment():
         nonlocal C
         nonlocal C_comm
+        nonlocal C_comm_global
         nonlocal kernel_timing
 
         shmem.barrier()
@@ -184,11 +210,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         with torch.cuda.stream(comm_stream):
             kernel_timing["communication"]["start_event"].record()
             persistent_all_scatter[(args["comm_sms"],)](
-                C_comm,
-                args["m"],
-                args["n"],
-                C_comm.stride(0),
-                C_comm.stride(1),
+                C_comm_global,
+                args["m_comm"],
+                n_comm_local,
+                C_comm_global.stride(0),
+                C_comm_global.stride(1),
                 args["BLK_M"],
                 args["BLK_N"],
                 args["gsize_m"],
@@ -227,16 +253,33 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     if args["validate"]:
         shmem.info("Validating...")
         matmul.set_debug(True)
-        # Validate global result
-        success = validate_gemm(A, B, C, shmem)
-        passed_str = "passed" if success else "failed"
-        shmem.info(f"Final C validation {passed_str}.")
+
+        # Validate GEMM result
+        shmem.info("Validating GEMM operation...")
+        success_gemm = validate_gemm(A, B, C, shmem)
+        passed_str = "passed" if success_gemm else "failed"
+        shmem.info(f"GEMM validation {passed_str}.")
+
+        # Wait for all to finish GEMM validation
+        shmem.barrier()
+
+        # Validate all-scatter result
+        shmem.info("Validating all-scatter operation...")
+        success_comm = validate_all_scatter(C_comm, C_comm_global, shmem)
+        passed_str = "passed" if success_comm else "failed"
+        shmem.info(f"All-scatter validation {passed_str}.")
+
+        # Overall success
+        success = success_gemm and success_comm
+        overall_str = "passed" if success else "failed"
+        shmem.info(f"Overall validation {overall_str}.")
 
         # Wait for all to finish validation
         shmem.barrier()
-        shmem.info("Validating local C...")
 
         json_writer.add_field("success", success)
+        json_writer.add_field("success_gemm", success_gemm)
+        json_writer.add_field("success_comm", success_comm)
 
         if not is_triton_interpret_set():
             gemm_registers = matmul.get_matmul_registers()
