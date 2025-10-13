@@ -32,8 +32,12 @@ def parse_args():
     parser.add_argument("-m", type=int, default=8192, help="Number of rows in matrix A (GEMM)")
     parser.add_argument("-n", type=int, default=4608, help="Number of columns in matrix B (GEMM)")
     parser.add_argument("-k", type=int, default=36864, help="Common dimension between matrices A and B (GEMM)")
-    parser.add_argument("--m_comm", type=int, default=None, help="Number of rows for communication tensor (defaults to m)")
-    parser.add_argument("--n_comm", type=int, default=None, help="Number of columns per rank for communication tensor (defaults to n)")
+    parser.add_argument(
+        "--m_comm", type=int, default=None, help="Number of rows for communication tensor (defaults to m)"
+    )
+    parser.add_argument(
+        "--n_comm", type=int, default=None, help="Number of columns per rank for communication tensor (defaults to n)"
+    )
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
     parser.add_argument("-t", "--trace_tiles", action="store_true", help="Enable tile-tracing mode")
@@ -96,16 +100,17 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     assert args["n"] % world_size == 0, f"N ({args['n']}) must be divisible by world size ({world_size})."
     assert args["k"] % world_size == 0, f"K ({args['k']}) must be divisible by world size ({world_size})."
-    
+
     # Set default values for communication dimensions if not provided
     if args["m_comm"] is None:
         args["m_comm"] = args["m"]
     if args["n_comm"] is None:
         args["n_comm"] = args["n"] // world_size
-    
+
     # Validate communication dimensions
-    assert args["n_comm"] * world_size <= args["n"] * world_size, \
+    assert args["n_comm"] * world_size <= args["n"] * world_size, (
         f"Communication N ({args['n_comm']} * {world_size}) cannot exceed total columns"
+    )
 
     A = shmem.randn(args["m"], args["k"], device="cuda", dtype=datatype)
     B = shmem.randn(args["n"], args["k"], device="cuda", dtype=datatype).T
@@ -245,22 +250,22 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     if args["validate"]:
         shmem.info("Validating...")
         matmul.set_debug(True)
-        
+
         # Validate GEMM result
         shmem.info("Validating GEMM operation...")
         success_gemm = validate_gemm(A, B, C, shmem)
         passed_str = "passed" if success_gemm else "failed"
         shmem.info(f"GEMM validation {passed_str}.")
-        
+
         # Wait for all to finish GEMM validation
         shmem.barrier()
-        
+
         # Validate all-scatter result
         shmem.info("Validating all-scatter operation...")
         success_comm = validate_all_scatter(C_comm, C_comm_global, shmem)
         passed_str = "passed" if success_comm else "failed"
         shmem.info(f"All-scatter validation {passed_str}.")
-        
+
         # Overall success
         success = success_gemm and success_comm
         overall_str = "passed" if success else "failed"
