@@ -127,10 +127,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     C = shmem.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
     # Create global communication tensor that will hold scattered results from all ranks
     C_comm_global = shmem.zeros((args["m_comm"], args["n_comm"] * world_size), device="cuda", dtype=datatype)
-    # Local communication tensor - this rank's portion to scatter
+    # Initialize this rank's portion in the global tensor with rank-specific data
+    C_comm_global[:, rank * args["n_comm"] : (rank + 1) * args["n_comm"]].fill_(rank + 1.0)
+    # Local communication tensor - this rank's portion (view for validation)
     C_comm = C_comm_global[:, rank * args["n_comm"] : (rank + 1) * args["n_comm"]].clone()
-    # Initialize with some data for validation
-    C_comm.fill_(rank + 1.0)  # Each rank fills with its rank + 1 for easy validation
 
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
