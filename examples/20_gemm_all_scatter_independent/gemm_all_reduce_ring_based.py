@@ -213,25 +213,25 @@ def persistent_all_reduce(
                         pass
                     # Send to NEXT and signal that tile 'idx' is ready for neighbor
                     iris.store(ring_buffer + goff, acc, cur_rank, next_rank, heap_bases, mask=sub_mask)
-                    tl.debug_barrier() # Wait for all stores to complete before releasing the lock.
+                    tl.debug_barrier()  # Wait for all stores to complete before releasing the lock.
                     iris.atomic_xchg(flags + idx, 1, cur_rank, next_rank, heap_bases, sem="release", scope="sys")
             else:
                 # Receive the traveling accumulator for this tile from PREV
                 while tl.atomic_cas(flags + idx, 0, 0, sem="acquire", scope="sys") != 1:
                     pass
                 recv = tl.load(ring_buffer + goff, mask=sub_mask, other=0).to(acc_dtype)
-                
+
                 # Wait for all to complete before releasing the lock.
                 # This one can technically be moved lower (closer to recv = tl.load),
                 # However, doing it much later allows for the two individual loads to issue and much-much
                 # later reset the lock.
-                tl.debug_barrier() 
+                tl.debug_barrier()
                 tl.atomic_xchg(flags + idx, 0, sem="release", scope="sys")  # clear local flag
-                
+
                 # Fold in our local partial (wait if GEMM not done yet)
                 while tl.atomic_cas(locks + idx, 0, 0, sem="acquire", scope="gpu") != 1:
                     pass
-                
+
                 part = tl.load(local_C + goff, mask=sub_mask, other=0).to(acc_dtype)
                 acc = recv + part
 
