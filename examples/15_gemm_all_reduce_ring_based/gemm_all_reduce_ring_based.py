@@ -181,7 +181,7 @@ def persistent_all_reduce(
             # Tile index this rank handles at step s
             idx = group_base + ((cur_rank + group_size - s) % group_size)
 
-            # Map linear tile idx -> (pid_m, pid_n) using your existing swizzle
+            # Map linear tile idx -> (pid_m, pid_n) using existing swizzle
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
             group_id = idx // num_pid_in_group
             first_pid_m = group_id * GROUP_SIZE_M
@@ -213,17 +213,25 @@ def persistent_all_reduce(
                         pass
                     # Send to NEXT and signal that tile 'idx' is ready for neighbor
                     iris.store(ring_buffer + goff, acc, cur_rank, next_rank, heap_bases, mask=sub_mask)
+                    tl.debug_barrier() # Wait for all stores to complete before releasing the lock.
                     iris.atomic_xchg(flags + idx, 1, cur_rank, next_rank, heap_bases, sem="release", scope="sys")
             else:
                 # Receive the traveling accumulator for this tile from PREV
                 while tl.atomic_cas(flags + idx, 0, 0, sem="acquire", scope="sys") != 1:
                     pass
                 recv = tl.load(ring_buffer + goff, mask=sub_mask, other=0).to(acc_dtype)
+                
+                # Wait for all to complete before releasing the lock.
+                # This one can technically be moved lower (closer to recv = tl.load),
+                # However, doing it much later allows for the two individual loads to issue and much-much
+                # later reset the lock.
+                tl.debug_barrier() 
                 tl.atomic_xchg(flags + idx, 0, sem="release", scope="sys")  # clear local flag
-
+                
                 # Fold in our local partial (wait if GEMM not done yet)
                 while tl.atomic_cas(locks + idx, 0, 0, sem="acquire", scope="gpu") != 1:
                     pass
+                
                 part = tl.load(local_C + goff, mask=sub_mask, other=0).to(acc_dtype)
                 acc = recv + part
 
@@ -236,6 +244,7 @@ def persistent_all_reduce(
                     ):
                         pass
                     iris.store(ring_buffer + goff, acc, cur_rank, next_rank, heap_bases, mask=sub_mask)
+                    tl.debug_barrier()
                     iris.atomic_xchg(flags + idx, 1, cur_rank, next_rank, heap_bases, sem="release", scope="sys")
                 else:
                     # Last hop for tile idx on this rank: we own the fully reduced acc
