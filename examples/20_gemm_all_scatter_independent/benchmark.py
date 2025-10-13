@@ -36,7 +36,7 @@ def parse_args():
         "--m_comm", type=int, default=None, help="Number of rows for communication tensor (defaults to m)"
     )
     parser.add_argument(
-        "--n_comm", type=int, default=None, help="Number of columns per rank for communication tensor (defaults to n)"
+        "--n_comm", type=int, default=None, help="Total number of columns for communication tensor (defaults to n)"
     )
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
@@ -105,12 +105,15 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     if args["m_comm"] is None:
         args["m_comm"] = args["m"]
     if args["n_comm"] is None:
-        args["n_comm"] = args["n"] // world_size
+        args["n_comm"] = args["n"]
 
     # Validate communication dimensions
-    assert args["n_comm"] * world_size <= args["n"] * world_size, (
-        f"Communication N ({args['n_comm']} * {world_size}) cannot exceed total columns"
+    assert args["n_comm"] % world_size == 0, (
+        f"Communication N ({args['n_comm']}) must be divisible by world size ({world_size})"
     )
+
+    # Calculate per-rank communication columns
+    n_comm_local = args["n_comm"] // world_size
 
     A = shmem.randn(args["m"], args["k"], device="cuda", dtype=datatype)
     B = shmem.randn(args["n"], args["k"], device="cuda", dtype=datatype).T
@@ -126,11 +129,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     C = shmem.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
     # Create global communication tensor that will hold scattered results from all ranks
-    C_comm_global = shmem.zeros((args["m_comm"], args["n_comm"] * world_size), device="cuda", dtype=datatype)
+    C_comm_global = shmem.zeros((args["m_comm"], args["n_comm"]), device="cuda", dtype=datatype)
     # Initialize this rank's portion in the global tensor with rank-specific data
-    C_comm_global[:, rank * args["n_comm"] : (rank + 1) * args["n_comm"]].fill_(rank + 1.0)
+    C_comm_global[:, rank * n_comm_local : (rank + 1) * n_comm_local].fill_(rank + 1.0)
     # Local communication tensor - this rank's portion (view for validation)
-    C_comm = C_comm_global[:, rank * args["n_comm"] : (rank + 1) * args["n_comm"]].clone()
+    C_comm = C_comm_global[:, rank * n_comm_local : (rank + 1) * n_comm_local].clone()
 
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
@@ -209,7 +212,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             persistent_all_scatter[(args["comm_sms"],)](
                 C_comm_global,
                 args["m_comm"],
-                args["n_comm"],
+                n_comm_local,
                 C_comm_global.stride(0),
                 C_comm_global.stride(1),
                 args["BLK_M"],
