@@ -119,19 +119,17 @@ def persistent_gemm(
         # Define the C-mask (BLOCK_SIZE_M, 1) x (1, BLOCK_SIZE_N)
         sub_mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-        # Calculate the "global" offset of C based on the rank.
-        # Note how the N-dimension is being multiplied by current rank.
-        # This is because each rank is computing a portion of the N-dimension
-        # locally and then scattering it to all other ranks to complete
-        # the global N-dimension.
-        global_offset = rm[:, None] * stride_cm + (rn[None, :] + cur_rank * N) * stride_cn
+        # Calculate the local offset of C.
+        # In this independent GEMM version, each rank computes its full local result
+        # without scattering during GEMM. Scattering is done separately.
+        local_offset = rm[:, None] * stride_cm + rn[None, :] * stride_cn
 
         # Timestamp for GEMM before store
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
-        tl.store(C + global_offset, c, mask=sub_mask, cache_modifier=".wt")
+        tl.store(C + local_offset, c, mask=sub_mask, cache_modifier=".wt")
 
 
 @triton.jit()
