@@ -251,6 +251,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         kernel_timing[k]["experiments"] = 0
 
     if args["validate"]:
+        # Ensure all GPU kernels have completed before validation
+        torch.cuda.synchronize()
+        shmem.barrier()
+        
         shmem.info("Validating...")
         matmul.set_debug(True)
 
