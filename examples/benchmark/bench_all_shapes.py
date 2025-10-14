@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 import argparse
 import json
+import torch
 
 
 def launch_sbatch(
@@ -110,16 +111,28 @@ def main(hashes, config, sbatch_script_content, input_json, tiling_json, dry_run
         if mkn not in mkn_gemm_tiles:
             mkn_gemm_tiles[mkn] = {key: entry[key] for key in optional_keys if key in entry}
 
-    if config["partition"] is not None:
-        if "mi300" in config["partition"]:
-            print("Running on MI300")
+    # Determine gemm_sms based on available GPU or partition name
+    try:
+        if torch.cuda.is_available():
+            gemm_sms = torch.cuda.get_device_properties(0).multi_processor_count
+            print(f"Auto-detected CU count: {gemm_sms}")
+        else:
+            gemm_sms = None
+    except Exception:
+        # Fall back to partition-based detection
+        gemm_sms = None
+
+    if gemm_sms is None:
+        if config["partition"] is not None:
+            if "mi300" in config["partition"]:
+                print("Running on MI300 (partition-based)")
+                gemm_sms = 304
+            elif "mi250" in config["partition"]:
+                print("Running on MI250 (partition-based)")
+                gemm_sms = 104
+        else:
+            print("Assuming MI300 (default)")
             gemm_sms = 304
-        elif "mi250" in config["partition"]:
-            print("Running on MI250")
-            gemm_sms = 104
-    else:
-        print("Assuming MI300")
-        gemm_sms = 304
 
     enable_algorithms = False
     enable_mkn = True

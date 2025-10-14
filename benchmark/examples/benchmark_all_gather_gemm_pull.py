@@ -63,7 +63,9 @@ def parse_args():
     parser.add_argument("--BLK_N", type=int, default=64, help="Block size N for the kernel")
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K for the kernel")
     parser.add_argument("--gsize_m", type=int, default=6, help="Group size in M dimension")
-    parser.add_argument("--num_sms", type=int, default=304, help="Number of SMs for the kernel")
+    parser.add_argument(
+        "--num_sms", type=int, default=None, help="Number of SMs for the kernel (default: auto-detected)"
+    )
 
     parser.add_argument("--num_ranks", type=int, default=8, help="Number of GPUs to run the example on.")
 
@@ -75,7 +77,9 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
     This function will be executed by each spawned process.
     """
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=rank)
+    dist.init_process_group(
+        backend=backend, init_method=init_url, world_size=world_size, rank=rank, device_id=torch.device(f"cuda:{rank}")
+    )
 
     shmem = iris.iris(args.heap_size)
     torch.cuda.set_device(rank)
@@ -138,7 +142,12 @@ def worker(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
         A_local_iris = shmem.empty((M, K_local), dtype=datatype)
         A_local_iris.copy_(A_local)
 
-        num_sms = torch.cuda.get_device_properties(rank).multi_processor_count
+        # Use provided num_sms or auto-detect
+        if run_args["num_sms"] is None:
+            num_sms = torch.cuda.get_device_properties(rank).multi_processor_count
+            run_args["num_sms"] = num_sms
+        else:
+            num_sms = run_args["num_sms"]
 
         main_stream = torch.cuda.Stream()
         kernel_timing = {
