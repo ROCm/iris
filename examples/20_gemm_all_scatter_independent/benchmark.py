@@ -130,10 +130,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     C = shmem.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
     # Create global communication tensor that will hold scattered results from all ranks
     C_comm_global = shmem.zeros((args["m_comm"], args["n_comm"]), device="cuda", dtype=datatype)
-    # Initialize this rank's portion in the global tensor with rank-specific data
-    C_comm_global[:, rank * n_comm_local : (rank + 1) * n_comm_local].fill_(rank + 1.0)
-    # Local communication tensor - this rank's portion (view for validation)
-    C_comm = C_comm_global[:, rank * n_comm_local : (rank + 1) * n_comm_local].clone()
+    # Create local communication tensor with rank-specific data
+    C_comm = shmem.full((args["m_comm"], n_comm_local), rank + 1.0, device="cuda", dtype=datatype)
+    # Initialize this rank's portion in the global tensor with the local data
+    C_comm_global[:, rank * n_comm_local : (rank + 1) * n_comm_local] = C_comm
 
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
@@ -251,6 +251,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         kernel_timing[k]["experiments"] = 0
 
     if args["validate"]:
+        # Ensure all GPU kernels have completed before validation
+        torch.cuda.synchronize()
+        shmem.barrier()
+
         shmem.info("Validating...")
         matmul.set_debug(True)
 
