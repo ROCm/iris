@@ -35,10 +35,17 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     fi
     
 elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
-    echo "[INFO] Building with Docker..."
-    IMAGE_NAME=${1:-"iris-dev"}
-    # We don't want to build a docker container for now.
-    # bash docker/build.sh "$IMAGE_NAME"
+    echo "[INFO] Checking Docker images..."
+    IMAGE_NAME="iris-dev-triton-aafec41"
+    
+    # Check if the triton image exists
+    if docker image inspect "$IMAGE_NAME" &> /dev/null; then
+        echo "[INFO] Using existing Docker image: $IMAGE_NAME"
+    else
+        echo "[WARNING] Docker image $IMAGE_NAME not found"
+        echo "[INFO] Please build it using: ./build_triton_image.sh"
+        echo "[INFO] Or pull it if available from registry"
+    fi
 fi
 
 echo "[INFO] Container build completed successfully with $CONTAINER_RUNTIME"

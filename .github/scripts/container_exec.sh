@@ -80,7 +80,7 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     $EXEC_CMD "$IMAGE" bash -c "$COMMAND"
     
 elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
-    IMAGE_NAME=${CUSTOM_IMAGE:-${DOCKER_IMAGE_NAME:-"iris-dev"}}
+    IMAGE_NAME=${CUSTOM_IMAGE:-${DOCKER_IMAGE_NAME:-"iris-dev-triton-aafec41"}}
     
     if ! docker image inspect "$IMAGE_NAME" &> /dev/null; then
         echo "[ERROR] Docker image $IMAGE_NAME not found"

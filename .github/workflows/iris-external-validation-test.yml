@@ -64,3 +64,32 @@ jobs:
           echo "::endgroup::"
 
           echo "✅ External validation test passed!"
+
+  external-gluon-validation-test:
+    name: External Gluon Validation Test
+    needs: build-container-image
+    runs-on: [self-hosted, mi3008x]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cleanup lingering ports before tests
+        run: |
+          bash .github/scripts/cleanup_ports.sh
+
+      - name: Run External Gluon Validation Test
+        run: |
+          set -e
+
+          echo "::group::Running external gluon validation test"
+          bash .github/scripts/container_exec.sh --gpus "0,1" "
+            set -e
+            pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
+            wget -O test_iris_gluon_distributed.py https://gist.githubusercontent.com/mawad-amd/2666dde8ebe2755eb0c4f2108709fcd5/raw/aa567ef3185c37a80d25bc9724ae9589548261b4/test_iris_gluon_distributed.py
+            python test_iris_gluon_distributed.py
+          "
+          echo "::endgroup::"
+
+          echo "✅ External gluon validation test passed!"
