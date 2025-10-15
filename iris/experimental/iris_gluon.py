@@ -52,7 +52,7 @@ import ctypes
 import logging
 
 # Import logging functionality from the separate logging module
-from .logging import logger
+from ..logging import logger
 
 
 @aggregate
