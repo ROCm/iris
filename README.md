@@ -27,7 +27,6 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 - [Examples](https://rocm.github.io/iris/reference/examples.html)
 - [Fine-grained GEMM & Communication Overlap](https://rocm.github.io/iris/conceptual/finegrained-overlap.html)
 - [Setup Alternatives](https://rocm.github.io/iris/getting-started/installation.html)
-- [API Comparison](docs/api-comparison.md) - Original vs Gluon API comparison
 
 ## API Example
 
