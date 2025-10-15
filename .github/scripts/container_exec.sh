@@ -92,6 +92,7 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     RUN_CMD="$RUN_CMD --cap-add=SYS_PTRACE --security-opt seccomp=unconfined"
     RUN_CMD="$RUN_CMD -v ${PWD}:/iris_workspace -w /iris_workspace"
     RUN_CMD="$RUN_CMD --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864"
+    RUN_CMD="$RUN_CMD --entrypoint bash"
     
     # Add GPU selection if specified
     if [ -n "$GPU_DEVICES" ]; then
@@ -99,6 +100,6 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     fi
     
     # Execute
-    $RUN_CMD "$IMAGE_NAME" bash -c "$COMMAND"
+    $RUN_CMD "$IMAGE_NAME" -c "$COMMAND"
 fi
 
