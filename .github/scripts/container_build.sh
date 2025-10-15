@@ -37,7 +37,8 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
 elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     echo "[INFO] Building with Docker..."
     IMAGE_NAME=${1:-"iris-dev"}
-    bash docker/build.sh "$IMAGE_NAME"
+    # We don't want to build a docker container for now.
+    # bash docker/build.sh "$IMAGE_NAME"
 fi
 
 echo "[INFO] Container build completed successfully with $CONTAINER_RUNTIME"
