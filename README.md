@@ -105,9 +105,12 @@ if __name__ == "__main__":
 Iris also provides an experimental cleaner API using Triton's Gluon with `@gluon.jit` decorator:
 
 ```python
-import iris.experimental.iris_gluon as iris_gl
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+import iris.experimental.iris_gluon as iris_gl
 
 # Device-side APIs - context encapsulates heap_bases
 @gluon.jit
@@ -127,18 +130,42 @@ def kernel(IrisDeviceCtx: gl.constexpr, context_tensor,
     ctx.store(buffer + offsets, 1, target_rank, mask=mask)
 
 def _worker(rank, world_size):
-    # Initialize as before...
+    # Torch distributed initialization
+    device_id = rank % torch.cuda.device_count()
+    dist.init_process_group(
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
+        init_method="tcp://127.0.0.1:29500",
+        device_id=torch.device(f"cuda:{device_id}")
+    )
+
+    # Iris initialization
+    heap_size = 2**30   # 1GiB symmetric heap
     iris_ctx = iris_gl.iris(heap_size)
     context_tensor = iris_ctx.get_device_context()  # Get encoded context
+    cur_rank = iris_ctx.get_rank()
     
+    # Iris tensor allocation
+    buffer_size = 4096  # 4K elements buffer
     buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
     
+    # Launch the kernel on rank 0
+    block_size = 1024
+    grid = (buffer_size + block_size - 1) // block_size
+    source_rank = 0
     if cur_rank == source_rank:
         kernel[(grid,)](iris_gl.IrisDeviceCtx, context_tensor, 
                        buffer, buffer_size, block_size, num_warps=1)
-```
 
-See [docs/api-comparison.md](docs/api-comparison.md) for a complete comparison.
+    # Synchronize all ranks
+    iris_ctx.barrier()
+    dist.destroy_process_group()
+
+if __name__ == "__main__":
+    world_size = 2  # Using two ranks
+    mp.spawn(_worker, args=(world_size,), nprocs=world_size, join=True)
+```
 
 ## Quick Start Guide
 
