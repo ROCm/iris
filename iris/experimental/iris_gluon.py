@@ -208,7 +208,7 @@ class IrisDeviceCtx:
     def copy(self, src_ptr, dst_ptr, from_rank, to_rank, mask=None):
         """
         Copies data from the specified rank's memory into the destination rank's memory.
-        
+
         This function performs the transfer by translating src_ptr from the from_rank's address
         space to the to_rank's address space, performing a masked load from the translated
         source, and storing the loaded data to dst_ptr in the to_rank memory location.
