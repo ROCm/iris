@@ -13,6 +13,15 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 Iris is a Triton-based framework for Remote Memory Access (RMA) operations developed by AMD's Research and Advanced Development team. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton's programmability and performance.
 
+## Latest with Iris 🔥
+
+- Iris + Gluon Released
+- Iris All-Scatter Taxonomy Released
+- FlashDecode with Iris
+- AMD's GPU Mode Competition Announced
+- Presented Iris at [GPUMode]()
+- Iris Released
+
 ## Key Features
 
 - **SHMEM-like RMA**: Iris provides SHMEM-like RMA support in Triton.
