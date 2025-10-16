@@ -55,7 +55,14 @@ jobs:
           chmod +x build_docs.sh
           ./build_docs.sh
           
-      - name: Upload artifact
+      - name: Upload documentation artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: docs/_build/html
+          retention-days: 30
+          
+      - name: Upload artifact for GitHub Pages
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/_build/html
