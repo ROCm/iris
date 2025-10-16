@@ -28,10 +28,12 @@ def atomic_and_kernel(
 
     bit = (cur_rank // 32) % 2
     val = bit << (cur_rank % results.dtype.element_ty.primitive_bitwidth)
-    acc = gl.full([BLOCK_SIZE], val, dtype=results.dtype.element_ty)
+    acc = gl.full([BLOCK_SIZE], val, results.type.element_ty, layout)
 
     for target_rank in range(num_ranks):
-        ctx.atomic_and(results + offsets, acc, target_rank, mask=mask, sem=sem, scope=scope)
+        ctx.atomic_and(
+            results + offsets, acc, target_rank, mask=mask, sem=sem, scope=scope
+        )
 
 
 @pytest.mark.parametrize(

@@ -27,7 +27,7 @@ def atomic_xor_kernel(
     mask = offsets < BLOCK_SIZE
 
     # Use 1 as the xor operand
-    acc = gl.full([BLOCK_SIZE], 1, dtype=results.dtype.element_ty)
+    acc = gl.full([BLOCK_SIZE], 1, results.type.element_ty, layout)
 
     # Loop over all ranks and atomically xor acc into results.
     for target_rank in range(num_ranks):

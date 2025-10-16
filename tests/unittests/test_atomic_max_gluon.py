@@ -26,7 +26,7 @@ def atomic_max_kernel(
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 
-    acc = gl.full([BLOCK_SIZE], cur_rank + 1, dtype=results.dtype.element_ty)
+    acc = gl.full([BLOCK_SIZE], cur_rank + 1, results.type.element_ty, layout)
 
     for target_rank in range(num_ranks):
         ctx.atomic_max(results + offsets, acc, target_rank, mask=mask, sem=sem, scope=scope)

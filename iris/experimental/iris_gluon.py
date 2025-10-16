@@ -181,7 +181,7 @@ class IrisDeviceCtx:
             >>> # Copy from rank 1 to current rank's local memory
             >>> ctx.get(remote_ptr + offsets, local_ptr + offsets, 1, mask=mask)
         """
-        translated_from_ptr = self._translate(from_ptr, from_rank, self.cur_rank)
+        translated_from_ptr = self._translate(from_ptr, self.cur_rank, from_rank)
         data = gl.load(translated_from_ptr, mask=mask)
         gl.store(to_ptr, data, mask=mask)
 
@@ -497,8 +497,12 @@ class IrisGluon:
 
         distributed_barrier()
 
-        all_ipc_handles = distributed_allgather(np.frombuffer(ipc_handle, dtype=np.uint8))
-        all_heap_bases = distributed_allgather(np.array([heap_bases[cur_rank]], dtype=np.uint64))
+        all_ipc_handles = distributed_allgather(
+            np.frombuffer(ipc_handle, dtype=np.uint8)
+        )
+        all_heap_bases = distributed_allgather(
+            np.array([heap_bases[cur_rank]], dtype=np.uint64)
+        )
 
         distributed_barrier()
 
@@ -514,7 +518,9 @@ class IrisGluon:
             self.debug(f"GPU {i}: Heap base {hex(int(ipc_heap_bases[i]))}")
 
         distributed_barrier()
-        self.heap_bases = torch.from_numpy(ipc_heap_bases).to(device=self.device, dtype=torch.uint64)
+        self.heap_bases = torch.from_numpy(ipc_heap_bases).to(
+            device=self.device, dtype=torch.uint64
+        )
 
         distributed_barrier()
 
@@ -562,7 +568,9 @@ class IrisGluon:
 
         # Create context tensor: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
         context_data = [self.cur_rank, self.num_ranks] + heap_bases_list
-        context_tensor = torch.tensor(context_data, dtype=torch.int64, device=self.device)
+        context_tensor = torch.tensor(
+            context_data, dtype=torch.int64, device=self.device
+        )
 
         return context_tensor
 
@@ -638,8 +646,42 @@ class IrisGluon:
         Returns:
             The broadcasted data
         """
-        if isinstance(data, torch.Tensor):
-            return distributed_broadcast_tensor(data, src_rank)
+        # Check if the value on src_rank is a tensor or array-like
+        if self.cur_rank == src_rank and data is not None:
+            # Explicitly exclude strings and non-numeric types
+            if isinstance(data, (str, dict, bool)):
+                is_tensor = False
+            elif isinstance(data, torch.Tensor):
+                is_tensor = True
+            elif isinstance(data, np.ndarray):
+                is_tensor = True
+            elif isinstance(data, (list, tuple)):
+                # Try to convert list/tuple to tensor to check if it's numeric
+                try:
+                    torch.as_tensor(data)
+                    is_tensor = True
+                except (TypeError, ValueError):
+                    is_tensor = False
+            else:
+                # For other types, try to convert and check
+                try:
+                    test_array = np.asarray(data)
+                    # Check if it's a numeric dtype that torch can handle
+                    if np.issubdtype(test_array.dtype, np.number):
+                        torch.as_tensor(test_array)
+                        is_tensor = True
+                    else:
+                        is_tensor = False
+                except (TypeError, ValueError):
+                    is_tensor = False
+        else:
+            is_tensor = False
+
+        # Broadcast the type decision to all ranks
+        is_tensor = distributed_broadcast_scalar(is_tensor, src_rank)
+
+        if is_tensor:
+            return distributed_broadcast_tensor(data, root=src_rank)
         else:
             return distributed_broadcast_scalar(data, src_rank)
 
@@ -703,7 +745,15 @@ class IrisGluon:
         else:
             raise ValueError(f"Unsupported layout: {layout}")
 
-    def zeros(self, *size, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+    def zeros(
+        self,
+        *size,
+        out=None,
+        dtype=None,
+        layout=torch.strided,
+        device=None,
+        requires_grad=False,
+    ):
         """
         Create a tensor filled with zeros on the symmetric heap.
 
@@ -749,7 +799,15 @@ class IrisGluon:
 
         return tensor
 
-    def ones(self, *size, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+    def ones(
+        self,
+        *size,
+        out=None,
+        dtype=None,
+        layout=torch.strided,
+        device=None,
+        requires_grad=False,
+    ):
         """
         Returns a tensor filled with the scalar value 1, with the shape defined by the variable argument size.
         The tensor is allocated on the Iris symmetric heap.
@@ -775,7 +833,9 @@ class IrisGluon:
             >>> print(tensor.shape)  # torch.Size([2, 3])
             >>> print(tensor[0])  # tensor([1., 1., 1.], device='cuda:0')
         """
-        self.debug(f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
+        self.debug(
+            f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
+        )
 
         # Use global default dtype if None is provided
         if dtype is None:
@@ -814,7 +874,17 @@ class IrisGluon:
 
         return tensor
 
-    def full(self, size, fill_value, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+    def full(
+        self,
+        size,
+        fill_value,
+        *,
+        out=None,
+        dtype=None,
+        layout=torch.strided,
+        device=None,
+        requires_grad=False,
+    ):
         """
         Creates a tensor of size size filled with fill_value. The tensor's dtype is inferred from fill_value.
         The tensor is allocated on the Iris symmetric heap.
@@ -889,7 +959,14 @@ class IrisGluon:
         return tensor
 
     def zeros_like(
-        self, input, *, dtype=None, layout=None, device=None, requires_grad=False, memory_format=torch.preserve_format
+        self,
+        input,
+        *,
+        dtype=None,
+        layout=None,
+        device=None,
+        requires_grad=False,
+        memory_format=torch.preserve_format,
     ):
         """
         Returns a tensor filled with the scalar value 0, with the same size as input, allocated on the Iris symmetric heap.
@@ -953,10 +1030,14 @@ class IrisGluon:
     def __throw_if_invalid_output_tensor(self, out, num_elements, dtype):
         """Check if the output tensor is valid."""
         if out.numel() != num_elements:
-            raise RuntimeError(f"The output tensor has {out.numel()} elements, but {num_elements} are required")
+            raise RuntimeError(
+                f"The output tensor has {out.numel()} elements, but {num_elements} are required"
+            )
 
         if out.dtype != dtype:
-            raise RuntimeError(f"The output tensor has dtype {out.dtype}, but {dtype} is required")
+            raise RuntimeError(
+                f"The output tensor has dtype {out.dtype}, but {dtype} is required"
+            )
 
         if not self.__on_symmetric_heap(out):
             raise RuntimeError("The output tensor is not on the symmetric heap")

@@ -29,7 +29,7 @@ def get_kernel(
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 
-    acc = gl.zeros([BLOCK_SIZE], dtype=data.dtype.element_ty)
+    acc = gl.zeros([BLOCK_SIZE], data.type.element_ty, layout)
 
     # Loop over all ranks, get the stored data.
     # load to local register, accumulate.

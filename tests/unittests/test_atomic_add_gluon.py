@@ -26,10 +26,9 @@ def atomic_add_kernel(
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 
-    acc = gl.full([BLOCK_SIZE], 1, dtype=results.dtype.element_ty)
+    acc = gl.full([BLOCK_SIZE], 1, results.type.element_ty, layout)
 
-    # Loop over all ranks, get the stored data.
-    # atomic_add acc into results.
+    # Loop over all ranks, atomic_add acc into results.
     for target_rank in range(num_ranks):
         ctx.atomic_add(
             results + offsets,
