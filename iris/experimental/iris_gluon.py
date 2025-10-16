@@ -749,6 +749,225 @@ class IrisGluon:
 
         return tensor
 
+    def ones(self, *size, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+        """
+        Returns a tensor filled with the scalar value 1, with the shape defined by the variable argument size.
+        The tensor is allocated on the Iris symmetric heap.
+
+        Args:
+            *size (int...): a sequence of integers defining the shape of the output tensor.
+                Can be a variable number of arguments or a collection like a list or tuple.
+
+        Keyword Arguments:
+            out (Tensor, optional): the output tensor.
+            dtype (torch.dtype, optional): the desired data type of returned tensor.
+                Default: if None, uses a global default (see torch.set_default_dtype()).
+            layout (torch.layout, optional): the desired layout of returned Tensor.
+                Default: torch.strided. Note: Iris tensors always use `torch.strided` regardless of this parameter.
+            device (torch.device, optional): the desired device of returned tensor.
+                Default: if None, uses the current device for the default tensor type.
+            requires_grad (bool, optional): If autograd should record operations on the returned tensor.
+                Default: False.
+
+        Example:
+            >>> ctx = iris_gluon.iris(1 << 20)
+            >>> tensor = ctx.ones(2, 3)
+            >>> print(tensor.shape)  # torch.Size([2, 3])
+            >>> print(tensor[0])  # tensor([1., 1., 1.], device='cuda:0')
+        """
+        self.debug(f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
+
+        # Use global default dtype if None is provided
+        if dtype is None:
+            dtype = torch.get_default_dtype()
+
+        # Use current device if none specified
+        if device is None:
+            device = self.device
+
+        # Validate device compatibility with Iris
+        self.__throw_if_invalid_device(device)
+
+        # Parse size and calculate number of elements
+        size, num_elements = self.__parse_size(size)
+
+        # If out is provided, use it; otherwise allocate new tensor
+        if out is not None:
+            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            # Fill with ones
+            out.fill_(1)
+            # Create a reshaped view of the out tensor
+            tensor = out.view(size)
+        else:
+            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
+            # Fill with ones
+            tensor.fill_(1)
+            # Reshape to the desired size
+            tensor = tensor.reshape(size)
+
+        # Apply the requested layout
+        tensor = self.__apply_layout(tensor, layout)
+
+        # Set requires_grad if specified
+        if requires_grad:
+            tensor.requires_grad_()
+
+        return tensor
+
+    def full(self, size, fill_value, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+        """
+        Creates a tensor of size size filled with fill_value. The tensor's dtype is inferred from fill_value.
+        The tensor is allocated on the Iris symmetric heap.
+
+        Args:
+            size (int...): a list, tuple, or torch.Size of integers defining the shape of the output tensor.
+            fill_value (Scalar): the value to fill the output tensor with.
+
+        Keyword Arguments:
+            out (Tensor, optional): the output tensor.
+            dtype (torch.dtype, optional): the desired data type of returned tensor.
+                Default: if None, uses a global default (see torch.set_default_dtype()).
+            layout (torch.layout, optional): the desired layout of returned Tensor.
+                Default: torch.strided. Note: Iris tensors always use `torch.strided` regardless of this parameter.
+            device (torch.device, optional): the desired device of returned tensor.
+                Default: if None, uses the current device for the default tensor type.
+            requires_grad (bool, optional): If autograd should record operations on the returned tensor.
+                Default: False.
+
+        Example:
+            >>> ctx = iris_gluon.iris(1 << 20)
+            >>> tensor = ctx.full((2, 3), 3.14)
+            >>> print(tensor.shape)  # torch.Size([2, 3])
+            >>> print(tensor[0])  # tensor([3.1400, 3.1400, 3.1400], device='cuda:0')
+        """
+        self.debug(
+            f"full: size = {size}, fill_value = {fill_value}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
+        )
+
+        # Infer dtype from fill_value if not provided
+        if dtype is None:
+            if isinstance(fill_value, (int, float)):
+                if isinstance(fill_value, float):
+                    dtype = torch.get_default_dtype()
+                else:
+                    dtype = torch.int64
+            else:
+                # For other types (like tensors), use their dtype
+                dtype = torch.get_default_dtype()
+
+        # Use current device if none specified
+        if device is None:
+            device = self.device
+
+        # Validate device compatibility with Iris
+        self.__throw_if_invalid_device(device)
+
+        # Parse size and calculate number of elements
+        size, num_elements = self.__parse_size(size)
+
+        # If out is provided, use it; otherwise allocate new tensor
+        if out is not None:
+            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            # Fill with the specified value
+            out.fill_(fill_value)
+            # Create a reshaped view of the out tensor
+            tensor = out.view(size)
+        else:
+            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
+            # Fill with the specified value
+            tensor.fill_(fill_value)
+            # Reshape to the desired size
+            tensor = tensor.reshape(size)
+
+        # Apply the requested layout
+        tensor = self.__apply_layout(tensor, layout)
+
+        # Set requires_grad if specified
+        if requires_grad:
+            tensor.requires_grad_()
+
+        return tensor
+
+    def zeros_like(
+        self, input, *, dtype=None, layout=None, device=None, requires_grad=False, memory_format=torch.preserve_format
+    ):
+        """
+        Returns a tensor filled with the scalar value 0, with the same size as input, allocated on the Iris symmetric heap.
+
+        Args:
+            input (Tensor): the size of input will determine size of the output tensor.
+
+        Keyword Arguments:
+            dtype (torch.dtype, optional): the desired data type of returned Tensor.
+                Default: if None, defaults to the dtype of input.
+            layout (torch.layout, optional): the desired layout of returned tensor.
+                Default: if None, defaults to the layout of input. Note: Iris tensors are always contiguous (strided).
+            device (torch.device, optional): the desired device of returned tensor.
+                Default: if None, defaults to the device of input. Must be compatible with this Iris instance.
+            requires_grad (bool, optional): If autograd should record operations on the returned tensor.
+                Default: False.
+            memory_format (torch.memory_format, optional): the desired memory format of returned Tensor.
+                Default: torch.preserve_format.
+
+        Example:
+            >>> ctx = iris_gluon.iris(1 << 20)
+            >>> input_tensor = ctx.ones(2, 3)
+            >>> zeros_tensor = ctx.zeros_like(input_tensor)
+            >>> print(zeros_tensor.shape)  # torch.Size([2, 3])
+        """
+        self.debug(
+            f"zeros_like: input_shape = {input.shape}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
+        )
+
+        # Use input's properties as defaults if not specified
+        if dtype is None:
+            dtype = input.dtype
+        if layout is None:
+            layout = input.layout
+        if device is None:
+            device = input.device
+
+        # Validate device compatibility with Iris
+        self.__throw_if_invalid_device(device)
+
+        # Get the size from input tensor
+        size = input.size()
+        num_elements = input.numel()
+
+        # Allocate new tensor with the same size
+        new_tensor = self.__allocate(num_elements, dtype)
+        new_tensor.zero_()
+
+        # Reshape to match input size
+        new_tensor = new_tensor.reshape(size)
+
+        # Apply the requested layout
+        new_tensor = self.__apply_layout(new_tensor, layout)
+
+        # Set requires_grad if specified
+        if requires_grad:
+            new_tensor.requires_grad_()
+
+        return new_tensor
+
+    def __throw_if_invalid_output_tensor(self, out, num_elements, dtype):
+        """Check if the output tensor is valid."""
+        if out.numel() != num_elements:
+            raise RuntimeError(f"The output tensor has {out.numel()} elements, but {num_elements} are required")
+
+        if out.dtype != dtype:
+            raise RuntimeError(f"The output tensor has dtype {out.dtype}, but {dtype} is required")
+
+        if not self.__on_symmetric_heap(out):
+            raise RuntimeError("The output tensor is not on the symmetric heap")
+
+    def __on_symmetric_heap(self, tensor):
+        """Check if tensor is allocated on the symmetric heap."""
+        heap_start = self.memory_pool.data_ptr()
+        heap_end = heap_start + self.heap_size
+        tensor_ptr = tensor.data_ptr()
+        return heap_start <= tensor_ptr < heap_end
+
 
 def iris(heap_size=1 << 30):
     """

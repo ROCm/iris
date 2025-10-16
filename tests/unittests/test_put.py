@@ -2,34 +2,37 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import torch
-import triton
-import triton.language as tl
 import pytest
-import iris
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+import iris.experimental.iris_gluon as iris_gl
 
 
 # TODO: Separate this kernel out in the following categories:
 # 1. for local put.
 # 2. for remote put with one other rank.
 # 3. for remote put with more than one rank (if num_ranks > 2).
-@triton.jit
+@gluon.jit
 def put_kernel(
+    IrisDeviceCtx: gl.constexpr,
+    context_tensor,
     data,
     results,
-    cur_rank: tl.constexpr,
-    num_ranks: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    heap_bases: tl.tensor,
+    cur_rank: gl.constexpr,
+    num_ranks: gl.constexpr,
+    BLOCK_SIZE: gl.constexpr,
 ):
-    pid = tl.program_id(0)
+    ctx = IrisDeviceCtx.initialize(context_tensor)
+    pid = gl.program_id(0)
     block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 
     # Put data in all ranks
     # Doesn't matter which rank stores at the end, the data should all be the same at the end.
     for target_rank in range(num_ranks):
-        iris.put(data + offsets, results + offsets, cur_rank, target_rank, heap_bases, mask=mask)
+        ctx.put(data + offsets, results + offsets, target_rank, mask=mask)
 
 
 @pytest.mark.parametrize(
@@ -52,9 +55,9 @@ def put_kernel(
 )
 def test_put_api(dtype, BLOCK_SIZE):
     # TODO: Adjust heap size.
-    shmem = iris.iris(1 << 20)
+    shmem = iris_gl.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
-    heap_bases = shmem.get_heap_bases()
+    context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
 
     data = shmem.ones(BLOCK_SIZE, dtype=dtype)
@@ -62,8 +65,17 @@ def test_put_api(dtype, BLOCK_SIZE):
 
     shmem.barrier()
 
-    grid = lambda meta: (1,)
-    put_kernel[grid](data, results, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
+    grid = (1,)
+    put_kernel[grid](
+        iris_gl.IrisDeviceCtx,
+        context_tensor,
+        data,
+        results,
+        cur_rank,
+        num_ranks,
+        BLOCK_SIZE,
+        num_warps=1,
+    )
     shmem.barrier()
 
     # Verify the results

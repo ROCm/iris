@@ -2,32 +2,35 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import torch
-import triton
-import triton.language as tl
 import pytest
-import iris
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+import iris.experimental.iris_gluon as iris_gl
 
 
-@triton.jit
+@gluon.jit
 def load_kernel(
+    IrisDeviceCtx: gl.constexpr,
+    context_tensor,
     data,
     results,
-    source_rank: tl.constexpr,
-    num_ranks: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    heap_bases: tl.tensor,
+    source_rank: gl.constexpr,
+    num_ranks: gl.constexpr,
+    BLOCK_SIZE: gl.constexpr,
 ):
-    pid = tl.program_id(0)
+    ctx = IrisDeviceCtx.initialize(context_tensor)
+    pid = gl.program_id(0)
 
     partner = int((source_rank + num_ranks // 2) % num_ranks)
     # Compute start index of this block
     block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
 
     # Guard for out-of-bounds accesses
     mask = offsets < BLOCK_SIZE
-    result = iris.load(data + offsets, source_rank, partner, heap_bases, mask=mask)
-    tl.store(results + offsets, result, mask=mask)
+    result = ctx.load(data + offsets, partner, mask=mask)
+    gl.store(results + offsets, result, mask=mask)
 
 
 @pytest.mark.parametrize(
@@ -50,9 +53,9 @@ def load_kernel(
 )
 def test_load_api(dtype, BLOCK_SIZE):
     # TODO: Adjust heap size.
-    shmem = iris.iris(1 << 20)
+    shmem = iris_gl.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
-    heap_bases = shmem.get_heap_bases()
+    context_tensor = shmem.get_device_context()
     source_rank = shmem.get_rank()
     partner = int((source_rank + num_ranks // 2) % num_ranks)
 
@@ -61,8 +64,17 @@ def test_load_api(dtype, BLOCK_SIZE):
 
     shmem.barrier()
 
-    grid = lambda meta: (1,)
-    load_kernel[grid](data, results, source_rank, num_ranks, BLOCK_SIZE, heap_bases)
+    grid = (1,)
+    load_kernel[grid](
+        iris_gl.IrisDeviceCtx,
+        context_tensor,
+        data,
+        results,
+        source_rank,
+        num_ranks,
+        BLOCK_SIZE,
+        num_warps=1,
+    )
     shmem.barrier()
 
     # Verify the result

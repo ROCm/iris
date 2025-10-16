@@ -2,39 +2,40 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import torch
-import triton
-import triton.language as tl
 import pytest
-import iris
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+import iris.experimental.iris_gluon as iris_gl
 
 
-@triton.jit
+@gluon.jit
 def atomic_add_kernel(
+    IrisDeviceCtx: gl.constexpr,
+    context_tensor,
     results,
-    sem: tl.constexpr,
-    scope: tl.constexpr,
-    cur_rank: tl.constexpr,
-    num_ranks: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    heap_bases: tl.tensor,
+    sem: gl.constexpr,
+    scope: gl.constexpr,
+    cur_rank: gl.constexpr,
+    num_ranks: gl.constexpr,
+    BLOCK_SIZE: gl.constexpr,
 ):
-    pid = tl.program_id(0)
+    ctx = IrisDeviceCtx.initialize(context_tensor)
+    pid = gl.program_id(0)
     block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 
-    acc = tl.full([BLOCK_SIZE], 1, dtype=results.type.element_ty)
+    acc = gl.full([BLOCK_SIZE], 1, dtype=results.dtype.element_ty)
 
     # Loop over all ranks, get the stored data.
     # atomic_add acc into results.
     for target_rank in range(num_ranks):
-        iris.atomic_add(
+        ctx.atomic_add(
             results + offsets,
             acc,
-            cur_rank,
             target_rank,
-            heap_bases,
-            mask,
+            mask=mask,
             sem=sem,
             scope=scope,
         )
@@ -77,17 +78,27 @@ def atomic_add_kernel(
 )
 def test_atomic_add_api(dtype, sem, scope, BLOCK_SIZE):
     # TODO: Adjust heap size.
-    shmem = iris.iris(1 << 20)
+    shmem = iris_gl.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
-    heap_bases = shmem.get_heap_bases()
+    context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
 
     results = shmem.zeros(BLOCK_SIZE, dtype=dtype)
 
     shmem.barrier()
 
-    grid = lambda meta: (1,)
-    atomic_add_kernel[grid](results, sem, scope, cur_rank, num_ranks, BLOCK_SIZE, heap_bases)
+    grid = (1,)
+    atomic_add_kernel[grid](
+        iris_gl.IrisDeviceCtx,
+        context_tensor,
+        results,
+        sem,
+        scope,
+        cur_rank,
+        num_ranks,
+        BLOCK_SIZE,
+        num_warps=1,
+    )
     shmem.barrier()
 
     # Verify the results
