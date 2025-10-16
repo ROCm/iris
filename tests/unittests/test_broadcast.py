@@ -4,7 +4,7 @@
 import torch
 import numpy as np
 import pytest
-import iris
+import iris.experimental.iris_gluon as iris_gl
 
 
 @pytest.mark.parametrize(
@@ -20,11 +20,11 @@ import iris
 )
 def test_broadcast_scalar(value, expected):
     """Test broadcasting scalar values (int, float, bool, string, dict)."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris_gl.iris(1 << 20)
     rank = shmem.get_rank()
 
     val = value if rank == 0 else None
-    result = shmem.broadcast(val, source_rank=0)
+    result = shmem.broadcast(val, src_rank=0)
 
     if isinstance(expected, float):
         assert abs(result - expected) < 1e-6
@@ -43,11 +43,11 @@ def test_broadcast_scalar(value, expected):
 )
 def test_broadcast_tensor_dtype(dtype):
     """Test broadcasting tensors with different dtypes."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris_gl.iris(1 << 20)
     rank = shmem.get_rank()
 
     value = torch.arange(10, dtype=dtype) if rank == 0 else None
-    result = shmem.broadcast(value, source_rank=0)
+    result = shmem.broadcast(value, src_rank=0)
 
     assert isinstance(result, np.ndarray)
     np.testing.assert_array_equal(result, np.arange(10))
@@ -63,11 +63,11 @@ def test_broadcast_tensor_dtype(dtype):
 )
 def test_broadcast_tensor_shape(shape):
     """Test broadcasting tensors with different shapes."""
-    shmem = iris.iris(1 << 25)
+    shmem = iris_gl.iris(1 << 25)
     rank = shmem.get_rank()
 
     value = torch.randn(shape) if rank == 0 else None
-    result = shmem.broadcast(value, source_rank=0)
+    result = shmem.broadcast(value, src_rank=0)
 
     assert isinstance(result, np.ndarray)
     assert result.shape == shape
