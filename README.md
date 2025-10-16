@@ -18,7 +18,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 - **SHMEM-like RMA**: Iris provides SHMEM-like RMA support in Triton.
 - **Simple and Intuitive API**: Iris provides simple and intuitive RMA APIs. Writing multi-GPU programs is as easy as writing single-GPU programs.
 - **Triton-based**: Iris is built on top of Triton and inherits Triton's performance and capabilities.
-- **Gluon-style Aggregate API (Experimental)**: Optional cleaner API using Triton's `@aggregate` decorator for better encapsulation.
+- **Triton Gluon-based backend (Experimental)**: Includes an optional backend built on Triton’s Gluon language, a lower-level GPU programming model that exposes explicit control over layouts, memory, and data movement—ideal for users seeking maximal performance and hardware-level optimization.
 
 ## Documentation
 
