@@ -4,6 +4,16 @@
 The Gluon API is **experimental** and may undergo breaking changes in future releases.
 ```
 
+## Requirements
+
+The Gluon backend requires:
+- **ROCm 7.0** or later
+- **Triton commit `aafec417bded34db6308f5b3d6023daefae43905`** or later
+
+These specific versions are necessary to access the experimental Gluon features and `@aggregate` decorator support.
+
+## Overview
+
 The Gluon API provides a Triton Gluon-based implementation of Iris that uses the `@aggregate` decorator with `@gluon.jit` to encapsulate the Iris backend state, eliminating the need to pass `heap_bases` around manually in kernels.
 
 ## Key Differences from Standard Iris

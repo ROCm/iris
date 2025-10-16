@@ -103,6 +103,9 @@ if __name__ == "__main__":
 
 Iris also provides an experimental cleaner API using Triton's Gluon with `@gluon.jit` decorator:
 
+> [!NOTE]
+> **Requirements for Gluon backend**: ROCm 7.0 and Triton commit `aafec417bded34db6308f5b3d6023daefae43905` or later are required to use the experimental Gluon APIs.
+
 ```python
 import torch
 import torch.distributed as dist
