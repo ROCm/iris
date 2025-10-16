@@ -31,9 +31,7 @@ def atomic_and_kernel(
     acc = gl.full([BLOCK_SIZE], val, results.type.element_ty, layout)
 
     for target_rank in range(num_ranks):
-        ctx.atomic_and(
-            results + offsets, acc, target_rank, mask=mask, sem=sem, scope=scope
-        )
+        ctx.atomic_and(results + offsets, acc, target_rank, mask=mask, sem=sem, scope=scope)
 
 
 @pytest.mark.parametrize(

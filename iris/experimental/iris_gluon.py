@@ -497,12 +497,8 @@ class IrisGluon:
 
         distributed_barrier()
 
-        all_ipc_handles = distributed_allgather(
-            np.frombuffer(ipc_handle, dtype=np.uint8)
-        )
-        all_heap_bases = distributed_allgather(
-            np.array([heap_bases[cur_rank]], dtype=np.uint64)
-        )
+        all_ipc_handles = distributed_allgather(np.frombuffer(ipc_handle, dtype=np.uint8))
+        all_heap_bases = distributed_allgather(np.array([heap_bases[cur_rank]], dtype=np.uint64))
 
         distributed_barrier()
 
@@ -518,9 +514,7 @@ class IrisGluon:
             self.debug(f"GPU {i}: Heap base {hex(int(ipc_heap_bases[i]))}")
 
         distributed_barrier()
-        self.heap_bases = torch.from_numpy(ipc_heap_bases).to(
-            device=self.device, dtype=torch.uint64
-        )
+        self.heap_bases = torch.from_numpy(ipc_heap_bases).to(device=self.device, dtype=torch.uint64)
 
         distributed_barrier()
 
@@ -568,9 +562,7 @@ class IrisGluon:
 
         # Create context tensor: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
         context_data = [self.cur_rank, self.num_ranks] + heap_bases_list
-        context_tensor = torch.tensor(
-            context_data, dtype=torch.int64, device=self.device
-        )
+        context_tensor = torch.tensor(context_data, dtype=torch.int64, device=self.device)
 
         return context_tensor
 
@@ -833,9 +825,7 @@ class IrisGluon:
             >>> print(tensor.shape)  # torch.Size([2, 3])
             >>> print(tensor[0])  # tensor([1., 1., 1.], device='cuda:0')
         """
-        self.debug(
-            f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
-        )
+        self.debug(f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
 
         # Use global default dtype if None is provided
         if dtype is None:
@@ -1030,14 +1020,10 @@ class IrisGluon:
     def __throw_if_invalid_output_tensor(self, out, num_elements, dtype):
         """Check if the output tensor is valid."""
         if out.numel() != num_elements:
-            raise RuntimeError(
-                f"The output tensor has {out.numel()} elements, but {num_elements} are required"
-            )
+            raise RuntimeError(f"The output tensor has {out.numel()} elements, but {num_elements} are required")
 
         if out.dtype != dtype:
-            raise RuntimeError(
-                f"The output tensor has dtype {out.dtype}, but {dtype} is required"
-            )
+            raise RuntimeError(f"The output tensor has dtype {out.dtype}, but {dtype} is required")
 
         if not self.__on_symmetric_heap(out):
             raise RuntimeError("The output tensor is not on the symmetric heap")
