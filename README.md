@@ -99,7 +99,7 @@ if __name__ == "__main__":
     mp.spawn(_worker, args=(world_size,), nprocs=world_size, join=True)
 ```
 
-### Alternative: Gluon-style Aggregate API (Experimental)
+### Gluon-style API (Experimental)
 
 Iris also provides an experimental cleaner API using Triton's Gluon with `@gluon.jit` decorator:
 
