@@ -15,3 +15,4 @@ subtrees:
     - file: reference/api-iris-class.md
     - file: reference/api-tensor-creation.md
     - file: reference/api-device-functions.md
+    - file: reference/api-gluon.md
