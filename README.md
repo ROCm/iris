@@ -9,7 +9,12 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 # Iris: First-Class Multi-GPU Programming Experience in Triton
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml) [![Iris Tests](https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml/badge.svg)](https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml)
+<p align="center">
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
+  <a href="https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml"><img src="https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml/badge.svg" alt="Iris Tests"></a>
+  <a href="https://doi.org/10.5281/zenodo.17382307"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.17382307.svg" alt="DOI"></a>
+</p>
 
 Iris is a Triton-based framework for Remote Memory Access (RMA) operations developed by AMD's Research and Advanced Development team. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton's programmability and performance.
 
@@ -236,6 +241,22 @@ Need help? We're here to support you! Here are a few ways to get in touch:
 2. **Contact the Team**: If GitHub issues aren't working for you or you need to reach us directly, feel free to contact our development team
 
 We welcome your feedback and contributions!
+
+## How to Cite
+
+If you use Iris or reference it in your research, please cite our work:
+
+```bibtex
+@software{Awad:2025:IFM,
+  author        = {Muhammad Awad and Muhammad Osama and Brandon Potter},
+  title         = {{Iris}: First-Class Multi-{GPU} Programming Experience in {Triton}},
+  year          = 2025,
+  month         = oct,
+  doi           = {10.5281/zenodo.17382307},
+  url           = {https://github.com/ROCm/iris},
+  code          = {https://github.com/ROCm/iris}
+}
+```
 
 ## License
 
