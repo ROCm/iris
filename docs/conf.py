@@ -12,6 +12,7 @@
 #
 import os
 import sys
+from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.abspath(".."))
 
@@ -97,8 +98,6 @@ autodoc_mock_imports = [
 ]
 
 # Custom mocks that preserve docstrings for Triton Gluon
-import sys
-from unittest.mock import MagicMock
 
 # Docstring-preserving decorator mock
 class PreserveDocstringMock:
