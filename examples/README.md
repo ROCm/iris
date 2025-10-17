@@ -26,6 +26,7 @@ This directory contains various algorithm implementations for distributed comput
 - [`12_gemm_all_scatter_bulk_synchronous`](12_gemm_all_scatter_bulk_synchronous): Matrix multiplication with all-scatter using the bulk synchronous parallel approach
 - [`13_flash_decode`](13_flash_decode): Fused Flash Decode Attention for accelerating LLM inference
 - [`14_all_gather_gemm`](14_all_gather_gemm): Fused All-Gather + GEMM with Pull and Push models
+- [`20_gemm_all_scatter_independent`](20_gemm_all_scatter_independent): Independent GEMM and all-scatter operations with support for CSV input configurations
 
 ### Utilities
 - [`benchmark`](benchmark): Benchmarking utilities and performance testing tools
@@ -80,4 +81,23 @@ python examples/14_all_gather_gemm/example_run_pull.py --num_ranks 8
 
 # All-Gather + GEMM - Push model
 python examples/14_all_gather_gemm/example_run_push.py --num_ranks 8
+
+# Independent GEMM and all-scatter - single configuration
+python examples/20_gemm_all_scatter_independent/benchmark.py --benchmark --validate --num_ranks 8
+
+# Independent GEMM and all-scatter - sweep with CSV configurations
+python examples/20_gemm_all_scatter_independent/benchmark.py --benchmark --validate --num_ranks 8 --csv dataset/gemm_config.csv
+```
+
+### CSV Configuration Format
+
+Example 20 supports loading multiple configurations from a CSV file using the `--csv` argument. The CSV file should have the following format:
+
+```csv
+m,n,k,datatype
+8192,4608,36864,fp16
+8192,4096,12288,fp32
+8192,3584,14336,bf16
+4096,4096,8192,fp16
+2048,2048,4096,fp16
 ```
