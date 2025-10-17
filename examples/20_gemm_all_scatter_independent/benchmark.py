@@ -65,8 +65,24 @@ def parse_args():
     )
     parser.add_argument("--comm_sms", type=int, default=48, help="Number of SMs for All-Scatter kernel")
     parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
+    parser.add_argument(
+        "--only_gemm",
+        action="store_true",
+        help="Run only GEMM operation (cannot be used with --only_comm)",
+    )
+    parser.add_argument(
+        "--only_comm",
+        action="store_true",
+        help="Run only communication operation (cannot be used with --only_gemm)",
+    )
 
-    return vars(parser.parse_args())
+    args = vars(parser.parse_args())
+
+    # Validate mutually exclusive flags
+    if args["only_gemm"] and args["only_comm"]:
+        parser.error("--only_gemm and --only_comm cannot be used together")
+
+    return args
 
 
 def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
@@ -180,61 +196,81 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             timestamps.reset()
             shmem.barrier()
 
-        torch.cuda.nvtx.range_push("GEMM + Communication")
-        torch.cuda.nvtx.range_push("GEMM")
-        with torch.cuda.stream(gemm_stream):
-            kernel_timing["gemm"]["start_event"].record()
-            C = matmul.apply(
-                local_A,
-                local_B,
-                C,
-                bias,
-                rank,
-                world_size,
-                args["gemm_sms"],
-                args["BLK_M"],
-                args["BLK_N"],
-                args["BLK_K"],
-                args["gsize_m"],
-                shmem.get_heap_bases(),
-                "gfx942",
-                args["trace_tiles"],
-                timestamps.mm_begin_timestamp,
-                timestamps.mm_end_timestamp,
-            )
-            kernel_timing["gemm"]["end_event"].record()
-            kernel_timing["gemm"]["experiments"] += 1
+        # Determine what to run based on flags
+        run_gemm = not args["only_comm"]
+        run_comm = not args["only_gemm"]
 
-        torch.cuda.nvtx.range_pop()
-        torch.cuda.nvtx.range_push("Communication")
-        with torch.cuda.stream(comm_stream):
-            kernel_timing["communication"]["start_event"].record()
-            persistent_all_scatter[(args["comm_sms"],)](
-                C_comm_global,
-                args["m_comm"],
-                n_comm_local,
-                C_comm_global.stride(0),
-                C_comm_global.stride(1),
-                args["BLK_M"],
-                args["BLK_N"],
-                args["gsize_m"],
-                args["comm_sms"],
-                num_xcds,
-                shmem.get_heap_bases(),
-                rank,
-                world_size,
-                args["trace_tiles"],
-                timestamps.mm_begin_timestamp,
-                timestamps.mm_end_timestamp,
-            )
-            kernel_timing["communication"]["end_event"].record()
-            kernel_timing["communication"]["experiments"] += 1
-        torch.cuda.nvtx.range_pop()
+        # Set NVTX range name based on what we're running
+        if run_gemm and run_comm:
+            nvtx_name = "GEMM + Communication"
+        elif run_gemm:
+            nvtx_name = "GEMM"
+        else:
+            nvtx_name = "Communication"
+
+        torch.cuda.nvtx.range_push(nvtx_name)
+
+        if run_gemm:
+            torch.cuda.nvtx.range_push("GEMM")
+            with torch.cuda.stream(gemm_stream):
+                kernel_timing["gemm"]["start_event"].record()
+                C = matmul.apply(
+                    local_A,
+                    local_B,
+                    C,
+                    bias,
+                    rank,
+                    world_size,
+                    args["gemm_sms"],
+                    args["BLK_M"],
+                    args["BLK_N"],
+                    args["BLK_K"],
+                    args["gsize_m"],
+                    shmem.get_heap_bases(),
+                    "gfx942",
+                    args["trace_tiles"],
+                    timestamps.mm_begin_timestamp,
+                    timestamps.mm_end_timestamp,
+                )
+                kernel_timing["gemm"]["end_event"].record()
+                kernel_timing["gemm"]["experiments"] += 1
+            torch.cuda.nvtx.range_pop()
+
+        if run_comm:
+            torch.cuda.nvtx.range_push("Communication")
+            with torch.cuda.stream(comm_stream):
+                kernel_timing["communication"]["start_event"].record()
+                persistent_all_scatter[(args["comm_sms"],)](
+                    C_comm_global,
+                    args["m_comm"],
+                    n_comm_local,
+                    C_comm_global.stride(0),
+                    C_comm_global.stride(1),
+                    args["BLK_M"],
+                    args["BLK_N"],
+                    args["gsize_m"],
+                    args["comm_sms"],
+                    num_xcds,
+                    shmem.get_heap_bases(),
+                    rank,
+                    world_size,
+                    args["trace_tiles"],
+                    timestamps.mm_begin_timestamp,
+                    timestamps.mm_end_timestamp,
+                )
+                kernel_timing["communication"]["end_event"].record()
+                kernel_timing["communication"]["experiments"] += 1
+            torch.cuda.nvtx.range_pop()
+
         shmem.barrier()
 
-        for k in ["gemm", "communication"]:
-            ms = kernel_timing[k]["start_event"].elapsed_time(kernel_timing[k]["end_event"])
-            kernel_timing[k]["ms"] += ms
+        # Update timing for operations that were run
+        if run_gemm:
+            ms = kernel_timing["gemm"]["start_event"].elapsed_time(kernel_timing["gemm"]["end_event"])
+            kernel_timing["gemm"]["ms"] += ms
+        if run_comm:
+            ms = kernel_timing["communication"]["start_event"].elapsed_time(kernel_timing["communication"]["end_event"])
+            kernel_timing["communication"]["ms"] += ms
 
         torch.cuda.nvtx.range_pop()
 
@@ -258,20 +294,30 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.info("Validating...")
         matmul.set_debug(True)
 
-        # Validate GEMM result
-        shmem.info("Validating GEMM operation...")
-        success_gemm = validate_gemm(A, B, C, shmem)
-        passed_str = "passed" if success_gemm else "failed"
-        shmem.info(f"GEMM validation {passed_str}.")
+        # Determine what to validate based on flags
+        validate_gemm_op = not args["only_comm"]
+        validate_comm_op = not args["only_gemm"]
 
-        # Wait for all to finish GEMM validation
-        shmem.barrier()
+        success_gemm = True
+        success_comm = True
 
-        # Validate all-scatter result
-        shmem.info("Validating all-scatter operation...")
-        success_comm = validate_all_scatter(C_comm, C_comm_global, shmem)
-        passed_str = "passed" if success_comm else "failed"
-        shmem.info(f"All-scatter validation {passed_str}.")
+        # Validate GEMM result if it was run
+        if validate_gemm_op:
+            shmem.info("Validating GEMM operation...")
+            success_gemm = validate_gemm(A, B, C, shmem)
+            passed_str = "passed" if success_gemm else "failed"
+            shmem.info(f"GEMM validation {passed_str}.")
+            # Wait for all to finish GEMM validation
+            shmem.barrier()
+
+        # Validate all-scatter result if it was run
+        if validate_comm_op:
+            shmem.info("Validating all-scatter operation...")
+            success_comm = validate_all_scatter(C_comm, C_comm_global, shmem)
+            passed_str = "passed" if success_comm else "failed"
+            shmem.info(f"All-scatter validation {passed_str}.")
+            # Wait for all to finish communication validation
+            shmem.barrier()
 
         # Overall success
         success = success_gemm and success_comm
@@ -282,10 +328,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.barrier()
 
         json_writer.add_field("success", success)
-        json_writer.add_field("success_gemm", success_gemm)
-        json_writer.add_field("success_comm", success_comm)
+        if validate_gemm_op:
+            json_writer.add_field("success_gemm", success_gemm)
+        if validate_comm_op:
+            json_writer.add_field("success_comm", success_comm)
 
-        if not is_triton_interpret_set():
+        if validate_gemm_op and not is_triton_interpret_set():
             gemm_registers = matmul.get_matmul_registers()
             gemm_spills = matmul.get_matmul_spills()
 
@@ -301,16 +349,32 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         triton_ms = iris.do_bench(run_experiment, shmem.barrier)
         triton_tflops = perf(triton_ms)
         algo_string = "all_scatter"
-        shmem.info(
-            f"tile matmul + {algo_string} (total_tiles={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
-        )
+
+        # Determine what was run based on flags
+        run_gemm = not args["only_comm"]
+        run_comm = not args["only_gemm"]
+
+        if run_gemm and run_comm:
+            op_string = f"tile matmul + {algo_string}"
+        elif run_gemm:
+            op_string = "tile matmul"
+        else:
+            op_string = algo_string
+
+        shmem.info(f"{op_string} (total_tiles={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops")
 
         json_writer.add_field("tflops", triton_tflops)
         json_writer.add_field("total_ms", triton_ms)
 
-        for k in ["gemm", "communication"]:
-            json_writer.add_field(k + "_ms", kernel_timing[k]["ms"] / kernel_timing[k]["experiments"])
-            json_writer.add_field(k + "_experiments", kernel_timing[k]["experiments"])
+        # Only add timing for operations that were run
+        if run_gemm:
+            json_writer.add_field("gemm_ms", kernel_timing["gemm"]["ms"] / kernel_timing["gemm"]["experiments"])
+            json_writer.add_field("gemm_experiments", kernel_timing["gemm"]["experiments"])
+        if run_comm:
+            json_writer.add_field(
+                "communication_ms", kernel_timing["communication"]["ms"] / kernel_timing["communication"]["experiments"]
+            )
+            json_writer.add_field("communication_experiments", kernel_timing["communication"]["experiments"])
 
         # Wait for all to finish benchmarking
         shmem.barrier()
