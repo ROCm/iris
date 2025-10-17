@@ -11,6 +11,7 @@ import sys
 import os
 import argparse
 import json
+import csv
 
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set
 from examples.common.validation import validate_gemm, validate_all_scatter
@@ -65,8 +66,43 @@ def parse_args():
     )
     parser.add_argument("--comm_sms", type=int, default=48, help="Number of SMs for All-Scatter kernel")
     parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
+    parser.add_argument(
+        "--csv",
+        type=str,
+        default=None,
+        help="Path to CSV file with configurations (columns: m, n, k, datatype)",
+    )
 
     return vars(parser.parse_args())
+
+
+def load_configs_from_csv(csv_path):
+    """Load configurations from a CSV file.
+
+    Expected CSV format:
+    m,n,k,datatype
+    8192,4608,36864,fp16
+    8192,4096,12288,fp32
+    ...
+
+    Args:
+        csv_path: Path to the CSV file
+
+    Returns:
+        List of configuration dictionaries
+    """
+    configs = []
+    with open(csv_path, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            config = {
+                "m": int(row["m"]),
+                "n": int(row["n"]),
+                "k": int(row["k"]),
+                "datatype": row["datatype"],
+            }
+            configs.append(config)
+    return configs
 
 
 def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
@@ -331,16 +367,43 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
 def main():
     args = parse_args()
-
     num_ranks = args["num_ranks"]
-
     init_url = "tcp://127.0.0.1:29500"
-    mp.spawn(
-        fn=_worker,
-        args=(num_ranks, init_url, args),
-        nprocs=num_ranks,
-        join=True,
-    )
+
+    # If CSV is provided, run sweep with configurations from CSV
+    if args["csv"] is not None:
+        configs = load_configs_from_csv(args["csv"])
+        print(f"Loaded {len(configs)} configurations from {args['csv']}")
+
+        for i, config in enumerate(configs):
+            # Create a copy of args and update with CSV config
+            run_args = args.copy()
+            run_args.update(config)
+
+            print(
+                f"\n--- Running configuration {i + 1}/{len(configs)}: m={config['m']}, n={config['n']}, k={config['k']}, datatype={config['datatype']} ---"
+            )
+
+            # Generate unique output filename for this configuration
+            base_name, ext = os.path.splitext(args["output_file"])
+            run_args["output_file"] = (
+                f"{base_name}_m{config['m']}_n{config['n']}_k{config['k']}_{config['datatype']}{ext}"
+            )
+
+            mp.spawn(
+                fn=_worker,
+                args=(num_ranks, init_url, run_args),
+                nprocs=num_ranks,
+                join=True,
+            )
+    else:
+        # Single run with command line arguments
+        mp.spawn(
+            fn=_worker,
+            args=(num_ranks, init_url, args),
+            nprocs=num_ranks,
+            join=True,
+        )
 
 
 if __name__ == "__main__":
