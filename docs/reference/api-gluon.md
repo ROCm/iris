@@ -108,302 +108,32 @@ The `IrisDeviceCtx` aggregate is used within Gluon kernels to perform remote mem
 
 ### Initialization
 
-#### `initialize(context_tensor)`
-
-Initialize IrisDeviceCtx from the encoded tensor.
-
-The context tensor has the format: `[cur_rank, num_ranks, heap_base_0, heap_base_1, ...]`
-
-**Arguments:**
-- `context_tensor`: Pointer to encoded context data
-
-**Returns:**
-- `IrisDeviceCtx`: Initialized device context
-
-**Example:**
-```python
-@gluon.jit
-def kernel(IrisDeviceCtx: gl.constexpr, context_tensor, buffer):
-    ctx = IrisDeviceCtx.initialize(context_tensor)
-    # Use ctx for remote memory operations
+```{eval-rst}
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.initialize
 ```
 
 ### Memory Operations
 
-#### `load(self, pointer, from_rank, mask=None)`
-
-Loads a value from the specified rank's memory location to the current rank.
-
-**Arguments:**
-- `pointer`: Pointer in the from_rank's address space
-- `from_rank`: The rank ID from which to read the data
-- `mask`: Optional mask for conditional loading
-
-**Returns:**
-- The loaded value from the target memory location
-
-**Example:**
-```python
-# Load from rank 1 to current rank
-data = ctx.load(buffer + offsets, 1, mask=mask)
-```
-
-#### `store(self, pointer, value, to_rank, mask=None)`
-
-Writes data from the current rank to the specified rank's memory location.
-
-**Arguments:**
-- `pointer`: Pointer in the current rank's address space
-- `value`: The value to store
-- `to_rank`: The rank ID to which the data will be written
-- `mask`: Optional mask for conditional storing
-
-**Example:**
-```python
-# Store from current rank to rank 1
-ctx.store(buffer + offsets, values, 1, mask=mask)
-```
-
-#### `get(self, from_ptr, to_ptr, from_rank, mask=None)`
-
-Copies data from the specified rank's memory to the current rank's local memory.
-
-**Arguments:**
-- `from_ptr`: Pointer to remote memory in from_rank's address space
-- `to_ptr`: Pointer to local memory in current rank
-- `from_rank`: The rank ID from which to read the data
-- `mask`: Optional mask for conditional operations
-
-**Example:**
-```python
-# Copy from rank 1 to current rank's local memory
-ctx.get(remote_ptr + offsets, local_ptr + offsets, 1, mask=mask)
-```
-
-#### `put(self, from_ptr, to_ptr, to_rank, mask=None)`
-
-Copies data from the current rank's local memory to the specified rank's memory.
-
-**Arguments:**
-- `from_ptr`: Pointer to local memory in current rank
-- `to_ptr`: Pointer to remote memory in to_rank's address space
-- `to_rank`: The rank ID to which the data will be written
-- `mask`: Optional mask for conditional operations
-
-**Example:**
-```python
-# Copy from current rank's local memory to rank 1
-ctx.put(local_ptr + offsets, remote_ptr + offsets, 1, mask=mask)
-```
-
-#### `copy(self, src_ptr, dst_ptr, from_rank, to_rank, mask=None)`
-
-Copies data from the specified rank's memory into the destination rank's memory.
-
-This function performs the transfer by translating src_ptr from the from_rank's address space to the to_rank's address space, performing a masked load from the translated source, and storing the loaded data to dst_ptr in the to_rank memory location. If from_rank and to_rank are the same, this function performs a local copy operation. It is undefined behaviour if neither from_rank nor to_rank is the cur_rank.
-
-**Arguments:**
-- `src_ptr`: Pointer in the from_rank's local memory from which to read data
-- `dst_ptr`: Pointer in the to_rank's local memory where the data will be written
-- `from_rank`: The rank ID that owns src_ptr (source rank)
-- `to_rank`: The rank ID that will receive the data (destination rank)
-- `mask`: Optional mask for conditional operations
-
-**Example:**
-```python
-# Copy from rank 1 to rank 0 (current rank must be either 1 or 0)
-ctx.copy(remote_ptr + offsets, local_ptr + offsets, 1, 0, mask=mask)
+```{eval-rst}
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.load
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.store
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.get
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.put
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.copy
 ```
 
 ### Atomic Operations
 
-#### `atomic_add(self, pointer, val, to_rank, mask=None, sem=None, scope=None)`
-
-Performs an atomic add at the specified rank's memory location.
-
-**Arguments:**
-- `pointer`: The memory location in the current rank's address space
-- `val`: The value to add
-- `to_rank`: The rank ID to which the atomic operation will be performed
-- `mask`: Optional mask for conditional operations
-- `sem`: Memory semantics (acquire, release, acq_rel, relaxed)
-- `scope`: Scope of synchronization (gpu, cta, sys)
-
-**Returns:**
-- The value at the memory location before the atomic operation
-
-**Example:**
-```python
-# Atomically add to rank 1's memory
-old_val = ctx.atomic_add(buffer, 5, 1)
-```
-
-#### `atomic_sub(self, pointer, val, to_rank, mask=None, sem=None, scope=None)`
-
-Atomically subtracts data from the specified rank's memory location.
-
-**Arguments:**
-- `pointer`: Pointer in the current rank's address space
-- `val`: The value to subtract
-- `to_rank`: The rank ID to which the atomic operation will be performed
-- `mask`: Optional mask for conditional operations
-- `sem`: Memory semantics (acquire, release, acq_rel, relaxed)
-- `scope`: Scope of synchronization (gpu, cta, sys)
-
-**Returns:**
-- The value at the memory location before the atomic operation
-
-**Example:**
-```python
-# Atomically subtract from rank 1's memory
-old_val = ctx.atomic_sub(buffer, 3, 1)
-```
-
-#### `atomic_cas(self, pointer, cmp, val, to_rank, sem=None, scope=None)`
-
-Atomically compares and exchanges the specified rank's memory location.
-
-**Arguments:**
-- `pointer`: Pointer in the current rank's address space
-- `cmp`: The expected value to compare
-- `val`: The new value to write if comparison succeeds
-- `to_rank`: The rank ID to which the atomic operation will be performed
-- `sem`: Memory semantics (acquire, release, acq_rel, relaxed)
-- `scope`: Scope of synchronization (gpu, cta, sys)
-
-**Returns:**
-- The value at the memory location before the atomic operation
-
-**Example:**
-```python
-# Compare-and-swap on rank 1's memory
-old_val = ctx.atomic_cas(flag + pid, 0, 1, 1, sem="release", scope="sys")
-```
-
-#### `atomic_xchg(self, pointer, val, to_rank, mask=None, sem=None, scope=None)`
-
-Performs an atomic exchange at the specified rank's memory location.
-
-**Arguments:**
-- `pointer`: The memory location in the current rank's address space
-- `val`: The value to exchange
-- `to_rank`: The rank ID to which the atomic operation will be performed
-- `mask`: Optional mask for conditional operations
-- `sem`: Memory semantics (acquire, release, acq_rel, relaxed)
-- `scope`: Scope of synchronization (gpu, cta, sys)
-
-**Returns:**
-- The value at the memory location before the atomic operation
-
-**Example:**
-```python
-# Exchange value with rank 1's memory
-old_val = ctx.atomic_xchg(buffer, 99, 1)
-```
-
-#### `atomic_xor(self, pointer, val, to_rank, mask=None, sem=None, scope=None)`
-
-Performs an atomic xor at the specified rank's memory location.
-
-**Arguments:**
-- `pointer`: The memory location in the current rank's address space
-- `val`: The value to xor
-- `to_rank`: The rank ID to which the atomic operation will be performed
-- `mask`: Optional mask for conditional operations
-- `sem`: Memory semantics (acquire, release, acq_rel, relaxed)
-- `scope`: Scope of synchronization (gpu, cta, sys)
-
-**Returns:**
-- The value at the memory location before the atomic operation
-
-**Example:**
-```python
-# Atomically XOR with rank 1's memory
-old_val = ctx.atomic_xor(buffer, 0xFF, 1)
-```
-
-#### `atomic_and(self, pointer, val, to_rank, mask=None, sem=None, scope=None)`
-
-Performs an atomic and at the specified rank's memory location.
-
-**Arguments:**
-- `pointer`: The memory location in the current rank's address space
-- `val`: The value to and
-- `to_rank`: The rank ID to which the atomic operation will be performed
-- `mask`: Optional mask for conditional operations
-- `sem`: Memory semantics (acquire, release, acq_rel, relaxed)
-- `scope`: Scope of synchronization (gpu, cta, sys)
-
-**Returns:**
-- The value at the memory location before the atomic operation
-
-**Example:**
-```python
-# Atomically AND with rank 1's memory
-old_val = ctx.atomic_and(buffer, 0x0F, 1)
-```
-
-#### `atomic_or(self, pointer, val, to_rank, mask=None, sem=None, scope=None)`
-
-Performs an atomic or at the specified rank's memory location.
-
-**Arguments:**
-- `pointer`: The memory location in the current rank's address space
-- `val`: The value to or
-- `to_rank`: The rank ID to which the atomic operation will be performed
-- `mask`: Optional mask for conditional operations
-- `sem`: Memory semantics (acquire, release, acq_rel, relaxed)
-- `scope`: Scope of synchronization (gpu, cta, sys)
-
-**Returns:**
-- The value at the memory location before the atomic operation
-
-**Example:**
-```python
-# Atomically OR with rank 1's memory
-old_val = ctx.atomic_or(buffer, 0xF0, 1)
-```
-
-#### `atomic_min(self, pointer, val, to_rank, mask=None, sem=None, scope=None)`
-
-Performs an atomic min at the specified rank's memory location.
-
-**Arguments:**
-- `pointer`: The memory location in the current rank's address space
-- `val`: The value to compare and potentially store
-- `to_rank`: The rank ID to which the atomic operation will be performed
-- `mask`: Optional mask for conditional operations
-- `sem`: Memory semantics (acquire, release, acq_rel, relaxed)
-- `scope`: Scope of synchronization (gpu, cta, sys)
-
-**Returns:**
-- The value at the memory location before the atomic operation
-
-**Example:**
-```python
-# Atomically compute minimum with rank 1's memory
-old_val = ctx.atomic_min(buffer, 10, 1)
-```
-
-#### `atomic_max(self, pointer, val, to_rank, mask=None, sem=None, scope=None)`
-
-Performs an atomic max at the specified rank's memory location.
-
-**Arguments:**
-- `pointer`: The memory location in the current rank's address space
-- `val`: The value to compare and potentially store
-- `to_rank`: The rank ID to which the atomic operation will be performed
-- `mask`: Optional mask for conditional operations
-- `sem`: Memory semantics (acquire, release, acq_rel, relaxed)
-- `scope`: Scope of synchronization (gpu, cta, sys)
-
-**Returns:**
-- The value at the memory location before the atomic operation
-
-**Example:**
-```python
-# Atomically compute maximum with rank 1's memory
-old_val = ctx.atomic_max(buffer, 100, 1)
+```{eval-rst}
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_add
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_sub
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_cas
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_xchg
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_xor
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_and
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_or
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_min
+.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_max
 ```
 
 ## Complete Example: Producer-Consumer Pattern
