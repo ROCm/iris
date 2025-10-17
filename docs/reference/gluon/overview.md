@@ -1,4 +1,4 @@
-# Gluon APIs (Experimental)
+# Gluon (Experimental)
 
 ```{warning}
 The Gluon API is **experimental** and may undergo breaking changes in future releases.
@@ -19,7 +19,7 @@ The Gluon API provides a Triton Gluon-based implementation of Iris that uses the
 ## Key Differences from Standard Iris
 
 - Uses Triton's experimental `@gluon.jit` decorator for device-side methods
-- Encapsulates heap_bases and rank info in an `IrisDeviceCtx` aggregate
+- Encapsulates `heap_bases` and rank info in an `IrisDeviceCtx` aggregate
 - Provides the same functionality as standard Iris with improved ergonomics
 - Better integration with Triton's Gluon programming model
 
@@ -45,96 +45,13 @@ def kernel(IrisDeviceCtx: gl.constexpr, context_tensor, buffer):
     ctx.store(buffer, data, to_rank=0)
 ```
 
-## Factory Function
+## API Reference
 
-```{eval-rst}
-.. autofunction:: iris.experimental.iris_gluon.iris
-```
+Explore the API by section:
 
-## Host-Side IrisGluon Class
-
-The `IrisGluon` class provides host-side methods for managing the multi-GPU context and symmetric heap.
-
-### Initialization & Context
-
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.get_device_context
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.get_backend
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.get_heap_bases
-```
-
-### Rank Information
-
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.get_rank
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.get_num_ranks
-```
-
-### Device & Compute Units
-
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.get_device
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.get_cu_count
-```
-
-### Synchronization
-
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.barrier
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.broadcast
-```
-
-### Tensor Creation
-
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.zeros
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.ones
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.full
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.zeros_like
-```
-
-### Logging
-
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.debug
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.info
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.warning
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.error
-```
-
-## Device-Side IrisDeviceCtx Aggregate
-
-The `IrisDeviceCtx` aggregate is used within Gluon kernels to perform remote memory operations. It encapsulates the symmetric heap state and provides device-side APIs.
-
-### Initialization
-
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.initialize
-```
-
-### Memory Operations
-
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.load
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.store
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.get
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.put
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.copy
-```
-
-### Atomic Operations
-
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_add
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_sub
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_cas
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_xchg
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_xor
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_and
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_or
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_min
-.. automethod:: iris.experimental.iris_gluon.IrisDeviceCtx.atomic_max
-```
+- [Iris Class](class.md)
+- [Tensor Creation](tensor-creation.md)
+- [Device Functions](device-functions.md)
 
 ## Complete Example: Producer-Consumer Pattern
 
@@ -224,12 +141,56 @@ def worker(rank, world_size):
     
     # Allocate buffers
     buffer_size = 1024
+    block_size = 256
     source = ctx.zeros(buffer_size, dtype=torch.float32)
     target = ctx.zeros(buffer_size, dtype=torch.float32)
-    flag = ctx.zeros(triton.cdiv(buffer_size, 256), dtype=torch.int32)
+    num_blocks = triton.cdiv(buffer_size, block_size)
+    flag = ctx.zeros(num_blocks, dtype=torch.int32)
     
-    # Launch kernels based on rank...
-    # (see examples/06_message_passing/message_passing_gluon.py for full code)
+    # Initialize source data on producer
+    producer_rank = 0
+    consumer_rank = 1
+    if rank == producer_rank:
+        source.fill_(42.0)
+    
+    # Launch kernels based on rank
+    grid = (num_blocks,)
+    if rank == producer_rank:
+        ctx.info(f"Rank {rank} producing data...")
+        producer_kernel[grid](
+            iris_gl.IrisDeviceCtx,
+            context_tensor,
+            source,
+            target,
+            flag,
+            buffer_size,
+            producer_rank,
+            consumer_rank,
+            block_size,
+            num_warps=1,
+        )
+    else:
+        ctx.info(f"Rank {rank} consuming data...")
+        consumer_kernel[grid](
+            iris_gl.IrisDeviceCtx,
+            context_tensor,
+            target,
+            flag,
+            buffer_size,
+            consumer_rank,
+            block_size,
+            num_warps=1,
+        )
+    
+    ctx.barrier()
+    
+    # Validate on consumer
+    if rank == consumer_rank:
+        expected = source * 2  # Consumer doubles the values
+        if torch.allclose(target, expected, atol=1):
+            ctx.info("Validation successful!")
+        else:
+            ctx.error("Validation failed!")
     
     ctx.barrier()
     dist.destroy_process_group()
@@ -238,7 +199,3 @@ if __name__ == "__main__":
     world_size = 2
     mp.spawn(worker, args=(world_size,), nprocs=world_size, join=True)
 ```
-
-For more complete examples, see:
-- `examples/06_message_passing/message_passing_gluon.py`
-- Unit tests in `tests/unittests/test_*_gluon.py`

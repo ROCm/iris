@@ -5,12 +5,12 @@
 Iris Gluon: Gluon-based Multi-GPU Communication Framework
 
 This module provides a Gluon-based implementation of Iris that uses the
-`@aggregate` decorator with Gluon's @gluon.jit to encapsulate the Iris backend
-struct, eliminating the need to pass heap_bases around manually.
+`@aggregate` decorator with Gluon's `@gluon.jit` to encapsulate the Iris backend
+struct, eliminating the need to pass `heap_bases` around manually.
 
 Key Features:
-- Uses Gluon's @gluon.jit decorator for device-side methods
-- Encapsulates heap_bases and rank info in IrisDeviceCtx aggregate
+- Uses Gluon's `@gluon.jit` decorator for device-side methods
+- Encapsulates `heap_bases` and rank info in `IrisDeviceCtx` aggregate
 - Provides same functionality as original Iris with improved ergonomics
 
 Example:
@@ -60,7 +60,7 @@ class IrisDeviceCtx:
     """
     Gluon device-side context that decodes the tensor from Iris.get_device_context().
 
-    This aggregate encapsulates the heap_bases pointer and provides
+    This aggregate encapsulates the `heap_bases` pointer and provides
     device-side methods for memory operations and atomics using Gluon.
 
     Attributes:
@@ -81,15 +81,15 @@ class IrisDeviceCtx:
     @gluon.jit
     def initialize(context_tensor):
         """
-        Initialize IrisDeviceCtx from the encoded tensor.
+        Initialize `IrisDeviceCtx` from the encoded tensor.
 
-        The context tensor has the format: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
+        The context tensor has the format: `[cur_rank, num_ranks, heap_base_0, heap_base_1, ...]`
 
         Args:
             context_tensor: Pointer to encoded context data
 
         Returns:
-            IrisDeviceCtx: Initialized device context
+            `IrisDeviceCtx`: Initialized device context
         """
         # Decode the tensor: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
         cur_rank = gl.load(context_tensor + 0)
@@ -106,12 +106,12 @@ class IrisDeviceCtx:
         Internal function to translate a pointer from one rank's address space to another.
 
         Args:
-            ptr: Pointer in the from_rank's address space
+            ptr: Pointer in the `from_rank`'s address space
             from_rank: Source rank ID
             to_rank: Target rank ID
 
         Returns:
-            Translated pointer in the to_rank's address space
+            Translated pointer in the `to_rank`'s address space
         """
         from_base = gl.load(self.heap_bases + from_rank)
         to_base = gl.load(self.heap_bases + to_rank)
@@ -133,7 +133,7 @@ class IrisDeviceCtx:
         Loads a value from the specified rank's memory location to the current rank.
 
         Args:
-            pointer: Pointer in the from_rank's address space
+            pointer: Pointer in the `from_rank`'s address space
             from_rank: The rank ID from which to read the data
             mask: Optional mask for conditional loading
 
@@ -172,7 +172,7 @@ class IrisDeviceCtx:
         Copies data from the specified rank's memory to the current rank's local memory.
 
         Args:
-            from_ptr: Pointer to remote memory in from_rank's address space
+            from_ptr: Pointer to remote memory in `from_rank`'s address space
             to_ptr: Pointer to local memory in current rank
             from_rank: The rank ID from which to read the data
             mask: Optional mask for conditional operations
@@ -192,7 +192,7 @@ class IrisDeviceCtx:
 
         Args:
             from_ptr: Pointer to local memory in current rank
-            to_ptr: Pointer to remote memory in to_rank's address space
+            to_ptr: Pointer to remote memory in `to_rank`'s address space
             to_rank: The rank ID to which the data will be written
             mask: Optional mask for conditional operations
 
@@ -209,16 +209,16 @@ class IrisDeviceCtx:
         """
         Copies data from the specified rank's memory into the destination rank's memory.
 
-        This function performs the transfer by translating src_ptr from the from_rank's address
-        space to the to_rank's address space, performing a masked load from the translated
-        source, and storing the loaded data to dst_ptr in the to_rank memory location.
-        If from_rank and to_rank are the same, this function performs a local copy operation.
-        It is undefined behaviour if neither from_rank nor to_rank is the cur_rank.
+        This function performs the transfer by translating `src_ptr` from the `from_rank`'s address
+        space to the `to_rank`'s address space, performing a masked load from the translated
+        source, and storing the loaded data to `dst_ptr` in the `to_rank` memory location.
+        If `from_rank` and `to_rank` are the same, this function performs a local copy operation.
+        It is undefined behaviour if neither `from_rank` nor `to_rank` is the `cur_rank`.
 
         Args:
-            src_ptr: Pointer in the from_rank's local memory from which to read data
-            dst_ptr: Pointer in the to_rank's local memory where the data will be written
-            from_rank: The rank ID that owns src_ptr (source rank)
+            src_ptr: Pointer in the `from_rank`'s local memory from which to read data
+            dst_ptr: Pointer in the `to_rank`'s local memory where the data will be written
+            from_rank: The rank ID that owns `src_ptr` (source rank)
             to_rank: The rank ID that will receive the data (destination rank)
             mask: Optional mask for conditional operations
 
@@ -458,7 +458,7 @@ class IrisGluon:
     Gluon-based Iris class for multi-GPU communication and memory management.
 
     This class provides the same functionality as the original Iris class but
-    uses Gluon's @aggregate decorator to encapsulate the backend state.
+    uses Gluon's `@aggregate` decorator to encapsulate the backend state.
 
     Args:
         heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
@@ -543,7 +543,7 @@ class IrisGluon:
         """
         Get the device context tensor for Gluon kernels.
 
-        Returns a tensor encoding: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
+        Returns a tensor encoding: `[cur_rank, num_ranks, heap_base_0, heap_base_1, ...]`
 
         Returns:
             torch.Tensor: Encoded context data as int64 tensor on device

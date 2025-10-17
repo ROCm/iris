@@ -24,6 +24,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 
 - [API Reference](https://rocm.github.io/iris/reference/api-reference.html)
 - [Programming Model](https://rocm.github.io/iris/conceptual/programming-model.html)
+- [Taxonomy of Multi-GPU Programming Patterns](https://rocm.github.io/iris/conceptual/taxonomy.html)
 - [Examples](https://rocm.github.io/iris/reference/examples.html)
 - [Fine-grained GEMM & Communication Overlap](https://rocm.github.io/iris/conceptual/finegrained-overlap.html)
 - [Setup Alternatives](https://rocm.github.io/iris/getting-started/installation.html)
@@ -104,7 +105,7 @@ if __name__ == "__main__":
 Iris also provides an experimental cleaner API using Triton's Gluon with `@gluon.jit` decorator:
 
 > [!NOTE]
-> **Requirements for Gluon backend**: ROCm 7.0 and Triton commit `aafec417bded34db6308f5b3d6023daefae43905` or later are required to use the experimental Gluon APIs.
+> **Requirements for Gluon backend**: ROCm 7.0+ and Triton commit [aafec417bded34db6308f5b3d6023daefae43905](https://github.com/triton-lang/triton/tree/aafec417bded34db6308f5b3d6023daefae43905) or later are required to use the experimental Gluon APIs.
 
 ```python
 import torch

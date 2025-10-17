@@ -96,128 +96,32 @@ autodoc_mock_imports = [
     "iris.hip",
 ]
 
-# Mock triton but not the parts we're customizing
+# Custom mocks that preserve docstrings for Triton Gluon
 import sys
 from unittest.mock import MagicMock
 
-# First, create a basic mock for triton
+# Docstring-preserving decorator mock
+class PreserveDocstringMock:
+    """Mock decorator that preserves docstrings and function attributes."""
+    
+    def __call__(self, func):
+        # Return the original function unchanged to preserve docstrings
+        return func
+
+# Mock triton modules
 sys.modules['triton'] = MagicMock()
+sys.modules['triton.language'] = MagicMock()
+sys.modules['triton.language.core'] = MagicMock()
+sys.modules['triton.language.core']._aggregate = lambda cls: cls  # Preserve class
 
-# Mock triton.language with aggregate decorator
-class AggregateMock:
-    """Mock for @aggregate decorator that preserves class and method docstrings."""
-    
-    def __call__(self, cls):
-        # Return the class unchanged to preserve docstrings
-        return cls
-
-class TritonLanguageMock:
-    cast = MagicMock()
-
-class TritonLanguageCoreMock:
-    _aggregate = AggregateMock()
-
-sys.modules['triton.language'] = TritonLanguageMock()
-sys.modules['triton.language.core'] = TritonLanguageCoreMock()
-
-class PreserveDocstringMock(MagicMock):
-    """Mock that preserves __doc__ and other attributes from decorated functions."""
-    
-    def __call__(self, *args, **kwargs):
-        if len(args) == 1 and callable(args[0]):
-            # This is being used as a decorator
-            func = args[0]
-            # Preserve the original function's attributes
-            wrapper = MagicMock()
-            wrapper.__doc__ = func.__doc__
-            wrapper.__name__ = func.__name__
-            wrapper.__module__ = func.__module__
-            wrapper.__qualname__ = getattr(func, '__qualname__', func.__name__)
-            wrapper.__annotations__ = getattr(func, '__annotations__', {})
-            # Preserve the signature for autodoc
-            wrapper.__signature__ = getattr(func, '__signature__', None)
-            try:
-                import inspect
-                wrapper.__signature__ = inspect.signature(func)
-            except:
-                pass
-            return wrapper
-        return MagicMock(*args, **kwargs)
-
-# Setup custom mocks for gluon
+# Mock gluon with docstring-preserving jit
 class GluonMock:
     jit = PreserveDocstringMock()
 
-class GluonLanguageMock:
-    constexpr = type
-    tensor = type
-    pointer_type = MagicMock()
-    uint64 = type
-    int8 = type
-    
-    @staticmethod
-    def load(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def store(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def program_id(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def arange(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def BlockedLayout(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def atomic_add(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def atomic_sub(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def atomic_cas(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def atomic_xchg(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def atomic_xor(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def atomic_and(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def atomic_or(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def atomic_min(*args, **kwargs):
-        return MagicMock()
-    
-    @staticmethod
-    def atomic_max(*args, **kwargs):
-        return MagicMock()
-
-class TritonExperimentalMock:
-    gluon = GluonMock()
-
-# Inject custom mocks
-sys.modules['triton.experimental'] = TritonExperimentalMock()
+sys.modules['triton.experimental'] = MagicMock()
+sys.modules['triton.experimental'].gluon = GluonMock()
 sys.modules['triton.experimental.gluon'] = GluonMock()
-sys.modules['triton.experimental.gluon.language'] = GluonLanguageMock()
+sys.modules['triton.experimental.gluon'].language = MagicMock()
 
 # Napoleon settings for Google/NumPy docstring parsing
 napoleon_google_docstring = True

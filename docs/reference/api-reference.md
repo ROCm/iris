@@ -9,8 +9,12 @@ Explore Iris APIs. The reference is broken down into focused sections to mirror 
 
 Use the links below to navigate:
 
-- [Iris Class (ctor & helpers)](api-iris-class.md)
-- [Tensor Creation](api-tensor-creation.md)
-- [Triton Device Functions](api-device-functions.md)
-- [Gluon APIs (Experimental)](api-gluon.md)
+- [Triton](triton/overview.md)
+  - [Iris Class](triton/class.md)
+  - [Tensor Creation](triton/tensor-creation.md)
+  - [Device Functions](triton/device-functions.md)
+- [Gluon (Experimental)](gluon/overview.md)
+  - [Iris Class](gluon/class.md)
+  - [Tensor Creation](gluon/tensor-creation.md)
+  - [Device Functions](gluon/device-functions.md)
 
