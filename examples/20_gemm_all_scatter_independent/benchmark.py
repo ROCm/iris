@@ -67,12 +67,14 @@ def parse_args():
     parser.add_argument("--comm_sms", type=int, default=48, help="Number of SMs for All-Scatter kernel")
     parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
     parser.add_argument(
+
         "--csv",
         type=str,
         default=None,
         help="Path to CSV file with configurations (columns: m, n, k, datatype)",
     )
     parser.add_argument(
+
         "--only_gemm",
         action="store_true",
         help="Run only GEMM operation (cannot be used with --only_comm)",
@@ -345,7 +347,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             shmem.info(f"GEMM validation {passed_str}.")
             # Wait for all to finish GEMM validation
             shmem.barrier()
-
+            
         # Validate all-scatter result if it was run
         if validate_comm_op:
             shmem.info("Validating all-scatter operation...")
