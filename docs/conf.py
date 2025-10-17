@@ -99,28 +99,32 @@ autodoc_mock_imports = [
 
 # Custom mocks that preserve docstrings for Triton Gluon
 
+
 # Docstring-preserving decorator mock
 class PreserveDocstringMock:
     """Mock decorator that preserves docstrings and function attributes."""
-    
+
     def __call__(self, func):
         # Return the original function unchanged to preserve docstrings
         return func
 
+
 # Mock triton modules
-sys.modules['triton'] = MagicMock()
-sys.modules['triton.language'] = MagicMock()
-sys.modules['triton.language.core'] = MagicMock()
-sys.modules['triton.language.core']._aggregate = lambda cls: cls  # Preserve class
+sys.modules["triton"] = MagicMock()
+sys.modules["triton.language"] = MagicMock()
+sys.modules["triton.language.core"] = MagicMock()
+sys.modules["triton.language.core"]._aggregate = lambda cls: cls  # Preserve class
+
 
 # Mock gluon with docstring-preserving jit
 class GluonMock:
     jit = PreserveDocstringMock()
 
-sys.modules['triton.experimental'] = MagicMock()
-sys.modules['triton.experimental'].gluon = GluonMock()
-sys.modules['triton.experimental.gluon'] = GluonMock()
-sys.modules['triton.experimental.gluon'].language = MagicMock()
+
+sys.modules["triton.experimental"] = MagicMock()
+sys.modules["triton.experimental"].gluon = GluonMock()
+sys.modules["triton.experimental.gluon"] = GluonMock()
+sys.modules["triton.experimental.gluon"].language = MagicMock()
 
 # Napoleon settings for Google/NumPy docstring parsing
 napoleon_google_docstring = True
