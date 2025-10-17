@@ -20,7 +20,6 @@ keywords:
   - "Triton"
   - "ROCm"
   - "AMD"
-  - "RMA"
   - "SHMEM"
   - "RDMA"
   - "GPU communication"

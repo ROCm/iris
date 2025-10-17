@@ -253,8 +253,7 @@ If you use Iris or reference it in your research, please cite our work:
   year          = 2025,
   month         = oct,
   doi           = {10.5281/zenodo.17382307},
-  url           = {https://github.com/ROCm/iris},
-  code          = {https://github.com/ROCm/iris}
+  url           = {https://github.com/ROCm/iris}
 }
 ```
 
