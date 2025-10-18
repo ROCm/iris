@@ -160,6 +160,11 @@ def persistent_gemm_all_reduce(
         tl.debug_barrier()
         tl.store(locks + tile_id, 1, cache_modifier=".wt")
 
+        # Signal to all remote ranks that this tile is ready
+        for remote_rank in range(world_size):
+            if remote_rank != cur_rank:
+                iris.atomic_xchg(tile_ready + tile_id, 1, cur_rank, remote_rank, heap_bases, sem="release", scope="sys")
+
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
