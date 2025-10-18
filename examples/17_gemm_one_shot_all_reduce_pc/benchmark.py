@@ -21,6 +21,7 @@ from examples.common.utils import (
 import iris
 
 from matmul_wrapper import matmul
+from gemm_one_shot_all_reduce_pc import persistent_all_reduce
 from examples.common.validation import validate_gemm
 
 torch.manual_seed(123)
@@ -57,7 +58,8 @@ def parse_args():
     parser.add_argument("--BLK_K", type=int, default=64, help="Block size K")
     parser.add_argument("--gsize_m", type=int, default=6, help="Grid size M")
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
-    parser.add_argument("--num_sms", type=int, default=256, help="Number of SMs for kernel")
+    parser.add_argument("--gemm_sms", type=int, default=256, help="Number of SMs for GEMM kernel")
+    parser.add_argument("--comm_sms", type=int, default=48, help="Number of SMs for All-Reduce kernel")
     parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
     parser.add_argument(
         "--distribution",
@@ -138,8 +140,29 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     bias = None
 
-    json_writer.add_field("num_sms", args["num_sms"])
+    num_xcds = iris.hip.get_num_xcc()
+
+    gemm_stream = torch.cuda.Stream()
+    comm_stream = torch.cuda.Stream()
+
+    json_writer.add_field("gemm_sms", args["gemm_sms"])
+    json_writer.add_field("comm_sms", args["comm_sms"])
     json_writer.add_field("distribution", args["distribution"])
+
+    kernel_timing = {
+        "gemm": {
+            "start_event": torch.cuda.Event(enable_timing=True),
+            "end_event": torch.cuda.Event(enable_timing=True),
+            "ms": 0,
+            "experiments": 0,
+        },
+        "communication": {
+            "start_event": torch.cuda.Event(enable_timing=True),
+            "end_event": torch.cuda.Event(enable_timing=True),
+            "ms": 0,
+            "experiments": 0,
+        },
+    }
 
     # Timestamps
     timestamps = Timestamps(num_tiles=total_tiles)
@@ -153,7 +176,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.barrier()
 
     def run_experiment():
+        nonlocal local_C
         nonlocal C_global
+        nonlocal kernel_timing
 
         shmem.barrier()
 
@@ -162,29 +187,72 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             shmem.barrier()
 
         torch.cuda.nvtx.range_push("GEMM + All-Reduce")
-        C_global = matmul.apply(
-            local_A,
-            local_B,
-            local_C,
-            C_global,
-            bias,
-            locks,
-            tile_ready,
-            rank,
-            world_size,
-            args["num_sms"],
-            args["BLK_M"],
-            args["BLK_N"],
-            args["BLK_K"],
-            args["gsize_m"],
-            args["distribution"],
-            shmem.get_heap_bases(),
-            "gfx942",
-            args["trace_tiles"],
-            timestamps.mm_begin_timestamp,
-            timestamps.mm_end_timestamp,
-        )
+        torch.cuda.nvtx.range_push("GEMM")
+        with torch.cuda.stream(gemm_stream):
+            kernel_timing["gemm"]["start_event"].record()
+            local_C = matmul.apply(
+                local_A,
+                local_B,
+                local_C,
+                C_global,
+                bias,
+                locks,
+                tile_ready,
+                rank,
+                world_size,
+                args["gemm_sms"],
+                args["comm_sms"],
+                args["BLK_M"],
+                args["BLK_N"],
+                args["BLK_K"],
+                args["gsize_m"],
+                args["distribution"],
+                shmem.get_heap_bases(),
+                "gfx942",
+                args["trace_tiles"],
+                timestamps.mm_begin_timestamp,
+                timestamps.mm_end_timestamp,
+            )
+            kernel_timing["gemm"]["end_event"].record()
+            kernel_timing["gemm"]["experiments"] += 1
+
+        torch.cuda.nvtx.range_pop()
+        torch.cuda.nvtx.range_push("All-Reduce")
+        with torch.cuda.stream(comm_stream):
+            kernel_timing["communication"]["start_event"].record()
+            persistent_all_reduce[(args["comm_sms"],)](
+                local_C,
+                C_global,
+                locks,
+                tile_ready,
+                args["M"],
+                args["N"],
+                local_C.stride(0),
+                local_C.stride(1),
+                C_global.stride(0),
+                C_global.stride(1),
+                args["BLK_M"],
+                args["BLK_N"],
+                args["gsize_m"],
+                args["comm_sms"],
+                num_xcds,
+                shmem.get_heap_bases(),
+                rank,
+                world_size,
+                args["distribution"],
+                args["trace_tiles"],
+                timestamps.mm_begin_timestamp,
+                timestamps.mm_end_timestamp,
+            )
+            kernel_timing["communication"]["end_event"].record()
+            kernel_timing["communication"]["experiments"] += 1
+        torch.cuda.nvtx.range_pop()
         shmem.barrier()
+
+        for k in ["gemm", "communication"]:
+            ms = kernel_timing[k]["start_event"].elapsed_time(kernel_timing[k]["end_event"])
+            kernel_timing[k]["ms"] += ms
+
         torch.cuda.nvtx.range_pop()
 
     # Synchronize across all GPUs
@@ -196,6 +264,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     shmem.barrier()
     preamble()
     shmem.barrier()
+
+    for k in ["gemm", "communication"]:
+        kernel_timing[k]["ms"] = 0
+        kernel_timing[k]["experiments"] = 0
 
     if args["validate"]:
         shmem.info("Validating...")
@@ -230,6 +302,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
         json_writer.add_field("tflops", triton_tflops)
         json_writer.add_field("total_ms", triton_ms)
+
+        for k in ["gemm", "communication"]:
+            json_writer.add_field(k + "_ms", kernel_timing[k]["ms"] / kernel_timing[k]["experiments"])
+            json_writer.add_field(k + "_experiments", kernel_timing[k]["experiments"])
 
         # Wait for all to finish benchmarking
         shmem.barrier()

@@ -12,11 +12,10 @@ import iris
 
 
 @triton.jit()
-def persistent_gemm_all_reduce(
+def persistent_gemm(
     A,
     B,
     local_C,
-    C_global,
     bias_ptr,
     locks,
     tile_ready,
@@ -29,14 +28,12 @@ def persistent_gemm_all_reduce(
     stride_bn,
     stride_cm_local,
     stride_cn_local,
-    stride_cm_global,
-    stride_cn_global,
     stride_bias,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    NUM_SMS: tl.constexpr,
+    GEMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
@@ -49,11 +46,7 @@ def persistent_gemm_all_reduce(
     mm_end_timestamp_ptr: tl.tensor = None,
 ):
     """
-    Producer-consumer all-reduce where each GPU:
-    1. Computes a subset of tiles (producer)
-    2. Waits for that tile to be ready
-    3. Loads the tile from all GPUs
-    4. Accumulates and scatters results to all GPUs
+    Producer kernel: Computes a subset of tiles based on distribution mode.
 
     Two distribution modes:
     - DISTRIBUTION=0 (striding): GPU i gets tiles i, i+world_size, i+2*world_size, ...
@@ -62,7 +55,7 @@ def persistent_gemm_all_reduce(
     pid = tl.program_id(0)
 
     if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+        pid = (pid % NUM_XCDS) * (GEMM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -90,7 +83,7 @@ def persistent_gemm_all_reduce(
         stride = 1
 
     # Each SM within this rank processes tiles assigned to this rank
-    for tile_offset in range(pid, tiles_per_rank, NUM_SMS):
+    for tile_offset in range(pid, tiles_per_rank, GEMM_SMS):
         tile_id = start_tile + tile_offset * stride
 
         # Boundary check
@@ -169,9 +162,48 @@ def persistent_gemm_all_reduce(
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
-    # All-reduce phase: accumulate tiles from all ranks
+
+@triton.jit()
+def persistent_all_reduce(
+    local_C,
+    C_global,
+    locks,
+    tile_ready,
+    M,
+    N,
+    stride_cm_local,
+    stride_cn_local,
+    stride_cm_global,
+    stride_cn_global,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    heap_bases: tl.tensor,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    DISTRIBUTION: tl.constexpr,  # 0 for striding, 1 for block
+    COLLECT_TIMESTAMPS: tl.constexpr = False,
+    mm_begin_timestamp_ptr: tl.tensor = None,
+    mm_end_timestamp_ptr: tl.tensor = None,
+):
+    """
+    Consumer kernel: Waits for tiles, accumulates from all ranks, and scatters results.
+    """
+    pid = tl.program_id(0)
+
+    if NUM_XCDS != 1:
+        pid = (pid % NUM_XCDS) * (COMM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+
+    acc_dtype = tl.float32 if C_global.type.element_ty != tl.int8 else tl.int32
+
     # Each SM processes tiles in a round-robin fashion across ALL tiles
-    for tile_id in range(pid, total_tiles, NUM_SMS):
+    for tile_id in range(pid, total_tiles, COMM_SMS):
         # Wait for the tile to be ready on the rank that computed it
         if DISTRIBUTION == 0:
             # Striding: tile_id is owned by rank (tile_id % world_size)
@@ -185,7 +217,7 @@ def persistent_gemm_all_reduce(
         # Wait for the owner to finish computing this tile
         if owner_rank == cur_rank:
             # Local tile, already computed
-            while tl.atomic_cas(locks + tile_id, 0, 0, sem="acquire", scope="gpu") != 1:
+            while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
                 pass
         else:
             # Remote tile, wait for remote signal

@@ -7,12 +7,12 @@ import random
 import sys
 import os
 
-from gemm_one_shot_all_reduce_pc import persistent_gemm_all_reduce
+from gemm_one_shot_all_reduce_pc import persistent_gemm
 
 from examples.common.utils import is_triton_interpret_set
 import iris
 
-gemm_kernel = persistent_gemm_all_reduce
+gemm_kernel = persistent_gemm
 
 
 class matmul(torch.autograd.Function):
@@ -51,7 +51,8 @@ class matmul(torch.autograd.Function):
         tile_ready: torch.Tensor,
         rank: int,
         world_size: int,
-        num_sms: int,
+        gemm_sms: int,
+        comm_sms: int,
         BLK_M: int,
         BLK_N: int,
         BLK_K: int,
@@ -85,11 +86,10 @@ class matmul(torch.autograd.Function):
 
         # compute grid (work to do per SM on the first wave)
         stride_bias = bias.stride(0) if use_bias else 0
-        kk = gemm_kernel[(num_sms,)](
+        kk = gemm_kernel[(gemm_sms,)](
             a,
             b,
             local_C,
-            C_global,
             bias,
             locks,
             tile_ready,
@@ -102,14 +102,12 @@ class matmul(torch.autograd.Function):
             b.stride(1),
             local_C.stride(0),
             local_C.stride(1),
-            C_global.stride(0),
-            C_global.stride(1),
             stride_bias,
             BLOCK_SIZE_M=BLK_M,
             BLOCK_SIZE_N=BLK_N,
             BLOCK_SIZE_K=BLK_K,
             GROUP_SIZE_M=gsize_m,
-            NUM_SMS=num_sms,
+            GEMM_SMS=gemm_sms,
             NUM_XCDS=num_xcds,
             BIAS=use_bias,
             EVEN_K=even_k,
@@ -130,7 +128,7 @@ class matmul(torch.autograd.Function):
         matmul._registers = kk.n_regs
         matmul._spills = kk.n_spills
 
-        return C_global
+        return local_C
 
     @staticmethod
     def forward(
@@ -144,7 +142,8 @@ class matmul(torch.autograd.Function):
         tile_ready: torch.Tensor,
         rank: int,
         world_size: int,
-        num_sms: int,
+        gemm_sms: int,
+        comm_sms: int,
         BLK_M: int,
         BLK_N: int,
         BLK_K: int,
@@ -166,7 +165,8 @@ class matmul(torch.autograd.Function):
             tile_ready=tile_ready,
             rank=rank,
             world_size=world_size,
-            num_sms=num_sms,
+            gemm_sms=gemm_sms,
+            comm_sms=comm_sms,
             BLK_M=BLK_M,
             BLK_N=BLK_N,
             BLK_K=BLK_K,
@@ -178,4 +178,4 @@ class matmul(torch.autograd.Function):
             mm_begin_timestamp=mm_begin_timestamp,
             mm_end_timestamp=mm_end_timestamp,
         )
-        return C_global
+        return local_C
