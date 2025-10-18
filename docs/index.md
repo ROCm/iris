@@ -21,6 +21,7 @@ Iris is a **Triton-based framework for Remote Memory Access (RMA)** operations. 
 - **SHMEM-like RMA**: Iris provides SHMEM-like RMA support in Triton
 - **Simple and Intuitive API**: Iris provides simple and intuitive RMA APIs. Writing multi-GPU programs is as easy as writing single-GPU programs
 - **Triton-based**: Iris is built on top of Triton and inherits Triton's performance and capabilities
+- **Experimental Gluon Backend**: Optional Gluon-based API using `@aggregate` and `@gluon.jit` for improved ergonomics (requires ROCm 7.0 and Triton commit [aafec417bded34db6308f5b3d6023daefae43905](https://github.com/triton-lang/triton/tree/aafec417bded34db6308f5b3d6023daefae43905) or later)
 
 ## Quick Start
 
@@ -124,6 +125,73 @@ if __name__ == "__main__":
     mp.spawn(_worker, args=(world_size,), nprocs=world_size, join=True)
 ```
 
+### Gluon-style API (Experimental)
+
+Iris also provides a cleaner API using Triton's Gluon with `@gluon.jit` decorator:
+
+```python
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+import iris.experimental.iris_gluon as iris_gl
+
+# Device-side APIs - context encapsulates heap_bases
+@gluon.jit
+def kernel(IrisDeviceCtx: gl.constexpr, context_tensor,
+          buffer, buffer_size: gl.constexpr, block_size: gl.constexpr):
+    # Initialize device context from tensor
+    ctx = IrisDeviceCtx.initialize(context_tensor)
+    
+    pid = gl.program_id(0)
+    block_start = pid * block_size
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    offsets = block_start + gl.arange(0, block_size, layout=layout)
+    mask = offsets < buffer_size
+
+    # Store 1 in the target buffer - no need to pass heap_bases separately!
+    target_rank = 1
+    ctx.store(buffer + offsets, 1, target_rank, mask=mask)
+
+def _worker(rank, world_size):
+    # Torch distributed initialization
+    device_id = rank % torch.cuda.device_count()
+    dist.init_process_group(
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
+        init_method="tcp://127.0.0.1:29500",
+        device_id=torch.device(f"cuda:{device_id}")
+    )
+
+    # Iris initialization
+    heap_size = 2**30   # 1GiB symmetric heap
+    iris_ctx = iris_gl.iris(heap_size)
+    context_tensor = iris_ctx.get_device_context()  # Get encoded context
+    cur_rank = iris_ctx.get_rank()
+    
+    # Iris tensor allocation
+    buffer_size = 4096  # 4K elements buffer
+    buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
+    
+    # Launch the kernel on rank 0
+    block_size = 1024
+    grid = (buffer_size + block_size - 1) // block_size
+    source_rank = 0
+    if cur_rank == source_rank:
+        kernel[(grid,)](iris_gl.IrisDeviceCtx, context_tensor, 
+                       buffer, buffer_size, block_size, num_warps=1)
+
+    # Synchronize all ranks
+    iris_ctx.barrier()
+    dist.destroy_process_group()
+
+if __name__ == "__main__":
+    world_size = 2  # Using two ranks
+    mp.spawn(_worker, args=(world_size,), nprocs=world_size, join=True)
+```
+
 For more examples, see the [Examples](reference/examples.md) page with ready-to-run scripts and usage patterns.
 
 For other setup methods, see the [Installation Guide](getting-started/installation.md).
@@ -133,17 +201,17 @@ For other setup methods, see the [Installation Guide](getting-started/installati
 ### 📚 **Getting Started**
   - **[Installation](getting-started/installation.md)**: Set up Iris on your system
   - **[Examples](reference/examples.md)**: Working code examples
-  - **[Contributing](reference/contributing.md)**: How to contribute
+  - **[Contributing](CONTRIBUTING.md)**: How to contribute
 
 ### 🧠 **Conceptual**
 - **[Programming Model](conceptual/programming-model.md)**: How Iris works
 - **[Fine-grained Overlap](conceptual/finegrained-overlap.md)**: GEMM & communication overlap
+- **[Taxonomy](conceptual/taxonomy.md)**: Multi-GPU programming patterns
 
 ### 📖 **Reference**
 - **[API Reference](reference/api-reference.md)**: Structured API documentation
-- **[Initialization & Helpers](reference/api-iris-class.md)**: Factory and helper methods
-- **[Tensor Creation](reference/api-tensor-creation.md)**: Tensor-like APIs on Iris
-- **[Triton Device Functions](reference/api-device-functions.md)**: Load/store and atomics
+- **[Triton APIs](reference/triton/overview.md)**: Standard Iris APIs with Triton
+- **[Gluon APIs (Experimental)](reference/gluon/overview.md)**: Cleaner API with Gluon decorators
 
 ## Supported GPUs
 
@@ -169,7 +237,7 @@ Join the [GitHub Discussions](https://github.com/ROCm/iris/discussions) to ask q
 Found a bug or have a feature request? Report it on [GitHub Issues](https://github.com/ROCm/iris/issues).
 
 ### Contributing
-Want to contribute to Iris? Check out the [Contributing Guide](reference/contributing.md) to learn how you can help make Iris better for everyone.
+Want to contribute to Iris? Check out the [Contributing Guide](CONTRIBUTING.md) to learn how you can help make Iris better for everyone.
 
 ---
 

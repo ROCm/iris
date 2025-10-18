@@ -1,4 +1,4 @@
-# Iris Class API
+# Iris Class
 
 ## Factory Function
 

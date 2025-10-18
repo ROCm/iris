@@ -9,9 +9,18 @@ subtrees:
     entries:
     - file: conceptual/programming-model.md
     - file: conceptual/finegrained-overlap.md
+    - file: conceptual/taxonomy.md
   - caption: Reference
     entries:
     - file: reference/api-reference.md
-    - file: reference/api-iris-class.md
-    - file: reference/api-tensor-creation.md
-    - file: reference/api-device-functions.md
+      entries:
+      - file: reference/triton/overview.md
+        entries:
+        - file: reference/triton/class.md
+        - file: reference/triton/tensor-creation.md
+        - file: reference/triton/device-functions.md
+      - file: reference/gluon/overview.md
+        entries:
+        - file: reference/gluon/class.md
+        - file: reference/gluon/tensor-creation.md
+        - file: reference/gluon/device-functions.md

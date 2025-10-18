@@ -28,3 +28,4 @@ slurm*.out
 
 examples/gemm/results/*
 asm/
+*.img

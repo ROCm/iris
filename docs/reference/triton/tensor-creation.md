@@ -1,4 +1,4 @@
-# Tensor Creation APIs
+# Tensor Creation
 
 APIs on `Iris` that create and initialize tensors on the Iris symmetric heap.
 

@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+import torch
+import pytest
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+import iris.experimental.iris_gluon as iris_gl
+
+
+# TODO: Separate this kernel out in the following categories:
+# 1. for local put.
+# 2. for remote put with one other rank.
+# 3. for remote put with more than one rank (if num_ranks > 2).
+@gluon.jit
+def put_kernel(
+    IrisDeviceCtx: gl.constexpr,
+    context_tensor,
+    data,
+    results,
+    cur_rank: gl.constexpr,
+    num_ranks: gl.constexpr,
+    BLOCK_SIZE: gl.constexpr,
+):
+    ctx = IrisDeviceCtx.initialize(context_tensor)
+    pid = gl.program_id(0)
+    block_start = pid * BLOCK_SIZE
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
+    mask = offsets < BLOCK_SIZE
+
+    # Put data in all ranks
+    # Doesn't matter which rank stores at the end, the data should all be the same at the end.
+    for target_rank in range(num_ranks):
+        ctx.put(data + offsets, results + offsets, target_rank, mask=mask)
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.int8,
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ],
+)
+@pytest.mark.parametrize(
+    "BLOCK_SIZE",
+    [
+        1,
+        8,
+        16,
+        32,
+    ],
+)
+def test_put_api(dtype, BLOCK_SIZE):
+    # TODO: Adjust heap size.
+    shmem = iris_gl.iris(1 << 20)
+    num_ranks = shmem.get_num_ranks()
+    context_tensor = shmem.get_device_context()
+    cur_rank = shmem.get_rank()
+
+    data = shmem.ones(BLOCK_SIZE, dtype=dtype)
+    results = shmem.zeros_like(data)
+
+    shmem.barrier()
+
+    grid = (1,)
+    put_kernel[grid](
+        iris_gl.IrisDeviceCtx,
+        context_tensor,
+        data,
+        results,
+        cur_rank,
+        num_ranks,
+        BLOCK_SIZE,
+        num_warps=1,
+    )
+    shmem.barrier()
+
+    # Verify the results
+    expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda")
+
+    try:
+        torch.testing.assert_close(results, expected, rtol=0, atol=0)
+    except AssertionError as e:
+        print(e)
+        print("Expected:", expected)
+        print("Actual:", results)
+        raise

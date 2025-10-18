@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use Iris or reference it in your research, please cite our work."
+authors:
+  - family-names: "Awad"
+    given-names: "Muhammad"
+  - family-names: "Osama"
+    given-names: "Muhammad"
+  - family-names: "Potter"
+    given-names: "Brandon"
+title: "Iris: First-Class Multi-GPU Programming Experience in Triton"
+doi: "10.5281/zenodo.17382307"
+date-released: 2025-10-18
+url: "https://github.com/ROCm/iris"
+repository-code: "https://github.com/ROCm/iris"
+license: MIT
+keywords:
+  - "multi-GPU"
+  - "distributed programming"
+  - "RMA"
+  - "Triton"
+  - "ROCm"
+  - "AMD"
+  - "SHMEM"
+  - "RDMA"
+  - "GPU communication"
+  - "performance portability"
+abstract: "Iris is a Triton-based framework providing SHMEM-like Remote Memory Access (RMA) primitives for multi-GPU programming. Developed by AMD Research and Advanced Development, it enables intuitive inter-GPU communication through a simple and expressive API that makes distributed GPU programming as straightforward as single-GPU development. The framework supports both standard Triton and experimental Gluon backends, offering fine-grained control over memory access patterns and communication–computation overlap, with support for AMD MI300X, MI350X, and MI355X accelerators."

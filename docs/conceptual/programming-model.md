@@ -2,6 +2,41 @@
 
 Iris is an open-source triton-based framework for Remote Memory Access (RMA)[^1] operations written in only a few 100 lines of code. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming.
 
+## Traditional vs. Iris Approach
+
+### Contemporary Approach (e.g., RCCL)
+
+The traditional approach relies on CPU-initiated control flow with bulk-synchronous communication phases:
+
+<p align="center">
+  <img src="../images/approach-contemporary-rccl.png" alt="Contemporary Approach">
+  <br>
+  <em>Contemporary approach showing CPU-initiated control path with separate compute and RCCL communication kernels, requiring host-device synchronization.</em>
+</p>
+
+**Key Attributes:**
+- **CPU initiates communication (control path)**: Host orchestrates all GPU operations
+- **Bulk-synchronous communication phases**: Complete separation of compute and communication
+- **Remote device communication may not begin early**: Stream synchronization delays prevent early communication start
+
+### World of Iris
+
+Iris enables **GPU-initiated communication control path** with device-side primitives:
+
+<p align="center">
+  <img src="../images/approach-iris.png" alt="World of Iris">
+  <br>
+  <em>Iris approach showing GPU-initiated control path where communication can begin as soon as data is produced, enabling fine-grained overlap within fused kernels.</em>
+</p>
+
+**Key Attributes:**
+- **GPU initiates communication control path**: Device-side control eliminates host overhead
+- **Dynamic communication phases**: Communication happens naturally as data becomes available
+- **No intermediate buffers**: Data written directly to application
+- **Remote device communication may begin as soon as data is produced**: Fine-grained overlap at work-group granularity
+- **Suitable for tiled algorithms**: Natural fit for blocked matrix operations
+- **Suitable for partitioned communication/computation schemes with specialized roles**: Enables producer-consumer and work group specialization patterns
+
 <div class="theme-switch-wrapper">
   <img class="dark-theme-img only-dark" src="../images/iris-model.png" alt="Iris Model">
   <img class="light-theme-img only-light" src="../images/iris-model-light.png" alt="Iris Model">

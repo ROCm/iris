@@ -39,7 +39,7 @@ dev = [
 package-dir = { "" = "." }
 
 [tool.setuptools.packages.find]
-include = ["iris"]
+include = ["iris*"]
 
 # ---- setuptools-scm versioning ----
 [tool.setuptools_scm]

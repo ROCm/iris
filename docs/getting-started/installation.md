@@ -25,6 +25,13 @@ Iris has minimal dependencies including Python, PyTorch, ROCm HIP runtime, and T
 
 **Note**: These versions represent the minimum working configuration. Using different versions may cause compatibility issues.
 
+### Gluon Backend Requirements (Experimental)
+
+To use the experimental Gluon APIs, additional requirements apply:
+
+- ROCm 7.0+
+- Triton (required commit: [aafec417bded34db6308f5b3d6023daefae43905](https://github.com/triton-lang/triton/tree/aafec417bded34db6308f5b3d6023daefae43905) or later)
+
 ## Installation Methods
 ### 1. Direct Installation from Git
 

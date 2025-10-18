@@ -1,4 +1,4 @@
-# Triton Device Functions
+# Device Functions
 
 Device-side functions provided by Iris for remote memory operations and atomics.
 
@@ -8,7 +8,6 @@ Device-side functions provided by Iris for remote memory operations and atomics.
    :members:
    :no-undoc-members:
    :no-show-inheritance:
-   :no-docstring:
 ```
 
 ## Memory transfer operations

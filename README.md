@@ -9,7 +9,12 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 # Iris: First-Class Multi-GPU Programming Experience in Triton
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml) [![Iris Tests](https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml/badge.svg)](https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml)
+<p align="center">
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
+  <a href="https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml"><img src="https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml/badge.svg" alt="Iris Tests"></a>
+  <a href="https://doi.org/10.5281/zenodo.17382307"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.17382307.svg" alt="DOI"></a>
+</p>
 
 Iris is a Triton-based framework for Remote Memory Access (RMA) operations developed by AMD's Research and Advanced Development team. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton's programmability and performance.
 
@@ -18,14 +23,16 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 - **SHMEM-like RMA**: Iris provides SHMEM-like RMA support in Triton.
 - **Simple and Intuitive API**: Iris provides simple and intuitive RMA APIs. Writing multi-GPU programs is as easy as writing single-GPU programs.
 - **Triton-based**: Iris is built on top of Triton and inherits Triton's performance and capabilities.
+- **Triton Gluon-based backend (Experimental)**: Includes an optional backend built on Triton’s Gluon language, a lower-level GPU programming model that exposes explicit control over layouts, memory, and data movement—ideal for users seeking maximal performance and hardware-level optimization.
 
 ## Documentation
 
-- [API Reference](https://rocm.github.io/iris/reference/api-reference.html)
-- [Programming Model](https://rocm.github.io/iris/conceptual/programming-model.html)
-- [Examples](https://rocm.github.io/iris/reference/examples.html)
-- [Fine-grained GEMM & Communication Overlap](https://rocm.github.io/iris/conceptual/finegrained-overlap.html)
 - [Setup Alternatives](https://rocm.github.io/iris/getting-started/installation.html)
+- [Examples](https://rocm.github.io/iris/reference/examples.html)
+- [Programming Model](https://rocm.github.io/iris/conceptual/programming-model.html)
+- [Taxonomy of Multi-GPU Programming Patterns](https://rocm.github.io/iris/conceptual/taxonomy.html)
+- [Fine-grained GEMM & Communication Overlap](https://rocm.github.io/iris/conceptual/finegrained-overlap.html)
+- [API Reference](https://rocm.github.io/iris/reference/api-reference.html)
 
 ## API Example
 
@@ -88,6 +95,76 @@ def _worker(rank, world_size):
             block_size,
             iris_ctx.get_heap_bases(),
         )
+
+    # Synchronize all ranks
+    iris_ctx.barrier()
+    dist.destroy_process_group()
+
+if __name__ == "__main__":
+    world_size = 2  # Using two ranks
+    mp.spawn(_worker, args=(world_size,), nprocs=world_size, join=True)
+```
+
+### Gluon-style API (Experimental)
+
+Iris also provides an experimental cleaner API using Triton's Gluon with `@gluon.jit` decorator:
+
+> [!NOTE]
+> **Requirements for Gluon backend**: ROCm 7.0+ and Triton commit [aafec417bded34db6308f5b3d6023daefae43905](https://github.com/triton-lang/triton/tree/aafec417bded34db6308f5b3d6023daefae43905) or later are required to use the experimental Gluon APIs.
+
+```python
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+import iris.experimental.iris_gluon as iris_gl
+
+# Device-side APIs - context encapsulates heap_bases
+@gluon.jit
+def kernel(IrisDeviceCtx: gl.constexpr, context_tensor,
+          buffer, buffer_size: gl.constexpr, block_size: gl.constexpr):
+    # Initialize device context from tensor
+    ctx = IrisDeviceCtx.initialize(context_tensor)
+    
+    pid = gl.program_id(0)
+    block_start = pid * block_size
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    offsets = block_start + gl.arange(0, block_size, layout=layout)
+    mask = offsets < buffer_size
+
+    # Store 1 in the target buffer - no need to pass heap_bases separately!
+    target_rank = 1
+    ctx.store(buffer + offsets, 1, target_rank, mask=mask)
+
+def _worker(rank, world_size):
+    # Torch distributed initialization
+    device_id = rank % torch.cuda.device_count()
+    dist.init_process_group(
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
+        init_method="tcp://127.0.0.1:29500",
+        device_id=torch.device(f"cuda:{device_id}")
+    )
+
+    # Iris initialization
+    heap_size = 2**30   # 1GiB symmetric heap
+    iris_ctx = iris_gl.iris(heap_size)
+    context_tensor = iris_ctx.get_device_context()  # Get encoded context
+    cur_rank = iris_ctx.get_rank()
+    
+    # Iris tensor allocation
+    buffer_size = 4096  # 4K elements buffer
+    buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
+    
+    # Launch the kernel on rank 0
+    block_size = 1024
+    grid = (buffer_size + block_size - 1) // block_size
+    source_rank = 0
+    if cur_rank == source_rank:
+        kernel[(grid,)](iris_gl.IrisDeviceCtx, context_tensor, 
+                       buffer, buffer_size, block_size, num_warps=1)
 
     # Synchronize all ranks
     iris_ctx.barrier()
@@ -164,6 +241,21 @@ Need help? We're here to support you! Here are a few ways to get in touch:
 2. **Contact the Team**: If GitHub issues aren't working for you or you need to reach us directly, feel free to contact our development team
 
 We welcome your feedback and contributions!
+
+## How to Cite
+
+If you use Iris or reference it in your research, please cite our work:
+
+```bibtex
+@software{Awad:2025:IFM,
+  author        = {Muhammad Awad and Muhammad Osama and Brandon Potter},
+  title         = {{Iris}: First-Class Multi-{GPU} Programming Experience in {Triton}},
+  year          = 2025,
+  month         = oct,
+  doi           = {10.5281/zenodo.17382307},
+  url           = {https://github.com/ROCm/iris}
+}
+```
 
 ## License
 
