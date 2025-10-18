@@ -19,7 +19,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 - [Iris All-Scatter Taxonomy Released](https://rocm.github.io/iris/conceptual/taxonomy.html)
 - [FlashDecode with Iris](https://github.com/ROCm/iris/tree/main/examples/13_flash_decode)
 - [AMD's GPU Mode Competition Announced](https://amdchallenge2025.datamonsters.com/)
-- Presented Iris at [GPUMode]()
+- Iris was presented in [Chinese](https://youtu.be/wW14w1QNrY8) for participants of the AMD Distributed Inference Kernel Contest.
 - Iris Released
 
 ## Key Features
