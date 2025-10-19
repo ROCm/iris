@@ -443,14 +443,10 @@ def main():
             run_args.update(config)
 
             print(
-                f"\nRunning configuration {i + 1}/{len(configs)}:\n" +
-                "\n".join(
+                f"\nRunning configuration {i + 1}/{len(configs)}:\n"
+                + "\n".join(
                     f"\t{k}={config[k]}"
-                    for k in [
-                        "m", "n", "k", "datatype",
-                        "BLK_M", "BLK_N", "BLK_K",
-                        "gemm_sms", "comm_sms"
-                    ]
+                    for k in ["m", "n", "k", "datatype", "BLK_M", "BLK_N", "BLK_K", "gemm_sms", "comm_sms"]
                 )
             )
             # Generate unique output filename for this configuration
