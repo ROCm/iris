@@ -40,17 +40,13 @@ def persistent_gemm(
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
-    DISTRIBUTION: tl.constexpr,  # 0 for striding, 1 for block
     COLLECT_TIMESTAMPS: tl.constexpr = False,
     mm_begin_timestamp_ptr: tl.tensor = None,
     mm_end_timestamp_ptr: tl.tensor = None,
 ):
     """
-    Producer kernel: Computes a subset of tiles based on distribution mode.
-
-    Two distribution modes:
-    - DISTRIBUTION=0 (striding): GPU i gets tiles i, i+world_size, i+2*world_size, ...
-    - DISTRIBUTION=1 (block): GPU i gets tiles from [i*N/world_size, (i+1)*N/world_size)
+    Producer kernel: Computes all tiles (each rank produces partial results).
+    All ranks process all tiles and produce partials because K is split across ranks.
     """
     pid = tl.program_id(0)
 
@@ -70,26 +66,8 @@ def persistent_gemm(
 
     acc_dtype = tl.float32 if local_C.type.element_ty != tl.int8 else tl.int32
 
-    # Determine which tiles this rank is responsible for computing
-    if DISTRIBUTION == 0:
-        # Striding: rank gets tiles cur_rank, cur_rank + world_size, ...
-        tiles_per_rank = tl.cdiv(total_tiles, world_size)
-        start_tile = cur_rank
-        stride = world_size
-    else:
-        # Block: rank gets continuous block of tiles
-        tiles_per_rank = tl.cdiv(total_tiles, world_size)
-        start_tile = cur_rank * tiles_per_rank
-        stride = 1
-
-    # Each SM within this rank processes tiles assigned to this rank
-    for tile_offset in range(pid, tiles_per_rank, GEMM_SMS):
-        tile_id = start_tile + tile_offset * stride
-
-        # Boundary check
-        if tile_id >= total_tiles:
-            break
-
+    # All ranks process all tiles
+    for tile_id in range(pid, total_tiles, GEMM_SMS):
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
             tl.atomic_min(mm_begin_timestamp_ptr + tile_id, timestamp)
@@ -189,7 +167,8 @@ def persistent_all_reduce(
     mm_end_timestamp_ptr: tl.tensor = None,
 ):
     """
-    Consumer kernel: Waits for tiles, accumulates from all ranks, and scatters results.
+    Consumer kernel: Waits for tiles from all ranks, accumulates, and scatters results.
+    Each rank only processes a subset of tiles for reduction based on DISTRIBUTION.
     """
     pid = tl.program_id(0)
 
@@ -202,32 +181,41 @@ def persistent_all_reduce(
 
     acc_dtype = tl.float32 if C_global.type.element_ty != tl.int8 else tl.int32
 
-    # Each SM processes tiles in a round-robin fashion across ALL tiles
-    for tile_id in range(pid, total_tiles, COMM_SMS):
-        # Wait for the tile to be ready on the rank that computed it
-        if DISTRIBUTION == 0:
-            # Striding: tile_id is owned by rank (tile_id % world_size)
-            owner_rank = tile_id % world_size
-        else:
-            # Block: tile_id is owned by rank floor(tile_id / tiles_per_rank)
-            tiles_per_rank = tl.cdiv(total_tiles, world_size)
-            owner_rank = tile_id // tiles_per_rank
-            owner_rank = tl.minimum(owner_rank, world_size - 1)  # Handle edge case
+    # Determine which tiles this rank is responsible for reducing
+    if DISTRIBUTION == 0:
+        # Striding: rank reduces tiles cur_rank, cur_rank + world_size, ...
+        tiles_per_rank = tl.cdiv(total_tiles, world_size)
+        start_tile = cur_rank
+        stride = world_size
+    else:
+        # Block: rank reduces continuous block of tiles
+        tiles_per_rank = tl.cdiv(total_tiles, world_size)
+        start_tile = cur_rank * tiles_per_rank
+        stride = 1
 
-        # Wait for the owner to finish computing this tile
-        if owner_rank == cur_rank:
-            # Local tile, already computed
-            while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
-                pass
-        else:
-            # Remote tile, wait for remote signal
-            while (
-                iris.atomic_cas(
-                    tile_ready + tile_id, 0, 0, cur_rank, owner_rank, heap_bases, sem="acquire", scope="sys"
-                )
-                != 1
-            ):
-                pass
+    # Each SM processes tiles assigned to this rank for reduction
+    for tile_offset in range(pid, tiles_per_rank, COMM_SMS):
+        tile_id = start_tile + tile_offset * stride
+
+        # Boundary check
+        if tile_id >= total_tiles:
+            break
+
+        # Wait for all ranks to produce this tile (all ranks have partials)
+        # Local tile
+        while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
+            pass
+
+        # Wait for remote ranks
+        for remote_rank in range(world_size):
+            if remote_rank != cur_rank:
+                while (
+                    iris.atomic_cas(
+                        tile_ready + tile_id, 0, 0, cur_rank, remote_rank, heap_bases, sem="acquire", scope="sys"
+                    )
+                    != 1
+                ):
+                    pass
 
         # Map tile_id to (pid_m, pid_n)
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -246,13 +234,13 @@ def persistent_all_reduce(
         local_offset = rm[:, None] * stride_cm_local + rn[None, :] * stride_cn_local
 
         # Accumulate from all ranks
-        acc_reduce = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
         for remote_rank in range(world_size):
             partial = iris.load(local_C + local_offset, cur_rank, remote_rank, heap_bases, mask=mask)
-            acc_reduce += partial.to(acc_dtype)
+            acc += partial.to(acc_dtype)
 
         # Convert to output type
-        c_out = acc_reduce.to(C_global.type.element_ty)
+        c_out = acc.to(C_global.type.element_ty)
 
         # Scatter to all ranks
         global_offset = rm[:, None] * stride_cm_global + rn[None, :] * stride_cn_global

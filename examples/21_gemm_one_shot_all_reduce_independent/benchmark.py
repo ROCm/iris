@@ -78,6 +78,13 @@ def parse_args():
         action="store_true",
         help="Run only communication (all-reduce) operation (cannot be used with --only_gemm)",
     )
+    parser.add_argument(
+        "--distribution",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="Distribution mode for all-reduce: 0=striding, 1=block",
+    )
 
     args = vars(parser.parse_args())
 
@@ -318,6 +325,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                     shmem.get_heap_bases(),
                     rank,
                     world_size,
+                    args["distribution"],
                     args["trace_tiles"],
                     timestamps.mm_begin_timestamp,
                     timestamps.mm_end_timestamp,

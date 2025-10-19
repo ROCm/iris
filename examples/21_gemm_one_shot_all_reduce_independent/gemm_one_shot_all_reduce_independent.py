@@ -152,13 +152,14 @@ def persistent_all_reduce(
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
+    DISTRIBUTION: tl.constexpr,  # 0 for striding, 1 for block
     COLLECT_TIMESTAMPS: tl.constexpr = False,
     mm_begin_timestamp_ptr: tl.tensor = None,
     mm_end_timestamp_ptr: tl.tensor = None,
 ):
     """
     Independent all-reduce operation that works on its own data.
-    No synchronization with GEMM operation.
+    Each rank only reduces unique tiles based on distribution and scatters results.
     """
     pid = tl.program_id(0)
 
@@ -170,7 +171,26 @@ def persistent_all_reduce(
 
     acc_dtype = tl.float32 if global_result.type.element_ty != tl.int8 else tl.int32
 
-    for tile_id in range(pid, total_tiles, COMM_SMS):
+    # Determine which tiles this rank is responsible for reducing
+    if DISTRIBUTION == 0:
+        # Striding: rank reduces tiles cur_rank, cur_rank + world_size, ...
+        tiles_per_rank = tl.cdiv(total_tiles, world_size)
+        start_tile = cur_rank
+        stride = world_size
+    else:
+        # Block: rank reduces continuous block of tiles
+        tiles_per_rank = tl.cdiv(total_tiles, world_size)
+        start_tile = cur_rank * tiles_per_rank
+        stride = 1
+
+    # Each SM processes tiles assigned to this rank for reduction
+    for tile_offset in range(pid, tiles_per_rank, COMM_SMS):
+        tile_id = start_tile + tile_offset * stride
+
+        # Boundary check
+        if tile_id >= total_tiles:
+            break
+
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
         first_pid_m = group_id * GROUP_SIZE_M
@@ -198,6 +218,10 @@ def persistent_all_reduce(
         # Convert to output type
         result = acc.to(global_result.type.element_ty)
 
-        # Store result locally (all-reduce puts same result on all ranks)
+        # Scatter to all ranks
         global_offset = rm[:, None] * stride_global_m + rn[None, :] * stride_global_n
-        tl.store(global_result + global_offset, result, mask=sub_mask, cache_modifier=".wt")
+        for remote_rank in range(world_size):
+            if remote_rank == cur_rank:
+                tl.store(global_result + global_offset, result, mask=sub_mask, cache_modifier=".wt")
+            else:
+                iris.store(global_result + global_offset, result, cur_rank, remote_rank, heap_bases, mask=sub_mask)
