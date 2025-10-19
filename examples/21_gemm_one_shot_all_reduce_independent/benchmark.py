@@ -443,18 +443,16 @@ def main():
             run_args.update(config)
 
             print(
-                f"\nRunning configuration {i + 1}/{len(configs)}:\
-                    \n\tm={config['m']}\
-                    \n\tn={config['n']}\
-                    \n\tk={config['k']}\
-                    \n\tdatatype={config['datatype']}\
-                    \n\tBLK_M={config['BLK_M']}\
-                    \n\tBLK_N={config['BLK_N']}\
-                    \n\tBLK_K={config['BLK_K']}\
-                    \n\tgemm_sms={config['gemm_sms']}\
-                    \n\tcomm_sms={config['comm_sms']}"
+                f"\nRunning configuration {i + 1}/{len(configs)}:\n" +
+                "\n".join(
+                    f"\t{k}={config[k]}"
+                    for k in [
+                        "m", "n", "k", "datatype",
+                        "BLK_M", "BLK_N", "BLK_K",
+                        "gemm_sms", "comm_sms"
+                    ]
+                )
             )
-
             # Generate unique output filename for this configuration
             base_name, ext = os.path.splitext(args["output_file"])
             run_args["output_file"] = (
