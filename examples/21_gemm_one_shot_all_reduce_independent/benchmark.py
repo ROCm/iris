@@ -14,7 +14,7 @@ import json
 import csv
 
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set
-from examples.common.validation import validate_gemm
+from examples.common.validation import validate_gemm, validate_all_reduce
 
 import iris
 
@@ -127,43 +127,6 @@ def load_configs_from_csv(csv_path):
             }
             configs.append(config)
     return configs
-
-
-def validate_all_reduce(local_tensor, global_tensor, shmem, atol=1):
-    """
-    Validate all-reduce operation where each rank's local tensor is reduced and result is on all ranks.
-
-    Args:
-        local_tensor: The local tensor on this rank before all-reduce
-        global_tensor: The result tensor after all-reduce (should contain sum of all ranks)
-        shmem: Iris shmem object
-        atol: Absolute tolerance for comparison
-
-    Returns:
-        bool: True if validation passes, False otherwise
-    """
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
-
-    # Compute expected result: sum of all ranks' local tensors
-    # Each rank has value (rank+1), so sum should be 1+2+...+world_size = world_size*(world_size+1)/2
-    expected = torch.full_like(local_tensor, world_size * (world_size + 1) / 2.0)
-
-    diff_mask = ~torch.isclose(global_tensor, expected, atol=atol)
-    breaking_indices = torch.nonzero(diff_mask, as_tuple=False)
-
-    if not torch.allclose(global_tensor, expected, atol=atol):
-        max_diff = (global_tensor - expected).abs().max().item()
-        shmem.info(f"All-reduce validation: Max absolute difference: {max_diff}")
-        for idx in breaking_indices:
-            idx = tuple(idx.tolist())
-            computed_val = global_tensor[idx]
-            expected_val = expected[idx]
-            shmem.error(f"All-reduce mismatch at rank {rank}, index {idx}: got={computed_val}, expected={expected_val}")
-            break
-        return False
-
-    return True
 
 
 def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
