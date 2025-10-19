@@ -26,6 +26,8 @@ This directory contains various algorithm implementations for distributed comput
 - [`12_gemm_all_scatter_bulk_synchronous`](12_gemm_all_scatter_bulk_synchronous): Matrix multiplication with all-scatter using the bulk synchronous parallel approach
 - [`13_flash_decode`](13_flash_decode): Fused Flash Decode Attention for accelerating LLM inference
 - [`14_all_gather_gemm`](14_all_gather_gemm): Fused All-Gather + GEMM with Pull and Push models
+- [`15_gemm_all_reduce_ring_based`](15_gemm_all_reduce_ring_based): Matrix multiplication with ring-based all-reduce
+- [`16_all_reduce_ring_based`](16_all_reduce_ring_based): Ring-based all-reduce operation
 - [`20_gemm_all_scatter_independent`](20_gemm_all_scatter_independent): Independent GEMM and all-scatter operations with support for CSV input configurations
 
 ### Utilities
@@ -81,6 +83,12 @@ python examples/14_all_gather_gemm/example_run_pull.py --num_ranks 8
 
 # All-Gather + GEMM - Push model
 python examples/14_all_gather_gemm/example_run_push.py --num_ranks 8
+
+# Example command to run benchmark with ring-based all-reduce for GEMM
+python examples/15_gemm_all_reduce_ring_based/benchmark.py --benchmark --validate --num_ranks 8
+
+# Example command to run benchmark with ring-based all-reduce
+python examples/16_all_reduce_ring_based/benchmark.py --benchmark --validate --num_ranks 8
 
 # Independent GEMM and all-scatter - single configuration
 python examples/20_gemm_all_scatter_independent/benchmark.py --benchmark --validate --num_ranks 8
