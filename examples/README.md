@@ -26,7 +26,11 @@ This directory contains various algorithm implementations for distributed comput
 - [`12_gemm_all_scatter_bulk_synchronous`](12_gemm_all_scatter_bulk_synchronous): Matrix multiplication with all-scatter using the bulk synchronous parallel approach
 - [`13_flash_decode`](13_flash_decode): Fused Flash Decode Attention for accelerating LLM inference
 - [`14_all_gather_gemm`](14_all_gather_gemm): Fused All-Gather + GEMM with Pull and Push models
+- [`15_gemm_all_reduce_ring_based`](15_gemm_all_reduce_ring_based): Matrix multiplication with ring-based all-reduce
+- [`16_all_reduce_ring_based`](16_all_reduce_ring_based): Ring-based all-reduce operation
+- [`17_gemm_one_shot_all_reduce_pc`](17_gemm_one_shot_all_reduce_pc): Matrix multiplication with one-shot all-reduce using producer-consumer pattern with two distribution modes (striding and block)
 - [`20_gemm_all_scatter_independent`](20_gemm_all_scatter_independent): Independent GEMM and all-scatter operations with support for CSV input configurations
+- [`21_gemm_one_shot_all_reduce_independent`](21_gemm_one_shot_all_reduce_independent): Independent GEMM and all-reduce operations with support for CSV input configurations and selective execution
 
 ### Utilities
 - [`benchmark`](benchmark): Benchmarking utilities and performance testing tools
@@ -87,17 +91,41 @@ python examples/20_gemm_all_scatter_independent/benchmark.py --benchmark --valid
 
 # Independent GEMM and all-scatter - sweep with CSV configurations
 python examples/20_gemm_all_scatter_independent/benchmark.py --benchmark --validate --num_ranks 8 --csv dataset/gemm_config.csv
+
+# One-shot all-reduce with producer-consumer pattern - striding distribution
+python examples/17_gemm_one_shot_all_reduce_pc/benchmark.py --benchmark --validate --num_ranks 8 --distribution 0
+
+# One-shot all-reduce with producer-consumer pattern - block distribution
+python examples/17_gemm_one_shot_all_reduce_pc/benchmark.py --benchmark --validate --num_ranks 8 --distribution 1
+
+# Independent GEMM and all-reduce - run both operations
+python examples/21_gemm_one_shot_all_reduce_independent/benchmark.py --benchmark --validate --num_ranks 8
+
+# Independent GEMM and all-reduce - run only GEMM
+python examples/21_gemm_one_shot_all_reduce_independent/benchmark.py --only_gemm --validate --num_ranks 8
+
+# Independent GEMM and all-reduce - run only all-reduce
+python examples/21_gemm_one_shot_all_reduce_independent/benchmark.py --only_comm --validate --num_ranks 8
+
+# Independent GEMM and all-reduce - sweep with CSV configurations
+python examples/21_gemm_one_shot_all_reduce_independent/benchmark.py --benchmark --num_ranks 8 --csv examples/21_gemm_one_shot_all_reduce_independent/example_config.csv
 ```
 
 ### CSV Configuration Format
 
-Example 20 supports loading multiple configurations from a CSV file using the `--csv` argument. The CSV file should have the following format:
+**Note:** Only examples 20 and 21 support loading multiple configurations from a CSV file using the `--csv` argument. Example 17 does **not** support CSV configuration files.
 
+**Example 20 CSV format:**
 ```csv
-m,n,k,datatype
-8192,4608,36864,fp16
-8192,4096,12288,fp32
-8192,3584,14336,bf16
-4096,4096,8192,fp16
-2048,2048,4096,fp16
+m,n,k,datatype,blk_m,blk_n,blk_k,gemm_sms,comm_sms
+8192,4608,36864,fp16,256,64,64,256,48
+8192,4096,12288,fp32,256,128,64,256,48
+4096,4096,8192,bf16,128,128,64,240,56
+```
+
+**Example 21 CSV format:**
+```csv
+m,n,k,datatype,blk_m,blk_n,blk_k,gemm_sms,comm_sms
+8192,4608,36864,fp16,256,64,64,256,48
+4096,4096,12288,fp32,128,128,64,240,56
 ```
