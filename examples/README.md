@@ -113,7 +113,7 @@ python examples/21_gemm_one_shot_all_reduce_independent/benchmark.py --benchmark
 
 ### CSV Configuration Format
 
-Examples 20 and 21 support loading multiple configurations from a CSV file using the `--csv` argument.
+**Note:** Only examples 20 and 21 support loading multiple configurations from a CSV file using the `--csv` argument. Example 17 does **not** support CSV configuration files.
 
 **Example 20 CSV format:**
 ```csv
