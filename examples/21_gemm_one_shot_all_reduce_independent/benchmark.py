@@ -19,7 +19,7 @@ from examples.common.validation import validate_gemm, validate_all_reduce
 import iris
 
 from matmul_wrapper import matmul
-from gemm_one_shot_all_reduce_independent import persistent_all_reduce
+from all_reduce_wrapper import all_reduce_kernel
 
 torch.manual_seed(123)
 random.seed(123)
@@ -271,7 +271,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             torch.cuda.nvtx.range_push("All-Reduce")
             with torch.cuda.stream(comm_stream):
                 kernel_timing["communication"]["start_event"].record()
-                persistent_all_reduce[(args["comm_sms"],)](
+                all_reduce_kernel.run(
                     all_reduce_local,
                     all_reduce_result,
                     args["m_comm"],
@@ -328,6 +328,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
         shmem.info("Validating...")
         matmul.set_debug(True)
+        all_reduce_kernel.set_debug(True)
 
         # Determine what to validate based on flags
         validate_gemm_op = not args["only_comm"]
@@ -368,17 +369,26 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         if validate_comm_op:
             json_writer.add_field("success_comm", success_comm)
 
-        if validate_gemm_op and not is_triton_interpret_set():
-            gemm_registers = matmul.get_matmul_registers()
-            gemm_spills = matmul.get_matmul_spills()
+        if not is_triton_interpret_set():
+            if validate_gemm_op:
+                gemm_registers = matmul.get_matmul_registers()
+                gemm_spills = matmul.get_matmul_spills()
 
-            json_writer.add_field("gemm_registers", gemm_registers)
-            json_writer.add_field("gemm_spills", gemm_spills)
+                json_writer.add_field("gemm_registers", gemm_registers)
+                json_writer.add_field("gemm_spills", gemm_spills)
+
+            if validate_comm_op:
+                comm_registers = all_reduce_kernel.get_registers()
+                comm_spills = all_reduce_kernel.get_spills()
+
+                json_writer.add_field("comm_registers", comm_registers)
+                json_writer.add_field("comm_spills", comm_spills)
 
         shmem.info("Validation completed")
 
     if args["benchmark"]:
         matmul.set_debug(False)
+        all_reduce_kernel.set_debug(False)
         shmem.info("Benchmarking...")
         perf = lambda ms: 2 * args["m"] * args["n"] * args["k"] * 1e-12 / (ms * 1e-3)
         triton_ms = iris.do_bench(run_experiment, shmem.barrier)

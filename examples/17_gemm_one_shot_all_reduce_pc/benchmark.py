@@ -21,7 +21,7 @@ from examples.common.utils import (
 import iris
 
 from matmul_wrapper import matmul
-from gemm_one_shot_all_reduce_pc import persistent_all_reduce
+from all_reduce_wrapper import all_reduce_kernel
 from examples.common.validation import validate_gemm
 
 torch.manual_seed(123)
@@ -218,7 +218,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         torch.cuda.nvtx.range_push("All-Reduce")
         with torch.cuda.stream(comm_stream):
             kernel_timing["communication"]["start_event"].record()
-            persistent_all_reduce[(args["comm_sms"],)](
+            all_reduce_kernel.run(
                 local_C,
                 C_global,
                 locks,
@@ -270,6 +270,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     if args["validate"]:
         shmem.info("Validating...")
         matmul.set_debug(True)
+        all_reduce_kernel.set_debug(True)
         # Validate global result
         success = validate_gemm(A, B, C_global, shmem, atol=2)
         passed_str = "passed" if success else "failed"
@@ -284,12 +285,17 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         if not is_triton_interpret_set():
             gemm_registers = matmul.get_matmul_registers()
             gemm_spills = matmul.get_matmul_spills()
+            comm_registers = all_reduce_kernel.get_registers()
+            comm_spills = all_reduce_kernel.get_spills()
 
             json_writer.add_field("gemm_registers", gemm_registers)
             json_writer.add_field("gemm_spills", gemm_spills)
+            json_writer.add_field("comm_registers", comm_registers)
+            json_writer.add_field("comm_spills", comm_spills)
 
     if args["benchmark"]:
         matmul.set_debug(False)
+        all_reduce_kernel.set_debug(False)
         shmem.info("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
         triton_ms = iris.do_bench(run_experiment, shmem.barrier, preamble)
