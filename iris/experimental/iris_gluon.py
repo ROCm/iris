@@ -78,6 +78,7 @@ class IrisDeviceCtx:
         self.num_ranks = num_ranks
         self.heap_bases = heap_bases
 
+    @staticmethod
     @gluon.jit
     def initialize(context_tensor):
         """

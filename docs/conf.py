@@ -109,11 +109,20 @@ class PreserveDocstringMock:
         return func
 
 
-# Mock triton modules
-sys.modules["triton"] = MagicMock()
-sys.modules["triton.language"] = MagicMock()
+# Mock triton.language first
+triton_language_mock = MagicMock()
+sys.modules["triton.language"] = triton_language_mock
 sys.modules["triton.language.core"] = MagicMock()
 sys.modules["triton.language.core"]._aggregate = lambda cls: cls  # Preserve class
+
+
+# Mock triton modules with docstring-preserving jit decorator
+class TritonMock:
+    jit = PreserveDocstringMock()
+    language = triton_language_mock
+
+
+sys.modules["triton"] = TritonMock()
 
 
 # Mock gluon with docstring-preserving jit

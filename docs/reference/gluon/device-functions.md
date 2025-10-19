@@ -6,14 +6,6 @@ The Gluon API is **experimental** and may undergo breaking changes in future rel
 
 Device-side functions provided by Iris Gluon for remote memory operations and atomics. These methods are part of the `IrisDeviceCtx` aggregate used within Gluon kernels.
 
-```{eval-rst}
-.. automodule:: iris.experimental.iris_gluon
-   :noindex:
-   :members:
-   :no-undoc-members:
-   :no-show-inheritance:
-```
-
 ## Initialization
 
 ### initialize
