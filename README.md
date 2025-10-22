@@ -20,7 +20,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 - [18/09/2025] [FlashDecode with Iris](https://github.com/ROCm/iris/tree/main/examples/13_flash_decode)
 - [27/08/25] [AMD's GPU Mode Competition Announced](https://amdchallenge2025.datamonsters.com/)
 - [12/09/2025] Presented Iris at GPUMode [[talk](https://www.youtube.com/watch?v=i6Y2EelEC04)] | [[slides](https://github.com/ROCm/iris/blob/main/docs/slides/Awad-Osama-Potter%20-%20Iris%20Multi-GPU%20Programming%20Made%20Easier%20(GPU%20Mode).pdf)]
-- Iris was presented in [Chinese](https://youtu.be/wW14w1QNrY8) for participants of the AMD Distributed Inference Kernel Contest.
+- [16/09/2025] Iris was presented in [Chinese](https://youtu.be/wW14w1QNrY8) for participants of the AMD Distributed Inference Kernel Contest.
 - [25/06/2025] Iris Released
 
 ## Key Features
