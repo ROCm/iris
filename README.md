@@ -21,11 +21,11 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 ## Latest with Iris 🔥
 
 - [02/10/2025] [Iris + Gluon Released](https://rocm.github.io/iris/reference/gluon/overview.html)
-- [14/08/2025] Iris All-Scatter Taxonomy Released [[documentation](https://rocm.github.io/iris/conceptual/taxonomy.html)] | [[video](https://youtu.be/fYMdPe9UpHE)]
 - [18/09/2025] [FlashDecode with Iris](https://github.com/ROCm/iris/tree/main/examples/13_flash_decode)
-- [27/08/2025] [AMD's GPU Mode Competition Announced](https://amdchallenge2025.datamonsters.com/)
-- [12/09/2025] Presented Iris at GPUMode [[talk](https://www.youtube.com/watch?v=i6Y2EelEC04)] | [[slides](https://github.com/ROCm/iris/blob/main/docs/slides/Awad-Osama-Potter%20-%20Iris%20Multi-GPU%20Programming%20Made%20Easier%20(GPU%20Mode).pdf)]
 - [16/09/2025] Iris was presented in [Chinese](https://youtu.be/wW14w1QNrY8) for participants of the AMD Distributed Inference Kernel Contest
+- [12/09/2025] Presented Iris at GPUMode [[talk](https://www.youtube.com/watch?v=i6Y2EelEC04)] | [[slides](https://github.com/ROCm/iris/blob/main/docs/slides/Awad-Osama-Potter%20-%20Iris%20Multi-GPU%20Programming%20Made%20Easier%20(GPU%20Mode).pdf)]
+- [27/08/2025] [AMD's GPU Mode Competition Announced](https://amdchallenge2025.datamonsters.com/)
+- [14/08/2025] Iris All-Scatter Taxonomy Released [[documentation](https://rocm.github.io/iris/conceptual/taxonomy.html)] | [[video](https://youtu.be/fYMdPe9UpHE)]
 - [25/06/2025] Iris Released
 
 ## Key Features
