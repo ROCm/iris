@@ -99,6 +99,8 @@ def test_copy_cache_modifiers(load_cache_modifier, store_cache_modifier):
     # Verify results - each rank should have copied its data to all ranks
     for i in range(num_ranks):
         expected_value = base * (cur_rank + 1)
-        assert torch.allclose(results[i], torch.full((BLOCK_SIZE,), expected_value, dtype=torch.float32)), (
+        assert torch.allclose(
+            results[i], torch.full((BLOCK_SIZE,), expected_value, dtype=torch.float32, device=results.device)
+        ), (
             f"Mismatch at rank {cur_rank}, target {i} with load_cache_modifier={load_cache_modifier}, store_cache_modifier={store_cache_modifier}"
         )
