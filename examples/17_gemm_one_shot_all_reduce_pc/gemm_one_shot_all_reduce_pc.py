@@ -194,12 +194,19 @@ def persistent_all_reduce(
         stride = 1
 
     # Each SM processes tiles assigned to this rank for reduction
-    for tile_offset in range(pid, tiles_per_rank, COMM_SMS):
-        tile_id = start_tile + tile_offset * stride
+    # Calculate max tile_offset to avoid boundary issues (no break allowed in Triton)
+    max_tile_offset = tiles_per_rank
+    if DISTRIBUTION == 0:  # striding
+        # tile_id = start_tile + tile_offset * stride = cur_rank + tile_offset * world_size
+        # tile_id < total_tiles  =>  tile_offset < (total_tiles - cur_rank) / world_size
+        max_tile_offset = tl.minimum(tiles_per_rank, tl.cdiv(total_tiles - cur_rank, world_size))
+    else:  # block
+        # tile_id = start_tile + tile_offset = cur_rank * tiles_per_rank + tile_offset
+        # tile_id < total_tiles  =>  tile_offset < total_tiles - cur_rank * tiles_per_rank
+        max_tile_offset = tl.minimum(tiles_per_rank, total_tiles - cur_rank * tiles_per_rank)
 
-        # Boundary check
-        if tile_id >= total_tiles:
-            break
+    for tile_offset in range(pid, max_tile_offset, COMM_SMS):
+        tile_id = start_tile + tile_offset * stride
 
         # Wait for all ranks to produce this tile (all ranks have partials)
         # Local tile
