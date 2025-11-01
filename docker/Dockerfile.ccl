@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+FROM rocm/pytorch:rocm6.3.1_ubuntu22.04_py3.10_pytorch
+
+# Use bash shell for RUN commands
+SHELL ["/bin/bash", "-c"]
+
+# Set environment variables
+ENV TRITON_PATH=/opt/triton \
+    ROCM_PATH=/opt/rocm \
+    OMPI_MCA_mtl="^ofi" \
+    OMPI_MCA_pml="ob1"
+
+ENV LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH \
+    PATH="$ROCM_PATH/bin:$PATH"
+
+ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
+    OMPI_ALLOW_RUN_AS_ROOT=1
+
+# Install system packages
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    git wget ninja-build cmake python3-pip python3-dev build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python packages with pip
+RUN pip3 install --upgrade pip && \
+    pip3 install wheel jupyter pytest
+
+# Clone and install Triton
+WORKDIR $TRITON_PATH
+RUN git clone https://github.com/triton-lang/triton.git $TRITON_PATH
+RUN git checkout dd5823453bcc7973eabadb65f9d827c43281c434
+RUN pip3 install -e .
+ENV PYTHONPATH=$TRITON_PATH
+
+# Install rocprofiler-systems
+WORKDIR /workspace
+RUN wget https://github.com/ROCm/rocprofiler-systems/releases/download/rocm-6.3.1/rocprofiler-systems-install.py && \
+    python3 ./rocprofiler-systems-install.py --prefix /opt/rocprofiler-systems --rocm 6.3 && \
+    rm -f rocprofiler-systems-install.py
+
+# Copy iris code to workspace
+WORKDIR /workspace
+COPY . /workspace/iris
+WORKDIR /workspace/iris
+
+# Install iris in development mode
+RUN pip3 install -e .
+
+# Create validation script
+RUN echo '#!/bin/bash' > /validate_ccl.sh && \
+    echo 'cd /workspace/iris' >> /validate_ccl.sh && \
+    echo 'echo "Running iris-ccl all-to-all tests..."' >> /validate_ccl.sh && \
+    echo 'python3 tests/run_tests_distributed.py tests/ccl/test_all_to_all.py --num_ranks 2' >> /validate_ccl.sh && \
+    chmod +x /validate_ccl.sh
+
+# Create entrypoint script
+RUN echo '#!/bin/bash' > /entrypoint.sh && \
+    echo 'echo "Welcome to iris-ccl validation container!"' >> /entrypoint.sh && \
+    echo 'if [ $# -eq 0 ]; then' >> /entrypoint.sh && \
+    echo '    exec /bin/bash' >> /entrypoint.sh && \
+    echo 'else' >> /entrypoint.sh && \
+    echo '    exec "$@"' >> /entrypoint.sh && \
+    echo 'fi' >> /entrypoint.sh && \
+    chmod +x /entrypoint.sh
+
+# Set the entrypoint
+ENTRYPOINT ["/bin/bash", "-c", "source /entrypoint.sh && exec bash"]
+

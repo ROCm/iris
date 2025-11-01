@@ -32,6 +32,9 @@ This directory contains various algorithm implementations for distributed comput
 - [`20_gemm_all_scatter_independent`](20_gemm_all_scatter_independent): Independent GEMM and all-scatter operations with support for CSV input configurations
 - [`21_gemm_one_shot_all_reduce_independent`](21_gemm_one_shot_all_reduce_independent): Independent GEMM and all-reduce operations with support for CSV input configurations and selective execution
 
+### Collective Communication Library
+- [`ccl`](ccl): iris-ccl collective communication operations (all-to-all, etc.)
+
 ### Utilities
 - [`benchmark`](benchmark): Benchmarking utilities and performance testing tools
 - [`common`](common): Common utilities and shared code for examples
@@ -109,6 +112,9 @@ python examples/21_gemm_one_shot_all_reduce_independent/benchmark.py --only_comm
 
 # Independent GEMM and all-reduce - sweep with CSV configurations
 python examples/21_gemm_one_shot_all_reduce_independent/benchmark.py --benchmark --num_ranks 8 --csv examples/21_gemm_one_shot_all_reduce_independent/example_config.csv
+
+# All-to-all collective communication
+python examples/ccl/benchmark.py --benchmark --validate -m 1024 -n 512 -r 8 --datatype fp32
 ```
 
 ### CSV Configuration Format
