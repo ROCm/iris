@@ -33,7 +33,6 @@ import iris  # type: ignore
 def reduce_scatter_m_kernel(
     input_ptr,  # Local input tensor: *[M, N]
     output_ptr,  # Output shard in IRIS memory: *[M_shard, N]
-    dest_rank: tl.constexpr,  # Which destination rank to send to
     M,
     M_shard,
     N,
@@ -50,18 +49,21 @@ def reduce_scatter_m_kernel(
     NUM_SMS: tl.constexpr,
 ):
     """
-    Reduce-scatter kernel along M dimension with atomic accumulation.
+    Reduce-scatter kernel along M dimension using pull-based approach with iris.load.
     
-    For reduce-scatter, each rank MUST process all M rows because:
-    - Rank 0 needs rows [0:256] from ALL ranks (for summation)
-    - Rank 1 needs rows [256:512] from ALL ranks  
-    - etc.
+    Each rank computes its own output shard by:
+    - Loading the relevant portion from all ranks (including itself)
+    - Accumulating the sum locally
+    - Storing the result
     
-    So each source rank must:
-    - Read rows [dest_rank*M_shard : (dest_rank+1)*M_shard] from its M×N input
-    - Send to dest_rank for atomic accumulation
+    For example, rank 0 computes output[0:M_shard, :] by:
+    - Loading input[0:M_shard, :] from rank 0 (local)
+    - Loading input[0:M_shard, :] from rank 1 (remote via iris.load)
+    - ...
+    - Loading input[0:M_shard, :] from rank 7 (remote via iris.load)
+    - Summing all loaded data
     
-    This kernel is called once per destination rank.
+    This kernel is called once per rank.
     """
     pid = tl.program_id(0)
     
@@ -79,7 +81,7 @@ def reduce_scatter_m_kernel(
         pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
         pid_n = (tile_id % num_pid_in_group) // group_size_m
         
-        # Local indices in destination's shard (M_shard × N)
+        # Local indices in this rank's output shard (M_shard × N)
         rm_local = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
         rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         
@@ -92,21 +94,27 @@ def reduce_scatter_m_kernel(
         mask_n = rn < N
         mask = mask_m_local[:, None] & mask_n[None, :]
         
-        # Calculate which rows from our M×N input to read
-        # For destination rank dest_rank, we read rows [dest_rank*M_shard : (dest_rank+1)*M_shard]
-        rm_global = dest_rank * M_shard + rm_local
+        # Calculate which rows to read from each source rank's input
+        # This rank (cur_rank) needs rows [cur_rank*M_shard : (cur_rank+1)*M_shard]
+        # from ALL source ranks
+        rm_global = cur_rank * M_shard + rm_local
         mask_m_global = rm_global < M
         load_mask = mask_m_global[:, None] & mask_n[None, :]
         
-        # Load from our input tensor
-        input_ptrs = input_ptr + rm_global[:, None] * stride_im + rn[None, :] * stride_in
-        data = tl.load(input_ptrs, mask=load_mask, other=0.0)
+        # Accumulator for the sum across all ranks
+        accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         
-        # Destination pointers in the destination rank's output shard
+        # Pointers to the data we need from all ranks
+        src_ptrs = input_ptr + rm_global[:, None] * stride_im + rn[None, :] * stride_in
+        
+        # Load from all source ranks and accumulate
+        for src_rank in tl.static_range(world_size):
+            data = iris.load(src_ptrs, cur_rank, src_rank, heap_bases, mask=load_mask)
+            accumulator += data.to(tl.float32)
+        
+        # Store the result to output shard
         output_ptrs = output_ptr + rm_local[:, None] * stride_om + rn[None, :] * stride_on
-        
-        # Atomically accumulate to destination rank (handles both local and remote)
-        iris.atomic_add(output_ptrs, data, cur_rank, dest_rank, heap_bases, mask=mask)
+        tl.store(output_ptrs, accumulator.to(output_ptr.type.element_ty), mask=mask)
 
 
 @triton.jit
@@ -165,7 +173,7 @@ def all_gather_m_kernel(
             # Calculate global M indices
             rm_global = cur_rank * M_shard + rm_local
             mask_m_global = rm_global < M
-            
+
             if dst == cur_rank:
                 # Local store
                 out_ptrs = out_ptr + rm_global[:, None] * stride_om + rn[None, :] * stride_on
@@ -386,7 +394,7 @@ def main():
     
     grid_rs = (NUM_SMS,)
     
-    # Call kernel once - it will use iris.put() to send data to all destination ranks
+    # Call kernel once - it will use iris.load() to pull data from all source ranks
     reduce_scatter_m_kernel[grid_rs](
         local_input,
         reduced_shard,
@@ -407,7 +415,7 @@ def main():
         num_warps=4,
     )
     
-    # Synchronize to ensure all ranks have completed their puts
+    # Synchronize to ensure all ranks have completed their loads and reductions
     torch.cuda.synchronize()
     
     print(f"Rank {cur_rank}: Reduce-scatter complete, shard shape: {reduced_shard.shape}")

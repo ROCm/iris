@@ -62,16 +62,19 @@ def parse_args():
     )
     parser.add_argument("--num_ranks", type=int, default=8, help="Number of ranks/GPUs")
     parser.add_argument("--heap_size", type=int, default=1 << 30, help="IRIS heap size (default: 1GB)")
-    parser.add_argument("--BLOCK_M", type=int, default=64, help="Block size M")
-    parser.add_argument("--BLOCK_N", type=int, default=512, help="Block size N")
+    parser.add_argument("--BLOCK_M", type=int, default=16, help="Block size M")
+    parser.add_argument("--BLOCK_N", type=int, default=32, help="Block size N")
     parser.add_argument("--GROUP_SIZE_M", type=int, default=8, help="Tile swizzle group size")
     parser.add_argument("--NUM_SMS", type=int, default=None, help="Number of CUs (auto-detect if None)")
+    parser.add_argument("--num_warps", type=int, default=8, help="Number of warps per thread block")
+    parser.add_argument("--num_stages", type=int, default=2, help="Number of pipeline stages")
+    parser.add_argument("--waves_per_eu", type=int, default=0, help="Waves per execution unit (0=auto)")
     
     return vars(parser.parse_args())
 
 
-def run_reduce_scatter(input_tensor, M, M_shard, N, rank, world_size, heap_bases, BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, dtype, device, shmem=None, output_buffer=None):
-    """Run reduce-scatter operation with atomic accumulation."""
+def run_reduce_scatter(input_tensor, M, M_shard, N, rank, world_size, heap_bases, BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, num_warps, num_stages, waves_per_eu, dtype, device, shmem=None, output_buffer=None):
+    """Run reduce-scatter operation with pull-based iris.load approach."""
     # Use provided output buffer or allocate new one
     if output_buffer is not None:
         reduced_shard = output_buffer
@@ -83,31 +86,30 @@ def run_reduce_scatter(input_tensor, M, M_shard, N, rank, world_size, heap_bases
     
     grid_rs = (NUM_SMS,)
     
-    # Call kernel once for each destination rank
-    # Each call sends this rank's contribution to that destination
-    for dest_rank in range(world_size):
-        reduce_scatter_m_kernel[grid_rs](
-            input_tensor,
-            reduced_shard,
-            dest_rank,
-            M,
-            M_shard,
-            N,
-            input_tensor.stride(0),
-            input_tensor.stride(1),
-            reduced_shard.stride(0),
-            reduced_shard.stride(1),
-            rank,
-            world_size,
-            heap_bases,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
-            GROUP_SIZE_M=GROUP_SIZE_M,
-            NUM_SMS=NUM_SMS,
-            num_warps=4,
-        )
+    # Call kernel once - it will pull data from all source ranks using iris.load
+    reduce_scatter_m_kernel[grid_rs](
+        input_tensor,
+        reduced_shard,
+        M,
+        M_shard,
+        N,
+        input_tensor.stride(0),
+        input_tensor.stride(1),
+        reduced_shard.stride(0),
+        reduced_shard.stride(1),
+        rank,
+        world_size,
+        heap_bases,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        GROUP_SIZE_M=GROUP_SIZE_M,
+        NUM_SMS=NUM_SMS,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        waves_per_eu=waves_per_eu,
+    )
     
-    # Synchronize to ensure all atomic adds complete
+    # Synchronize to ensure all loads and reductions complete
     torch.cuda.synchronize()
     if shmem is not None:
         shmem.barrier()
@@ -145,6 +147,7 @@ def run_rmsnorm(input_tensor, eps, device):
         USE_BLOCKED=USE_BLOCKED,
         NUM_PRGMS=NUM_PRGMS,
         num_warps=16,
+        waves_per_eu=0,
     )
     
     return output
@@ -215,6 +218,7 @@ def run_all_gather(shard, M, M_shard, N, rank, world_size, heap_bases, shmem, BL
         GROUP_SIZE_M=GROUP_SIZE_M,
         NUM_SMS=NUM_SMS,
         num_warps=8,
+        waves_per_eu=2,
     )
     
     return full_output
@@ -267,12 +271,16 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     BLOCK_M = args["BLOCK_M"]
     BLOCK_N = args["BLOCK_N"]
     GROUP_SIZE_M = args["GROUP_SIZE_M"]
+    num_warps = args["num_warps"]
+    num_stages = args["num_stages"]
+    waves_per_eu = args["waves_per_eu"]
 
     if rank == 0:
         print(f"Configuration:")
         print(f"  M={M}, N={N}, M_shard={M_shard}")
         print(f"  dtype={dtype}, world_size={world_size}")
         print(f"  BLOCK_M={BLOCK_M}, BLOCK_N={BLOCK_N}, GROUP_SIZE_M={GROUP_SIZE_M}, NUM_SMS={NUM_SMS}")
+        print(f"  num_warps={num_warps}, num_stages={num_stages}, waves_per_eu={waves_per_eu}")
         print(f"  FP8 output: {args['fp8_out']}")
         print(f"  All-gather: {args['all_gather']}")
         
@@ -305,13 +313,15 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # ================================================================
     # Step 1: Reduce-Scatter
     # ================================================================
-    # Call kernel once per rank - it will use iris.put() to send data to destination ranks
+    # Call kernel once per rank - it will use iris.load() to pull data from all source ranks
     reduced_shard = run_reduce_scatter(
         input_tensor, M, M_shard, N, rank, world_size, heap_bases, 
-        BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, dtype, device, shmem
+        BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, 
+        num_warps, num_stages, waves_per_eu,
+        dtype, device, shmem
     )
     
-    # Synchronize to ensure all ranks have completed their puts
+    # Synchronize to ensure all ranks have completed their loads and reductions
     torch.cuda.synchronize()
     shmem.barrier()
 
@@ -404,29 +414,54 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         test_input.copy_(test_input_local)
         
         # Pre-allocate output buffer in IRIS memory (M_shard × N, will be reused)
-        test_reduced_shard = shmem.zeros((M_shard, N), dtype=dtype)
+        test_reduced_shard = shmem.zeros((2*M_shard, N), dtype=dtype)
         
         # Warmup
         for _ in range(args["warmup"]):
             test_reduced_shard.zero_()
             _ = run_reduce_scatter(test_input, M, M_shard, N, rank, world_size, heap_bases, 
-                                   BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, dtype, device, 
+                                   BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, 
+                                   num_warps, num_stages, waves_per_eu,
+                                   dtype, device, 
                                    shmem=shmem, output_buffer=test_reduced_shard)
             torch.cuda.synchronize()
             shmem.barrier()
         
-        # Benchmark
-        start_time = time.perf_counter()
+        # Benchmark using CUDA events for accurate GPU timing
+        # Call kernel directly (not through wrapper) to avoid sync overhead
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        
+        grid_rs = (NUM_SMS,)
+        
+        start_event.record()
         for _ in range(args["iters"]):
-            test_reduced_shard.zero_()
-            _ = run_reduce_scatter(test_input, M, M_shard, N, rank, world_size, heap_bases, 
-                                   BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, dtype, device, 
-                                   shmem=shmem, output_buffer=test_reduced_shard)
-            torch.cuda.synchronize()
-            shmem.barrier()
-        end_time = time.perf_counter()
+            reduce_scatter_m_kernel[grid_rs](
+                test_input,
+                test_reduced_shard,
+                M,
+                M_shard,
+                N,
+                test_input.stride(0),
+                test_input.stride(1),
+                test_reduced_shard.stride(0),
+                test_reduced_shard.stride(1),
+                rank,
+                world_size,
+                heap_bases,
+                BLOCK_M=BLOCK_M,
+                BLOCK_N=BLOCK_N,
+                GROUP_SIZE_M=GROUP_SIZE_M,
+                NUM_SMS=NUM_SMS,
+                num_warps=num_warps,
+                num_stages=num_stages,
+                waves_per_eu=waves_per_eu,
+            )
+        end_event.record()
         
-        rs_time_ms = (end_time - start_time) * 1000 / args["iters"]
+        torch.cuda.synchronize()
+        rs_time_ms = start_event.elapsed_time(end_event) / args["iters"]
+        shmem.barrier()
         
         # ----------------------------------------------------------------
         # Benchmark RMSNorm
@@ -436,14 +471,17 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             _ = run_rmsnorm(reduced_shard, args["eps"], device)
             torch.cuda.synchronize()
         
-        # Benchmark
-        start_time = time.perf_counter()
+        # Benchmark using CUDA events
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        
+        start_event.record()
         for _ in range(args["iters"]):
             _ = run_rmsnorm(reduced_shard, args["eps"], device)
-        torch.cuda.synchronize()
-        end_time = time.perf_counter()
+        end_event.record()
         
-        rmsnorm_time_ms = (end_time - start_time) * 1000 / args["iters"]
+        torch.cuda.synchronize()
+        rmsnorm_time_ms = start_event.elapsed_time(end_event) / args["iters"]
         
         # ----------------------------------------------------------------
         # Benchmark FP8 Quantization
@@ -454,13 +492,17 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                 _ = run_quantize_fp8(rmsnorm_output, BLOCK_M, BLOCK_N, device)
                 torch.cuda.synchronize()
             
-            start_time = time.perf_counter()
+            # Benchmark using CUDA events
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            
+            start_event.record()
             for _ in range(args["iters"]):
                 _ = run_quantize_fp8(rmsnorm_output, BLOCK_M, BLOCK_N, device)
-            torch.cuda.synchronize()
-            end_time = time.perf_counter()
+            end_event.record()
             
-            quant_time_ms = (end_time - start_time) * 1000 / args["iters"]
+            torch.cuda.synchronize()
+            quant_time_ms = start_event.elapsed_time(end_event) / args["iters"]
         
         # ----------------------------------------------------------------
         # Benchmark All-Gather
@@ -481,12 +523,15 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                     rank, world_size, heap_bases,
                     BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
                     GROUP_SIZE_M=GROUP_SIZE_M, NUM_SMS=NUM_SMS,
-                    num_warps=4,
+                    num_warps=8,
                 )
                 torch.cuda.synchronize()
             
-            # Benchmark
-            start_time = time.perf_counter()
+            # Benchmark using CUDA events
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            
+            start_event.record()
             for _ in range(args["iters"]):
                 all_gather_m_kernel[grid](
                     final_output, ag_output_reuse, M, M_shard, N,
@@ -497,10 +542,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                     GROUP_SIZE_M=GROUP_SIZE_M, NUM_SMS=NUM_SMS,
                     num_warps=4,
                 )
-            torch.cuda.synchronize()
-            end_time = time.perf_counter()
+            end_event.record()
             
-            ag_time_ms = (end_time - start_time) * 1000 / args["iters"]
+            torch.cuda.synchronize()
+            ag_time_ms = start_event.elapsed_time(end_event) / args["iters"]
         
         # ----------------------------------------------------------------
         # Calculate metrics for all components
@@ -508,9 +553,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         num_elements = M_shard * N
         bytes_per_element = dtype.itemsize if hasattr(dtype, 'itemsize') else 2
         
-        # Reduce-Scatter: Read full M×N, write (M/world_size)×N
-        # Each rank reads M×N from input and writes M_shard×N to output
-        rs_bytes = M * N * bytes_per_element + M_shard * N * bytes_per_element
+        # Reduce-Scatter with iris.load (pull-based):
+        # Each rank loads M_shard×N from ALL world_size ranks
+        # Total data loaded per rank = M_shard * N * world_size
+        rs_bytes = M_shard * N * world_size * bytes_per_element
         rs_bandwidth_gb_s = rs_bytes / (rs_time_ms / 1000) / 1e9
         
         # RMSNorm: Read (M_shard)×N + write (M_shard)×N
