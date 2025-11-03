@@ -93,8 +93,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     # Create input and output tensor lists for all-to-all
     # Each rank sends a different tensor to each rank
-    expected_output_list = []
-
     # Create concatenated input tensor: shape (M, N * world_size)
     # Each chunk of N columns corresponds to data sent to that rank
     input_concat = torch.zeros((M, N * world_size), dtype=datatype, device=f"cuda:{rank}")
