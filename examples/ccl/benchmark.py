@@ -12,7 +12,6 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import random
-import sys
 import os
 import argparse
 import json
