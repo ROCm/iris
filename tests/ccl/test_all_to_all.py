@@ -59,6 +59,6 @@ def test_all_to_all(dtype, M, N):
     # Validate results
     atol = 1e-3 if dtype == torch.float16 else 1e-5
     max_diff = torch.abs(output_concat - expected_concat).max().item()
-    assert max_diff < atol, f"Max difference: {max_diff}, expected < {atol}"
     
-    assert torch.allclose(output_concat, expected_concat, atol=atol)
+    
+    assert torch.allclose(output_concat, expected_concat, atol=atol), f"Max difference: {max_diff}, expected < {atol}"
