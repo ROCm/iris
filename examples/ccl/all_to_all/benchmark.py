@@ -48,6 +48,10 @@ def parse_args():
     )
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument("--comm_sms", type=int, default=32, help="Number of SMs for all-to-all kernel")
+    parser.add_argument("--block_size_m", type=int, default=None, help="Block size for M dimension tiling")
+    parser.add_argument("--block_size_n", type=int, default=None, help="Block size for N dimension tiling")
+    parser.add_argument("--swizzle_size", type=int, default=None, help="Number of tiles to swizzle together")
+    parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto-detected if not set)")
     parser.add_argument("-r", "--num_ranks", type=int, default=8, help="Number of ranks/processes")
 
     return vars(parser.parse_args())
@@ -82,8 +86,18 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     M = args["m"]
     N = args["n"]
 
-    # Create config outside of timing
-    config = Config(comm_sms=args["comm_sms"])
+    # Create config with optional block size parameters
+    config_kwargs = {"comm_sms": args["comm_sms"]}
+    if args["block_size_m"] is not None:
+        config_kwargs["block_size_m"] = args["block_size_m"]
+    if args["block_size_n"] is not None:
+        config_kwargs["block_size_n"] = args["block_size_n"]
+    if args["swizzle_size"] is not None:
+        config_kwargs["swizzle_size"] = args["swizzle_size"]
+    if args["num_xcds"] is not None:
+        config_kwargs["num_xcds"] = args["num_xcds"]
+    
+    config = Config(**config_kwargs)
 
     json_writer = JSONWriter(args["output_file"])
     json_writer.add_field("world_size", world_size)
@@ -95,9 +109,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # Each rank sends a different tensor to each rank
     # Create concatenated input tensor: shape (M, N * world_size)
     # Each chunk of N columns corresponds to data sent to that rank
-    input_concat = torch.zeros((M, N * world_size), dtype=datatype, device=f"cuda:{rank}")
-    output_concat = torch.zeros((M, N * world_size), dtype=datatype, device=f"cuda:{rank}")
-    expected_concat = torch.zeros((M, N * world_size), dtype=datatype, device=f"cuda:{rank}")
+    # Note: Must use shmem.zeros() to allocate on Iris symmetric heap for iris.put() compatibility
+    input_concat = shmem.zeros((M, N * world_size), dtype=datatype)
+    output_concat = shmem.zeros((M, N * world_size), dtype=datatype)
+    expected_concat = shmem.zeros((M, N * world_size), dtype=datatype)
     
     for target_rank in range(world_size):
         # Input: rank sends data at position (target_rank * N)
@@ -230,7 +245,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 def main():
     args = parse_args()
     num_ranks = args["num_ranks"]
-    init_url = "tcp://127.0.0.1:29500"
+    init_url = "tcp://127.0.0.1:29503"
 
     mp.spawn(
         fn=_worker,
