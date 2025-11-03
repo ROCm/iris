@@ -93,7 +93,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     # Create input and output tensor lists for all-to-all
     # Each rank sends a different tensor to each rank
-    input_tensor_list = []
     output_tensor_list = []
     expected_output_list = []
 
