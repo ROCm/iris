@@ -17,12 +17,20 @@ Pipeline:
 2. RMSNorm on (M/world_size)×N with full N dimension
 3. FP8 Quantization
 4. (Optional) All-Gather along M dimension to reconstruct full M×N
+
+Usage:
+    # Run with torchrun for multi-GPU
+    torchrun --nproc_per_node=8 reduce_scatter_rmsnorm_quant.py --verify
+    
+    # Or use the benchmark script which handles multi-process spawning
+    python benchmark.py --num_rows 8192 --num_cols 7168 --num_ranks 8 --validate
 """
 
 import os
 import argparse
 
 import torch
+import torch.distributed as dist
 import triton
 import triton.language as tl
 
@@ -220,7 +228,7 @@ def aiter_rmsnorm(
                 cols = blk_idx * BLOCK_SIZE + col_offsets
                 input_ptrs = row_input_ptr + cols
                 input_ptrs = tl.multiple_of(input_ptrs, (16,))
-                x = tl.load(input_ptrs).to(tl.float32)
+                x = tl.load(input_ptrs, cache_modifier=".cg").to(tl.float32)
                 sum_squares += tl.sum(x * x, axis=0)
 
             cols = n_cols_blks * BLOCK_SIZE + col_offsets
@@ -238,7 +246,7 @@ def aiter_rmsnorm(
                 cols = blk_idx * BLOCK_SIZE + col_offsets
                 input_ptrs = row_input_ptr + cols
                 input_ptrs = tl.multiple_of(input_ptrs, (16,))
-                x = tl.load(input_ptrs).to(tl.float32)
+                x = tl.load(input_ptrs, cache_modifier=".cg").to(tl.float32)
                 g_ptrs = g_ptr + cols
                 g = tl.load(g_ptrs).to(tl.float32)
                 rms_norm = x * norm_factor * g
@@ -250,7 +258,7 @@ def aiter_rmsnorm(
             input_ptrs = row_input_ptr + cols
             x = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
             g_ptrs = g_ptr + cols
-            g = tl.load(g_ptrs, mask=mask, other=0.0).to(tl.float32)
+            g = tl.load(g_ptrs, mask=mask, other=0.0, ).to(tl.float32)
             rms_norm = x * norm_factor * g
             output_ptrs = row_output_ptr + cols
             tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
@@ -357,26 +365,42 @@ def main():
     print(f"Rank {cur_rank}/{world_size}: M={M}, N={N}, M_shard={M_shard}")
 
     # ================================================================
-    # Create input: Each rank has M×N tensor (same position, different values)
+    # Initialize PyTorch Distributed (required for IRIS)
     # ================================================================
-    torch.manual_seed(42 + cur_rank)  # Different seed per rank for different values
-    local_input = torch.randn(M, N, device=device, dtype=dtype) * (cur_rank + 1)
+    if not dist.is_initialized():
+        # Set up distributed environment
+        os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "127.0.0.1")
+        os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "29500")
+        os.environ["RANK"] = str(cur_rank)
+        os.environ["WORLD_SIZE"] = str(world_size)
+        
+        dist.init_process_group(backend="gloo", rank=cur_rank, world_size=world_size)
     
-    print(f"Rank {cur_rank}: Input shape: {local_input.shape}")
-
     # ================================================================
     # Initialize IRIS for distributed communication
     # ================================================================
     heap_size = 1 << 28  # 256MB
-    shmem = iris.SharedMemory(
-        size=heap_size,
-        device=device,
-        name=f"iris_shmem_rank{cur_rank}",
-    )
+    shmem = iris.iris(heap_size)
     
     # Get heap base addresses for all ranks
-    heap_bases_list = shmem.get_bases()
-    heap_bases = torch.tensor(heap_bases_list, device=device, dtype=torch.int64)
+    heap_bases = shmem.get_heap_bases()
+    
+    # ================================================================
+    # Create input: Each rank has M×N tensor (same position, different values)
+    # Must be in IRIS shared memory for remote access via iris.load
+    # ================================================================
+    torch.manual_seed(42 + cur_rank)  # Different seed per rank for different values
+    local_input_temp = torch.randn(M, N, device=device, dtype=dtype) * (cur_rank + 1)
+    
+    # Allocate in IRIS shared memory
+    local_input = shmem.empty((M, N), dtype=dtype)
+    local_input.copy_(local_input_temp)
+    del local_input_temp
+    
+    print(f"Rank {cur_rank}: Input shape: {local_input.shape}")
+    
+    # Barrier to ensure all ranks have allocated their input tensors
+    shmem.barrier()
 
     BLOCK_M = 64
     BLOCK_N = 64
@@ -417,6 +441,7 @@ def main():
     
     # Synchronize to ensure all ranks have completed their loads and reductions
     torch.cuda.synchronize()
+    shmem.barrier()
     
     print(f"Rank {cur_rank}: Reduce-scatter complete, shard shape: {reduced_shard.shape}")
 
@@ -600,6 +625,10 @@ def main():
             print("❌ RMSNorm verification FAILED")
 
     print(f"\nRank {cur_rank}: Pipeline completed successfully!")
+    
+    # Cleanup
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
