@@ -13,7 +13,6 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import random
 import argparse
-import json
 
 from examples.common.utils import JSONWriter
 
