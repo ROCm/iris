@@ -38,22 +38,31 @@ def parse_args():
         description="Benchmark Reduce-Scatter → RMSNorm → FP8 Quantization",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--num_rows", type=int, default=2048, help="Number of rows (M)")
-    parser.add_argument("--num_cols", type=int, default=2048, help="Number of columns (N)")
+    parser.add_argument("--num_rows", type=int, default=2048, 
+                        help="Number of rows (M), must be divisible by num_ranks")
+    parser.add_argument("--num_cols", type=int, default=2048, 
+                        help="Number of columns (N)")
     parser.add_argument(
         "--datatype",
         type=str,
         default="fp16",
         choices=["fp16", "fp32", "bf16"],
-        help="Datatype of computation",
+        help="Data type for input/intermediate values",
     )
-    parser.add_argument("--fp8_out", action="store_true", help="Enable FP8 quantization")
-    parser.add_argument("--eps", type=float, default=1e-6, help="RMSNorm epsilon")
-    parser.add_argument("--all_gather", action="store_true", help="All-gather at the end (requires IRIS communication)")
-    parser.add_argument("--validate", action="store_true", help="Validate against PyTorch reference")
-    parser.add_argument("--benchmark", action="store_true", help="Run performance benchmark")
-    parser.add_argument("--warmup", type=int, default=10, help="Number of warmup iterations")
-    parser.add_argument("--iters", type=int, default=100, help="Number of benchmark iterations")
+    parser.add_argument("--fp8_out", action="store_true", 
+                        help="Enable FP8 quantization after RMSNorm")
+    parser.add_argument("--eps", type=float, default=1e-6, 
+                        help="RMSNorm epsilon for numerical stability")
+    parser.add_argument("--all_gather", action="store_true", 
+                        help="Perform all-gather to reconstruct full M×N tensor across all ranks")
+    parser.add_argument("--validate", action="store_true", 
+                        help="Validate results against PyTorch reference implementation")
+    parser.add_argument("--benchmark", action="store_true", 
+                        help="Run performance benchmarks with GPU-side timing")
+    parser.add_argument("--warmup", type=int, default=10, 
+                        help="Number of warmup iterations for benchmarking")
+    parser.add_argument("--iters", type=int, default=100, 
+                        help="Number of timed iterations for benchmarking")
     parser.add_argument(
         "--output_file",
         type=str,
@@ -420,27 +429,16 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # ================================================================
     quantized_output = None  # Initialize for validation scope
     if args["fp8_out"]:
-        # Allocate in regular CUDA memory (IRIS doesn't fully support FP8 dtype)
+        # Allocate in regular CUDA memory
         quantized_output, scale = run_quantize_fp8(rmsnorm_output, BLOCK_M, BLOCK_N, device, shmem=None)
         
-        if rank == 0:
-            print(f"\nDebug after FP8 quantization:")
-            print(f"  quantized_output dtype: {quantized_output.dtype}")
-            print(f"  quantized_output sum: {quantized_output.to(torch.float32).sum().item():.4f}")
-        
-        # If all-gather is enabled, copy to IRIS memory as uint8 (workaround for FP8 dtype issues)
+        # If all-gather is enabled, copy to IRIS memory as uint8 (workaround for FP8 dtype support)
         if args["all_gather"]:
-            # Allocate as uint8 in IRIS (1 byte per element, same as FP8)
+            # IRIS may not fully support FP8 dtype, so copy via uint8 byte view
             final_output_iris_bytes = shmem.empty((M_shard, N), dtype=torch.uint8)
-            # Copy FP8 data as bytes
             quantized_bytes = quantized_output.view(torch.uint8)
             final_output_iris_bytes.copy_(quantized_bytes)
-            # View back as FP8
             final_output = final_output_iris_bytes.view(quantized_output.dtype)
-            
-            if rank == 0:
-                print(f"Debug after copy to IRIS (via uint8):")
-                print(f"  final_output sum: {final_output.to(torch.float32).sum().item():.4f}")
         else:
             final_output = quantized_output
     else:
@@ -462,13 +460,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         )
         torch.cuda.synchronize()
         shmem.barrier()
-        
-        # Debug: Check all-gather result
-        if rank == 0:
-            print(f"\nDebug after All-Gather:")
-            print(f"  result shape: {result.shape}")
-            print(f"  result sum: {result.to(torch.float32).sum().item():.4f}")
-            print(f"  result[0:1024] sum: {result[0:M_shard].to(torch.float32).sum().item():.4f}")
     else:
         result = final_output
 
@@ -547,6 +538,18 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         
         # Compare All-Gather
         if args["all_gather"]:
+            # Check value range of full gathered result
+            result_float = result.to(torch.float32)
+            result_min = result_float.min().item()
+            result_max = result_float.max().item()
+            result_sum = result_float.sum().item()
+            result_nonzero = (result_float.abs() > 0.01).sum().item()
+            
+            print(f"  All-Gather full result:")
+            print(f"    Value range: [{result_min:.4f}, {result_max:.4f}]")
+            print(f"    Sum: {result_sum:.4f}")
+            print(f"    Non-zero elements: {result_nonzero}/{result_float.numel()} ({result_nonzero/result_float.numel()*100:.1f}%)")
+            
             # Verify that this rank's shard appears correctly in the gathered result
             ag_shard_result = result[rank * M_shard:(rank + 1) * M_shard, :]
             
@@ -554,17 +557,18 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             ag_result_float = ag_shard_result.to(torch.float32)
             final_out_float = final_output.to(torch.float32)
             
-            print(f"  All-Gather Debug:")
-            print(f"    result[{rank*M_shard}:{(rank+1)*M_shard}] sum: {ag_result_float.sum().item():.4f}, nonzero: {(ag_result_float != 0).sum().item()}")
-            print(f"    final_output (sent) sum: {final_out_float.sum().item():.4f}, nonzero: {(final_out_float != 0).sum().item()}")
-            
             ag_diff_float = torch.abs(ag_result_float - final_out_float)
             ag_sum_diff = abs(ag_result_float.sum() - final_out_float.sum())
             ag_rel_err = ag_sum_diff / abs(final_out_float.sum()) * 100 if final_out_float.sum() != 0 else 0.0
             
-            print(f"  All-Gather (rank {rank} shard) max diff: {ag_diff_float.max().item():.8f}")
-            print(f"  All-Gather (rank {rank} shard) sum diff: {ag_sum_diff:.4f}, relative: {ag_rel_err:.4f}%")
-            print(f"  {'✅ PASS' if ag_diff_float.max() < 0.01 else '❌ FAIL'}")
+            print(f"  All-Gather (rank {rank} shard) max diff: {ag_diff_float.max().item():.8f}, rel error: {ag_rel_err:.4f}%")
+            
+            # Check if result is valid (not all zeros)
+            is_valid = (abs(result_sum) > 1.0) and (result_nonzero > result_float.numel() * 0.5)
+            if not is_valid:
+                print(f"  ⚠️  WARNING: All-Gather result may be invalid (mostly zeros or very small values)")
+            
+            print(f"  {'✅ PASS' if (ag_diff_float.max() < 0.01 and is_valid) else '❌ FAIL'}")
 
     # ================================================================
     # Benchmarking
@@ -652,11 +656,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         RMSNORM_NUM_WARPS = 8 if rmsnorm_num_warps is None else rmsnorm_num_warps
         RMSNORM_WAVES_PER_EU = 2 if rmsnorm_waves_per_eu is None else rmsnorm_waves_per_eu
         
-        if rank == 0:
-            print(f"\n  RMSNorm Actual Config (in benchmark):")
-            print(f"    BLOCK_SIZE={RMSNORM_BLOCK_SIZE}, USE_BLOCKED={RMSNORM_USE_BLOCKED}")
-            print(f"    NUM_PRGMS={RMSNORM_NUM_PRGMS}, num_warps={RMSNORM_NUM_WARPS}, waves_per_eu={RMSNORM_WAVES_PER_EU}\n")
-        
         # Warmup
         for _ in range(args["warmup"]):
             aiter_rmsnorm[(M_shard,)](
@@ -728,11 +727,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             
             grid_fp8 = (triton.cdiv(M_shard, FP8_BLOCK_M), triton.cdiv(N, FP8_BLOCK_N))
             
-            if rank == 0:
-                print(f"\n  FP8 Quant Actual Config (in benchmark):")
-                print(f"    BLOCK_M={FP8_BLOCK_M}, BLOCK_N={FP8_BLOCK_N}")
-                print(f"    num_warps={FP8_NUM_WARPS}, num_stages={FP8_NUM_STAGES}, waves_per_eu={FP8_WAVES_PER_EU}\n")
-            
             # Warmup
             for _ in range(args["warmup"]):
                 quantize_fp8_kernel[grid_fp8](
@@ -797,11 +791,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             
             grid_ag = (NUM_SMS,)
             
-            if rank == 0:
-                print(f"\n  All-Gather Actual Config (in benchmark):")
-                print(f"    BLOCK_M={AG_BLOCK_M}, BLOCK_N={AG_BLOCK_N}")
-                print(f"    num_warps={AG_NUM_WARPS}, num_stages={AG_NUM_STAGES}, waves_per_eu={AG_WAVES_PER_EU}\n")
-            
             # Warmup
             for _ in range(args["warmup"]):
                 all_gather_m_kernel[grid_ag](
@@ -846,10 +835,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         bytes_per_element = dtype.itemsize if hasattr(dtype, 'itemsize') else 2
         
         # Reduce-Scatter with iris.load (pull-based):
-        # Each rank loads M_shard×N from ALL world_size ranks
-        # Total data loaded per rank = M_shard * N * world_size
-        rs_bytes = M_shard * N * world_size * bytes_per_element
-        rs_bandwidth_gb_s = rs_bytes / (rs_time_ms / 1000) / 1e9
+        # Each rank loads M_shard×N from (world_size - 1) remote ranks
+        # Local read doesn't go over interconnect, so we exclude it
+        # Interconnect bandwidth = data transferred over network / time
+        rs_interconnect_bytes = M_shard * N * (world_size - 1) * bytes_per_element
+        rs_bandwidth_gb_s = rs_interconnect_bytes / (rs_time_ms / 1000) / 1e9
         
         # RMSNorm: Read (M_shard)×N + write (M_shard)×N
         bytes_processed_rmsnorm = num_elements * bytes_per_element * 2  # Read + write
@@ -868,17 +858,19 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             fp8_bytes = num_elements * 3
             quant_bandwidth_gb_s = fp8_bytes / (quant_time_ms / 1000) / 1e9
         
-        # All-Gather: Read (M_shard)×N + write M×N (to all ranks)
+        # All-Gather: Each rank sends M_shard×N to (world_size - 1) remote ranks
+        # Local write doesn't go over interconnect, so we exclude it
+        # Interconnect bandwidth = data transferred over network / time
         ag_bandwidth_gb_s = 0.0
-        ag_bytes = 0
+        ag_interconnect_bytes = 0
         if args["all_gather"]:
             # Use actual dtype of data being gathered (FP8 if quantized, otherwise FP16)
             ag_bytes_per_element = fp8_output_bench.element_size() if args["fp8_out"] else bytes_per_element
-            ag_bytes = M_shard * N * ag_bytes_per_element + M * N * ag_bytes_per_element
-            ag_bandwidth_gb_s = ag_bytes / (ag_time_ms / 1000) / 1e9
+            ag_interconnect_bytes = M_shard * N * (world_size - 1) * ag_bytes_per_element
+            ag_bandwidth_gb_s = ag_interconnect_bytes / (ag_time_ms / 1000) / 1e9
         
         # Calculate total bytes and time
-        total_bytes = rs_bytes + bytes_processed_rmsnorm + fp8_bytes + ag_bytes
+        total_bytes = rs_interconnect_bytes + bytes_processed_rmsnorm + fp8_bytes + ag_interconnect_bytes
         total_time = rs_time_ms + rmsnorm_time_ms + quant_time_ms + ag_time_ms
         
         # Calculate total effective bandwidth
@@ -894,22 +886,24 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             print(f"  Elements per rank: {num_elements:,}")
             print(f"\nComponent Performance:")
             print(f"  Reduce-Scatter:")
-            print(f"    Time:      {rs_time_ms:.3f} ms")
-            print(f"    Bandwidth: {rs_bandwidth_gb_s:.2f} GB/s")
+            print(f"    Time:             {rs_time_ms:.3f} ms")
+            print(f"    Interconnect BW:  {rs_bandwidth_gb_s:.2f} GB/s")
+            print(f"    Data transferred: {rs_interconnect_bytes / 1e9:.3f} GB")
             print(f"  RMSNorm:")
             print(f"    Time:      {rmsnorm_time_ms:.3f} ms")
-            print(f"    Bandwidth: {rmsnorm_bandwidth_gb_s:.2f} GB/s")
+            print(f"    Bandwidth: {rmsnorm_bandwidth_gb_s:.2f} GB/s (memory)")
             print(f"    TFLOPS:    {rmsnorm_tflops:.2f}")
             
             if args["fp8_out"]:
                 print(f"  FP8 Quantization:")
                 print(f"    Time:      {quant_time_ms:.3f} ms")
-                print(f"    Bandwidth: {quant_bandwidth_gb_s:.2f} GB/s")
+                print(f"    Bandwidth: {quant_bandwidth_gb_s:.2f} GB/s (memory)")
             
             if args["all_gather"]:
                 print(f"  All-Gather:")
-                print(f"    Time:      {ag_time_ms:.3f} ms")
-                print(f"    Bandwidth: {ag_bandwidth_gb_s:.2f} GB/s")
+                print(f"    Time:             {ag_time_ms:.3f} ms")
+                print(f"    Interconnect BW:  {ag_bandwidth_gb_s:.2f} GB/s")
+                print(f"    Data transferred: {ag_interconnect_bytes / 1e9:.3f} GB")
             
             print(f"\nTotal Pipeline:")
             print(f"  Total time:        {total_time:.3f} ms")

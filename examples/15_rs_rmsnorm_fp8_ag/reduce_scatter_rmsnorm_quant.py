@@ -39,7 +39,7 @@ import iris  # type: ignore
 
 @triton.jit
 def reduce_scatter_m_kernel(
-    input_ptr,  # Local input tensor: *[M, N]
+    input_ptr,  # Local input tensor in IRIS memory: *[M, N]
     output_ptr,  # Output shard in IRIS memory: *[M_shard, N]
     M,
     M_shard,
@@ -188,9 +188,11 @@ def all_gather_m_kernel(
                 tl.store(out_ptrs, shard_data, mask=mask_m_global[:, None] & mask_n[None, :])
             else:
                 # Remote store using IRIS
+                # iris.put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask)
+                # from_ptr: local source, to_ptr: remote destination
                 iris.put(
-                    out_ptr + rm_global[:, None] * stride_om + rn[None, :] * stride_on,
-                    shard_ptr + rm_local[:, None] * stride_sm + rn[None, :] * stride_sn,
+                    shard_ptr + rm_local[:, None] * stride_sm + rn[None, :] * stride_sn,  # from_ptr (local source)
+                    out_ptr + rm_global[:, None] * stride_om + rn[None, :] * stride_on,    # to_ptr (remote dest)
                     cur_rank,
                     dst,
                     heap_bases,
@@ -402,10 +404,12 @@ def main():
     # Barrier to ensure all ranks have allocated their input tensors
     shmem.barrier()
 
-    BLOCK_M = 64
+    # Default parameters (can be overridden via tuning)
+    BLOCK_M = 16
     BLOCK_N = 64
     GROUP_SIZE_M = 8
-    NUM_SMS = 304  # MI300X
+    # MI350
+    NUM_SMS = 256
 
     # ================================================================
     # Step 1: Reduce-Scatter along M dimension
@@ -436,7 +440,9 @@ def main():
         BLOCK_N=BLOCK_N,
         GROUP_SIZE_M=GROUP_SIZE_M,
         NUM_SMS=NUM_SMS,
-        num_warps=4,
+        num_warps=16,  # Tuned for better performance
+        num_stages=4,
+        waves_per_eu=4,
     )
     
     # Synchronize to ensure all ranks have completed their loads and reductions
@@ -454,16 +460,11 @@ def main():
     rmsnorm_output = torch.empty_like(reduced_shard)
     rsigma = torch.empty(M_shard, device=device, dtype=dtype)
 
-    # AITer logic for determining block size and whether to use blocked mode
-    # BLOCK_SIZE is limited by shared memory (65536 bytes) and must be power of 2
-    element_size = reduced_shard.element_size()  # bytes per element
-    max_block_size = 65536 // element_size  # max elements that fit in shared memory
-    BLOCK_SIZE = min(max_block_size, triton.next_power_of_2(N))
-    
-    # Use blocked mode if N is larger than the block size
-    USE_BLOCKED = N > BLOCK_SIZE
-    
-    NUM_PRGMS = 1
+    # AITer RMSNorm configuration
+    # Note: Tuning found BLOCK_SIZE=1024 optimal for N=7168 (avoid VGPR spills with larger sizes)
+    BLOCK_SIZE = 1024
+    USE_BLOCKED = False  # Tuned: non-blocked mode is faster for moderate N
+    NUM_PRGMS = M_shard  # Full parallelism: each program processes one row
     
     aiter_rmsnorm[(M_shard,)](
         reduced_shard,
@@ -478,7 +479,8 @@ def main():
         BLOCK_SIZE=BLOCK_SIZE,
         USE_BLOCKED=USE_BLOCKED,
         NUM_PRGMS=NUM_PRGMS,
-        num_warps=4,
+        num_warps=8,  # Tuned for better occupancy
+        waves_per_eu=2,
     )
     
     print(f"Rank {cur_rank}: RMSNorm complete, output shape: {rmsnorm_output.shape}")
@@ -500,7 +502,10 @@ def main():
         else:
             quantized_output = torch.empty_like(rmsnorm_output)
         
-        grid_quant = (triton.cdiv(M_shard, BLOCK_M), triton.cdiv(N, BLOCK_N))
+        # FP8 quantization uses medium tile sizes
+        FP8_BLOCK_M = 64
+        FP8_BLOCK_N = 64
+        grid_quant = (triton.cdiv(M_shard, FP8_BLOCK_M), triton.cdiv(N, FP8_BLOCK_N))
         
         quantize_fp8_kernel[grid_quant](
             rmsnorm_output,
@@ -512,9 +517,11 @@ def main():
             rmsnorm_output.stride(1),
             quantized_output.stride(0),
             quantized_output.stride(1),
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
+            BLOCK_M=FP8_BLOCK_M,
+            BLOCK_N=FP8_BLOCK_N,
             num_warps=4,
+            num_stages=2,
+            waves_per_eu=2,
         )
         
         final_shard = quantized_output
@@ -540,6 +547,10 @@ def main():
         
         grid_ag = (NUM_SMS,)
         
+        # All-gather uses similar parameters to reduce-scatter
+        AG_BLOCK_M = 64
+        AG_BLOCK_N = 64
+        
         all_gather_m_kernel[grid_ag](
             final_shard,
             full_output,
@@ -553,11 +564,13 @@ def main():
             cur_rank,
             world_size,
             heap_bases,
-            BLOCK_M=BLOCK_M,
-            BLOCK_N=BLOCK_N,
+            BLOCK_M=AG_BLOCK_M,
+            BLOCK_N=AG_BLOCK_N,
             GROUP_SIZE_M=GROUP_SIZE_M,
             NUM_SMS=NUM_SMS,
-            num_warps=4,
+            num_warps=8,
+            num_stages=3,
+            waves_per_eu=2,
         )
         
         # Synchronize to ensure all ranks have completed their puts
