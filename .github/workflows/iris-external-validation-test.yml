@@ -31,6 +31,35 @@ jobs:
             echo "Container runtime already available"
           fi
 
+      - name: Setup Docker daemon and permissions
+        run: |
+          if command -v docker &> /dev/null; then
+            # Check if Docker daemon is running
+            if ! docker ps &> /dev/null; then
+              echo "Cannot access Docker, checking if daemon is running..."
+              
+              # Try to start Docker daemon if it's not running
+              if command -v sudo &> /dev/null; then
+                if ! sudo systemctl is-active --quiet docker; then
+                  echo "Docker daemon is not running, attempting to start..."
+                  sudo systemctl start docker
+                  sleep 2
+                fi
+                
+                # If still can't access, it's a permission issue
+                if ! docker ps &> /dev/null; then
+                  echo "Docker daemon running but no permission, adding user to docker group..."
+                  sudo usermod -aG docker $USER
+                  echo "User added to docker group. Note: Full effect requires runner restart."
+                fi
+              else
+                echo "Warning: sudo not available, cannot start Docker or modify permissions"
+              fi
+            else
+              echo "Docker is accessible and running"
+            fi
+          fi
+
       - name: Build Iris container
         run: |
           # Use the universal container build script
