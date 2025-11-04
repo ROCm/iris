@@ -1,55 +1,35 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
-FROM rocm/pytorch:rocm6.3.1_ubuntu22.04_py3.10_pytorch
+FROM rocm/pytorch:rocm7.0_ubuntu22.04_py3.10_pytorch_release_2.8.0
 
-# Use bash shell for RUN commands
-SHELL ["/bin/bash", "-c"]
-
-# Set environment variables
-ENV TRITON_PATH=/opt/triton \
-    ROCM_PATH=/opt/rocm \
-    OMPI_MCA_mtl="^ofi" \
-    OMPI_MCA_pml="ob1"
-
-ENV LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH \
-    PATH="$ROCM_PATH/bin:$PATH"
-
-ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
-    OMPI_ALLOW_RUN_AS_ROOT=1
-
-# Install system packages
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    git wget ninja-build cmake python3-pip python3-dev build-essential && \
+# Install dependencies and Triton
+RUN apt-get update && apt-get install -y git && \
+    export TRITON_PATH=/workspace/triton && \
+    git clone https://github.com/triton-lang/triton.git $TRITON_PATH && \
+    cd $TRITON_PATH && \
+    git checkout aafec417bded34db6308f5b3d6023daefae43905 && \
+    pip install -e . && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python packages with pip
-RUN pip3 install --upgrade pip && \
-    pip3 install wheel jupyter
+# Set environment variables
+ENV TRITON_PATH=/workspace/triton
+ENV PYTHONPATH=${TRITON_PATH}/python/
+ENV LD_LIBRARY_PATH=/opt/rocm/lib:${LD_LIBRARY_PATH}
+ENV ROCM_PATH=/opt/rocm
+ENV PATH=/opt/conda/envs/py_3.10/bin:/opt/rocm/bin:${PATH}
+ENV OMPI_MCA_mtl="^ofi"
+ENV OMPI_MCA_pml="ob1"
 
-# Clone and install Triton
-WORKDIR $TRITON_PATH
-RUN git clone https://github.com/triton-lang/triton.git $TRITON_PATH
-RUN git checkout dd5823453bcc7973eabadb65f9d827c43281c434
-RUN pip3 install -e .
-ENV PYTHONPATH=$TRITON_PATH
-
-# Install rocprofiler-systems
+# Set working directory
 WORKDIR /workspace
-RUN wget https://github.com/ROCm/rocprofiler-systems/releases/download/rocm-6.3.1/rocprofiler-systems-install.py && \
-    python3 ./rocprofiler-systems-install.py --prefix /opt/rocprofiler-systems --rocm 6.3 && \
-    rm -f rocprofiler-systems-install.py
 
 # Create entrypoint script
-RUN echo '#!/bin/bash' > /entrypoint.sh && \
-    echo 'echo "Welcome to the ROCm-aware Docker image!"' >> /entrypoint.sh && \
-    echo 'if [ $# -eq 0 ]; then' >> /entrypoint.sh && \
-    echo '    exec /bin/bash' >> /entrypoint.sh && \
-    echo 'else' >> /entrypoint.sh && \
-    echo '    exec "$@"' >> /entrypoint.sh && \
-    echo 'fi' >> /entrypoint.sh && \
+RUN echo '#!/bin/bash\n\
+echo "Welcome to the ROCm-aware Docker image!"\n\
+exec "$@"' > /entrypoint.sh && \
     chmod +x /entrypoint.sh
 
-# Set the entrypoint
-ENTRYPOINT ["/bin/bash", "-c", "source /entrypoint.sh && exec bash"]
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["/bin/bash"]
+
