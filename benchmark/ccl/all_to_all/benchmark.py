@@ -17,7 +17,7 @@ import argparse
 from examples.common.utils import JSONWriter
 
 import iris
-from iris.ccl import all_to_all, Config
+from iris.ccl import Config
 
 torch.manual_seed(123)
 random.seed(123)
@@ -29,14 +29,14 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-m", type=int, default=1024, help="Number of rows in tensors")
-    parser.add_argument("-n", type=int, default=512, help="Number of columns in tensors")
+    parser.add_argument("-n", type=int, default=1024, help="Number of columns in tensors")
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
     parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking mode")
     parser.add_argument(
         "--datatype",
         type=str,
-        default="fp32",
+        default="fp16",
         choices=["fp16", "fp32", "bf16"],
         help="Datatype of tensors",
     )
@@ -46,7 +46,7 @@ def parse_args():
         default="log.json",
         help="Output file",
     )
-    parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
+    parser.add_argument("--heap_size", type=int, default=1 << 34, help="Iris heap size")
     parser.add_argument("--comm_sms", type=int, default=32, help="Number of SMs for all-to-all kernel")
     parser.add_argument("--block_size_m", type=int, default=None, help="Block size for M dimension tiling")
     parser.add_argument("--block_size_n", type=int, default=None, help="Block size for N dimension tiling")
@@ -123,6 +123,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         expected_val = float(target_rank * 1000 + rank)
         expected_concat[:, target_rank * N : (target_rank + 1) * N] = expected_val
 
+    comm_stream = torch.cuda.Stream()
+
     kernel_timing = {
         "all_to_all": {
             "start_event": torch.cuda.Event(enable_timing=True),
@@ -137,13 +139,14 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.barrier()
 
         torch.cuda.nvtx.range_push("All-to-All")
-        kernel_timing["all_to_all"]["start_event"].record()
-        all_to_all(output_concat, input_concat, shmem, config=config)
-        kernel_timing["all_to_all"]["end_event"].record()
-        kernel_timing["all_to_all"]["experiments"] += 1
+        with torch.cuda.stream(comm_stream):
+            kernel_timing["all_to_all"]["start_event"].record()
+            shmem.ccl.all_to_all(output_concat, input_concat, config=config, async_op=False)
+            kernel_timing["all_to_all"]["end_event"].record()
+            kernel_timing["all_to_all"]["experiments"] += 1
         torch.cuda.nvtx.range_pop()
-
-        torch.cuda.synchronize()
+        
+        # Synchronize before querying event timing
         shmem.barrier()
         
         # Update timing
@@ -209,13 +212,13 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         
         # Calculate bandwidth
         # In all-to-all, each rank sends and receives world_size tensors
-        # Total bytes = world_size * M * N * element_size * 2 (send + receive)
+        # Total bytes = (world_size - 1) * M * N * element_size
         element_size = torch.tensor([], dtype=datatype).element_size()
-        total_bytes = world_size * M * N * element_size * 2  # Send and receive
+        total_bytes = (world_size - 1) * M * N * element_size
         total_bytes_gb = total_bytes / (1024**3)
 
         triton_ms = iris.do_bench(run_experiment, shmem.barrier)
-        bandwidth_gbps = total_bytes_gb / (triton_ms * 1e-3)
+        bandwidth_gbps = total_bytes_gb / ((kernel_timing["all_to_all"]["ms"] / kernel_timing["all_to_all"]["experiments"]) * 1e-3)
 
         shmem.info(
             f"All-to-all (M={M}, N={N}, world_size={world_size}, dtype={args['datatype']}): "

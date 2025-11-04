@@ -118,6 +118,9 @@ class Iris:
         self.heap_bases = torch.from_numpy(ipc_heap_bases).to(device=self.device, dtype=torch.uint64)
 
         distributed_barrier()
+        
+        # Initialize CCL interface
+        self.ccl = self.CCL(self)
 
     def _log_with_rank(self, level, message):
         """Helper method to log with rank information injected into the record."""
@@ -1493,6 +1496,56 @@ class Iris:
 
         # For non-CUDA devices, always return False
         return False
+
+    class CCL:
+        """
+        Collective Communication Library (CCL) interface for Iris.
+        
+        Provides collective operations that can be called as methods on the Iris instance.
+        Example usage:
+            >>> shmem = iris.iris()
+            >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
+        """
+        
+        def __init__(self, iris_instance):
+            """
+            Initialize CCL with a reference to the parent Iris instance.
+            
+            Args:
+                iris_instance: The parent Iris instance
+            """
+            self._iris = iris_instance
+        
+        def all_to_all(self, output_tensor, input_tensor, config=None, async_op=False):
+            """
+            All-to-all collective operation.
+
+            Each rank sends a tensor chunk to each other rank and receives
+            a tensor chunk from each other rank. Input/output tensors should have
+            shape (M, N * world_size) where each chunk of N columns corresponds to one rank.
+
+            Args:
+                output_tensor: Output tensor of shape (M, N * world_size)
+                input_tensor: Input tensor of shape (M, N * world_size)
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
+
+            Example:
+                >>> shmem = iris.iris()
+                >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
+                
+                >>> # Custom configuration
+                >>> from iris.ccl import Config
+                >>> config = Config(block_size_m=128, block_size_n=32)
+                >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
+                
+                >>> # Async operation (no barrier)
+                >>> shmem.ccl.all_to_all(output_tensor, input_tensor, async_op=True)
+            """
+            from iris.ccl.all_to_all import all_to_all as _all_to_all
+            _all_to_all(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
 
 
 @triton.jit

@@ -78,24 +78,49 @@ def persistent_all_to_all(
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-        # For each target rank, BSP-style exchange using only remote PUTs
-        # Rank cur_rank sends input[cur_rank][target_rank] to rank target_rank
-        # Remote rank writes into output[target_rank][cur_rank]
-        for target_rank in range(world_size):
-            # Send our chunk destined to target_rank from input at columns [target_rank*N : (target_rank+1)*N]
-            input_offset_send = rm[:, None] * stride_in_m + (rn[None, :] + target_rank * N) * stride_in_n
+        # Pre-compute base offsets for better memory access patterns and vectorization
+        # Base offset for input rows (M dimension)
+        input_base_m = rm[:, None] * stride_in_m
+        # Base offset for output rows (M dimension)  
+        output_base_m = rm[:, None] * stride_out_m
+        # Base offset for input columns (N dimension) - will be adjusted per rank
+        input_base_n = rn[None, :] * stride_in_n
+        # Base offset for output columns (N dimension) - will be adjusted per rank
+        output_base_n = rn[None, :] * stride_out_n
 
-            if target_rank == cur_rank:
-                # Local path: copy input[cur_rank] chunk to output[cur_rank] chunk
-                data = tl.load(input_ptr + input_offset_send, mask=mask)
-                output_offset_local = rm[:, None] * stride_out_m + (rn[None, :] + cur_rank * N) * stride_out_n
-                tl.store(output_ptr + output_offset_local, data, mask=mask, cache_modifier=".wt")
-            else:
-                # Remote PUT: write into target's output at columns [cur_rank*N : (cur_rank+1)*N]
-                output_offset_remote = rm[:, None] * stride_out_m + (rn[None, :] + cur_rank * N) * stride_out_n
-                iris.put(
-                    input_ptr + input_offset_send,
-                    output_ptr + output_offset_remote,
+        # Process local rank first for better cache locality
+        # Local path: copy input[cur_rank] chunk to output[cur_rank] chunk
+        input_offset_local = input_base_m + (input_base_n + cur_rank * N * stride_in_n)
+        output_offset_local = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
+        input_ptr_local = input_ptr + input_offset_local
+        output_ptr_local = output_ptr + output_offset_local
+        # Vectorization hints for 2D access pattern
+        input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        output_ptr_local = tl.multiple_of(output_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        
+        data = tl.load(input_ptr_local, mask=mask)
+        tl.store(output_ptr_local, data, mask=mask, cache_modifier=".wt")
+
+        # Then process all remote ranks (skip cur_rank)
+        for target_rank in range(world_size):
+            # Skip local rank as it's already processed above
+            if target_rank != cur_rank:
+                # Send our chunk destined to target_rank from input at columns [target_rank*N : (target_rank+1)*N]
+                input_offset_send = input_base_m + (input_base_n + target_rank * N * stride_in_n)
+                input_ptr_send = input_ptr + input_offset_send
+                input_ptr_send = tl.multiple_of(input_ptr_send, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+                
+                # Load data into registers once
+                data = tl.load(input_ptr_send, mask=mask)
+                
+                # Remote store: write into target's output at columns [cur_rank*N : (cur_rank+1)*N]
+                output_offset_remote = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
+                output_ptr_remote = output_ptr + output_offset_remote
+                output_ptr_remote = tl.multiple_of(output_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+                
+                iris.store(
+                    output_ptr_remote,
+                    data,
                     cur_rank,
                     target_rank,
                     heap_bases,
@@ -103,9 +128,13 @@ def persistent_all_to_all(
                 )
 
 
-def all_to_all(output_tensor, input_tensor, shmem, config=None):
+def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
     """
-    All-to-all collective operation.
+    Internal all-to-all collective operation implementation.
+    
+    This function is called internally by shmem.ccl.all_to_all().
+    Users should use the Iris instance method instead:
+        >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
 
     Each rank sends a tensor chunk to each other rank and receives
     a tensor chunk from each other rank. Input/output tensors should have
@@ -117,20 +146,8 @@ def all_to_all(output_tensor, input_tensor, shmem, config=None):
         shmem: Iris shmem context
         config: Config instance with kernel parameters (default: None).
                 If None, uses default Config values.
-
-    Example:
-        >>> # Basic usage with default config
-        >>> all_to_all(output_tensor, input_tensor, shmem)
-        
-        >>> # Custom configuration
-        >>> from iris.ccl import Config
-        >>> config = Config(
-        ...     block_size_m=128,
-        ...     block_size_n=32,
-        ...     swizzle_size=8,
-        ...     comm_sms=64
-        ... )
-        >>> all_to_all(output_tensor, input_tensor, shmem, config=config)
+        async_op: If False, performs a barrier at the end. If True, returns immediately.
+                  Default: False.
     """
     # Use provided config or create default one
     if config is None:
@@ -163,3 +180,6 @@ def all_to_all(output_tensor, input_tensor, shmem, config=None):
         config.comm_sms,
         config.num_xcds,
     )
+    
+    if not async_op:
+        shmem.barrier()

@@ -28,14 +28,16 @@ class Config:
         num_xcds: Number of XCCs. If None, auto-detected from system (default: None)
     
     Example:
-        >>> from iris.ccl import all_to_all, Config
+        >>> import iris
+        >>> from iris.ccl import Config
+        >>> shmem = iris.iris()
         >>> config = Config(
         ...     block_size_m=128,
         ...     block_size_n=32,
         ...     swizzle_size=8,
         ...     comm_sms=64
         ... )
-        >>> all_to_all(output_tensor, input_tensor, shmem, config=config)
+        >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
     """
     block_size_m: int = 256
     block_size_n: int = 64

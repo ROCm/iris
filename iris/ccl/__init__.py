@@ -4,13 +4,14 @@
 """
 iris-ccl: Collective Communication Library for Iris
 
-This module provides standalone collective communication primitives
-that match PyTorch's RCCL/NCCL interface.
+This module provides configuration for collective communication primitives.
+Collective operations are accessed through the Iris instance's ccl attribute:
+    >>> shmem = iris.iris()
+    >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
 """
 
-from .all_to_all import all_to_all
 from .config import Config
 
-__all__ = ["all_to_all", "Config"]
+__all__ = ["Config"]
 
 

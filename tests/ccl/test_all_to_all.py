@@ -8,7 +8,7 @@ Test suite for all-to-all collective operation.
 import pytest
 import torch
 import iris
-from iris.ccl import all_to_all, Config
+from iris.ccl import Config
 
 
 @pytest.mark.parametrize(
@@ -49,12 +49,11 @@ def test_all_to_all(dtype, M, N):
         expected_val = float(target_rank * 1000 + rank)
         expected_concat[:, target_rank * N : (target_rank + 1) * N] = expected_val
     
-    # Perform all-to-all
+    # Perform all-to-all using new API
     config = Config()
     shmem.barrier()
-    all_to_all(output_concat, input_concat, shmem, config=config)
+    shmem.ccl.all_to_all(output_concat, input_concat, config=config)
     torch.cuda.synchronize()
-    shmem.barrier()
     
     # Validate results
     atol = 1e-3 if dtype == torch.float16 else 1e-5
