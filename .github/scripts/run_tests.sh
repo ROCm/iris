@@ -27,7 +27,7 @@ fi
 # Run tests in container
 "$SCRIPT_DIR/container_exec.sh" $GPU_ARG "
     set -e
-    pip install -e .
+    pip install --user -e .
     
     # Run examples tests
     for test_file in tests/examples/test_*.py; do
