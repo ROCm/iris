@@ -83,9 +83,16 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     
     IMAGE_NAME="iris-dev-triton-aafec41"
     
-    # Check if the triton image exists
+    # Build Docker image
     echo "[INFO] Building Docker image..."
-    docker build -t "$IMAGE_NAME" -f docker/Dockerfile .
+    if ! docker build -t "$IMAGE_NAME" -f docker/Dockerfile . ; then
+        echo "[WARNING] Docker build failed, attempting recovery..."
+        echo "[INFO] Cleaning Docker builder cache..."
+        docker builder prune -a -f || true
+        
+        echo "[INFO] Retrying Docker build..."
+        docker build -t "$IMAGE_NAME" -f docker/Dockerfile .
+    fi
     echo "[INFO] Successfully built Docker image: $IMAGE_NAME"
 fi
 
