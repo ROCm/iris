@@ -37,6 +37,14 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
 elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     echo "[INFO] Checking Docker access..."
     
+    # Skip building on problematic hosts
+    HOSTNAME=$(hostname)
+    if [[ "$HOSTNAME" == "smci355-ccs-aus-n02-09" ]]; then
+        echo "[INFO] Detected problematic host: $HOSTNAME"
+        echo "[INFO] Skipping image build check on this host"
+        exit 0
+    fi
+    
     # Check if Docker daemon is accessible
     if ! docker ps &> /dev/null; then
         echo "[INFO] Cannot access Docker, checking if daemon is running..."
