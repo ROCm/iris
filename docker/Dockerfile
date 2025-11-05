@@ -9,14 +9,17 @@ RUN python -m venv /opt/iris_venv && \
     /opt/iris_venv/bin/pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm7.0
 
 
-# Install dependencies and Triton
+# Install dependencies and Triton into venv
 RUN apt-get update && apt-get install -y git && \
     export TRITON_PATH=/workspace/triton && \
     git clone https://github.com/triton-lang/triton.git $TRITON_PATH && \
     cd $TRITON_PATH && \
     git checkout aafec417bded34db6308f5b3d6023daefae43905 && \
-    pip install -e . && \
+    /opt/iris_venv/bin/pip install -e . && \
     rm -rf /var/lib/apt/lists/*
+
+# Make venv writable by all users (since container runs as non-root)
+RUN chmod -R 777 /opt/iris_venv
 # Set environment variables
 ENV TRITON_PATH=/workspace/triton
 ENV PYTHONPATH=${TRITON_PATH}/python/
