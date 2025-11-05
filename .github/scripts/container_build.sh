@@ -84,13 +84,9 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     IMAGE_NAME="iris-dev-triton-aafec41"
     
     # Check if the triton image exists
-    if docker image inspect "$IMAGE_NAME" &> /dev/null; then
-        echo "[INFO] Using existing Docker image: $IMAGE_NAME"
-    else
-        echo "[INFO] Docker image $IMAGE_NAME not found, building..."
-        docker build -t "$IMAGE_NAME" -f docker/Dockerfile .
-        echo "[INFO] Successfully built Docker image: $IMAGE_NAME"
-    fi
+    echo "[INFO] Building Docker image..."
+    docker build -t "$IMAGE_NAME" -f docker/Dockerfile .
+    echo "[INFO] Successfully built Docker image: $IMAGE_NAME"
 fi
 
 echo "[INFO] Container build completed successfully with $CONTAINER_RUNTIME"
