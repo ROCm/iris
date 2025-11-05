@@ -12,6 +12,27 @@ from .config import Config
 
 
 @triton.jit()
+def chiplet_transform_chunked(
+    pid, 
+    num_workgroups: tl.constexpr, 
+    num_xcds: tl.constexpr, 
+    chunk_size: tl.constexpr
+):
+    if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
+        # Outside of the contiguous chunked region, leave unchanged.
+        return pid
+    
+    local_pid = pid // num_xcds 
+    # Calculate chunk index and position within chunk
+    chunk_idx = local_pid // chunk_size 
+    pos_in_chunk = local_pid % chunk_size 
+
+    # Calculate new PID
+    xcd = pid % num_xcds 
+    new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
+    return new_pid
+
+@triton.jit()
 def persistent_all_to_all(
     input_ptr,
     output_ptr,
@@ -29,6 +50,7 @@ def persistent_all_to_all(
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
 ):
     """
     Persistent all-to-all kernel.
@@ -54,7 +76,7 @@ def persistent_all_to_all(
     pid = tl.program_id(0)
 
     if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (COMM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+        pid = chiplet_transform_chunked(pid, NUM_XCDS, COMM_SMS, CHUNK_SIZE)
     
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -101,31 +123,87 @@ def persistent_all_to_all(
         data = tl.load(input_ptr_local, mask=mask)
         tl.store(output_ptr_local, data, mask=mask, cache_modifier=".wt")
 
-        # Then process all remote ranks (skip cur_rank)
+        # Pre-compute constant parts that don't depend on target_rank
+        # Base offset for input (without rank-specific column offset)
+        input_base_offset = input_base_m + input_base_n
+        # Remote store offset: write into target's output at columns [cur_rank*N : (cur_rank+1)*N]
+        # This is constant for all target_rank iterations since it only depends on cur_rank
+        output_offset_remote = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
+        output_ptr_remote = output_ptr + output_offset_remote
+        output_ptr_remote = tl.multiple_of(output_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        
+        # Pre-compute rank stride for input (N * stride_in_n)
+        rank_stride_in = N * stride_in_n
+        
+        # Traffic shaping: Break each tile into 64x64 sub-blocks and process them
+        # This creates better memory access patterns and allows hardware to distribute
+        # traffic across XGMI links based on access patterns
+        SUB_BLOCK_M: tl.constexpr = 64
+        SUB_BLOCK_N: tl.constexpr = 64
+        
+        # Calculate number of 64x64 sub-blocks needed to cover the tile
+        num_sub_blocks_m = tl.cdiv(BLOCK_SIZE_M, SUB_BLOCK_M)
+        num_sub_blocks_n = tl.cdiv(BLOCK_SIZE_N, SUB_BLOCK_N)
+        total_sub_blocks = num_sub_blocks_m * num_sub_blocks_n
+        
+        # Base row/column indices for the tile
+        tile_base_m = pid_m * BLOCK_SIZE_M
+        tile_base_n = pid_n * BLOCK_SIZE_N
+        
+        # Process all remote ranks: load each chunk and scatter to corresponding target
+        # Each target_rank may have different input data, so we must load separately
         for target_rank in range(world_size):
             # Skip local rank as it's already processed above
             if target_rank != cur_rank:
-                # Send our chunk destined to target_rank from input at columns [target_rank*N : (target_rank+1)*N]
-                input_offset_send = input_base_m + (input_base_n + target_rank * N * stride_in_n)
-                input_ptr_send = input_ptr + input_offset_send
-                input_ptr_send = tl.multiple_of(input_ptr_send, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-                
-                # Load data into registers once
-                data = tl.load(input_ptr_send, mask=mask)
-                
-                # Remote store: write into target's output at columns [cur_rank*N : (cur_rank+1)*N]
-                output_offset_remote = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
-                output_ptr_remote = output_ptr + output_offset_remote
-                output_ptr_remote = tl.multiple_of(output_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-                
-                iris.store(
-                    output_ptr_remote,
-                    data,
-                    cur_rank,
-                    target_rank,
-                    heap_bases,
-                    mask=mask,
-                )
+                # Traffic shaping: Process tile in 64x64 sub-blocks
+                # Loop over all sub-blocks to ensure complete coverage
+                for sub_block_id in range(total_sub_blocks):
+                    # Calculate sub-block position within the tile
+                    sub_block_m = (sub_block_id // num_sub_blocks_n) * SUB_BLOCK_M
+                    sub_block_n = (sub_block_id % num_sub_blocks_n) * SUB_BLOCK_N
+                    
+                    # Compute row and column indices for this 64x64 sub-block
+                    # Start from tile base and add sub-block offset, then create arrays
+                    sub_rm_base = tile_base_m + sub_block_m
+                    sub_rn_base = tile_base_n + sub_block_n
+                    sub_rm = sub_rm_base + tl.arange(0, SUB_BLOCK_M)
+                    sub_rn = sub_rn_base + tl.arange(0, SUB_BLOCK_N)
+                    
+                    # Create mask for this sub-block
+                    sub_mask = (sub_rm[:, None] < M) & (sub_rn[None, :] < N) & \
+                               (sub_rm[:, None] < (tile_base_m + BLOCK_SIZE_M)) & \
+                               (sub_rn[None, :] < (tile_base_n + BLOCK_SIZE_N))
+                    
+                    # Compute offsets for this sub-block
+                    sub_input_base_m = sub_rm[:, None] * stride_in_m
+                    sub_input_base_n = sub_rn[None, :] * stride_in_n
+                    sub_output_base_m = sub_rm[:, None] * stride_out_m
+                    sub_output_base_n = sub_rn[None, :] * stride_out_n
+                    
+                    # Compute input pointer for this target_rank's chunk (sub-block)
+                    sub_input_offset = sub_input_base_m + (sub_input_base_n + target_rank * N * stride_in_n)
+                    sub_input_ptr_send = input_ptr + sub_input_offset
+                    sub_input_ptr_send = tl.multiple_of(sub_input_ptr_send, (SUB_BLOCK_M, SUB_BLOCK_N))
+                    
+                    # Compute output pointer (sub-block)
+                    sub_output_offset = sub_output_base_m + (sub_output_base_n + cur_rank * N * stride_out_n)
+                    sub_output_ptr_remote = output_ptr + sub_output_offset
+                    sub_output_ptr_remote = tl.multiple_of(sub_output_ptr_remote, (SUB_BLOCK_M, SUB_BLOCK_N))
+                    
+                    # Load data chunk for this target rank (64x64 sub-block)
+                    sub_data = tl.load(sub_input_ptr_send, mask=sub_mask)
+                    
+                    # Scatter to target rank's output
+                    # Processing in 64x64 sub-blocks creates better memory access patterns
+                    # that allow hardware to distribute traffic across XGMI links
+                    iris.store(
+                        sub_output_ptr_remote,
+                        sub_data,
+                        cur_rank,
+                        target_rank,
+                        heap_bases,
+                        mask=sub_mask,
+                    )
 
 
 def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
@@ -179,6 +257,7 @@ def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
         config.swizzle_size,
         config.comm_sms,
         config.num_xcds,
+        config.chunk_size,
     )
     
     if not async_op:

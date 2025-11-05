@@ -28,8 +28,8 @@ def parse_args():
         description="Benchmark all-to-all collective operation.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-m", type=int, default=1024, help="Number of rows in tensors")
-    parser.add_argument("-n", type=int, default=1024, help="Number of columns in tensors")
+    parser.add_argument("-m", type=int, default=16384, help="Number of rows in tensors")
+    parser.add_argument("-n", type=int, default=16384, help="Number of columns in tensors")
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
     parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking mode")
@@ -104,6 +104,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     for key, value in args.items():
         json_writer.add_field(key, value)
+    
+    # Export config values to JSON (use actual values from config, including defaults)
+    json_writer.add_field("block_size_m", config.block_size_m)
+    json_writer.add_field("block_size_n", config.block_size_n)
+    json_writer.add_field("swizzle_size", config.swizzle_size)
+    json_writer.add_field("num_xcds", config.num_xcds)
 
     # Create input and output tensor lists for all-to-all
     # Each rank sends a different tensor to each rank

@@ -39,16 +39,21 @@ class Config:
         ... )
         >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
     """
-    block_size_m: int = 256
-    block_size_n: int = 64
+    block_size_m: int = 128
+    block_size_n: int = 128
     swizzle_size: int = 6
-    comm_sms: int = 32
+    comm_sms: int = 64
     num_xcds: int = None
+    chunk_size: int = None
     
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
         if self.num_xcds is None:
             self.num_xcds = iris.hip.get_num_xcc()
+            
+        if self.chunk_size is None:
+            self.chunk_size = self.swizzle_size * self.swizzle_size
+            self.chunk_size = min(self.chunk_size, self.comm_sms // self.num_xcds)
         
         if self.block_size_m <= 0:
             raise ValueError(f"block_size_m must be positive, got {self.block_size_m}")
