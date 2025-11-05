@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Run benchmark in container
 "$SCRIPT_DIR/container_exec.sh" --gpus "0,1,2,3,4,5,6,7" "
     set -e
-    pip install --user -e .
+    pip install -e .
     python examples/${EXAMPLE_PATH}/benchmark.py \
         --benchmark \
         --validate \
