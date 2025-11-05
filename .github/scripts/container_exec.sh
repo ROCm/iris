@@ -114,10 +114,10 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
         RUN_CMD="$RUN_CMD -e HIP_VISIBLE_DEVICES=${GPU_DEVICES}"
     fi
     
-    # Wrap command with venv setup
+    # Wrap command with venv setup (inherit system packages like torch)
     WRAPPED_COMMAND="
         set -e
-        python -m venv .venv
+        python -m venv --system-site-packages .venv
         source .venv/bin/activate
         pip install --upgrade pip
         $COMMAND
