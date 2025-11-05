@@ -114,11 +114,17 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
         RUN_CMD="$RUN_CMD -e HIP_VISIBLE_DEVICES=${GPU_DEVICES}"
     fi
     
-    # Wrap command with venv setup (inherit system packages like torch)
+    # Wrap command to deactivate existing venv and create fresh one
     WRAPPED_COMMAND="
         set -e
-        python -m venv --system-site-packages .venv
-        source .venv/bin/activate
+        # Deactivate any existing virtualenv
+        if [ -n \"\$VIRTUAL_ENV\" ]; then
+            unset VIRTUAL_ENV
+            export PATH=\$(echo \$PATH | sed -e 's|/opt/venv/bin:||g')
+        fi
+        # Create fresh venv with access to conda/system packages
+        python -m venv --system-site-packages /iris_workspace/.venv
+        source /iris_workspace/.venv/bin/activate
         pip install --upgrade pip
         $COMMAND
     "
