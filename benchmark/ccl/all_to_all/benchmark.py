@@ -19,6 +19,13 @@ from examples.common.utils import JSONWriter
 import iris
 from iris.ccl import Config
 
+# Conditional import for Gluon
+try:
+    import iris.experimental.iris_gluon as iris_gluon
+    GLUON_AVAILABLE = True
+except ImportError:
+    GLUON_AVAILABLE = False
+
 torch.manual_seed(123)
 random.seed(123)
 
@@ -53,6 +60,7 @@ def parse_args():
     parser.add_argument("--swizzle_size", type=int, default=None, help="Number of tiles to swizzle together")
     parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto-detected if not set)")
     parser.add_argument("-r", "--num_ranks", type=int, default=8, help="Number of ranks/processes")
+    parser.add_argument("--use_gluon", action="store_true", help="Use Gluon implementation with traffic shaping")
 
     return vars(parser.parse_args())
 
@@ -67,7 +75,15 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         rank=local_rank,
         device_id=torch.device(f"cuda:{local_rank}"),
     )
-    shmem = iris.iris(args["heap_size"])
+    
+    # Use Gluon if requested and available
+    if args.get("use_gluon", False):
+        if not GLUON_AVAILABLE:
+            raise RuntimeError("Gluon is not available. Install Triton with Gluon support or remove --use_gluon flag")
+        shmem = iris_gluon.iris(args["heap_size"])
+    else:
+        shmem = iris.iris(args["heap_size"])
+    
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
@@ -96,6 +112,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         config_kwargs["swizzle_size"] = args["swizzle_size"]
     if args["num_xcds"] is not None:
         config_kwargs["num_xcds"] = args["num_xcds"]
+    if args.get("use_gluon", False):
+        config_kwargs["use_gluon"] = True
     
     config = Config(**config_kwargs)
 
@@ -110,6 +128,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     json_writer.add_field("block_size_n", config.block_size_n)
     json_writer.add_field("swizzle_size", config.swizzle_size)
     json_writer.add_field("num_xcds", config.num_xcds)
+    json_writer.add_field("use_gluon", config.use_gluon)
 
     # Create input and output tensor lists for all-to-all
     # Each rank sends a different tensor to each rank

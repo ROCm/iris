@@ -2,16 +2,24 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Test suite for all-to-all collective operation.
+Test suite for all-to-all collective operation using Gluon with traffic shaping.
 """
 
 import pytest
 import torch
 import torch.distributed as dist
-import iris
-from iris.ccl import Config
+
+# Try to import Gluon, skip tests if not available
+try:
+    import iris.experimental.iris_gluon as iris_gluon
+    from iris.ccl import Config
+    from iris.ccl.all_to_all import all_to_all
+    GLUON_AVAILABLE = True
+except ImportError:
+    GLUON_AVAILABLE = False
 
 
+@pytest.mark.skipif(not GLUON_AVAILABLE, reason="Gluon not available")
 @pytest.mark.parametrize(
     "dtype",
     [
@@ -28,14 +36,14 @@ from iris.ccl import Config
         (8192, 8192), # Large
     ],
 )
-def test_all_to_all(dtype, M, N):
-    """Test all-to-all functionality by comparing against PyTorch's implementation."""
+def test_all_to_all_gluon(dtype, M, N):
+    """Test all-to-all functionality using Gluon with traffic shaping by comparing against PyTorch's implementation."""
     # Ensure torch.distributed is initialized (should be done by test runner)
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
     
-    heap_size = 2**33  # 1GB
-    shmem = iris.iris(heap_size)
+    heap_size = 2**33  # 8GB
+    shmem = iris_gluon.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
     
@@ -62,7 +70,7 @@ def test_all_to_all(dtype, M, N):
     for target_rank in range(world_size):
         pytorch_output_concat[:, target_rank * N : (target_rank + 1) * N] = pytorch_output_list[target_rank]
     
-    # Now set up Iris all_to_all format
+    # Now set up Iris Gluon all_to_all format
     # Iris format: concatenated tensor (M, N * world_size)
     # input[:, i*N:(i+1)*N] contains data to send to rank i
     # Since we're sending the same M x N data to all ranks, we replicate it
@@ -72,10 +80,10 @@ def test_all_to_all(dtype, M, N):
     
     iris_output_concat = shmem.zeros((M, N * world_size), dtype=dtype)
     
-    # Run Iris all_to_all
+    # Run Iris Gluon all_to_all with traffic shaping enabled
     shmem.barrier()
-    config = Config()
-    shmem.ccl.all_to_all(iris_output_concat, iris_input_concat, config=config)
+    config = Config(use_gluon=True)  # Enable Gluon with traffic shaping
+    all_to_all(iris_output_concat, iris_input_concat, shmem, config=config)
     torch.cuda.synchronize()
     
     # Compare results
@@ -84,4 +92,5 @@ def test_all_to_all(dtype, M, N):
     
     assert torch.allclose(iris_output_concat, pytorch_output_concat, atol=atol), \
         f"Max difference: {max_diff}, expected < {atol}\n" \
-        f"Rank {rank}: Iris output doesn't match PyTorch's all_to_all"
+        f"Rank {rank}: Iris Gluon output doesn't match PyTorch's all_to_all"
+

@@ -19,13 +19,18 @@ class Config:
     origami config pattern from ROCm libraries.
     
     Args:
-        block_size_m: Block size for the M dimension tiling (default: 256)
-        block_size_n: Block size for the N dimension tiling (default: 64)
+        block_size_m: Block size for the M dimension tiling (default: 128)
+                      Optimized for Gluon all-to-all with minimal rows (4)
+        block_size_n: Block size for the N dimension tiling (default: 128)
+                      Optimized for Gluon all-to-all with full column vectorization (2048)
         swizzle_size: Number of tiles to swizzle/group together for 
                      better memory access patterns (default: 6)
         comm_sms: Number of SMs (Streaming Multiprocessors) to use for 
-                 communication kernel (default: 32)
+                 communication kernel (default: 64)
+                 Optimized for Gluon all-to-all achieving (108)
         num_xcds: Number of XCCs. If None, auto-detected from system (default: None)
+        use_gluon: If True, use Gluon-based implementation (default: False)
+                   Gluon provides better control over warp-level traffic shaping
     
     Example:
         >>> import iris
@@ -35,7 +40,8 @@ class Config:
         ...     block_size_m=128,
         ...     block_size_n=32,
         ...     swizzle_size=8,
-        ...     comm_sms=64
+        ...     comm_sms=64,
+        ...     use_gluon=True
         ... )
         >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
     """
@@ -45,6 +51,7 @@ class Config:
     comm_sms: int = 64
     num_xcds: int = None
     chunk_size: int = None
+    use_gluon: bool = False
     
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
