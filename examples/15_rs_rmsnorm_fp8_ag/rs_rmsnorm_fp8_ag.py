@@ -91,88 +91,212 @@ def aiter_rmsnorm(
             output_ptrs = tl.multiple_of(output_ptrs, (16,))
             tl.store(output_ptrs, rms_norm.to(output_ptr.type.element_ty), mask=mask)
 
-
-@triton.jit
-def gemm_all_scatter(
-    A,  # input: *[M, K_shard]
-    B,  # weight shard: *[K_shard, N]
-    C_local,  # local partial result: *[M, N]
-    C_global,  # distributed result buffer: *[M, N]
+@triton.jit()
+def persistent_gemm_all_scatter(
+    A,
+    B,
+    C,
+    c_global,
     M,
-    K_shard,
     N,
+    K,
     stride_am,
     stride_ak,
     stride_bk,
     stride_bn,
-    stride_clm,
-    stride_cln,
-    stride_cgm,
-    stride_cgn,
+    stride_cm,
+    stride_cn,
+    stride_cm_global,
+    stride_cn_global,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
-    heap_bases: tl.tensor,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    pid = tl.program_id(0)
 
-    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    rk = tl.arange(0, BLOCK_K)
+    if NUM_XCDS != 1:
+        pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
 
-    rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_M), BLOCK_M)
-    rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_N), BLOCK_N)
-    rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_K), BLOCK_K)
+    tl.assume(stride_am > 0)
+    tl.assume(stride_ak > 0)
+    tl.assume(stride_bn > 0)
+    tl.assume(stride_bk > 0)
+    tl.assume(stride_cm > 0)
+    tl.assume(stride_cn > 0)
 
-    mask_m = rm < M
-    mask_n = rn < N
-    mask_k = rk < K_shard
+    acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
-    # Initialize accumulator
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for tile_id in range(pid, total_tiles, NUM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-    # GEMM computation
-    for k in range(0, tl.cdiv(K_shard, BLOCK_K)):
-        # Load A block
-        a_ptr = A + rm[:, None] * stride_am + (k * BLOCK_K + rk[None, :]) * stride_ak
-        a_mask = mask_m[:, None] & mask_k[None, :]
-        a = tl.load(a_ptr, mask=a_mask, other=0.0)
+        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
 
-        # Load B block
-        b_ptr = B + (k * BLOCK_K + rk[:, None]) * stride_bk + rn[None, :] * stride_bn
-        b_mask = mask_k[:, None] & mask_n[None, :]
-        b = tl.load(b_ptr, mask=b_mask, other=0.0)
+        rk = tl.arange(0, BLOCK_SIZE_K)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
+        B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
 
-        # Accumulate
-        acc += tl.dot(a, b)
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
 
-    # Convert accumulator to output dtype
-    c = acc.to(C_local.type.element_ty)
+        loop_k = tl.cdiv(K, BLOCK_SIZE_K)
+        if not EVEN_K:
+            loop_k -= 1
 
-    # Store local partial result
-    c_local_ptr = C_local + rm[:, None] * stride_clm + rn[None, :] * stride_cln
-    tl.store(c_local_ptr, c, mask=mask_m[:, None] & mask_n[None, :])
+        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+        for k in range(0, loop_k):
+            a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
+            b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
+            acc += tl.dot(a, b)
+            A_BASE += BLOCK_SIZE_K * stride_ak
+            B_BASE += BLOCK_SIZE_K * stride_bk
 
-    # All-scatter: distribute partial result to all ranks
-    for dst_rank in range(world_size):
-        if dst_rank == cur_rank:
-            # Local copy
-            c_global_ptr = C_global + rm[:, None] * stride_cgm + rn[None, :] * stride_cgn
-            tl.store(c_global_ptr, c, mask=mask_m[:, None] & mask_n[None, :])
-        else:
-            # Remote scatter using IRIS
-            iris.store(
-                C_global + rm[:, None] * stride_cgm + rn[None, :] * stride_cgn,
-                c,
-                cur_rank,
-                dst_rank,
-                heap_bases,
-                mask=mask_m[:, None] & mask_n[None, :],
-            )
+        if not EVEN_K:
+            k = loop_k
+            rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+            A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
+            B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+            A_BASE = tl.multiple_of(A_BASE, (1, 16))
+            B_BASE = tl.multiple_of(B_BASE, (16, 1))
+            a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0)
+            b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
+            acc += tl.dot(a, b)
 
+        # Accumulator registers with C results
+        c = acc.to(C.type.element_ty)
+
+        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+
+        # Add compiler hints
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        # Define the C-mask (BLOCK_SIZE_M, 1) x (1, BLOCK_SIZE_N)
+        sub_mask = (rm[:, None] < M) & (rn[None, :] < N)
+
+        # Calculate the "global" offset of C based on the rank.
+        # Note how the N-dimension is being multiplied by current rank.
+        # This is because each rank is computing a portion of the N-dimension
+        # locally and then scattering it to all other ranks to complete
+        # the global N-dimension.
+        global_offset = rm[:, None] * stride_cm_global + (rn[None, :] + cur_rank * N) * stride_cn_global
+
+        # Store data to the global result using puts
+        for remote_rank in range(world_size):
+            if remote_rank == cur_rank:
+                # For the current rank, we can use store
+                tl.store(c_global + global_offset, c, mask=sub_mask)
+            else:
+                iris.store(
+                    c_global + global_offset,
+                    c,
+                    cur_rank,
+                    remote_rank,
+                    heap_bases,
+                    mask=sub_mask,
+                )
+
+gemm_kernel = persistent_gemm_all_scatter
+
+##@triton.jit
+##def gemm_all_scatter(
+##    A,  # input: *[M, K_shard]
+##    B,  # weight shard: *[K_shard, N]
+##    C_local,  # local partial result: *[M, N]
+##    C_global,  # distributed result buffer: *[M, N]
+##    M,
+##    K_shard,
+##    N,
+##    stride_am,
+##    stride_ak,
+##    stride_bk,
+##    stride_bn,
+##    stride_clm,
+##    stride_cln,
+##    stride_cgm,
+##    stride_cgn,
+##    cur_rank: tl.constexpr,
+##    world_size: tl.constexpr,
+##    heap_bases: tl.tensor,
+##    BLOCK_M: tl.constexpr,
+##    BLOCK_N: tl.constexpr,
+##    BLOCK_K: tl.constexpr,
+##):
+##    pid_m = tl.program_id(0)
+##    pid_n = tl.program_id(1)
+##
+##    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+##    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+##    rk = tl.arange(0, BLOCK_K)
+##
+##    rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_M), BLOCK_M)
+##    rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_N), BLOCK_N)
+##    rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_K), BLOCK_K)
+##
+##    mask_m = rm < M
+##    mask_n = rn < N
+##    mask_k = rk < K_shard
+##
+##    # Initialize accumulator
+##    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+##
+##    # GEMM computation
+##    for k in range(0, tl.cdiv(K_shard, BLOCK_K)):
+##        # Load A block
+##        a_ptr = A + rm[:, None] * stride_am + (k * BLOCK_K + rk[None, :]) * stride_ak
+##        a_mask = mask_m[:, None] & mask_k[None, :]
+##        a = tl.load(a_ptr, mask=a_mask, other=0.0)
+##
+##        # Load B block
+##        b_ptr = B + (k * BLOCK_K + rk[:, None]) * stride_bk + rn[None, :] * stride_bn
+##        b_mask = mask_k[:, None] & mask_n[None, :]
+##        b = tl.load(b_ptr, mask=b_mask, other=0.0)
+##
+##        # Accumulate
+##        acc += tl.dot(a, b)
+##
+##    # Convert accumulator to output dtype
+##    c = acc.to(C_local.type.element_ty)
+##
+##    # Store local partial result
+##    c_local_ptr = C_local + rm[:, None] * stride_clm + rn[None, :] * stride_cln
+##    tl.store(c_local_ptr, c, mask=mask_m[:, None] & mask_n[None, :])
+##
+##    # All-scatter: distribute partial result to all ranks
+##    for dst_rank in range(world_size):
+##        if dst_rank == cur_rank:
+##            # Local copy
+##            c_global_ptr = C_global + rm[:, None] * stride_cgm + rn[None, :] * stride_cgn
+##            tl.store(c_global_ptr, c, mask=mask_m[:, None] & mask_n[None, :])
+##        else:
+##            # Remote scatter using IRIS
+##            iris.store(
+##                C_global + rm[:, None] * stride_cgm + rn[None, :] * stride_cgn,
+##                c,
+##                cur_rank,
+##                dst_rank,
+##                heap_bases,
+##                mask=mask_m[:, None] & mask_n[None, :],
+##            )
+##
 
 @triton.jit
 def all_gather_push(
@@ -276,19 +400,60 @@ def main():
     # Distributed result buffer (each rank will have the complete [M, N] result)
     distributed_result = torch.empty(M, N, device=device, dtype=dtype)
 
-    BLOCK_M = 128
-    BLOCK_N = 128
-    BLOCK_K = 128
+    BLOCK_M = 256
+    BLOCK_N = 256
+    BLOCK_K = 64
     grid_gemm = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+    num_xcds = 8
+    num_sms = 256
 
-    gemm_all_scatter[grid_gemm](
+    # TODO: Use arch-specific values.
+    num_stages = 2
+    num_warps = 8
+    waves_per_eu = 0
+    mfma = 16
+    kpack = 1
+
+    total_blocks_M = triton.cdiv(M, BLK_M)
+    total_blocks_N = triton.cdiv(N, BLK_N)
+    iters_per_tile = triton.cdiv(K, BLK_K)
+    total_tiles = total_blocks_M * total_blocks_N
+    even_k = K % BLK_K == 0
+
+
+##    gemm_all_scatter[grid_gemm](
+##        x_input,  # [M, K_shard]
+##        weight_shard,  # [K_shard, N]
+##        partial_result,  # [M, N] - local partial
+##        distributed_result,  # [M, N] - distributed result
+##        M,
+##        K_shard,
+##        N,
+##        x_input.stride(0),
+##        x_input.stride(1),
+##        weight_shard.stride(0),
+##        weight_shard.stride(1),
+##        partial_result.stride(0),
+##        partial_result.stride(1),
+##        distributed_result.stride(0),
+##        distributed_result.stride(1),
+##        cur_rank,
+##        world_size,
+##        heap_bases,
+##        BLOCK_M=BLOCK_M,
+##        BLOCK_N=BLOCK_N,
+##        BLOCK_K=BLOCK_K,
+##        num_warps=8,
+##    )
+
+    kk = gemm_kernel[(num_sms,)](
         x_input,  # [M, K_shard]
         weight_shard,  # [K_shard, N]
         partial_result,  # [M, N] - local partial
         distributed_result,  # [M, N] - distributed result
         M,
-        K_shard,
         N,
+        K_shard,
         x_input.stride(0),
         x_input.stride(1),
         weight_shard.stride(0),
@@ -297,13 +462,21 @@ def main():
         partial_result.stride(1),
         distributed_result.stride(0),
         distributed_result.stride(1),
-        cur_rank,
-        world_size,
-        heap_bases,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-        BLOCK_K=BLOCK_K,
-        num_warps=4,
+        BLOCK_SIZE_M=BLOCK_M,
+        BLOCK_SIZE_N=BLOCK_N,
+        BLOCK_SIZE_K=BLOCK_K,
+        GROUP_SIZE_M=gsize_m,
+        NUM_SMS=num_sms,
+        NUM_XCDS=num_xcds,
+        EVEN_K=even_k,
+        num_stages=num_stages,
+        num_warps=num_warps,
+        waves_per_eu=waves_per_eu,
+        matrix_instr_nonkdim=mfma,
+        kpack=kpack,
+        heap_bases=heap_bases_ptr,
+        cur_rank=rank,
+        world_size=world_size,
     )
 
     # Phase 3: RMSNorm (operates on complete [M, N] tensor)
