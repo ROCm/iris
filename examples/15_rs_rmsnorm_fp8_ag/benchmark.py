@@ -70,7 +70,8 @@ def parse_args():
         help="Output JSON file for results",
     )
     parser.add_argument("--num_ranks", type=int, default=8, help="Number of ranks/GPUs")
-    parser.add_argument("--heap_size", type=int, default=1 << 30, help="IRIS heap size (default: 1GB)")
+    parser.add_argument("--heap_size", type=int, default=0, help="IRIS heap size in bytes (0=auto, default: 2GB)")
+    parser.add_argument("--heap_size_gb", type=float, default=None, help="IRIS heap size in GB (overrides --heap_size)")
     parser.add_argument("--BLOCK_M", type=int, default=16, help="Block size M")
     parser.add_argument("--BLOCK_N", type=int, default=32, help="Block size N")
     parser.add_argument("--GROUP_SIZE_M", type=int, default=8, help="Tile swizzle group size")
@@ -81,7 +82,6 @@ def parse_args():
     
     # RMSNorm specific parameters
     parser.add_argument("--rmsnorm_block_size", type=int, default=None, help="RMSNorm BLOCK_SIZE (auto-detect if None)")
-    parser.add_argument("--rmsnorm_use_blocked", type=lambda x: x.lower() == 'true', default=None, help="RMSNorm USE_BLOCKED (auto-detect if None)")
     parser.add_argument("--rmsnorm_num_warps", type=int, default=None, help="RMSNorm num_warps (default: 8)")
     parser.add_argument("--rmsnorm_num_prgms", type=int, default=None, help="RMSNorm NUM_PRGMS (default: M_shard)")
     parser.add_argument("--rmsnorm_waves_per_eu", type=int, default=None, help="RMSNorm waves_per_eu (default: 2)")
@@ -147,7 +147,7 @@ def run_reduce_scatter(input_tensor, M, M_shard, N, rank, world_size, heap_bases
     return reduced_shard
 
 
-def run_rmsnorm(input_tensor, eps, device, block_size=None, use_blocked=None, num_warps=None, num_prgms=None, waves_per_eu=None):
+def run_rmsnorm(input_tensor, eps, device, block_size=None, num_warps=None, num_prgms=None, waves_per_eu=None):
     """Run RMSNorm operation using AITer kernel."""
     M_shard, N = input_tensor.shape
     dtype = input_tensor.dtype
@@ -164,11 +164,8 @@ def run_rmsnorm(input_tensor, eps, device, block_size=None, use_blocked=None, nu
     else:
         BLOCK_SIZE = block_size
     
-    # Auto-detect USE_BLOCKED if not provided
-    if use_blocked is None:
-        USE_BLOCKED = N > BLOCK_SIZE
-    else:
-        USE_BLOCKED = use_blocked
+    # Always auto-detect USE_BLOCKED based on N and BLOCK_SIZE
+    USE_BLOCKED = N > BLOCK_SIZE
     
     # Set NUM_PRGMS (default to M_shard for full parallelism)
     NUM_PRGMS = num_prgms if num_prgms is not None else M_shard
@@ -273,26 +270,6 @@ def run_all_gather(shard, M, M_shard, N, rank, world_size, heap_bases, shmem, BL
 
 def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     """Worker function for distributed execution."""
-    # Use gloo backend for CPU-based coordination (RCCL will be used by IRIS for GPU comm)
-    backend = "gloo"
-    dist.init_process_group(
-        backend=backend,
-        init_method=init_url,
-        world_size=world_size,
-        rank=local_rank,
-    )
-
-    # Initialize IRIS
-    shmem = iris.iris(args["heap_size"])
-    rank = shmem.get_rank()
-    world_size_iris = shmem.get_num_ranks()
-    
-    assert world_size == world_size_iris, f"World size mismatch: {world_size} != {world_size_iris}"
-
-    # Set device
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
-
     # Parse arguments
     M = args["num_rows"]
     N = args["num_cols"]
@@ -307,6 +284,63 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         "bf16": torch.bfloat16,
     }
     dtype = dtype_map[args["datatype"]]
+    
+    # Calculate heap size if auto (0) or use provided value
+    if args.get("heap_size_gb") is not None:
+        # User specified GB
+        heap_size = int(args["heap_size_gb"] * (1024 ** 3))
+    elif args["heap_size"] == 0:
+        # Auto-calculate based on problem size
+        bytes_per_element = 2 if dtype in [torch.float16, torch.bfloat16] else 4
+        fp8_bytes_per_element = 1
+        
+        # Validation allocations:
+        mem_input = M * N * bytes_per_element  # input_tensor
+        mem_rs_output = M_shard * N * bytes_per_element  # reduced_shard
+        mem_rmsnorm = M_shard * N * bytes_per_element  # rmsnorm_output
+        mem_fp8 = M_shard * N * fp8_bytes_per_element if args['fp8_out'] else 0  # quantized_output (as uint8)
+        mem_ag_output = M * N * (fp8_bytes_per_element if args['fp8_out'] else bytes_per_element) if args['all_gather'] else 0
+        
+        # Benchmark allocations (if enabled):
+        if args.get('benchmark'):
+            mem_test_input = M * N * bytes_per_element  # test_input
+            mem_test_rs = 2 * M_shard * N * bytes_per_element  # test_reduced_shard (2x size)
+            mem_test_rmsnorm = M_shard * N * bytes_per_element  # rmsnorm_output_bench
+            mem_test_fp8 = M_shard * N * fp8_bytes_per_element if args['fp8_out'] else 0
+            mem_test_ag = M * N * (fp8_bytes_per_element if args['fp8_out'] else bytes_per_element) if args['all_gather'] else 0
+        else:
+            mem_test_input = mem_test_rs = mem_test_rmsnorm = mem_test_fp8 = mem_test_ag = 0
+        
+        total_mem = (mem_input + mem_rs_output + mem_rmsnorm + mem_fp8 + mem_ag_output + 
+                     mem_test_input + mem_test_rs + mem_test_rmsnorm + mem_test_fp8 + mem_test_ag)
+        
+        # Add 20% overhead for alignment (1KB per allocation) and safety margin
+        heap_size = int(total_mem * 1.2)
+        
+        # Ensure minimum 1GB
+        heap_size = max(heap_size, 1 << 30)
+    else:
+        heap_size = args["heap_size"]
+    
+    # Use gloo backend for CPU-based coordination (RCCL will be used by IRIS for GPU comm)
+    backend = "gloo"
+    dist.init_process_group(
+        backend=backend,
+        init_method=init_url,
+        world_size=world_size,
+        rank=local_rank,
+    )
+
+    # Initialize IRIS with calculated heap size
+    shmem = iris.iris(heap_size)
+    rank = shmem.get_rank()
+    world_size_iris = shmem.get_num_ranks()
+    
+    assert world_size == world_size_iris, f"World size mismatch: {world_size} != {world_size_iris}"
+
+    # Set device
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
 
     # Auto-detect NUM_SMS if not provided
     if args["NUM_SMS"] is None:
@@ -324,7 +358,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     
     # RMSNorm parameters - extract from args if they exist
     rmsnorm_block_size = args.get("rmsnorm_block_size")
-    rmsnorm_use_blocked = args.get("rmsnorm_use_blocked")
     rmsnorm_num_warps = args.get("rmsnorm_num_warps")
     rmsnorm_num_prgms = args.get("rmsnorm_num_prgms")
     rmsnorm_waves_per_eu = args.get("rmsnorm_waves_per_eu")
@@ -352,7 +385,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         print(f"    num_warps={num_warps}, num_stages={num_stages}, waves_per_eu={waves_per_eu}")
         print(f"  RMSNorm Parameters:")
         print(f"    BLOCK_SIZE: {rmsnorm_block_size or 'auto'}")
-        print(f"    USE_BLOCKED: {rmsnorm_use_blocked if rmsnorm_use_blocked is not None else 'auto'}")
+        print(f"    USE_BLOCKED: auto (N > BLOCK_SIZE)")
         print(f"    num_warps: {rmsnorm_num_warps or 8}")
         print(f"    NUM_PRGMS: {rmsnorm_num_prgms or M_shard}")
         print(f"    waves_per_eu: {rmsnorm_waves_per_eu if rmsnorm_waves_per_eu is not None else 2}")
@@ -371,14 +404,42 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         print(f"  FP8 output: {args['fp8_out']}")
         print(f"  All-gather: {args['all_gather']}")
         
-        # Calculate memory requirements
+        # Calculate memory requirements (should match auto-calculation logic)
         bytes_per_element = 2 if dtype in [torch.float16, torch.bfloat16] else 4
-        single_mn_mb = (M * N * bytes_per_element) / (1024 * 1024)
-        estimated_heap_mb = single_mn_mb * 4  # Conservative estimate: ~4 M×N buffers
-        print(f"  Heap size: {args['heap_size'] / (1024**2):.0f} MB")
+        fp8_bytes_per_element = 1
+        
+        # Validation memory:
+        mem_input = M * N * bytes_per_element
+        mem_rs_output = M_shard * N * bytes_per_element
+        mem_rmsnorm = M_shard * N * bytes_per_element
+        mem_fp8 = M_shard * N * fp8_bytes_per_element if args['fp8_out'] else 0
+        mem_ag_output = M * N * (fp8_bytes_per_element if args['fp8_out'] else bytes_per_element) if args['all_gather'] else 0
+        
+        # Benchmark memory (if enabled):
+        if args.get('benchmark'):
+            mem_test_input = M * N * bytes_per_element
+            mem_test_rs = 2 * M_shard * N * bytes_per_element
+            mem_test_rmsnorm = M_shard * N * bytes_per_element
+            mem_test_fp8 = M_shard * N * fp8_bytes_per_element if args['fp8_out'] else 0
+            mem_test_ag = M * N * (fp8_bytes_per_element if args['fp8_out'] else bytes_per_element) if args['all_gather'] else 0
+        else:
+            mem_test_input = mem_test_rs = mem_test_rmsnorm = mem_test_fp8 = mem_test_ag = 0
+        
+        total_mem = (mem_input + mem_rs_output + mem_rmsnorm + mem_fp8 + mem_ag_output + 
+                     mem_test_input + mem_test_rs + mem_test_rmsnorm + mem_test_fp8 + mem_test_ag)
+        
+        # Add 20% overhead for alignment
+        estimated_heap_bytes = int(total_mem * 1.2)
+        estimated_heap_mb = estimated_heap_bytes / (1024 * 1024)
+        
+        heap_size_mb = heap_size / (1024**2)
+        print(f"  Heap size: {heap_size_mb:.0f} MB {'(auto-calculated)' if args['heap_size'] == 0 else ''}")
         print(f"  Estimated memory needed: ~{estimated_heap_mb:.0f} MB")
-        if estimated_heap_mb > args['heap_size'] / (1024**2):
-            print(f"  ⚠️  WARNING: May run out of heap memory! Increase --heap_size")
+        
+        if estimated_heap_bytes > heap_size:
+            print(f"  ⚠️  WARNING: May run out of heap memory!")
+            print(f"     Recommended: --heap_size {estimated_heap_bytes}")
+            print(f"     Or use smaller M/N values")
 
     # Clear GPU cache
     torch.cuda.empty_cache()
@@ -418,7 +479,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     rmsnorm_output = run_rmsnorm(
         reduced_shard, args["eps"], device,
         block_size=rmsnorm_block_size,
-        use_blocked=rmsnorm_use_blocked,
         num_warps=rmsnorm_num_warps,
         num_prgms=rmsnorm_num_prgms,
         waves_per_eu=rmsnorm_waves_per_eu
@@ -651,7 +711,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         else:
             RMSNORM_BLOCK_SIZE = rmsnorm_block_size
         
-        RMSNORM_USE_BLOCKED = (N > RMSNORM_BLOCK_SIZE) if rmsnorm_use_blocked is None else rmsnorm_use_blocked
+        RMSNORM_USE_BLOCKED = N > RMSNORM_BLOCK_SIZE  # Always auto-detect
         RMSNORM_NUM_PRGMS = M_shard if rmsnorm_num_prgms is None else rmsnorm_num_prgms
         RMSNORM_NUM_WARPS = 8 if rmsnorm_num_warps is None else rmsnorm_num_warps
         RMSNORM_WAVES_PER_EU = 2 if rmsnorm_waves_per_eu is None else rmsnorm_waves_per_eu
