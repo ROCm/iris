@@ -37,10 +37,8 @@ def parse_args():
         description="Benchmark Reduce-Scatter → RMSNorm → FP8 Quantization",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--num_rows", type=int, default=2048, 
-                        help="Number of rows (M), must be divisible by num_ranks")
-    parser.add_argument("--num_cols", type=int, default=2048, 
-                        help="Number of columns (N)")
+    parser.add_argument("--num_rows", type=int, default=2048, help="Number of rows (M), must be divisible by num_ranks")
+    parser.add_argument("--num_cols", type=int, default=2048, help="Number of columns (N)")
     parser.add_argument(
         "--datatype",
         type=str,
@@ -48,20 +46,17 @@ def parse_args():
         choices=["fp16", "fp32", "bf16"],
         help="Data type for input/intermediate values",
     )
-    parser.add_argument("--fp8_out", action="store_true", 
-                        help="Enable FP8 quantization after RMSNorm")
-    parser.add_argument("--eps", type=float, default=1e-6, 
-                        help="RMSNorm epsilon for numerical stability")
-    parser.add_argument("--all_gather", action="store_true", 
-                        help="Perform all-gather to reconstruct full M×N tensor across all ranks")
-    parser.add_argument("--validate", action="store_true", 
-                        help="Validate results against PyTorch reference implementation")
-    parser.add_argument("--benchmark", action="store_true", 
-                        help="Run performance benchmarks with GPU-side timing")
-    parser.add_argument("--warmup", type=int, default=10, 
-                        help="Number of warmup iterations for benchmarking")
-    parser.add_argument("--iters", type=int, default=100, 
-                        help="Number of timed iterations for benchmarking")
+    parser.add_argument("--fp8_out", action="store_true", help="Enable FP8 quantization after RMSNorm")
+    parser.add_argument("--eps", type=float, default=1e-6, help="RMSNorm epsilon for numerical stability")
+    parser.add_argument(
+        "--all_gather", action="store_true", help="Perform all-gather to reconstruct full M×N tensor across all ranks"
+    )
+    parser.add_argument(
+        "--validate", action="store_true", help="Validate results against PyTorch reference implementation"
+    )
+    parser.add_argument("--benchmark", action="store_true", help="Run performance benchmarks with GPU-side timing")
+    parser.add_argument("--warmup", type=int, default=10, help="Number of warmup iterations for benchmarking")
+    parser.add_argument("--iters", type=int, default=100, help="Number of timed iterations for benchmarking")
     parser.add_argument(
         "--output_file",
         type=str,
@@ -86,15 +81,23 @@ def parse_args():
     parser.add_argument("--rmsnorm_waves_per_eu", type=int, default=None, help="RMSNorm waves_per_eu (default: 2)")
 
     # FP8 Quantization specific parameters
-    parser.add_argument("--fp8_block_m", type=int, default=None, help="FP8 BLOCK_M (default: same as reduce-scatter BLOCK_M)")
-    parser.add_argument("--fp8_block_n", type=int, default=None, help="FP8 BLOCK_N (default: same as reduce-scatter BLOCK_N)")
+    parser.add_argument(
+        "--fp8_block_m", type=int, default=None, help="FP8 BLOCK_M (default: same as reduce-scatter BLOCK_M)"
+    )
+    parser.add_argument(
+        "--fp8_block_n", type=int, default=None, help="FP8 BLOCK_N (default: same as reduce-scatter BLOCK_N)"
+    )
     parser.add_argument("--fp8_num_warps", type=int, default=None, help="FP8 num_warps (default: 4)")
     parser.add_argument("--fp8_num_stages", type=int, default=None, help="FP8 num_stages (default: 2)")
     parser.add_argument("--fp8_waves_per_eu", type=int, default=None, help="FP8 waves_per_eu (default: 0)")
 
     # All-Gather specific parameters
-    parser.add_argument("--ag_block_m", type=int, default=None, help="All-Gather BLOCK_M (default: same as reduce-scatter)")
-    parser.add_argument("--ag_block_n", type=int, default=None, help="All-Gather BLOCK_N (default: same as reduce-scatter)")
+    parser.add_argument(
+        "--ag_block_m", type=int, default=None, help="All-Gather BLOCK_M (default: same as reduce-scatter)"
+    )
+    parser.add_argument(
+        "--ag_block_n", type=int, default=None, help="All-Gather BLOCK_N (default: same as reduce-scatter)"
+    )
     parser.add_argument("--ag_num_warps", type=int, default=None, help="All-Gather num_warps (default: 4)")
     parser.add_argument("--ag_num_stages", type=int, default=None, help="All-Gather num_stages (default: 2)")
     parser.add_argument("--ag_waves_per_eu", type=int, default=None, help="All-Gather waves_per_eu (default: 0)")
@@ -102,7 +105,26 @@ def parse_args():
     return vars(parser.parse_args())
 
 
-def run_reduce_scatter(input_tensor, M, M_shard, N, rank, world_size, heap_bases, BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, num_warps, num_stages, waves_per_eu, dtype, device, shmem=None, output_buffer=None):
+def run_reduce_scatter(
+    input_tensor,
+    M,
+    M_shard,
+    N,
+    rank,
+    world_size,
+    heap_bases,
+    BLOCK_M,
+    BLOCK_N,
+    GROUP_SIZE_M,
+    NUM_SMS,
+    num_warps,
+    num_stages,
+    waves_per_eu,
+    dtype,
+    device,
+    shmem=None,
+    output_buffer=None,
+):
     """Run reduce-scatter operation with pull-based iris.load approach."""
     # Use provided output buffer or allocate new one
     if output_buffer is not None:
@@ -230,7 +252,22 @@ def run_quantize_fp8(input_tensor, BLOCK_M, BLOCK_N, device, shmem=None):
     return output, scale
 
 
-def run_all_gather(shard, M, M_shard, N, rank, world_size, heap_bases, shmem, BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, device, output_buffer=None):
+def run_all_gather(
+    shard,
+    M,
+    M_shard,
+    N,
+    rank,
+    world_size,
+    heap_bases,
+    shmem,
+    BLOCK_M,
+    BLOCK_N,
+    GROUP_SIZE_M,
+    NUM_SMS,
+    device,
+    output_buffer=None,
+):
     """Run all-gather operation."""
     dtype = shard.dtype
 
@@ -287,7 +324,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # Calculate heap size if auto (0) or use provided value
     if args.get("heap_size_gb") is not None:
         # User specified GB
-        heap_size = int(args["heap_size_gb"] * (1024 ** 3))
+        heap_size = int(args["heap_size_gb"] * (1024**3))
     elif args["heap_size"] == 0:
         # Auto-calculate based on problem size
         bytes_per_element = 2 if dtype in [torch.float16, torch.bfloat16] else 4
@@ -297,21 +334,35 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         mem_input = M * N * bytes_per_element  # input_tensor
         mem_rs_output = M_shard * N * bytes_per_element  # reduced_shard
         mem_rmsnorm = M_shard * N * bytes_per_element  # rmsnorm_output
-        mem_fp8 = M_shard * N * fp8_bytes_per_element if args['fp8_out'] else 0  # quantized_output (as uint8)
-        mem_ag_output = M * N * (fp8_bytes_per_element if args['fp8_out'] else bytes_per_element) if args['all_gather'] else 0
+        mem_fp8 = M_shard * N * fp8_bytes_per_element if args["fp8_out"] else 0  # quantized_output (as uint8)
+        mem_ag_output = (
+            M * N * (fp8_bytes_per_element if args["fp8_out"] else bytes_per_element) if args["all_gather"] else 0
+        )
 
         # Benchmark allocations (if enabled):
-        if args.get('benchmark'):
+        if args.get("benchmark"):
             mem_test_input = M * N * bytes_per_element  # test_input
             mem_test_rs = 2 * M_shard * N * bytes_per_element  # test_reduced_shard (2x size)
             mem_test_rmsnorm = M_shard * N * bytes_per_element  # rmsnorm_output_bench
-            mem_test_fp8 = M_shard * N * fp8_bytes_per_element if args['fp8_out'] else 0
-            mem_test_ag = M * N * (fp8_bytes_per_element if args['fp8_out'] else bytes_per_element) if args['all_gather'] else 0
+            mem_test_fp8 = M_shard * N * fp8_bytes_per_element if args["fp8_out"] else 0
+            mem_test_ag = (
+                M * N * (fp8_bytes_per_element if args["fp8_out"] else bytes_per_element) if args["all_gather"] else 0
+            )
         else:
             mem_test_input = mem_test_rs = mem_test_rmsnorm = mem_test_fp8 = mem_test_ag = 0
 
-        total_mem = (mem_input + mem_rs_output + mem_rmsnorm + mem_fp8 + mem_ag_output + 
-                     mem_test_input + mem_test_rs + mem_test_rmsnorm + mem_test_fp8 + mem_test_ag)
+        total_mem = (
+            mem_input
+            + mem_rs_output
+            + mem_rmsnorm
+            + mem_fp8
+            + mem_ag_output
+            + mem_test_input
+            + mem_test_rs
+            + mem_test_rmsnorm
+            + mem_test_fp8
+            + mem_test_ag
+        )
 
         # Add 20% overhead for alignment (1KB per allocation) and safety margin
         heap_size = int(total_mem * 1.2)
@@ -380,25 +431,25 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     ag_waves_per_eu = args.get("ag_waves_per_eu")
 
     if rank == 0:
-        print(f"Configuration:")
+        print("Configuration:")
         print(f"  M={M}, N={N}, M_shard={M_shard}")
         print(f"  dtype={dtype}, world_size={world_size}")
-        print(f"  Reduce-Scatter:")
+        print("  Reduce-Scatter:")
         print(f"    BLOCK_M={BLOCK_M}, BLOCK_N={BLOCK_N}, GROUP_SIZE_M={GROUP_SIZE_M}, NUM_SMS={NUM_SMS}")
         print(f"    num_warps={num_warps}, num_stages={num_stages}, waves_per_eu={waves_per_eu}")
-        print(f"  RMSNorm Parameters:")
+        print("  RMSNorm Parameters:")
         print(f"    BLOCK_SIZE: {rmsnorm_block_size or 'auto'}")
-        print(f"    USE_BLOCKED: auto (N > BLOCK_SIZE)")
+        print("    USE_BLOCKED: auto (N > BLOCK_SIZE)")
         print(f"    num_warps: {rmsnorm_num_warps or 8}")
         print(f"    NUM_PRGMS: {rmsnorm_num_prgms or M_shard}")
         print(f"    waves_per_eu: {rmsnorm_waves_per_eu if rmsnorm_waves_per_eu is not None else 2}")
-        print(f"  FP8 Quantization Parameters:")
+        print("  FP8 Quantization Parameters:")
         print(f"    BLOCK_M: {fp8_block_m or BLOCK_M}")
         print(f"    BLOCK_N: {fp8_block_n or BLOCK_N}")
         print(f"    num_warps: {fp8_num_warps or 4}")
         print(f"    num_stages: {fp8_num_stages or 2}")
         print(f"    waves_per_eu: {fp8_waves_per_eu if fp8_waves_per_eu is not None else 0}")
-        print(f"  All-Gather Parameters:")
+        print("  All-Gather Parameters:")
         print(f"    BLOCK_M: {ag_block_m or BLOCK_M}")
         print(f"    BLOCK_N: {ag_block_n or BLOCK_N}")
         print(f"    num_warps: {ag_num_warps or 4}")
@@ -415,21 +466,35 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         mem_input = M * N * bytes_per_element
         mem_rs_output = M_shard * N * bytes_per_element
         mem_rmsnorm = M_shard * N * bytes_per_element
-        mem_fp8 = M_shard * N * fp8_bytes_per_element if args['fp8_out'] else 0
-        mem_ag_output = M * N * (fp8_bytes_per_element if args['fp8_out'] else bytes_per_element) if args['all_gather'] else 0
+        mem_fp8 = M_shard * N * fp8_bytes_per_element if args["fp8_out"] else 0
+        mem_ag_output = (
+            M * N * (fp8_bytes_per_element if args["fp8_out"] else bytes_per_element) if args["all_gather"] else 0
+        )
 
         # Benchmark memory (if enabled):
-        if args.get('benchmark'):
+        if args.get("benchmark"):
             mem_test_input = M * N * bytes_per_element
             mem_test_rs = 2 * M_shard * N * bytes_per_element
             mem_test_rmsnorm = M_shard * N * bytes_per_element
-            mem_test_fp8 = M_shard * N * fp8_bytes_per_element if args['fp8_out'] else 0
-            mem_test_ag = M * N * (fp8_bytes_per_element if args['fp8_out'] else bytes_per_element) if args['all_gather'] else 0
+            mem_test_fp8 = M_shard * N * fp8_bytes_per_element if args["fp8_out"] else 0
+            mem_test_ag = (
+                M * N * (fp8_bytes_per_element if args["fp8_out"] else bytes_per_element) if args["all_gather"] else 0
+            )
         else:
             mem_test_input = mem_test_rs = mem_test_rmsnorm = mem_test_fp8 = mem_test_ag = 0
 
-        total_mem = (mem_input + mem_rs_output + mem_rmsnorm + mem_fp8 + mem_ag_output + 
-                     mem_test_input + mem_test_rs + mem_test_rmsnorm + mem_test_fp8 + mem_test_ag)
+        total_mem = (
+            mem_input
+            + mem_rs_output
+            + mem_rmsnorm
+            + mem_fp8
+            + mem_ag_output
+            + mem_test_input
+            + mem_test_rs
+            + mem_test_rmsnorm
+            + mem_test_fp8
+            + mem_test_ag
+        )
 
         # Add 20% overhead for alignment
         estimated_heap_bytes = int(total_mem * 1.2)
@@ -440,9 +505,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         print(f"  Estimated memory needed: ~{estimated_heap_mb:.0f} MB")
 
         if estimated_heap_bytes > heap_size:
-            print(f"WARNING: May run out of heap memory!")
+            print("WARNING: May run out of heap memory!")
             print(f"Recommended: --heap_size {estimated_heap_bytes}")
-            print(f"Or use smaller M/N values")
+            print("Or use smaller M/N values")
 
     # Clear GPU cache
     torch.cuda.empty_cache()
@@ -466,10 +531,23 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # ================================================================
     # Call kernel once per rank - it will use iris.load() to pull data from all source ranks
     reduced_shard = run_reduce_scatter(
-        input_tensor, M, M_shard, N, rank, world_size, heap_bases, 
-        BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, 
-        num_warps, num_stages, waves_per_eu,
-        dtype, device, shmem
+        input_tensor,
+        M,
+        M_shard,
+        N,
+        rank,
+        world_size,
+        heap_bases,
+        BLOCK_M,
+        BLOCK_N,
+        GROUP_SIZE_M,
+        NUM_SMS,
+        num_warps,
+        num_stages,
+        waves_per_eu,
+        dtype,
+        device,
+        shmem,
     )
 
     # Synchronize to ensure all ranks have completed their loads and reductions
@@ -480,11 +558,13 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # Step 2: RMSNorm
     # ================================================================
     rmsnorm_output = run_rmsnorm(
-        reduced_shard, args["eps"], device,
+        reduced_shard,
+        args["eps"],
+        device,
         block_size=rmsnorm_block_size,
         num_warps=rmsnorm_num_warps,
         num_prgms=rmsnorm_num_prgms,
-        waves_per_eu=rmsnorm_waves_per_eu
+        waves_per_eu=rmsnorm_waves_per_eu,
     )
 
     # ================================================================
@@ -518,8 +598,19 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # ================================================================
     if args["all_gather"]:
         result = run_all_gather(
-            final_output, M, M_shard, N, rank, world_size, heap_bases, shmem,
-            BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, device
+            final_output,
+            M,
+            M_shard,
+            N,
+            rank,
+            world_size,
+            heap_bases,
+            shmem,
+            BLOCK_M,
+            BLOCK_N,
+            GROUP_SIZE_M,
+            NUM_SMS,
+            device,
         )
         torch.cuda.synchronize()
         shmem.barrier()
@@ -550,7 +641,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             ref_reduced += tensor.to(torch.float32)
 
         # Convert back to FP16 and extract shard
-        ref_shard = ref_reduced[rank * M_shard:(rank + 1) * M_shard, :].to(dtype)
+        ref_shard = ref_reduced[rank * M_shard : (rank + 1) * M_shard, :].to(dtype)
 
         # Debug: Print sums to diagnose accumulation issues
         ref_sum = ref_shard.sum(dtype=torch.float32).item()
@@ -566,9 +657,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         # For FP16 with 8-rank accumulation, max diff ~0.1 is acceptable
         # The key metric is the sum - should be within 0.1% relative error
         if rel_error < 0.1 and rs_diff.max() < 0.1:
-            print(f"  ✅ PASS")
+            print("  ✅ PASS")
         else:
-            print(f"  ❌ FAIL")
+            print("  ❌ FAIL")
 
         # Compare RMSNorm
         rmsnorm_layer = nn.RMSNorm(N, eps=args["eps"], device=device, dtype=dtype)
@@ -582,7 +673,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         ref_norm_sum = ref_normed.sum(dtype=torch.float32).item()
         actual_norm_sum = rmsnorm_output.sum(dtype=torch.float32).item()
         rms_sum_rel_err = abs(ref_norm_sum - actual_norm_sum) / abs(ref_norm_sum) * 100
-        print(f"  RMSNorm sum - Reference: {ref_norm_sum:.4f}, Actual: {actual_norm_sum:.4f}, Rel Error: {rms_sum_rel_err:.4f}%")
+        print(
+            f"  RMSNorm sum - Reference: {ref_norm_sum:.4f}, Actual: {actual_norm_sum:.4f}, Rel Error: {rms_sum_rel_err:.4f}%"
+        )
         print(f"  {'✅ PASS' if rms_diff.max() < 10.0 else '❌ FAIL'} (initial exec, may differ from benchmark)")
 
         # Compare FP8 Quantization
@@ -597,7 +690,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             in_range = (quant_float.min() >= -448.0) and (quant_float.max() <= 448.0)
             not_all_zero = quant_float.abs().max() > 0.01
 
-            print(f"  {'✅ PASS' if (in_range and not_all_zero) else '❌ FAIL'} (values in valid FP8 range and non-zero)")
+            print(
+                f"  {'✅ PASS' if (in_range and not_all_zero) else '❌ FAIL'} (values in valid FP8 range and non-zero)"
+            )
 
         # Compare All-Gather
         if args["all_gather"]:
@@ -608,13 +703,15 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             result_sum = result_float.sum().item()
             result_nonzero = (result_float.abs() > 0.01).sum().item()
 
-            print(f"  All-Gather full result:")
+            print("  All-Gather full result:")
             print(f"    Value range: [{result_min:.4f}, {result_max:.4f}]")
             print(f"    Sum: {result_sum:.4f}")
-            print(f"    Non-zero elements: {result_nonzero}/{result_float.numel()} ({result_nonzero/result_float.numel()*100:.1f}%)")
+            print(
+                f"    Non-zero elements: {result_nonzero}/{result_float.numel()} ({result_nonzero / result_float.numel() * 100:.1f}%)"
+            )
 
             # Verify that this rank's shard appears correctly in the gathered result
-            ag_shard_result = result[rank * M_shard:(rank + 1) * M_shard, :]
+            ag_shard_result = result[rank * M_shard : (rank + 1) * M_shard, :]
 
             # Convert to float32 for comparison (FP8 doesn't support some ops)
             ag_result_float = ag_shard_result.to(torch.float32)
@@ -624,12 +721,14 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             ag_sum_diff = abs(ag_result_float.sum() - final_out_float.sum())
             ag_rel_err = ag_sum_diff / abs(final_out_float.sum()) * 100 if final_out_float.sum() != 0 else 0.0
 
-            print(f"  All-Gather (rank {rank} shard) max diff: {ag_diff_float.max().item():.8f}, rel error: {ag_rel_err:.4f}%")
+            print(
+                f"  All-Gather (rank {rank} shard) max diff: {ag_diff_float.max().item():.8f}, rel error: {ag_rel_err:.4f}%"
+            )
 
             # Check if result is valid (not all zeros)
             is_valid = (abs(result_sum) > 1.0) and (result_nonzero > result_float.numel() * 0.5)
             if not is_valid:
-                print(f"WARNING: All-Gather result may be invalid (mostly zeros or very small values)")
+                print("WARNING: All-Gather result may be invalid (mostly zeros or very small values)")
 
             print(f"  {'✅ PASS' if (ag_diff_float.max() < 0.01 and is_valid) else '❌ FAIL'}")
 
@@ -649,16 +748,31 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         test_input.copy_(test_input_local)
 
         # Pre-allocate output buffer in IRIS memory (M_shard × N, will be reused)
-        test_reduced_shard = shmem.zeros((2*M_shard, N), dtype=dtype)
+        test_reduced_shard = shmem.zeros((2 * M_shard, N), dtype=dtype)
 
         # Warmup
         for _ in range(args["warmup"]):
             test_reduced_shard.zero_()
-            _ = run_reduce_scatter(test_input, M, M_shard, N, rank, world_size, heap_bases, 
-                                   BLOCK_M, BLOCK_N, GROUP_SIZE_M, NUM_SMS, 
-                                   num_warps, num_stages, waves_per_eu,
-                                   dtype, device, 
-                                   shmem=shmem, output_buffer=test_reduced_shard)
+            _ = run_reduce_scatter(
+                test_input,
+                M,
+                M_shard,
+                N,
+                rank,
+                world_size,
+                heap_bases,
+                BLOCK_M,
+                BLOCK_N,
+                GROUP_SIZE_M,
+                NUM_SMS,
+                num_warps,
+                num_stages,
+                waves_per_eu,
+                dtype,
+                device,
+                shmem=shmem,
+                output_buffer=test_reduced_shard,
+            )
             torch.cuda.synchronize()
             shmem.barrier()
 
@@ -857,12 +971,22 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             # Warmup
             for _ in range(args["warmup"]):
                 all_gather_m_kernel[grid_ag](
-                    final_output, ag_output_reuse, M, M_shard, N,
-                    final_output.stride(0), final_output.stride(1),
-                    ag_output_reuse.stride(0), ag_output_reuse.stride(1),
-                    rank, world_size, heap_bases,
-                    BLOCK_M=AG_BLOCK_M, BLOCK_N=AG_BLOCK_N,
-                    GROUP_SIZE_M=GROUP_SIZE_M, NUM_SMS=NUM_SMS,
+                    final_output,
+                    ag_output_reuse,
+                    M,
+                    M_shard,
+                    N,
+                    final_output.stride(0),
+                    final_output.stride(1),
+                    ag_output_reuse.stride(0),
+                    ag_output_reuse.stride(1),
+                    rank,
+                    world_size,
+                    heap_bases,
+                    BLOCK_M=AG_BLOCK_M,
+                    BLOCK_N=AG_BLOCK_N,
+                    GROUP_SIZE_M=GROUP_SIZE_M,
+                    NUM_SMS=NUM_SMS,
                     num_warps=AG_NUM_WARPS,
                     num_stages=AG_NUM_STAGES,
                     waves_per_eu=AG_WAVES_PER_EU,
@@ -876,12 +1000,22 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             start_event.record()
             for _ in range(args["iters"]):
                 all_gather_m_kernel[grid_ag](
-                    final_output, ag_output_reuse, M, M_shard, N,
-                    final_output.stride(0), final_output.stride(1),
-                    ag_output_reuse.stride(0), ag_output_reuse.stride(1),
-                    rank, world_size, heap_bases,
-                    BLOCK_M=AG_BLOCK_M, BLOCK_N=AG_BLOCK_N,
-                    GROUP_SIZE_M=GROUP_SIZE_M, NUM_SMS=NUM_SMS,
+                    final_output,
+                    ag_output_reuse,
+                    M,
+                    M_shard,
+                    N,
+                    final_output.stride(0),
+                    final_output.stride(1),
+                    ag_output_reuse.stride(0),
+                    ag_output_reuse.stride(1),
+                    rank,
+                    world_size,
+                    heap_bases,
+                    BLOCK_M=AG_BLOCK_M,
+                    BLOCK_N=AG_BLOCK_N,
+                    GROUP_SIZE_M=GROUP_SIZE_M,
+                    NUM_SMS=NUM_SMS,
                     num_warps=AG_NUM_WARPS,
                     num_stages=AG_NUM_STAGES,
                     waves_per_eu=AG_WAVES_PER_EU,
@@ -895,7 +1029,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         # Calculate metrics for all components
         # ----------------------------------------------------------------
         num_elements = M_shard * N
-        bytes_per_element = dtype.itemsize if hasattr(dtype, 'itemsize') else 2
+        bytes_per_element = dtype.itemsize if hasattr(dtype, "itemsize") else 2
 
         # Reduce-Scatter with iris.load (pull-based):
         # Each rank loads M_shard×N from (world_size - 1) remote ranks
@@ -940,39 +1074,39 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         total_bandwidth_gb_s = total_bytes / (total_time / 1000) / 1e9
 
         if rank == 0:
-            print(f"\n{'='*60}")
-            print(f"Benchmark Results (Rank 0)")
-            print(f"{'='*60}")
-            print(f"Configuration:")
+            print(f"\n{'=' * 60}")
+            print("Benchmark Results (Rank 0)")
+            print(f"{'=' * 60}")
+            print("Configuration:")
             print(f"  M={M}, N={N}, M_shard={M_shard}")
             print(f"  dtype={args['datatype']}, world_size={world_size}")
             print(f"  Elements per rank: {num_elements:,}")
-            print(f"\nComponent Performance:")
-            print(f"  Reduce-Scatter:")
+            print("\nComponent Performance:")
+            print("  Reduce-Scatter:")
             print(f"    Time:             {rs_time_ms:.3f} ms")
             print(f"    Interconnect BW:  {rs_bandwidth_gb_s:.2f} GB/s")
             print(f"    Data transferred: {rs_interconnect_bytes / 1e9:.3f} GB")
-            print(f"  RMSNorm:")
+            print("  RMSNorm:")
             print(f"    Time:      {rmsnorm_time_ms:.3f} ms")
             print(f"    Bandwidth: {rmsnorm_bandwidth_gb_s:.2f} GB/s (memory)")
             print(f"    TFLOPS:    {rmsnorm_tflops:.2f}")
 
             if args["fp8_out"]:
-                print(f"  FP8 Quantization:")
+                print("  FP8 Quantization:")
                 print(f"    Time:      {quant_time_ms:.3f} ms")
                 print(f"    Bandwidth: {quant_bandwidth_gb_s:.2f} GB/s (memory)")
 
             if args["all_gather"]:
-                print(f"  All-Gather:")
+                print("  All-Gather:")
                 print(f"    Time:             {ag_time_ms:.3f} ms")
                 print(f"    Interconnect BW:  {ag_bandwidth_gb_s:.2f} GB/s")
                 print(f"    Data transferred: {ag_interconnect_bytes / 1e9:.3f} GB")
 
-            print(f"\nTotal Pipeline:")
+            print("\nTotal Pipeline:")
             print(f"  Total time:        {total_time:.3f} ms")
             print(f"  Total bandwidth:   {total_bandwidth_gb_s:.2f} GB/s")
             print(f"  Total bytes:       {total_bytes / 1e9:.3f} GB")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
 
             # Save results
             results = {
@@ -983,29 +1117,23 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                 "dtype": args["datatype"],
                 "fp8_out": args["fp8_out"],
                 "all_gather": args["all_gather"],
-
                 # Reduce-Scatter metrics
                 "reduce_scatter_time_ms": rs_time_ms,
                 "reduce_scatter_bandwidth_gb_s": rs_bandwidth_gb_s,
-
                 # RMSNorm metrics
                 "rmsnorm_time_ms": rmsnorm_time_ms,
                 "rmsnorm_bandwidth_gb_s": rmsnorm_bandwidth_gb_s,
                 "rmsnorm_tflops": rmsnorm_tflops,
-
                 # FP8 Quantization metrics
                 "quant_time_ms": quant_time_ms if args["fp8_out"] else None,
                 "quant_bandwidth_gb_s": quant_bandwidth_gb_s if args["fp8_out"] else None,
-
                 # All-Gather metrics
                 "all_gather_time_ms": ag_time_ms if args["all_gather"] else None,
                 "all_gather_bandwidth_gb_s": ag_bandwidth_gb_s if args["all_gather"] else None,
-
                 # Total pipeline metrics
                 "total_time_ms": total_time,
                 "total_bandwidth_gb_s": total_bandwidth_gb_s,
                 "total_bytes_gb": total_bytes / 1e9,
-
                 # Configuration
                 "NUM_SMS": NUM_SMS,
                 "BLOCK_M": BLOCK_M,
