@@ -31,6 +31,10 @@ class Config:
         num_xcds: Number of XCCs. If None, auto-detected from system (default: None)
         use_gluon: If True, use Gluon-based implementation (default: False)
                    Gluon provides better control over warp-level traffic shaping
+        all_reduce_variant: Variant for all-reduce operation (default: "atomic")
+                           Options: "atomic", "ring", "two_shot"
+        all_reduce_distribution: Distribution for two-shot all-reduce (default: 0)
+                               0 for striding, 1 for block distribution
     
     Example:
         >>> import iris
@@ -44,6 +48,10 @@ class Config:
         ...     use_gluon=True
         ... )
         >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
+        
+        >>> # All-reduce with ring variant
+        >>> config = Config(all_reduce_variant="ring")
+        >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
     """
     block_size_m: int = 128
     block_size_n: int = 128
@@ -52,6 +60,8 @@ class Config:
     num_xcds: int = None
     chunk_size: int = None
     use_gluon: bool = False
+    all_reduce_variant: str = "atomic"
+    all_reduce_distribution: int = 0
     
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
@@ -72,4 +82,8 @@ class Config:
             raise ValueError(f"comm_sms must be positive, got {self.comm_sms}")
         if self.num_xcds <= 0:
             raise ValueError(f"num_xcds must be positive, got {self.num_xcds}")
+        if self.all_reduce_variant not in ["atomic", "ring", "two_shot"]:
+            raise ValueError(f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', got {self.all_reduce_variant}")
+        if self.all_reduce_distribution not in [0, 1]:
+            raise ValueError(f"all_reduce_distribution must be 0 (striding) or 1 (block), got {self.all_reduce_distribution}")
 

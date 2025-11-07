@@ -1546,6 +1546,41 @@ class Iris:
             """
             from iris.ccl.all_to_all import all_to_all as _all_to_all
             _all_to_all(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+        
+        def all_reduce(self, output_tensor, input_tensor, config=None, async_op=False):
+            """
+            All-reduce collective operation.
+
+            Each rank has a local input tensor, and all ranks compute the sum of all
+            input tensors. The result is written to output_tensor on all ranks.
+
+            Args:
+                output_tensor: Output tensor of shape (M, N) - will contain sum of all inputs
+                input_tensor: Input tensor of shape (M, N) - local rank's partial data
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
+                        Set config.all_reduce_variant to choose variant: "atomic", "ring", or "two_shot"
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
+
+            Example:
+                >>> shmem = iris.iris()
+                >>> shmem.ccl.all_reduce(output_tensor, input_tensor)
+                
+                >>> # Custom configuration with ring variant
+                >>> from iris.ccl import Config
+                >>> config = Config(all_reduce_variant="ring")
+                >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
+                
+                >>> # Two-shot variant with block distribution
+                >>> config = Config(all_reduce_variant="two_shot", all_reduce_distribution=1)
+                >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
+                
+                >>> # Async operation (no barrier)
+                >>> shmem.ccl.all_reduce(output_tensor, input_tensor, async_op=True)
+            """
+            from iris.ccl.all_reduce import all_reduce as _all_reduce
+            _all_reduce(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
 
 
 @triton.jit
