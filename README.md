@@ -20,6 +20,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 
 ## Latest with Iris 🔥
 
+- [04/11/2025] [Eliminating Multi-GPU Performance Taxes: A Systems Approach to Efficient Distributed LLMs](https://arxiv.org/abs/2511.02168)
 - [02/10/2025] [Iris + Gluon Released](https://rocm.github.io/iris/reference/gluon/overview.html)
 - [18/09/2025] [FlashDecode with Iris](https://github.com/ROCm/iris/tree/main/examples/13_flash_decode)
 - [16/09/2025] Iris was presented in [Chinese](https://youtu.be/wW14w1QNrY8) for participants of the AMD Distributed Inference Kernel Contest
@@ -264,6 +265,16 @@ If you use Iris or reference it in your research, please cite our work:
   month         = oct,
   doi           = {10.5281/zenodo.17382307},
   url           = {https://github.com/ROCm/iris}
+}
+
+@misc{Trifan:2025:EMT,
+  author        = {Octavian Alexandru Trifan and Karthik Sangaiah and Muhammad Awad and Muhammad Osama and Sumanth Gudaparthi and Alexandru Nicolau and Alexander Veidenbaum and Ganesh Dasika},
+  title         = {Eliminating Multi-{GPU} Performance Taxes: A Systems Approach to Efficient Distributed {LLMs}},
+  year          = {2025},
+  archivePrefix = {arXiv},
+  eprint        = {2511.02168},
+  primaryClass  = {cs.DC},
+  doi           = {10.48550/arXiv.2511.02168}
 }
 ```
 
