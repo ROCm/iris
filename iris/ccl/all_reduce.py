@@ -6,6 +6,9 @@ All-reduce collective communication primitive for Iris.
 Supports three variants: atomic-based, ring-based, and two-shot-based.
 """
 
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
 import triton
 import triton.language as tl
 import torch
@@ -16,6 +19,97 @@ from .config import Config
 VARIANT_ATOMIC = "atomic"
 VARIANT_RING = "ring"
 VARIANT_TWO_SHOT = "two_shot"
+
+
+@dataclass
+class AllReduceWorkspace:
+    """
+    Holds reusable workspace allocations for all-reduce variants.
+
+    Attributes:
+        variant: Selected all-reduce variant.
+        shape: Tuple of (M, N) for tensor shape.
+        dtype: Torch dtype of buffers.
+        ring_buffer: Temporary buffer used by ring-based algorithm.
+        flags: Synchronization flags for ring-based algorithm.
+        prepared: Indicates whether preamble has been executed since last use.
+    """
+
+    variant: str = ""
+    shape: Tuple[int, int] = ()
+    dtype: Optional[torch.dtype] = None
+    ring_buffer: Optional[torch.Tensor] = None
+    flags: Optional[torch.Tensor] = None
+    prepared: bool = False
+
+
+def all_reduce_preamble(
+    output_tensor,
+    input_tensor,
+    shmem,
+    config: Optional[Config] = None,
+    workspace: Optional[AllReduceWorkspace] = None,
+):
+    """
+    Allocate and reset temporary buffers for the chosen variant.
+
+    Returns:
+        AllReduceWorkspace instance ready for the next call to all_reduce.
+    """
+    if config is None:
+        config = Config()
+
+    variant = config.all_reduce_variant.lower()
+    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT]:
+        raise ValueError(
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}"
+        )
+
+    M, N = input_tensor.shape[:2]
+    dtype = input_tensor.dtype
+
+    if workspace is None:
+        workspace = AllReduceWorkspace()
+
+    workspace.variant = variant
+    workspace.shape = (M, N)
+    workspace.dtype = dtype
+    workspace.prepared = False
+
+    if variant == VARIANT_ATOMIC:
+        output_tensor.zero_()
+        shmem.barrier()
+
+    elif variant == VARIANT_RING:
+        num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
+        num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
+        total_tiles = num_pid_m * num_pid_n
+
+        if (
+            workspace.ring_buffer is None
+            or workspace.ring_buffer.shape != (M, N)
+            or workspace.ring_buffer.dtype != dtype
+        ):
+            workspace.ring_buffer = shmem.zeros((M, N), dtype=dtype)
+        else:
+            workspace.ring_buffer.zero_()
+
+        if (
+            workspace.flags is None
+            or workspace.flags.numel() != total_tiles
+        ):
+            workspace.flags = shmem.zeros((total_tiles,), dtype=torch.int32)
+        else:
+            workspace.flags.zero_()
+
+        output_tensor.zero_()
+        shmem.barrier()
+
+    elif variant == VARIANT_TWO_SHOT:
+        pass
+
+    workspace.prepared = True
+    return workspace
 
 
 @triton.jit()
@@ -74,9 +168,9 @@ def persistent_all_reduce_atomic(
     """
     pid = tl.program_id(0)
 
-    # Use same transform as example 08 for consistency
+    # Use chiplet transform to distribute program IDs across XCDs
     if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (COMM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+        pid = chiplet_transform_chunked(pid, NUM_XCDS, COMM_SMS, CHUNK_SIZE)
     
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -116,9 +210,7 @@ def persistent_all_reduce_atomic(
         data = tl.load(input_ptr_local, mask=mask)
 
         # Atomically add to output buffer on all ranks
-        # Following example 08 pattern: each rank adds its contribution to all ranks' outputs
         # Each rank's output tensor is in its own heap, accessible via IPC
-        # We write to each rank's output separately
         for target_rank in range(world_size):
             if target_rank == cur_rank:
                 # For the current rank, use local atomic add
@@ -181,9 +273,9 @@ def persistent_all_reduce_ring(
     """
     pid = tl.program_id(0)
 
-    # Use same transform as example 08/16 for consistency
+    # Use chiplet transform to distribute program IDs across XCDs
     if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (COMM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+        pid = chiplet_transform_chunked(pid, NUM_XCDS, COMM_SMS, CHUNK_SIZE)
     
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -267,89 +359,9 @@ def persistent_all_reduce_ring(
 
 
 @triton.jit()
-def persistent_all_reduce_two_shot_producer(
+def persistent_all_reduce_two_shot(
     input_ptr,
-    local_buffer,
-    locks,
-    tile_ready,
-    M,
-    N,
-    stride_in_m,
-    stride_in_n,
-    heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
-    world_size: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    COMM_SMS: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
-    CHUNK_SIZE: tl.constexpr,
-):
-    """
-    Producer kernel for two-shot all-reduce: stores local partials to local_buffer.
-    """
-    pid = tl.program_id(0)
-
-    # Use same transform as example 17 for consistency
-    if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (COMM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
-    
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
-
-    # Phase 1: Producer - store local partials
-    for tile_id in range(pid, total_tiles, COMM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
-
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
-
-        # Compute row and column indices
-        # Calculate base indices without modulo to avoid double-counting when blocks are larger than dimensions
-        rm_base = pid_m * BLOCK_SIZE_M
-        rn_base = pid_n * BLOCK_SIZE_N
-        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
-        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        # Create mask to prevent out-of-bounds access
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
-        
-        # Use the original rm/rn for offsets (mask will prevent out-of-bounds access)
-        offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-        input_ptr_local = input_ptr + offset
-        input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        
-        # Load and store local partial
-        data = tl.load(input_ptr_local, mask=mask)
-        local_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-        tl.store(local_buffer + local_offset, data, mask=mask, cache_modifier=".wt")
-
-        # Ensure local write completes before signaling
-        tl.debug_barrier()
-
-        # Signal that this tile is ready
-        tl.store(locks + tile_id, 1, cache_modifier=".wt")
-
-        # Signal to all remote ranks that this tile is ready
-        for remote_rank in range(world_size):
-            if remote_rank != cur_rank:
-                iris.atomic_add(tile_ready + tile_id, 1, cur_rank, remote_rank, heap_bases, sem="release", scope="sys")
-
-
-@triton.jit()
-def persistent_all_reduce_two_shot_consumer(
     output_ptr,
-    local_buffer,
-    locks,
-    tile_ready,
     M,
     N,
     stride_in_m,
@@ -365,69 +377,37 @@ def persistent_all_reduce_two_shot_consumer(
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
-    DISTRIBUTION: tl.constexpr,  # 0 for striding, 1 for block
+    DISTRIBUTION: tl.constexpr,
 ):
-    """
-    Consumer kernel for two-shot all-reduce: reduces assigned tiles and scatters results.
-    """
+    """Reduce assigned tiles for a rank and broadcast the result to all peers."""
     pid = tl.program_id(0)
 
-    # Use same transform as example 17 for consistency
     if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (COMM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
-    
+        pid = chiplet_transform_chunked(pid, NUM_XCDS, COMM_SMS, CHUNK_SIZE)
+
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
 
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
 
-    # Phase 2: Consumer - reduce assigned tiles and scatter
-    # Determine which tiles this rank is responsible for reducing
+    tiles_per_rank = tl.cdiv(total_tiles, world_size)
     if DISTRIBUTION == 0:
-        # Striding: rank reduces tiles cur_rank, cur_rank + world_size, ...
-        tiles_per_rank = tl.cdiv(total_tiles, world_size)
         start_tile = cur_rank
         stride = world_size
+        remaining = total_tiles - start_tile
+        remaining = tl.maximum(remaining, 0)
+        max_tile_offset = tl.cdiv(remaining, stride)
     else:
-        # Block: rank reduces continuous block of tiles
-        tiles_per_rank = tl.cdiv(total_tiles, world_size)
         start_tile = cur_rank * tiles_per_rank
         stride = 1
-
-    # Calculate max tile_offset to avoid boundary issues
-    max_tile_offset = tiles_per_rank
-    if DISTRIBUTION == 0:  # striding
-        max_tile_offset = tl.minimum(tiles_per_rank, tl.cdiv(total_tiles - cur_rank, world_size))
-    else:  # block
-        max_tile_offset = tl.minimum(tiles_per_rank, total_tiles - cur_rank * tiles_per_rank)
+        remaining = total_tiles - start_tile
+        remaining = tl.maximum(remaining, 0)
+        max_tile_offset = tl.minimum(tiles_per_rank, remaining)
 
     for tile_offset in range(pid, max_tile_offset, COMM_SMS):
         tile_id = start_tile + tile_offset * stride
 
-        # Wait for all ranks to produce this tile
-        # Local tile
-        while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
-            pass
-
-        # Ensure local producer's writes are visible
-        tl.debug_barrier()
-
-        # Wait for remote ranks - each remote rank increments tile_ready when done
-        # We expect (world_size - 1) increments from all other ranks
-        while iris.atomic_cas(
-            tile_ready + tile_id,
-            0,  # Never matches when ready, so acts as atomic read
-            0,
-            cur_rank,
-            cur_rank,
-            heap_bases,
-            sem="acquire",
-            scope="sys",
-        ) < (world_size - 1):
-            pass
-
-        # Map tile_id to (pid_m, pid_n)
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
         first_pid_m = group_id * GROUP_SIZE_M
@@ -435,38 +415,48 @@ def persistent_all_reduce_two_shot_consumer(
         pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
         pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        # Compute offsets
-        # Calculate base indices without modulo to avoid double-counting when blocks are larger than dimensions
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+
         rm_base = pid_m * BLOCK_SIZE_M
         rn_base = pid_n * BLOCK_SIZE_N
         rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        # Create mask to prevent out-of-bounds access
         mask = (rm[:, None] < M) & (rn[None, :] < N)
-        # Use the original rm/rn for offsets (mask will prevent out-of-bounds access)
-        local_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
 
-        # Accumulate from all ranks
+        input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
         for remote_rank in range(world_size):
-            partial = iris.load(local_buffer + local_offset, cur_rank, remote_rank, heap_bases, mask=mask)
+            partial = iris.load(
+                input_ptr + input_offset,
+                cur_rank,
+                remote_rank,
+                heap_bases,
+                mask=mask,
+            )
             acc += partial.to(acc_dtype)
 
-        # Convert to output type
-        c_out = acc.to(output_ptr.type.element_ty)
+        reduced = acc.to(output_ptr.type.element_ty)
 
-        # Scatter to all ranks
-        output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
         for remote_rank in range(world_size):
             if remote_rank == cur_rank:
-                tl.store(output_ptr + output_offset, c_out, mask=mask)
+                tl.store(output_ptr + output_offset, reduced, mask=mask, cache_modifier=".wt")
             else:
-                iris.store(output_ptr + output_offset, c_out, cur_rank, remote_rank, heap_bases, mask=mask)
+                iris.store(
+                    output_ptr + output_offset,
+                    reduced,
+                    cur_rank,
+                    remote_rank,
+                    heap_bases,
+                    mask=mask,
+                )
 
 
-def all_reduce(output_tensor, input_tensor, shmem, config=None, async_op=False):
+def all_reduce(output_tensor, input_tensor, shmem, config=None, async_op=False, workspace: Optional[AllReduceWorkspace] = None):
     """
     Internal all-reduce collective operation implementation.
     
@@ -486,32 +476,42 @@ def all_reduce(output_tensor, input_tensor, shmem, config=None, async_op=False):
                 Set config.all_reduce_variant to choose variant: "atomic", "ring", or "two_shot"
         async_op: If False, performs a barrier at the end. If True, returns immediately.
                   Default: False.
+        workspace: Optional AllReduceWorkspace instance prepared via all_reduce_preamble.
     """
-    # Use provided config or create default one
     if config is None:
         config = Config()
-    
+
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
-    
     M, N = input_tensor.shape[:2]
-    
+
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
-    
-    # Determine variant
+
     variant = config.all_reduce_variant.lower()
     if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT]:
         raise ValueError(f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}")
-    
+
+    needs_prepare = (
+        workspace is None
+        or not getattr(workspace, "prepared", False)
+        or workspace.variant != variant
+        or workspace.shape != (M, N)
+        or workspace.dtype != input_tensor.dtype
+    )
+
+    if needs_prepare:
+        workspace = all_reduce_preamble(
+            output_tensor,
+            input_tensor,
+            shmem,
+            config=config,
+            workspace=workspace,
+        )
+
     heap_bases = shmem.get_heap_bases()
-    
+
     if variant == VARIANT_ATOMIC:
-        # Initialize output to zero on all ranks
-        # Use barrier to ensure all ranks see the zeroed output before starting
-        output_tensor.zero_()
-        shmem.barrier()
-        
         persistent_all_reduce_atomic[(config.comm_sms,)](
             input_tensor,
             output_tensor,
@@ -531,31 +531,18 @@ def all_reduce(output_tensor, input_tensor, shmem, config=None, async_op=False):
             config.num_xcds,
             config.chunk_size,
         )
-        
-        # Synchronize GPU to ensure all atomic operations complete
-        torch.cuda.synchronize()
-    
+
     elif variant == VARIANT_RING:
-        # Initialize output to zero
-        output_tensor.zero_()
-        
-        # Allocate temporary buffers for ring algorithm
-        num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
-        num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-        total_tiles = num_pid_m * num_pid_n
-        
-        ring_buffer = shmem.zeros((M, N), dtype=input_tensor.dtype)
-        flags = shmem.zeros((total_tiles,), dtype=torch.int32)
-        flags.zero_()
-        
-        # Ensure all ranks see zeroed flags before starting
-        shmem.barrier()
-        
+        if workspace is None or workspace.ring_buffer is None or workspace.flags is None:
+            raise RuntimeError(
+                "Ring variant requires workspace preparation. Call all_reduce_preamble before all_reduce."
+            )
+
         persistent_all_reduce_ring[(config.comm_sms,)](
             input_tensor,
             output_tensor,
-            ring_buffer,
-            flags,
+            workspace.ring_buffer,
+            workspace.flags,
             M,
             N,
             stride_in_m,
@@ -572,55 +559,11 @@ def all_reduce(output_tensor, input_tensor, shmem, config=None, async_op=False):
             config.num_xcds,
             config.chunk_size,
         )
-        
-        # Synchronize GPU to ensure all operations complete
-        torch.cuda.synchronize()
-    
+
     elif variant == VARIANT_TWO_SHOT:
-        # Initialize output to zero
-        output_tensor.zero_()
-        
-        # Allocate temporary buffers for two-shot algorithm
-        num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
-        num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-        total_tiles = num_pid_m * num_pid_n
-        
-        local_buffer = shmem.zeros((M, N), dtype=input_tensor.dtype)
-        locks = shmem.zeros((total_tiles,), dtype=torch.int32)
-        tile_ready = shmem.zeros((total_tiles,), dtype=torch.int32)
-        locks.zero_()
-        tile_ready.zero_()
-        
-        # Phase 1: Producer - all ranks store their local partials
-        persistent_all_reduce_two_shot_producer[(config.comm_sms,)](
+        persistent_all_reduce_two_shot[(config.comm_sms,)](
             input_tensor,
-            local_buffer,
-            locks,
-            tile_ready,
-            M,
-            N,
-            stride_in_m,
-            stride_in_n,
-            heap_bases,
-            rank,
-            world_size,
-            config.block_size_m,
-            config.block_size_n,
-            config.swizzle_size,
-            config.comm_sms,
-            config.num_xcds,
-            config.chunk_size,
-        )
-        
-        # Synchronize before consumer phase
-        shmem.barrier()
-        
-        # Phase 2: Consumer - each rank reduces assigned tiles and scatters
-        persistent_all_reduce_two_shot_consumer[(config.comm_sms,)](
             output_tensor,
-            local_buffer,
-            locks,
-            tile_ready,
             M,
             N,
             stride_in_m,
@@ -636,9 +579,14 @@ def all_reduce(output_tensor, input_tensor, shmem, config=None, async_op=False):
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
-            config.all_reduce_distribution,  # 0 for striding, 1 for block
+            config.all_reduce_distribution,
         )
-    
+
+    if workspace is not None:
+        workspace.prepared = False
+
     if not async_op:
         shmem.barrier()
+
+    return workspace
 

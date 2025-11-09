@@ -1547,7 +1547,30 @@ class Iris:
             from iris.ccl.all_to_all import all_to_all as _all_to_all
             _all_to_all(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
         
-        def all_reduce(self, output_tensor, input_tensor, config=None, async_op=False):
+        def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
+            """
+            Prepare reusable workspace for all-reduce.
+
+            Args:
+                output_tensor: Output tensor that will receive the reduced data.
+                input_tensor: Input tensor providing the local contribution.
+                config: Optional Config describing variant parameters.
+                workspace: Optional existing workspace to update/reuse.
+
+            Returns:
+                Workspace object that can be passed to ``all_reduce``.
+            """
+            from iris.ccl.all_reduce import all_reduce_preamble as _all_reduce_preamble
+
+            return _all_reduce_preamble(
+                output_tensor,
+                input_tensor,
+                self._iris,
+                config=config,
+                workspace=workspace,
+            )
+        
+        def all_reduce(self, output_tensor, input_tensor, config=None, async_op=False, workspace=None):
             """
             All-reduce collective operation.
 
@@ -1562,6 +1585,8 @@ class Iris:
                         Set config.all_reduce_variant to choose variant: "atomic", "ring", or "two_shot"
                 async_op: If False, performs a barrier at the end. If True, returns immediately.
                           Default: False.
+                workspace: Optional workspace prepared by ``all_reduce_preamble`` to
+                           reuse internal buffers across invocations.
 
             Example:
                 >>> shmem = iris.iris()
@@ -1580,7 +1605,15 @@ class Iris:
                 >>> shmem.ccl.all_reduce(output_tensor, input_tensor, async_op=True)
             """
             from iris.ccl.all_reduce import all_reduce as _all_reduce
-            _all_reduce(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+
+            return _all_reduce(
+                output_tensor,
+                input_tensor,
+                self._iris,
+                config=config,
+                async_op=async_op,
+                workspace=workspace,
+            )
 
 
 @triton.jit

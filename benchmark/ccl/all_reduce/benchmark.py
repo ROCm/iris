@@ -140,7 +140,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # Note: Must use shmem.zeros() to allocate on Iris symmetric heap
     input_tensor = shmem.zeros((M, N), dtype=datatype)
     output_tensor = shmem.zeros((M, N), dtype=datatype)
-    expected_tensor = shmem.zeros((M, N), dtype=datatype)
+    expected_tensor = None
     
     # Fill input with deterministic values
     val = float(rank + 1)
@@ -148,7 +148,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     
     # Expected result: sum of all ranks (1 + 2 + ... + world_size)
     expected_sum = float(world_size * (world_size + 1) / 2)
-    expected_tensor.fill_(expected_sum)
+    if args["validate"]:
+        expected_tensor = shmem.zeros((M, N), dtype=datatype)
+        expected_tensor.fill_(expected_sum)
 
     comm_stream = torch.cuda.Stream()
 
@@ -161,14 +163,30 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         },
     }
 
+    workspace = None
+
     def run_experiment():
-        nonlocal kernel_timing
+        nonlocal kernel_timing, workspace
+
+        workspace = shmem.ccl.all_reduce_preamble(
+            output_tensor,
+            input_tensor,
+            config=config,
+            workspace=workspace,
+        )
+
         shmem.barrier()
 
         torch.cuda.nvtx.range_push("All-Reduce")
         with torch.cuda.stream(comm_stream):
             kernel_timing["all_reduce"]["start_event"].record()
-            shmem.ccl.all_reduce(output_tensor, input_tensor, config=config, async_op=False)
+            shmem.ccl.all_reduce(
+                output_tensor,
+                input_tensor,
+                config=config,
+                async_op=False,
+                workspace=workspace,
+            )
             kernel_timing["all_reduce"]["end_event"].record()
             kernel_timing["all_reduce"]["experiments"] += 1
         torch.cuda.nvtx.range_pop()
