@@ -57,7 +57,7 @@ def parse_args():
         "--variant",
         type=str,
         default="atomic",
-        choices=["atomic", "ring", "two_shot"],
+        choices=["atomic", "ring", "two_shot", "one_shot", "spinlock"],
         help="All-reduce variant to use",
     )
     parser.add_argument(
@@ -66,6 +66,18 @@ def parse_args():
         default=0,
         choices=[0, 1],
         help="Distribution for two-shot variant (0=striding, 1=block)",
+    )
+    parser.add_argument(
+        "--num_rings",
+        type=int,
+        default=1,
+        help="Number of concurrent rings for ring variant",
+    )
+    parser.add_argument(
+        "--ring_slice_n",
+        type=int,
+        default=None,
+        help="Column slice size for ring variant (power of two, must divide block_size_n)",
     )
 
     return vars(parser.parse_args())
@@ -107,6 +119,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         "comm_sms": args["comm_sms"],
         "all_reduce_variant": args["variant"],
     }
+    if args["variant"] == "ring":
+        config_kwargs["all_reduce_num_rings"] = args["num_rings"]
+        if args["ring_slice_n"] is not None:
+            config_kwargs["all_reduce_ring_slice_n"] = args["ring_slice_n"]
     if args["block_size_m"] is not None:
         config_kwargs["block_size_m"] = args["block_size_m"]
     if args["block_size_n"] is not None:
@@ -132,6 +148,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     json_writer.add_field("swizzle_size", config.swizzle_size)
     json_writer.add_field("num_xcds", config.num_xcds)
     json_writer.add_field("all_reduce_variant", config.all_reduce_variant)
+    if args["variant"] == "ring":
+        json_writer.add_field("all_reduce_num_rings", config.all_reduce_num_rings)
+        json_writer.add_field("all_reduce_ring_slice_n", config.all_reduce_ring_slice_n)
     if args["variant"] == "two_shot":
         json_writer.add_field("all_reduce_distribution", config.all_reduce_distribution)
 
@@ -280,6 +299,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.barrier()
 
     if rank == 0:
+        if args["variant"] == "ring":
+            json_writer.add_field("all_reduce_ring_slice_n", config.all_reduce_ring_slice_n)
         json_writer.flush()
         json_writer.display()
 

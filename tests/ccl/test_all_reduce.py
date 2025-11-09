@@ -18,6 +18,8 @@ from iris.ccl import Config
         "atomic",
         "ring",
         "two_shot",
+        "one_shot",
+        "spinlock",
     ],
 )
 @pytest.mark.parametrize(
@@ -72,6 +74,8 @@ def test_all_reduce(variant, dtype, M, N):
     if variant == "two_shot":
         # Test both distribution modes for two_shot
         config.all_reduce_distribution = 0  # striding
+    if variant == "ring":
+        config.all_reduce_num_rings = min(2, config.comm_sms)
     shmem.ccl.all_reduce(iris_output_tensor, iris_input_tensor, config=config)
     torch.cuda.synchronize()
     

@@ -32,9 +32,12 @@ class Config:
         use_gluon: If True, use Gluon-based implementation (default: False)
                    Gluon provides better control over warp-level traffic shaping
         all_reduce_variant: Variant for all-reduce operation (default: "atomic")
-                           Options: "atomic", "ring", "two_shot"
+                           Options: "atomic", "ring", "two_shot", "one_shot", "spinlock"
         all_reduce_distribution: Distribution for two-shot all-reduce (default: 0)
                                0 for striding, 1 for block distribution
+        all_reduce_num_rings: Number of concurrent rings to form in ring-based all-reduce (default: 1)
+        all_reduce_ring_slice_n: Column slice size for ring reduce-scatter/all-gather
+                                 (default: auto-set to block_size_n // world_size at runtime)
     
     Example:
         >>> import iris
@@ -62,6 +65,8 @@ class Config:
     use_gluon: bool = False
     all_reduce_variant: str = "atomic"
     all_reduce_distribution: int = 0
+    all_reduce_num_rings: int = 1
+    all_reduce_ring_slice_n: int | None = None
     
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
@@ -82,8 +87,25 @@ class Config:
             raise ValueError(f"comm_sms must be positive, got {self.comm_sms}")
         if self.num_xcds <= 0:
             raise ValueError(f"num_xcds must be positive, got {self.num_xcds}")
-        if self.all_reduce_variant not in ["atomic", "ring", "two_shot"]:
-            raise ValueError(f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', got {self.all_reduce_variant}")
+        if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock"]:
+            raise ValueError(
+                f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'spinlock', got {self.all_reduce_variant}"
+            )
         if self.all_reduce_distribution not in [0, 1]:
             raise ValueError(f"all_reduce_distribution must be 0 (striding) or 1 (block), got {self.all_reduce_distribution}")
+        if self.all_reduce_num_rings <= 0:
+            raise ValueError(f"all_reduce_num_rings must be positive, got {self.all_reduce_num_rings}")
+        if self.all_reduce_ring_slice_n is None:
+            self.all_reduce_ring_slice_n = self.block_size_n
+        if self.all_reduce_ring_slice_n <= 0:
+            raise ValueError(f"all_reduce_ring_slice_n must be positive, got {self.all_reduce_ring_slice_n}")
+        if self.block_size_n % self.all_reduce_ring_slice_n != 0:
+            raise ValueError(
+                f"all_reduce_ring_slice_n must divide block_size_n "
+                f"(block_size_n={self.block_size_n}, slice={self.all_reduce_ring_slice_n})"
+            )
+        if self.all_reduce_ring_slice_n & (self.all_reduce_ring_slice_n - 1):
+            raise ValueError(
+                f"all_reduce_ring_slice_n must be a power of two, got {self.all_reduce_ring_slice_n}"
+            )
 
