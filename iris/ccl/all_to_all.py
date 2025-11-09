@@ -86,7 +86,7 @@ def persistent_all_to_all(
     pid = tl.program_id(0)
 
     if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, NUM_XCDS, COMM_SMS, CHUNK_SIZE)
+        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
     
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -139,8 +139,8 @@ def persistent_all_to_all(
         # Remote store offset: write into target's output at columns [cur_rank*N : (cur_rank+1)*N]
         # This is constant for all target_rank iterations since it only depends on cur_rank
         output_offset_remote = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
-        output_ptr_remote = output_ptr + output_offset_remote
-        output_ptr_remote = tl.multiple_of(output_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        output_ptr_remote = tl.multiple_of(output_ptr + output_offset_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        
         
         # Pre-compute rank stride for input (N * stride_in_n)
         rank_stride_in = N * stride_in_n

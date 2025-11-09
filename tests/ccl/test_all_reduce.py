@@ -47,7 +47,7 @@ def test_all_reduce(variant, dtype, M, N):
     heap_size = 2**33  # 8GB
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+
     
     # PyTorch's all_reduce format: each rank has M x N data
     # All ranks compute the sum of all tensors
@@ -103,7 +103,7 @@ def test_all_reduce_two_shot_distribution(distribution, dtype=torch.float32, M=1
     heap_size = 2**33
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+
     
     pytorch_input_tensor = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
     pytorch_input_tensor.fill_(float(rank + 1))

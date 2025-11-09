@@ -82,7 +82,7 @@ def all_reduce_preamble(
     workspace.dtype = dtype
     workspace.num_rings = getattr(config, "all_reduce_num_rings", 1)
     workspace.prepared = False
-    world_size = shmem.get_num_ranks()
+
 
     if variant in (VARIANT_ATOMIC, VARIANT_SPINLOCK, VARIANT_ONE_SHOT):
         output_tensor.zero_()

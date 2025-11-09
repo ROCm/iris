@@ -60,8 +60,8 @@ class Config:
     block_size_n: int = 128
     swizzle_size: int = 6
     comm_sms: int = 64
-    num_xcds: int = None
-    chunk_size: int = None
+    num_xcds: int | None = None
+    chunk_size: int | None = None
     use_gluon: bool = False
     all_reduce_variant: str = "atomic"
     all_reduce_distribution: int = 0
