@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   build-container-image:
-    runs-on: [self-hosted, mi3008x, iris-githubrunner-mi3008x]
+    runs-on: [iris-githubrunner-mi3008x]
     timeout-minutes: 90
 
     steps:
