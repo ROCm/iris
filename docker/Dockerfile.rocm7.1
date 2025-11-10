@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+FROM rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.8.0
+
+# Use bash shell for RUN commands
+SHELL ["/bin/bash", "-c"]
+
+# Set environment variables
+ENV TRITON_PATH=/opt/triton \
+    ROCM_PATH=/opt/rocm \
+    OMPI_MCA_mtl="^ofi" \
+    OMPI_MCA_pml="ob1"
+
+ENV LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH \
+    PATH="$ROCM_PATH/bin:$PATH"
+
+ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
+    OMPI_ALLOW_RUN_AS_ROOT=1
+
+# Install system packages
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    git wget ninja-build cmake python3-pip python3-dev build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python packages with pip
+RUN pip3 install --upgrade pip && \
+    pip3 install wheel jupyter
+
+# Clone and install Triton
+ARG TRITON_COMMIT=aafec417bded34db6308f5b3d6023daefae43905
+WORKDIR $TRITON_PATH
+RUN git clone https://github.com/triton-lang/triton.git $TRITON_PATH
+RUN git checkout ${TRITON_COMMIT}
+RUN pip3 install -e .
+ENV PYTHONPATH=$TRITON_PATH
+
+WORKDIR /workspace
+
+# Make Python site-packages writable by all users for development
+RUN chmod -R a+w /opt/venv/lib/python3.12/site-packages/
+

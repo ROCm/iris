@@ -20,7 +20,6 @@ requires-python = ">=3.8"
 dependencies = [
     "numpy",
     "requests",
-    "ruff",
 ]
 
 [project.urls]
@@ -33,6 +32,7 @@ dev = [
     "pytest",
     "black",
     "mypy",
+    "ruff",
 ]
 
 [tool.setuptools]
