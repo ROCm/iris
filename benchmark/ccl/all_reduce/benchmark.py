@@ -271,11 +271,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.info("Benchmarking...")
         
         # Calculate bandwidth
-        # In all-reduce, each rank sends its data to all other ranks
-        # Total bytes = (world_size - 1) * M * N * element_size (send) + (world_size - 1) * M * N * element_size (receive)
-        # But for reduction, we typically count: world_size * M * N * element_size (all ranks contribute)
+        # All-reduce moves 2 * (world_size - 1) / world_size * data_size bytes
+        # This accounts for the ring-based algorithm where data is transferred in (world_size - 1) steps
+        # Each rank transfers 2 * (world_size - 1) / world_size * M * N * element_size bytes
         element_size = torch.tensor([], dtype=datatype).element_size()
-        total_bytes = world_size * M * N * element_size  # All ranks contribute
+        total_bytes = M * N * element_size * (2 * (world_size - 1)) / world_size
         total_bytes_gb = total_bytes / (1024**3)
 
         triton_ms = iris.do_bench(run_experiment, shmem.barrier)
