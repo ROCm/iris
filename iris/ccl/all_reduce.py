@@ -135,19 +135,19 @@ def all_reduce_preamble(
 
 @triton.jit()
 def chiplet_transform_chunked(
-    pid, 
-    num_workgroups: tl.constexpr, 
-    num_xcds: tl.constexpr, 
+    pid,
+    num_workgroups: tl.constexpr,
+    num_xcds: tl.constexpr,
     chunk_size: tl.constexpr
 ):
     if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
         return pid
-    
-    local_pid = pid // num_xcds 
-    chunk_idx = local_pid // chunk_size 
-    pos_in_chunk = local_pid % chunk_size 
 
-    xcd = pid % num_xcds 
+    local_pid = pid // num_xcds
+    chunk_idx = local_pid // chunk_size
+    pos_in_chunk = local_pid % chunk_size
+
+    xcd = pid % num_xcds
     new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
     return new_pid
 
@@ -174,10 +174,10 @@ def persistent_all_reduce_atomic(
 ):
     """
     Atomic-based all-reduce kernel.
-    
+
     Each rank atomically adds its local partial result to the global output buffer.
     All ranks write to all locations using atomic operations.
-    
+
     Args:
         input_ptr: Pointer to input tensor (local rank's partial data)
         output_ptr: Pointer to output tensor (will contain sum of all ranks)
@@ -192,7 +192,7 @@ def persistent_all_reduce_atomic(
     # Use chiplet transform to distribute program IDs across XCDs
     if NUM_XCDS != 1:
         pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
-    
+
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
@@ -218,15 +218,15 @@ def persistent_all_reduce_atomic(
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         # Create mask to prevent out-of-bounds access
         mask = (rm[:, None] < M) & (rn[None, :] < N)
-        
+
         # Use the original rm/rn for offsets (mask will prevent out-of-bounds access)
         # This avoids double-counting that occurs with modulo when block_size > dimension
         input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
-        
+
         input_ptr_local = input_ptr + input_offset
         input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        
+
         # Load local partial result
         data = tl.load(input_ptr_local, mask=mask)
 
@@ -464,7 +464,7 @@ def persistent_all_reduce_ring(
 
     # Ring topology
     next_rank = (cur_rank + 1) % world_size
-    
+
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
     elem_ty = input_ptr.type.element_ty
 
@@ -665,7 +665,7 @@ def persistent_all_reduce_two_shot(
 def all_reduce(output_tensor, input_tensor, shmem, config=None, async_op=False, workspace: Optional[AllReduceWorkspace] = None):
     """
     Internal all-reduce collective operation implementation.
-    
+
     This function is called internally by shmem.ccl.all_reduce().
     Users should use the Iris instance method instead:
         >>> shmem.ccl.all_reduce(output_tensor, input_tensor)

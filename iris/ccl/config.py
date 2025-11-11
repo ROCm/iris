@@ -13,19 +13,19 @@ import iris
 class Config:
     """
     Configuration parameters for iris-ccl collective operations.
-    
+
     This configuration struct encapsulates common kernel parameters that can be
-    set once and reused across multiple collective calls, similar to the 
+    set once and reused across multiple collective calls, similar to the
     origami config pattern from ROCm libraries.
-    
+
     Args:
         block_size_m: Block size for the M dimension tiling (default: 128)
                       Optimized for Gluon all-to-all with minimal rows (4)
         block_size_n: Block size for the N dimension tiling (default: 128)
                       Optimized for Gluon all-to-all with full column vectorization (2048)
-        swizzle_size: Number of tiles to swizzle/group together for 
+        swizzle_size: Number of tiles to swizzle/group together for
                      better memory access patterns (default: 6)
-        comm_sms: Number of SMs (Streaming Multiprocessors) to use for 
+        comm_sms: Number of SMs (Streaming Multiprocessors) to use for
                  communication kernel (default: 64)
                  Optimized for Gluon all-to-all achieving (108)
         num_xcds: Number of XCCs. If None, auto-detected from system (default: None)
@@ -38,7 +38,7 @@ class Config:
         all_reduce_num_rings: Number of concurrent rings to form in ring-based all-reduce (default: 1)
         all_reduce_ring_slice_n: Column slice size for ring reduce-scatter/all-gather
                                  (default: auto-set to block_size_n // world_size at runtime)
-    
+
     Example:
         >>> import iris
         >>> from iris.ccl import Config
@@ -51,7 +51,7 @@ class Config:
         ...     use_gluon=True
         ... )
         >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
-        
+
         >>> # All-reduce with ring variant
         >>> config = Config(all_reduce_variant="ring")
         >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
@@ -67,16 +67,16 @@ class Config:
     all_reduce_distribution: int = 0
     all_reduce_num_rings: int = 1
     all_reduce_ring_slice_n: int | None = None
-    
+
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
         if self.num_xcds is None:
             self.num_xcds = iris.hip.get_num_xcc()
-            
+
         if self.chunk_size is None:
             self.chunk_size = self.swizzle_size * self.swizzle_size
             self.chunk_size = min(self.chunk_size, self.comm_sms // self.num_xcds)
-        
+
         if self.block_size_m <= 0:
             raise ValueError(f"block_size_m must be positive, got {self.block_size_m}")
         if self.block_size_n <= 0:

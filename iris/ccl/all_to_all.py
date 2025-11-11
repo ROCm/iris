@@ -23,22 +23,22 @@ except ImportError:
 
 @triton.jit()
 def chiplet_transform_chunked(
-    pid, 
-    num_workgroups: tl.constexpr, 
-    num_xcds: tl.constexpr, 
+    pid,
+    num_workgroups: tl.constexpr,
+    num_xcds: tl.constexpr,
     chunk_size: tl.constexpr
 ):
     if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
         # Outside of the contiguous chunked region, leave unchanged.
         return pid
-    
-    local_pid = pid // num_xcds 
+
+    local_pid = pid // num_xcds
     # Calculate chunk index and position within chunk
-    chunk_idx = local_pid // chunk_size 
-    pos_in_chunk = local_pid % chunk_size 
+    chunk_idx = local_pid // chunk_size
+    pos_in_chunk = local_pid % chunk_size
 
     # Calculate new PID
-    xcd = pid % num_xcds 
+    xcd = pid % num_xcds
     new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
     return new_pid
 
@@ -64,10 +64,10 @@ def persistent_all_to_all(
 ):
     """
     Persistent all-to-all kernel.
-    
+
     Each rank sends input data to all ranks and receives data from all ranks.
     Similar to all-scatter but bidirectional.
-    
+
     Args:
         input_ptr: Pointer to input tensor (local rank's data to send)
         output_ptr: Pointer to output tensor (will receive from all ranks)
@@ -87,7 +87,7 @@ def persistent_all_to_all(
 
     if NUM_XCDS != 1:
         pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
-    
+
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
@@ -113,7 +113,7 @@ def persistent_all_to_all(
         # Pre-compute base offsets for better memory access patterns and vectorization
         # Base offset for input rows (M dimension)
         input_base_m = rm[:, None] * stride_in_m
-        # Base offset for output rows (M dimension)  
+        # Base offset for output rows (M dimension)
         output_base_m = rm[:, None] * stride_out_m
         # Base offset for input columns (N dimension) - will be adjusted per rank
         input_base_n = rn[None, :] * stride_in_n
@@ -129,7 +129,7 @@ def persistent_all_to_all(
         # Vectorization hints for 2D access pattern
         input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
         output_ptr_local = tl.multiple_of(output_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        
+
         data = tl.load(input_ptr_local, mask=mask)
         tl.store(output_ptr_local, data, mask=mask, cache_modifier=".wt")
 
@@ -140,26 +140,26 @@ def persistent_all_to_all(
         # This is constant for all target_rank iterations since it only depends on cur_rank
         output_offset_remote = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
         output_ptr_remote = tl.multiple_of(output_ptr + output_offset_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        
-        
+
+
         # Pre-compute rank stride for input (N * stride_in_n)
         rank_stride_in = N * stride_in_n
-        
+
         # Traffic shaping: Break each tile into 64x64 sub-blocks and process them
         # This creates better memory access patterns and allows hardware to distribute
         # traffic across XGMI links based on access patterns
         SUB_BLOCK_M: tl.constexpr = 64
         SUB_BLOCK_N: tl.constexpr = 64
-        
+
         # Calculate number of 64x64 sub-blocks needed to cover the tile
         num_sub_blocks_m = tl.cdiv(BLOCK_SIZE_M, SUB_BLOCK_M)
         num_sub_blocks_n = tl.cdiv(BLOCK_SIZE_N, SUB_BLOCK_N)
         total_sub_blocks = num_sub_blocks_m * num_sub_blocks_n
-        
+
         # Base row/column indices for the tile
         tile_base_m = pid_m * BLOCK_SIZE_M
         tile_base_n = pid_n * BLOCK_SIZE_N
-        
+
         # Process all remote ranks: load each chunk and scatter to corresponding target
         # Each target_rank may have different input data, so we must load separately
         for target_rank in range(world_size):
@@ -171,38 +171,38 @@ def persistent_all_to_all(
                     # Calculate sub-block position within the tile
                     sub_block_m = (sub_block_id // num_sub_blocks_n) * SUB_BLOCK_M
                     sub_block_n = (sub_block_id % num_sub_blocks_n) * SUB_BLOCK_N
-                    
+
                     # Compute row and column indices for this 64x64 sub-block
                     # Start from tile base and add sub-block offset, then create arrays
                     sub_rm_base = tile_base_m + sub_block_m
                     sub_rn_base = tile_base_n + sub_block_n
                     sub_rm = sub_rm_base + tl.arange(0, SUB_BLOCK_M)
                     sub_rn = sub_rn_base + tl.arange(0, SUB_BLOCK_N)
-                    
+
                     # Create mask for this sub-block
                     sub_mask = (sub_rm[:, None] < M) & (sub_rn[None, :] < N) & \
                                (sub_rm[:, None] < (tile_base_m + BLOCK_SIZE_M)) & \
                                (sub_rn[None, :] < (tile_base_n + BLOCK_SIZE_N))
-                    
+
                     # Compute offsets for this sub-block
                     sub_input_base_m = sub_rm[:, None] * stride_in_m
                     sub_input_base_n = sub_rn[None, :] * stride_in_n
                     sub_output_base_m = sub_rm[:, None] * stride_out_m
                     sub_output_base_n = sub_rn[None, :] * stride_out_n
-                    
+
                     # Compute input pointer for this target_rank's chunk (sub-block)
                     sub_input_offset = sub_input_base_m + (sub_input_base_n + target_rank * N * stride_in_n)
                     sub_input_ptr_send = input_ptr + sub_input_offset
                     sub_input_ptr_send = tl.multiple_of(sub_input_ptr_send, (SUB_BLOCK_M, SUB_BLOCK_N))
-                    
+
                     # Compute output pointer (sub-block)
                     sub_output_offset = sub_output_base_m + (sub_output_base_n + cur_rank * N * stride_out_n)
                     sub_output_ptr_remote = output_ptr + sub_output_offset
                     sub_output_ptr_remote = tl.multiple_of(sub_output_ptr_remote, (SUB_BLOCK_M, SUB_BLOCK_N))
-                    
+
                     # Load data chunk for this target rank (64x64 sub-block)
                     sub_data = tl.load(sub_input_ptr_send, mask=sub_mask)
-                    
+
                     # Scatter to target rank's output
                     # Processing in 64x64 sub-blocks creates better memory access patterns
                     # that allow hardware to distribute traffic across XGMI links
@@ -220,19 +220,19 @@ def persistent_all_to_all(
 if GLUON_AVAILABLE:
     @gluon.jit
     def chiplet_transform_chunked_gluon(
-        pid, 
-        num_xcds: gl.constexpr, 
-        num_workgroups: gl.constexpr, 
+        pid,
+        num_xcds: gl.constexpr,
+        num_workgroups: gl.constexpr,
         chunk_size: gl.constexpr
     ):
         if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
             return pid
-        
-        local_pid = pid // num_xcds 
-        chunk_idx = local_pid // chunk_size 
-        pos_in_chunk = local_pid % chunk_size 
 
-        xcd = pid % num_xcds 
+        local_pid = pid // num_xcds
+        chunk_idx = local_pid // chunk_size
+        pos_in_chunk = local_pid % chunk_size
+
+        xcd = pid % num_xcds
         new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
         return new_pid
 
@@ -259,17 +259,17 @@ if GLUON_AVAILABLE:
     ):
         """
         Persistent all-to-all kernel using Gluon.
-        
+
         Each rank sends input data to all ranks and receives data from all ranks.
         Simplified version that mirrors the Triton implementation.
         """
         ctx = IrisDeviceCtx.initialize(context_tensor)
-        
+
         pid = gl.program_id(0)
 
         if NUM_XCDS != 1:
             pid = chiplet_transform_chunked_gluon(pid, NUM_XCDS, COMM_SMS, CHUNK_SIZE)
-        
+
         num_pid_m = gl.cdiv(M, BLOCK_SIZE_M)
         num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
         total_tiles = num_pid_m * num_pid_n
@@ -288,29 +288,29 @@ if GLUON_AVAILABLE:
             # BlockedLayout: [size_per_thread], [threads_per_warp], [warps_per_cta], [order]
             layout_col: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])  # Column access
             layout_row: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])  # Row indices
-            
+
             rm = (pid_m * BLOCK_SIZE_M + gl.arange(0, BLOCK_SIZE_M, layout=layout_row)) % M
             rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=layout_col)) % N
             # Strong hints for coalesced access and dwordx4
             rm = gl.max_contiguous(gl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
             rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-            
+
             # Pre-compute base offsets - maximize VGPR usage by keeping all offsets in registers
             row_offsets_m = rm * stride_in_m
             row_offsets_out_m = rm * stride_out_m
             col_offsets_n = rn * stride_in_n
             col_offsets_out_n = rn * stride_out_n
-            
+
             # Process local rank - optimized access pattern for dwordx4
             # Process rows to maximize VGPR usage (BLOCK_SIZE_N elements per row)
             for i in range(BLOCK_SIZE_M):
                 row_idx = (pid_m * BLOCK_SIZE_M + i) % M
-                
+
                 if row_idx < M:
                     row_offset_m = row_idx * stride_in_m
                     row_offset_out_m = row_idx * stride_out_m
                     col_mask = rn < N
-                    
+
                     # Compute offsets - compiler should see contiguous access pattern
                     input_offset_local = row_offset_m + (col_offsets_n + cur_rank * N * stride_in_n)
                     output_offset_local = row_offset_out_m + (col_offsets_out_n + cur_rank * N * stride_out_n)
@@ -320,22 +320,22 @@ if GLUON_AVAILABLE:
                     # This tells compiler that addresses are aligned to 4-element boundaries
                     input_ptr_local = gl.multiple_of(input_ptr_local, 4)
                     output_ptr_local = gl.multiple_of(output_ptr_local, 4)
-                    
+
                     # Load/store - should generate dwordx4 for 4 consecutive fp16 elements
                     data = gl.load(input_ptr_local, mask=col_mask)
                     gl.store(output_ptr_local, data, mask=col_mask, cache_modifier=".wt")
-            
+
             # Process remote ranks - same optimized pattern
             for target_rank in range(world_size):
                 if target_rank != cur_rank:
                     for i in range(BLOCK_SIZE_M):
                         row_idx = (pid_m * BLOCK_SIZE_M + i) % M
-                        
+
                         if row_idx < M:
                             row_offset_m = row_idx * stride_in_m
                             row_offset_out_m = row_idx * stride_out_m
                             col_mask = rn < N
-                            
+
                             input_offset_remote = row_offset_m + (col_offsets_n + target_rank * N * stride_in_n)
                             output_offset_remote = row_offset_out_m + (col_offsets_out_n + cur_rank * N * stride_out_n)
                             input_ptr_remote = input_ptr + input_offset_remote
@@ -343,7 +343,7 @@ if GLUON_AVAILABLE:
                             # Strong hints for dwordx4
                             input_ptr_remote = gl.multiple_of(input_ptr_remote, 4)
                             output_ptr_remote = gl.multiple_of(output_ptr_remote, 4)
-                            
+
                             remote_data = gl.load(input_ptr_remote, mask=col_mask)
                             ctx.store(output_ptr_remote, remote_data, target_rank, mask=col_mask)
 
@@ -351,7 +351,7 @@ if GLUON_AVAILABLE:
 def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
     """
     Internal all-to-all collective operation implementation.
-    
+
     This function is called internally by shmem.ccl.all_to_all().
     Users should use the Iris instance method instead:
         >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
@@ -373,24 +373,24 @@ def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
     # Use provided config or create default one
     if config is None:
         config = Config()
-    
+
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
-    
+
     M, total_N = input_tensor.shape[:2]
     N = total_N // world_size
-    
+
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
-    
+
     # Choose between Triton and Gluon implementation
     if config.use_gluon and GLUON_AVAILABLE:
         # Check if shmem is Iris Gluon (has get_device_context method)
         if not hasattr(shmem, 'get_device_context'):
             raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
-        
+
         context_tensor = shmem.get_device_context()
-        
+
         persistent_all_to_all_gluon[(config.comm_sms,)](
             IrisDeviceCtx,
             context_tensor,
@@ -415,7 +415,7 @@ def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
         # Use Triton implementation
         if config.use_gluon and not GLUON_AVAILABLE:
             raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False")
-        
+
         persistent_all_to_all[(config.comm_sms,)](
             input_tensor,
             output_tensor,
@@ -435,6 +435,6 @@ def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
             config.num_xcds,
             config.chunk_size,
         )
-    
+
     if not async_op:
         shmem.barrier()

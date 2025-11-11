@@ -43,31 +43,31 @@ def test_all_reduce(variant, dtype, M, N):
     # Ensure torch.distributed is initialized (should be done by test runner)
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
-    
+
     heap_size = 2**33  # 8GB
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
 
-    
+
     # PyTorch's all_reduce format: each rank has M x N data
     # All ranks compute the sum of all tensors
     pytorch_input_tensor = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
     # Fill with deterministic values for easier debugging
     pytorch_input_tensor.fill_(float(rank + 1))
-    
+
     # Run PyTorch's all_reduce to get reference output
     pytorch_output_tensor = pytorch_input_tensor.clone()
     shmem.barrier()
     dist.all_reduce(pytorch_output_tensor, op=dist.ReduceOp.SUM)
     torch.cuda.synchronize()
-    
+
     # Now set up Iris all_reduce format
     # Iris format: same as PyTorch - input and output are both (M, N)
     iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
     iris_input_tensor.copy_(pytorch_input_tensor)
-    
+
     iris_output_tensor = shmem.zeros((M, N), dtype=dtype)
-    
+
     # Run Iris all_reduce with specified variant
     shmem.barrier()
     config = Config(all_reduce_variant=variant)
@@ -78,11 +78,11 @@ def test_all_reduce(variant, dtype, M, N):
         config.all_reduce_num_rings = min(2, config.comm_sms)
     shmem.ccl.all_reduce(iris_output_tensor, iris_input_tensor, config=config)
     torch.cuda.synchronize()
-    
+
     # Compare results
     atol = 1e-3 if dtype == torch.float16 else 1e-5
     max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
-    
+
     assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), \
         f"Max difference: {max_diff}, expected < {atol}\n" \
         f"Rank {rank}: Iris output doesn't match PyTorch's all_reduce (variant={variant})"
@@ -99,33 +99,33 @@ def test_all_reduce_two_shot_distribution(distribution, dtype=torch.float32, M=1
     """Test two-shot all-reduce with different distribution modes."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
-    
+
     heap_size = 2**33
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
 
-    
+
     pytorch_input_tensor = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
     pytorch_input_tensor.fill_(float(rank + 1))
-    
+
     pytorch_output_tensor = pytorch_input_tensor.clone()
     shmem.barrier()
     dist.all_reduce(pytorch_output_tensor, op=dist.ReduceOp.SUM)
     torch.cuda.synchronize()
-    
+
     iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
     iris_input_tensor.copy_(pytorch_input_tensor)
-    
+
     iris_output_tensor = shmem.zeros((M, N), dtype=dtype)
-    
+
     shmem.barrier()
     config = Config(all_reduce_variant="two_shot", all_reduce_distribution=distribution)
     shmem.ccl.all_reduce(iris_output_tensor, iris_input_tensor, config=config)
     torch.cuda.synchronize()
-    
+
     atol = 1e-5
     max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
-    
+
     assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), \
         f"Max difference: {max_diff}, expected < {atol}\n" \
         f"Rank {rank}: Iris two-shot output doesn't match PyTorch (distribution={distribution})"
