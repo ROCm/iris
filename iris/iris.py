@@ -118,7 +118,7 @@ class Iris:
         self.heap_bases = torch.from_numpy(ipc_heap_bases).to(device=self.device, dtype=torch.uint64)
 
         distributed_barrier()
-        
+
         # Initialize CCL interface
         self.ccl = self.CCL(self)
 
@@ -1500,22 +1500,22 @@ class Iris:
     class CCL:
         """
         Collective Communication Library (CCL) interface for Iris.
-        
+
         Provides collective operations that can be called as methods on the Iris instance.
         Example usage:
             >>> shmem = iris.iris()
             >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
         """
-        
+
         def __init__(self, iris_instance):
             """
             Initialize CCL with a reference to the parent Iris instance.
-            
+
             Args:
                 iris_instance: The parent Iris instance
             """
             self._iris = iris_instance
-        
+
         def all_to_all(self, output_tensor, input_tensor, config=None, async_op=False):
             """
             All-to-all collective operation.
@@ -1535,18 +1535,18 @@ class Iris:
             Example:
                 >>> shmem = iris.iris()
                 >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
-                
+
                 >>> # Custom configuration
                 >>> from iris.ccl import Config
                 >>> config = Config(block_size_m=128, block_size_n=32)
                 >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
-                
+
                 >>> # Async operation (no barrier)
                 >>> shmem.ccl.all_to_all(output_tensor, input_tensor, async_op=True)
             """
             from iris.ccl.all_to_all import all_to_all as _all_to_all
             _all_to_all(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
-        
+
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
             Prepare reusable workspace for all-reduce.
@@ -1569,7 +1569,7 @@ class Iris:
                 config=config,
                 workspace=workspace,
             )
-        
+
         def all_reduce(self, output_tensor, input_tensor, config=None, async_op=False, workspace=None):
             """
             All-reduce collective operation.
@@ -1591,16 +1591,16 @@ class Iris:
             Example:
                 >>> shmem = iris.iris()
                 >>> shmem.ccl.all_reduce(output_tensor, input_tensor)
-                
+
                 >>> # Custom configuration with ring variant
                 >>> from iris.ccl import Config
                 >>> config = Config(all_reduce_variant="ring")
                 >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
-                
+
                 >>> # Two-shot variant with block distribution
                 >>> config = Config(all_reduce_variant="two_shot", all_reduce_distribution=1)
                 >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
-                
+
                 >>> # Async operation (no barrier)
                 >>> shmem.ccl.all_reduce(output_tensor, input_tensor, async_op=True)
             """

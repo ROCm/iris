@@ -100,7 +100,7 @@ class IrisDeviceCtx:
         heap_bases = context_tensor + 2  # Offset pointer to start at heap bases
 
         return IrisDeviceCtx(cur_rank, num_ranks, heap_bases)
-    
+
     @gluon.jit
     def _translate(self, ptr, from_rank, to_rank):
         """
@@ -126,13 +126,13 @@ class IrisDeviceCtx:
         translated_ptr_byte = to_base_byte + offset
         # Cast to_base back to pointer type
         translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
-        
+
         # Optimization to vectorize the load/store - similar to iris.py
         # This enables the compiler to generate dwordx4 or wider loads
         # Note: Gluon uses scalar multiples, not 2D tuples like Triton
         # ptr = gl.max_contiguous(gl.multiple_of(ptr, 64), 64)
         # translated_ptr = gl.max_contiguous(gl.multiple_of(translated_ptr, 64), 64)
-        
+
         return translated_ptr
 
     @gluon.jit
@@ -525,29 +525,29 @@ class IrisGluon:
         self.heap_bases = torch.from_numpy(ipc_heap_bases).to(device=self.device, dtype=torch.uint64)
 
         distributed_barrier()
-        
+
         # Initialize CCL interface
         self.ccl = self.CCL(self)
 
     class CCL:
         """
         Collective Communication Library (CCL) interface for IrisGluon.
-        
+
         Provides collective operations that can be called as methods on the IrisGluon instance.
         Example usage:
             >>> shmem = iris_gluon.iris()
             >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
         """
-        
+
         def __init__(self, iris_instance):
             """
             Initialize CCL with a reference to the parent IrisGluon instance.
-            
+
             Args:
                 iris_instance: The parent IrisGluon instance
             """
             self._iris = iris_instance
-        
+
         def all_to_all(self, output_tensor, input_tensor, config=None, async_op=False):
             """
             All-to-all collective operation.
@@ -568,7 +568,7 @@ class IrisGluon:
             Example:
                 >>> shmem = iris_gluon.iris()
                 >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
-                
+
                 >>> # Custom configuration with Gluon traffic shaping
                 >>> from iris.ccl import Config
                 >>> config = Config(use_gluon=True, block_size_m=128, block_size_n=32)
