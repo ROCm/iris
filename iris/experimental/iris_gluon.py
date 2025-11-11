@@ -100,7 +100,7 @@ class IrisDeviceCtx:
         heap_bases = context_tensor + 2  # Offset pointer to start at heap bases
 
         return IrisDeviceCtx(cur_rank, num_ranks, heap_bases)
-
+    
     @gluon.jit
     def _translate(self, ptr, from_rank, to_rank):
         """
@@ -116,19 +116,15 @@ class IrisDeviceCtx:
         """
         from_base = gl.load(self.heap_bases + from_rank)
         to_base = gl.load(self.heap_bases + to_rank)
-
         # convert to int to compute difference
         ptr_int = tl.cast(ptr, gl.uint64)
-        from_base_int = tl.cast(from_base, gl.uint64)
-        to_base_byte_ptr = tl.cast(to_base, gl.pointer_type(gl.int8))
-
         # Find the offset from from_rank heap
-        offset = ptr_int - from_base_int
-
+        offset = ptr_int - from_base
+        # Byte cast for byte offset addition
+        to_base_byte = tl.cast(to_base, gl.pointer_type(gl.int8))
         # Find the offset into the to_rank heap
-        translated_ptr_byte = to_base_byte_ptr + offset
-
-        # Cast back to pointer type
+        translated_ptr_byte = to_base_byte + offset
+        # Cast to_base back to pointer type
         translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
         
         # Optimization to vectorize the load/store - similar to iris.py
