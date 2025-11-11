@@ -83,4 +83,5 @@ def test_atomic_xchg_api(dtype, sem, scope):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()

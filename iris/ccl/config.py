@@ -56,6 +56,7 @@ class Config:
         >>> config = Config(all_reduce_variant="ring")
         >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
     """
+
     block_size_m: int = 128
     block_size_n: int = 128
     swizzle_size: int = 6
@@ -92,7 +93,9 @@ class Config:
                 f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'spinlock', got {self.all_reduce_variant}"
             )
         if self.all_reduce_distribution not in [0, 1]:
-            raise ValueError(f"all_reduce_distribution must be 0 (striding) or 1 (block), got {self.all_reduce_distribution}")
+            raise ValueError(
+                f"all_reduce_distribution must be 0 (striding) or 1 (block), got {self.all_reduce_distribution}"
+            )
         if self.all_reduce_num_rings <= 0:
             raise ValueError(f"all_reduce_num_rings must be positive, got {self.all_reduce_num_rings}")
         if self.all_reduce_ring_slice_n is None:
@@ -105,7 +108,4 @@ class Config:
                 f"(block_size_n={self.block_size_n}, slice={self.all_reduce_ring_slice_n})"
             )
         if self.all_reduce_ring_slice_n & (self.all_reduce_ring_slice_n - 1):
-            raise ValueError(
-                f"all_reduce_ring_slice_n must be a power of two, got {self.all_reduce_ring_slice_n}"
-            )
-
+            raise ValueError(f"all_reduce_ring_slice_n must be a power of two, got {self.all_reduce_ring_slice_n}")

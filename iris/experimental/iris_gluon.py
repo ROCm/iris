@@ -575,6 +575,7 @@ class IrisGluon:
                 >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
             """
             from iris.ccl.all_to_all import all_to_all as _all_to_all
+
             _all_to_all(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
 
     def _log_with_rank(self, level, message):

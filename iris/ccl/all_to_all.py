@@ -16,18 +16,14 @@ try:
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
     from iris.experimental.iris_gluon import IrisDeviceCtx
+
     GLUON_AVAILABLE = True
 except ImportError:
     GLUON_AVAILABLE = False
 
 
 @triton.jit()
-def chiplet_transform_chunked(
-    pid,
-    num_workgroups: tl.constexpr,
-    num_xcds: tl.constexpr,
-    chunk_size: tl.constexpr
-):
+def chiplet_transform_chunked(pid, num_workgroups: tl.constexpr, num_xcds: tl.constexpr, chunk_size: tl.constexpr):
     if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
         # Outside of the contiguous chunked region, leave unchanged.
         return pid
@@ -41,6 +37,7 @@ def chiplet_transform_chunked(
     xcd = pid % num_xcds
     new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
     return new_pid
+
 
 @triton.jit()
 def persistent_all_to_all(
@@ -141,7 +138,6 @@ def persistent_all_to_all(
         output_offset_remote = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
         output_ptr_remote = tl.multiple_of(output_ptr + output_offset_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-
         # Pre-compute rank stride for input (N * stride_in_n)
         rank_stride_in = N * stride_in_n
 
@@ -180,9 +176,12 @@ def persistent_all_to_all(
                     sub_rn = sub_rn_base + tl.arange(0, SUB_BLOCK_N)
 
                     # Create mask for this sub-block
-                    sub_mask = (sub_rm[:, None] < M) & (sub_rn[None, :] < N) & \
-                               (sub_rm[:, None] < (tile_base_m + BLOCK_SIZE_M)) & \
-                               (sub_rn[None, :] < (tile_base_n + BLOCK_SIZE_N))
+                    sub_mask = (
+                        (sub_rm[:, None] < M)
+                        & (sub_rn[None, :] < N)
+                        & (sub_rm[:, None] < (tile_base_m + BLOCK_SIZE_M))
+                        & (sub_rn[None, :] < (tile_base_n + BLOCK_SIZE_N))
+                    )
 
                     # Compute offsets for this sub-block
                     sub_input_base_m = sub_rm[:, None] * stride_in_m
@@ -218,12 +217,10 @@ def persistent_all_to_all(
 
 # Gluon implementation with traffic shaping based on micro-benchmark algorithm
 if GLUON_AVAILABLE:
+
     @gluon.jit
     def chiplet_transform_chunked_gluon(
-        pid,
-        num_xcds: gl.constexpr,
-        num_workgroups: gl.constexpr,
-        chunk_size: gl.constexpr
+        pid, num_xcds: gl.constexpr, num_workgroups: gl.constexpr, chunk_size: gl.constexpr
     ):
         if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
             return pid
@@ -386,7 +383,7 @@ def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
     # Choose between Triton and Gluon implementation
     if config.use_gluon and GLUON_AVAILABLE:
         # Check if shmem is Iris Gluon (has get_device_context method)
-        if not hasattr(shmem, 'get_device_context'):
+        if not hasattr(shmem, "get_device_context"):
             raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
 
         context_tensor = shmem.get_device_context()

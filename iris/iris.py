@@ -1545,6 +1545,7 @@ class Iris:
                 >>> shmem.ccl.all_to_all(output_tensor, input_tensor, async_op=True)
             """
             from iris.ccl.all_to_all import all_to_all as _all_to_all
+
             _all_to_all(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
 
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):

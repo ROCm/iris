@@ -23,9 +23,9 @@ from iris.ccl import Config
 @pytest.mark.parametrize(
     "M, N",
     [
-        (128, 64),   # Small
+        (128, 64),  # Small
         (1024, 256),  # Medium
-        (8192, 8192), # Large
+        (8192, 8192),  # Large
     ],
 )
 def test_all_to_all(dtype, M, N):
@@ -82,6 +82,6 @@ def test_all_to_all(dtype, M, N):
     atol = 1e-3 if dtype == torch.float16 else 1e-5
     max_diff = torch.abs(iris_output_concat - pytorch_output_concat).max().item()
 
-    assert torch.allclose(iris_output_concat, pytorch_output_concat, atol=atol), \
-        f"Max difference: {max_diff}, expected < {atol}\n" \
-        f"Rank {rank}: Iris output doesn't match PyTorch's all_to_all"
+    assert torch.allclose(iris_output_concat, pytorch_output_concat, atol=atol), (
+        f"Max difference: {max_diff}, expected < {atol}\nRank {rank}: Iris output doesn't match PyTorch's all_to_all"
+    )

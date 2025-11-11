@@ -13,5 +13,3 @@ Collective operations are accessed through the Iris instance's ccl attribute:
 from .config import Config
 
 __all__ = ["Config"]
-
-

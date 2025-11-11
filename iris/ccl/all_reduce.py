@@ -83,7 +83,6 @@ def all_reduce_preamble(
     workspace.num_rings = getattr(config, "all_reduce_num_rings", 1)
     workspace.prepared = False
 
-
     if variant in (VARIANT_ATOMIC, VARIANT_SPINLOCK, VARIANT_ONE_SHOT):
         output_tensor.zero_()
         shmem.barrier()
@@ -103,10 +102,7 @@ def all_reduce_preamble(
         else:
             workspace.ring_buffer.zero_()
 
-        if (
-            workspace.flags is None
-            or workspace.flags.numel() != total_flags
-        ):
+        if workspace.flags is None or workspace.flags.numel() != total_flags:
             workspace.flags = shmem.zeros((total_flags,), dtype=torch.int32)
         else:
             workspace.flags.zero_()
@@ -121,10 +117,7 @@ def all_reduce_preamble(
         num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
         num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
         total_tiles = num_pid_m * num_pid_n
-        if (
-            workspace.locks is None
-            or workspace.locks.numel() != total_tiles
-        ):
+        if workspace.locks is None or workspace.locks.numel() != total_tiles:
             workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
         else:
             workspace.locks.zero_()
@@ -134,12 +127,7 @@ def all_reduce_preamble(
 
 
 @triton.jit()
-def chiplet_transform_chunked(
-    pid,
-    num_workgroups: tl.constexpr,
-    num_xcds: tl.constexpr,
-    chunk_size: tl.constexpr
-):
+def chiplet_transform_chunked(pid, num_workgroups: tl.constexpr, num_xcds: tl.constexpr, chunk_size: tl.constexpr):
     if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
         return pid
 
@@ -497,9 +485,7 @@ def persistent_all_reduce_ring(
                 mask = (rm[:, None] < M) & (rn[None, :] < N)
                 tile_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
 
-                local_tile = tl.load(
-                    input_ptr + tile_offset, mask=mask, other=0
-                )
+                local_tile = tl.load(input_ptr + tile_offset, mask=mask, other=0)
                 acc = local_tile.to(acc_dtype)
                 send_data = local_tile
 
@@ -508,16 +494,19 @@ def persistent_all_reduce_ring(
                 local_flag_ptr = flags + flag_offset
 
                 for _step in range(0, world_size - 1):
-                    while iris.atomic_cas(
-                        remote_flag_ptr,
-                        0,
-                        0,
-                        cur_rank,
-                        next_rank,
-                        heap_bases,
-                        sem="acquire",
-                        scope="sys",
-                    ) != 0:
+                    while (
+                        iris.atomic_cas(
+                            remote_flag_ptr,
+                            0,
+                            0,
+                            cur_rank,
+                            next_rank,
+                            heap_bases,
+                            sem="acquire",
+                            scope="sys",
+                        )
+                        != 0
+                    ):
                         pass
 
                     iris.store(
@@ -539,23 +528,14 @@ def persistent_all_reduce_ring(
                         scope="sys",
                     )
 
-                    while (
-                        tl.atomic_cas(
-                            local_flag_ptr, 0, 0, sem="acquire", scope="sys"
-                        )
-                        != 1
-                    ):
+                    while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
                         pass
 
-                    recv_tile = tl.load(
-                        ring_buffer + tile_offset, mask=mask, other=0
-                    )
+                    recv_tile = tl.load(ring_buffer + tile_offset, mask=mask, other=0)
                     acc += recv_tile.to(acc_dtype)
                     send_data = recv_tile
                     tl.debug_barrier()
-                    tl.atomic_xchg(
-                        local_flag_ptr, 0, sem="release", scope="sys"
-                    )
+                    tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
 
                 tl.store(
                     output_ptr + tile_offset,
@@ -662,7 +642,9 @@ def persistent_all_reduce_two_shot(
                 )
 
 
-def all_reduce(output_tensor, input_tensor, shmem, config=None, async_op=False, workspace: Optional[AllReduceWorkspace] = None):
+def all_reduce(
+    output_tensor, input_tensor, shmem, config=None, async_op=False, workspace: Optional[AllReduceWorkspace] = None
+):
     """
     Internal all-reduce collective operation implementation.
 
@@ -867,4 +849,3 @@ def all_reduce(output_tensor, input_tensor, shmem, config=None, async_op=False, 
         shmem.barrier()
 
     return workspace
-

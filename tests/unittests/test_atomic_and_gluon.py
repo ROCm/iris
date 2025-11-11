@@ -117,4 +117,5 @@ def test_atomic_and_api(dtype, sem, scope, BLOCK_SIZE):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()

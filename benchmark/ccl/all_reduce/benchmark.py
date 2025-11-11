@@ -93,9 +93,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         rank=local_rank,
         device_id=torch.device(f"cuda:{local_rank}"),
     )
-    
+
     shmem = iris.iris(args["heap_size"])
-    
+
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
@@ -133,7 +133,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         config_kwargs["num_xcds"] = args["num_xcds"]
     if args["variant"] == "two_shot":
         config_kwargs["all_reduce_distribution"] = args["distribution"]
-    
+
     config = Config(**config_kwargs)
 
     json_writer = JSONWriter(args["output_file"])
@@ -141,7 +141,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     for key, value in args.items():
         json_writer.add_field(key, value)
-    
+
     # Export config values to JSON (use actual values from config, including defaults)
     json_writer.add_field("block_size_m", config.block_size_m)
     json_writer.add_field("block_size_n", config.block_size_n)
@@ -160,11 +160,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     input_tensor = shmem.zeros((M, N), dtype=datatype)
     output_tensor = shmem.zeros((M, N), dtype=datatype)
     expected_tensor = None
-    
+
     # Fill input with deterministic values
     val = float(rank + 1)
     input_tensor.fill_(val)
-    
+
     # Expected result: sum of all ranks (1 + 2 + ... + world_size)
     expected_sum = float(world_size * (world_size + 1) / 2)
     if args["validate"]:
@@ -209,10 +209,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             kernel_timing["all_reduce"]["end_event"].record()
             kernel_timing["all_reduce"]["experiments"] += 1
         torch.cuda.nvtx.range_pop()
-        
+
         # Synchronize before querying event timing
         shmem.barrier()
-        
+
         # Update timing
         ms = kernel_timing["all_reduce"]["start_event"].elapsed_time(kernel_timing["all_reduce"]["end_event"])
         kernel_timing["all_reduce"]["ms"] += ms
@@ -222,15 +222,15 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     if args["validate"]:
         shmem.info("Validating...")
-        
+
         # Reset output before validation
         output_tensor.zero_()
         shmem.barrier()
-        
+
         # Reinitialize input data
         input_tensor.fill_(float(rank + 1))
         shmem.barrier()
-        
+
         run_experiment()
         torch.cuda.synchronize()
         shmem.barrier()
@@ -250,7 +250,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
         # Wait for all to finish validation
         shmem.barrier()
-    
+
     if args["benchmark"]:
         # Warmup for benchmarking
         run_experiment()
@@ -263,13 +263,13 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         # Reset output before benchmarking
         output_tensor.zero_()
         shmem.barrier()
-        
+
         # Reinitialize input data
         input_tensor.fill_(float(rank + 1))
         shmem.barrier()
-        
+
         shmem.info("Benchmarking...")
-        
+
         # Calculate bandwidth
         # All-reduce moves 2 * (world_size - 1) / world_size * data_size bytes
         # This accounts for the ring-based algorithm where data is transferred in (world_size - 1) steps
@@ -279,7 +279,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         total_bytes_gb = total_bytes / (1024**3)
 
         triton_ms = iris.do_bench(run_experiment, shmem.barrier)
-        bandwidth_gbps = total_bytes_gb / ((kernel_timing["all_reduce"]["ms"] / kernel_timing["all_reduce"]["experiments"]) * 1e-3)
+        bandwidth_gbps = total_bytes_gb / (
+            (kernel_timing["all_reduce"]["ms"] / kernel_timing["all_reduce"]["experiments"]) * 1e-3
+        )
 
         shmem.info(
             f"All-reduce (M={M}, N={N}, world_size={world_size}, dtype={args['datatype']}, variant={args['variant']}): "
@@ -323,4 +325,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

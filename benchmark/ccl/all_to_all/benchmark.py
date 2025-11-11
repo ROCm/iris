@@ -22,6 +22,7 @@ from iris.ccl import Config
 # Conditional import for Gluon
 try:
     import iris.experimental.iris_gluon as iris_gluon
+
     GLUON_AVAILABLE = True
 except ImportError:
     GLUON_AVAILABLE = False
@@ -75,7 +76,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         rank=local_rank,
         device_id=torch.device(f"cuda:{local_rank}"),
     )
-    
+
     # Use Gluon if requested and available
     if args.get("use_gluon", False):
         if not GLUON_AVAILABLE:
@@ -83,7 +84,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem = iris_gluon.iris(args["heap_size"])
     else:
         shmem = iris.iris(args["heap_size"])
-    
+
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
@@ -114,7 +115,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         config_kwargs["num_xcds"] = args["num_xcds"]
     if args.get("use_gluon", False):
         config_kwargs["use_gluon"] = True
-    
+
     config = Config(**config_kwargs)
 
     json_writer = JSONWriter(args["output_file"])
@@ -122,7 +123,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     for key, value in args.items():
         json_writer.add_field(key, value)
-    
+
     # Export config values to JSON (use actual values from config, including defaults)
     json_writer.add_field("block_size_m", config.block_size_m)
     json_writer.add_field("block_size_n", config.block_size_n)
@@ -138,12 +139,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     input_concat = shmem.zeros((M, N * world_size), dtype=datatype)
     output_concat = shmem.zeros((M, N * world_size), dtype=datatype)
     expected_concat = shmem.zeros((M, N * world_size), dtype=datatype)
-    
+
     for target_rank in range(world_size):
         # Input: rank sends data at position (target_rank * N)
         val = float(rank * 1000 + target_rank)
         input_concat[:, target_rank * N : (target_rank + 1) * N] = val
-        
+
         # Expected: receive from target_rank at position (target_rank * N)
         expected_val = float(target_rank * 1000 + rank)
         expected_concat[:, target_rank * N : (target_rank + 1) * N] = expected_val
@@ -170,10 +171,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             kernel_timing["all_to_all"]["end_event"].record()
             kernel_timing["all_to_all"]["experiments"] += 1
         torch.cuda.nvtx.range_pop()
-        
+
         # Synchronize before querying event timing
         shmem.barrier()
-        
+
         # Update timing
         ms = kernel_timing["all_to_all"]["start_event"].elapsed_time(kernel_timing["all_to_all"]["end_event"])
         kernel_timing["all_to_all"]["ms"] += ms
@@ -183,17 +184,17 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     if args["validate"]:
         shmem.info("Validating...")
-        
+
         # Reset output before validation
         output_concat.zero_()
         shmem.barrier()
-        
+
         # Reinitialize input data
         for target_rank in range(world_size):
             val = float(rank * 1000 + target_rank)
             input_concat[:, target_rank * N : (target_rank + 1) * N] = val
         shmem.barrier()
-        
+
         run_experiment()
         torch.cuda.synchronize()
         shmem.barrier()
@@ -213,7 +214,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
         # Wait for all to finish validation
         shmem.barrier()
-    
+
     if args["benchmark"]:
         # Warmup for benchmarking
         run_experiment()
@@ -226,15 +227,15 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         # Reset output before benchmarking
         output_concat.zero_()
         shmem.barrier()
-        
+
         # Reinitialize input data
         for target_rank in range(world_size):
             val = float(rank * 1000 + target_rank)
             input_concat[:, target_rank * N : (target_rank + 1) * N] = val
         shmem.barrier()
-        
+
         shmem.info("Benchmarking...")
-        
+
         # Calculate bandwidth
         # In all-to-all, each rank sends and receives world_size tensors
         # Total bytes = (world_size - 1) * M * N * element_size
@@ -243,7 +244,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         total_bytes_gb = total_bytes / (1024**3)
 
         triton_ms = iris.do_bench(run_experiment, shmem.barrier)
-        bandwidth_gbps = total_bytes_gb / ((kernel_timing["all_to_all"]["ms"] / kernel_timing["all_to_all"]["experiments"]) * 1e-3)
+        bandwidth_gbps = total_bytes_gb / (
+            (kernel_timing["all_to_all"]["ms"] / kernel_timing["all_to_all"]["experiments"]) * 1e-3
+        )
 
         shmem.info(
             f"All-to-all (M={M}, N={N}, world_size={world_size}, dtype={args['datatype']}): "
@@ -285,4 +288,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
