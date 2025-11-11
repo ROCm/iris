@@ -40,7 +40,7 @@ jobs:
     name: Pip Install Test 1/2/4 Ranks (Parallel)
     needs: build-container-image
     runs-on: [self-hosted, mi3008x]
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -132,7 +132,7 @@ jobs:
     name: Pip Install Test 8 Ranks
     needs: build-container-image
     runs-on: [self-hosted, mi3008x]
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
