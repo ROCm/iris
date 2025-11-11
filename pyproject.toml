@@ -14,7 +14,7 @@ authors = [
     { name = "Muhammad Osama", email = "Muhammad.Osama@amd.com" },
     { name = "Brandon Potter", email = "Brandon.Potter@amd.com" }
 ]
-license = { text = "MIT" }
+license = "MIT"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
