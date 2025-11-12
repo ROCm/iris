@@ -107,6 +107,7 @@ def run_message_passing_kernels(module, args):
             del shmem
             # Force garbage collection to ensure IPC handles are cleaned up
             import gc
+
             gc.collect()
 
 

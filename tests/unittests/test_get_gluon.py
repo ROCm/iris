@@ -103,4 +103,5 @@ def test_get_api(dtype, BLOCK_SIZE):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()

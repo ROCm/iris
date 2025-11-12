@@ -89,6 +89,7 @@ def test_all_load_bench(dtype, buffer_size, heap_size, block_size):
             del shmem
             # Force garbage collection to ensure IPC handles are cleaned up
             import gc
+
             gc.collect()
 
 
@@ -147,6 +148,7 @@ def test_all_load_bench_with_validation(dtype):
             del shmem
             # Force garbage collection to ensure IPC handles are cleaned up
             import gc
+
             gc.collect()
 
 

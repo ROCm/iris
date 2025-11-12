@@ -96,6 +96,7 @@ def test_all_reduce(variant, dtype, M, N):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()
 
 
@@ -150,4 +151,5 @@ def test_all_reduce_two_shot_distribution(distribution, dtype=torch.float32, M=1
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()

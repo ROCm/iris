@@ -105,4 +105,5 @@ def test_all_to_all_gluon(dtype, M, N):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()

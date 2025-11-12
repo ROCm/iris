@@ -95,4 +95,5 @@ def test_all_to_all(dtype, M, N):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()

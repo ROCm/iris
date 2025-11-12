@@ -144,6 +144,7 @@ def test_copy_get(dtype, BLOCK_SIZE):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()
 
 
@@ -213,6 +214,7 @@ def test_copy_put(dtype, BLOCK_SIZE):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()
 
 
@@ -279,4 +281,5 @@ def test_copy_local(dtype, BLOCK_SIZE):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()

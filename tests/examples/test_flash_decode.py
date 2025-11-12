@@ -251,4 +251,5 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
             del shmem
             # Force garbage collection to ensure IPC handles are cleaned up
             import gc
+
             gc.collect()

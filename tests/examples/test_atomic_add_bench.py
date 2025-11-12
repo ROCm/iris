@@ -103,6 +103,7 @@ def test_atomic_bandwidth(dtype, buffer_size, heap_size, block_size):
             del shmem
             # Force garbage collection to ensure IPC handles are cleaned up
             import gc
+
             gc.collect()
 
 
@@ -173,4 +174,5 @@ def test_atomic_correctness(dtype, buffer_size, heap_size, block_size):
             del shmem
             # Force garbage collection to ensure IPC handles are cleaned up
             import gc
+
             gc.collect()

@@ -40,6 +40,7 @@ def test_broadcast_scalar(value, expected):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()
 
 
@@ -72,6 +73,7 @@ def test_broadcast_tensor_dtype(dtype):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()
 
 
@@ -103,4 +105,5 @@ def test_broadcast_tensor_shape(shape):
         del shmem
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
+
         gc.collect()
