@@ -135,6 +135,16 @@ def test_copy_get(dtype, BLOCK_SIZE):
         print("Expected:", expected)
         print("Actual:", results)
         raise
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        shmem.barrier()
+        # Explicitly delete the shmem instance to trigger cleanup
+        del shmem
+        # Force garbage collection to ensure IPC handles are cleaned up
+        import gc
+        gc.collect()
 
 
 @pytest.mark.parametrize(
@@ -194,6 +204,16 @@ def test_copy_put(dtype, BLOCK_SIZE):
         print("Expected:", expected)
         print("Actual:", results)
         raise
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        shmem.barrier()
+        # Explicitly delete the shmem instance to trigger cleanup
+        del shmem
+        # Force garbage collection to ensure IPC handles are cleaned up
+        import gc
+        gc.collect()
 
 
 @pytest.mark.parametrize(
@@ -250,3 +270,13 @@ def test_copy_local(dtype, BLOCK_SIZE):
         print("Expected:", expected)
         print("Actual:", results)
         raise
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        shmem.barrier()
+        # Explicitly delete the shmem instance to trigger cleanup
+        del shmem
+        # Force garbage collection to ensure IPC handles are cleaned up
+        import gc
+        gc.collect()
