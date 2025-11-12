@@ -97,7 +97,7 @@ def test_atomic_bandwidth(dtype, buffer_size, heap_size, block_size):
         if shmem is not None:
             try:
                 shmem.barrier()
-            except:
+            except Exception:
                 pass  # Ignore errors during cleanup
             # Explicitly delete the shmem instance to trigger cleanup
             del shmem
@@ -167,7 +167,7 @@ def test_atomic_correctness(dtype, buffer_size, heap_size, block_size):
         if shmem is not None:
             try:
                 shmem.barrier()
-            except:
+            except Exception:
                 pass  # Ignore errors during cleanup
             # Explicitly delete the shmem instance to trigger cleanup
             del shmem

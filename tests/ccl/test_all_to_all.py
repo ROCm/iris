@@ -82,6 +82,17 @@ def test_all_to_all(dtype, M, N):
     atol = 1e-3 if dtype == torch.float16 else 1e-5
     max_diff = torch.abs(iris_output_concat - pytorch_output_concat).max().item()
 
-    assert torch.allclose(iris_output_concat, pytorch_output_concat, atol=atol), (
-        f"Max difference: {max_diff}, expected < {atol}\nRank {rank}: Iris output doesn't match PyTorch's all_to_all"
-    )
+    try:
+        assert torch.allclose(iris_output_concat, pytorch_output_concat, atol=atol), (
+            f"Max difference: {max_diff}, expected < {atol}\nRank {rank}: Iris output doesn't match PyTorch's all_to_all"
+        )
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        shmem.barrier()
+        # Explicitly delete the shmem instance to trigger cleanup
+        del shmem
+        # Force garbage collection to ensure IPC handles are cleaned up
+        import gc
+        gc.collect()

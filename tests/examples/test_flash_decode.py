@@ -245,7 +245,7 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
         if shmem is not None:
             try:
                 shmem.barrier()
-            except:
+            except Exception:
                 pass  # Ignore errors during cleanup
             # Explicitly delete the shmem instance to trigger cleanup
             del shmem

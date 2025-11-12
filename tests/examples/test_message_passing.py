@@ -101,7 +101,7 @@ def run_message_passing_kernels(module, args):
         if shmem is not None:
             try:
                 shmem.barrier()
-            except:
+            except Exception:
                 pass  # Ignore errors during cleanup
             # Explicitly delete the shmem instance to trigger cleanup
             del shmem

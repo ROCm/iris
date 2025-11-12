@@ -82,10 +82,21 @@ def test_all_reduce(variant, dtype, M, N):
     atol = 1e-3 if dtype == torch.float16 else 1e-5
     max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
 
-    assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), (
-        f"Max difference: {max_diff}, expected < {atol}\n"
-        f"Rank {rank}: Iris output doesn't match PyTorch's all_reduce (variant={variant})"
-    )
+    try:
+        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), (
+            f"Max difference: {max_diff}, expected < {atol}\n"
+            f"Rank {rank}: Iris output doesn't match PyTorch's all_reduce (variant={variant})"
+        )
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        shmem.barrier()
+        # Explicitly delete the shmem instance to trigger cleanup
+        del shmem
+        # Force garbage collection to ensure IPC handles are cleaned up
+        import gc
+        gc.collect()
 
 
 @pytest.mark.parametrize(
@@ -125,7 +136,18 @@ def test_all_reduce_two_shot_distribution(distribution, dtype=torch.float32, M=1
     atol = 1e-5
     max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
 
-    assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), (
-        f"Max difference: {max_diff}, expected < {atol}\n"
-        f"Rank {rank}: Iris two-shot output doesn't match PyTorch (distribution={distribution})"
-    )
+    try:
+        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), (
+            f"Max difference: {max_diff}, expected < {atol}\n"
+            f"Rank {rank}: Iris two-shot output doesn't match PyTorch (distribution={distribution})"
+        )
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        shmem.barrier()
+        # Explicitly delete the shmem instance to trigger cleanup
+        del shmem
+        # Force garbage collection to ensure IPC handles are cleaned up
+        import gc
+        gc.collect()
