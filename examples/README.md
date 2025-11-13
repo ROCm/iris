@@ -28,7 +28,6 @@ This directory contains various algorithm implementations for distributed comput
 - [`14_all_gather_gemm`](14_all_gather_gemm): Fused All-Gather + GEMM with Pull and Push models
 - [`15_gemm_all_reduce_ring_based`](15_gemm_all_reduce_ring_based): Matrix multiplication with ring-based all-reduce
 - [`16_all_reduce_ring_based`](16_all_reduce_ring_based): Ring-based all-reduce operation
-- [`17_gemm_one_shot_all_reduce_pc`](17_gemm_one_shot_all_reduce_pc): Matrix multiplication with one-shot all-reduce using producer-consumer pattern with two distribution modes (striding and block)
 - [`20_gemm_all_scatter_independent`](20_gemm_all_scatter_independent): Independent GEMM and all-scatter operations with support for CSV input configurations
 - [`21_gemm_one_shot_all_reduce_independent`](21_gemm_one_shot_all_reduce_independent): Independent GEMM and all-reduce operations with support for CSV input configurations and selective execution
 
@@ -95,12 +94,6 @@ python examples/20_gemm_all_scatter_independent/benchmark.py --benchmark --valid
 # Independent GEMM and all-scatter - sweep with CSV configurations
 python examples/20_gemm_all_scatter_independent/benchmark.py --benchmark --validate --num_ranks 8 --csv dataset/gemm_config.csv
 
-# One-shot all-reduce with producer-consumer pattern - striding distribution
-python examples/17_gemm_one_shot_all_reduce_pc/benchmark.py --benchmark --validate --num_ranks 8 --distribution 0
-
-# One-shot all-reduce with producer-consumer pattern - block distribution
-python examples/17_gemm_one_shot_all_reduce_pc/benchmark.py --benchmark --validate --num_ranks 8 --distribution 1
-
 # Independent GEMM and all-reduce - run both operations
 python examples/21_gemm_one_shot_all_reduce_independent/benchmark.py --benchmark --validate --num_ranks 8
 
@@ -119,7 +112,7 @@ python examples/ccl/benchmark.py --benchmark --validate -m 1024 -n 512 -r 8 --da
 
 ### CSV Configuration Format
 
-**Note:** Only examples 20 and 21 support loading multiple configurations from a CSV file using the `--csv` argument. Example 17 does **not** support CSV configuration files.
+**Note:** Only examples 20 and 21 support loading multiple configurations from a CSV file using the `--csv` argument.
 
 **Example 20 CSV format:**
 ```csv

@@ -44,7 +44,7 @@ def parse_args():
         "--datatype",
         type=str,
         default="fp16",
-        choices=["fp16", "fp32", "int8", "bf16"],
+        choices=["fp16", "fp32", "bf16"],
         help="Datatype of computation",
     )
     parser.add_argument(
@@ -61,6 +61,7 @@ def parse_args():
 
     # Best to try 1, 6 or 8
     parser.add_argument("--gsize_m", type=int, default=6, help="Grid size M")
+    parser.add_argument("--num_stages", type=int, default=2, help="Number of stages")
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
 
     # For All Scatter, use: 288
@@ -96,8 +97,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         datatype = torch.float16
     elif args["datatype"] == "fp32":
         datatype = torch.float32
-    elif args["datatype"] == "int8":
-        datatype = torch.int8
     elif args["datatype"] == "bf16":
         datatype = torch.bfloat16
     else:
@@ -201,6 +200,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                 args["BLK_N"],
                 args["BLK_K"],
                 args["gsize_m"],
+                args["num_stages"],
                 shmem.get_heap_bases(),
                 "gfx942",
                 args["trace_tiles"],

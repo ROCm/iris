@@ -44,7 +44,7 @@ def parse_args():
         "--datatype",
         type=str,
         default="fp16",
-        choices=["fp16", "fp32", "int8", "bf16"],
+        choices=["fp16", "fp32", "bf16"],
         help="Datatype of computation",
     )
     parser.add_argument(
@@ -104,8 +104,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         datatype = torch.float16
     elif args["datatype"] == "fp32":
         datatype = torch.float32
-    elif args["datatype"] == "int8":
-        datatype = torch.int8
     elif args["datatype"] == "bf16":
         datatype = torch.bfloat16
     else:
