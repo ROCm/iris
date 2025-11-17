@@ -25,7 +25,8 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     bash apptainer/run.sh "$@"
 elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     echo "[INFO] Running with Docker..."
-    IMAGE_NAME=${1:-"iris-dev-triton-aafec41"}
+    # Use GitHub variable if set, otherwise default to iris-dev
+    IMAGE_NAME=${1:-${DOCKER_IMAGE_NAME:-"iris-dev"}}
     WORKSPACE_DIR=${2:-"$(pwd)"}
     bash docker/run.sh "$IMAGE_NAME" "$WORKSPACE_DIR"
 fi

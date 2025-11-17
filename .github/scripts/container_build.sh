@@ -36,9 +36,10 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     
 elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     echo "[INFO] Checking Docker images..."
-    IMAGE_NAME="iris-dev-triton-aafec41"
+    # Use GitHub variable if set, otherwise default to iris-dev
+    IMAGE_NAME=${DOCKER_IMAGE_NAME:-"iris-dev"}
     
-    # Check if the triton image exists
+    # Check if the image exists
     if docker image inspect "$IMAGE_NAME" &> /dev/null; then
         echo "[INFO] Using existing Docker image: $IMAGE_NAME"
     else
