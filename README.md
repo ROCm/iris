@@ -20,6 +20,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 
 ## Latest with Iris 🔥
 
+- [11/20/2025] Paper released: _[Iris: First-Class Multi-GPU Programming Experience in Triton](https://arxiv.org/abs/2511.12500)_
 - [04/11/2025] Paper released: _[Eliminating Multi-GPU Performance Taxes: A Systems Approach to Efficient Distributed LLMs](https://arxiv.org/abs/2511.02168)_
 - [02/10/2025] [Iris + Gluon Released](https://rocm.github.io/iris/reference/gluon/overview.html)
 - [18/09/2025] [FlashDecode with Iris](https://github.com/ROCm/iris/tree/main/examples/13_flash_decode)
@@ -258,13 +259,14 @@ We welcome your feedback and contributions!
 If you use Iris or reference it in your research, please cite our work:
 
 ```bibtex
-@software{Awad:2025:IFM,
+@misc{Awad:2025:IFM,
   author        = {Muhammad Awad and Muhammad Osama and Brandon Potter},
-  title         = {{Iris}: First-Class Multi-{GPU} Programming Experience in {Triton}},
-  year          = 2025,
-  month         = oct,
-  doi           = {10.5281/zenodo.17382307},
-  url           = {https://github.com/ROCm/iris}
+  title         = {Iris: First-Class Multi-{GPU} Programming Experience in {Triton}},
+  year          = {2025},
+  archivePrefix = {arXiv},
+  eprint        = {2511.12500},
+  primaryClass  = {cs.DC},
+  doi           = {10.48550/arXiv.2511.12500}
 }
 
 @misc{Trifan:2025:EMT,
@@ -275,6 +277,15 @@ If you use Iris or reference it in your research, please cite our work:
   eprint        = {2511.02168},
   primaryClass  = {cs.DC},
   doi           = {10.48550/arXiv.2511.02168}
+}
+
+@software{Awad:2025:IFM:Software,
+  author        = {Muhammad Awad and Muhammad Osama and Brandon Potter},
+  title         = {{Iris}: First-Class Multi-{GPU} Programming Experience in {Triton}},
+  year          = 2025,
+  month         = oct,
+  doi           = {10.5281/zenodo.17382307},
+  url           = {https://github.com/ROCm/iris}
 }
 ```
 
