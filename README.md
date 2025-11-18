@@ -281,7 +281,7 @@ If you use Iris or reference it in your research, please cite our work:
 
 @software{Awad:2025:IFM:Software,
   author        = {Muhammad Awad and Muhammad Osama and Brandon Potter},
-  title         = {{Iris}: First-Class Multi-{GPU} Programming Experience in {Triton}},
+  title         = {Iris: First-Class Multi-{GPU} Programming Experience in {Triton}},
   year          = 2025,
   month         = oct,
   doi           = {10.5281/zenodo.17382307},
