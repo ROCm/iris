@@ -16,7 +16,7 @@ from iris.ccl import Config
     "variant",
     [
         "atomic",
-        "ring",
+        # "ring",
         "two_shot",
         "one_shot",
         "spinlock",
