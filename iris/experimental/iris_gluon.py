@@ -126,6 +126,13 @@ class IrisDeviceCtx:
         translated_ptr_byte = to_base_byte + offset
         # Cast to_base back to pointer type
         translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
+
+        # Optimization to vectorize the load/store - similar to iris.py
+        # This enables the compiler to generate dwordx4 or wider loads
+        # Note: Gluon uses scalar multiples, not 2D tuples like Triton
+        # ptr = gl.max_contiguous(gl.multiple_of(ptr, 64), 64)
+        # translated_ptr = gl.max_contiguous(gl.multiple_of(translated_ptr, 64), 64)
+
         return translated_ptr
 
     @gluon.jit
@@ -518,6 +525,58 @@ class IrisGluon:
         self.heap_bases = torch.from_numpy(ipc_heap_bases).to(device=self.device, dtype=torch.uint64)
 
         distributed_barrier()
+
+        # Initialize CCL interface
+        self.ccl = self.CCL(self)
+
+    class CCL:
+        """
+        Collective Communication Library (CCL) interface for IrisGluon.
+
+        Provides collective operations that can be called as methods on the IrisGluon instance.
+        Example usage:
+            >>> shmem = iris_gluon.iris()
+            >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
+        """
+
+        def __init__(self, iris_instance):
+            """
+            Initialize CCL with a reference to the parent IrisGluon instance.
+
+            Args:
+                iris_instance: The parent IrisGluon instance
+            """
+            self._iris = iris_instance
+
+        def all_to_all(self, output_tensor, input_tensor, config=None, async_op=False):
+            """
+            All-to-all collective operation.
+
+            Each rank sends a tensor chunk to each other rank and receives
+            a tensor chunk from each other rank. Input/output tensors should have
+            shape (M, N * world_size) where each chunk of N columns corresponds to one rank.
+
+            Args:
+                output_tensor: Output tensor of shape (M, N * world_size)
+                input_tensor: Input tensor of shape (M, N * world_size)
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
+                        Set config.use_gluon=True to use Gluon implementation with traffic shaping.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
+
+            Example:
+                >>> shmem = iris_gluon.iris()
+                >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
+
+                >>> # Custom configuration with Gluon traffic shaping
+                >>> from iris.ccl import Config
+                >>> config = Config(use_gluon=True, block_size_m=128, block_size_n=32)
+                >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
+            """
+            from iris.ccl.all_to_all import all_to_all as _all_to_all
+
+            _all_to_all(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
 
     def _log_with_rank(self, level, message):
         """Helper method to log with rank information injected into the record."""

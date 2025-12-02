@@ -21,15 +21,27 @@ import iris
 def test_broadcast_scalar(value, expected):
     """Test broadcasting scalar values (int, float, bool, string, dict)."""
     shmem = iris.iris(1 << 20)
-    rank = shmem.get_rank()
+    try:
+        rank = shmem.get_rank()
 
-    val = value if rank == 0 else None
-    result = shmem.broadcast(val, source_rank=0)
+        val = value if rank == 0 else None
+        result = shmem.broadcast(val, source_rank=0)
 
-    if isinstance(expected, float):
-        assert abs(result - expected) < 1e-6
-    else:
-        assert result == expected
+        if isinstance(expected, float):
+            assert abs(result - expected) < 1e-6
+        else:
+            assert result == expected
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        shmem.barrier()
+        # Explicitly delete the shmem instance to trigger cleanup
+        del shmem
+        # Force garbage collection to ensure IPC handles are cleaned up
+        import gc
+
+        gc.collect()
 
 
 @pytest.mark.parametrize(
@@ -44,13 +56,25 @@ def test_broadcast_scalar(value, expected):
 def test_broadcast_tensor_dtype(dtype):
     """Test broadcasting tensors with different dtypes."""
     shmem = iris.iris(1 << 20)
-    rank = shmem.get_rank()
+    try:
+        rank = shmem.get_rank()
 
-    value = torch.arange(10, dtype=dtype) if rank == 0 else None
-    result = shmem.broadcast(value, source_rank=0)
+        value = torch.arange(10, dtype=dtype) if rank == 0 else None
+        result = shmem.broadcast(value, source_rank=0)
 
-    assert isinstance(result, np.ndarray)
-    np.testing.assert_array_equal(result, np.arange(10))
+        assert isinstance(result, np.ndarray)
+        np.testing.assert_array_equal(result, np.arange(10))
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        shmem.barrier()
+        # Explicitly delete the shmem instance to trigger cleanup
+        del shmem
+        # Force garbage collection to ensure IPC handles are cleaned up
+        import gc
+
+        gc.collect()
 
 
 @pytest.mark.parametrize(
@@ -64,10 +88,22 @@ def test_broadcast_tensor_dtype(dtype):
 def test_broadcast_tensor_shape(shape):
     """Test broadcasting tensors with different shapes."""
     shmem = iris.iris(1 << 25)
-    rank = shmem.get_rank()
+    try:
+        rank = shmem.get_rank()
 
-    value = torch.randn(shape) if rank == 0 else None
-    result = shmem.broadcast(value, source_rank=0)
+        value = torch.randn(shape) if rank == 0 else None
+        result = shmem.broadcast(value, source_rank=0)
 
-    assert isinstance(result, np.ndarray)
-    assert result.shape == shape
+        assert isinstance(result, np.ndarray)
+        assert result.shape == shape
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        shmem.barrier()
+        # Explicitly delete the shmem instance to trigger cleanup
+        del shmem
+        # Force garbage collection to ensure IPC handles are cleaned up
+        import gc
+
+        gc.collect()

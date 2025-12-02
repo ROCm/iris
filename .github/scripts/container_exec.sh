@@ -5,7 +5,6 @@
 # Universal container exec script - thin wrapper that executes commands in either Apptainer or Docker
 # Usage: container_exec.sh [--gpus GPUS] [--image IMAGE] <command>
 
-set -e
 
 # Parse optional arguments
 GPU_DEVICES=""
@@ -30,8 +29,8 @@ done
 # Remaining args are the command
 COMMAND="$@"
 if [ -z "$COMMAND" ]; then
-    echo "[ERROR] No command provided"
-    echo "Usage: $0 [--gpus GPUS] [--image IMAGE] <command>"
+    echo "[ERROR] No command provided" >&2
+    echo "Usage: $0 [--gpus GPUS] [--image IMAGE] <command>" >&2
     exit 1
 fi
 
@@ -43,7 +42,7 @@ elif command -v docker &> /dev/null; then
     CONTAINER_RUNTIME="docker"
     echo "[INFO] Using Docker"
 else
-    echo "[ERROR] Neither Apptainer nor Docker is available"
+    echo "[ERROR] Neither Apptainer nor Docker is available" >&2
     exit 1
 fi
 
@@ -57,13 +56,16 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     elif [ -f apptainer/images/iris.sif ]; then
         IMAGE="apptainer/images/iris.sif"
     else
-        echo "[ERROR] Apptainer image not found"
+        echo "[ERROR] Apptainer image not found" >&2
         exit 1
     fi
     
-    # Create temporary overlay in workspace
-    OVERLAY="./iris_overlay_$(date +%s%N).img"
-    apptainer overlay create --size 1024 --create-dir /var/cache/iris "${OVERLAY}" > /dev/null 2>&1
+    # Create temporary overlay in workspace with unique name based on PID and timestamp
+    OVERLAY="./iris_overlay_$$_$(date +%s%N).img"
+    if ! apptainer overlay create --size 1024 --create-dir /var/cache/iris "${OVERLAY}" > /dev/null 2>&1; then
+        echo "[ERROR] Failed to create Apptainer overlay"
+        exit 1
+    fi
     
     # Build exec command
     EXEC_CMD="apptainer exec --overlay ${OVERLAY} --no-home --cleanenv"
@@ -76,14 +78,18 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     # Add standard flags
     EXEC_CMD="$EXEC_CMD --bind ${PWD}:/iris_workspace --cwd /iris_workspace"
     
-    # Execute
-    $EXEC_CMD "$IMAGE" bash -c "$COMMAND"
+    # Execute with cleanup of overlay file
+    EXIT_CODE=0
+    $EXEC_CMD "$IMAGE" bash -c "$COMMAND" || EXIT_CODE=$?
+    # Clean up overlay file (always cleanup, even on failure)
+    rm -f "${OVERLAY}" 2>/dev/null || true
+    exit $EXIT_CODE
     
 elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     IMAGE_NAME=${CUSTOM_IMAGE:-${DOCKER_IMAGE_NAME:-"iris-dev-triton-aafec41"}}
     
     if ! docker image inspect "$IMAGE_NAME" &> /dev/null; then
-        echo "[ERROR] Docker image $IMAGE_NAME not found"
+        echo "[ERROR] Docker image $IMAGE_NAME not found" >&2
         exit 1
     fi
     
@@ -114,7 +120,9 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
         RUN_CMD="$RUN_CMD -e HIP_VISIBLE_DEVICES=${GPU_DEVICES}"
     fi
     
-    # Execute
-    $RUN_CMD "$IMAGE_NAME" -c "$COMMAND"
+    # Execute and capture exit code
+    EXIT_CODE=0
+    $RUN_CMD "$IMAGE_NAME" -c "$COMMAND" || EXIT_CODE=$?
+    exit $EXIT_CODE
 fi
 

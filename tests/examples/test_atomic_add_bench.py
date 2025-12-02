@@ -62,32 +62,49 @@ spec.loader.exec_module(module)
 )
 def test_atomic_bandwidth(dtype, buffer_size, heap_size, block_size):
     """Test that atomic_add benchmark runs and produces positive bandwidth."""
-    shmem = iris.iris(heap_size)
-    num_ranks = shmem.get_num_ranks()
+    shmem = None
+    try:
+        shmem = iris.iris(heap_size)
+        num_ranks = shmem.get_num_ranks()
 
-    element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-    n_elements = buffer_size // element_size_bytes
-    source_buffer = shmem.arange(n_elements, dtype=dtype)
+        element_size_bytes = torch.tensor([], dtype=dtype).element_size()
+        n_elements = buffer_size // element_size_bytes
+        source_buffer = shmem.arange(n_elements, dtype=dtype)
 
-    shmem.barrier()
+        shmem.barrier()
 
-    args = {
-        "datatype": torch_dtype_to_str(dtype),
-        "block_size": block_size,
-        "verbose": False,
-        "validate": False,
-        "num_experiments": 10,
-        "num_warmup": 5,
-    }
+        args = {
+            "datatype": torch_dtype_to_str(dtype),
+            "block_size": block_size,
+            "verbose": False,
+            "validate": False,
+            "num_experiments": 10,
+            "num_warmup": 5,
+        }
 
-    source_rank = 0
-    destination_rank = 1 if num_ranks > 1 else 0
+        source_rank = 0
+        destination_rank = 1 if num_ranks > 1 else 0
 
-    bandwidth_gbps, _ = module.run_experiment(shmem, args, source_rank, destination_rank, source_buffer)
+        bandwidth_gbps, _ = module.run_experiment(shmem, args, source_rank, destination_rank, source_buffer)
 
-    assert bandwidth_gbps > 0, f"Bandwidth should be positive, got {bandwidth_gbps}"
+        assert bandwidth_gbps > 0, f"Bandwidth should be positive, got {bandwidth_gbps}"
 
-    shmem.barrier()
+        shmem.barrier()
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        if shmem is not None:
+            try:
+                shmem.barrier()
+            except Exception:
+                pass  # Ignore errors during cleanup
+            # Explicitly delete the shmem instance to trigger cleanup
+            del shmem
+            # Force garbage collection to ensure IPC handles are cleaned up
+            import gc
+
+            gc.collect()
 
 
 @pytest.mark.parametrize(
@@ -113,32 +130,49 @@ def test_atomic_bandwidth(dtype, buffer_size, heap_size, block_size):
 )
 def test_atomic_correctness(dtype, buffer_size, heap_size, block_size):
     """Test that atomic_add benchmark runs and produces positive bandwidth."""
-    shmem = iris.iris(heap_size)
-    num_ranks = shmem.get_num_ranks()
+    shmem = None
+    try:
+        shmem = iris.iris(heap_size)
+        num_ranks = shmem.get_num_ranks()
 
-    element_size_bytes = torch.tensor([], dtype=dtype).element_size()
-    n_elements = buffer_size // element_size_bytes
-    source_buffer = shmem.arange(n_elements, dtype=dtype)
+        element_size_bytes = torch.tensor([], dtype=dtype).element_size()
+        n_elements = buffer_size // element_size_bytes
+        source_buffer = shmem.arange(n_elements, dtype=dtype)
 
-    shmem.barrier()
+        shmem.barrier()
 
-    args = {
-        "datatype": torch_dtype_to_str(dtype),
-        "block_size": block_size,
-        "verbose": False,
-        "validate": False,
-        "num_experiments": 1,
-        "num_warmup": 0,
-    }
+        args = {
+            "datatype": torch_dtype_to_str(dtype),
+            "block_size": block_size,
+            "verbose": False,
+            "validate": False,
+            "num_experiments": 1,
+            "num_warmup": 0,
+        }
 
-    source_rank = 0
-    destination_rank = 1 if num_ranks > 1 else 0
+        source_rank = 0
+        destination_rank = 1 if num_ranks > 1 else 0
 
-    _, result_buffer = module.run_experiment(shmem, args, source_rank, destination_rank, source_buffer)
+        _, result_buffer = module.run_experiment(shmem, args, source_rank, destination_rank, source_buffer)
 
-    if shmem.get_rank() == destination_rank:
-        expected = torch.ones(n_elements, dtype=dtype, device="cuda")
+        if shmem.get_rank() == destination_rank:
+            expected = torch.ones(n_elements, dtype=dtype, device="cuda")
 
-        assert torch.allclose(result_buffer, expected), "Result buffer should be equal to expected"
+            assert torch.allclose(result_buffer, expected), "Result buffer should be equal to expected"
 
-    shmem.barrier()
+        shmem.barrier()
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        if shmem is not None:
+            try:
+                shmem.barrier()
+            except Exception:
+                pass  # Ignore errors during cleanup
+            # Explicitly delete the shmem instance to trigger cleanup
+            del shmem
+            # Force garbage collection to ensure IPC handles are cleaned up
+            import gc
+
+            gc.collect()

@@ -128,111 +128,128 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
     Tests the correctness of the Iris Fused implementation against the Torch reference.
     This test is parameterized to run all combinations of the parameters.
     """
-    shmem = iris.iris()
-
-    args = Namespace()
-    args.rank = shmem.get_rank()
-    args.num_ranks = shmem.get_num_ranks()
-    args.local_num_ranks = shmem.get_num_ranks()
-    args.shmem = shmem
-
-    config = {
-        "kv_len": kv_len,
-        "num_heads": num_heads,
-        "num_seqs": num_seqs,
-        "head_dim": head_dim,
-        "dtype": torch.float16,
-        "block_size": 1,
-        "soft_cap": 0,
-    }
-
-    # torch.manual_seed(42)
-    torch.set_default_device("cuda")
-
-    num_query_heads = num_heads
-    num_kv_heads = num_query_heads // 8 if num_query_heads >= 8 else 1
-    scale = head_dim**-0.5
-    NUM_BLOCKS_PER_RANK = config["kv_len"] + 1
-    NUM_BLOCKS = NUM_BLOCKS_PER_RANK * args.num_ranks
-
-    tensor_data = prepare_correctness_data(config, args, num_query_heads, num_kv_heads, NUM_BLOCKS)
-    query = tensor_data["query"]
-    key_value_cache = tensor_data["key_value_cache"]
-
-    key_cache = key_value_cache[:, 0, :, :, :].contiguous()
-    value_cache = key_value_cache[:, 1, :, :, :].contiguous()
-    key_cache_this_rank = key_cache[
-        args.rank * NUM_BLOCKS_PER_RANK : (args.rank + 1) * NUM_BLOCKS_PER_RANK
-    ].contiguous()
-    value_cache_this_rank = value_cache[
-        args.rank * NUM_BLOCKS_PER_RANK : (args.rank + 1) * NUM_BLOCKS_PER_RANK
-    ].contiguous()
-
-    block_tables_this_rank = torch.arange(NUM_BLOCKS_PER_RANK, dtype=torch.int32).repeat(num_seqs, 1)
-    all_block_tables_numpy = iris._distributed_helpers.distributed_allgather_multidim(
-        block_tables_this_rank.cpu().numpy()
-    )
-    block_tables = torch.from_numpy(all_block_tables_numpy).view(args.num_ranks, num_seqs, -1)
-    ref_block_tables = torch.cat([block_tables[i] + i * NUM_BLOCKS_PER_RANK for i in range(args.num_ranks)], dim=-1)
-
-    common_params = {
-        "num_q_heads": num_query_heads,
-        "num_kv_heads": num_kv_heads,
-        "q_head_dim": head_dim,
-        "v_head_dim": head_dim,
-        "page_size": config["block_size"],
-        "scale": scale,
-        "soft_cap": config["soft_cap"],
-        "max_allowed_batch": num_seqs,
-    }
-
-    iris_fd_layer = flash_decode_fused_layer(
-        args.shmem,
-        args.rank,
-        args.rank // args.local_num_ranks,
-        args.num_ranks,
-        args.num_ranks // args.local_num_ranks,
-        **common_params,
-    )
-
-    args.shmem.barrier()
-    if hasattr(iris_fd_layer, "clear_flags"):
-        iris_fd_layer.clear_flags()
-    args.shmem.barrier()
-
-    kv_lens_per_rank = [config["kv_len"]] * num_seqs
-    global_kv_lens = [kv_lens_per_rank[0] * args.num_ranks] * num_seqs
-    kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32, device=query.device)
-    global_kv_lens_tensor = kv_lens_tensor.unsqueeze(0).repeat(args.num_ranks, 1)
-
-    output = iris_fd_layer(
-        query, key_cache_this_rank, value_cache_this_rank, global_kv_lens_tensor, block_tables_this_rank
-    )
-    torch.cuda.synchronize()
-
-    ref_output = ref_paged_attn(
-        query=query.clone(),
-        key_cache=key_cache,
-        value_cache=value_cache,
-        query_lens=[1] * num_seqs,
-        kv_lens_per_rank=global_kv_lens,
-        block_tables=ref_block_tables,
-        scale=scale,
-        soft_cap=config["soft_cap"],
-    )
-    args.shmem.barrier()
-
-    error = None
+    shmem = None
     try:
-        atol = 1e-4
-        rtol = 1e-4
-        torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
-    except AssertionError as e:
-        error = e
+        shmem = iris.iris()
 
-    print_correctness_report(args.rank, output, ref_output, error)
+        args = Namespace()
+        args.rank = shmem.get_rank()
+        args.num_ranks = shmem.get_num_ranks()
+        args.local_num_ranks = shmem.get_num_ranks()
+        args.shmem = shmem
 
-    if error:
-        raise error
+        config = {
+            "kv_len": kv_len,
+            "num_heads": num_heads,
+            "num_seqs": num_seqs,
+            "head_dim": head_dim,
+            "dtype": torch.float16,
+            "block_size": 1,
+            "soft_cap": 0,
+        }
 
-    args.shmem.barrier()
+        # torch.manual_seed(42)
+        torch.set_default_device("cuda")
+
+        num_query_heads = num_heads
+        num_kv_heads = num_query_heads // 8 if num_query_heads >= 8 else 1
+        scale = head_dim**-0.5
+        NUM_BLOCKS_PER_RANK = config["kv_len"] + 1
+        NUM_BLOCKS = NUM_BLOCKS_PER_RANK * args.num_ranks
+
+        tensor_data = prepare_correctness_data(config, args, num_query_heads, num_kv_heads, NUM_BLOCKS)
+        query = tensor_data["query"]
+        key_value_cache = tensor_data["key_value_cache"]
+
+        key_cache = key_value_cache[:, 0, :, :, :].contiguous()
+        value_cache = key_value_cache[:, 1, :, :, :].contiguous()
+        key_cache_this_rank = key_cache[
+            args.rank * NUM_BLOCKS_PER_RANK : (args.rank + 1) * NUM_BLOCKS_PER_RANK
+        ].contiguous()
+        value_cache_this_rank = value_cache[
+            args.rank * NUM_BLOCKS_PER_RANK : (args.rank + 1) * NUM_BLOCKS_PER_RANK
+        ].contiguous()
+
+        block_tables_this_rank = torch.arange(NUM_BLOCKS_PER_RANK, dtype=torch.int32).repeat(num_seqs, 1)
+        all_block_tables_numpy = iris._distributed_helpers.distributed_allgather_multidim(
+            block_tables_this_rank.cpu().numpy()
+        )
+        block_tables = torch.from_numpy(all_block_tables_numpy).view(args.num_ranks, num_seqs, -1)
+        ref_block_tables = torch.cat([block_tables[i] + i * NUM_BLOCKS_PER_RANK for i in range(args.num_ranks)], dim=-1)
+
+        common_params = {
+            "num_q_heads": num_query_heads,
+            "num_kv_heads": num_kv_heads,
+            "q_head_dim": head_dim,
+            "v_head_dim": head_dim,
+            "page_size": config["block_size"],
+            "scale": scale,
+            "soft_cap": config["soft_cap"],
+            "max_allowed_batch": num_seqs,
+        }
+
+        iris_fd_layer = flash_decode_fused_layer(
+            args.shmem,
+            args.rank,
+            args.rank // args.local_num_ranks,
+            args.num_ranks,
+            args.num_ranks // args.local_num_ranks,
+            **common_params,
+        )
+
+        args.shmem.barrier()
+        if hasattr(iris_fd_layer, "clear_flags"):
+            iris_fd_layer.clear_flags()
+        args.shmem.barrier()
+
+        kv_lens_per_rank = [config["kv_len"]] * num_seqs
+        global_kv_lens = [kv_lens_per_rank[0] * args.num_ranks] * num_seqs
+        kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32, device=query.device)
+        global_kv_lens_tensor = kv_lens_tensor.unsqueeze(0).repeat(args.num_ranks, 1)
+
+        output = iris_fd_layer(
+            query, key_cache_this_rank, value_cache_this_rank, global_kv_lens_tensor, block_tables_this_rank
+        )
+        torch.cuda.synchronize()
+
+        ref_output = ref_paged_attn(
+            query=query.clone(),
+            key_cache=key_cache,
+            value_cache=value_cache,
+            query_lens=[1] * num_seqs,
+            kv_lens_per_rank=global_kv_lens,
+            block_tables=ref_block_tables,
+            scale=scale,
+            soft_cap=config["soft_cap"],
+        )
+        args.shmem.barrier()
+
+        error = None
+        try:
+            atol = 1e-4
+            rtol = 1e-4
+            torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
+        except AssertionError as e:
+            error = e
+
+        print_correctness_report(args.rank, output, ref_output, error)
+
+        if error:
+            raise error
+
+        args.shmem.barrier()
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        if shmem is not None:
+            try:
+                shmem.barrier()
+            except Exception:
+                pass  # Ignore errors during cleanup
+            # Explicitly delete the shmem instance to trigger cleanup
+            del shmem
+            # Force garbage collection to ensure IPC handles are cleaned up
+            import gc
+
+            gc.collect()
