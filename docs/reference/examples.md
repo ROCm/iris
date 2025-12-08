@@ -26,7 +26,6 @@ We've curated a growing collection of practical examples that showcase the power
 - **[14_all_gather_gemm](https://github.com/ROCm/iris/tree/main/examples/14_all_gather_gemm)**: Fused All-Gather + GEMM with Pull and Push models
 - **[15_gemm_all_reduce_ring_based](https://github.com/ROCm/iris/tree/main/examples/15_gemm_all_reduce_ring_based)**: Matrix multiplication with ring-based all-reduce
 - **[16_all_reduce_ring_based](https://github.com/ROCm/iris/tree/main/examples/16_all_reduce_ring_based)**: Ring-based all-reduce operation
-- **[17_gemm_one_shot_all_reduce_pc](https://github.com/ROCm/iris/tree/main/examples/17_gemm_one_shot_all_reduce_pc)**: Matrix multiplication with one-shot all-reduce using producer-consumer pattern with two distribution modes (striding and block)
 - **[20_gemm_all_scatter_independent](https://github.com/ROCm/iris/tree/main/examples/20_gemm_all_scatter_independent)**: Independent GEMM and all-scatter operations with support for CSV input configurations
 - **[21_gemm_one_shot_all_reduce_independent](https://github.com/ROCm/iris/tree/main/examples/21_gemm_one_shot_all_reduce_independent)**: Independent GEMM and all-reduce operations with support for CSV input configurations and selective execution
 
