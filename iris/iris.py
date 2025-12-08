@@ -119,6 +119,9 @@ class Iris:
 
         distributed_barrier()
 
+        # Initialize CCL interface
+        self.ccl = self.CCL(self)
+
     def _log_with_rank(self, level, message):
         """Helper method to log with rank information injected into the record."""
         if logger.isEnabledFor(level):
@@ -1493,6 +1496,125 @@ class Iris:
 
         # For non-CUDA devices, always return False
         return False
+
+    class CCL:
+        """
+        Collective Communication Library (CCL) interface for Iris.
+
+        Provides collective operations that can be called as methods on the Iris instance.
+        Example usage:
+            >>> shmem = iris.iris()
+            >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
+        """
+
+        def __init__(self, iris_instance):
+            """
+            Initialize CCL with a reference to the parent Iris instance.
+
+            Args:
+                iris_instance: The parent Iris instance
+            """
+            self._iris = iris_instance
+
+        def all_to_all(self, output_tensor, input_tensor, config=None, async_op=False):
+            """
+            All-to-all collective operation.
+
+            Each rank sends a tensor chunk to each other rank and receives
+            a tensor chunk from each other rank. Input/output tensors should have
+            shape (M, N * world_size) where each chunk of N columns corresponds to one rank.
+
+            Args:
+                output_tensor: Output tensor of shape (M, N * world_size)
+                input_tensor: Input tensor of shape (M, N * world_size)
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
+
+            Example:
+                >>> shmem = iris.iris()
+                >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
+
+                >>> # Custom configuration
+                >>> from iris.ccl import Config
+                >>> config = Config(block_size_m=128, block_size_n=32)
+                >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
+
+                >>> # Async operation (no barrier)
+                >>> shmem.ccl.all_to_all(output_tensor, input_tensor, async_op=True)
+            """
+            from iris.ccl.all_to_all import all_to_all as _all_to_all
+
+            _all_to_all(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+
+        def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
+            """
+            Prepare reusable workspace for all-reduce.
+
+            Args:
+                output_tensor: Output tensor that will receive the reduced data.
+                input_tensor: Input tensor providing the local contribution.
+                config: Optional Config describing variant parameters.
+                workspace: Optional existing workspace to update/reuse.
+
+            Returns:
+                Workspace object that can be passed to ``all_reduce``.
+            """
+            from iris.ccl.all_reduce import all_reduce_preamble as _all_reduce_preamble
+
+            return _all_reduce_preamble(
+                output_tensor,
+                input_tensor,
+                self._iris,
+                config=config,
+                workspace=workspace,
+            )
+
+        def all_reduce(self, output_tensor, input_tensor, config=None, async_op=False, workspace=None):
+            """
+            All-reduce collective operation.
+
+            Each rank has a local input tensor, and all ranks compute the sum of all
+            input tensors. The result is written to output_tensor on all ranks.
+
+            Args:
+                output_tensor: Output tensor of shape (M, N) - will contain sum of all inputs
+                input_tensor: Input tensor of shape (M, N) - local rank's partial data
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
+                        Set config.all_reduce_variant to choose variant: "atomic", "ring", or "two_shot"
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
+                workspace: Optional workspace prepared by ``all_reduce_preamble`` to
+                           reuse internal buffers across invocations.
+
+            Example:
+                >>> shmem = iris.iris()
+                >>> shmem.ccl.all_reduce(output_tensor, input_tensor)
+
+                >>> # Custom configuration with ring variant
+                >>> from iris.ccl import Config
+                >>> config = Config(all_reduce_variant="ring")
+                >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
+
+                >>> # Two-shot variant with block distribution
+                >>> config = Config(all_reduce_variant="two_shot", all_reduce_distribution=1)
+                >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
+
+                >>> # Async operation (no barrier)
+                >>> shmem.ccl.all_reduce(output_tensor, input_tensor, async_op=True)
+            """
+            from iris.ccl.all_reduce import all_reduce as _all_reduce
+
+            return _all_reduce(
+                output_tensor,
+                input_tensor,
+                self._iris,
+                config=config,
+                async_op=async_op,
+                workspace=workspace,
+            )
 
 
 @triton.jit

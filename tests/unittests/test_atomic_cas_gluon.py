@@ -13,16 +13,19 @@ def atomic_cas_kernel(
     IrisDeviceCtx: gl.constexpr,
     context_tensor,
     results,
+    cmp_val_ptr,
+    val_ptr,
     sem: gl.constexpr,
     scope: gl.constexpr,
     cur_rank: gl.constexpr,
     num_ranks: gl.constexpr,
 ):
     ctx = IrisDeviceCtx.initialize(context_tensor)
-    # Cast constants to match results.dtype
-    dtype = results.dtype.element_ty
-    cmp = gl.full((), 0, dtype=dtype)  # scalar 0
-    val = gl.full((), num_ranks, dtype=dtype)  # scalar num_ranks
+    # Load values from single-element tensors passed from host using ctx.load
+    # This is a workaround for Gluon's lack of 0D tensor support
+    # Use ctx.load which handles the translation, loading from current rank (cur_rank)
+    cmp = ctx.load(cmp_val_ptr, cur_rank)
+    val = ctx.load(val_ptr, cur_rank)
 
     for target_rank in range(num_ranks):
         ctx.atomic_cas(results, cmp, val, target_rank, sem=sem, scope=scope)
@@ -60,6 +63,9 @@ def test_atomic_cas_api(dtype, sem, scope):
     cur_rank = shmem.get_rank()
 
     results = shmem.zeros((1,), dtype=dtype)
+    # Create single-element tensors for cmp and val values (workaround for 0D tensor limitation)
+    cmp_val = shmem.zeros((1,), dtype=dtype)  # Will be 0
+    val_tensor = shmem.full((1,), num_ranks, dtype=dtype)
 
     shmem.barrier()
 
@@ -68,6 +74,8 @@ def test_atomic_cas_api(dtype, sem, scope):
         iris_gl.IrisDeviceCtx,
         context_tensor,
         results,
+        cmp_val,
+        val_tensor,
         sem,
         scope,
         cur_rank,
@@ -86,3 +94,14 @@ def test_atomic_cas_api(dtype, sem, scope):
         print("Expected:", expected)
         print("Actual:", results)
         raise
+    finally:
+        # Final barrier to ensure all ranks complete before test cleanup
+        # This helps with test isolation when running multiple tests
+        # Note: shmem.barrier() already does cuda.synchronize()
+        shmem.barrier()
+        # Explicitly delete the shmem instance to trigger cleanup
+        del shmem
+        # Force garbage collection to ensure IPC handles are cleaned up
+        import gc
+
+        gc.collect()

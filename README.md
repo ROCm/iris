@@ -14,12 +14,15 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
   <a href="https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
   <a href="https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml"><img src="https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml/badge.svg" alt="Iris Tests"></a>
   <a href="https://doi.org/10.5281/zenodo.17382307"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.17382307.svg" alt="DOI"></a>
+  <a href="https://doi.org/10.48550/arXiv.2511.12500"><img src="https://img.shields.io/badge/cs.DC%2C%20cs.LG-arXiv%3A2511.12500-B31B1B.svg" alt="DOI"></a>
 </p>
 
 Iris is a Triton-based framework for Remote Memory Access (RMA) operations developed by AMD's Research and Advanced Development team. Iris provides SHMEM-like APIs within Triton for Multi-GPU programming. Iris' goal is to make Multi-GPU programming a first-class citizen in Triton while retaining Triton's programmability and performance.
 
 ## Latest with Iris 🔥
 
+- [16/11/2025] Paper released: _[Iris: First-Class Multi-GPU Programming Experience in Triton](https://arxiv.org/abs/2511.12500)_
+- [04/11/2025] Paper released: _[Eliminating Multi-GPU Performance Taxes: A Systems Approach to Efficient Distributed LLMs](https://arxiv.org/abs/2511.02168)_
 - [02/10/2025] [Iris + Gluon Released](https://rocm.github.io/iris/reference/gluon/overview.html)
 - [18/09/2025] [FlashDecode with Iris](https://github.com/ROCm/iris/tree/main/examples/13_flash_decode)
 - [16/09/2025] Iris was presented in [Chinese](https://youtu.be/wW14w1QNrY8) for participants of the AMD Distributed Inference Kernel Contest
@@ -257,9 +260,29 @@ We welcome your feedback and contributions!
 If you use Iris or reference it in your research, please cite our work:
 
 ```bibtex
-@software{Awad:2025:IFM,
+@misc{Awad:2025:IFM,
   author        = {Muhammad Awad and Muhammad Osama and Brandon Potter},
-  title         = {{Iris}: First-Class Multi-{GPU} Programming Experience in {Triton}},
+  title         = {Iris: First-Class Multi-{GPU} Programming Experience in {Triton}},
+  year          = {2025},
+  archivePrefix = {arXiv},
+  eprint        = {2511.12500},
+  primaryClass  = {cs.DC},
+  doi           = {10.48550/arXiv.2511.12500}
+}
+
+@misc{Trifan:2025:EMT,
+  author        = {Octavian Alexandru Trifan and Karthik Sangaiah and Muhammad Awad and Muhammad Osama and Sumanth Gudaparthi and Alexandru Nicolau and Alexander Veidenbaum and Ganesh Dasika},
+  title         = {Eliminating Multi-{GPU} Performance Taxes: A Systems Approach to Efficient Distributed {LLMs}},
+  year          = {2025},
+  archivePrefix = {arXiv},
+  eprint        = {2511.02168},
+  primaryClass  = {cs.DC},
+  doi           = {10.48550/arXiv.2511.02168}
+}
+
+@software{Awad:2025:IFM:Software,
+  author        = {Muhammad Awad and Muhammad Osama and Brandon Potter},
+  title         = {Iris: First-Class Multi-{GPU} Programming Experience in {Triton}},
   year          = 2025,
   month         = oct,
   doi           = {10.5281/zenodo.17382307},

@@ -40,5 +40,12 @@ fi
         echo \"Testing: \$test_file with $NUM_RANKS ranks\"
         python tests/run_tests_distributed.py --num_ranks $NUM_RANKS \"\$test_file\" -v --tb=short --durations=10
     done
+
+    # Run ccl tests
+    # DISABLED: CCL host-side APIs have issues for some data types/algorithms
+    # for test_file in tests/ccl/test_*.py; do
+    #     echo \"Testing: \$test_file with $NUM_RANKS ranks\"
+    #     python tests/run_tests_distributed.py --num_ranks $NUM_RANKS \"\$test_file\" -v --tb=short --durations=10
+    # done
 "
 

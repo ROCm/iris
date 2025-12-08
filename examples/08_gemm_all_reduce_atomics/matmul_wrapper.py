@@ -40,6 +40,7 @@ class matmul(torch.autograd.Function):
         BLK_N: int,
         BLK_K: int,
         gsize_m: int,
+        num_stages: int,
         heap_bases_ptr: torch.Tensor = None,
         arch: str = "gfx942",
         COLLECT_TIMESTAMPS: bool = False,
@@ -55,7 +56,6 @@ class matmul(torch.autograd.Function):
         num_xcds = iris.hip.get_num_xcc()
 
         # TODO: Use arch-specific values.
-        num_stages = 2
         num_warps = 8
         waves_per_eu = 0
         mfma = 16
@@ -130,6 +130,7 @@ class matmul(torch.autograd.Function):
         BLK_N: int,
         BLK_K: int,
         gsize_m: int,
+        num_stages: int,
         heap_bases_ptr: torch.Tensor = None,
         arch: str = "gfx942",
         COLLECT_TIMESTAMPS: bool = False,
@@ -149,6 +150,7 @@ class matmul(torch.autograd.Function):
             BLK_N=BLK_N,
             BLK_K=BLK_K,
             gsize_m=gsize_m,
+            num_stages=num_stages,
             heap_bases_ptr=heap_bases_ptr,
             arch=arch,
             COLLECT_TIMESTAMPS=COLLECT_TIMESTAMPS,
