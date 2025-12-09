@@ -56,6 +56,11 @@ def parse_args():
     )
     parser.add_argument("--heap_size", type=int, default=1 << 34, help="Iris heap size")
     parser.add_argument("--comm_sms", type=int, default=64, help="Number of SMs for all-to-all kernel")
+    parser.add_argument(
+        "--benchmark_rccl",
+        action="store_true",
+        help="Also benchmark PyTorch RCCL (all_to_all_single) for comparison",
+    )
     parser.add_argument("--block_size_m", type=int, default=None, help="Block size for M dimension tiling")
     parser.add_argument("--block_size_n", type=int, default=None, help="Block size for N dimension tiling")
     parser.add_argument("--swizzle_size", type=int, default=None, help="Number of tiles to swizzle together")
@@ -266,6 +271,84 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         json_writer.add_field("all_to_all_experiments", kernel_timing["all_to_all"]["experiments"])
 
         # Wait for all to finish benchmarking
+        shmem.barrier()
+
+    # Benchmark RCCL (PyTorch all_to_all_single) for comparison
+    if args.get("benchmark_rccl", False):
+        shmem.info("Benchmarking PyTorch RCCL (all_to_all_single)...")
+
+        # Create PyTorch tensors (not on Iris heap)
+        # PyTorch all_to_all_single splits along dimension 0 (rows)
+        # Input: (M * world_size, N) - each rank has M rows for each target rank
+        # Output: (M * world_size, N) - each rank receives M rows from each source rank
+        # Split sizes: [M] * world_size for both input and output
+        pytorch_input = torch.zeros(M * world_size, N, dtype=datatype, device=f"cuda:{rank}")
+        pytorch_output = torch.zeros(M * world_size, N, dtype=datatype, device=f"cuda:{rank}")
+        
+        # Initialize input: each rank has M rows for each target rank
+        for target_rank in range(world_size):
+            val = float(rank * 1000 + target_rank)
+            pytorch_input[target_rank * M : (target_rank + 1) * M, :] = val
+
+        # Warmup
+        for _ in range(10):
+            dist.all_to_all_single(
+                pytorch_output,
+                pytorch_input,
+                output_split_sizes=[M] * world_size,
+                input_split_sizes=[M] * world_size,
+            )
+        torch.cuda.synchronize()
+        dist.barrier()
+
+        # Benchmark
+        pytorch_output.zero_()
+        for target_rank in range(world_size):
+            val = float(rank * 1000 + target_rank)
+            pytorch_input[target_rank * M : (target_rank + 1) * M, :] = val
+        dist.barrier()
+
+        rccl_start = torch.cuda.Event(enable_timing=True)
+        rccl_end = torch.cuda.Event(enable_timing=True)
+
+        num_iterations = 126  # Match Iris benchmark iterations
+        dist.barrier()
+        rccl_start.record()
+        for _ in range(num_iterations):
+            dist.all_to_all_single(
+                pytorch_output,
+                pytorch_input,
+                output_split_sizes=[M] * world_size,
+                input_split_sizes=[M] * world_size,
+            )
+        rccl_end.record()
+        torch.cuda.synchronize()
+        dist.barrier()
+
+        rccl_ms = rccl_start.elapsed_time(rccl_end) / num_iterations
+        element_size = torch.tensor([], dtype=datatype).element_size()
+        # RCCL all-to-all: same bandwidth calculation as Iris
+        # Each rank sends and receives (world_size - 1) chunks
+        total_bytes = (world_size - 1) * M * N * element_size
+        total_bytes_gb = total_bytes / (1024**3)
+        rccl_bandwidth_gbps = total_bytes_gb / (rccl_ms * 1e-3)
+
+        shmem.info(
+            f"RCCL all_to_all_single (M={M}, N={N}, world_size={world_size}, dtype={args['datatype']}): "
+            f"{rccl_ms:.3f} ms, {rccl_bandwidth_gbps:.3f} GB/s"
+        )
+
+        if args["benchmark"]:
+            # Calculate performance ratio
+            iris_bandwidth = bandwidth_gbps
+            rccl_ratio = (iris_bandwidth / rccl_bandwidth_gbps) * 100 if rccl_bandwidth_gbps > 0 else 0
+            shmem.info(f"Performance ratio (Iris/RCCL): {rccl_ratio:.1f}%")
+
+            json_writer.add_field("rccl_bandwidth_gbps", rccl_bandwidth_gbps)
+            json_writer.add_field("rccl_ms", rccl_ms)
+            json_writer.add_field("rccl_ratio_percent", rccl_ratio)
+
+        # Wait for all to finish RCCL benchmarking
         shmem.barrier()
 
     if rank == 0:
