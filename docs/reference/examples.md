@@ -24,6 +24,10 @@ We've curated a growing collection of practical examples that showcase the power
 - **[12_gemm_all_scatter_bulk_synchronous](https://github.com/ROCm/iris/tree/main/examples/12_gemm_all_scatter_bulk_synchronous)**: Matrix multiplication with all-scatter using the bulk synchronous parallel approach
 - **[13_flash_decode](https://github.com/ROCm/iris/tree/main/examples/13_flash_decode)**: Fused Flash Decode Attention for accelerating LLM inference
 - **[14_all_gather_gemm](https://github.com/ROCm/iris/tree/main/examples/14_all_gather_gemm)**: Fused All-Gather + GEMM with Pull and Push models
+- **[15_gemm_all_reduce_ring_based](https://github.com/ROCm/iris/tree/main/examples/15_gemm_all_reduce_ring_based)**: Matrix multiplication with ring-based all-reduce
+- **[16_all_reduce_ring_based](https://github.com/ROCm/iris/tree/main/examples/16_all_reduce_ring_based)**: Ring-based all-reduce operation
+- **[20_gemm_all_scatter_independent](https://github.com/ROCm/iris/tree/main/examples/20_gemm_all_scatter_independent)**: Independent GEMM and all-scatter operations with support for CSV input configurations
+- **[21_gemm_one_shot_all_reduce_independent](https://github.com/ROCm/iris/tree/main/examples/21_gemm_one_shot_all_reduce_independent)**: Independent GEMM and all-reduce operations with support for CSV input configurations and selective execution
 
 ### Utilities
 - **[benchmark](https://github.com/ROCm/iris/tree/main/examples/benchmark)**: Benchmarking utilities and performance testing tools

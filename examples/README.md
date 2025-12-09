@@ -88,6 +88,12 @@ python examples/14_all_gather_gemm/example_run_pull.py --num_ranks 8
 # All-Gather + GEMM - Push model
 python examples/14_all_gather_gemm/example_run_push.py --num_ranks 8
 
+# Example command to run benchmark with ring-based all-reduce for GEMM
+python examples/15_gemm_all_reduce_ring_based/benchmark.py --benchmark --validate --num_ranks 8
+
+# Example command to run benchmark with ring-based all-reduce
+python examples/16_all_reduce_ring_based/benchmark.py --benchmark --validate --num_ranks 8
+
 # Independent GEMM and all-scatter - single configuration
 python examples/20_gemm_all_scatter_independent/benchmark.py --benchmark --validate --num_ranks 8
 
