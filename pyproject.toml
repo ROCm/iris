@@ -34,6 +34,9 @@ dev = [
     "black",
     "mypy",
 ]
+gemm = [
+    "tritonblas @ git+https://github.com/ROCm/tritonBLAS.git",
+]
 
 [tool.setuptools]
 package-dir = { "" = "." }
