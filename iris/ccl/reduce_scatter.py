@@ -56,8 +56,8 @@ def persistent_reduce_scatter_two_shot(
     """
     pid = tl.program_id(0)
 
-    if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+    # if NUM_XCDS != 1:
+    #     pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)

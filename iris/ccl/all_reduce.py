@@ -568,8 +568,6 @@ def persistent_all_reduce_two_shot(
     """Reduce assigned tiles for a rank and broadcast the result to all peers."""
     pid = tl.program_id(0)
 
-    if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -603,7 +601,11 @@ def persistent_all_reduce_two_shot(
 
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
-
+        tl.assume(tile_id >= 0)
+        tl.assume(stride_in_m >= 0)
+        tl.assume(stride_in_n >= 0)
+        tl.assume(stride_out_m >= 0)
+        tl.assume(stride_out_n >= 0)
         rm_base = pid_m * BLOCK_SIZE_M
         rn_base = pid_n * BLOCK_SIZE_N
         rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
@@ -614,26 +616,41 @@ def persistent_all_reduce_two_shot(
 
         input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+        base_ptr = input_ptr + input_offset
 
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-        for remote_rank in range(world_size):
+        # First rank initializes accumulator
+        acc = iris.load(
+            base_ptr,
+            cur_rank,
+            0,
+            heap_bases,
+            mask=mask,
+        ).to(acc_dtype)
+
+        # Unrolled accumulation over the rest of the ranks
+        for remote_rank in tl.static_range(1, world_size):
             partial = iris.load(
-                input_ptr + input_offset,
+                base_ptr,          # or base_ptr + remote_rank * stride_remote
                 cur_rank,
                 remote_rank,
                 heap_bases,
                 mask=mask,
             )
-            acc += partial.to(acc_dtype)
+            partial = partial.to(acc_dtype)
+            acc += partial
 
         reduced = acc.to(output_ptr.type.element_ty)
+        out_ptr = output_ptr + output_offset
 
-        for remote_rank in range(world_size):
-            if remote_rank == cur_rank:
-                tl.store(output_ptr + output_offset, reduced, mask=mask, cache_modifier=".wt")
-            else:
+        # Local write once
+        tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
+
+
+        # Remote writes: static, branch disappears at compile time
+        for remote_rank in tl.static_range(world_size):
+            if remote_rank != cur_rank:
                 iris.store(
-                    output_ptr + output_offset,
+                    out_ptr,
                     reduced,
                     cur_rank,
                     remote_rank,
@@ -828,6 +845,9 @@ def all_reduce(
             config.num_xcds,
             config.chunk_size,
             config.all_reduce_distribution,
+            num_warps=8,
+            num_stages=8,
+            waves_per_eu=1,
         )
     elif variant == VARIANT_ONE_SHOT:
         persistent_all_reduce_one_shot[(config.comm_sms,)](

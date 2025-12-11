@@ -1697,8 +1697,9 @@ def __translate(ptr, from_rank, to_rank, heap_bases):
 
     # Optimization to vectorize the load/store
     # We can't do this in general because we don't know the shape of the tensor
-    # ptr = tl.max_contiguous(tl.multiple_of(ptr, (64, 64)), (64, 64))
-    # translated_ptr = tl.max_contiguous(tl.multiple_of(translated_ptr, (64, 64)), (64, 64))
+    #ptr = tl.max_contiguous(tl.multiple_of(ptr, (16, 16)), (16, 32))
+    translated_ptr = tl.multiple_of(translated_ptr, (32, 32))
+    translated_ptr = tl.max_contiguous(translated_ptr, (1, 32))
 
     # ptr = tl.max_contiguous(tl.multiple_of(ptr, 512), 512)
     # translated_ptr = tl.max_contiguous(tl.multiple_of(translated_ptr, 512), 512)
