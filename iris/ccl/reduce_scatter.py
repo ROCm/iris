@@ -56,8 +56,8 @@ def persistent_reduce_scatter_two_shot(
     """
     pid = tl.program_id(0)
 
-    # if NUM_XCDS != 1:
-    #     pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -94,31 +94,49 @@ def persistent_reduce_scatter_two_shot(
 
         rm_base = pid_m * BLOCK_SIZE_M
         rn_base = pid_n * BLOCK_SIZE_N
+
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+
+        # Build indices (used by both paths)
         rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
 
         input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
 
-        # Reduce: sum contributions from all ranks
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-        for remote_rank in range(world_size):
-            partial = iris.load(
-                input_ptr + input_offset,
-                cur_rank,
-                remote_rank,
-                heap_bases,
-                mask=mask,
-            )
-            acc += partial.to(acc_dtype)
+        base_ptr = input_ptr + input_offset
+        out_ptr = output_ptr + output_offset
 
-        reduced = acc.to(output_ptr.type.element_ty)
+        # Fast path: NO MASKS
+        if is_full:
+            start_rank = pid % world_size
+            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = (start_rank + i) % world_size
+                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases).to(acc_dtype)
 
-        # Store only to own rank (no broadcast)
-        tl.store(output_ptr + output_offset, reduced, mask=mask, cache_modifier=".wt")
+            reduced = acc.to(output_ptr.type.element_ty)
+
+            # Store only to own rank (no broadcast)
+            tl.store(out_ptr, reduced, cache_modifier=".wt")
+
+        # Slow path: masked (only boundary tiles land here)
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+
+            start_rank = pid % world_size
+            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases, mask=mask).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = (start_rank + i) % world_size
+                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+
+            reduced = acc.to(output_ptr.type.element_ty)
+
+            # Store only to own rank (no broadcast)
+            tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
 
 
 def reduce_scatter(output_tensor, input_tensor, shmem, config=None, async_op=False):
@@ -213,4 +231,3 @@ def reduce_scatter(output_tensor, input_tensor, shmem, config=None, async_op=Fal
 
     if not async_op:
         shmem.barrier()
-

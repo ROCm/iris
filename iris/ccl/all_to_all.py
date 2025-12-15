@@ -102,117 +102,90 @@ def persistent_all_to_all(
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
 
-        # Compute row and column indices
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+        # Compute base indices for this tile
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+
+        # Check if this tile is fully within bounds (no edge cases)
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+
+        # Build indices (used by both paths)
+        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
 
         # Pre-compute base offsets for better memory access patterns and vectorization
-        # Base offset for input rows (M dimension)
         input_base_m = rm[:, None] * stride_in_m
-        # Base offset for output rows (M dimension)
         output_base_m = rm[:, None] * stride_out_m
-        # Base offset for input columns (N dimension) - will be adjusted per rank
         input_base_n = rn[None, :] * stride_in_n
-        # Base offset for output columns (N dimension) - will be adjusted per rank
         output_base_n = rn[None, :] * stride_out_n
 
-        # Process local rank first for better cache locality
-        # Local path: copy input[cur_rank] chunk to output[cur_rank] chunk
-        input_offset_local = input_base_m + (input_base_n + cur_rank * N * stride_in_n)
-        output_offset_local = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
-        input_ptr_local = input_ptr + input_offset_local
-        output_ptr_local = output_ptr + output_offset_local
-        # Vectorization hints for 2D access pattern
-        input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        output_ptr_local = tl.multiple_of(output_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        # Fast path: NO MASKS (full tiles)
+        if is_full:
+            # Process local rank first for better cache locality
+            input_offset_local = input_base_m + (input_base_n + cur_rank * N * stride_in_n)
+            output_offset_local = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
+            input_ptr_local = input_ptr + input_offset_local
+            output_ptr_local = output_ptr + output_offset_local
+            input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+            output_ptr_local = tl.multiple_of(output_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-        data = tl.load(input_ptr_local, mask=mask)
-        tl.store(output_ptr_local, data, mask=mask, cache_modifier=".wt")
+            data = tl.load(input_ptr_local)
+            tl.store(output_ptr_local, data, cache_modifier=".wt")
 
-        # Pre-compute constant parts that don't depend on target_rank
-        # Base offset for input (without rank-specific column offset)
-        input_base_offset = input_base_m + input_base_n
-        # Remote store offset: write into target's output at columns [cur_rank*N : (cur_rank+1)*N]
-        # This is constant for all target_rank iterations since it only depends on cur_rank
-        output_offset_remote = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
-        output_ptr_remote = tl.multiple_of(output_ptr + output_offset_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+            # Process all remote ranks
+            for target_rank in range(world_size):
+                if target_rank != cur_rank:
+                    input_offset_remote = input_base_m + (input_base_n + target_rank * N * stride_in_n)
+                    output_offset_remote = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
+                    input_ptr_remote = input_ptr + input_offset_remote
+                    output_ptr_remote = output_ptr + output_offset_remote
+                    input_ptr_remote = tl.multiple_of(input_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+                    output_ptr_remote = tl.multiple_of(output_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-        # Pre-compute rank stride for input (N * stride_in_n)
-        rank_stride_in = N * stride_in_n
-
-        # Traffic shaping: Break each tile into 64x64 sub-blocks and process them
-        # This creates better memory access patterns and allows hardware to distribute
-        # traffic across XGMI links based on access patterns
-        SUB_BLOCK_M: tl.constexpr = 64
-        SUB_BLOCK_N: tl.constexpr = 64
-
-        # Calculate number of 64x64 sub-blocks needed to cover the tile
-        num_sub_blocks_m = tl.cdiv(BLOCK_SIZE_M, SUB_BLOCK_M)
-        num_sub_blocks_n = tl.cdiv(BLOCK_SIZE_N, SUB_BLOCK_N)
-        total_sub_blocks = num_sub_blocks_m * num_sub_blocks_n
-
-        # Base row/column indices for the tile
-        tile_base_m = pid_m * BLOCK_SIZE_M
-        tile_base_n = pid_n * BLOCK_SIZE_N
-
-        # Process all remote ranks: load each chunk and scatter to corresponding target
-        # Each target_rank may have different input data, so we must load separately
-        for target_rank in range(world_size):
-            if target_rank != cur_rank:
-                # Traffic shaping: Process tile in 64x64 sub-blocks
-                # Loop over all sub-blocks to ensure complete coverage
-                for sub_block_id in range(total_sub_blocks):
-                    # Calculate sub-block position within the tile
-                    sub_block_m = (sub_block_id // num_sub_blocks_n) * SUB_BLOCK_M
-                    sub_block_n = (sub_block_id % num_sub_blocks_n) * SUB_BLOCK_N
-
-                    # Compute row and column indices for this 64x64 sub-block
-                    # Start from tile base and add sub-block offset, then create arrays
-                    sub_rm_base = tile_base_m + sub_block_m
-                    sub_rn_base = tile_base_n + sub_block_n
-                    sub_rm = sub_rm_base + tl.arange(0, SUB_BLOCK_M)
-                    sub_rn = sub_rn_base + tl.arange(0, SUB_BLOCK_N)
-
-                    # Create mask for this sub-block
-                    sub_mask = (
-                        (sub_rm[:, None] < M)
-                        & (sub_rn[None, :] < N)
-                        & (sub_rm[:, None] < (tile_base_m + BLOCK_SIZE_M))
-                        & (sub_rn[None, :] < (tile_base_n + BLOCK_SIZE_N))
-                    )
-
-                    # Compute offsets for this sub-block
-                    sub_input_base_m = sub_rm[:, None] * stride_in_m
-                    sub_input_base_n = sub_rn[None, :] * stride_in_n
-                    sub_output_base_m = sub_rm[:, None] * stride_out_m
-                    sub_output_base_n = sub_rn[None, :] * stride_out_n
-
-                    # Compute input pointer for this target_rank's chunk (sub-block)
-                    sub_input_offset = sub_input_base_m + (sub_input_base_n + target_rank * N * stride_in_n)
-                    sub_input_ptr_send = input_ptr + sub_input_offset
-                    sub_input_ptr_send = tl.multiple_of(sub_input_ptr_send, (SUB_BLOCK_M, SUB_BLOCK_N))
-
-                    # Compute output pointer (sub-block)
-                    sub_output_offset = sub_output_base_m + (sub_output_base_n + cur_rank * N * stride_out_n)
-                    sub_output_ptr_remote = output_ptr + sub_output_offset
-                    sub_output_ptr_remote = tl.multiple_of(sub_output_ptr_remote, (SUB_BLOCK_M, SUB_BLOCK_N))
-
-                    # Load data chunk for this target rank (64x64 sub-block)
-                    sub_data = tl.load(sub_input_ptr_send, mask=sub_mask)
-
-                    # Scatter to target rank's output
-                    # Processing in 64x64 sub-blocks creates better memory access patterns
-                    # that allow hardware to distribute traffic across XGMI links
+                    remote_data = tl.load(input_ptr_remote)
                     iris.store(
-                        sub_output_ptr_remote,
-                        sub_data,
+                        output_ptr_remote,
+                        remote_data,
                         cur_rank,
                         target_rank,
                         heap_bases,
-                        mask=sub_mask,
+                    )
+
+        # Slow path: masked (only boundary tiles land here)
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+
+            # Process local rank first for better cache locality
+            input_offset_local = input_base_m + (input_base_n + cur_rank * N * stride_in_n)
+            output_offset_local = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
+            input_ptr_local = input_ptr + input_offset_local
+            output_ptr_local = output_ptr + output_offset_local
+            input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+            output_ptr_local = tl.multiple_of(output_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+            data = tl.load(input_ptr_local, mask=mask)
+            tl.store(output_ptr_local, data, mask=mask, cache_modifier=".wt")
+
+            # Process all remote ranks
+            for target_rank in range(world_size):
+                if target_rank != cur_rank:
+                    input_offset_remote = input_base_m + (input_base_n + target_rank * N * stride_in_n)
+                    output_offset_remote = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
+                    input_ptr_remote = input_ptr + input_offset_remote
+                    output_ptr_remote = output_ptr + output_offset_remote
+                    input_ptr_remote = tl.multiple_of(input_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+                    output_ptr_remote = tl.multiple_of(output_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+                    remote_data = tl.load(input_ptr_remote, mask=mask)
+                    iris.store(
+                        output_ptr_remote,
+                        remote_data,
+                        cur_rank,
+                        target_rank,
+                        heap_bases,
+                        mask=mask,
                     )
 
 

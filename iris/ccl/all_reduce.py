@@ -623,15 +623,18 @@ def persistent_all_reduce_two_shot(
         if is_full:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-            acc = iris.load(base_ptr, cur_rank, 0, heap_bases).to(acc_dtype)
-            for remote_rank in tl.static_range(1, world_size):
+            start_rank = pid % world_size
+            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = (start_rank + i) % world_size
                 acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
             tl.store(out_ptr, reduced, cache_modifier=".wt")
 
-            for remote_rank in tl.static_range(0, world_size):
+            for i in tl.static_range(0, world_size):
+                remote_rank = (start_rank + i) % world_size
                 if remote_rank != cur_rank:
                     iris.store(out_ptr, reduced, cur_rank, remote_rank, heap_bases)
 
@@ -639,15 +642,18 @@ def persistent_all_reduce_two_shot(
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-            acc = iris.load(base_ptr, cur_rank, 0, heap_bases, mask=mask).to(acc_dtype)
-            for remote_rank in tl.static_range(1, world_size):
+            start_rank = pid % world_size
+            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases, mask=mask).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = (start_rank + i) % world_size
                 acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
 
-            for remote_rank in tl.static_range(0, world_size):
+            for i in tl.static_range(0, world_size):
+                remote_rank = (start_rank + i) % world_size
                 if remote_rank != cur_rank:
                     iris.store(out_ptr, reduced, cur_rank, remote_rank, heap_bases, mask=mask)
 

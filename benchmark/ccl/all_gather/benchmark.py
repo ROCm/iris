@@ -336,7 +336,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 def main():
     args = parse_args()
     num_ranks = args["num_ranks"]
-    init_url = "tcp://127.0.0.1:29503"
+    init_url = "tcp://127.0.0.1:29234"
 
     mp.spawn(
         fn=_worker,
