@@ -543,8 +543,7 @@ def persistent_all_reduce_ring(
                     mask=mask,
                 )
 
-
-@triton.jit()
+@triton.jit
 def persistent_all_reduce_two_shot(
     input_ptr,
     output_ptr,
@@ -561,13 +560,14 @@ def persistent_all_reduce_two_shot(
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
-    CHUNK_SIZE: tl.constexpr,
+    NUM_XCDS: tl.constexpr,      # unused here but kept for signature compatibility
+    CHUNK_SIZE: tl.constexpr,    # unused here but kept for signature compatibility
     DISTRIBUTION: tl.constexpr,
 ):
-    """Reduce assigned tiles for a rank and broadcast the result to all peers."""
+    """Reduce assigned tiles for a rank and broadcast the result to all peers.
+       Single kernel: unmasked fast path for full tiles, masked slow path for tails.
+    """
     pid = tl.program_id(0)
-
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -589,6 +589,7 @@ def persistent_all_reduce_two_shot(
         remaining = tl.maximum(remaining, 0)
         max_tile_offset = tl.minimum(tiles_per_rank, remaining)
 
+    # Persistent traversal
     for tile_offset in range(pid, max_tile_offset, COMM_SMS):
         tile_id = start_tile + tile_offset * stride
 
@@ -599,65 +600,56 @@ def persistent_all_reduce_two_shot(
         pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
         pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
-        tl.assume(tile_id >= 0)
-        tl.assume(stride_in_m >= 0)
-        tl.assume(stride_in_n >= 0)
-        tl.assume(stride_out_m >= 0)
-        tl.assume(stride_out_n >= 0)
         rm_base = pid_m * BLOCK_SIZE_M
         rn_base = pid_n * BLOCK_SIZE_N
+
+
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+
+        # Build indices (used by both paths)
         rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
 
         input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+
         base_ptr = input_ptr + input_offset
+        out_ptr  = output_ptr + output_offset
 
-        # First rank initializes accumulator
-        acc = iris.load(
-            base_ptr,
-            cur_rank,
-            0,
-            heap_bases,
-            mask=mask,
-        ).to(acc_dtype)
+        # Fast path: NO MASKS
+        if is_full:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-        # Unrolled accumulation over the rest of the ranks
-        for remote_rank in tl.static_range(1, world_size):
-            partial = iris.load(
-                base_ptr,          # or base_ptr + remote_rank * stride_remote
-                cur_rank,
-                remote_rank,
-                heap_bases,
-                mask=mask,
-            )
-            partial = partial.to(acc_dtype)
-            acc += partial
+            acc = iris.load(base_ptr, cur_rank, 0, heap_bases).to(acc_dtype)
+            for remote_rank in tl.static_range(1, world_size):
+                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases).to(acc_dtype)
 
-        reduced = acc.to(output_ptr.type.element_ty)
-        out_ptr = output_ptr + output_offset
+            reduced = acc.to(output_ptr.type.element_ty)
 
-        # Local write once
-        tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
+            tl.store(out_ptr, reduced, cache_modifier=".wt")
 
+            for remote_rank in tl.static_range(0, world_size):
+                if remote_rank != cur_rank:
+                    iris.store(out_ptr, reduced, cur_rank, remote_rank, heap_bases)
 
-        # Remote writes: static, branch disappears at compile time
-        for remote_rank in tl.static_range(world_size):
-            if remote_rank != cur_rank:
-                iris.store(
-                    out_ptr,
-                    reduced,
-                    cur_rank,
-                    remote_rank,
-                    heap_bases,
-                    mask=mask,
-                )
+        # Slow path: masked (only boundary tiles land here)
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
 
+            acc = iris.load(base_ptr, cur_rank, 0, heap_bases, mask=mask).to(acc_dtype)
+            for remote_rank in tl.static_range(1, world_size):
+                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+
+            reduced = acc.to(output_ptr.type.element_ty)
+
+            tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
+
+            for remote_rank in tl.static_range(0, world_size):
+                if remote_rank != cur_rank:
+                    iris.store(out_ptr, reduced, cur_rank, remote_rank, heap_bases, mask=mask)
 
 def all_reduce(
     output_tensor, input_tensor, shmem, config=None, async_op=False, workspace: Optional[AllReduceWorkspace] = None
@@ -846,7 +838,7 @@ def all_reduce(
             config.chunk_size,
             config.all_reduce_distribution,
             num_warps=8,
-            num_stages=8,
+            num_stages=1,
             waves_per_eu=1,
         )
     elif variant == VARIANT_ONE_SHOT:
