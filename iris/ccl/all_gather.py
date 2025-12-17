@@ -137,7 +137,7 @@ def persistent_all_gather(
 
             if rank == cur_rank:
                 # Local destination: use direct store
-                tl.store(output_ptr_target, data,  cache_modifier=".wt")
+                tl.store(output_ptr_target, data, cache_modifier=".wt")
             else:
                 # Remote destination: use iris.put to send from local source to remote destination
                 # from_ptr: local input source, to_ptr: remote output destination

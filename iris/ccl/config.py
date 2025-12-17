@@ -115,6 +115,4 @@ class Config:
 
         # Validate reduce_scatter_variant
         if self.reduce_scatter_variant != "two_shot":
-            raise ValueError(
-                f"reduce_scatter_variant must be 'two_shot', got '{self.reduce_scatter_variant}'"
-            )
+            raise ValueError(f"reduce_scatter_variant must be 'two_shot', got '{self.reduce_scatter_variant}'")

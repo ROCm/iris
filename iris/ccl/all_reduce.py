@@ -543,6 +543,7 @@ def persistent_all_reduce_ring(
                     mask=mask,
                 )
 
+
 @triton.jit
 def persistent_all_reduce_two_shot(
     input_ptr,
@@ -560,12 +561,12 @@ def persistent_all_reduce_two_shot(
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
-    NUM_XCDS: tl.constexpr,      # unused here but kept for signature compatibility
-    CHUNK_SIZE: tl.constexpr,    # unused here but kept for signature compatibility
+    NUM_XCDS: tl.constexpr,  # unused here but kept for signature compatibility
+    CHUNK_SIZE: tl.constexpr,  # unused here but kept for signature compatibility
     DISTRIBUTION: tl.constexpr,
 ):
     """Reduce assigned tiles for a rank and broadcast the result to all peers.
-       Single kernel: unmasked fast path for full tiles, masked slow path for tails.
+    Single kernel: unmasked fast path for full tiles, masked slow path for tails.
     """
     pid = tl.program_id(0)
 
@@ -603,7 +604,6 @@ def persistent_all_reduce_two_shot(
         rm_base = pid_m * BLOCK_SIZE_M
         rn_base = pid_n * BLOCK_SIZE_N
 
-
         is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
 
         # Build indices (used by both paths)
@@ -617,7 +617,7 @@ def persistent_all_reduce_two_shot(
         output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
 
         base_ptr = input_ptr + input_offset
-        out_ptr  = output_ptr + output_offset
+        out_ptr = output_ptr + output_offset
 
         # Fast path: NO MASKS
         if is_full:
@@ -656,6 +656,7 @@ def persistent_all_reduce_two_shot(
                 remote_rank = (start_rank + i) % world_size
                 if remote_rank != cur_rank:
                     iris.store(out_ptr, reduced, cur_rank, remote_rank, heap_bases, mask=mask)
+
 
 def all_reduce(
     output_tensor, input_tensor, shmem, config=None, async_op=False, workspace: Optional[AllReduceWorkspace] = None

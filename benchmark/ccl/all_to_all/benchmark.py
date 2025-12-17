@@ -279,12 +279,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
         # Create PyTorch tensors (not on Iris heap)
         # For all_to_all, we need a list of tensors to send and receive
-        pytorch_input_list = [
-            torch.zeros(M, N, dtype=datatype, device=f"cuda:{rank}") for _ in range(world_size)
-        ]
-        pytorch_output_list = [
-            torch.zeros(M, N, dtype=datatype, device=f"cuda:{rank}") for _ in range(world_size)
-        ]
+        pytorch_input_list = [torch.zeros(M, N, dtype=datatype, device=f"cuda:{rank}") for _ in range(world_size)]
+        pytorch_output_list = [torch.zeros(M, N, dtype=datatype, device=f"cuda:{rank}") for _ in range(world_size)]
 
         # Fill input tensors with deterministic values
         for target_rank in range(world_size):

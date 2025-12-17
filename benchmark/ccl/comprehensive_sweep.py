@@ -142,19 +142,27 @@ def run_validation(operation, comm_sms, args):
 
     script_path = script_map[operation]
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         temp_output = f.name
 
     cmd = [
-        "python", script_path,
-        "-m", str(args["m"]),
-        "-n", str(args["n"]),
-        "--datatype", args["datatype"],
-        "--comm_sms", str(comm_sms),
-        "-r", str(args["num_ranks"]),
-        "--heap_size", str(args["heap_size"]),
+        "python",
+        script_path,
+        "-m",
+        str(args["m"]),
+        "-n",
+        str(args["n"]),
+        "--datatype",
+        args["datatype"],
+        "--comm_sms",
+        str(comm_sms),
+        "-r",
+        str(args["num_ranks"]),
+        "--heap_size",
+        str(args["heap_size"]),
         "--validate",
-        "--output_file", temp_output,
+        "--output_file",
+        temp_output,
     ]
 
     # Add operation-specific parameters (same as benchmark)
@@ -185,7 +193,7 @@ def run_validation(operation, comm_sms, args):
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
-        with open(temp_output, 'r') as f:
+        with open(temp_output, "r") as f:
             data = json.load(f)
 
         os.unlink(temp_output)
@@ -222,20 +230,28 @@ def run_benchmark(operation, comm_sms, args):
     script_path = script_map[operation]
 
     # Create temporary output file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         temp_output = f.name
 
     # Build command
     cmd = [
-        "python", script_path,
-        "-m", str(args["m"]),
-        "-n", str(args["n"]),
-        "--datatype", args["datatype"],
-        "--comm_sms", str(comm_sms),
-        "-r", str(args["num_ranks"]),
-        "--heap_size", str(args["heap_size"]),
+        "python",
+        script_path,
+        "-m",
+        str(args["m"]),
+        "-n",
+        str(args["n"]),
+        "--datatype",
+        args["datatype"],
+        "--comm_sms",
+        str(comm_sms),
+        "-r",
+        str(args["num_ranks"]),
+        "--heap_size",
+        str(args["heap_size"]),
         "--benchmark",
-        "--output_file", temp_output,
+        "--output_file",
+        temp_output,
     ]
 
     # Add operation-specific parameters
@@ -278,7 +294,7 @@ def run_benchmark(operation, comm_sms, args):
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)
 
         # Read results from JSON file
-        with open(temp_output, 'r') as f:
+        with open(temp_output, "r") as f:
             data = json.load(f)
 
         # Clean up temp file
@@ -307,19 +323,19 @@ def main():
 
     results = []
 
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print("Comprehensive CCL Benchmark Sweep")
     print(f"Operations: {', '.join(args['operations'])}")
     print(f"CU range: {args['min_cus']} to {args['max_cus']} (step {args['cu_step']})")
     print(f"Problem size: {args['m']}x{args['n']}")
     print(f"Datatype: {args['datatype']}")
     print(f"Ranks: {args['num_ranks']}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     for comm_sms in cu_values:
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Testing with comm_sms={comm_sms}")
-        print(f"{'='*80}")
+        print(f"{'=' * 80}")
 
         for operation in args["operations"]:
             # Run validation if requested
@@ -393,21 +409,32 @@ def main():
 
         # Sort fieldnames for consistent column order
         # Put common fields first, then operation-specific fields
-        common_fields = ["operation", "comm_sms", "m", "n", "world_size", "datatype",
-                        "block_size_m", "block_size_n", "swizzle_size", "num_xcds",
-                        "iris_latency_ms", "iris_bandwidth_gbps"]
+        common_fields = [
+            "operation",
+            "comm_sms",
+            "m",
+            "n",
+            "world_size",
+            "datatype",
+            "block_size_m",
+            "block_size_n",
+            "swizzle_size",
+            "num_xcds",
+            "iris_latency_ms",
+            "iris_bandwidth_gbps",
+        ]
         optional_fields = sorted(all_fieldnames - set(common_fields))
         fieldnames = [f for f in common_fields if f in all_fieldnames] + optional_fields
 
-        with open(args["output_csv"], 'w', newline='') as csvfile:
+        with open(args["output_csv"], "w", newline="") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(results)
 
-        print(f"\n{'='*80}")
+        print(f"\n{'=' * 80}")
         print(f"Results written to: {args['output_csv']}")
         print(f"Total benchmarks run: {len(results)}")
-        print(f"{'='*80}\n")
+        print(f"{'=' * 80}\n")
     else:
         print("\nNo results collected!")
 
