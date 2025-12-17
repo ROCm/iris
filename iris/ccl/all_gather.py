@@ -99,7 +99,7 @@ def persistent_all_gather(
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
         rm_input = tl.max_contiguous(tl.multiple_of(rm_input, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        
+
         # Mask for local input bounds
         input_mask = (rm_input[:, None] < M) & (rn[None, :] < N)
 
@@ -110,7 +110,7 @@ def persistent_all_gather(
         input_offset = input_base_m + input_base_n
         input_ptr_source = input_ptr + input_offset
         input_ptr_source = tl.multiple_of(input_ptr_source, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        
+
         # Load local input data once for this tile
         data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
 
@@ -120,10 +120,10 @@ def persistent_all_gather(
             # Compute global output row indices: offset by cur_rank * M
             # This rank's data should be placed at output[cur_rank * M : (cur_rank + 1) * M, :]
             rm_output = rm_input + cur_rank * M
-            
+
             # Output mask: check bounds for output tensor (world_size * M rows, N cols)
             output_mask = (rm_output[:, None] < (world_size * M)) & (rn[None, :] < N)
-            
+
             # Combine masks: must be valid in both input and output
             combined_mask = input_mask & output_mask
 

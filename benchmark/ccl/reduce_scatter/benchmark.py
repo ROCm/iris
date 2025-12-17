@@ -215,58 +215,58 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         # Create reference output by manually computing expected reduce-scatter result
         # Each rank should reduce its assigned tiles from all ranks' inputs
         reference_output = shmem.zeros((M, N), dtype=datatype)
-        
+
         # Compute reference: sum all ranks' inputs for tiles assigned to this rank
         # This simulates what reduce_scatter should produce
         for r in range(world_size):
             # Create input for rank r
             rank_input = shmem.zeros((M, N), dtype=datatype)
             rank_input.fill_(float(r + 1) * 0.1)
-            
+
             # Add to reference (all tiles get summed)
             reference_output += rank_input
-        
+
         # Now reference_output contains the sum of all inputs at each location
         # In reduce_scatter, each rank only gets its assigned tiles (rest should be zero)
         # But we can use this to validate the non-zero values
-        
+
         # Validate using double precision to avoid overflow in sum computation
         output_sum = output_tensor.double().sum().item()
         input_sum = input_tensor.double().sum().item()
-        
+
         # Expected: each tile location gets sum of all ranks' contributions
         # For reduce-scatter, each rank gets its assigned tiles reduced
         # The expected value at each reduced location is the sum of all ranks' inputs
         expected_value_per_element = sum(float(r + 1) * 0.1 for r in range(world_size))
-        
+
         # Simple validation: output should be non-zero and have reasonable values
         atol = 1e-3 if datatype == torch.float16 else 1e-5
-        
+
         # Count non-zero elements across entire tensor
         non_zero_mask = output_tensor.abs() > atol
         num_non_zero = non_zero_mask.sum().item()
         total_elements = output_tensor.numel()
-        
+
         # Get statistics on non-zero values and compare with reference
         if num_non_zero > 0:
             non_zero_values = output_tensor[non_zero_mask].double()
             mean_value = non_zero_values.mean().item()
             min_value = non_zero_values.min().item()
             max_value = non_zero_values.max().item()
-            
+
             # Compare with reference output
             # For non-zero elements, they should match the reference (sum of all inputs)
             reference_non_zero = reference_output[non_zero_mask].double()
-            
+
             # Count how many elements match the reference (within tolerance)
             match_tolerance = 1e-2 if datatype == torch.float16 else 1e-4
             matches = (non_zero_values - reference_non_zero).abs() < match_tolerance
             num_matches = matches.sum().item()
             match_percentage = (num_matches / num_non_zero) * 100
-            
+
             # Check that non-zero values are close to expected sum
             expected_close = abs(mean_value - expected_value_per_element) < (expected_value_per_element * 0.2)
-            
+
             if expected_close and match_percentage > 95:
                 success = True
                 shmem.info(
@@ -360,7 +360,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         # Our implementation is different (tiles vs chunks), so we'll benchmark with same input size
         pytorch_input = torch.zeros(M, N, dtype=datatype, device=f"cuda:{rank}")
         pytorch_input.fill_(float(rank + 1) * 0.1)  # Scale down to prevent overflow
-        
+
         # PyTorch reduce_scatter_tensor splits along dim 0
         output_size_m = M // world_size
         pytorch_output = torch.zeros(output_size_m, N, dtype=datatype, device=f"cuda:{rank}")

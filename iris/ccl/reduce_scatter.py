@@ -50,7 +50,7 @@ def persistent_reduce_scatter_two_shot(
 ):
     """
     Reduce-scatter using two-shot approach.
-    
+
     Each rank reduces its assigned tiles from all ranks and stores the result
     only to its own output (no broadcast to other ranks).
     """

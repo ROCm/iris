@@ -112,7 +112,7 @@ class Config:
             )
         if self.all_reduce_ring_slice_n & (self.all_reduce_ring_slice_n - 1):
             raise ValueError(f"all_reduce_ring_slice_n must be a power of two, got {self.all_reduce_ring_slice_n}")
-        
+
         # Validate reduce_scatter_variant
         if self.reduce_scatter_variant != "two_shot":
             raise ValueError(
