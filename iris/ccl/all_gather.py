@@ -104,7 +104,6 @@ def persistent_all_gather(
         input_mask = (rm_input[:, None] < M) & (rn[None, :] < N)
 
         # Compute input offset and load local shard data once
-        # Each rank loads its own input data and then broadcasts it to all ranks
         input_base_m = rm_input[:, None] * stride_in_m
         input_base_n = rn[None, :] * stride_in_n
         input_offset = input_base_m + input_base_n
@@ -118,17 +117,15 @@ def persistent_all_gather(
         # Each rank's input goes to output[cur_rank * M : (cur_rank + 1) * M, :] on all ranks
         for rank in tl.static_range(world_size):
             # Compute global output row indices: offset by cur_rank * M
-            # This rank's data should be placed at output[cur_rank * M : (cur_rank + 1) * M, :]
             rm_output = rm_input + cur_rank * M
 
-            # Output mask: check bounds for output tensor (world_size * M rows, N cols)
-            output_mask = (rm_output[:, None] < (world_size * M)) & (rn[None, :] < N)
-
+            # Output mask: only write where input was valid
+            output_mask = (rm_output[:, None] < (cur_rank + 1) * M) & (rn[None, :] < N)
+            
             # Combine masks: must be valid in both input and output
             combined_mask = input_mask & output_mask
 
-            # Compute output offset: write to output at rows [cur_rank * M : (cur_rank + 1) * M]
-            # This is the same location on all destination ranks
+            # Compute output offset
             output_base_m = rm_output[:, None] * stride_out_m
             output_base_n = rn[None, :] * stride_out_n
             output_offset = output_base_m + output_base_n
@@ -137,16 +134,16 @@ def persistent_all_gather(
 
             if rank == cur_rank:
                 # Local destination: use direct store
-                tl.store(output_ptr_target, data, cache_modifier=".wt")
+                tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
             else:
-                # Remote destination: use iris.put to send from local source to remote destination
-                # from_ptr: local input source, to_ptr: remote output destination
-                iris.put(
-                    input_ptr_source,
+                # Remote destination: use iris.store to send data to remote destination
+                iris.store(
                     output_ptr_target,
+                    data,
                     cur_rank,
                     rank,
                     heap_bases,
+                    mask=combined_mask,
                 )
 
 
