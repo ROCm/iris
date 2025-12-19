@@ -18,14 +18,7 @@ from examples.common.utils import JSONWriter
 
 import iris
 from iris.ccl import Config
-
-# Conditional import for Gluon
-try:
-    import iris.experimental.iris_gluon as iris_gluon
-
-    GLUON_AVAILABLE = True
-except ImportError:
-    GLUON_AVAILABLE = False
+import iris.experimental.iris_gluon as iris_gluon
 
 torch.manual_seed(123)
 random.seed(123)
@@ -82,10 +75,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         device_id=torch.device(f"cuda:{local_rank}"),
     )
 
-    # Use Gluon if requested and available
-    if args.get("use_gluon", False):
-        if not GLUON_AVAILABLE:
-            raise RuntimeError("Gluon is not available. Install Triton with Gluon support or remove --use_gluon flag")
+    # Use Gluon if requested
+    if args["use_gluon"]:
         shmem = iris_gluon.iris(args["heap_size"])
     else:
         shmem = iris.iris(args["heap_size"])
@@ -118,7 +109,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         config_kwargs["swizzle_size"] = args["swizzle_size"]
     if args["num_xcds"] is not None:
         config_kwargs["num_xcds"] = args["num_xcds"]
-    if args.get("use_gluon", False):
+    if args["use_gluon"]:
         config_kwargs["use_gluon"] = True
 
     config = Config(**config_kwargs)
@@ -220,9 +211,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     if args["benchmark"]:
         # Warmup for benchmarking
-        run_experiment()
-        shmem.barrier()
-
+        for k in ["all_gather"]:
+            kernel_timing[k]["ms"] = 0
+            kernel_timing[k]["experiments"] = 0
+        
+        iris.do_bench(run_experiment, shmem.barrier, n_warmup=25, n_repeat=1)
+        
         for k in ["all_gather"]:
             kernel_timing[k]["ms"] = 0
             kernel_timing[k]["experiments"] = 0
@@ -270,7 +264,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.barrier()
 
     # Benchmark RCCL (PyTorch all_gather_into_tensor) for comparison
-    if args.get("benchmark_rccl", False):
+    if args["benchmark_rccl"]:
         shmem.info("Benchmarking PyTorch RCCL (all_gather_into_tensor)...")
 
         # Create PyTorch tensors (not on Iris heap)

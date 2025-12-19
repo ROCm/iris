@@ -11,20 +11,7 @@ import triton.language as tl
 import torch
 import iris
 from .config import Config
-
-
-@triton.jit()
-def chiplet_transform_chunked(pid, num_workgroups: tl.constexpr, num_xcds: tl.constexpr, chunk_size: tl.constexpr):
-    if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
-        return pid
-
-    local_pid = pid // num_xcds
-    chunk_idx = local_pid // chunk_size
-    pos_in_chunk = local_pid % chunk_size
-
-    xcd = pid % num_xcds
-    new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
-    return new_pid
+from .utils import chiplet_transform_chunked
 
 
 @triton.jit()

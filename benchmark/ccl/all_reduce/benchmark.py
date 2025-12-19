@@ -259,9 +259,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     if args["benchmark"]:
         # Warmup for benchmarking
-        run_experiment()
-        shmem.barrier()
-
+        for k in ["all_reduce"]:
+            kernel_timing[k]["ms"] = 0
+            kernel_timing[k]["experiments"] = 0
+        
+        iris.do_bench(run_experiment, shmem.barrier, n_warmup=25, n_repeat=1)
+        
         for k in ["all_reduce"]:
             kernel_timing[k]["ms"] = 0
             kernel_timing[k]["experiments"] = 0
@@ -307,7 +310,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.barrier()
 
     # Benchmark RCCL (PyTorch all_reduce) for comparison
-    if args.get("benchmark_rccl", False):
+    if args["benchmark_rccl"]:
         shmem.info("Benchmarking PyTorch RCCL (all_reduce)...")
 
         # Create PyTorch tensors (not on Iris heap)

@@ -11,20 +11,7 @@ import triton.language as tl
 import torch
 import iris
 from .config import Config
-
-
-@triton.jit()
-def chiplet_transform_chunked(pid, num_workgroups: tl.constexpr, num_xcds: tl.constexpr, chunk_size: tl.constexpr):
-    if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
-        return pid
-
-    local_pid = pid // num_xcds
-    chunk_idx = local_pid // chunk_size
-    pos_in_chunk = local_pid % chunk_size
-
-    xcd = pid % num_xcds
-    new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
-    return new_pid
+from .utils import chiplet_transform_chunked
 
 
 @triton.jit()
@@ -110,7 +97,10 @@ def persistent_reduce_scatter_two_shot(
         base_ptr = input_ptr + input_offset
         out_ptr = output_ptr + output_offset
 
-        # Fast path: NO MASKS
+        # Fast path: NO MASKS (full tiles)
+        # The masking is problem size dependent, and the compiler does not recognize it can have two paths
+        # (one with masks and one without). Separate unmasked paths allow the compiler to generate
+        # more efficient vectorized instructions.
         if is_full:
             start_rank = pid % world_size
             acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases).to(acc_dtype)
@@ -123,7 +113,8 @@ def persistent_reduce_scatter_two_shot(
             # Store only to own rank (no broadcast)
             tl.store(out_ptr, reduced, cache_modifier=".wt")
 
-        # Slow path: masked (only boundary tiles land here)
+        # Slow path: MASKED (only boundary tiles land here)
+        # This path handles tiles at tensor boundaries where not all elements are valid.
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 

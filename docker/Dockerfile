@@ -37,9 +37,6 @@ ENV PYTHONPATH=$TRITON_PATH
 
 # Install rocprofiler-systems
 WORKDIR /workspace
-# RUN wget https://github.com/ROCm/rocprofiler-systems/releases/latest/download/rocprofiler-systems-install.py && \
-#     python3 ./rocprofiler-systems-install.py --prefix /opt/rocprofiler-systems --rocm 7.1 && \
-#     rm -f rocprofiler-systems-install.py
 
 # Create entrypoint script
 RUN echo '#!/bin/bash' > /entrypoint.sh && \

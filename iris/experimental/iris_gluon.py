@@ -25,8 +25,18 @@ Example:
 """
 
 from triton.language.core import _aggregate as aggregate
-from triton.experimental import gluon
-from triton.experimental.gluon import language as gl
+
+# Import Gluon - if this fails, you need to update Triton to a version with Gluon support
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+except ImportError as e:
+    raise ImportError(
+        "Gluon is not available in your Triton installation. "
+        "Please update Triton to a version with Gluon support to use iris.experimental.iris_gluon. "
+        "You can install the latest Triton with: pip install --upgrade triton"
+    ) from e
+
 import triton
 import triton.language as tl
 

@@ -11,6 +11,7 @@ import triton.language as tl
 import torch
 import iris
 from .config import Config
+from .utils import chiplet_transform_chunked
 
 # Conditional import for Gluon
 try:
@@ -21,23 +22,6 @@ try:
     GLUON_AVAILABLE = True
 except ImportError:
     GLUON_AVAILABLE = False
-
-
-@triton.jit()
-def chiplet_transform_chunked(pid, num_workgroups: tl.constexpr, num_xcds: tl.constexpr, chunk_size: tl.constexpr):
-    if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
-        # Outside of the contiguous chunked region, leave unchanged.
-        return pid
-
-    local_pid = pid // num_xcds
-    # Calculate chunk index and position within chunk
-    chunk_idx = local_pid // chunk_size
-    pos_in_chunk = local_pid % chunk_size
-
-    # Calculate new PID
-    xcd = pid % num_xcds
-    new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
-    return new_pid
 
 
 @triton.jit()
@@ -122,6 +106,9 @@ def persistent_all_to_all(
         output_base_n = rn[None, :] * stride_out_n
 
         # Fast path: NO MASKS (full tiles)
+        # The masking is problem size dependent, and the compiler does not recognize it can have two paths
+        # (one with masks and one without). Separate unmasked paths allow the compiler to generate
+        # more efficient vectorized instructions.
         if is_full:
             # Process local rank first for better cache locality
             input_offset_local = input_base_m + (input_base_n + cur_rank * N * stride_in_n)
@@ -153,7 +140,8 @@ def persistent_all_to_all(
                         heap_bases,
                     )
 
-        # Slow path: masked (only boundary tiles land here)
+        # Slow path: MASKED (only boundary tiles land here)
+        # This path handles tiles at tensor boundaries where not all elements are valid.
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
