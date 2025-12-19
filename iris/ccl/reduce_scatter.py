@@ -171,7 +171,7 @@ def reduce_scatter(output_tensor, input_tensor, shmem, config=None, async_op=Fal
         >>> shmem.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
     """
     if config is None:
-        config = Config()
+        config = Config(block_size_m=32,block_size_n=64,all_reduce_distribution=1)
 
     # Check for unsupported options
     if config.use_gluon:

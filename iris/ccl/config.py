@@ -59,15 +59,15 @@ class Config:
         >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
     """
 
-    block_size_m: int = 128
-    block_size_n: int = 128
-    swizzle_size: int = 6
+    block_size_m: int = 32
+    block_size_n: int = 64
+    swizzle_size: int = 4
     comm_sms: int = 64
     num_xcds: int | None = None
     chunk_size: int | None = None
     use_gluon: bool = False
-    all_reduce_variant: str = "atomic"
-    all_reduce_distribution: int = 0
+    all_reduce_variant: str = "two_shot"
+    all_reduce_distribution: int = 1
     all_reduce_num_rings: int = 1
     all_reduce_ring_slice_n: int | None = None
     reduce_scatter_variant: str = "two_shot"
