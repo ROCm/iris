@@ -8,7 +8,6 @@ Gathers tensors from all ranks and concatenates them along the last dimension.
 
 import triton
 import triton.language as tl
-import torch
 import iris
 from .config import Config
 from .utils import chiplet_transform_chunked
