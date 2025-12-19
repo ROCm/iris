@@ -86,7 +86,9 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     exit $EXIT_CODE
     
 elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
-    IMAGE_NAME=${CUSTOM_IMAGE:-${DOCKER_IMAGE_NAME:-"iris-dev-triton-aafec41"}}
+    # Use custom image if provided, otherwise use GitHub variable or default
+    # GitHub Actions sets DOCKER_IMAGE_NAME, locally defaults to iris-dev
+    IMAGE_NAME=${CUSTOM_IMAGE:-${DOCKER_IMAGE_NAME:-"iris-dev"}}
     
     if ! docker image inspect "$IMAGE_NAME" &> /dev/null; then
         echo "[ERROR] Docker image $IMAGE_NAME not found" >&2
