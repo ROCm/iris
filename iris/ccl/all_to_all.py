@@ -343,7 +343,7 @@ def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
     """
     # Use provided config or create default one
     if config is None:
-        config = Config(block_size_m=32,block_size_n=128)
+        config = Config(block_size_m=32, block_size_n=128)
 
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()

@@ -170,7 +170,7 @@ def all_gather(output_tensor, input_tensor, shmem, config=None, async_op=False):
     """
     # Use provided config or create default one
     if config is None:
-        config = Config(block_size_m=32,block_size_n=64)
+        config = Config(block_size_m=32, block_size_n=64)
 
     # Check for unsupported options
     if config.use_gluon:

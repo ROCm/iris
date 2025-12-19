@@ -683,7 +683,7 @@ def all_reduce(
         workspace: Optional AllReduceWorkspace instance prepared via all_reduce_preamble.
     """
     if config is None:
-        config = Config(block_size_m=32,block_size_n=64,all_reduce_distribution=1)
+        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
 
     # Check for unsupported options
     if config.use_gluon:
