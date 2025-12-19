@@ -121,7 +121,7 @@ def persistent_all_gather(
 
             # Output mask: only write where input was valid
             output_mask = (rm_output[:, None] < (cur_rank + 1) * M) & (rn[None, :] < N)
-            
+
             # Combine masks: must be valid in both input and output
             combined_mask = input_mask & output_mask
 
