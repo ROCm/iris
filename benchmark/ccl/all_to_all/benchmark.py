@@ -294,19 +294,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             pytorch_input_list[target_rank].fill_(val)
         dist.barrier()
 
-        rccl_start = torch.cuda.Event(enable_timing=True)
-        rccl_end = torch.cuda.Event(enable_timing=True)
-
-        num_iterations = 126  # Match Iris benchmark iterations
-        dist.barrier()
-        rccl_start.record()
-        for _ in range(num_iterations):
+        def run_rccl_experiment():
             dist.all_to_all(pytorch_output_list, pytorch_input_list)
-        rccl_end.record()
-        torch.cuda.synchronize()
-        dist.barrier()
 
-        rccl_ms = rccl_start.elapsed_time(rccl_end) / num_iterations
+        rccl_ms = iris.do_bench(run_rccl_experiment, dist.barrier)
         element_size = torch.tensor([], dtype=datatype).element_size()
         total_bytes = (world_size - 1) * M * N * element_size
         total_bytes_gb = total_bytes / (1024**3)

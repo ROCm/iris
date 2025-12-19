@@ -370,19 +370,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         pytorch_input.fill_(float(rank + 1) * 0.1)  # Scale down to prevent overflow
         dist.barrier()
 
-        rccl_start = torch.cuda.Event(enable_timing=True)
-        rccl_end = torch.cuda.Event(enable_timing=True)
-
-        num_iterations = 126  # Match Iris benchmark iterations
-        dist.barrier()
-        rccl_start.record()
-        for _ in range(num_iterations):
+        def run_rccl_experiment():
             dist.reduce_scatter_tensor(pytorch_output, pytorch_input, op=dist.ReduceOp.SUM)
-        rccl_end.record()
-        torch.cuda.synchronize()
-        dist.barrier()
 
-        rccl_ms = rccl_start.elapsed_time(rccl_end) / num_iterations
+        rccl_ms = iris.do_bench(run_rccl_experiment, dist.barrier)
         element_size = torch.tensor([], dtype=datatype).element_size()
         # RCCL reduce-scatter: similar bandwidth calculation
         # Each rank reads from all ranks and writes its output chunk
