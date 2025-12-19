@@ -13,16 +13,16 @@ import triton.language as tl
 def chiplet_transform_chunked(pid, num_workgroups: tl.constexpr, num_xcds: tl.constexpr, chunk_size: tl.constexpr):
     """
     Transform program ID for chiplet-aware workgroup distribution.
-    
+
     This function redistributes workgroups across multiple XCDs (chiplets) in chunks
     to improve load balancing and memory access patterns.
-    
+
     Args:
         pid: Program ID to transform
         num_workgroups: Total number of workgroups
         num_xcds: Number of XCDs (chiplets)
         chunk_size: Size of chunks for distribution
-        
+
     Returns:
         Transformed program ID
     """

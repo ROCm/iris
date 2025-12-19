@@ -262,9 +262,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         for k in ["all_reduce"]:
             kernel_timing[k]["ms"] = 0
             kernel_timing[k]["experiments"] = 0
-        
+
         iris.do_bench(run_experiment, shmem.barrier, n_warmup=25, n_repeat=1)
-        
+
         for k in ["all_reduce"]:
             kernel_timing[k]["ms"] = 0
             kernel_timing[k]["experiments"] = 0
