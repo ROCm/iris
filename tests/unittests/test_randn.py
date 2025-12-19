@@ -3,7 +3,6 @@
 
 import torch
 import pytest
-import math
 import iris
 
 

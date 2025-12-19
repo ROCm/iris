@@ -32,10 +32,8 @@
 import torch
 import triton
 import math
-import os
 import triton.language as tl
 from triton.language.extra import libdevice
-import iris
 
 
 def gqa_local_kernels(

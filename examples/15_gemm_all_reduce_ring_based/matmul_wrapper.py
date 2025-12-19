@@ -3,15 +3,11 @@
 
 import torch
 import triton
-import random
-import sys
-import os
 
 # from streamk_kernel import streamk_gemm
 # from streamk_kernel_atomic import streamk_gemm
 from gemm_all_reduce_ring_based import persistent_gemm
 
-from examples.common.utils import is_triton_interpret_set
 import iris
 
 gemm_kernel = persistent_gemm

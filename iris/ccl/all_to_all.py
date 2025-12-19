@@ -8,7 +8,6 @@ Supports both Triton and Gluon implementations based on config.
 
 import triton
 import triton.language as tl
-import torch
 import iris
 from .config import Config
 from .utils import chiplet_transform_chunked

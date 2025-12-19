@@ -3,13 +3,9 @@
 
 import torch
 import triton
-import random
-import sys
-import os
 
 from gemm_one_shot_all_reduce_independent import persistent_gemm
 
-from examples.common.utils import is_triton_interpret_set
 import iris
 
 gemm_kernel = persistent_gemm

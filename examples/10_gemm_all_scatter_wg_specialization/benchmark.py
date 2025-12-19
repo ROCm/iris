@@ -7,10 +7,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import triton
 import random
-import sys
-import os
 import argparse
-import json
 import math
 
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set

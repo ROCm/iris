@@ -3,11 +3,9 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import sys
-from typing import List, Dict, Any, Optional
+from typing import Optional
 
 import torch
-import os
-import json
 
 
 def dist_print(message: str, rank: int, is_error: bool = False):

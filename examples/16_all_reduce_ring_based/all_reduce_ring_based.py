@@ -3,10 +3,7 @@
 
 import triton
 import triton.language as tl
-from examples.common.utils import read_realtime
 
-import sys
-import os
 
 import iris
 

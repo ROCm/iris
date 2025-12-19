@@ -2,7 +2,6 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import torch
-import torch.distributed as dist
 import triton
 import torch.cuda.nvtx as nvtx
 

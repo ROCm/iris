@@ -9,8 +9,6 @@ import torch.multiprocessing as mp
 import triton
 import triton.language as tl
 import random
-import os
-import sys
 
 import iris
 

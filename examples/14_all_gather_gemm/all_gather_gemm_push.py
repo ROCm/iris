@@ -5,7 +5,6 @@
 import triton
 import triton.language as tl
 import iris
-import torch
 
 
 @triton.jit

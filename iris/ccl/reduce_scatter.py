@@ -8,7 +8,6 @@ Uses the two-shot approach: reduce assigned tiles and store only to own rank.
 
 import triton
 import triton.language as tl
-import torch
 import iris
 from .config import Config
 from .utils import chiplet_transform_chunked

@@ -38,7 +38,6 @@ from iris.hip import (
     count_devices,
     get_ipc_handle,
     open_ipc_handle,
-    get_wall_clock_rate,
     get_ipc_handle_size,
 )
 import numpy as np

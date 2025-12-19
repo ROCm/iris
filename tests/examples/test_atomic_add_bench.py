@@ -4,9 +4,6 @@
 
 import pytest
 import torch
-import triton
-import triton.language as tl
-import numpy as np
 import iris
 
 import importlib.util

@@ -8,11 +8,9 @@ This avoids the overhead of creating/destroying process groups for each test cas
 """
 
 import sys
-import subprocess
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import socket
-import os
 
 
 def _find_free_port():

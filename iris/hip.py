@@ -3,7 +3,6 @@
 
 import ctypes
 import numpy as np
-import sys
 import torch
 import subprocess
 import os

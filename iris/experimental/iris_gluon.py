@@ -37,7 +37,6 @@ except ImportError as e:
         "You can install the latest Triton with: pip install --upgrade triton"
     ) from e
 
-import triton
 import triton.language as tl
 
 from iris._distributed_helpers import (
@@ -53,7 +52,6 @@ from iris.hip import (
     count_devices,
     get_ipc_handle,
     open_ipc_handle,
-    get_wall_clock_rate,
 )
 import numpy as np
 import math
