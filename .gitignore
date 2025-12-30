@@ -2,6 +2,7 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 .venv/
+.pip-cache/
 _build/
 docs-repo-template-main/
 results/
