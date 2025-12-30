@@ -1,0 +1,34 @@
+name: Copilot Setup Steps
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+  copilot-setup-steps:
+    runs-on: [self-hosted, copilot, mi3xx]
+
+    permissions:
+      contents: read
+
+    timeout-minutes: 59
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Verify ROCm and GPU visibility
+        run: |
+          echo "=== rocminfo ==="
+          rocminfo | head -50 || true
+          echo "=== rocm-smi ==="
+          rocm-smi || true
+
+      - name: Install project in editable mode
+        run: |
+          pip install -e .
