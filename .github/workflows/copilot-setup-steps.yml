@@ -21,6 +21,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        
+      - name: Create task venv for Copilot
+        run: |
+          python3 -m venv $GITHUB_WORKSPACE/.venv
+          source $GITHUB_WORKSPACE/.venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Make venv default for subsequent steps
+        run: |
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
 
       - name: Verify ROCm and GPU visibility
         run: |
