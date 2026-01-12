@@ -111,7 +111,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     assert M % world_size == 0, f"M ({M}) must be divisible by world size ({world_size})"
     assert K % world_size == 0, f"K ({K}) must be divisible by world size ({world_size})"
-    assert (M // world_size) % args["BLK_M"] == 0, f"M_per_rank ({M // world_size}) must be divisible by BLK_M ({args['BLK_M']})"
+    assert (M // world_size) % args["BLK_M"] == 0, (
+        f"M_per_rank ({M // world_size}) must be divisible by BLK_M ({args['BLK_M']})"
+    )
 
     local_K = K // world_size
     M_per_rank = M // world_size
@@ -277,9 +279,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         triton_ms = iris.do_bench(run_experiment, shmem.barrier)
         triton_tflops = perf(triton_ms)
 
-        shmem.info(
-            f"GEMM + ReduceScatter (total_tiles={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
-        )
+        shmem.info(f"GEMM + ReduceScatter (total_tiles={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops")
 
         json_writer.add_field("tflops", triton_tflops)
         json_writer.add_field("total_ms", triton_ms)

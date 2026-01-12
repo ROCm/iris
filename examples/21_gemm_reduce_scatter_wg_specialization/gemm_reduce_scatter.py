@@ -16,8 +16,8 @@ import iris
 def persistent_gemm_reduce_scatter_wg_specialized(
     A,
     B,
-    C,                  # local buffer [M, N]
-    C_global,           # global output buffer [M, N] on each rank
+    C,  # local buffer [M, N]
+    C_global,  # global output buffer [M, N] on each rank
     locks,
     M,
     N,

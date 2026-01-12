@@ -2,7 +2,6 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import torch
-import triton
 from gemm_reduce_scatter import persistent_gemm_reduce_scatter_wg_specialized
 from examples.common.utils import is_triton_interpret_set
 import iris
@@ -18,6 +17,7 @@ class matmul_rs(torch.autograd.Function):
     - GEMM SMs: Perform matrix multiplication computation
     - Communication SMs: Handle data communication
     """
+
     _debug = False
     _registers = None
     _spills = None
@@ -45,8 +45,8 @@ class matmul_rs(torch.autograd.Function):
     def _call(
         a: torch.Tensor,
         b: torch.Tensor,
-        c: torch.Tensor,           # local buffer [M, N]
-        c_global: torch.Tensor,    # global output [M_per_rank, N]
+        c: torch.Tensor,  # local buffer [M, N]
+        c_global: torch.Tensor,  # global output [M_per_rank, N]
         locks: torch.Tensor,
         rank: int,
         world_size: int,
