@@ -123,9 +123,6 @@ def validate_reduce_scatter(local_tensor, output_tensor, shmem, tp_group, atol=1
         tp_group: torch.distributed process group for communication
         atol: Absolute tolerance for comparison
 
-    Returns:
-        bool: True if validation passes, False otherwise
-
     ReduceScatter semantics:
         - Each rank has input tensor of shape [M, N]
         - All inputs are reduced (summed) element-wise to get [M, N]

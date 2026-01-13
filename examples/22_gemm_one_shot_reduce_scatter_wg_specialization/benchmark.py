@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
-#
-# GEMM + ReduceScatter Benchmark with Workgroup Specialization
-# Reference: ByteDance Triton-distributed
-# https://github.com/ByteDance-Seed/Triton-distributed/blob/main/tutorials/10-AMD-overlapping-gemm-reduce-scatter.py
 
 import torch
 import torch.distributed as dist
@@ -20,8 +16,8 @@ from examples.common.validation import validate_reduce_scatter
 import iris
 from matmul_wrapper import matmul_rs
 
-torch.manual_seed(123)
-random.seed(123)
+torch.manual_seed(0)
+random.seed(0)
 
 
 def parse_args():
@@ -95,7 +91,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         # Use next smaller power of 2 for GEMM SMs
         args["gemm_sms"] = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
 
-    # Datatype
     datatype = torch.float16
     if args["datatype"] == "fp16":
         datatype = torch.float16
@@ -118,7 +113,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     local_K = K // world_size
     M_per_rank = M // world_size
 
-    # Generate full matrices for reference calculation
     A_full = shmem.randn(M, K, device="cuda", dtype=datatype)
     B_full = shmem.randn(K, N, device="cuda", dtype=datatype)
 
@@ -136,11 +130,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     for key, value in args.items():
         json_writer.add_field(key, value)
 
-    # Local buffer for GEMM result [M, N]
     local_buf = shmem.zeros((M, N), device="cuda", dtype=datatype)
 
-    # Global output buffer for ReduceScatter result [M_per_rank, N]
-    # This is where each rank accumulates its final result
     output_buf = shmem.zeros((M_per_rank, N), device="cuda", dtype=datatype)
 
     total_blocks_M = triton.cdiv(M, args["BLK_M"])
@@ -163,13 +154,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         },
     }
 
-    # Allocate Timestamps
     timestamps = Timestamps(num_tiles=total_tiles)
 
     def run_experiment():
         nonlocal local_buf, output_buf
 
-        # Reset buffers
         local_buf.zero_()
         output_buf.zero_()
         locks.zero_()
@@ -207,19 +196,17 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             kernel_timing["gemm_rs"]["experiments"] += 1
 
         torch.cuda.nvtx.range_pop()
-        # Ensure kernel completion before barrier
-        gemm_stream.synchronize()
         shmem.barrier()
 
         for k in ["gemm_rs"]:
             ms = kernel_timing[k]["start_event"].elapsed_time(kernel_timing[k]["end_event"])
             kernel_timing[k]["ms"] += ms
 
-    # Synchronize across all GPUs
     shmem.barrier()
 
     # Warmup
     run_experiment()
+
     shmem.barrier()
 
     for k in ["gemm_rs"]:
@@ -230,25 +217,15 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.info("Validating...")
         matmul_rs.set_debug(True)
 
-        # Run one more time for validation
-        run_experiment()
-        # Additional barrier to ensure all remote writes are complete
-        torch.cuda.synchronize()
-        shmem.barrier()
-
-        # Get the GEMM result (input to reduce_scatter) and final output
         local_gemm = local_buf.clone()
         local_output = output_buf.clone()
 
         # Create process group for validation
         tp_group = dist.new_group(ranks=list(range(world_size)))
 
-        # For fp16 with atomic_add across multiple ranks, allow larger tolerance
-        # The 0.5 max_diff comes from accumulated rounding errors in atomic operations
-        # Relative error is ~0.08% which is acceptable for distributed computation
+        # Allow larger tolerance for fp16 due to accumulated rounding errors in atomic operations
         atol = 1.0 if datatype == torch.float16 else 0.5
 
-        # Validate reduce_scatter using the common validation function
         success = validate_reduce_scatter(local_gemm, local_output, shmem, tp_group, atol=atol)
 
         if success:
@@ -271,9 +248,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         matmul_rs.set_debug(False)
         shmem.info("Benchmarking...")
 
-        # Performance calculation:
-        # Each rank computes [M, N] partial result from [M, local_K] x [local_K, N]
-        # FLOPs = 2 * M * N * local_K
         perf = lambda ms: 2 * M * N * local_K * 1e-12 / (ms * 1e-3)
 
         triton_ms = iris.do_bench(run_experiment, shmem.barrier)

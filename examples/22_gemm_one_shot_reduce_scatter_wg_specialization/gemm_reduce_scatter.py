@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
-#
-# GEMM + ReduceScatter implementation using iris
-# Reference: ByteDance Triton-distributed tutorial
-# https://github.com/ByteDance-Seed/Triton-distributed/blob/main/tutorials/10-AMD-overlapping-gemm-reduce-scatter.py
 
 import triton
 import triton.language as tl
@@ -81,14 +77,12 @@ def persistent_gemm_reduce_scatter_wg_specialized(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
-    # Workgroup specialization: GEMM path
     if pid < GEMM_SMS:
         for tile_id in range(pid, total_tiles, GEMM_SMS):
             if COLLECT_TIMESTAMPS:
                 timestamp = read_realtime()
                 tl.atomic_min(mm_begin_timestamp_ptr + tile_id, timestamp)
 
-            # Standard tile mapping with GROUP_SIZE_M for L2 cache locality
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
             group_id = tile_id // num_pid_in_group
             first_pid_m = group_id * GROUP_SIZE_M
@@ -108,7 +102,6 @@ def persistent_gemm_reduce_scatter_wg_specialized(
             A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
             B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
 
-            # GEMM computation
             loop_k = tl.cdiv(K, BLOCK_SIZE_K)
             if not EVEN_K:
                 loop_k -= 1
@@ -151,12 +144,11 @@ def persistent_gemm_reduce_scatter_wg_specialized(
             tl.debug_barrier()
             tl.store(locks + tile_id, 1, cache_modifier=".wt")
 
-    else:  # Communication path: pid >= GEMM_SMS
+    else:
         COMM_SMS = NUM_SMS - GEMM_SMS
         comm_pid = pid - GEMM_SMS
 
         for tile_id in range(comm_pid, total_tiles, COMM_SMS):
-            # Calculate tile position (same mapping as GEMM path)
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
             group_id = tile_id // num_pid_in_group
             first_pid_m = group_id * GROUP_SIZE_M
@@ -175,11 +167,9 @@ def persistent_gemm_reduce_scatter_wg_specialized(
 
             local_offset = rm[:, None] * stride_cm + rn[None, :] * stride_cn
 
-            # Wait for GEMM to finish this tile
             while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
                 pass
 
-            # Load computed data from local buffer
             c = tl.load(C + local_offset, mask=sub_mask)
 
             # Determine target rank based on M position
@@ -194,15 +184,11 @@ def persistent_gemm_reduce_scatter_wg_specialized(
             offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
             global_offset = offs_cm[:, None] * stride_cg_m + offs_cn[None, :] * stride_cg_n
 
-            # Mask for valid elements within the target region
             global_mask = (offs_cm[:, None] < M_per_rank) & (offs_cn[None, :] < N)
 
-            # Send to target rank using atomic add
             if target_rank == cur_rank:
-                # Local atomic add
                 tl.atomic_add(C_global + global_offset, c, mask=global_mask)
             else:
-                # Remote atomic add using iris
                 iris.atomic_add(
                     C_global + global_offset,
                     c,
