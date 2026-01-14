@@ -138,7 +138,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     total_blocks_N = triton.cdiv(N, args["BLK_N"])
     total_tiles = total_blocks_M * total_blocks_N
 
-    locks = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int8)
+    locks = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int32)
 
     gemm_stream = torch.cuda.Stream()
 
@@ -187,7 +187,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                 args["gsize_m"],
                 args["num_stages"],
                 shmem.get_heap_bases(),
-                "gfx942",
+                torch.cuda.get_device_properties(rank).name,
                 args["trace_tiles"],
                 timestamps.mm_begin_timestamp,
                 timestamps.mm_end_timestamp,

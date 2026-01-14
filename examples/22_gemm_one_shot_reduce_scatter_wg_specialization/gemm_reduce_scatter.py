@@ -141,8 +141,7 @@ def persistent_gemm_reduce_scatter_wg_specialized(
                 tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
             tl.store(C + local_offset, c, mask=sub_mask, cache_modifier=".wt")
-            tl.debug_barrier()
-            tl.store(locks + tile_id, 1, cache_modifier=".wt")
+            iris.atomic_cas(locks + tile_id, 0, 1, cur_rank, cur_rank, heap_bases, sem="release", scope="sys")
 
     else:
         COMM_SMS = NUM_SMS - GEMM_SMS
@@ -167,8 +166,11 @@ def persistent_gemm_reduce_scatter_wg_specialized(
 
             local_offset = rm[:, None] * stride_cm + rn[None, :] * stride_cn
 
-            while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
-                pass
+            done = 0
+            while done == 0:
+                done = iris.atomic_cas(
+                    locks + tile_id, 1, 0, cur_rank, cur_rank, heap_bases, sem="acquire", scope="sys"
+                )
 
             c = tl.load(C + local_offset, mask=sub_mask)
 
