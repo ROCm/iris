@@ -32,10 +32,16 @@
         }
     },
     "mounts": [
-        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/home/vscode/.ssh,type=bind,consistency=cached",
-        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached"
+        "source=${localEnv:SSH_AUTH_SOCK},target=/tmp/ssh-agent.sock,type=bind,consistency=cached"
     ],
+    "remoteEnv": {
+        "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock"
+    },
+    "containerEnv": {
+        "GIT_USER_NAME": "${localEnv:USER}",
+        "GIT_USER_EMAIL": "${localEnv:EMAIL}"
+    },
     "remoteUser": "vscode",
-    "postStartCommand": "sudo usermod -aG video,render vscode",
+    "postStartCommand": "sudo usermod -aG video,render vscode && git config --global user.name \"${GIT_USER_NAME}\" && git config --global user.email \"${GIT_USER_EMAIL}\"",
     "updateRemoteUserUID": true
 }
