@@ -1,5 +1,3 @@
-// For format details, see https://aka.ms/devcontainer.json. For config options, see the
-// README at: https://github.com/devcontainers/templates
 {
     "name": "Iris",
     // Use the existing Dockerfile
@@ -7,6 +5,9 @@
         "dockerfile": "../docker/Dockerfile",
         "context": ".."
     },
+    // Runs on the HOST before the container is created/started.
+    // Creates a stable agent socket at ~/.ssh/ssh-agent.sock and optionally loads ~/.ssh/id_rsa.
+    "initializeCommand": "bash -lc \"bash '${localWorkspaceFolder}/.devcontainer/ensure-ssh-agent.sh'\"",
     "runArgs": [
         "--name=${localEnv:USER}-iris-dev",
         "--network=host",
@@ -32,16 +33,12 @@
         }
     },
     "mounts": [
-        "source=${localEnv:SSH_AUTH_SOCK},target=/tmp/ssh-agent.sock,type=bind,consistency=cached"
+        "source=${localEnv:HOME}/.ssh/ssh-agent.sock,target=/tmp/ssh-agent.sock,type=bind"
     ],
     "remoteEnv": {
         "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock"
     },
-    "containerEnv": {
-        "GIT_USER_NAME": "${localEnv:USER}",
-        "GIT_USER_EMAIL": "${localEnv:EMAIL}"
-    },
     "remoteUser": "vscode",
-    "postStartCommand": "sudo usermod -aG video,render vscode && git config --global user.name \"${GIT_USER_NAME}\" && git config --global user.email \"${GIT_USER_EMAIL}\"",
+    "postStartCommand": "bash -lc 'set -e; if ! getent group video >/dev/null; then sudo groupadd -r video || true; fi; if ! getent group render >/dev/null; then sudo groupadd -r render || true; fi; sudo usermod -aG video,render vscode || true'",
     "updateRemoteUserUID": true
 }

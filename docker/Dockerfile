@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 FROM rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
 
@@ -23,6 +23,9 @@ RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
     git wget ninja-build cmake python3-pip python3-dev build-essential && \
     rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r video 2>/dev/null || true && \
+    groupadd -r render 2>/dev/null || true
 
 # Install Python packages with pip
 RUN pip3 install --upgrade pip && \
