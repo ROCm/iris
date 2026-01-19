@@ -45,3 +45,5 @@ __pycache__/
 *.pywz
 *.pyzw
 *.pyzwz
+
+!.devcontainer/devcontainer.json

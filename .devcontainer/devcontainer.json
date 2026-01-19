@@ -1,0 +1,41 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates
+{
+    "name": "Iris",
+    // Use the existing Dockerfile
+    "build": {
+        "dockerfile": "../docker/Dockerfile",
+        "context": ".."
+    },
+    "runArgs": [
+        "--name=${localEnv:USER}-iris-dev",
+        "--network=host",
+        "--device=/dev/kfd",
+        "--device=/dev/dri",
+        "--cap-add=SYS_PTRACE",
+        "--group-add=video",
+        "--security-opt=seccomp=unconfined",
+        "--shm-size=16G",
+        "--ipc=host",
+        "--ulimit=memlock=-1",
+        "--ulimit=stack=67108864"
+    ],
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "installZsh": true,
+            "installOhMyZsh": true,
+            "upgradePackages": false,
+            "username": "automatic",
+            "uid": "automatic",
+            "gid": "automatic",
+            "configureZshAsDefaultShell": false
+        }
+    },
+    "mounts": [
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.ssh,target=/home/vscode/.ssh,type=bind,consistency=cached",
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached"
+    ],
+    "remoteUser": "vscode",
+    "postStartCommand": "sudo usermod -aG video,render vscode",
+    "updateRemoteUserUID": true
+}
