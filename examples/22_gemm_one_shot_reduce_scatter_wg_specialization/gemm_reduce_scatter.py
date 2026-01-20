@@ -193,5 +193,5 @@ def persistent_gemm_reduce_scatter_wg_specialized(
                     heap_bases,
                     mask=global_mask,
                     sem="relaxed",
-                    scope="sys"
+                    scope="sys",
                 )
