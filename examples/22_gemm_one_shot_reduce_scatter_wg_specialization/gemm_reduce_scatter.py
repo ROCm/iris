@@ -127,13 +127,9 @@ def persistent_gemm_reduce_scatter_wg_specialized(
 
             c = acc.to(C.type.element_ty)
 
-            rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-            rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-            rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
             sub_mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-            # Store to local buffer with write-through cache
+            # Store to local buffer
             local_offset = rm[:, None] * stride_cm + rn[None, :] * stride_cn
 
             if COLLECT_TIMESTAMPS:
@@ -174,13 +170,11 @@ def persistent_gemm_reduce_scatter_wg_specialized(
 
             c = tl.load(C + local_offset, mask=sub_mask)
 
-            # Determine target rank based on M position
-            # ReduceScatter: chunk i of M dimension goes to rank i
+            # chunk i of M dimension goes to rank i
             tile_m_start = pid_m * BLOCK_SIZE_M
             target_rank = tile_m_start // M_per_rank
 
-            # Calculate offset within target rank's output region
-            # target_m is the row offset within C_global[M_per_rank, N]
+            # offset within target rank's output
             target_m = tile_m_start % M_per_rank
             offs_cm = target_m + tl.arange(0, BLOCK_SIZE_M)
             offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -198,4 +192,6 @@ def persistent_gemm_reduce_scatter_wg_specialized(
                     target_rank,
                     heap_bases,
                     mask=global_mask,
+                    sem="relaxed",
+                    scope="sys"
                 )

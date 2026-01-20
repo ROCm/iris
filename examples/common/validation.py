@@ -122,12 +122,6 @@ def validate_reduce_scatter(local_tensor, output_tensor, shmem, tp_group, atol=1
         shmem: Iris shmem object
         tp_group: torch.distributed process group for communication
         atol: Absolute tolerance for comparison
-
-    ReduceScatter semantics:
-        - Each rank has input tensor of shape [M, N]
-        - All inputs are reduced (summed) element-wise to get [M, N]
-        - The result is scattered: rank i gets rows [i*M_per_rank : (i+1)*M_per_rank]
-        - Output shape is [M/world_size, N]
     """
     import torch.distributed as dist
 

@@ -10,14 +10,6 @@ gemm_kernel = persistent_gemm_reduce_scatter_wg_specialized
 
 
 class matmul_rs(torch.autograd.Function):
-    """
-    GEMM + ReduceScatter matmul wrapper with Workgroup Specialization
-
-    Split SMs into two groups:
-    - GEMM SMs: Perform matrix multiplication computation
-    - Communication SMs: Handle data communication
-    """
-
     _debug = False
     _registers = None
     _spills = None
@@ -45,8 +37,8 @@ class matmul_rs(torch.autograd.Function):
     def _call(
         a: torch.Tensor,
         b: torch.Tensor,
-        c: torch.Tensor,  # local buffer [M, N]
-        c_global: torch.Tensor,  # global output [M_per_rank, N]
+        c: torch.Tensor,
+        c_global: torch.Tensor,
         locks: torch.Tensor,
         rank: int,
         world_size: int,

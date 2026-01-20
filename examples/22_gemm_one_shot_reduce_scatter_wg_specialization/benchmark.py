@@ -83,7 +83,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
-    # Set default SM values if not provided
     cu_count = torch.cuda.get_device_properties(rank).multi_processor_count
     if args["num_sms"] is None:
         args["num_sms"] = cu_count
@@ -116,7 +115,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     A_full = shmem.randn(M, K, device="cuda", dtype=datatype)
     B_full = shmem.randn(K, N, device="cuda", dtype=datatype)
 
-    # Each rank gets a portion of K dimension
+    # Each rank gets a portion of K dimension as input
     local_A = A_full[:, rank * local_K : (rank + 1) * local_K].clone()
     local_B = B_full[rank * local_K : (rank + 1) * local_K, :].clone()
 
@@ -220,12 +219,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         local_gemm = local_buf.clone()
         local_output = output_buf.clone()
 
-        # Create process group for validation
-        tp_group = dist.new_group(ranks=list(range(world_size)))
-
         # Allow larger tolerance for fp16 due to accumulated rounding errors in atomic operations
         atol = 1.0 if datatype == torch.float16 else 0.5
 
+        tp_group = dist.new_group(ranks=list(range(world_size)))
         success = validate_reduce_scatter(local_gemm, local_output, shmem, tp_group, atol=atol)
 
         if success:
