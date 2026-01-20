@@ -9,7 +9,7 @@ import iris
 gemm_kernel = persistent_gemm_reduce_scatter_wg_specialized
 
 
-class matmul_rs(torch.autograd.Function):
+class MatMulReduceScatterWgSpecialized(torch.autograd.Function):
     _debug = False
     _registers = None
     _spills = None
@@ -17,19 +17,19 @@ class matmul_rs(torch.autograd.Function):
 
     @staticmethod
     def set_debug(debug: bool):
-        matmul_rs._debug = debug
+        MatMulReduceScatterWgSpecialized._debug = debug
 
     @staticmethod
     def get_matmul_registers():
-        if matmul_rs._debug:
-            return matmul_rs._registers
+        if MatMulReduceScatterWgSpecialized._debug:
+            return MatMulReduceScatterWgSpecialized._registers
         else:
             raise RuntimeError("Debug mode is not enabled. Call set_debug(True) first.")
 
     @staticmethod
     def get_matmul_spills():
-        if matmul_rs._debug:
-            return matmul_rs._spills
+        if MatMulReduceScatterWgSpecialized._debug:
+            return MatMulReduceScatterWgSpecialized._spills
         else:
             raise RuntimeError("Debug mode is not enabled. Call set_debug(True) first.")
 
@@ -59,7 +59,7 @@ class matmul_rs(torch.autograd.Function):
         M, K = a.shape
         _, N = b.shape
 
-        num_xcds = matmul_rs._num_xcds
+        num_xcds = MatMulReduceScatterWgSpecialized._num_xcds
         num_warps = 8
         waves_per_eu = 0
         mfma = 16
@@ -106,9 +106,9 @@ class matmul_rs(torch.autograd.Function):
             mm_end_timestamp_ptr=mm_end_timestamp,
         )
 
-        if matmul_rs._debug and not is_triton_interpret_set():
-            matmul_rs._registers = kk.n_regs
-            matmul_rs._spills = kk.n_spills
+        if MatMulReduceScatterWgSpecialized._debug and not is_triton_interpret_set():
+            MatMulReduceScatterWgSpecialized._registers = kk.n_regs
+            MatMulReduceScatterWgSpecialized._spills = kk.n_spills
 
         return c_global
 
@@ -135,7 +135,7 @@ class matmul_rs(torch.autograd.Function):
         mm_begin_timestamp: torch.Tensor = None,
         mm_end_timestamp: torch.Tensor = None,
     ):
-        return matmul_rs._call(
+        return MatMulReduceScatterWgSpecialized._call(
             a=a,
             b=b,
             c=c,

@@ -14,7 +14,7 @@ from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_se
 from examples.common.validation import validate_reduce_scatter
 
 import iris
-from matmul_wrapper import matmul_rs
+from matmul_wrapper import MatMulReduceScatterWgSpecialized
 
 torch.manual_seed(0)
 random.seed(0)
@@ -170,7 +170,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         torch.cuda.nvtx.range_push("GEMM + ReduceScatter")
         with torch.cuda.stream(gemm_stream):
             kernel_timing["gemm_rs"]["start_event"].record()
-            matmul_rs.apply(
+            MatMulReduceScatterWgSpecialized.apply(
                 local_A,
                 local_B,
                 local_buf,
@@ -214,7 +214,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     if args["validate"]:
         shmem.info("Validating...")
-        matmul_rs.set_debug(True)
+        MatMulReduceScatterWgSpecialized.set_debug(True)
 
         local_gemm = local_buf.clone()
         local_output = output_buf.clone()
@@ -233,8 +233,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         json_writer.add_field("success", success)
 
         if not is_triton_interpret_set():
-            gemm_registers = matmul_rs.get_matmul_registers()
-            gemm_spills = matmul_rs.get_matmul_spills()
+            gemm_registers = MatMulReduceScatterWgSpecialized.get_matmul_registers()
+            gemm_spills = MatMulReduceScatterWgSpecialized.get_matmul_spills()
             json_writer.add_field("gemm_registers", gemm_registers)
             json_writer.add_field("gemm_spills", gemm_spills)
 
@@ -242,10 +242,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.info("Validation completed")
 
     if args["benchmark"]:
-        matmul_rs.set_debug(False)
+        MatMulReduceScatterWgSpecialized.set_debug(False)
         shmem.info("Benchmarking...")
 
-        perf = lambda ms: 2 * M * N * local_K * 1e-12 / (ms * 1e-3)
+        perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
 
         triton_ms = iris.do_bench(run_experiment, shmem.barrier)
         triton_tflops = perf(triton_ms)
