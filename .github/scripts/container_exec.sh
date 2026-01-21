@@ -68,8 +68,7 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     fi
     
     # Build exec command
-    # Use --writable-tmpfs to ensure /dev/shm is writable and has sufficient space
-    EXEC_CMD="apptainer exec --overlay ${OVERLAY} --no-home --cleanenv --writable-tmpfs"
+    EXEC_CMD="apptainer exec --overlay ${OVERLAY} --no-home --cleanenv"
     
     # Add GPU selection if specified
     if [ -n "$GPU_DEVICES" ]; then
@@ -77,7 +76,8 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     fi
     
     # Add standard flags
-    EXEC_CMD="$EXEC_CMD --bind ${PWD}:/iris_workspace --cwd /iris_workspace"
+    # Bind /dev/shm from host to ensure sufficient shared memory for NCCL
+    EXEC_CMD="$EXEC_CMD --bind ${PWD}:/iris_workspace --bind /dev/shm:/dev/shm --cwd /iris_workspace"
     
     # Execute with cleanup of overlay file
     EXIT_CODE=0
