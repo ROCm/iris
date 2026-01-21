@@ -32,16 +32,6 @@ From: rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
     cd \$TRITON_PATH
     git checkout 715f6b1d442601436bf8d462db6ff8e17aec8cfb
     pip3 install -e .
-
-    # Create entrypoint script
-    echo '#!/bin/bash' > /entrypoint.sh
-    echo 'echo \"Welcome to the ROCm-aware Apptainer image!\"' >> /entrypoint.sh
-    echo 'if [ \$# -eq 0 ]; then' >> /entrypoint.sh
-    echo '    exec /bin/bash' >> /entrypoint.sh
-    echo 'else' >> /entrypoint.sh
-    echo '    exec \"\$@\"' >> /entrypoint.sh
-    echo 'fi' >> /entrypoint.sh
-    chmod +x /entrypoint.sh
     "
 
 %environment
@@ -57,4 +47,5 @@ From: rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
     export OMPI_ALLOW_RUN_AS_ROOT=1
 
 %runscript
-    exec /entrypoint.sh "$@"
+    echo "Welcome to the ROCm-aware Apptainer image!"
+    exec "$@"
