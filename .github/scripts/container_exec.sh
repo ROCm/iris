@@ -68,7 +68,8 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     fi
     
     # Build exec command
-    EXEC_CMD="apptainer exec --overlay ${OVERLAY} --no-home --cleanenv"
+    # Use --writable-tmpfs to ensure /dev/shm is writable and has sufficient space
+    EXEC_CMD="apptainer exec --overlay ${OVERLAY} --no-home --cleanenv --writable-tmpfs"
     
     # Add GPU selection if specified
     if [ -n "$GPU_DEVICES" ]; then
