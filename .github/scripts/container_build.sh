@@ -26,13 +26,9 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     # Create persistent Apptainer directory
     mkdir -p ~/apptainer
     
-    # Build Apptainer image from definition file (only if it doesn't exist)
-    if [ ! -f ~/apptainer/iris-dev.sif ]; then
-        echo "[INFO] Building new Apptainer image..."
-        apptainer build ~/apptainer/iris-dev.sif apptainer/iris.def
-    else
-        echo "[INFO] Using existing Apptainer image at ~/apptainer/iris-dev.sif"
-    fi
+    # Build Apptainer image from definition file (force rebuild)
+    echo "[INFO] Building Apptainer image (forcing rebuild)..."
+    apptainer build --force ~/apptainer/iris-dev.sif apptainer/iris.def
     
 elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     echo "[INFO] Checking Docker images..."
