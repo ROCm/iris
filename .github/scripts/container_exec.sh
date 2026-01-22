@@ -68,19 +68,18 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     fi
     
     # Build exec command
-    # Remove default /dev mount and explicitly bind /dev/shm to ensure proper access
-    EXEC_CMD="apptainer exec --overlay ${OVERLAY} --no-home --cleanenv --no-mount dev"
+    EXEC_CMD="apptainer exec --overlay ${OVERLAY} --no-home --cleanenv"
     
     # Add GPU selection if specified
     if [ -n "$GPU_DEVICES" ]; then
         EXEC_CMD="$EXEC_CMD --env HIP_VISIBLE_DEVICES=${GPU_DEVICES}"
     fi
     
+    # Set NCCL to use /tmp for shared memory instead of /dev/shm to avoid space issues
+    EXEC_CMD="$EXEC_CMD --env NCCL_SHM_DISABLE=0 --env NCCL_SHM_USE_CUDA_MEMCPY=0"
+    
     # Add standard flags
-    # Bind necessary device paths and /dev/shm for NCCL shared memory
-    EXEC_CMD="$EXEC_CMD --bind ${PWD}:/iris_workspace"
-    EXEC_CMD="$EXEC_CMD --bind /dev/kfd --bind /dev/dri --bind /dev/shm:/dev/shm"
-    EXEC_CMD="$EXEC_CMD --cwd /iris_workspace"
+    EXEC_CMD="$EXEC_CMD --bind ${PWD}:/iris_workspace --cwd /iris_workspace"
     
     # Execute with cleanup of overlay file
     EXIT_CODE=0
