@@ -62,7 +62,7 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     
     # Create temporary overlay in workspace with unique name based on PID and timestamp
     OVERLAY="./iris_overlay_$$_$(date +%s%N).img"
-    if ! apptainer overlay create --size 8192 --create-dir /var/cache/iris "${OVERLAY}" > /dev/null 2>&1; then
+    if ! apptainer overlay create --size 1024 --create-dir /var/cache/iris "${OVERLAY}" > /dev/null 2>&1; then
         echo "[ERROR] Failed to create Apptainer overlay"
         exit 1
     fi
@@ -74,9 +74,6 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     if [ -n "$GPU_DEVICES" ]; then
         EXEC_CMD="$EXEC_CMD --env HIP_VISIBLE_DEVICES=${GPU_DEVICES}"
     fi
-    
-    # Set NCCL to use /tmp for shared memory instead of /dev/shm to avoid space issues
-    EXEC_CMD="$EXEC_CMD --env NCCL_SHM_DISABLE=0 --env NCCL_SHM_USE_CUDA_MEMCPY=0"
     
     # Add standard flags
     EXEC_CMD="$EXEC_CMD --bind ${PWD}:/iris_workspace --cwd /iris_workspace"
