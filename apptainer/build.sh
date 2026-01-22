@@ -6,6 +6,6 @@
 
 # Build the SIF image with the specified ROCm version
 IMAGE_NAME="iris.sif"
-apptainer build --force apptainer/images/"$IMAGE_NAME" apptainer/iris.def
+apptainer build apptainer/images/"$IMAGE_NAME" apptainer/iris.def
 
 echo "Built image: $IMAGE_NAME"
