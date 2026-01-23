@@ -556,7 +556,7 @@ class IrisGluon:
             """
             self._iris = iris_instance
 
-        def all_to_all(self, output_tensor, input_tensor, config=None, async_op=False):
+        def all_to_all(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
             All-to-all collective operation.
 
@@ -567,11 +567,13 @@ class IrisGluon:
             Args:
                 output_tensor: Output tensor of shape (M, N * world_size)
                 input_tensor: Input tensor of shape (M, N * world_size)
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
                 config: Config instance with kernel parameters (default: None).
                         If None, uses default Config values.
                         Set config.use_gluon=True to use Gluon implementation with traffic shaping.
-                async_op: If False, performs a barrier at the end. If True, returns immediately.
-                          Default: False.
 
             Example:
                 >>> shmem = iris_gluon.iris()
@@ -584,7 +586,7 @@ class IrisGluon:
             """
             from iris.ccl.all_to_all import all_to_all as _all_to_all
 
-            _all_to_all(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+            _all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
         def all_gather(self, output_tensor, input_tensor, config=None, async_op=False):
             """
@@ -614,9 +616,9 @@ class IrisGluon:
             """
             from iris.ccl.all_gather import all_gather as _all_gather
 
-            _all_gather(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+            _all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
-        def reduce_scatter(self, output_tensor, input_tensor, config=None, async_op=False):
+        def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
             """
             Reduce-scatter collective operation.
 
@@ -627,11 +629,15 @@ class IrisGluon:
             Args:
                 output_tensor: Output tensor of shape (M, N) - will contain reduced tiles for this rank
                 input_tensor: Input tensor of shape (M, N) - local rank's partial data
+                op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
+                    Default: ReduceOp.SUM.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
                 config: Config instance with kernel parameters (default: None).
                         If None, uses default Config values.
                         Only supports reduce_scatter_variant="two_shot".
-                async_op: If False, performs a barrier at the end. If True, returns immediately.
-                          Default: False.
 
             Example:
                 >>> shmem = iris_gluon.iris()
@@ -643,8 +649,13 @@ class IrisGluon:
                 >>> shmem.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
             """
             from iris.ccl.reduce_scatter import reduce_scatter as _reduce_scatter
+            from iris.ccl import ReduceOp
+            
+            # Default to SUM if not specified
+            if op is None:
+                op = ReduceOp.SUM
 
-            _reduce_scatter(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+            _reduce_scatter(output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config)
 
     def _log_with_rank(self, level, message):
         """Helper method to log with rank information injected into the record."""

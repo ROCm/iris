@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 import iris
 from .config import Config
+from .utils import extract_group_info
 
 
 @triton.jit()
@@ -25,6 +26,8 @@ def persistent_all_gather(
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -100,7 +103,9 @@ def persistent_all_gather(
 
         # Send local shard data to all destination ranks
         # Each rank's input goes to output[cur_rank * M : (cur_rank + 1) * M, :] on all ranks
-        for rank in tl.static_range(world_size):
+        for i in tl.static_range(world_size):
+            target_rank = rank_start + i * rank_stride
+            
             # Compute global output row indices: offset by cur_rank * M
             rm_output = rm_input + cur_rank * M
 
@@ -117,7 +122,7 @@ def persistent_all_gather(
             output_ptr_target = output_ptr + output_offset
             output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-            if rank == cur_rank:
+            if target_rank == cur_rank:
                 # Local destination: use direct store
                 tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
             else:
@@ -126,13 +131,20 @@ def persistent_all_gather(
                     output_ptr_target,
                     data,
                     cur_rank,
-                    rank,
+                    target_rank,
                     heap_bases,
                     mask=combined_mask,
                 )
 
 
-def all_gather(output_tensor, input_tensor, shmem, config=None, async_op=False):
+def all_gather(
+    output_tensor,
+    input_tensor,
+    shmem,
+    group=None,
+    async_op=False,
+    config=None,
+):
     """
     Internal all-gather collective operation implementation.
 
@@ -148,10 +160,12 @@ def all_gather(output_tensor, input_tensor, shmem, config=None, async_op=False):
         output_tensor: Output tensor of shape (world_size * M, N) - will contain concatenated inputs
         input_tensor: Input tensor of shape (M, N) - local rank's data to send
         shmem: Iris shmem context
-        config: Config instance with kernel parameters (default: None).
-                If None, uses default Config values.
+        group: ProcessGroup or None. If None, uses all ranks in shmem context.
+               Default: None.
         async_op: If False, performs a barrier at the end. If True, returns immediately.
                   Default: False.
+        config: Config instance with kernel parameters (default: None).
+                If None, uses default Config values.
     """
     # Use provided config or create default one
     if config is None:
@@ -165,8 +179,8 @@ def all_gather(output_tensor, input_tensor, shmem, config=None, async_op=False):
             "Use default config (use_gluon=False)."
         )
 
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+    # Extract group information
+    rank, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
 
     M, N = input_tensor.shape[:2]
     expected_output_shape = (world_size * M, N)
@@ -194,6 +208,8 @@ def all_gather(output_tensor, input_tensor, shmem, config=None, async_op=False):
         heap_bases,
         rank,
         world_size,
+        rank_start,
+        rank_stride,
         config.block_size_m,
         config.block_size_n,
         config.swizzle_size,

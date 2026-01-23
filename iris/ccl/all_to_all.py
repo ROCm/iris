@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 import iris
 from .config import Config
-from .utils import chiplet_transform_chunked
+from .utils import chiplet_transform_chunked, extract_group_info
 
 # Conditional import for Gluon
 try:
@@ -36,6 +36,8 @@ def persistent_all_to_all(
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -121,9 +123,12 @@ def persistent_all_to_all(
             tl.store(output_ptr_local, data, cache_modifier=".wt")
 
             # Process all remote ranks
-            for target_rank in range(world_size):
+            for i in range(world_size):
+                target_rank = rank_start + i * rank_stride
                 if target_rank != cur_rank:
-                    input_offset_remote = input_base_m + (input_base_n + target_rank * N * stride_in_n)
+                    # Calculate which chunk of input to read based on rank_in_group
+                    rank_in_group_target = i
+                    input_offset_remote = input_base_m + (input_base_n + rank_in_group_target * N * stride_in_n)
                     output_offset_remote = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
                     input_ptr_remote = input_ptr + input_offset_remote
                     output_ptr_remote = output_ptr + output_offset_remote
@@ -156,9 +161,12 @@ def persistent_all_to_all(
             tl.store(output_ptr_local, data, mask=mask, cache_modifier=".wt")
 
             # Process all remote ranks
-            for target_rank in range(world_size):
+            for i in range(world_size):
+                target_rank = rank_start + i * rank_stride
                 if target_rank != cur_rank:
-                    input_offset_remote = input_base_m + (input_base_n + target_rank * N * stride_in_n)
+                    # Calculate which chunk of input to read based on rank_in_group
+                    rank_in_group_target = i
+                    input_offset_remote = input_base_m + (input_base_n + rank_in_group_target * N * stride_in_n)
                     output_offset_remote = output_base_m + (output_base_n + cur_rank * N * stride_out_n)
                     input_ptr_remote = input_ptr + input_offset_remote
                     output_ptr_remote = output_ptr + output_offset_remote
@@ -208,6 +216,8 @@ if GLUON_AVAILABLE:
         stride_out_n,
         cur_rank: gl.constexpr,
         world_size: gl.constexpr,
+        rank_start: gl.constexpr,
+        rank_stride: gl.constexpr,
         BLOCK_SIZE_M: gl.constexpr,
         BLOCK_SIZE_N: gl.constexpr,
         GROUP_SIZE_M: gl.constexpr,
@@ -284,7 +294,8 @@ if GLUON_AVAILABLE:
                     gl.store(output_ptr_local, data, mask=col_mask, cache_modifier=".wt")
 
             # Process remote ranks - same optimized pattern
-            for target_rank in range(world_size):
+            for rank_idx in range(world_size):
+                target_rank = rank_start + rank_idx * rank_stride
                 if target_rank != cur_rank:
                     for i in range(BLOCK_SIZE_M):
                         row_idx = (pid_m * BLOCK_SIZE_M + i) % M
@@ -294,7 +305,8 @@ if GLUON_AVAILABLE:
                             row_offset_out_m = row_idx * stride_out_m
                             col_mask = rn < N
 
-                            input_offset_remote = row_offset_m + (col_offsets_n + target_rank * N * stride_in_n)
+                            # Use rank_idx for input chunk offset (based on position in group)
+                            input_offset_remote = row_offset_m + (col_offsets_n + rank_idx * N * stride_in_n)
                             output_offset_remote = row_offset_out_m + (col_offsets_out_n + cur_rank * N * stride_out_n)
                             input_ptr_remote = input_ptr + input_offset_remote
                             output_ptr_remote = output_ptr + output_offset_remote
@@ -306,7 +318,14 @@ if GLUON_AVAILABLE:
                             ctx.store(output_ptr_remote, remote_data, target_rank, mask=col_mask)
 
 
-def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
+def all_to_all(
+    output_tensor,
+    input_tensor,
+    shmem,
+    group=None,
+    async_op=False,
+    config=None,
+):
     """
     Internal all-to-all collective operation implementation.
 
@@ -322,18 +341,20 @@ def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
         output_tensor: Output tensor of shape (M, N * world_size)
         input_tensor: Input tensor of shape (M, N * world_size)
         shmem: Iris shmem context (regular Iris or Iris Gluon)
+        group: ProcessGroup or None. If None, uses all ranks in shmem context.
+               Default: None.
+        async_op: If False, performs a barrier at the end. If True, returns immediately.
+                  Default: False.
         config: Config instance with kernel parameters (default: None).
                 If None, uses default Config values.
                 Set config.use_gluon=True to use Gluon implementation with traffic shaping.
-        async_op: If False, performs a barrier at the end. If True, returns immediately.
-                  Default: False.
     """
     # Use provided config or create default one
     if config is None:
         config = Config(block_size_m=32, block_size_n=128)
 
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+    # Extract group information
+    rank, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
 
     M, total_N = input_tensor.shape[:2]
     N = total_N // world_size
@@ -362,6 +383,8 @@ def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
             stride_out_n,
             rank,
             world_size,
+            rank_start,
+            rank_stride,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
@@ -386,6 +409,8 @@ def all_to_all(output_tensor, input_tensor, shmem, config=None, async_op=False):
             shmem.get_heap_bases(),
             rank,
             world_size,
+            rank_start,
+            rank_stride,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
