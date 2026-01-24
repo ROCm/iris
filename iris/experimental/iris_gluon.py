@@ -588,7 +588,7 @@ class IrisGluon:
 
             _all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
-        def all_gather(self, output_tensor, input_tensor, config=None, async_op=False):
+        def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
             All-gather collective operation.
 
@@ -599,10 +599,12 @@ class IrisGluon:
             Args:
                 output_tensor: Output tensor of shape (world_size * M, N) - will contain concatenated inputs
                 input_tensor: Input tensor of shape (M, N) - local rank's data to send
-                config: Config instance with kernel parameters (default: None).
-                        If None, uses default Config values.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
                 async_op: If False, performs a barrier at the end. If True, returns immediately.
                           Default: False.
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
 
             Example:
                 >>> shmem = iris_gluon.iris()

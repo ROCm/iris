@@ -56,7 +56,7 @@ class ReduceOp(IntEnum):
     BXOR = 6
 
 
-def extract_group_info(group, shmem) -> Tuple[int, int, int, int]:
+def extract_group_info(group, shmem) -> Tuple[int, int, int, int, int]:
     """
     Extract group information for collective operations.
     
@@ -65,32 +65,35 @@ def extract_group_info(group, shmem) -> Tuple[int, int, int, int]:
         shmem: Iris shmem context
         
     Returns:
-        Tuple of (rank, world_size, rank_start, rank_stride)
-        - rank: Rank within the group (0-indexed)
+        Tuple of (rank_in_group, rank_global, world_size, rank_start, rank_stride)
+        - rank_in_group: Rank within the group (0-indexed), used for tile assignment and comparisons
+        - rank_global: Global rank of this process, used for iris IPC operations (heap_bases indexing)
         - world_size: Number of ranks in the group
         - rank_start: Starting global rank of the group
         - rank_stride: Stride between consecutive ranks in the group
         
     Examples:
-        >>> # group=None: all ranks [0,1,2,3]
+        >>> # group=None: all ranks [0,1,2,3], current global rank is 2
         >>> extract_group_info(None, shmem)
-        (2, 4, 0, 1)  # rank=2, world_size=4, start=0, stride=1
+        (2, 2, 4, 0, 1)  # rank_in_group=2, rank_global=2, world_size=4, start=0, stride=1
         
-        >>> # TP group: consecutive ranks [0,1,2,3]
+        >>> # TP group: consecutive ranks [0,1,2,3], current global rank is 2
         >>> extract_group_info(tp_group, shmem)
-        (2, 4, 0, 1)  # rank=2, world_size=4, start=0, stride=1
+        (2, 2, 4, 0, 1)  # rank_in_group=2, rank_global=2, world_size=4, start=0, stride=1
         
-        >>> # DP group: strided ranks [0,4,8,12]
+        >>> # DP group: strided ranks [0,4,8,12], current global rank is 8
         >>> extract_group_info(dp_group, shmem)
-        (2, 4, 0, 4)  # rank=2, world_size=4, start=0, stride=4
+        (2, 8, 4, 0, 4)  # rank_in_group=2, rank_global=8, world_size=4, start=0, stride=4
     """
     if group is None:
         # Use all ranks in shmem context
-        rank = shmem.get_rank()
+        # When group is None, rank_in_group equals rank_global
+        rank_global = shmem.get_rank()
+        rank_in_group = rank_global
         world_size = shmem.get_num_ranks()
         rank_start = 0
         rank_stride = 1
-        return rank, world_size, rank_start, rank_stride
+        return rank_in_group, rank_global, world_size, rank_start, rank_stride
     
     # Extract from ProcessGroup
     import torch.distributed as dist
@@ -103,15 +106,15 @@ def extract_group_info(group, shmem) -> Tuple[int, int, int, int]:
     
     group_ranks = dist.get_process_group_ranks(group)
     world_size = len(group_ranks)
-    current_rank = dist.get_rank()
+    rank_global = dist.get_rank()
     
-    if current_rank not in group_ranks:
+    if rank_global not in group_ranks:
         raise RuntimeError(
-            f"Current rank {current_rank} is not part of the specified process group. "
+            f"Current rank {rank_global} is not part of the specified process group. "
             f"Group contains ranks: {group_ranks}"
         )
     
-    rank_in_group = group_ranks.index(current_rank)
+    rank_in_group = group_ranks.index(rank_global)
     
     # Detect stride pattern
     if len(group_ranks) > 1:
@@ -122,6 +125,14 @@ def extract_group_info(group, shmem) -> Tuple[int, int, int, int]:
         if is_strided:
             rank_start = group_ranks[0]
             rank_stride = strides[0]
+            
+            # Validate rank_stride is not zero (would indicate duplicate ranks)
+            if rank_stride == 0:
+                raise ValueError(
+                    f"Invalid process group: rank_stride is 0, indicating duplicate ranks. "
+                    f"Group ranks: {group_ranks}. "
+                    f"Each rank must appear exactly once in a process group."
+                )
         else:
             # Non-strided group - not supported yet
             raise NotImplementedError(
@@ -134,4 +145,4 @@ def extract_group_info(group, shmem) -> Tuple[int, int, int, int]:
         rank_start = group_ranks[0]
         rank_stride = 1
     
-    return rank_in_group, world_size, rank_start, rank_stride
+    return rank_in_group, rank_global, world_size, rank_start, rank_stride

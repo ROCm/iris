@@ -25,6 +25,7 @@ def persistent_all_gather(
     stride_out_n,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
+    cur_rank_global: tl.constexpr,
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
@@ -50,8 +51,9 @@ def persistent_all_gather(
         stride_in_m, stride_in_n: Strides for input tensor
         stride_out_m, stride_out_n: Strides for output tensor
         heap_bases: Heap base pointers for all ranks
-        cur_rank: Current rank
-        world_size: Total number of ranks
+        cur_rank: Current rank within the group (for comparisons)
+        cur_rank_global: Global rank (for iris IPC operations)
+        world_size: Total number of ranks in the group
         BLOCK_SIZE_M, BLOCK_SIZE_N: Block sizes for tiling
         GROUP_SIZE_M: Group size for M dimension tiling
         COMM_SMS: Number of SMs for communication
@@ -122,15 +124,16 @@ def persistent_all_gather(
             output_ptr_target = output_ptr + output_offset
             output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-            if target_rank == cur_rank:
-                # Local destination: use direct store
+            if i == cur_rank:
+                # Local destination (i == rank_in_group): use direct store
                 tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
             else:
                 # Remote destination: use iris.store to send data to remote destination
+                # Use cur_rank_global for iris IPC operations
                 iris.store(
                     output_ptr_target,
                     data,
-                    cur_rank,
+                    cur_rank_global,
                     target_rank,
                     heap_bases,
                     mask=combined_mask,
@@ -180,7 +183,9 @@ def all_gather(
         )
 
     # Extract group information
-    rank, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
+    # rank_in_group: position within the group (0, 1, 2, ...) - used for comparisons
+    # rank_global: global rank across all processes - used for iris IPC operations
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
 
     M, N = input_tensor.shape[:2]
     expected_output_shape = (world_size * M, N)
@@ -206,7 +211,8 @@ def all_gather(
         stride_out_m,
         stride_out_n,
         heap_bases,
-        rank,
+        rank_in_group,
+        rank_global,
         world_size,
         rank_start,
         rank_stride,

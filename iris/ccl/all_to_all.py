@@ -35,6 +35,7 @@ def persistent_all_to_all(
     stride_out_n,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
+    cur_rank_global: tl.constexpr,
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
@@ -125,7 +126,7 @@ def persistent_all_to_all(
             # Process all remote ranks
             for i in range(world_size):
                 target_rank = rank_start + i * rank_stride
-                if target_rank != cur_rank:
+                if i != cur_rank:
                     # Calculate which chunk of input to read based on rank_in_group
                     rank_in_group_target = i
                     input_offset_remote = input_base_m + (input_base_n + rank_in_group_target * N * stride_in_n)
@@ -139,7 +140,7 @@ def persistent_all_to_all(
                     iris.store(
                         output_ptr_remote,
                         remote_data,
-                        cur_rank,
+                        cur_rank_global,
                         target_rank,
                         heap_bases,
                     )
@@ -163,7 +164,7 @@ def persistent_all_to_all(
             # Process all remote ranks
             for i in range(world_size):
                 target_rank = rank_start + i * rank_stride
-                if target_rank != cur_rank:
+                if i != cur_rank:
                     # Calculate which chunk of input to read based on rank_in_group
                     rank_in_group_target = i
                     input_offset_remote = input_base_m + (input_base_n + rank_in_group_target * N * stride_in_n)
@@ -177,7 +178,7 @@ def persistent_all_to_all(
                     iris.store(
                         output_ptr_remote,
                         remote_data,
-                        cur_rank,
+                        cur_rank_global,
                         target_rank,
                         heap_bases,
                         mask=mask,
@@ -215,6 +216,7 @@ if GLUON_AVAILABLE:
         stride_out_m,
         stride_out_n,
         cur_rank: gl.constexpr,
+        cur_rank_global: gl.constexpr,
         world_size: gl.constexpr,
         rank_start: gl.constexpr,
         rank_stride: gl.constexpr,
@@ -296,7 +298,7 @@ if GLUON_AVAILABLE:
             # Process remote ranks - same optimized pattern
             for rank_idx in range(world_size):
                 target_rank = rank_start + rank_idx * rank_stride
-                if target_rank != cur_rank:
+                if rank_idx != cur_rank:
                     for i in range(BLOCK_SIZE_M):
                         row_idx = (pid_m * BLOCK_SIZE_M + i) % M
 
@@ -354,7 +356,9 @@ def all_to_all(
         config = Config(block_size_m=32, block_size_n=128)
 
     # Extract group information
-    rank, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
+    # rank_in_group: position within the group (0, 1, 2, ...) - used for comparisons
+    # rank_global: global rank across all processes - used for iris IPC operations
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
 
     M, total_N = input_tensor.shape[:2]
     N = total_N // world_size
@@ -381,7 +385,8 @@ def all_to_all(
             stride_in_n,
             stride_out_m,
             stride_out_n,
-            rank,
+            rank_in_group,
+            rank_global,
             world_size,
             rank_start,
             rank_stride,
@@ -407,7 +412,8 @@ def all_to_all(
             stride_out_m,
             stride_out_n,
             shmem.get_heap_bases(),
-            rank,
+            rank_in_group,
+            rank_global,
             world_size,
             rank_start,
             rank_stride,
