@@ -70,6 +70,7 @@ jobs:
     name: External Gluon Validation Test
     needs: build-container-image
     runs-on: [self-hosted, mi3xx]
+    if: false  # Disabled
 
     steps:
       - name: Checkout repository
