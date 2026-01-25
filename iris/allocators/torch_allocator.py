@@ -116,10 +116,9 @@ class TorchAllocator(BaseAllocator):
 
                     # Use context manager for peer handle and import the DMA-BUF
                     with managed_fd(peer_handle):
-                        # Import peer's memory via DMA-BUF to enable RMA
-                        import_dmabuf_handle(peer_handle, self.heap_size)
-                        # Use peer's original base address (no remapping for TorchAllocator)
-                        heap_bases_array[peer] = all_bases[peer]
+                        # Import peer's memory via DMA-BUF and get mapped address
+                        mapped_addr = import_dmabuf_handle(peer_handle, self.heap_size)
+                        heap_bases_array[peer] = mapped_addr
 
             # Set our own base
             heap_bases_array[self.cur_rank] = all_bases[self.cur_rank]
