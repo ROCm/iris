@@ -14,7 +14,7 @@ import torch
 from typing import Optional, Dict
 
 from .base import BaseAllocator
-from iris.hip import export_dmabuf_handle
+from iris.hip import export_dmabuf_handle, import_dmabuf_handle
 from iris.fd_passing import send_fd, recv_fd, managed_fd
 
 
@@ -84,21 +84,6 @@ class TorchAllocator(BaseAllocator):
         heap_base = self.get_base_address()
         return export_dmabuf_handle(heap_base, self.heap_size)
 
-    def import_from_peer(self, peer_rank: int, handle: any, peer_base_address: int) -> Optional[int]:
-        """
-        Import peer's memory.
-
-        Args:
-            peer_rank: Rank of the peer process
-            handle: Shareable handle from peer
-            peer_base_address: Base address of peer's heap
-
-        Returns:
-            None (not implemented in TorchAllocator)
-        """
-        # TorchAllocator doesn't import peer memory
-        return None
-
     def establish_peer_access(self, all_bases: Dict[int, int], connections: Optional[Dict] = None):
         """
         Establish access to peer memory for symmetric addressing.
@@ -129,10 +114,11 @@ class TorchAllocator(BaseAllocator):
                         peer_handle, _ = recv_fd(sock)
                         send_fd(sock, my_handle)
 
-                    # Use context manager for peer handle
+                    # Use context manager for peer handle and import the DMA-BUF
                     with managed_fd(peer_handle):
-                        # Import peer's memory (returns None for TorchAllocator)
-                        self.import_from_peer(peer, peer_handle, all_bases[peer])
+                        # Import peer's memory via DMA-BUF to enable RMA
+                        import_dmabuf_handle(peer_handle, self.heap_size)
+                        # Use peer's original base address (no remapping for TorchAllocator)
                         heap_bases_array[peer] = all_bases[peer]
 
             # Set our own base

@@ -283,3 +283,85 @@ def export_dmabuf_handle(ptr, size):
         gpu_try(err)  # Will raise with error message
 
     return fd.value
+
+
+def import_dmabuf_handle(fd, size):
+    """
+    Import a DMA-BUF file descriptor and map it to a GPU address.
+
+    Args:
+        fd: DMA-BUF file descriptor
+        size: Size of the memory range in bytes
+
+    Returns:
+        Mapped GPU address (integer)
+
+    Raises:
+        RuntimeError: If import fails or backend doesn't support it
+    """
+    if not _is_amd_backend:
+        raise RuntimeError("DMA-BUF import only supported on AMD/HIP backend")
+
+    # hipExternalMemory_t is an opaque handle (pointer)
+    hipExternalMemory_t = ctypes.c_void_p
+
+    # Create external memory handle descriptor
+    class hipExternalMemoryHandleDesc(ctypes.Structure):
+        class HandleUnion(ctypes.Union):
+            _fields_ = [
+                ("fd", ctypes.c_int),
+                ("win32", ctypes.c_void_p * 2),  # handle + name (16 bytes on 64-bit)
+            ]
+
+        _fields_ = [
+            ("type", ctypes.c_int),  # hipExternalMemoryHandleType
+            ("_pad", ctypes.c_int),  # Padding for 8-byte alignment
+            ("handle", HandleUnion),
+            ("size", ctypes.c_ulonglong),
+            ("flags", ctypes.c_uint),
+            ("_pad2", ctypes.c_uint),  # Padding
+            ("reserved", ctypes.c_uint * 16),
+        ]
+
+    # Create buffer descriptor
+    class hipExternalMemoryBufferDesc(ctypes.Structure):
+        _fields_ = [
+            ("offset", ctypes.c_ulonglong),
+            ("size", ctypes.c_ulonglong),
+            ("flags", ctypes.c_uint),
+            ("reserved", ctypes.c_uint * 16),
+        ]
+
+    # Setup handle descriptor (hipExternalMemoryHandleTypeOpaqueFd = 1)
+    mem_handle_desc = hipExternalMemoryHandleDesc()
+    mem_handle_desc.type = 1  # hipExternalMemoryHandleTypeOpaqueFd
+    mem_handle_desc.handle.fd = fd
+    mem_handle_desc.size = size
+    mem_handle_desc.flags = 0
+
+    # Import external memory
+    ext_mem = hipExternalMemory_t()
+
+    # Set argument types for hipImportExternalMemory
+    gpu_runtime.hipImportExternalMemory.argtypes = [
+        ctypes.POINTER(hipExternalMemory_t),
+        ctypes.POINTER(hipExternalMemoryHandleDesc)
+    ]
+    gpu_runtime.hipImportExternalMemory.restype = ctypes.c_int
+
+    err = gpu_runtime.hipImportExternalMemory(ctypes.byref(ext_mem), ctypes.byref(mem_handle_desc))
+    if err != 0:
+        gpu_try(err)
+
+    # Map buffer
+    buffer_desc = hipExternalMemoryBufferDesc()
+    buffer_desc.offset = 0
+    buffer_desc.size = size
+    buffer_desc.flags = 0
+
+    dev_ptr = ctypes.c_void_p()
+    err = gpu_runtime.hipExternalMemoryGetMappedBuffer(ctypes.byref(dev_ptr), ext_mem, ctypes.byref(buffer_desc))
+    if err != 0:
+        gpu_try(err)
+
+    return dev_ptr.value

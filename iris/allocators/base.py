@@ -70,21 +70,6 @@ class BaseAllocator(ABC):
         pass
 
     @abstractmethod
-    def import_from_peer(self, peer_rank: int, handle: any, peer_base_address: int) -> Optional[int]:
-        """
-        Import peer's heap for remote memory access.
-
-        Args:
-            peer_rank: Rank of the peer process
-            handle: Shareable handle from peer
-            peer_base_address: Base address of peer's heap
-
-        Returns:
-            Local mapped address for peer's heap, or None if not supported
-        """
-        pass
-
-    @abstractmethod
     def establish_peer_access(self, all_bases: Dict[int, int], connections: Optional[Dict] = None):
         """
         Establish access to peer memory for symmetric addressing.
