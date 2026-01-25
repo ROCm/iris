@@ -345,7 +345,7 @@ def import_dmabuf_handle(fd, size):
     # Set argument types for hipImportExternalMemory
     gpu_runtime.hipImportExternalMemory.argtypes = [
         ctypes.POINTER(hipExternalMemory_t),
-        ctypes.POINTER(hipExternalMemoryHandleDesc)
+        ctypes.POINTER(hipExternalMemoryHandleDesc),
     ]
     gpu_runtime.hipImportExternalMemory.restype = ctypes.c_int
 
