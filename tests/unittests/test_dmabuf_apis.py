@@ -138,23 +138,10 @@ def test_dmabuf_multirank_exchange():
                 # Verify heap bases are different addresses
                 assert int(ctx.heap_bases[peer].item()) != int(ctx.heap_bases[ctx.cur_rank].item())
 
-    # Test basic RMA by reading from another rank's memory
-    if ctx.num_ranks > 1:
-        # Allocate a buffer for remote read
-        remote_data = ctx.zeros(1024, dtype=torch.float32)
+    # Verify local memory access still works after FD exchange
+    ctx.barrier()
+    tensor.fill_(float(ctx.cur_rank * 100))
+    ctx.barrier()
+    assert torch.all(tensor == float(ctx.cur_rank * 100))
 
-        # Use Iris put/get operations (which test RMA via the heap_bases)
-        peer_rank = (ctx.cur_rank + 1) % ctx.num_ranks
-
-        # Write to peer's memory
-        ctx.barrier()
-
-        # Each rank writes its own ID to its tensor
-        tensor.fill_(float(ctx.cur_rank * 100))
-
-        ctx.barrier()
-
-        # Verify we can read our own memory
-        assert torch.all(tensor == float(ctx.cur_rank * 100))
-
-    print(f"Rank {ctx.cur_rank}: Multi-rank test passed!")
+    print(f"Rank {ctx.cur_rank}: Multi-rank FD exchange test passed!")
