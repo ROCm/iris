@@ -78,7 +78,7 @@ class Iris:
 
         # Initialize symmetric heap
         self.heap = SymmetricHeap(heap_size, gpu_id, cur_rank, num_ranks)
-        self.device = self.heap.get_device()
+        self.device = f"cuda:{gpu_id}"
         self.heap_bases = self.heap.get_heap_bases()
 
         for i in range(num_ranks):
@@ -1412,18 +1412,8 @@ class Iris:
         return tensor_device == iris_device
 
     def __on_symmetric_heap(self, tensor: torch.Tensor):
-        # Special case for empty tensors - they might not have a valid data_ptr
-        if tensor.numel() == 0:
-            self.debug("Empty tensor detected, skipping heap check")
-            return True
-
-        # Convert CUDA pointer to integer for comparison
-        tensor_ptr = int(tensor.data_ptr())
-        heap_base = int(self.heap_bases[self.cur_rank])
-
-        result = tensor_ptr >= heap_base and tensor_ptr < heap_base + self.heap_size
-
-        return result
+        """Check if a tensor is allocated on the symmetric heap."""
+        return self.heap.on_symmetric_heap(tensor)
 
     def __is_valid_device(self, device) -> bool:
         """
