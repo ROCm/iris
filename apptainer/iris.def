@@ -1,35 +1,51 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 Bootstrap: docker
-From: rocm/pytorch:rocm6.3.1_ubuntu22.04_py3.10_pytorch
+From: rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
 
 %post
     /bin/bash -c "
-    apt-get update && apt-get install -y git
-    export TRITON_PATH=/workspace/triton
-    conda env list
-    source /opt/conda/bin/activate py_3.10
-    conda install -y -n py_3.10 -c conda-forge jupyter ninja cmake wheel
+    # Set environment variables
+    export TRITON_PATH=/opt/triton
+    export ROCM_PATH=/opt/rocm
+    export LD_LIBRARY_PATH=\$ROCM_PATH/lib:\$LD_LIBRARY_PATH
+    export PATH=\"\$ROCM_PATH/bin:\$PATH\"
+
+    # Install system packages
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        git wget ninja-build cmake python3-pip python3-dev build-essential jq && \
+    rm -rf /var/lib/apt/lists/*
+
+    # Create groups if they don't exist
+    groupadd -r video 2>/dev/null || true
+    groupadd -r render 2>/dev/null || true
+
+    # Install Python packages with pip
+    pip3 install --upgrade pip && \
+    pip3 install wheel jupyter
+
+    # Clone and install Triton
+    cd /opt
     git clone https://github.com/triton-lang/triton.git \$TRITON_PATH
     cd \$TRITON_PATH
-    git checkout dd5823453bcc7973eabadb65f9d827c43281c434
-    pip install -e .
-    wget https://github.com/ROCm/rocprofiler-systems/releases/download/rocm-6.3.1/rocprofiler-systems-install.py
-    python3 ./rocprofiler-systems-install.py --prefix /opt/rocprofiler-systems --rocm 6.3
+    git checkout aafec417bded34db6308f5b3d6023daefae43905 
+    pip3 install -e .
     "
 
 %environment
     # Define environment variables
-    export TRITON_PATH=/workspace/triton
-    export PYTHONPATH=$TRITON_PATH/python/
-    export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
+    export TRITON_PATH=/opt/triton
     export ROCM_PATH=/opt/rocm
-    export PATH=/opt/conda/envs/py_3.10/bin:/opt/rocm/bin:$PATH
+    export PYTHONPATH=$TRITON_PATH
+    export LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH
+    export PATH="$ROCM_PATH/bin:$PATH"
     export OMPI_MCA_mtl="^ofi"
     export OMPI_MCA_pml="ob1"
+    export OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+    export OMPI_ALLOW_RUN_AS_ROOT=1
 
 %runscript
     echo "Welcome to the ROCm-aware Apptainer image!"
-    source /opt/conda/bin/activate py_3.10
     exec "$@"

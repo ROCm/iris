@@ -62,7 +62,7 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     
     # Create temporary overlay in workspace with unique name based on PID and timestamp
     OVERLAY="./iris_overlay_$$_$(date +%s%N).img"
-    if ! apptainer overlay create --size 1024 --create-dir /var/cache/iris "${OVERLAY}" > /dev/null 2>&1; then
+    if ! apptainer overlay create --size 16384 --create-dir /var/cache/iris "${OVERLAY}" > /dev/null 2>&1; then
         echo "[ERROR] Failed to create Apptainer overlay"
         exit 1
     fi
