@@ -67,6 +67,17 @@ def make_rank_sock_path(prefix: str, rank: int) -> str:
     return os.path.join("/tmp", f"{prefix}-{os.getpid()}-{rank}.sock")
 
 
+def recv_exact(sock: socket.socket, n: int) -> bytes:
+    """Receive exactly n bytes from a socket."""
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("Socket closed before receiving all data")
+        data += chunk
+    return data
+
+
 def setup_fd_mesh(rank: int, world_size: int, all_paths: Dict[int, str]) -> Dict[int, socket.socket]:
     """
     Create a simple persistent mesh:
@@ -81,6 +92,7 @@ def setup_fd_mesh(rank: int, world_size: int, all_paths: Dict[int, str]) -> Dict
     try:
         os.unlink(path)
     except FileNotFoundError:
+        # Socket path doesn't exist yet, no cleanup needed
         pass
 
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -113,10 +125,18 @@ def setup_fd_mesh(rank: int, world_size: int, all_paths: Dict[int, str]) -> Dict
     # Accept connections from higher ranks
     for _ in range(rank + 1, world_size):
         client, _ = listener.accept()
-        peer_rank = int.from_bytes(client.recv(4), "little", signed=False)
+        peer_rank_bytes = recv_exact(client, 4)
+        peer_rank = int.from_bytes(peer_rank_bytes, "little", signed=False)
         conns[peer_rank] = client
 
+    # Close listener and clean up socket path
     listener.close()
+    try:
+        os.unlink(path)
+    except OSError:
+        # Best effort cleanup
+        pass
+
     return conns
 
 

@@ -6,7 +6,7 @@ Base allocator interface for Iris symmetric heap management.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 import torch
 
 
@@ -60,7 +60,7 @@ class BaseAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_shareable_handle(self) -> any:
+    def get_shareable_handle(self) -> Any:
         """
         Get a shareable handle for inter-process communication.
 

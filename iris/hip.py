@@ -276,6 +276,16 @@ def export_dmabuf_handle(ptr, size):
     fd = ctypes.c_int(-1)
     ptr_arg = ctypes.c_void_p(ptr) if isinstance(ptr, int) else ptr
 
+    # Configure function signature to avoid truncation
+    gpu_runtime.hipMemGetHandleForAddressRange.restype = ctypes.c_int
+    gpu_runtime.hipMemGetHandleForAddressRange.argtypes = [
+        ctypes.POINTER(ctypes.c_int),  # handle (DMA-BUF fd)
+        ctypes.c_void_p,  # devPtr
+        ctypes.c_size_t,  # size
+        ctypes.c_int,  # handleType
+        ctypes.c_ulonglong,  # flags
+    ]
+
     # hipMemRangeHandleTypeDmaBufFd = 1
     err = gpu_runtime.hipMemGetHandleForAddressRange(ctypes.byref(fd), ptr_arg, size, 1, 0)
 
