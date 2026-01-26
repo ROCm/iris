@@ -135,3 +135,16 @@ class TorchAllocator(BaseAllocator):
     def get_heap_bases(self) -> torch.Tensor:
         """Get heap base addresses as a tensor."""
         return torch.from_numpy(self.heap_bases_array).to(device=self.device, dtype=torch.uint64)
+
+    def is_pointer_in_heap(self, ptr: int) -> bool:
+        """
+        Check if a pointer is within the allocator's managed heap.
+
+        Args:
+            ptr: Integer pointer to check
+
+        Returns:
+            True if pointer is within the heap, False otherwise
+        """
+        heap_base = self.get_base_address()
+        return ptr >= heap_base and ptr < heap_base + self.heap_size

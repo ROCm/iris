@@ -99,3 +99,16 @@ class BaseAllocator(ABC):
             Tensor of shape (num_ranks,) with base addresses
         """
         pass
+
+    @abstractmethod
+    def is_pointer_in_heap(self, ptr: int) -> bool:
+        """
+        Check if a pointer is within the allocator's managed heap.
+
+        Args:
+            ptr: Integer pointer to check
+
+        Returns:
+            True if pointer is within the heap, False otherwise
+        """
+        pass
