@@ -850,6 +850,7 @@ def all_reduce(
         else:
             # Group case: get the group ranks and find next in ring
             import torch.distributed as dist
+
             group_ranks = dist.get_process_group_ranks(group)
             next_rank_in_group = (rank_in_group + 1) % world_size
             next_rank = group_ranks[next_rank_in_group]

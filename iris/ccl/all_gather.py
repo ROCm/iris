@@ -107,7 +107,7 @@ def persistent_all_gather(
         # Each rank's input goes to output[group_rank * M : (group_rank + 1) * M, :] on all ranks
         for i in tl.static_range(world_size):
             target_rank = rank_start + i * rank_stride
-            
+
             # Compute global output row indices: offset by group_rank * M
             rm_output = rm_input + group_rank * M
 

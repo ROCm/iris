@@ -44,9 +44,10 @@ class ReduceOp(IntEnum):
     """
     Reduction operations for collective communications.
     Matches torch.distributed.ReduceOp semantics.
-    
+
     Note: Currently only SUM is implemented. Other operations will be added in future releases.
     """
+
     SUM = 0
     PRODUCT = 1
     MIN = 2
@@ -59,11 +60,11 @@ class ReduceOp(IntEnum):
 def extract_group_info(group, shmem) -> Tuple[int, int, int, int, int]:
     """
     Extract group information for collective operations.
-    
+
     Args:
         group: ProcessGroup or None. If None, uses all ranks in shmem context.
         shmem: Iris shmem context
-        
+
     Returns:
         Tuple of (rank_in_group, rank_global, world_size, rank_start, rank_stride)
         - rank_in_group: Rank within the group (0-indexed), used for tile assignment and comparisons
@@ -71,16 +72,16 @@ def extract_group_info(group, shmem) -> Tuple[int, int, int, int, int]:
         - world_size: Number of ranks in the group
         - rank_start: Starting global rank of the group
         - rank_stride: Stride between consecutive ranks in the group
-        
+
     Examples:
         >>> # group=None: all ranks [0,1,2,3], current global rank is 2
         >>> extract_group_info(None, shmem)
         (2, 2, 4, 0, 1)  # rank_in_group=2, rank_global=2, world_size=4, start=0, stride=1
-        
+
         >>> # TP group: consecutive ranks [0,1,2,3], current global rank is 2
         >>> extract_group_info(tp_group, shmem)
         (2, 2, 4, 0, 1)  # rank_in_group=2, rank_global=2, world_size=4, start=0, stride=1
-        
+
         >>> # DP group: strided ranks [0,4,8,12], current global rank is 8
         >>> extract_group_info(dp_group, shmem)
         (2, 8, 4, 0, 4)  # rank_in_group=2, rank_global=8, world_size=4, start=0, stride=4
@@ -94,38 +95,38 @@ def extract_group_info(group, shmem) -> Tuple[int, int, int, int, int]:
         rank_start = 0
         rank_stride = 1
         return rank_in_group, rank_global, world_size, rank_start, rank_stride
-    
+
     # Extract from ProcessGroup
     import torch.distributed as dist
-    
+
     if not dist.is_initialized():
         raise RuntimeError(
             "torch.distributed must be initialized to use ProcessGroup. "
             "Call torch.distributed.init_process_group() first."
         )
-    
+
     group_ranks = dist.get_process_group_ranks(group)
     world_size = len(group_ranks)
     rank_global = dist.get_rank()
-    
+
     if rank_global not in group_ranks:
         raise RuntimeError(
             f"Current rank {rank_global} is not part of the specified process group. "
             f"Group contains ranks: {group_ranks}"
         )
-    
+
     rank_in_group = group_ranks.index(rank_global)
-    
+
     # Detect stride pattern
     if len(group_ranks) > 1:
         # Check if all consecutive pairs have the same stride
-        strides = [group_ranks[i] - group_ranks[i-1] for i in range(1, len(group_ranks))]
+        strides = [group_ranks[i] - group_ranks[i - 1] for i in range(1, len(group_ranks))]
         is_strided = all(s == strides[0] for s in strides)
-        
+
         if is_strided:
             rank_start = group_ranks[0]
             rank_stride = strides[0]
-            
+
             # Validate rank_stride is not zero (would indicate duplicate ranks)
             if rank_stride == 0:
                 raise ValueError(
@@ -144,5 +145,5 @@ def extract_group_info(group, shmem) -> Tuple[int, int, int, int, int]:
         # Single rank group
         rank_start = group_ranks[0]
         rank_stride = 1
-    
+
     return rank_in_group, rank_global, world_size, rank_start, rank_stride

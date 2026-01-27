@@ -310,7 +310,9 @@ if GLUON_AVAILABLE:
 
                             # Use rank_idx for input chunk offset (based on position in group)
                             input_offset_remote = row_offset_m + (col_offsets_n + rank_idx * N * stride_in_n)
-                            output_offset_remote = row_offset_out_m + (col_offsets_out_n + group_rank * N * stride_out_n)
+                            output_offset_remote = row_offset_out_m + (
+                                col_offsets_out_n + group_rank * N * stride_out_n
+                            )
                             input_ptr_remote = input_ptr + input_offset_remote
                             output_ptr_remote = output_ptr + output_offset_remote
                             # Strong hints for dwordx4
