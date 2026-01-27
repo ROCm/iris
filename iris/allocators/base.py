@@ -101,7 +101,7 @@ class BaseAllocator(ABC):
         pass
 
     @abstractmethod
-    def is_pointer_in_heap(self, tensor: torch.Tensor) -> bool:
+    def owns_tensor(self, tensor: torch.Tensor) -> bool:
         """
         Check if a tensor is within the allocator's managed heap.
 

@@ -85,7 +85,7 @@ class SymmetricHeap:
             True if tensor is on the symmetric heap, False otherwise
         """
         # Delegate to allocator to check if tensor is in heap
-        return self.allocator.is_pointer_in_heap(tensor)
+        return self.allocator.owns_tensor(tensor)
 
     def get_heap_bases(self) -> torch.Tensor:
         """Get heap base addresses for all ranks as a tensor."""
