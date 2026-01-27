@@ -52,7 +52,7 @@ def persistent_all_gather(
         stride_out_m, stride_out_n: Strides for output tensor
         heap_bases: Heap base pointers for all ranks
         cur_rank: Current rank within the group (for comparisons)
-        cur_rank_global: Global rank (for iris IPC operations)
+        cur_rank_global: Rank within the `iris` instance
         world_size: Total number of ranks in the group
         BLOCK_SIZE_M, BLOCK_SIZE_N: Block sizes for tiling
         GROUP_SIZE_M: Group size for M dimension tiling
@@ -163,7 +163,7 @@ def all_gather(
         output_tensor: Output tensor of shape (world_size * M, N) - will contain concatenated inputs
         input_tensor: Input tensor of shape (M, N) - local rank's data to send
         shmem: Iris shmem context
-        group: ProcessGroup or None. If None, uses all ranks in shmem context.
+        group: ProcessGroup or None. If None, uses all ranks in `iris` context.
                Default: None.
         async_op: If False, performs a barrier at the end. If True, returns immediately.
                   Default: False.
@@ -184,7 +184,7 @@ def all_gather(
 
     # Extract group information
     # rank_in_group: position within the group (0, 1, 2, ...) - used for comparisons
-    # rank_global: global rank across all processes - used for iris IPC operations
+    # rank_global: global rank across all processes - used for iris RMA operations
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
 
     M, N = input_tensor.shape[:2]
