@@ -1607,7 +1607,9 @@ class Iris:
                 workspace=workspace,
             )
 
-        def all_reduce(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None, workspace=None):
+        def all_reduce(
+            self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None, workspace=None
+        ):
             """
             All-reduce collective operation.
 
@@ -1647,7 +1649,7 @@ class Iris:
             """
             from iris.ccl.all_reduce import all_reduce as _all_reduce
             from iris.ccl import ReduceOp
-            
+
             # Default to SUM if not specified
             if op is None:
                 op = ReduceOp.SUM
@@ -1695,12 +1697,14 @@ class Iris:
             """
             from iris.ccl.reduce_scatter import reduce_scatter as _reduce_scatter
             from iris.ccl import ReduceOp
-            
+
             # Default to SUM if not specified
             if op is None:
                 op = ReduceOp.SUM
 
-            _reduce_scatter(output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config)
+            _reduce_scatter(
+                output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
+            )
 
 
 @triton.jit

@@ -652,12 +652,14 @@ class IrisGluon:
             """
             from iris.ccl.reduce_scatter import reduce_scatter as _reduce_scatter
             from iris.ccl import ReduceOp
-            
+
             # Default to SUM if not specified
             if op is None:
                 op = ReduceOp.SUM
 
-            _reduce_scatter(output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config)
+            _reduce_scatter(
+                output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
+            )
 
     def _log_with_rank(self, level, message):
         """Helper method to log with rank information injected into the record."""
