@@ -24,8 +24,8 @@ def persistent_all_gather(
     stride_out_m,
     stride_out_n,
     heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
-    cur_rank_global: tl.constexpr,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
@@ -51,8 +51,8 @@ def persistent_all_gather(
         stride_in_m, stride_in_n: Strides for input tensor
         stride_out_m, stride_out_n: Strides for output tensor
         heap_bases: Heap base pointers for all ranks
-        cur_rank: Current rank within the group (for comparisons)
-        cur_rank_global: Rank within the `iris` instance
+        group_rank: Rank within the ProcessGroup (0 to group_size-1), used for tile assignment and comparisons
+        iris_rank: Rank in the iris context, used for iris RMA operations (heap_bases indexing)
         world_size: Total number of ranks in the group
         BLOCK_SIZE_M, BLOCK_SIZE_N: Block sizes for tiling
         GROUP_SIZE_M: Group size for M dimension tiling
@@ -104,15 +104,15 @@ def persistent_all_gather(
         data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
 
         # Send local shard data to all destination ranks
-        # Each rank's input goes to output[cur_rank * M : (cur_rank + 1) * M, :] on all ranks
+        # Each rank's input goes to output[group_rank * M : (group_rank + 1) * M, :] on all ranks
         for i in tl.static_range(world_size):
             target_rank = rank_start + i * rank_stride
             
-            # Compute global output row indices: offset by cur_rank * M
-            rm_output = rm_input + cur_rank * M
+            # Compute global output row indices: offset by group_rank * M
+            rm_output = rm_input + group_rank * M
 
             # Output mask: only write where input was valid
-            output_mask = (rm_output[:, None] < (cur_rank + 1) * M) & (rn[None, :] < N)
+            output_mask = (rm_output[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
 
             # Combine masks: must be valid in both input and output
             combined_mask = input_mask & output_mask
@@ -124,16 +124,16 @@ def persistent_all_gather(
             output_ptr_target = output_ptr + output_offset
             output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-            if i == cur_rank:
-                # Local destination (i == rank_in_group): use direct store
+            if i == group_rank:
+                # Local destination (i == group_rank): use direct store
                 tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
             else:
                 # Remote destination: use iris.store to send data to remote destination
-                # Use cur_rank_global for iris IPC operations
+                # Use iris_rank for iris RMA operations (heap_bases indexing)
                 iris.store(
                     output_ptr_target,
                     data,
-                    cur_rank_global,
+                    iris_rank,
                     target_rank,
                     heap_bases,
                     mask=combined_mask,
@@ -183,8 +183,8 @@ def all_gather(
         )
 
     # Extract group information
-    # rank_in_group: position within the group (0, 1, 2, ...) - used for comparisons
-    # rank_global: global rank across all processes - used for iris RMA operations
+    # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
+    # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
 
     M, N = input_tensor.shape[:2]

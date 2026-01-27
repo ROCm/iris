@@ -24,8 +24,8 @@ def persistent_reduce_scatter_two_shot(
     stride_out_m,
     stride_out_n,
     heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
-    cur_rank_global: tl.constexpr,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
@@ -56,13 +56,13 @@ def persistent_reduce_scatter_two_shot(
 
     tiles_per_rank = tl.cdiv(total_tiles, world_size)
     if DISTRIBUTION == 0:
-        start_tile = cur_rank
+        start_tile = group_rank
         stride = world_size
         remaining = total_tiles - start_tile
         remaining = tl.maximum(remaining, 0)
         max_tile_offset = tl.cdiv(remaining, stride)
     else:
-        start_tile = cur_rank * tiles_per_rank
+        start_tile = group_rank * tiles_per_rank
         stride = 1
         remaining = total_tiles - start_tile
         remaining = tl.maximum(remaining, 0)
@@ -106,11 +106,11 @@ def persistent_reduce_scatter_two_shot(
         if is_full:
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, cur_rank_global, start_rank_global, heap_bases).to(acc_dtype)
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, cur_rank_global, remote_rank, heap_bases).to(acc_dtype)
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
@@ -124,11 +124,11 @@ def persistent_reduce_scatter_two_shot(
 
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, cur_rank_global, start_rank_global, heap_bases, mask=mask).to(acc_dtype)
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, cur_rank_global, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
@@ -206,7 +206,7 @@ def reduce_scatter(
 
     # Extract group information
     # rank_in_group: position within the group (0, 1, 2, ...) - used for tile assignment
-    # rank_global: global rank across all processes - used for iris IPC operations
+    # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
     M, N = input_tensor.shape[:2]
 

@@ -120,7 +120,6 @@ def test_all_reduce_with_groups(variant, group_type, dtype=torch.float32, M=256,
     assert my_group is not None, f"Rank {rank} not in any group"
     
     group_ranks = dist.get_process_group_ranks(my_group)
-    group_size = len(group_ranks)
     
     # Create input tensor with deterministic values
     # Each rank fills with its global rank + 1 for easy verification
@@ -334,7 +333,6 @@ def test_reduce_scatter_with_groups(group_type, dtype=torch.float32, M=256, N=12
     assert my_group is not None
     
     group_ranks = dist.get_process_group_ranks(my_group)
-    group_size = len(group_ranks)
     
     # Each rank fills with its global rank + 1
     input_value = float(rank + 1)
@@ -469,3 +467,181 @@ def test_all_reduce_group_correctness():
         del shmem
         import gc
         gc.collect()
+
+
+def test_rank_stride_target_rank_calculation():
+    """
+    Explicitly test that rank_start + i * rank_stride correctly computes target_rank.
+    
+    This test verifies the core indexing mechanism used in CCL kernels:
+    - Loop index `i` goes from 0 to world_size-1 (position in group)
+    - `target_rank = rank_start + i * rank_stride` computes global rank
+    - `group_rank` (rank_in_group) is compared with `i` for local vs remote operations
+    
+    Example with strided group [0, 2] (stride=2):
+        i=0 -> target_rank = 0 + 0*2 = 0 (global rank 0)
+        i=1 -> target_rank = 0 + 1*2 = 2 (global rank 2)
+    """
+    world_size, rank = _get_world_info()
+    
+    if world_size < 4:
+        pytest.skip("Need at least 4 ranks for stride testing")
+    
+    heap_size = 2**33
+    shmem = iris.iris(heap_size)
+    
+    from iris.ccl.utils import extract_group_info
+    
+    # Test with strided group [0, 2] - stride of 2
+    strided_group_02 = dist.new_group([0, 2])
+    
+    # Test with strided group [1, 3] - stride of 2
+    strided_group_13 = dist.new_group([1, 3])
+    
+    if rank in [0, 2]:
+        rank_in_group, rank_global, ws, rank_start, rank_stride = extract_group_info(strided_group_02, shmem)
+        
+        # Verify the target_rank calculation for each loop iteration
+        expected_target_ranks = [0, 2]  # Global ranks in the group
+        for i in range(ws):
+            computed_target_rank = rank_start + i * rank_stride
+            assert computed_target_rank == expected_target_ranks[i], (
+                f"Rank {rank}: For i={i}, expected target_rank={expected_target_ranks[i]}, "
+                f"got {computed_target_rank} (rank_start={rank_start}, rank_stride={rank_stride})"
+            )
+        
+        # Verify that i == group_rank identifies the local rank correctly
+        expected_local_i = 0 if rank == 0 else 1
+        assert rank_in_group == expected_local_i, (
+            f"Rank {rank}: rank_in_group={rank_in_group} should match expected_local_i={expected_local_i}"
+        )
+        
+        # Verify: when i == rank_in_group, target_rank == rank_global
+        local_target_rank = rank_start + rank_in_group * rank_stride
+        assert local_target_rank == rank_global, (
+            f"Rank {rank}: local_target_rank={local_target_rank} should equal rank_global={rank_global}"
+        )
+    
+    if rank in [1, 3]:
+        rank_in_group, rank_global, ws, rank_start, rank_stride = extract_group_info(strided_group_13, shmem)
+        
+        # Verify the target_rank calculation for each loop iteration
+        expected_target_ranks = [1, 3]  # Global ranks in the group
+        for i in range(ws):
+            computed_target_rank = rank_start + i * rank_stride
+            assert computed_target_rank == expected_target_ranks[i], (
+                f"Rank {rank}: For i={i}, expected target_rank={expected_target_ranks[i]}, "
+                f"got {computed_target_rank} (rank_start={rank_start}, rank_stride={rank_stride})"
+            )
+        
+        # Verify that i == group_rank identifies the local rank correctly
+        expected_local_i = 0 if rank == 1 else 1
+        assert rank_in_group == expected_local_i, (
+            f"Rank {rank}: rank_in_group={rank_in_group} should match expected_local_i={expected_local_i}"
+        )
+        
+        # Verify: when i == rank_in_group, target_rank == rank_global
+        local_target_rank = rank_start + rank_in_group * rank_stride
+        assert local_target_rank == rank_global, (
+            f"Rank {rank}: local_target_rank={local_target_rank} should equal rank_global={rank_global}"
+        )
+    
+    shmem.barrier()
+    del shmem
+    import gc
+    gc.collect()
+
+
+def test_all_gather_strided_data_placement():
+    """
+    Verify all-gather with strided groups places data in correct output locations.
+    
+    This test ensures that with strided groups like [0, 2]:
+    - Rank 0's data goes to output[0:M, :] on all group members
+    - Rank 2's data goes to output[M:2M, :] on all group members
+    
+    The key insight: output placement uses rank_in_group (0, 1) not global rank (0, 2).
+    """
+    world_size, rank = _get_world_info()
+    
+    if world_size < 4:
+        pytest.skip("Need at least 4 ranks for stride testing")
+    
+    heap_size = 2**33
+    shmem = iris.iris(heap_size)
+    
+    M, N = 64, 32
+    dtype = torch.float32
+    
+    # Create strided groups [0, 2] and [1, 3]
+    strided_group_02 = dist.new_group([0, 2])
+    strided_group_13 = dist.new_group([1, 3])
+    
+    # Test with group [0, 2]
+    if rank in [0, 2]:
+        group_ranks = [0, 2]
+        group_size = 2
+        
+        # Each rank fills input with its global rank + 1 for identification
+        input_tensor = shmem.zeros((M, N), dtype=dtype)
+        input_tensor.fill_(float(rank + 1))  # Rank 0 -> 1.0, Rank 2 -> 3.0
+        
+        output_tensor = shmem.zeros((group_size * M, N), dtype=dtype)
+        
+        shmem.barrier()
+        config = Config()
+        shmem.ccl.all_gather(output_tensor, input_tensor, group=strided_group_02, config=config)
+        torch.cuda.synchronize()
+        
+        # Verify data placement:
+        # - output[0:M, :] should contain rank 0's data (value 1.0)
+        # - output[M:2M, :] should contain rank 2's data (value 3.0)
+        chunk_0 = output_tensor[0:M, :].mean().item()
+        chunk_1 = output_tensor[M:2*M, :].mean().item()
+        
+        expected_chunk_0 = 1.0  # From global rank 0 (rank_in_group=0)
+        expected_chunk_1 = 3.0  # From global rank 2 (rank_in_group=1)
+        
+        assert abs(chunk_0 - expected_chunk_0) < 1e-5, (
+            f"Rank {rank}: output[0:M] should be {expected_chunk_0} (from rank 0), got {chunk_0}"
+        )
+        assert abs(chunk_1 - expected_chunk_1) < 1e-5, (
+            f"Rank {rank}: output[M:2M] should be {expected_chunk_1} (from rank 2), got {chunk_1}"
+        )
+    
+    # Test with group [1, 3]
+    if rank in [1, 3]:
+        group_ranks = [1, 3]
+        group_size = 2
+        
+        # Each rank fills input with its global rank + 1 for identification
+        input_tensor = shmem.zeros((M, N), dtype=dtype)
+        input_tensor.fill_(float(rank + 1))  # Rank 1 -> 2.0, Rank 3 -> 4.0
+        
+        output_tensor = shmem.zeros((group_size * M, N), dtype=dtype)
+        
+        shmem.barrier()
+        config = Config()
+        shmem.ccl.all_gather(output_tensor, input_tensor, group=strided_group_13, config=config)
+        torch.cuda.synchronize()
+        
+        # Verify data placement:
+        # - output[0:M, :] should contain rank 1's data (value 2.0)
+        # - output[M:2M, :] should contain rank 3's data (value 4.0)
+        chunk_0 = output_tensor[0:M, :].mean().item()
+        chunk_1 = output_tensor[M:2*M, :].mean().item()
+        
+        expected_chunk_0 = 2.0  # From global rank 1 (rank_in_group=0)
+        expected_chunk_1 = 4.0  # From global rank 3 (rank_in_group=1)
+        
+        assert abs(chunk_0 - expected_chunk_0) < 1e-5, (
+            f"Rank {rank}: output[0:M] should be {expected_chunk_0} (from rank 1), got {chunk_0}"
+        )
+        assert abs(chunk_1 - expected_chunk_1) < 1e-5, (
+            f"Rank {rank}: output[M:2M] should be {expected_chunk_1} (from rank 3), got {chunk_1}"
+        )
+    
+    shmem.barrier()
+    del shmem
+    import gc
+    gc.collect()

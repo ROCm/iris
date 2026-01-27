@@ -67,7 +67,7 @@ def extract_group_info(group, shmem) -> Tuple[int, int, int, int, int]:
     Returns:
         Tuple of (rank_in_group, rank_global, world_size, rank_start, rank_stride)
         - rank_in_group: Rank within the group (0-indexed), used for tile assignment and comparisons
-        - rank_global: Global rank of this process, used for iris IPC operations (heap_bases indexing)
+        - rank_global: Global rank of this process, used for iris RMA operations (heap_bases indexing)
         - world_size: Number of ranks in the group
         - rank_start: Starting global rank of the group
         - rank_stride: Stride between consecutive ranks in the group
