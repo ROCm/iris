@@ -31,13 +31,11 @@
 
 
 import sys
-import os
 from pathlib import Path
 import pytest
 from typing import List, Optional
 from argparse import Namespace
 
-import numpy as np
 import torch
 import iris
 

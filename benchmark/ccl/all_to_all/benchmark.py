@@ -18,14 +18,7 @@ from examples.common.utils import JSONWriter
 
 import iris
 from iris.ccl import Config
-
-# Conditional import for Gluon
-try:
-    import iris.experimental.iris_gluon as iris_gluon
-
-    GLUON_AVAILABLE = True
-except ImportError:
-    GLUON_AVAILABLE = False
+import iris.experimental.iris_gluon as iris_gluon
 
 torch.manual_seed(123)
 random.seed(123)
@@ -56,17 +49,17 @@ def parse_args():
     )
     parser.add_argument("--heap_size", type=int, default=1 << 34, help="Iris heap size")
     parser.add_argument("--comm_sms", type=int, default=64, help="Number of SMs for all-to-all kernel")
-    parser.add_argument(
-        "--benchmark_rccl",
-        action="store_true",
-        help="Also benchmark PyTorch RCCL (all_to_all_single) for comparison",
-    )
     parser.add_argument("--block_size_m", type=int, default=None, help="Block size for M dimension tiling")
-    parser.add_argument("--block_size_n", type=int, default=None, help="Block size for N dimension tiling")
+    parser.add_argument("--block_size_n", type=int, default=128, help="Block size for N dimension tiling")
     parser.add_argument("--swizzle_size", type=int, default=None, help="Number of tiles to swizzle together")
     parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto-detected if not set)")
     parser.add_argument("-r", "--num_ranks", type=int, default=8, help="Number of ranks/processes")
     parser.add_argument("--use_gluon", action="store_true", help="Use Gluon implementation with traffic shaping")
+    parser.add_argument(
+        "--benchmark_rccl",
+        action="store_true",
+        help="Also benchmark PyTorch RCCL (all_to_all) for comparison",
+    )
 
     return vars(parser.parse_args())
 
@@ -82,10 +75,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         device_id=torch.device(f"cuda:{local_rank}"),
     )
 
-    # Use Gluon if requested and available
-    if args.get("use_gluon", False):
-        if not GLUON_AVAILABLE:
-            raise RuntimeError("Gluon is not available. Install Triton with Gluon support or remove --use_gluon flag")
+    # Use Gluon if requested
+    if args["use_gluon"]:
         shmem = iris_gluon.iris(args["heap_size"])
     else:
         shmem = iris.iris(args["heap_size"])
@@ -118,7 +109,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         config_kwargs["swizzle_size"] = args["swizzle_size"]
     if args["num_xcds"] is not None:
         config_kwargs["num_xcds"] = args["num_xcds"]
-    if args.get("use_gluon", False):
+    if args["use_gluon"]:
         config_kwargs["use_gluon"] = True
 
     config = Config(**config_kwargs)
@@ -225,8 +216,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     if args["benchmark"]:
         # Warmup for benchmarking
-        run_experiment()
-        shmem.barrier()
+        for k in ["all_to_all"]:
+            kernel_timing[k]["ms"] = 0
+            kernel_timing[k]["experiments"] = 0
+
+        iris.do_bench(run_experiment, shmem.barrier, n_warmup=25, n_repeat=1)
 
         for k in ["all_to_all"]:
             kernel_timing[k]["ms"] = 0
@@ -273,68 +267,44 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         # Wait for all to finish benchmarking
         shmem.barrier()
 
-    # Benchmark RCCL (PyTorch all_to_all_single) for comparison
-    if args.get("benchmark_rccl", False):
-        shmem.info("Benchmarking PyTorch RCCL (all_to_all_single)...")
+    # Benchmark RCCL (PyTorch all_to_all) for comparison
+    if args["benchmark_rccl"]:
+        shmem.info("Benchmarking PyTorch RCCL (all_to_all)...")
 
         # Create PyTorch tensors (not on Iris heap)
-        # PyTorch all_to_all_single splits along dimension 0 (rows)
-        # Input: (M * world_size, N) - each rank has M rows for each target rank
-        # Output: (M * world_size, N) - each rank receives M rows from each source rank
-        # Split sizes: [M] * world_size for both input and output
-        pytorch_input = torch.zeros(M * world_size, N, dtype=datatype, device=f"cuda:{rank}")
-        pytorch_output = torch.zeros(M * world_size, N, dtype=datatype, device=f"cuda:{rank}")
-        
-        # Initialize input: each rank has M rows for each target rank
+        # For all_to_all, we need a list of tensors to send and receive
+        pytorch_input_list = [torch.zeros(M, N, dtype=datatype, device=f"cuda:{rank}") for _ in range(world_size)]
+        pytorch_output_list = [torch.zeros(M, N, dtype=datatype, device=f"cuda:{rank}") for _ in range(world_size)]
+
+        # Fill input tensors with deterministic values
         for target_rank in range(world_size):
             val = float(rank * 1000 + target_rank)
-            pytorch_input[target_rank * M : (target_rank + 1) * M, :] = val
+            pytorch_input_list[target_rank].fill_(val)
 
         # Warmup
         for _ in range(10):
-            dist.all_to_all_single(
-                pytorch_output,
-                pytorch_input,
-                output_split_sizes=[M] * world_size,
-                input_split_sizes=[M] * world_size,
-            )
+            dist.all_to_all(pytorch_output_list, pytorch_input_list)
         torch.cuda.synchronize()
         dist.barrier()
 
         # Benchmark
-        pytorch_output.zero_()
         for target_rank in range(world_size):
+            pytorch_output_list[target_rank].zero_()
             val = float(rank * 1000 + target_rank)
-            pytorch_input[target_rank * M : (target_rank + 1) * M, :] = val
+            pytorch_input_list[target_rank].fill_(val)
         dist.barrier()
 
-        rccl_start = torch.cuda.Event(enable_timing=True)
-        rccl_end = torch.cuda.Event(enable_timing=True)
+        def run_rccl_experiment():
+            dist.all_to_all(pytorch_output_list, pytorch_input_list)
 
-        num_iterations = 126  # Match Iris benchmark iterations
-        dist.barrier()
-        rccl_start.record()
-        for _ in range(num_iterations):
-            dist.all_to_all_single(
-                pytorch_output,
-                pytorch_input,
-                output_split_sizes=[M] * world_size,
-                input_split_sizes=[M] * world_size,
-            )
-        rccl_end.record()
-        torch.cuda.synchronize()
-        dist.barrier()
-
-        rccl_ms = rccl_start.elapsed_time(rccl_end) / num_iterations
+        rccl_ms = iris.do_bench(run_rccl_experiment, dist.barrier)
         element_size = torch.tensor([], dtype=datatype).element_size()
-        # RCCL all-to-all: same bandwidth calculation as Iris
-        # Each rank sends and receives (world_size - 1) chunks
         total_bytes = (world_size - 1) * M * N * element_size
         total_bytes_gb = total_bytes / (1024**3)
         rccl_bandwidth_gbps = total_bytes_gb / (rccl_ms * 1e-3)
 
         shmem.info(
-            f"RCCL all_to_all_single (M={M}, N={N}, world_size={world_size}, dtype={args['datatype']}): "
+            f"RCCL all_to_all (M={M}, N={N}, world_size={world_size}, dtype={args['datatype']}): "
             f"{rccl_ms:.3f} ms, {rccl_bandwidth_gbps:.3f} GB/s"
         )
 
@@ -362,7 +332,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 def main():
     args = parse_args()
     num_ranks = args["num_ranks"]
-    init_url = "tcp://127.0.0.1:29503"
+    init_url = "tcp://127.0.0.1:29569"
 
     mp.spawn(
         fn=_worker,

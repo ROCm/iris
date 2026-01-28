@@ -2,11 +2,8 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import torch
-import triton
-import iris
 
 from gemm_one_shot_all_reduce_independent import persistent_all_reduce
-from examples.common.utils import is_triton_interpret_set
 
 
 class all_reduce_kernel:

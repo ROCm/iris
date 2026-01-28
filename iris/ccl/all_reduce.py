@@ -14,6 +14,7 @@ import triton.language as tl
 import torch
 import iris
 from .config import Config
+from .utils import chiplet_transform_chunked
 
 # Variant types
 VARIANT_ATOMIC = "atomic"
@@ -124,20 +125,6 @@ def all_reduce_preamble(
 
     workspace.prepared = True
     return workspace
-
-
-@triton.jit()
-def chiplet_transform_chunked(pid, num_workgroups: tl.constexpr, num_xcds: tl.constexpr, chunk_size: tl.constexpr):
-    if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
-        return pid
-
-    local_pid = pid // num_xcds
-    chunk_idx = local_pid // chunk_size
-    pos_in_chunk = local_pid % chunk_size
-
-    xcd = pid % num_xcds
-    new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
-    return new_pid
 
 
 @triton.jit()
@@ -544,7 +531,7 @@ def persistent_all_reduce_ring(
                 )
 
 
-@triton.jit()
+@triton.jit
 def persistent_all_reduce_two_shot(
     input_ptr,
     output_ptr,
@@ -561,15 +548,14 @@ def persistent_all_reduce_two_shot(
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
-    CHUNK_SIZE: tl.constexpr,
+    NUM_XCDS: tl.constexpr,  # unused here but kept for signature compatibility
+    CHUNK_SIZE: tl.constexpr,  # unused here but kept for signature compatibility
     DISTRIBUTION: tl.constexpr,
 ):
-    """Reduce assigned tiles for a rank and broadcast the result to all peers."""
+    """Reduce assigned tiles for a rank and broadcast the result to all peers.
+    Single kernel: unmasked fast path for full tiles, masked slow path for tails.
+    """
     pid = tl.program_id(0)
-
-    if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -591,6 +577,7 @@ def persistent_all_reduce_two_shot(
         remaining = tl.maximum(remaining, 0)
         max_tile_offset = tl.minimum(tiles_per_rank, remaining)
 
+    # Persistent traversal
     for tile_offset in range(pid, max_tile_offset, COMM_SMS):
         tile_id = start_tile + tile_offset * stride
 
@@ -601,45 +588,65 @@ def persistent_all_reduce_two_shot(
         pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
         pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
-
         rm_base = pid_m * BLOCK_SIZE_M
         rn_base = pid_n * BLOCK_SIZE_N
+
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+
+        # Build indices (used by both paths)
         rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
 
         input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
 
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-        for remote_rank in range(world_size):
-            partial = iris.load(
-                input_ptr + input_offset,
-                cur_rank,
-                remote_rank,
-                heap_bases,
-                mask=mask,
-            )
-            acc += partial.to(acc_dtype)
+        base_ptr = input_ptr + input_offset
+        out_ptr = output_ptr + output_offset
 
-        reduced = acc.to(output_ptr.type.element_ty)
+        # Fast path: NO MASKS (full tiles)
+        # The masking is problem size dependent, and the compiler does not recognize it can have two paths
+        # (one with masks and one without). Separate unmasked paths allow the compiler to generate
+        # more efficient vectorized instructions.
+        if is_full:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-        for remote_rank in range(world_size):
-            if remote_rank == cur_rank:
-                tl.store(output_ptr + output_offset, reduced, mask=mask, cache_modifier=".wt")
-            else:
-                iris.store(
-                    output_ptr + output_offset,
-                    reduced,
-                    cur_rank,
-                    remote_rank,
-                    heap_bases,
-                    mask=mask,
-                )
+            start_rank = pid % world_size
+            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = (start_rank + i) % world_size
+                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases).to(acc_dtype)
+
+            reduced = acc.to(output_ptr.type.element_ty)
+
+            tl.store(out_ptr, reduced, cache_modifier=".wt")
+
+            for i in tl.static_range(0, world_size):
+                remote_rank = (start_rank + i) % world_size
+                if remote_rank != cur_rank:
+                    iris.store(out_ptr, reduced, cur_rank, remote_rank, heap_bases)
+
+        # Slow path: MASKED (only boundary tiles land here)
+        # This path handles tiles at tensor boundaries where not all elements are valid.
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+
+            start_rank = pid % world_size
+            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases, mask=mask).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = (start_rank + i) % world_size
+                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+
+            reduced = acc.to(output_ptr.type.element_ty)
+
+            tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
+
+            for i in tl.static_range(0, world_size):
+                remote_rank = (start_rank + i) % world_size
+                if remote_rank != cur_rank:
+                    iris.store(out_ptr, reduced, cur_rank, remote_rank, heap_bases, mask=mask)
 
 
 def all_reduce(
@@ -667,7 +674,15 @@ def all_reduce(
         workspace: Optional AllReduceWorkspace instance prepared via all_reduce_preamble.
     """
     if config is None:
-        config = Config()
+        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+
+    # Check for unsupported options
+    if config.use_gluon:
+        raise ValueError(
+            "all_reduce does not support use_gluon=True. "
+            "Gluon implementation is not available for all_reduce. "
+            "Use default config (use_gluon=False)."
+        )
 
     # Check for unsupported options
     if config.use_gluon:
@@ -828,6 +843,9 @@ def all_reduce(
             config.num_xcds,
             config.chunk_size,
             config.all_reduce_distribution,
+            num_warps=8,
+            num_stages=1,
+            waves_per_eu=1,
         )
     elif variant == VARIANT_ONE_SHOT:
         persistent_all_reduce_one_shot[(config.comm_sms,)](

@@ -12,7 +12,7 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 <p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://github.com/ROCm/iris/blob/main/.github/workflows/lint.yml"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
-  <a href="https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml"><img src="https://github.com/ROCm/iris/actions/workflows/iris-tests-apptainer.yml/badge.svg" alt="Iris Tests"></a>
+  <a href="https://github.com/ROCm/iris/actions/workflows/iris-tests.yml"><img src="https://github.com/ROCm/iris/actions/workflows/iris-tests.yml/badge.svg" alt="Iris Tests"></a>
   <a href="https://doi.org/10.5281/zenodo.17382307"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.17382307.svg" alt="DOI"></a>
   <a href="https://doi.org/10.48550/arXiv.2511.12500"><img src="https://img.shields.io/badge/cs.DC%2C%20cs.LG-arXiv%3A2511.12500-B31B1B.svg" alt="DOI"></a>
 </p>

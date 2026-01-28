@@ -1,0 +1,44 @@
+{
+    "name": "Iris",
+    // Use the existing Dockerfile
+    "build": {
+        "dockerfile": "../docker/Dockerfile",
+        "context": ".."
+    },
+    // Runs on the HOST before the container is created/started.
+    // Creates a stable agent socket at ~/.ssh/ssh-agent.sock and optionally loads ~/.ssh/id_rsa.
+    "initializeCommand": "bash -lc \"bash '${localWorkspaceFolder}/.devcontainer/ensure-ssh-agent.sh'\"",
+    "runArgs": [
+        "--name=${localEnv:USER}-iris-dev",
+        "--network=host",
+        "--device=/dev/kfd",
+        "--device=/dev/dri",
+        "--cap-add=SYS_PTRACE",
+        "--group-add=video",
+        "--security-opt=seccomp=unconfined",
+        "--shm-size=16G",
+        "--ipc=host",
+        "--ulimit=memlock=-1",
+        "--ulimit=stack=67108864"
+    ],
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "installZsh": true,
+            "installOhMyZsh": true,
+            "upgradePackages": false,
+            "username": "automatic",
+            "uid": "automatic",
+            "gid": "automatic",
+            "configureZshAsDefaultShell": false
+        }
+    },
+    "mounts": [
+        "source=${localEnv:HOME}/.ssh/ssh-agent.sock,target=/tmp/ssh-agent.sock,type=bind"
+    ],
+    "remoteEnv": {
+        "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock"
+    },
+    "remoteUser": "vscode",
+    "postStartCommand": "bash -lc 'set -e; if ! getent group video >/dev/null; then sudo groupadd -r video || true; fi; if ! getent group render >/dev/null; then sudo groupadd -r render || true; fi; sudo usermod -aG video,render vscode || true'",
+    "updateRemoteUserUID": true
+}

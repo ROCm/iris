@@ -16,7 +16,7 @@ env:
 
 jobs:
   build-container-image:
-    runs-on: [self-hosted, mi3008x]
+    runs-on: [self-hosted, mi3xx]
     timeout-minutes: 20
 
     steps:
@@ -42,7 +42,7 @@ jobs:
   performance-test:
     name: ${{ matrix.example_name }}
     needs: build-container-image
-    runs-on: [self-hosted, mi3008x]
+    runs-on: [self-hosted, mi3xx]
     timeout-minutes: 30
     strategy:
       fail-fast: false

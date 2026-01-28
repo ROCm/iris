@@ -8,23 +8,9 @@ Uses the two-shot approach: reduce assigned tiles and store only to own rank.
 
 import triton
 import triton.language as tl
-import torch
 import iris
 from .config import Config
-
-
-@triton.jit()
-def chiplet_transform_chunked(pid, num_workgroups: tl.constexpr, num_xcds: tl.constexpr, chunk_size: tl.constexpr):
-    if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
-        return pid
-
-    local_pid = pid // num_xcds
-    chunk_idx = local_pid // chunk_size
-    pos_in_chunk = local_pid % chunk_size
-
-    xcd = pid % num_xcds
-    new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
-    return new_pid
+from .utils import chiplet_transform_chunked
 
 
 @triton.jit()
@@ -50,7 +36,7 @@ def persistent_reduce_scatter_two_shot(
 ):
     """
     Reduce-scatter using two-shot approach.
-    
+
     Each rank reduces its assigned tiles from all ranks and stores the result
     only to its own output (no broadcast to other ranks).
     """
@@ -94,31 +80,53 @@ def persistent_reduce_scatter_two_shot(
 
         rm_base = pid_m * BLOCK_SIZE_M
         rn_base = pid_n * BLOCK_SIZE_N
+
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+
+        # Build indices (used by both paths)
         rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
 
         input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
 
-        # Reduce: sum contributions from all ranks
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-        for remote_rank in range(world_size):
-            partial = iris.load(
-                input_ptr + input_offset,
-                cur_rank,
-                remote_rank,
-                heap_bases,
-                mask=mask,
-            )
-            acc += partial.to(acc_dtype)
+        base_ptr = input_ptr + input_offset
+        out_ptr = output_ptr + output_offset
 
-        reduced = acc.to(output_ptr.type.element_ty)
+        # Fast path: NO MASKS (full tiles)
+        # The masking is problem size dependent, and the compiler does not recognize it can have two paths
+        # (one with masks and one without). Separate unmasked paths allow the compiler to generate
+        # more efficient vectorized instructions.
+        if is_full:
+            start_rank = pid % world_size
+            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = (start_rank + i) % world_size
+                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases).to(acc_dtype)
 
-        # Store only to own rank (no broadcast)
-        tl.store(output_ptr + output_offset, reduced, mask=mask, cache_modifier=".wt")
+            reduced = acc.to(output_ptr.type.element_ty)
+
+            # Store only to own rank (no broadcast)
+            tl.store(out_ptr, reduced, cache_modifier=".wt")
+
+        # Slow path: MASKED (only boundary tiles land here)
+        # This path handles tiles at tensor boundaries where not all elements are valid.
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+
+            start_rank = pid % world_size
+            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases, mask=mask).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = (start_rank + i) % world_size
+                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+
+            reduced = acc.to(output_ptr.type.element_ty)
+
+            # Store only to own rank (no broadcast)
+            tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
 
 
 def reduce_scatter(output_tensor, input_tensor, shmem, config=None, async_op=False):
@@ -153,7 +161,7 @@ def reduce_scatter(output_tensor, input_tensor, shmem, config=None, async_op=Fal
         >>> shmem.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
     """
     if config is None:
-        config = Config()
+        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
 
     # Check for unsupported options
     if config.use_gluon:
@@ -213,4 +221,3 @@ def reduce_scatter(output_tensor, input_tensor, shmem, config=None, async_op=Fal
 
     if not async_op:
         shmem.barrier()
-

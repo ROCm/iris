@@ -109,3 +109,57 @@ def validate_all_reduce(local_tensor, global_tensor, shmem, atol=1):
         return False
 
     return True
+
+
+def validate_reduce_scatter(local_tensor, output_tensor, shmem, tp_group, atol=1):
+    """
+    Validate reduce-scatter operation where each rank's local tensor is reduced (summed)
+    and the result is scattered across ranks along the first dimension.
+
+    Args:
+        local_tensor: The local tensor on this rank before reduce-scatter [M, N]
+        output_tensor: The result tensor after reduce-scatter [M/world_size, N]
+        shmem: Iris shmem object
+        tp_group: torch.distributed process group for communication
+        atol: Absolute tolerance for comparison
+    """
+    import torch.distributed as dist
+
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+
+    M, N = local_tensor.shape
+    M_per_rank = M // world_size
+
+    # Verify output shape
+    expected_output_shape = (M_per_rank, N)
+    if output_tensor.shape != expected_output_shape:
+        shmem.error(f"Output tensor shape mismatch: expected {expected_output_shape}, got {output_tensor.shape}")
+        return False
+
+    # Gather all local tensors to compute expected result
+    all_local_tensors = [torch.zeros_like(local_tensor) for _ in range(world_size)]
+    dist.all_gather(all_local_tensors, local_tensor, group=tp_group)
+
+    # Compute expected: sum of all local tensors, then take this rank's slice
+    total_sum = sum(all_local_tensors)
+    expected = total_sum[rank * M_per_rank : (rank + 1) * M_per_rank, :]
+
+    # Compare
+    diff_mask = ~torch.isclose(output_tensor, expected, atol=atol)
+    breaking_indices = torch.nonzero(diff_mask, as_tuple=False)
+
+    if not torch.allclose(output_tensor, expected, atol=atol):
+        max_diff = (output_tensor - expected).abs().max().item()
+        mean_diff = (output_tensor - expected).abs().mean().item()
+        shmem.info(f"Reduce-scatter validation: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}")
+        for idx in breaking_indices[:5]:  # Show up to 5 mismatches
+            idx = tuple(idx.tolist())
+            computed_val = output_tensor[idx]
+            expected_val = expected[idx]
+            shmem.error(
+                f"Reduce-scatter mismatch at rank {rank}, index {idx}: got={computed_val}, expected={expected_val}"
+            )
+        return False
+
+    return True

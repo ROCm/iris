@@ -84,6 +84,9 @@ def parse_args():
         default=None,
         help="Column slice size for ring variant (power of two, must divide block_size_n)",
     )
+    parser.add_argument(
+        "--init_url", type=str, default="tcp://127.0.0.1:29527", help="Initialization URL for distributed setup"
+    )
 
     return vars(parser.parse_args())
 
@@ -100,10 +103,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     )
 
     shmem = iris.iris(args["heap_size"])
-
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
-
     # Datatype mapping
     datatype = torch.float32
     if args["datatype"] == "fp16":
@@ -258,8 +259,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     if args["benchmark"]:
         # Warmup for benchmarking
-        run_experiment()
-        shmem.barrier()
+        for k in ["all_reduce"]:
+            kernel_timing[k]["ms"] = 0
+            kernel_timing[k]["experiments"] = 0
+
+        iris.do_bench(run_experiment, shmem.barrier, n_warmup=25, n_repeat=1)
 
         for k in ["all_reduce"]:
             kernel_timing[k]["ms"] = 0
@@ -306,7 +310,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.barrier()
 
     # Benchmark RCCL (PyTorch all_reduce) for comparison
-    if args.get("benchmark_rccl", False):
+    if args["benchmark_rccl"]:
         shmem.info("Benchmarking PyTorch RCCL (all_reduce)...")
 
         # Create PyTorch tensors (not on Iris heap)
@@ -323,19 +327,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         pytorch_tensor.fill_(float(rank + 1))
         dist.barrier()
 
-        rccl_start = torch.cuda.Event(enable_timing=True)
-        rccl_end = torch.cuda.Event(enable_timing=True)
-
-        num_iterations = 126  # Match Iris benchmark iterations
-        dist.barrier()
-        rccl_start.record()
-        for _ in range(num_iterations):
+        def run_rccl_experiment():
             dist.all_reduce(pytorch_tensor, op=dist.ReduceOp.SUM)
-        rccl_end.record()
-        torch.cuda.synchronize()
-        dist.barrier()
 
-        rccl_ms = rccl_start.elapsed_time(rccl_end) / num_iterations
+        rccl_ms = iris.do_bench(run_rccl_experiment, dist.barrier)
         element_size = torch.tensor([], dtype=datatype).element_size()
         # RCCL all-reduce: same bandwidth calculation as Iris
         # All-reduce moves 2 * (world_size - 1) / world_size * data_size bytes
@@ -374,7 +369,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 def main():
     args = parse_args()
     num_ranks = args["num_ranks"]
-    init_url = "tcp://127.0.0.1:29503"
+    init_url = args["init_url"]
 
     mp.spawn(
         fn=_worker,

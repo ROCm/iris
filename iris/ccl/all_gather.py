@@ -8,23 +8,8 @@ Gathers tensors from all ranks and concatenates them along the last dimension.
 
 import triton
 import triton.language as tl
-import torch
 import iris
 from .config import Config
-
-
-@triton.jit()
-def chiplet_transform_chunked(pid, num_workgroups: tl.constexpr, num_xcds: tl.constexpr, chunk_size: tl.constexpr):
-    if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
-        return pid
-
-    local_pid = pid // num_xcds
-    chunk_idx = local_pid // chunk_size
-    pos_in_chunk = local_pid % chunk_size
-
-    xcd = pid % num_xcds
-    new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
-    return new_pid
 
 
 @triton.jit()
@@ -72,13 +57,10 @@ def persistent_all_gather(
     """
     pid = tl.program_id(0)
 
-    if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
-
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
-
+    tl.assume(total_tiles > 0)
     for tile_id in range(pid, total_tiles, COMM_SMS):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
@@ -89,6 +71,11 @@ def persistent_all_gather(
 
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
+        tl.assume(tile_id >= 0)
+        tl.assume(stride_in_m >= 0)
+        tl.assume(stride_in_n >= 0)
+        tl.assume(stride_out_m >= 0)
+        tl.assume(stride_out_n >= 0)
 
         # Compute local row and column indices for input tensor
         rm_base = pid_m * BLOCK_SIZE_M
@@ -97,36 +84,33 @@ def persistent_all_gather(
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
         rm_input = tl.max_contiguous(tl.multiple_of(rm_input, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        
+
         # Mask for local input bounds
         input_mask = (rm_input[:, None] < M) & (rn[None, :] < N)
 
         # Compute input offset and load local shard data once
-        # Each rank loads its own input data and then broadcasts it to all ranks
         input_base_m = rm_input[:, None] * stride_in_m
         input_base_n = rn[None, :] * stride_in_n
         input_offset = input_base_m + input_base_n
         input_ptr_source = input_ptr + input_offset
         input_ptr_source = tl.multiple_of(input_ptr_source, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        
+
         # Load local input data once for this tile
         data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
 
         # Send local shard data to all destination ranks
         # Each rank's input goes to output[cur_rank * M : (cur_rank + 1) * M, :] on all ranks
-        for rank in range(world_size):
+        for rank in tl.static_range(world_size):
             # Compute global output row indices: offset by cur_rank * M
-            # This rank's data should be placed at output[cur_rank * M : (cur_rank + 1) * M, :]
             rm_output = rm_input + cur_rank * M
-            
-            # Output mask: check bounds for output tensor (world_size * M rows, N cols)
-            output_mask = (rm_output[:, None] < (world_size * M)) & (rn[None, :] < N)
-            
+
+            # Output mask: only write where input was valid
+            output_mask = (rm_output[:, None] < (cur_rank + 1) * M) & (rn[None, :] < N)
+
             # Combine masks: must be valid in both input and output
             combined_mask = input_mask & output_mask
 
-            # Compute output offset: write to output at rows [cur_rank * M : (cur_rank + 1) * M]
-            # This is the same location on all destination ranks
+            # Compute output offset
             output_base_m = rm_output[:, None] * stride_out_m
             output_base_n = rn[None, :] * stride_out_n
             output_offset = output_base_m + output_base_n
@@ -137,11 +121,10 @@ def persistent_all_gather(
                 # Local destination: use direct store
                 tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
             else:
-                # Remote destination: use iris.put to send from local source to remote destination
-                # from_ptr: local input source, to_ptr: remote output destination
-                iris.put(
-                    input_ptr_source,
+                # Remote destination: use iris.store to send data to remote destination
+                iris.store(
                     output_ptr_target,
+                    data,
                     cur_rank,
                     rank,
                     heap_bases,
@@ -172,7 +155,7 @@ def all_gather(output_tensor, input_tensor, shmem, config=None, async_op=False):
     """
     # Use provided config or create default one
     if config is None:
-        config = Config()
+        config = Config(block_size_m=32, block_size_n=64)
 
     # Check for unsupported options
     if config.use_gluon:

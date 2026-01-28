@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
 Iris Gluon: Gluon-based Multi-GPU Communication Framework
@@ -25,14 +25,22 @@ Example:
 """
 
 from triton.language.core import _aggregate as aggregate
-from triton.experimental import gluon
-from triton.experimental.gluon import language as gl
-import triton
+
+# Import Gluon - if this fails, you need to update Triton to a version with Gluon support
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+except ImportError as e:
+    raise ImportError(
+        "Gluon is not available in your Triton installation. "
+        "Please update Triton to a version with Gluon support to use iris.experimental.iris_gluon. "
+        "You can install the latest Triton with: pip install --upgrade triton"
+    ) from e
+
 import triton.language as tl
 
 from iris._distributed_helpers import (
     init_distributed,
-    distributed_allgather,
     distributed_barrier,
     distributed_broadcast_scalar,
     distributed_broadcast_tensor,
@@ -41,14 +49,11 @@ from iris.hip import (
     set_device,
     get_cu_count,
     count_devices,
-    get_ipc_handle,
-    open_ipc_handle,
-    get_wall_clock_rate,
 )
+from iris.symmetric_heap import SymmetricHeap
 import numpy as np
 import math
 import torch
-import ctypes
 import logging
 
 # Import logging functionality from the separate logging module
@@ -478,7 +483,7 @@ class IrisGluon:
     """
 
     def __init__(self, heap_size=1 << 30):
-        # Initialize (same as original Iris)
+        # Initialize distributed environment
         comm, cur_rank, num_ranks = init_distributed()
         num_gpus = count_devices()
 
@@ -490,39 +495,14 @@ class IrisGluon:
         self.cur_rank = cur_rank
         self.gpu_id = gpu_id
         self.heap_size = heap_size
-        self.heap_offset = 0
-        self.alignment = 1024
         self.device = f"cuda:{gpu_id}"
-        self.memory_pool = torch.empty(heap_size, device=self.device, dtype=torch.int8)
 
-        heap_base = self.memory_pool.data_ptr()
-        heap_base_ptr = ctypes.c_void_p(heap_base)
-
-        heap_bases = np.zeros(num_ranks, dtype=np.uint64)
-        heap_bases[cur_rank] = heap_base
-        ipc_handles = np.zeros((num_ranks, 64), dtype=np.uint8)
-        ipc_handle = get_ipc_handle(heap_base_ptr, cur_rank)
-
-        distributed_barrier()
-
-        all_ipc_handles = distributed_allgather(np.frombuffer(ipc_handle, dtype=np.uint8))
-        all_heap_bases = distributed_allgather(np.array([heap_bases[cur_rank]], dtype=np.uint64))
-
-        distributed_barrier()
-
-        ipc_heap_bases = np.zeros(num_ranks, dtype=np.uintp)
-        for rank in range(num_ranks):
-            if rank != cur_rank:
-                handle = open_ipc_handle(all_ipc_handles[rank], cur_rank)
-                ipc_heap_bases[rank] = int(handle)
-            else:
-                ipc_heap_bases[rank] = heap_bases[rank]
+        # Initialize symmetric heap
+        self.heap = SymmetricHeap(heap_size, gpu_id, cur_rank, num_ranks)
+        self.heap_bases = self.heap.get_heap_bases()
 
         for i in range(num_ranks):
-            self.debug(f"GPU {i}: Heap base {hex(int(ipc_heap_bases[i]))}")
-
-        distributed_barrier()
-        self.heap_bases = torch.from_numpy(ipc_heap_bases).to(device=self.device, dtype=torch.uint64)
+            self.debug(f"GPU {i}: Heap base {hex(int(self.heap_bases[i].item()))}")
 
         distributed_barrier()
 
@@ -718,7 +698,7 @@ class IrisGluon:
         Returns:
             torch.device: The CUDA device of Iris-managed memory
         """
-        return self.memory_pool.device
+        return self.heap.get_device()
 
     def get_cu_count(self):
         """
@@ -800,19 +780,7 @@ class IrisGluon:
     def __allocate(self, num_elements, dtype):
         """Internal method to allocate memory from the symmetric heap."""
         self.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")
-
-        element_size = torch.tensor([], dtype=dtype).element_size()
-        size_in_bytes = num_elements * element_size
-        aligned_size = math.ceil(size_in_bytes / self.alignment) * self.alignment
-
-        if self.heap_offset + aligned_size > self.heap_size:
-            raise MemoryError("Heap out of memory")
-
-        start = self.heap_offset
-        self.heap_offset += aligned_size
-
-        sub_buffer = self.memory_pool[start : start + size_in_bytes].view(dtype)
-        return sub_buffer.reshape((num_elements,))
+        return self.heap.allocate(num_elements, dtype)
 
     def __parse_size(self, size):
         """Parse size parameter and calculate number of elements."""
@@ -1150,10 +1118,7 @@ class IrisGluon:
 
     def __on_symmetric_heap(self, tensor):
         """Check if tensor is allocated on the symmetric heap."""
-        heap_start = self.memory_pool.data_ptr()
-        heap_end = heap_start + self.heap_size
-        tensor_ptr = tensor.data_ptr()
-        return heap_start <= tensor_ptr < heap_end
+        return self.heap.on_symmetric_heap(tensor)
 
 
 def iris(heap_size=1 << 30):

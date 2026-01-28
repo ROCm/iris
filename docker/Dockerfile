@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 FROM rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
 
@@ -24,6 +24,9 @@ RUN apt-get update && \
     git wget ninja-build cmake python3-pip python3-dev build-essential && \
     rm -rf /var/lib/apt/lists/*
 
+RUN groupadd -r video 2>/dev/null || true && \
+    groupadd -r render 2>/dev/null || true
+
 # Install Python packages with pip
 RUN pip3 install --upgrade pip && \
     pip3 install wheel jupyter
@@ -37,9 +40,6 @@ ENV PYTHONPATH=$TRITON_PATH
 
 # Install rocprofiler-systems
 WORKDIR /workspace
-# RUN wget https://github.com/ROCm/rocprofiler-systems/releases/latest/download/rocprofiler-systems-install.py && \
-#     python3 ./rocprofiler-systems-install.py --prefix /opt/rocprofiler-systems --rocm 7.1 && \
-#     rm -f rocprofiler-systems-install.py
 
 # Create entrypoint script
 RUN echo '#!/bin/bash' > /entrypoint.sh && \

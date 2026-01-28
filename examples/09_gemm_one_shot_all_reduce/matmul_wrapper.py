@@ -3,9 +3,6 @@
 
 import torch
 import triton
-import random
-import sys
-import os
 
 # from streamk_kernel import streamk_gemm
 # from streamk_kernel_atomic import streamk_gemm

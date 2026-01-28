@@ -16,7 +16,7 @@ env:
 
 jobs:
   build-container-image:
-    runs-on: [self-hosted, mi3008x]
+    runs-on: [self-hosted, mi3xx]
 
     steps:
       - name: Checkout repository
@@ -41,7 +41,7 @@ jobs:
   external-validation-test:
     name: External Validation Test
     needs: build-container-image
-    runs-on: [self-hosted, mi3008x]
+    runs-on: [self-hosted, mi3xx]
 
     steps:
       - name: Checkout repository
@@ -69,7 +69,7 @@ jobs:
   external-gluon-validation-test:
     name: External Gluon Validation Test
     needs: build-container-image
-    runs-on: [self-hosted, mi3008x]
+    runs-on: [self-hosted, mi3xx]
 
     steps:
       - name: Checkout repository
