@@ -22,7 +22,6 @@ try:
 except ImportError:
     TRITONBLAS_AVAILABLE = False
 
-from .reduce_scatter import reduce_scatter
 from .core import Tile, TensorView, DeviceContext
 
 
@@ -218,10 +217,10 @@ def gemm_reduce_scatter(
         # would check tile ownership internally.
 
         if tile_rank == cur_rank and local_pid_n < num_pid_n_local:
-            # This tile belongs to this rank, perform reduce-scatter using OOP API
+            # This tile belongs to this rank, perform reduce-scatter using ctx API
             tile = Tile(output_coord_m, local_pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
             src_view = TensorView(C_full, M, N, stride_cm_full, stride_cn_full)
             dst_view = TensorView(C, M, N // world_size, stride_cm, stride_cn)
             ctx = DeviceContext(cur_rank, world_size, heap_bases)
 
-            reduce_scatter(tile, src_view, dst_view, ctx)
+            ctx.reduce_scatter(tile, src_view, dst_view)

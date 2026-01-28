@@ -346,6 +346,49 @@ class TensorView:
 
 
 @aggregate
+class AllReduceConfig:
+    """
+    Device-side configuration for all_reduce collective.
+
+    This config is shared across all tiles and specifies which algorithm to use
+    and any required temporary resources (like locks).
+
+    Fields:
+        variant: Algorithm to use - "atomic", "ring", "one_shot", "two_shot", or "spinlock"
+        locks_ptr: Pointer to locks array (required for spinlock variant, ignored otherwise)
+
+    Example:
+        # Atomic variant (default)
+        config = AllReduceConfig("atomic", None)
+
+        # Ring variant
+        config = AllReduceConfig("ring")
+
+        # Spinlock variant with locks
+        locks = shmem.zeros(num_tiles, dtype=torch.int32)
+        config = AllReduceConfig("spinlock", locks)
+
+        # Then in kernel:
+        ctx.all_reduce(tile, src_view, dst_view, config=config, tile_id=tile_id)
+    """
+
+    variant: tl.constexpr
+    locks_ptr: tl.tensor  # Can be None for non-spinlock variants
+
+    @triton.constexpr_function
+    def __init__(self, variant="atomic", locks_ptr=None):
+        """
+        Create an all_reduce configuration.
+
+        Args:
+            variant: Algorithm variant - "atomic", "ring", "one_shot", "two_shot", or "spinlock"
+            locks_ptr: Pointer to locks array (only required for spinlock variant)
+        """
+        self.variant = tl.constexpr(variant)
+        self.locks_ptr = locks_ptr
+
+
+@aggregate
 class DeviceContext:
     """
     Device context encapsulating distributed system information.
@@ -356,6 +399,10 @@ class DeviceContext:
     Usage:
         ctx = DeviceContext(rank, world_size, heap_bases)
         iris.store(ptr, data, ctx.rank, ctx.target_rank, ctx.heap_bases)
+
+        # Call collectives directly on ctx
+        ctx.all_gather(tile, src_view, dst_view, dim=0)
+        ctx.all_reduce(tile, src_view, dst_view)
     """
 
     rank: tl.constexpr
@@ -375,3 +422,118 @@ class DeviceContext:
         self.rank = tl.constexpr(rank)
         self.world_size = tl.constexpr(world_size)
         self.heap_bases = heap_bases
+
+    @triton.jit
+    def all_gather(self, tile: Tile, src_view: TensorView, dst_view: TensorView, dim: tl.constexpr):
+        """
+        Tile-level all-gather collective.
+
+        Gathers data from all ranks and concatenates along the specified dimension.
+
+        Args:
+            tile: Tile object with position and dimensions
+            src_view: Source tensor view
+            dst_view: Destination tensor view
+            dim: Dimension to gather along (0 for M, 1 for N)
+
+        Example:
+            ctx.all_gather(tile, src_view, dst_view, dim=0)
+        """
+        from .all_gather import all_gather as _all_gather
+
+        return _all_gather(tile, src_view, dst_view, dim, self)
+
+    @triton.jit
+    def all_reduce(self, tile: Tile, src_view: TensorView, dst_view: TensorView, config=None, tile_id=None):
+        """
+        Tile-level all-reduce collective.
+
+        Reduces data from all ranks using the specified algorithm variant.
+
+        Args:
+            tile: Tile object with position and dimensions
+            src_view: Source tensor view
+            dst_view: Destination tensor view
+            config: Optional AllReduceConfig (default: atomic variant)
+            tile_id: Tile ID for lock indexing (required only for spinlock variant)
+
+        Example:
+            # Default (atomic)
+            ctx.all_reduce(tile, src_view, dst_view)
+
+            # Ring algorithm
+            config = AllReduceConfig("ring")
+            ctx.all_reduce(tile, src_view, dst_view, config=config)
+
+            # Spinlock with locks
+            config = AllReduceConfig("spinlock", locks_ptr)
+            ctx.all_reduce(tile, src_view, dst_view, config=config, tile_id=tile_id)
+        """
+        # Default to atomic variant if no config provided
+        if config is None:
+            from .all_reduce import all_reduce_atomic
+
+            return all_reduce_atomic(tile, src_view, dst_view, self)
+
+        # Dispatch based on variant
+        variant = config.variant
+        if variant == "atomic":
+            from .all_reduce import all_reduce_atomic
+
+            return all_reduce_atomic(tile, src_view, dst_view, self)
+        elif variant == "ring":
+            from .all_reduce import all_reduce_ring
+
+            return all_reduce_ring(tile, src_view, dst_view, self)
+        elif variant == "one_shot":
+            from .all_reduce import all_reduce_one_shot
+
+            return all_reduce_one_shot(tile, src_view, dst_view, self)
+        elif variant == "two_shot":
+            from .all_reduce import all_reduce_two_shot
+
+            return all_reduce_two_shot(tile, src_view, dst_view, self)
+        elif variant == "spinlock":
+            from .all_reduce import all_reduce_spinlock
+
+            return all_reduce_spinlock(tile, src_view, dst_view, config.locks_ptr, tile_id, self)
+
+    @triton.jit
+    def all_to_all(self, tile: Tile, src_view: TensorView, dst_view: TensorView, N_per_rank: tl.constexpr):
+        """
+        Tile-level all-to-all collective.
+
+        Performs all-to-all communication where each rank sends and receives data
+        to/from all other ranks.
+
+        Args:
+            tile: Tile object with position and dimensions
+            src_view: Source tensor view
+            dst_view: Destination tensor view
+            N_per_rank: Number of columns each rank sends/receives
+
+        Example:
+            ctx.all_to_all(tile, src_view, dst_view, N_per_rank=N // world_size)
+        """
+        from .all_to_all import all_to_all as _all_to_all
+
+        return _all_to_all(tile, src_view, dst_view, N_per_rank, self)
+
+    @triton.jit
+    def reduce_scatter(self, tile: Tile, src_view: TensorView, dst_view: TensorView):
+        """
+        Tile-level reduce-scatter collective.
+
+        Reduces data from all ranks and each rank stores only its assigned portion.
+
+        Args:
+            tile: Tile object with position and dimensions
+            src_view: Source tensor view
+            dst_view: Destination tensor view
+
+        Example:
+            ctx.reduce_scatter(tile, src_view, dst_view)
+        """
+        from .reduce_scatter import reduce_scatter as _reduce_scatter
+
+        return _reduce_scatter(tile, src_view, dst_view, self)

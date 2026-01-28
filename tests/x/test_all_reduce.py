@@ -303,3 +303,154 @@ def test_all_reduce(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         import gc
 
         gc.collect()
+
+
+# NEW: Tests for ctx API with AllReduceConfig
+
+
+@triton.jit
+def x_all_reduce_ctx_api_kernel(
+    input_ptr,
+    output_ptr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    stride_in_m: tl.constexpr,
+    stride_in_n: tl.constexpr,
+    stride_out_m: tl.constexpr,
+    stride_out_n: tl.constexpr,
+    heap_bases: tl.tensor,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    variant: tl.constexpr,
+    locks_ptr=None,
+):
+    """Kernel using new ctx.all_reduce() API with AllReduceConfig."""
+    pid = tl.program_id(0)
+    grid_size = tl.num_programs(0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+
+    for tile_id in range(pid, total_tiles, grid_size):
+        pid_m = tile_id // num_pid_n
+        pid_n = tile_id % num_pid_n
+
+        # Create OOP objects for new API
+        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
+        dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
+        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+
+        # NEW: Call all_reduce with config
+        if variant == "default":
+            # Default (atomic)
+            ctx.all_reduce(tile, src_view, dst_view)
+        elif variant == "spinlock":
+            # Spinlock variant needs locks_ptr and tile_id
+            config = iris.x.AllReduceConfig("spinlock", locks_ptr)
+            ctx.all_reduce(tile, src_view, dst_view, config=config, tile_id=tile_id)
+        else:
+            # Other variants (atomic, ring, one_shot, two_shot)
+            config = iris.x.AllReduceConfig(variant)
+            ctx.all_reduce(tile, src_view, dst_view, config=config)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "default",  # No config, uses default atomic
+        "atomic",
+        "ring",
+        "one_shot",
+        "two_shot",
+        "spinlock",
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(256, 128, 64, 64)])
+def test_all_reduce_ctx_with_config(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
+    """Test ctx.all_reduce() with AllReduceConfig."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33  # 8GB
+    shmem = iris.iris(heap_size)
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+
+    # Create input tensor
+    pytorch_input_tensor = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
+    pytorch_input_tensor.fill_(float(rank + 1))
+
+    # Run PyTorch's all_reduce to get reference output
+    pytorch_output_tensor = pytorch_input_tensor.clone()
+    shmem.barrier()
+    dist.all_reduce(pytorch_output_tensor, op=dist.ReduceOp.SUM)
+    torch.cuda.synchronize()
+
+    # Set up Iris tensors
+    iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
+    iris_input_tensor.copy_(pytorch_input_tensor)
+    iris_output_tensor = shmem.zeros((M, N), dtype=dtype)
+
+    # Allocate locks for spinlock variant
+    locks_ptr = None
+    if variant == "spinlock":
+        num_tiles = ((M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M) * ((N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N)
+        locks_tensor = shmem.zeros(num_tiles, dtype=torch.int32)
+        locks_ptr = locks_tensor
+
+    shmem.barrier()
+
+    # Launch kernel using NEW ctx API
+    num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+    num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
+    total_tiles = num_pid_m * num_pid_n
+    grid = (total_tiles,)
+
+    x_all_reduce_ctx_api_kernel[grid](
+        iris_input_tensor,
+        iris_output_tensor,
+        M,
+        N,
+        iris_input_tensor.stride(0),
+        iris_input_tensor.stride(1),
+        iris_output_tensor.stride(0),
+        iris_output_tensor.stride(1),
+        shmem.get_heap_bases(),
+        rank,
+        world_size,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        variant,
+        locks_ptr,
+    )
+
+    torch.cuda.synchronize()
+    shmem.barrier()
+
+    # Compare results
+    atol = 1e-3 if dtype == torch.float16 else 1e-5
+    rtol = 1e-3 if dtype == torch.float16 else 1e-5
+
+    try:
+        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
+            f"Rank {rank}: ctx.all_reduce({variant}) output doesn't match PyTorch's all_reduce"
+        )
+
+        # Verify the reduction is correct (sum of all ranks)
+        expected_sum = sum(float(r + 1) for r in range(world_size))
+        assert torch.allclose(iris_output_tensor, torch.full_like(iris_output_tensor, expected_sum), atol=atol), (
+            f"Rank {rank}: Reduction result is incorrect, expected {expected_sum}"
+        )
+
+        if rank == 0:
+            print(f"✓ ctx.all_reduce({variant}) test passed: {dtype}, M={M}, N={N}")
+    finally:
+        shmem.barrier()
+        del shmem
+        import gc
+
+        gc.collect()

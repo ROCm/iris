@@ -22,7 +22,6 @@ try:
 except ImportError:
     TRITONBLAS_AVAILABLE = False
 
-from .all_gather import all_gather
 from .core import Tile, TensorView, DeviceContext
 
 
@@ -139,13 +138,13 @@ def all_gather_gemm(
         gather_pid_m = gather_tile_id // num_tiles_k_gather
         gather_pid_k = gather_tile_id % num_tiles_k_gather
 
-        # Call all_gather with gather_dim=1 for column-wise gathering using OOP API
+        # Call all_gather with gather_dim=1 for column-wise gathering using ctx API
         tile = Tile(gather_pid_m, gather_pid_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
         src_view = TensorView(A_sharded, M, K_local, stride_am, stride_ak)
         dst_view = TensorView(A_gathered, M, K, stride_ag_m, stride_ag_n)
         ctx = DeviceContext(cur_rank, world_size, heap_bases)
 
-        all_gather(tile, src_view, dst_view, 1, ctx)  # gather_dim=1 for columns
+        ctx.all_gather(tile, src_view, dst_view, 1)  # gather_dim=1 for columns
 
     # Synchronization barrier to ensure all-gather completes before GEMM
     tl.debug_barrier()

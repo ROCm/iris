@@ -22,8 +22,7 @@ try:
 except ImportError:
     TRITONBLAS_AVAILABLE = False
 
-from .all_reduce import all_reduce_one_shot
-from .core import Tile, TensorView, DeviceContext
+from .core import Tile, TensorView, DeviceContext, AllReduceConfig
 
 
 @triton.jit()
@@ -193,12 +192,13 @@ def gemm_all_reduce(
             stride_cn,
         )
 
-        # Perform all-reduce using one-shot approach with OOP API
-        # all_reduce_one_shot reads from all ranks' C (which now contains GEMM results)
+        # Perform all-reduce using one-shot approach with ctx API
+        # all_reduce reads from all ranks' C (which now contains GEMM results)
         # and writes the summed result back to C
         tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         src_view = TensorView(C, M, N, stride_cm, stride_cn)
         dst_view = TensorView(C, M, N, stride_cm, stride_cn)
         ctx = DeviceContext(cur_rank, world_size, heap_bases)
+        config = AllReduceConfig("one_shot")
 
-        all_reduce_one_shot(tile, src_view, dst_view, ctx)
+        ctx.all_reduce(tile, src_view, dst_view, config=config)
