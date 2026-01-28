@@ -25,6 +25,7 @@ except ImportError:
     TRITONBLAS_AVAILABLE = False
 
 from .all_gather import all_gather
+from .core import Tile, TensorView, DeviceContext
 
 
 @triton.jit()
@@ -34,18 +35,18 @@ def all_gather_gemm(
     C,
     A_gathered,
     bias_ptr,
-    M,
-    N,
-    K,
-    stride_am,
-    stride_ak,
-    stride_bn,
-    stride_bk,
-    stride_cm,
-    stride_cn,
-    stride_ag_m,
-    stride_ag_n,
-    stride_bias,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    stride_am: tl.constexpr,
+    stride_ak: tl.constexpr,
+    stride_bn: tl.constexpr,
+    stride_bk: tl.constexpr,
+    stride_cm: tl.constexpr,
+    stride_cn: tl.constexpr,
+    stride_ag_m: tl.constexpr,
+    stride_ag_n: tl.constexpr,
+    stride_bias: tl.constexpr,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -138,25 +139,13 @@ def all_gather_gemm(
         gather_pid_m = gather_tile_id // num_tiles_k_gather
         gather_pid_k = gather_tile_id % num_tiles_k_gather
         
-        # Call all_gather with gather_dim=1 for column-wise gathering
-        all_gather(
-            A_sharded,
-            A_gathered,
-            gather_pid_m,
-            gather_pid_k,
-            M,
-            K_local,
-            stride_am,
-            stride_ak,
-            stride_ag_m,
-            stride_ag_n,
-            heap_bases,
-            cur_rank,
-            world_size,
-            BLOCK_SIZE_M,
-            BLOCK_SIZE_K,
-            gather_dim=1,  # Gather along columns (K dimension)
-        )
+        # Call all_gather with gather_dim=1 for column-wise gathering using OOP API
+        tile = Tile(gather_pid_m, gather_pid_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
+        src_view = TensorView(A_sharded, M, K_local, stride_am, stride_ak)
+        dst_view = TensorView(A_gathered, M, K, stride_ag_m, stride_ag_n)
+        ctx = DeviceContext(cur_rank, world_size, heap_bases)
+        
+        all_gather(tile, src_view, dst_view, 1, ctx)  # gather_dim=1 for columns
     
     # Synchronization barrier to ensure all-gather completes before GEMM
     tl.debug_barrier()

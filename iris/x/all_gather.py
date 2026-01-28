@@ -63,10 +63,10 @@ def all_gather(
                 # Read from remote rank
                 remote_tile = iris.load(
                     src_tile_ptr,
+                    ctx.rank,  # to_rank (current rank)
+                    r,  # from_rank (remote rank)
                     ctx.heap_bases,
-                    r,
                     mask=mask,
-                    other=0.0,
                 )
                 # Write to output at rank r's section
                 out_offset_m = r * src_view.M + tile.pid_m * tile.block_m
@@ -91,10 +91,10 @@ def all_gather(
                 # Read from remote rank
                 remote_tile = iris.load(
                     src_tile_ptr,
+                    ctx.rank,  # to_rank (current rank)
+                    r,  # from_rank (remote rank)
                     ctx.heap_bases,
-                    r,
                     mask=mask,
-                    other=0.0,
                 )
                 # Write to output at rank r's section
                 out_offset_m = tile.pid_m * tile.block_m

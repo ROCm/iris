@@ -24,6 +24,7 @@ except ImportError:
     TRITONBLAS_AVAILABLE = False
 
 from .all_gather import all_gather
+from .core import Tile, TensorView, DeviceContext
 
 
 @triton.jit()
@@ -32,16 +33,16 @@ def gemm_all_gather(
     B,
     C,
     bias_ptr,
-    M,
-    N,
-    K,
-    stride_am,
-    stride_ak,
-    stride_bn,
-    stride_bk,
-    stride_cm,
-    stride_cn,
-    stride_bias,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    stride_am: tl.constexpr,
+    stride_ak: tl.constexpr,
+    stride_bn: tl.constexpr,
+    stride_bk: tl.constexpr,
+    stride_cm: tl.constexpr,
+    stride_cn: tl.constexpr,
+    stride_bias: tl.constexpr,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -207,24 +208,13 @@ def gemm_all_gather(
         pid_m = output_coord_m
         pid_n = output_coord_n
 
-        # Call all_gather to gather this tile from all ranks
+        # Call all_gather to gather this tile from all ranks using OOP API
         # all_gather reads from C at [cur_rank * M : (cur_rank + 1) * M, :] (input)
         # and writes to C at [cur_rank * M : (cur_rank + 1) * M, :] on all ranks (output)
-        all_gather(
-            C,  # input_ptr: local rank's computed result (already stored above)
-            C,  # output_ptr: will receive from all ranks (same tensor)
-            pid_m,
-            pid_n,
-            M,  # M per rank (input dimension)
-            N,  # N dimension
-            stride_cm,
-            stride_cn,  # input strides (reading from local portion)
-            stride_cm,
-            stride_cn,  # output strides (writing to full output)
-            heap_bases,
-            cur_rank,
-            world_size,
-            BLOCK_SIZE_M,
-            BLOCK_SIZE_N,
-        )
+        tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        src_view = TensorView(C, M, N, stride_cm, stride_cn)
+        dst_view = TensorView(C, M * world_size, N, stride_cm, stride_cn)
+        ctx = DeviceContext(cur_rank, world_size, heap_bases)
+        
+        all_gather(tile, src_view, dst_view, 0, ctx)  # gather_dim=0 for rows
 

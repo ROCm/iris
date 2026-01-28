@@ -70,9 +70,9 @@ def all_to_all(
             # Remote data: read from rank r
             data = iris.load(
                 src_view.ptr + src_offsets,
+                ctx.rank,  # to_rank (current rank)
+                r,  # from_rank (remote rank)
                 ctx.heap_bases,
-                r,
                 mask=mask,
-                other=0.0,
             )
             tl.store(dst_view.ptr + dst_offsets, data, mask=mask)

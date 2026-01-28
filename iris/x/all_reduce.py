@@ -43,8 +43,8 @@ def all_reduce_atomic(
     # Accumulate from all remote ranks using atomics
     for r in range(ctx.world_size):
         if r != ctx.rank:
-            remote_tile = iris.load(src_tile_ptr, ctx.heap_bases, r, mask=mask, other=0.0)
-            iris.atomic_add(dst_tile_ptr, remote_tile, ctx.heap_bases, ctx.rank, mask=mask)
+            remote_tile = iris.load(src_tile_ptr, ctx.rank, r, ctx.heap_bases, mask=mask)
+            iris.atomic_add(dst_tile_ptr, remote_tile, ctx.rank, ctx.rank, ctx.heap_bases, mask=mask)
 
 
 @triton.jit()
@@ -52,47 +52,49 @@ def all_reduce_spinlock(
     tile: Tile,
     src_view: TensorView,
     dst_view: TensorView,
+    locks_ptr,
+    tile_id,
     ctx: DeviceContext,
 ):
     """
     Tile-level all-reduce using spinlock synchronization.
 
+    Uses atomic locks to ensure only one rank computes the reduction at a time.
+
     Args:
         tile: Tile object with position and dimensions.
         src_view: TensorView for input tensor.
         dst_view: TensorView for output tensor.
+        locks_ptr: Pointer to locks array (one lock per tile).
+        tile_id: Unique identifier for this tile for lock indexing.
         ctx: DeviceContext with rank, world_size, and heap_bases.
     """
+    lock_ptr = locks_ptr + tile_id
+
+    # Acquire lock (spin until we swap 0 -> 1)
+    while tl.atomic_cas(lock_ptr, 0, 1, sem="acquire", scope="sys") != 0:
+        pass
+
     # Get tile pointer and mask
     src_tile_ptr, mask = src_view.tile_ptr(tile)
     dst_tile_ptr, _ = dst_view.tile_ptr(tile)
 
-    # Load local tile
+    # Load local tile to get dtype
     local_tile = tl.load(src_tile_ptr, mask=mask, other=0.0)
 
     # Initialize accumulator
     acc_dtype = tl.float32 if local_tile.dtype == tl.float16 else local_tile.dtype
     acc = tl.zeros((tile.block_m, tile.block_n), dtype=acc_dtype)
-    acc += local_tile.to(acc_dtype)
 
-    # Accumulate from remote ranks
-    for r in range(ctx.world_size):
-        if r != ctx.rank:
-            remote_tile = iris.load(src_tile_ptr, ctx.heap_bases, r, mask=mask, other=0.0)
-            acc += remote_tile.to(acc_dtype)
+    # Accumulate from all ranks
+    for remote_rank in range(ctx.world_size):
+        partial = iris.load(src_tile_ptr, ctx.rank, remote_rank, ctx.heap_bases, mask=mask)
+        acc += partial.to(acc_dtype)
 
-    # Store result
+    # Store result and release lock
     result = acc.to(local_tile.dtype)
     tl.store(dst_tile_ptr, result, mask=mask)
-
-    # Spinlock: wait for all ranks to write their results
-    for r in range(ctx.world_size):
-        if r != ctx.rank:
-            expected = result
-            while True:
-                remote_result = iris.load(dst_tile_ptr, ctx.heap_bases, r, mask=mask, other=0.0)
-                if tl.sum(tl.abs(remote_result - expected)) < 1e-6:
-                    break
+    tl.atomic_xchg(lock_ptr, 0, sem="release", scope="sys")
 
 
 @triton.jit()
@@ -103,7 +105,9 @@ def all_reduce_one_shot(
     ctx: DeviceContext,
 ):
     """
-    Tile-level all-reduce using one-shot algorithm (rank 0 aggregates and broadcasts).
+    Tile-level all-reduce using one-shot algorithm (all ranks gather and reduce locally).
+
+    Each rank reads from all other ranks in one shot and computes the reduction locally.
 
     Args:
         tile: Tile object with position and dimensions.
@@ -115,25 +119,21 @@ def all_reduce_one_shot(
     src_tile_ptr, mask = src_view.tile_ptr(tile)
     dst_tile_ptr, _ = dst_view.tile_ptr(tile)
 
-    # Load local tile
+    # Load local tile to get dtype
     local_tile = tl.load(src_tile_ptr, mask=mask, other=0.0)
 
-    # Rank 0 aggregates
-    if ctx.rank == 0:
-        acc_dtype = tl.float32 if local_tile.dtype == tl.float16 else local_tile.dtype
-        acc = tl.zeros((tile.block_m, tile.block_n), dtype=acc_dtype)
-        acc += local_tile.to(acc_dtype)
+    # Initialize accumulator
+    acc_dtype = tl.float32 if local_tile.dtype == tl.float16 else local_tile.dtype
+    acc = tl.zeros((tile.block_m, tile.block_n), dtype=acc_dtype)
 
-        for r in range(1, ctx.world_size):
-            remote_tile = iris.load(src_tile_ptr, ctx.heap_bases, r, mask=mask, other=0.0)
-            acc += remote_tile.to(acc_dtype)
+    # Gather all partials from all ranks (including self) and accumulate
+    for remote_rank in range(ctx.world_size):
+        partial = iris.load(src_tile_ptr, ctx.rank, remote_rank, ctx.heap_bases, mask=mask)
+        acc += partial.to(acc_dtype)
 
-        result = acc.to(local_tile.dtype)
-        tl.store(dst_tile_ptr, result, mask=mask)
-    else:
-        # Non-zero ranks wait and read from rank 0
-        result = iris.load(dst_tile_ptr, ctx.heap_bases, 0, mask=mask, other=0.0)
-        tl.store(dst_tile_ptr, result, mask=mask)
+    # Store result
+    result = acc.to(local_tile.dtype)
+    tl.store(dst_tile_ptr, result, mask=mask)
 
 
 @triton.jit()
@@ -192,7 +192,7 @@ def all_reduce_ring(
         recv_rank = (ctx.rank + step + 1) % ctx.world_size
 
         if recv_rank != ctx.rank:
-            remote_result = iris.load(dst_tile_ptr, ctx.heap_bases, recv_rank, mask=mask, other=0.0)
+            remote_result = iris.load(dst_tile_ptr, ctx.rank, recv_rank, ctx.heap_bases, mask=mask)
             tl.store(dst_tile_ptr, remote_result, mask=mask)
 
 
@@ -204,7 +204,9 @@ def all_reduce_two_shot(
     ctx: DeviceContext,
 ):
     """
-    Tile-level all-reduce using two-shot algorithm (reduce to rank 0, then broadcast).
+    Tile-level all-reduce using two-shot algorithm (all ranks gather, compute, then sync).
+
+    Similar to one_shot but may use different synchronization strategy.
 
     Args:
         tile: Tile object with position and dimensions.
@@ -216,26 +218,21 @@ def all_reduce_two_shot(
     src_tile_ptr, mask = src_view.tile_ptr(tile)
     dst_tile_ptr, _ = dst_view.tile_ptr(tile)
 
-    # Load local tile
+    # Load local tile to get dtype
     local_tile = tl.load(src_tile_ptr, mask=mask, other=0.0)
 
-    # Phase 1: Reduce to rank 0
-    if ctx.rank == 0:
-        acc_dtype = tl.float32 if local_tile.dtype == tl.float16 else local_tile.dtype
-        acc = tl.zeros((tile.block_m, tile.block_n), dtype=acc_dtype)
-        acc += local_tile.to(acc_dtype)
+    # Initialize accumulator
+    acc_dtype = tl.float32 if local_tile.dtype == tl.float16 else local_tile.dtype
+    acc = tl.zeros((tile.block_m, tile.block_n), dtype=acc_dtype)
 
-        for r in range(1, ctx.world_size):
-            remote_tile = iris.load(src_tile_ptr, ctx.heap_bases, r, mask=mask, other=0.0)
-            acc += remote_tile.to(acc_dtype)
+    # Gather all partials from all ranks and accumulate
+    for remote_rank in range(ctx.world_size):
+        partial = iris.load(src_tile_ptr, ctx.rank, remote_rank, ctx.heap_bases, mask=mask)
+        acc += partial.to(acc_dtype)
 
-        result = acc.to(local_tile.dtype)
-        tl.store(dst_tile_ptr, result, mask=mask)
-
-    # Phase 2: Broadcast from rank 0
-    if ctx.rank != 0:
-        result = iris.load(dst_tile_ptr, ctx.heap_bases, 0, mask=mask, other=0.0)
-        tl.store(dst_tile_ptr, result, mask=mask)
+    # Store result
+    result = acc.to(local_tile.dtype)
+    tl.store(dst_tile_ptr, result, mask=mask)
 
 
 # Convenience alias for default all_reduce

@@ -24,6 +24,7 @@ except ImportError:
     TRITONBLAS_AVAILABLE = False
 
 from .all_reduce import all_reduce_one_shot
+from .core import Tile, TensorView, DeviceContext
 
 
 @triton.jit()
@@ -32,16 +33,16 @@ def gemm_all_reduce(
     B,
     C,
     bias_ptr,
-    M,
-    N,
-    K,
-    stride_am,
-    stride_ak,
-    stride_bn,
-    stride_bk,
-    stride_cm,
-    stride_cn,
-    stride_bias,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    stride_am: tl.constexpr,
+    stride_ak: tl.constexpr,
+    stride_bn: tl.constexpr,
+    stride_bk: tl.constexpr,
+    stride_cm: tl.constexpr,
+    stride_cn: tl.constexpr,
+    stride_bias: tl.constexpr,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -186,24 +187,13 @@ def gemm_all_reduce(
             stride_cn,
         )
 
-        # Perform all-reduce using one-shot approach
+        # Perform all-reduce using one-shot approach with OOP API
         # all_reduce_one_shot reads from all ranks' C (which now contains GEMM results)
         # and writes the summed result back to C
-        all_reduce_one_shot(
-            C,  # input_ptr: local rank's computed result (already stored above)
-            C,  # output_ptr: will contain sum from all ranks
-            pid_m,
-            pid_n,
-            M,
-            N,
-            stride_cm,
-            stride_cn,  # input strides
-            stride_cm,
-            stride_cn,  # output strides
-            heap_bases,
-            cur_rank,
-            world_size,
-            BLOCK_SIZE_M,
-            BLOCK_SIZE_N,
-        )
+        tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        src_view = TensorView(C, M, N, stride_cm, stride_cn)
+        dst_view = TensorView(C, M, N, stride_cm, stride_cn)
+        ctx = DeviceContext(cur_rank, world_size, heap_bases)
+        
+        all_reduce_one_shot(tile, src_view, dst_view, ctx)
 

@@ -47,13 +47,7 @@ def reduce_scatter(
     for r in range(ctx.world_size):
         if r != ctx.rank:
             # Read tile from remote rank
-            remote_tile = iris.load(
-                src_tile_ptr,
-                ctx.heap_bases,
-                r,
-                mask=mask,
-                other=0.0,
-            )
+            remote_tile = iris.load(src_tile_ptr, ctx.rank, r, ctx.heap_bases, mask=mask)
             acc += remote_tile.to(acc_dtype)
 
     # Convert back to original dtype and store
