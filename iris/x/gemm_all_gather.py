@@ -124,9 +124,7 @@ def gemm_all_gather(
 
     # Persistent loop: process multiple tiles per workgroup
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        # ============================================================
         # Compute tile coordinates and initialize accumulator
-        # ============================================================
         output_coord_m, output_coord_n, row_indices, col_indices, acc = idx2coord(
             tile_id,
             num_pid_m,
@@ -139,9 +137,7 @@ def gemm_all_gather(
             acc_dtype,
         )
 
-        # ============================================================
         # Compute matrix multiplication over full K dimension
-        # ============================================================
         acc = gemm_loop(
             A,
             B,  # Pointers to A and B tensors
@@ -161,9 +157,7 @@ def gemm_all_gather(
             EVEN_K,  # Extra compile time constants
         )
 
-        # ============================================================
         # Add bias and convert to output dtype
-        # ============================================================
         # Add bias if provided
         if BIAS:
             bias_vector = tl.load(
@@ -174,10 +168,8 @@ def gemm_all_gather(
         # Convert to output dtype
         result = convert_dtype(acc, C.type.element_ty)  # Convert accumulator to output datatype
 
-        # ============================================================
         # Store GEMM result to local portion of output buffer
         # Each rank stores its computed tile to C[cur_rank * M : (cur_rank + 1) * M, :]
-        # ============================================================
         # Compute global output row indices for this rank's section
         # row_indices are local (0 to M-1), we offset by cur_rank * M
         output_row_indices = row_indices + cur_rank * M
@@ -196,9 +188,7 @@ def gemm_all_gather(
             stride_cn,  # Stride of output dimensions
         )
 
-        # ============================================================
         # Perform all-gather on the computed tile
-        # ============================================================
         # Now we need to gather this tile from all ranks
         # all_gather will read each rank's portion from C and write it to
         # the appropriate location in C on all ranks

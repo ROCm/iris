@@ -134,9 +134,7 @@ def gemm_reduce_scatter(
 
     # Persistent loop: process multiple tiles per workgroup
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        # ============================================================
         # Compute tile coordinates for full output
-        # ============================================================
         output_coord_m, output_coord_n, row_indices, col_indices, acc = idx2coord(
             tile_id,
             num_pid_m,
@@ -149,9 +147,7 @@ def gemm_reduce_scatter(
             acc_dtype,
         )
 
-        # ============================================================
         # Compute matrix multiplication over full K dimension
-        # ============================================================
         acc = gemm_loop(
             A,
             B,
@@ -171,9 +167,7 @@ def gemm_reduce_scatter(
             EVEN_K,
         )
 
-        # ============================================================
         # Add bias and convert to output dtype
-        # ============================================================
         if BIAS:
             bias_vector = tl.load(
                 bias_ptr + row_indices * stride_bias, mask=row_indices < M, other=0.0
@@ -183,9 +177,7 @@ def gemm_reduce_scatter(
         # Convert to output dtype
         result = convert_dtype(acc, C_full.type.element_ty)
 
-        # ============================================================
         # Store full result to C_full, then reduce-scatter
-        # ============================================================
         # Store the computed result (full N columns) to C_full buffer
 
         store(
@@ -199,9 +191,7 @@ def gemm_reduce_scatter(
             stride_cn_full,
         )
 
-        # ============================================================
         # Perform reduce-scatter on the computed tile
-        # ============================================================
         # reduce_scatter will read from C_full (full result) on all ranks
         # and write reduced result to C (local portion) only on the assigned rank
         # 

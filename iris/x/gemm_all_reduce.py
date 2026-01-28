@@ -23,7 +23,7 @@ try:
 except ImportError:
     TRITONBLAS_AVAILABLE = False
 
-from .all_reduce import all_reduce_atomic
+from .all_reduce import all_reduce_one_shot
 
 
 @triton.jit()
@@ -124,9 +124,7 @@ def gemm_all_reduce(
 
     # Persistent loop: process multiple tiles per workgroup
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        # ============================================================
         # Compute tile coordinates and initialize accumulator
-        # ============================================================
         output_coord_m, output_coord_n, row_indices, col_indices, acc = idx2coord(
             tile_id,
             num_pid_m,
@@ -139,9 +137,7 @@ def gemm_all_reduce(
             acc_dtype,
         )
 
-        # ============================================================
         # Compute matrix multiplication over full K dimension
-        # ============================================================
         acc = gemm_loop(
             A,
             B,  # Pointers to A and B tensors
@@ -161,9 +157,7 @@ def gemm_all_reduce(
             EVEN_K,  # Extra compile time constants
         )
 
-        # ============================================================
         # Add bias and convert to output dtype
-        # ============================================================
         # Add bias if provided
         if BIAS:
             bias_vector = tl.load(
@@ -174,29 +168,16 @@ def gemm_all_reduce(
         # Convert to output dtype
         result = convert_dtype(acc, C.type.element_ty)  # Convert accumulator to output datatype
 
-        # ============================================================
-        # Perform all-reduce on the computed tile using atomic operations
-        # ============================================================
+        # Perform all-reduce on the computed tile
         # Compute pid_m and pid_n for the all_reduce call
         pid_m = output_coord_m
         pid_n = output_coord_n
 
-        # all_reduce_atomic will atomically add this rank's result to all ranks' outputs
-        # It reads from input_ptr and atomically adds to output_ptr
-        # We can use C as both input and output, but we need to ensure C is zeroed first
-        # For this tile, we'll directly use all_reduce_atomic which handles the atomic add
-        # Note: C should be zeroed before calling this kernel
-        
-        # Perform all-reduce using atomic operations
-        # all_reduce_atomic reads from input and atomically adds to output
-        # We'll use a temporary approach: store result, then all_reduce
-        # But actually, all_reduce_atomic expects input_ptr to have the data
-        # So we need to store result first, then call all_reduce
-        
-        # Store local result first
+        # Store local GEMM result to C first
+        # Each rank stores its computed result, then all-reduce gathers and sums them
         store(
             C,
-            result,  # Store local GEMM result
+            result,
             row_indices,
             col_indices,
             M,
@@ -205,10 +186,11 @@ def gemm_all_reduce(
             stride_cn,
         )
 
-        # Now all-reduce: atomically add this rank's contribution to all ranks
-        # Note: This will add to C on all ranks, so C should be zeroed before kernel launch
-        all_reduce_atomic(
-            C,  # input_ptr: local rank's computed result
+        # Perform all-reduce using one-shot approach
+        # all_reduce_one_shot reads from all ranks' C (which now contains GEMM results)
+        # and writes the summed result back to C
+        all_reduce_one_shot(
+            C,  # input_ptr: local rank's computed result (already stored above)
             C,  # output_ptr: will contain sum from all ranks
             pid_m,
             pid_n,

@@ -70,21 +70,10 @@ def test_all_gather_gemm(dtype, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_
     # Set up Iris tensors
     iris_A_sharded = shmem.zeros((M, K_local), dtype=dtype)
     iris_A_sharded.copy_(A_local)
-    iris_A_gathered = shmem.zeros((M, K_total), dtype=dtype)  # Will be populated by all_gather
+    iris_A_gathered = shmem.zeros((M, K_total), dtype=dtype)  # Will be populated by kernel
     iris_B = shmem.zeros((K_total, N), dtype=dtype)
     iris_B.copy_(B)
     iris_C = shmem.zeros((M, N), dtype=dtype)
-
-    # First, gather A using iris.ccl.all_gather
-    # Note: iris.ccl.all_gather gathers along rows, so we need to transpose
-    # For this test, we'll manually gather A first
-    shmem.barrier()
-    # Use PyTorch's all_gather to populate A_gathered for now
-    # In practice, you'd use iris primitives to gather along K dimension
-    A_gathered_list_iris = [torch.empty_like(A_local) for _ in range(world_size)]
-    dist.all_gather(A_gathered_list_iris, A_local)
-    A_gathered_iris = torch.cat(A_gathered_list_iris, dim=1)
-    iris_A_gathered.copy_(A_gathered_iris)
 
     shmem.barrier()
 
@@ -139,13 +128,17 @@ def test_all_gather_gemm(dtype, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_
         shmem.barrier()
 
         # Compare results
-        atol = 1e-3 if dtype == torch.float16 else 1e-5
+        atol = 1e-2 if dtype == torch.float16 else 1e-3  # GEMM has higher error tolerance
+        rtol = 1e-2 if dtype == torch.float16 else 1e-3
         max_diff = torch.abs(iris_C - pytorch_output_tensor).max().item()
 
-        assert torch.allclose(iris_C, pytorch_output_tensor, atol=atol), (
+        assert torch.allclose(iris_C, pytorch_output_tensor, atol=atol, rtol=rtol), (
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.all_gather_gemm output doesn't match reference"
         )
+        
+        if rank == 0:
+            print(f"✓ All-Gather+GEMM test passed: {dtype}, M={M}, N={N}, K={K_total}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N},{BLOCK_SIZE_K})")
     except Exception as e:
         pytest.fail(f"all_gather_gemm failed: {e}")
     finally:

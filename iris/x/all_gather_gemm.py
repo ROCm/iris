@@ -11,6 +11,7 @@ from all ranks and then computes matrix multiplication, useful for tensor-parall
 import triton
 import triton.language as tl
 import torch
+import iris
 
 try:
     from tritonblas.kernels.stages.indexing import grid_setup, idx2coord
@@ -125,6 +126,41 @@ def all_gather_gemm(
     # A_sharded has shape (M, K_local), A_gathered has shape (M, K)
     K_local = K // world_size
 
+    # Perform column-wise all-gather on A_sharded using the generalized all_gather primitive
+    # A_sharded: (M, K_local) per rank -> A_gathered: (M, K) where K = world_size * K_local
+    # Each rank's data goes to columns [cur_rank * K_local : (cur_rank+1) * K_local]
+    num_tiles_m_gather = tl.cdiv(M, BLOCK_SIZE_M)
+    num_tiles_k_gather = tl.cdiv(K_local, BLOCK_SIZE_K)  # Use BLOCK_SIZE_K for K dimension
+    total_gather_tiles = num_tiles_m_gather * num_tiles_k_gather
+    
+    pid_base = tl.program_id(0)
+    for gather_tile_id in range(pid_base, total_gather_tiles, NUM_SMS):
+        gather_pid_m = gather_tile_id // num_tiles_k_gather
+        gather_pid_k = gather_tile_id % num_tiles_k_gather
+        
+        # Call all_gather with gather_dim=1 for column-wise gathering
+        all_gather(
+            A_sharded,
+            A_gathered,
+            gather_pid_m,
+            gather_pid_k,
+            M,
+            K_local,
+            stride_am,
+            stride_ak,
+            stride_ag_m,
+            stride_ag_n,
+            heap_bases,
+            cur_rank,
+            world_size,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_K,
+            gather_dim=1,  # Gather along columns (K dimension)
+        )
+    
+    # Synchronization barrier to ensure all-gather completes before GEMM
+    tl.debug_barrier()
+
     # Compute Global Grid information once (for output C dimensions)
     pid, num_pid_m, num_pid_n, total_tiles = grid_setup(
         M, N, K,  # Problem Dimensions (using full K for gathered A)
@@ -135,9 +171,7 @@ def all_gather_gemm(
 
     # Persistent loop: process multiple tiles per workgroup
     for tile_id in range(pid, total_tiles, NUM_SMS):
-        # ============================================================
         # Compute tile coordinates for output C
-        # ============================================================
         output_coord_m, output_coord_n, row_indices, col_indices, acc = idx2coord(
             tile_id,
             num_pid_m,
@@ -150,28 +184,7 @@ def all_gather_gemm(
             acc_dtype,
         )
 
-        # ============================================================
-        # Phase 1: All-Gather A tiles needed for this output tile
-        # ============================================================
-        # A is sharded along K dimension: each rank has A_sharded of shape (M, K_local)
-        # We need to gather to A_gathered of shape (M, K) where K = world_size * K_local
-        # 
-        # Note: The all_gather primitive gathers along rows (M dimension), but here we need
-        # to gather along columns (K dimension). For this implementation, we assume
-        # A_gathered is pre-populated by calling all_gather separately on A_sharded.
-        # 
-        # In practice, you would:
-        # 1. Transpose A_sharded to (K_local, M) 
-        # 2. Call all_gather to get (K, M)
-        # 3. Transpose back to (M, K)
-        # Or use a column-wise all_gather variant.
-        #
-        # For this tile-level primitive, we assume A_gathered is already populated
-        # with the gathered data needed for this tile.
-
-        # ============================================================
-        # Phase 2: Compute GEMM using gathered A
-        # ============================================================
+        # Compute GEMM using gathered A
         # Now compute GEMM: C = A_gathered @ B
         # Use gemm_loop with gathered A
         acc = gemm_loop(

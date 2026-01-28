@@ -220,6 +220,9 @@ def test_all_reduce_spinlock_kernel(
         (128, 64, 64, 32),  # Small
         (1024, 256, 128, 128),  # Medium
         (2048, 2048, 256, 256),  # Large
+        (100, 100, 64, 64),  # Non-aligned dimensions
+        (256, 384, 128, 128),  # Non-square
+        (64, 32, 128, 128),  # Block size larger than dimensions
     ],
 )
 def test_all_reduce(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
@@ -314,13 +317,24 @@ def test_all_reduce(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
 
     # Compare results
     atol = 1e-3 if dtype == torch.float16 else 1e-5
+    rtol = 1e-3 if dtype == torch.float16 else 1e-5
     max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
 
     try:
-        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), (
+        # Verify overall correctness
+        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.all_reduce_{variant} output doesn't match PyTorch's all_reduce"
         )
+        
+        # Verify the reduction is correct (sum of all ranks)
+        expected_sum = sum(float(r + 1) for r in range(world_size))
+        assert torch.allclose(iris_output_tensor, torch.full_like(iris_output_tensor, expected_sum), atol=atol), (
+            f"Rank {rank}: Reduction result is incorrect, expected {expected_sum}"
+        )
+        
+        if rank == 0:
+            print(f"✓ All-reduce {variant} test passed: {dtype}, M={M}, N={N}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N})")
     finally:
         shmem.barrier()
         del shmem

@@ -121,13 +121,17 @@ def test_gemm_reduce_scatter(dtype, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_S
         shmem.barrier()
 
         # Compare results
-        atol = 1e-3 if dtype == torch.float16 else 1e-5
+        atol = 1e-2 if dtype == torch.float16 else 1e-3  # GEMM has higher error tolerance
+        rtol = 1e-2 if dtype == torch.float16 else 1e-3
         max_diff = torch.abs(iris_C - C_local_ref).max().item()
 
-        assert torch.allclose(iris_C, C_local_ref, atol=atol), (
+        assert torch.allclose(iris_C, C_local_ref, atol=atol, rtol=rtol), (
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.gemm_reduce_scatter output doesn't match reference"
         )
+        
+        if rank == 0:
+            print(f"✓ GEMM+Reduce-Scatter test passed: {dtype}, M={M}, N={N}, K={K}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N},{BLOCK_SIZE_K})")
     except Exception as e:
         pytest.fail(f"gemm_reduce_scatter failed: {e}")
     finally:

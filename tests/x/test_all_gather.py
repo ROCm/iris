@@ -29,6 +29,7 @@ def test_all_gather_kernel(
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
+    gather_dim: tl.constexpr,
 ):
     """Kernel that iterates over tiles and calls all_gather for each."""
     pid = tl.program_id(0)
@@ -56,9 +57,14 @@ def test_all_gather_kernel(
             world_size,
             BLOCK_SIZE_M,
             BLOCK_SIZE_N,
+            gather_dim,
         )
 
 
+@pytest.mark.parametrize(
+    "gather_dim",
+    [0, 1],
+)
 @pytest.mark.parametrize(
     "dtype",
     [
@@ -73,9 +79,12 @@ def test_all_gather_kernel(
         (128, 64, 64, 32),  # Small
         (1024, 256, 128, 128),  # Medium
         (2048, 2048, 256, 256),  # Large
+        (100, 100, 64, 64),  # Non-aligned dimensions
+        (256, 384, 128, 128),  # Non-square
+        (64, 32, 128, 128),  # Block size larger than dimensions
     ],
 )
-def test_all_gather(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
+def test_all_gather(gather_dim, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     """Test tile-level all-gather primitive by comparing against PyTorch's implementation."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -93,13 +102,24 @@ def test_all_gather(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     pytorch_output_list = [torch.empty_like(pytorch_input_tensor) for _ in range(world_size)]
     shmem.barrier()
     dist.all_gather(pytorch_output_list, pytorch_input_tensor)
-    pytorch_output_tensor = torch.cat(pytorch_output_list, dim=0)  # Concatenate along dim 0
+    
+    if gather_dim == 0:
+        # Gather along rows (M dimension)
+        pytorch_output_tensor = torch.cat(pytorch_output_list, dim=0)  # Concatenate along dim 0
+    else:
+        # Gather along columns (N dimension)
+        pytorch_output_tensor = torch.cat(pytorch_output_list, dim=1)  # Concatenate along dim 1
+    
     torch.cuda.synchronize()
 
     # Set up Iris tensors
     iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
     iris_input_tensor.copy_(pytorch_input_tensor)
-    iris_output_tensor = shmem.zeros((world_size * M, N), dtype=dtype)
+    
+    if gather_dim == 0:
+        iris_output_tensor = shmem.zeros((world_size * M, N), dtype=dtype)
+    else:
+        iris_output_tensor = shmem.zeros((M, world_size * N), dtype=dtype)
 
     shmem.barrier()
 
@@ -123,6 +143,7 @@ def test_all_gather(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         world_size,
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
+        gather_dim,
     )
 
     torch.cuda.synchronize()
@@ -130,13 +151,41 @@ def test_all_gather(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
 
     # Compare results
     atol = 1e-3 if dtype == torch.float16 else 1e-5
+    rtol = 1e-3 if dtype == torch.float16 else 1e-5
     max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
 
     try:
-        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), (
+        # Verify overall correctness
+        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.all_gather output doesn't match PyTorch's all_gather"
         )
+        
+        # Verify each rank's data is in the correct location
+        if gather_dim == 0:
+            # Gathered along rows
+            for r in range(world_size):
+                start_row = r * M
+                end_row = (r + 1) * M
+                rank_data = iris_output_tensor[start_row:end_row, :]
+                expected_value = float(r + 1)
+                assert torch.allclose(rank_data, torch.full_like(rank_data, expected_value), atol=atol), (
+                    f"Rank {rank}: Data from rank {r} not in correct location or has wrong value"
+                )
+        else:
+            # Gathered along columns
+            for r in range(world_size):
+                start_col = r * N
+                end_col = (r + 1) * N
+                rank_data = iris_output_tensor[:, start_col:end_col]
+                expected_value = float(r + 1)
+                assert torch.allclose(rank_data, torch.full_like(rank_data, expected_value), atol=atol), (
+                    f"Rank {rank}: Data from rank {r} not in correct location or has wrong value"
+                )
+        
+        if rank == 0:
+            dim_str = "rows" if gather_dim == 0 else "cols"
+            print(f"✓ All-gather test passed ({dim_str}): {dtype}, M={M}, N={N}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N})")
     finally:
         shmem.barrier()
         del shmem

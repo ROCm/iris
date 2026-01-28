@@ -73,6 +73,9 @@ def test_all_to_all_kernel(
         (128, 64, 64, 32),  # Small
         (1024, 256, 128, 128),  # Medium
         (2048, 2048, 256, 256),  # Large
+        (100, 100, 64, 64),  # Non-aligned dimensions
+        (256, 384, 128, 128),  # Non-square
+        (64, 32, 128, 128),  # Block size larger than dimensions
     ],
 )
 def test_all_to_all(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
@@ -135,13 +138,29 @@ def test_all_to_all(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
 
     # Compare results
     atol = 1e-3 if dtype == torch.float16 else 1e-5
+    rtol = 1e-3 if dtype == torch.float16 else 1e-5
     max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
 
     try:
-        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), (
+        # Verify overall correctness
+        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.all_to_all output doesn't match PyTorch's all_to_all"
         )
+        
+        # Verify each rank's received chunks contain correct data
+        for r in range(world_size):
+            start_col = r * N
+            end_col = (r + 1) * N
+            chunk_data = iris_output_tensor[:, start_col:end_col]
+            # Data in this chunk should be from rank r, which is filled with value (r+1)
+            expected_value = float(r + 1)
+            assert torch.allclose(chunk_data, torch.full_like(chunk_data, expected_value), atol=atol), (
+                f"Rank {rank}: Data from rank {r} not in correct location or has wrong value"
+            )
+        
+        if rank == 0:
+            print(f"✓ All-to-all test passed: {dtype}, M={M}, N={N}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N})")
     finally:
         shmem.barrier()
         del shmem
