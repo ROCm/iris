@@ -39,6 +39,6 @@
         "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock"
     },
     "remoteUser": "vscode",
-    "postStartCommand": "bash -lc 'set -e; if ! getent group video >/dev/null; then sudo groupadd -r video || true; fi; if ! getent group render >/dev/null; then sudo groupadd -r render || true; fi; sudo usermod -aG video,render vscode || true'",
+    "postStartCommand": "bash -lc 'set -e; HOST_RENDER_GID=$(stat -c \"%g\" /dev/kfd 2>/dev/null || stat -c \"%g\" /dev/dri/renderD128 2>/dev/null || echo \"\"); if [ -n \"$HOST_RENDER_GID\" ]; then if ! getent group $HOST_RENDER_GID >/dev/null; then sudo groupadd -g $HOST_RENDER_GID host-render || true; fi; sudo usermod -aG $HOST_RENDER_GID vscode || true; fi; if ! getent group video >/dev/null; then sudo groupadd -r video || true; fi; sudo usermod -aG video vscode || true; for rcfile in ~/.bashrc ~/.zshrc; do if [ -f \"$rcfile\" ] && ! grep -q \"exec sg host-render\" \"$rcfile\" 2>/dev/null; then echo \"if getent group host-render >/dev/null 2>&1 && ! groups | grep -q host-render; then exec sg host-render \\\"\\$SHELL\\\"; fi\" >> \"$rcfile\"; fi; done'",
     "updateRemoteUserUID": true
 }
