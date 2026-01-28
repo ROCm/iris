@@ -1096,19 +1096,23 @@ class Iris:
         """
         return self.heap_bases
 
-    def barrier(self, stream=None):
+    def barrier(self, stream=None, group=None):
         """
-        Synchronize all ranks and their CUDA devices.
+        Synchronize ranks within the specified group and their CUDA devices.
 
         This first calls ``torch.cuda.synchronize()`` or ``stream.synchronize()`` to ensure the local GPU has
-        finished all queued work, then performs a global distributed barrier so that all
-        ranks reach the same point before proceeding.
+        finished all queued work, then performs a distributed barrier so that all
+        ranks in the group reach the same point before proceeding.
+
         Args:
             stream: If stream is given: wait only for that stream before barrier. If stream is None: legacy behavior (device-wide sync).
+            group (ProcessGroup, optional): The process group to synchronize.
+                If None, uses the default process group (all ranks).
 
         Example:
             >>> ctx = iris.iris(1 << 20)
             >>> ctx.barrier()  # Synchronize all ranks
+            >>> ctx.barrier(group=my_group)  # Synchronize only ranks in my_group
         """
         # Wait for all GPUs to finish work
         if stream is None:
@@ -1117,7 +1121,7 @@ class Iris:
             stream.synchronize()
 
         # Distributed barrier
-        distributed_barrier()
+        distributed_barrier(group=group)
 
     def get_device(self):
         """
@@ -1462,7 +1466,7 @@ class Iris:
             """
             self._iris = iris_instance
 
-        def all_to_all(self, output_tensor, input_tensor, config=None, async_op=False):
+        def all_to_all(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
             All-to-all collective operation.
 
@@ -1473,10 +1477,12 @@ class Iris:
             Args:
                 output_tensor: Output tensor of shape (M, N * world_size)
                 input_tensor: Input tensor of shape (M, N * world_size)
-                config: Config instance with kernel parameters (default: None).
-                        If None, uses default Config values.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
                 async_op: If False, performs a barrier at the end. If True, returns immediately.
                           Default: False.
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
 
             Example:
                 >>> shmem = iris.iris()
@@ -1492,9 +1498,9 @@ class Iris:
             """
             from iris.ccl.all_to_all import all_to_all as _all_to_all
 
-            _all_to_all(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+            _all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
-        def all_gather(self, output_tensor, input_tensor, config=None, async_op=False):
+        def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
             All-gather collective operation.
 
@@ -1505,10 +1511,12 @@ class Iris:
             Args:
                 output_tensor: Output tensor of shape (world_size * M, N) - will contain concatenated inputs
                 input_tensor: Input tensor of shape (M, N) - local rank's data to send
-                config: Config instance with kernel parameters (default: None).
-                        If None, uses default Config values.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
                 async_op: If False, performs a barrier at the end. If True, returns immediately.
                           Default: False.
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
 
             Example:
                 >>> shmem = iris.iris()
@@ -1525,7 +1533,7 @@ class Iris:
             """
             from iris.ccl.all_gather import all_gather as _all_gather
 
-            _all_gather(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+            _all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
@@ -1550,7 +1558,9 @@ class Iris:
                 workspace=workspace,
             )
 
-        def all_reduce(self, output_tensor, input_tensor, config=None, async_op=False, workspace=None):
+        def all_reduce(
+            self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None, workspace=None
+        ):
             """
             All-reduce collective operation.
 
@@ -1560,11 +1570,15 @@ class Iris:
             Args:
                 output_tensor: Output tensor of shape (M, N) - will contain sum of all inputs
                 input_tensor: Input tensor of shape (M, N) - local rank's partial data
+                op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
+                    Default: ReduceOp.SUM.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
                 config: Config instance with kernel parameters (default: None).
                         If None, uses default Config values.
                         Set config.all_reduce_variant to choose variant: "atomic", "ring", or "two_shot"
-                async_op: If False, performs a barrier at the end. If True, returns immediately.
-                          Default: False.
                 workspace: Optional workspace prepared by ``all_reduce_preamble`` to
                            reuse internal buffers across invocations.
 
@@ -1585,17 +1599,24 @@ class Iris:
                 >>> shmem.ccl.all_reduce(output_tensor, input_tensor, async_op=True)
             """
             from iris.ccl.all_reduce import all_reduce as _all_reduce
+            from iris.ccl import ReduceOp
+
+            # Default to SUM if not specified
+            if op is None:
+                op = ReduceOp.SUM
 
             return _all_reduce(
                 output_tensor,
                 input_tensor,
                 self._iris,
-                config=config,
+                op=op,
+                group=group,
                 async_op=async_op,
+                config=config,
                 workspace=workspace,
             )
 
-        def reduce_scatter(self, output_tensor, input_tensor, config=None, async_op=False):
+        def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
             """
             Reduce-scatter collective operation.
 
@@ -1606,11 +1627,15 @@ class Iris:
             Args:
                 output_tensor: Output tensor of shape (M, N) - will contain reduced tiles for this rank
                 input_tensor: Input tensor of shape (M, N) - local rank's partial data
+                op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
+                    Default: ReduceOp.SUM.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
                 config: Config instance with kernel parameters (default: None).
                         If None, uses default Config values.
                         Only supports reduce_scatter_variant="two_shot".
-                async_op: If False, performs a barrier at the end. If True, returns immediately.
-                          Default: False.
 
             Example:
                 >>> shmem = iris.iris()
@@ -1622,8 +1647,15 @@ class Iris:
                 >>> shmem.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
             """
             from iris.ccl.reduce_scatter import reduce_scatter as _reduce_scatter
+            from iris.ccl import ReduceOp
 
-            _reduce_scatter(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+            # Default to SUM if not specified
+            if op is None:
+                op = ReduceOp.SUM
+
+            _reduce_scatter(
+                output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
+            )
 
 
 @triton.jit
