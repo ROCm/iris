@@ -303,9 +303,7 @@ class TensorView:
         rn_offset = rn + offset_n
 
         # Compute pointer and mask
-        tile_ptr, dst_mask = self.tile_ptr_from_indices(
-            rm_offset, rn_offset, tile.block_m, tile.block_n
-        )
+        tile_ptr, dst_mask = self.tile_ptr_from_indices(rm_offset, rn_offset, tile.block_m, tile.block_n)
 
         # Combine masks if source mask provided
         if src_mask is not None:

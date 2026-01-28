@@ -52,9 +52,7 @@ def all_gather(
         # Each rank writes to a different row block
         for r in range(ctx.world_size):
             # Get destination pointer with rank-specific row offset (1 line replaces 7!)
-            dst_ptr, combined_mask = dst_view.offset_tile_ptr(
-                tile, offset_m=r * src_view.M, src_mask=mask
-            )
+            dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_m=r * src_view.M, src_mask=mask)
 
             if r == ctx.rank:
                 # Write local tile to output
@@ -74,9 +72,7 @@ def all_gather(
         # Each rank writes to a different column block
         for r in range(ctx.world_size):
             # Get destination pointer with rank-specific column offset (1 line replaces 7!)
-            dst_ptr, combined_mask = dst_view.offset_tile_ptr(
-                tile, offset_n=r * src_view.N, src_mask=mask
-            )
+            dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_n=r * src_view.N, src_mask=mask)
 
             if r == ctx.rank:
                 # Write local tile to output
