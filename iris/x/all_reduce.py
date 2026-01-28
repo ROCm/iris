@@ -11,436 +11,232 @@ Users manage tile iteration themselves and call these functions from their own k
 import triton
 import triton.language as tl
 import iris
-from .common import compute_tile_indices, compute_tile_offsets
+from .core import Tile, TensorView, DeviceContext
 
 
 @triton.jit()
 def all_reduce_atomic(
-    input_ptr,
-    output_ptr,
-    pid_m,
-    pid_n,
-    M,
-    N,
-    stride_in_m,
-    stride_in_n,
-    stride_out_m,
-    stride_out_n,
-    heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
-    world_size: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
+    tile: Tile,
+    src_view: TensorView,
+    dst_view: TensorView,
+    ctx: DeviceContext,
 ):
     """
-    Atomic-based all-reduce for a single tile.
-
-    Each rank atomically adds its local partial result to the global output buffer.
-    All ranks write to all locations using atomic operations.
+    Tile-level all-reduce using atomic operations.
 
     Args:
-        input_ptr: Pointer to input tensor (local rank's partial data)
-        output_ptr: Pointer to output tensor (will contain sum of all ranks)
-        pid_m: Tile coordinate in M dimension
-        pid_n: Tile coordinate in N dimension
-        M: Number of rows in full tensor
-        N: Number of columns in full tensor
-        stride_in_m, stride_in_n: Strides for input tensor
-        stride_out_m, stride_out_n: Strides for output tensor
-        heap_bases: Heap base pointers for all ranks
-        cur_rank: Current rank
-        world_size: Total number of ranks
-        BLOCK_SIZE_M: Block size for M dimension
-        BLOCK_SIZE_N: Block size for N dimension
+        tile: Tile object with position and dimensions.
+        src_view: TensorView for input tensor.
+        dst_view: TensorView for output tensor.
+        ctx: DeviceContext with rank, world_size, and heap_bases.
     """
-    tl.assume(pid_m >= 0)
-    tl.assume(pid_n >= 0)
+    # Get tile pointer and mask
+    src_tile_ptr, mask = src_view.tile_ptr(tile)
+    dst_tile_ptr, _ = dst_view.tile_ptr(tile)
 
-    # Compute tile indices and mask
-    rm, rn, mask = compute_tile_indices(pid_m, pid_n, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N)
-    input_offset, output_offset = compute_tile_offsets(
-        rm, rn, stride_in_m, stride_in_n, stride_out_m, stride_out_n
-    )
+    # Load local tile
+    local_tile = tl.load(src_tile_ptr, mask=mask, other=0.0)
 
-    input_ptr_local = input_ptr + input_offset
-    input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+    # Initialize output with local data
+    tl.store(dst_tile_ptr, local_tile, mask=mask)
 
-    # Load local partial result
-    data = tl.load(input_ptr_local, mask=mask)
-
-    # Atomically add to output buffer on all ranks
-    for target_rank in range(world_size):
-        if target_rank == cur_rank:
-            # For the current rank, use local atomic add
-            tl.atomic_add(output_ptr + output_offset, data, mask=mask)
-        else:
-            # For remote ranks, use iris.atomic_add to translate pointer
-            iris.atomic_add(
-                output_ptr + output_offset,
-                data,
-                cur_rank,
-                target_rank,
-                heap_bases,
-                mask=mask,
-            )
-    # Ensure all atomic operations complete
-    tl.debug_barrier()
+    # Accumulate from all remote ranks using atomics
+    for r in range(ctx.world_size):
+        if r != ctx.rank:
+            remote_tile = iris.load(src_tile_ptr, ctx.heap_bases, r, mask=mask, other=0.0)
+            iris.atomic_add(dst_tile_ptr, remote_tile, ctx.heap_bases, ctx.rank, mask=mask)
 
 
 @triton.jit()
 def all_reduce_spinlock(
-    input_ptr,
-    output_ptr,
-    locks_ptr,
-    tile_id,
-    pid_m,
-    pid_n,
-    M,
-    N,
-    stride_in_m,
-    stride_in_n,
-    stride_out_m,
-    stride_out_n,
-    heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
-    world_size: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
+    tile: Tile,
+    src_view: TensorView,
+    dst_view: TensorView,
+    ctx: DeviceContext,
 ):
     """
-    Spinlock-based all-reduce for a single tile.
-
-    Each tile acquires its lock across the entire system before accumulating remote
-    partials locally, then writes the reduced result once and releases the lock.
-    Atomics are used only for CAS/XCHG (lock/unlock); the accumulation itself is done
-    with ordinary loads/stores.
+    Tile-level all-reduce using spinlock synchronization.
 
     Args:
-        input_ptr: Pointer to input tensor (local rank's partial data)
-        output_ptr: Pointer to output tensor (will contain sum of all ranks)
-        locks_ptr: Pointer to locks array (one lock per tile)
-        tile_id: Unique tile identifier for lock indexing
-        pid_m: Tile coordinate in M dimension
-        pid_n: Tile coordinate in N dimension
-        M: Number of rows in full tensor
-        N: Number of columns in full tensor
-        stride_in_m, stride_in_n: Strides for input tensor
-        stride_out_m, stride_out_n: Strides for output tensor
-        heap_bases: Heap base pointers for all ranks
-        cur_rank: Current rank
-        world_size: Total number of ranks
-        BLOCK_SIZE_M: Block size for M dimension
-        BLOCK_SIZE_N: Block size for N dimension
+        tile: Tile object with position and dimensions.
+        src_view: TensorView for input tensor.
+        dst_view: TensorView for output tensor.
+        ctx: DeviceContext with rank, world_size, and heap_bases.
     """
-    tl.assume(pid_m >= 0)
-    tl.assume(pid_n >= 0)
+    # Get tile pointer and mask
+    src_tile_ptr, mask = src_view.tile_ptr(tile)
+    dst_tile_ptr, _ = dst_view.tile_ptr(tile)
 
-    lock_ptr = locks_ptr + tile_id
+    # Load local tile
+    local_tile = tl.load(src_tile_ptr, mask=mask, other=0.0)
 
-    # Acquire lock (spin until we swap 0 -> 1)
-    while tl.atomic_cas(lock_ptr, 0, 1, sem="acquire", scope="sys") != 0:
-        pass
+    # Initialize accumulator
+    acc_dtype = tl.float32 if local_tile.dtype == tl.float16 else local_tile.dtype
+    acc = tl.zeros((tile.block_m, tile.block_n), dtype=acc_dtype)
+    acc += local_tile.to(acc_dtype)
 
-    # Compute tile indices and mask
-    rm, rn, mask = compute_tile_indices(pid_m, pid_n, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N)
-    input_offset, output_offset = compute_tile_offsets(
-        rm, rn, stride_in_m, stride_in_n, stride_out_m, stride_out_n
-    )
+    # Accumulate from remote ranks
+    for r in range(ctx.world_size):
+        if r != ctx.rank:
+            remote_tile = iris.load(src_tile_ptr, ctx.heap_bases, r, mask=mask, other=0.0)
+            acc += remote_tile.to(acc_dtype)
 
-    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+    # Store result
+    result = acc.to(local_tile.dtype)
+    tl.store(dst_tile_ptr, result, mask=mask)
 
-    # Accumulate from all ranks
-    for remote_rank in range(world_size):
-        partial = iris.load(
-            input_ptr + input_offset,
-            cur_rank,
-            remote_rank,
-            heap_bases,
-            mask=mask,
-        )
-        acc += partial.to(acc_dtype)
-
-    # Store result and release lock
-    tl.store(output_ptr + output_offset, acc.to(output_ptr.type.element_ty), mask=mask)
-    tl.atomic_xchg(lock_ptr, 0, sem="release", scope="sys")
+    # Spinlock: wait for all ranks to write their results
+    for r in range(ctx.world_size):
+        if r != ctx.rank:
+            expected = result
+            while True:
+                remote_result = iris.load(dst_tile_ptr, ctx.heap_bases, r, mask=mask, other=0.0)
+                if tl.sum(tl.abs(remote_result - expected)) < 1e-6:
+                    break
 
 
 @triton.jit()
 def all_reduce_one_shot(
-    input_ptr,
-    output_ptr,
-    pid_m,
-    pid_n,
-    M,
-    N,
-    stride_in_m,
-    stride_in_n,
-    stride_out_m,
-    stride_out_n,
-    heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
-    world_size: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
+    tile: Tile,
+    src_view: TensorView,
+    dst_view: TensorView,
+    ctx: DeviceContext,
 ):
     """
-    One-shot all-reduce for a single tile.
-
-    Gathers all partials directly using iris.load and writes the final result once.
-    Suitable for small/latency-bound buffers.
+    Tile-level all-reduce using one-shot algorithm (rank 0 aggregates and broadcasts).
 
     Args:
-        input_ptr: Pointer to input tensor (local rank's partial data)
-        output_ptr: Pointer to output tensor (will contain sum of all ranks)
-        pid_m: Tile coordinate in M dimension
-        pid_n: Tile coordinate in N dimension
-        M: Number of rows in full tensor
-        N: Number of columns in full tensor
-        stride_in_m, stride_in_n: Strides for input tensor
-        stride_out_m, stride_out_n: Strides for output tensor
-        heap_bases: Heap base pointers for all ranks
-        cur_rank: Current rank
-        world_size: Total number of ranks
-        BLOCK_SIZE_M: Block size for M dimension
-        BLOCK_SIZE_N: Block size for N dimension
+        tile: Tile object with position and dimensions.
+        src_view: TensorView for input tensor.
+        dst_view: TensorView for output tensor.
+        ctx: DeviceContext with rank, world_size, and heap_bases.
     """
-    tl.assume(pid_m >= 0)
-    tl.assume(pid_n >= 0)
+    # Get tile pointer and mask
+    src_tile_ptr, mask = src_view.tile_ptr(tile)
+    dst_tile_ptr, _ = dst_view.tile_ptr(tile)
 
-    # Compute tile indices and mask
-    rm, rn, mask = compute_tile_indices(pid_m, pid_n, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N)
-    input_offset, output_offset = compute_tile_offsets(
-        rm, rn, stride_in_m, stride_in_n, stride_out_m, stride_out_n
-    )
+    # Load local tile
+    local_tile = tl.load(src_tile_ptr, mask=mask, other=0.0)
 
-    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+    # Rank 0 aggregates
+    if ctx.rank == 0:
+        acc_dtype = tl.float32 if local_tile.dtype == tl.float16 else local_tile.dtype
+        acc = tl.zeros((tile.block_m, tile.block_n), dtype=acc_dtype)
+        acc += local_tile.to(acc_dtype)
 
-    # Gather all partials and accumulate
-    for remote_rank in range(world_size):
-        partial = iris.load(
-            input_ptr + input_offset,
-            cur_rank,
-            remote_rank,
-            heap_bases,
-            mask=mask,
-        )
-        acc += partial.to(acc_dtype)
+        for r in range(1, ctx.world_size):
+            remote_tile = iris.load(src_tile_ptr, ctx.heap_bases, r, mask=mask, other=0.0)
+            acc += remote_tile.to(acc_dtype)
 
-    # Store result
-    tl.store(
-        output_ptr + output_offset,
-        acc.to(output_ptr.type.element_ty),
-        mask=mask,
-    )
+        result = acc.to(local_tile.dtype)
+        tl.store(dst_tile_ptr, result, mask=mask)
+    else:
+        # Non-zero ranks wait and read from rank 0
+        result = iris.load(dst_tile_ptr, ctx.heap_bases, 0, mask=mask, other=0.0)
+        tl.store(dst_tile_ptr, result, mask=mask)
 
 
 @triton.jit()
 def all_reduce_ring(
-    input_ptr,
-    output_ptr,
-    ring_buffer,
-    flags,
-    tile_id,
-    pid_m,
-    pid_n,
-    M,
-    N,
-    stride_in_m,
-    stride_in_n,
-    stride_out_m,
-    stride_out_n,
-    heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
-    world_size: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    FLAGS_PER_TILE: tl.constexpr,
+    tile: Tile,
+    src_view: TensorView,
+    dst_view: TensorView,
+    ctx: DeviceContext,
 ):
     """
-    Ring-based all-reduce for a single tile.
-
-    Streams the tile around the ring using a single-buffer, producer/consumer handshake.
-    Each rank keeps a running accumulator, forwards the tile to its successor, and
-    consumes the predecessor's contribution. After (world_size - 1) hops, every rank
-    has seen all partial tiles.
+    Tile-level all-reduce using ring algorithm.
 
     Args:
-        input_ptr: Pointer to input tensor (local rank's partial data)
-        output_ptr: Pointer to output tensor (will contain sum of all ranks)
-        ring_buffer: Temporary buffer for ring communication
-        flags: Synchronization flags for ring communication
-        tile_id: Unique tile identifier for flag indexing
-        pid_m: Tile coordinate in M dimension
-        pid_n: Tile coordinate in N dimension
-        M: Number of rows in full tensor
-        N: Number of columns in full tensor
-        stride_in_m, stride_in_n: Strides for input tensor
-        stride_out_m, stride_out_n: Strides for output tensor
-        heap_bases: Heap base pointers for all ranks
-        cur_rank: Current rank
-        world_size: Total number of ranks
-        BLOCK_SIZE_M: Block size for M dimension
-        BLOCK_SIZE_N: Block size for N dimension
-        FLAGS_PER_TILE: Number of flags per tile
+        tile: Tile object with position and dimensions.
+        src_view: TensorView for input tensor.
+        dst_view: TensorView for output tensor.
+        ctx: DeviceContext with rank, world_size, and heap_bases.
     """
-    tl.assume(pid_m >= 0)
-    tl.assume(pid_n >= 0)
-    tl.static_assert(FLAGS_PER_TILE >= 1, "FLAGS_PER_TILE must be at least 1")
+    # Get tile pointer and mask
+    src_tile_ptr, mask = src_view.tile_ptr(tile)
+    dst_tile_ptr, _ = dst_view.tile_ptr(tile)
 
-    # Ring topology
-    next_rank = (cur_rank + 1) % world_size
+    # Load local tile
+    local_tile = tl.load(src_tile_ptr, mask=mask, other=0.0)
 
-    # Compute tile indices and mask
-    rm, rn, mask = compute_tile_indices(pid_m, pid_n, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N)
-    input_offset, output_offset = compute_tile_offsets(
-        rm, rn, stride_in_m, stride_in_n, stride_out_m, stride_out_n
-    )
+    # Initialize accumulator
+    acc_dtype = tl.float32 if local_tile.dtype == tl.float16 else local_tile.dtype
+    acc = tl.zeros((tile.block_m, tile.block_n), dtype=acc_dtype)
+    acc += local_tile.to(acc_dtype)
 
-    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
-    local_tile = tl.load(input_ptr + input_offset, mask=mask, other=0)
-    acc = local_tile.to(acc_dtype)
-    send_data = local_tile
+    # Ring reduce-scatter phase
+    for step in range(ctx.world_size - 1):
+        send_rank = (ctx.rank - step) % ctx.world_size
+        recv_rank = (ctx.rank - step - 1) % ctx.world_size
 
-    flag_offset = tile_id * FLAGS_PER_TILE
-    remote_flag_ptr = flags + flag_offset
-    local_flag_ptr = flags + flag_offset
+        # Compute chunk for this step
+        chunk_id = (ctx.rank - step - 1) % ctx.world_size
 
-    # Ring communication: (world_size - 1) hops
-    for _step in range(0, world_size - 1):
-        # Wait for remote flag to be ready (0)
-        while (
-            iris.atomic_cas(
-                remote_flag_ptr,
-                0,
-                0,
-                cur_rank,
-                next_rank,
-                heap_bases,
-                sem="acquire",
-                scope="sys",
+        # Calculate offset for ring algorithm
+        indices_m, indices_n = tile.layout(src_view.M, src_view.N)
+        ring_offset = indices_m[:, None] * src_view.stride_m + indices_n[None, :] * src_view.stride_n
+
+        # Receive and accumulate from previous rank in ring
+        if recv_rank != ctx.rank:
+            remote_tile = iris.load(
+                src_view.ptr + ring_offset, ctx.heap_bases, recv_rank, mask=mask, other=0.0
             )
-            != 0
-        ):
-            pass
+            acc += remote_tile.to(acc_dtype)
 
-        # Send data to next rank
-        iris.store(
-            ring_buffer + input_offset,
-            send_data,
-            cur_rank,
-            next_rank,
-            heap_bases,
-            mask=mask,
-        )
-        tl.debug_barrier()
-        # Signal that data is ready
-        iris.atomic_xchg(
-            remote_flag_ptr,
-            1,
-            cur_rank,
-            next_rank,
-            heap_bases,
-            sem="release",
-            scope="sys",
-        )
+    # Ring all-gather phase
+    result = acc.to(local_tile.dtype)
+    tl.store(dst_tile_ptr, result, mask=mask)
 
-        # Wait for local flag to indicate data is ready (1)
-        while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
-            pass
+    for step in range(ctx.world_size - 1):
+        send_rank = (ctx.rank + step) % ctx.world_size
+        recv_rank = (ctx.rank + step + 1) % ctx.world_size
 
-        # Receive data from previous rank
-        recv_tile = tl.load(ring_buffer + input_offset, mask=mask, other=0)
-        acc += recv_tile.to(acc_dtype)
-        send_data = recv_tile
-        tl.debug_barrier()
-        # Reset local flag
-        tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
-
-    # Store final result
-    tl.store(
-        output_ptr + output_offset,
-        acc.to(output_ptr.type.element_ty),
-        mask=mask,
-    )
+        if recv_rank != ctx.rank:
+            remote_result = iris.load(dst_tile_ptr, ctx.heap_bases, recv_rank, mask=mask, other=0.0)
+            tl.store(dst_tile_ptr, remote_result, mask=mask)
 
 
 @triton.jit()
 def all_reduce_two_shot(
-    input_ptr,
-    output_ptr,
-    pid_m,
-    pid_n,
-    M,
-    N,
-    stride_in_m,
-    stride_in_n,
-    stride_out_m,
-    stride_out_n,
-    heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
-    world_size: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
+    tile: Tile,
+    src_view: TensorView,
+    dst_view: TensorView,
+    ctx: DeviceContext,
 ):
     """
-    Two-shot all-reduce for a single tile.
-
-    First phase: reduce assigned tiles from all ranks.
-    Second phase: broadcast the result to all peers.
+    Tile-level all-reduce using two-shot algorithm (reduce to rank 0, then broadcast).
 
     Args:
-        input_ptr: Pointer to input tensor (local rank's partial data)
-        output_ptr: Pointer to output tensor (will contain sum of all ranks)
-        pid_m: Tile coordinate in M dimension
-        pid_n: Tile coordinate in N dimension
-        M: Number of rows in full tensor
-        N: Number of columns in full tensor
-        stride_in_m, stride_in_n: Strides for input tensor
-        stride_out_m, stride_out_n: Strides for output tensor
-        heap_bases: Heap base pointers for all ranks
-        cur_rank: Current rank
-        world_size: Total number of ranks
-        BLOCK_SIZE_M: Block size for M dimension
-        BLOCK_SIZE_N: Block size for N dimension
+        tile: Tile object with position and dimensions.
+        src_view: TensorView for input tensor.
+        dst_view: TensorView for output tensor.
+        ctx: DeviceContext with rank, world_size, and heap_bases.
     """
-    tl.assume(pid_m >= 0)
-    tl.assume(pid_n >= 0)
+    # Get tile pointer and mask
+    src_tile_ptr, mask = src_view.tile_ptr(tile)
+    dst_tile_ptr, _ = dst_view.tile_ptr(tile)
 
-    # Compute tile indices and mask
-    rm, rn, mask = compute_tile_indices(pid_m, pid_n, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N)
-    input_offset, output_offset = compute_tile_offsets(
-        rm, rn, stride_in_m, stride_in_n, stride_out_m, stride_out_n
-    )
+    # Load local tile
+    local_tile = tl.load(src_tile_ptr, mask=mask, other=0.0)
 
-    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+    # Phase 1: Reduce to rank 0
+    if ctx.rank == 0:
+        acc_dtype = tl.float32 if local_tile.dtype == tl.float16 else local_tile.dtype
+        acc = tl.zeros((tile.block_m, tile.block_n), dtype=acc_dtype)
+        acc += local_tile.to(acc_dtype)
 
-    # Phase 1: Reduce from all ranks
-    for remote_rank in range(world_size):
-        partial = iris.load(
-            input_ptr + input_offset,
-            cur_rank,
-            remote_rank,
-            heap_bases,
-            mask=mask,
-        )
-        acc += partial.to(acc_dtype)
+        for r in range(1, ctx.world_size):
+            remote_tile = iris.load(src_tile_ptr, ctx.heap_bases, r, mask=mask, other=0.0)
+            acc += remote_tile.to(acc_dtype)
 
-    reduced = acc.to(output_ptr.type.element_ty)
+        result = acc.to(local_tile.dtype)
+        tl.store(dst_tile_ptr, result, mask=mask)
 
-    # Phase 2: Broadcast to all ranks
-    for remote_rank in range(world_size):
-        if remote_rank == cur_rank:
-            tl.store(output_ptr + output_offset, reduced, mask=mask, cache_modifier=".wt")
-        else:
-            iris.store(
-                output_ptr + output_offset,
-                reduced,
-                cur_rank,
-                remote_rank,
-                heap_bases,
-                mask=mask,
-            )
+    # Phase 2: Broadcast from rank 0
+    if ctx.rank != 0:
+        result = iris.load(dst_tile_ptr, ctx.heap_bases, 0, mask=mask, other=0.0)
+        tl.store(dst_tile_ptr, result, mask=mask)
 
+
+# Convenience alias for default all_reduce
+all_reduce = all_reduce_atomic

@@ -24,6 +24,7 @@ Example:
     >>>     )
 """
 
+from .core import Tile, TensorView, DeviceContext, tile_layout, tile_ptr, offset_ptr
 from .all_reduce import (
     all_reduce_atomic,
     all_reduce_ring,
@@ -43,6 +44,14 @@ try:
     from .gemm_reduce_scatter import gemm_reduce_scatter
 
     __all__ = [
+        # Core abstractions
+        "Tile",
+        "TensorView",
+        "DeviceContext",
+        "tile_layout",
+        "tile_ptr",
+        "offset_ptr",
+        # Collectives
         "all_reduce_atomic",
         "all_reduce_ring",
         "all_reduce_two_shot",
@@ -51,6 +60,7 @@ try:
         "all_gather",
         "all_to_all",
         "reduce_scatter",
+        # GEMM+Comm
         "gemm_all_gather",
         "gemm_all_reduce",
         "all_gather_gemm",
