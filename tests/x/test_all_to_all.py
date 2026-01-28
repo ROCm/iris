@@ -15,7 +15,7 @@ import iris.x
 
 
 @triton.jit
-def test_all_to_all_kernel(
+def test_x_all_to_all_kernel(
     input_ptr,
     output_ptr,
     M: tl.constexpr,
@@ -33,11 +33,12 @@ def test_all_to_all_kernel(
 ):
     """Kernel that iterates over tiles and calls all_to_all for each."""
     pid = tl.program_id(0)
+    grid_size = tl.num_programs(0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
 
-    for tile_id in range(pid, total_tiles, 1):
+    for tile_id in range(pid, total_tiles, grid_size):
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
@@ -90,8 +91,9 @@ def test_all_to_all(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     pytorch_output_tensor = torch.empty_like(pytorch_input_tensor)
     shmem.barrier()
     # PyTorch all_to_all: split input into chunks, send chunk i to rank i
-    input_chunks = list(torch.chunk(pytorch_input_tensor, world_size, dim=1))
-    output_chunks = list(torch.chunk(pytorch_output_tensor, world_size, dim=1))
+    # Make chunks contiguous as required by PyTorch dist.all_to_all
+    input_chunks = [chunk.contiguous() for chunk in torch.chunk(pytorch_input_tensor, world_size, dim=1)]
+    output_chunks = [chunk.contiguous() for chunk in torch.chunk(pytorch_output_tensor, world_size, dim=1)]
     dist.all_to_all(output_chunks, input_chunks)
     torch.cuda.synchronize()
 
@@ -108,7 +110,7 @@ def test_all_to_all(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     total_tiles = num_pid_m * num_pid_n
     grid = (total_tiles,)
 
-    test_all_to_all_kernel[grid](
+    test_x_all_to_all_kernel[grid](
         iris_input_tensor,
         iris_output_tensor,
         M,

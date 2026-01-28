@@ -15,7 +15,7 @@ import iris.x
 
 
 @triton.jit
-def test_all_gather_kernel(
+def test_x_all_gather_kernel(
     input_ptr,
     output_ptr,
     M: tl.constexpr,
@@ -33,11 +33,12 @@ def test_all_gather_kernel(
 ):
     """Kernel that iterates over tiles and calls all_gather for each."""
     pid = tl.program_id(0)
+    grid_size = tl.num_programs(0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
 
-    for tile_id in range(pid, total_tiles, 1):
+    for tile_id in range(pid, total_tiles, grid_size):
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
@@ -120,7 +121,7 @@ def test_all_gather(gather_dim, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     total_tiles = num_pid_m * num_pid_n
     grid = (total_tiles,)
 
-    test_all_gather_kernel[grid](
+    test_x_all_gather_kernel[grid](
         iris_input_tensor,
         iris_output_tensor,
         M,

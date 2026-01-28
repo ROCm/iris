@@ -15,7 +15,7 @@ import iris.x
 
 
 @triton.jit
-def test_all_reduce_atomic_kernel(
+def test_x_all_reduce_atomic_kernel(
     input_ptr,
     output_ptr,
     M: tl.constexpr,
@@ -32,11 +32,12 @@ def test_all_reduce_atomic_kernel(
 ):
     """Kernel that iterates over tiles and calls all_reduce_atomic for each."""
     pid = tl.program_id(0)
+    grid_size = tl.num_programs(0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
 
-    for tile_id in range(pid, total_tiles, 1):  # Process all tiles
+    for tile_id in range(pid, total_tiles, grid_size):  # Stride by grid size to avoid overlap
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
@@ -50,7 +51,7 @@ def test_all_reduce_atomic_kernel(
 
 
 @triton.jit
-def test_all_reduce_one_shot_kernel(
+def test_x_all_reduce_one_shot_kernel(
     input_ptr,
     output_ptr,
     M: tl.constexpr,
@@ -67,11 +68,12 @@ def test_all_reduce_one_shot_kernel(
 ):
     """Kernel that iterates over tiles and calls all_reduce_one_shot for each."""
     pid = tl.program_id(0)
+    grid_size = tl.num_programs(0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
 
-    for tile_id in range(pid, total_tiles, 1):
+    for tile_id in range(pid, total_tiles, grid_size):
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
@@ -85,7 +87,7 @@ def test_all_reduce_one_shot_kernel(
 
 
 @triton.jit
-def test_all_reduce_two_shot_kernel(
+def test_x_all_reduce_two_shot_kernel(
     input_ptr,
     output_ptr,
     M: tl.constexpr,
@@ -102,11 +104,12 @@ def test_all_reduce_two_shot_kernel(
 ):
     """Kernel that iterates over tiles and calls all_reduce_two_shot for each."""
     pid = tl.program_id(0)
+    grid_size = tl.num_programs(0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
 
-    for tile_id in range(pid, total_tiles, 1):
+    for tile_id in range(pid, total_tiles, grid_size):
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
@@ -120,7 +123,7 @@ def test_all_reduce_two_shot_kernel(
 
 
 @triton.jit
-def test_all_reduce_spinlock_kernel(
+def test_x_all_reduce_spinlock_kernel(
     input_ptr,
     output_ptr,
     locks_ptr,
@@ -138,11 +141,12 @@ def test_all_reduce_spinlock_kernel(
 ):
     """Kernel that iterates over tiles and calls all_reduce_spinlock for each."""
     pid = tl.program_id(0)
+    grid_size = tl.num_programs(0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
 
-    for tile_id in range(pid, total_tiles, 1):
+    for tile_id in range(pid, total_tiles, grid_size):
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
@@ -152,7 +156,7 @@ def test_all_reduce_spinlock_kernel(
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
-        iris.x.all_reduce_spinlock(tile, src_view, dst_view, ctx)
+        iris.x.all_reduce_spinlock(tile, src_view, dst_view, locks_ptr, tile_id, ctx)
 
 
 @pytest.mark.parametrize(
@@ -220,13 +224,13 @@ def test_all_reduce(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
 
     # Select kernel based on variant
     if variant == "atomic":
-        kernel = test_all_reduce_atomic_kernel
+        kernel = test_x_all_reduce_atomic_kernel
     elif variant == "one_shot":
-        kernel = test_all_reduce_one_shot_kernel
+        kernel = test_x_all_reduce_one_shot_kernel
     elif variant == "two_shot":
-        kernel = test_all_reduce_two_shot_kernel
+        kernel = test_x_all_reduce_two_shot_kernel
     elif variant == "spinlock":
-        kernel = test_all_reduce_spinlock_kernel
+        kernel = test_x_all_reduce_spinlock_kernel
     else:
         pytest.fail(f"Unknown variant: {variant}")
 
