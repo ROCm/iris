@@ -76,4 +76,3 @@ def compute_tile_offsets(
     input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
     output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
     return input_offset, output_offset
-

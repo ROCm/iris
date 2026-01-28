@@ -105,6 +105,7 @@ def offset_ptr(ptr, stride_m, stride_n, offset_m, offset_n):
 # OOP API using @constexpr_function pattern
 # This provides a clean object-oriented interface while working within Triton's limitations
 
+
 @aggregate
 class Tile:
     """
@@ -122,6 +123,7 @@ class Tile:
         tile = Tile(pid_m, pid_n, BLOCK_M, BLOCK_N)
         rm, rn, mask = tile.layout(M, N)  # Coords stored, dims passed
     """
+
     pid_m: tl.tensor
     pid_n: tl.tensor
     block_m: tl.constexpr
@@ -176,6 +178,7 @@ class TensorView:
     Note: If M, N, strides are NOT constexpr (runtime kernel args), you cannot store them.
     In that case, use the device functions directly or pass them as method arguments.
     """
+
     ptr: tl.tensor
     M: tl.constexpr
     N: tl.constexpr
@@ -211,8 +214,9 @@ class TensorView:
         Returns:
             tile_ptr, mask: Pointer tensor and bounds mask
         """
-        return tile_ptr(self.ptr, self.M, self.N, self.stride_m, self.stride_n,
-                       tile.pid_m, tile.pid_n, tile.block_m, tile.block_n)
+        return tile_ptr(
+            self.ptr, self.M, self.N, self.stride_m, self.stride_n, tile.pid_m, tile.pid_n, tile.block_m, tile.block_n
+        )
 
     @triton.jit
     def offset(self, offset_m=0, offset_n=0):
@@ -258,6 +262,7 @@ class DeviceContext:
         ctx = DeviceContext(rank, world_size, heap_bases)
         iris.store(ptr, data, ctx.rank, ctx.target_rank, ctx.heap_bases)
     """
+
     rank: tl.constexpr
     world_size: tl.constexpr
     heap_bases: tl.tensor

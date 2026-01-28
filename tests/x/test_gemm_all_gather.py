@@ -132,7 +132,9 @@ def test_gemm_all_gather(dtype, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_
         )
 
         if rank == 0:
-            print(f"✓ GEMM+All-Gather test passed: {dtype}, M={M}, N={N}, K={K}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N},{BLOCK_SIZE_K})")
+            print(
+                f"✓ GEMM+All-Gather test passed: {dtype}, M={M}, N={N}, K={K}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N},{BLOCK_SIZE_K})"
+            )
     except Exception as e:
         pytest.fail(f"gemm_all_gather failed: {e}")
     finally:
@@ -141,4 +143,3 @@ def test_gemm_all_gather(dtype, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_
         import gc
 
         gc.collect()
-

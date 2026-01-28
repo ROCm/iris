@@ -98,7 +98,9 @@ def gemm_all_gather(
         ALLOW_TF32: Whether to allow TF32 precision
     """
     if not TRITONBLAS_AVAILABLE:
-        tl.static_assert(False, "tritonBLAS is required for gemm_all_gather. Install it from https://github.com/ROCm/tritonBLAS")
+        tl.static_assert(
+            False, "tritonBLAS is required for gemm_all_gather. Install it from https://github.com/ROCm/tritonBLAS"
+        )
 
     # Stride guards
     tl.assume(stride_am > 0)
@@ -116,9 +118,14 @@ def gemm_all_gather(
 
     # Compute Global Grid information once
     pid, num_pid_m, num_pid_n, total_tiles = grid_setup(
-        M, N, K,  # Problem Dimensions
-        BLOCK_SIZE_M, BLOCK_SIZE_N,  # Tile Dimensions
-        NUM_SMS, NUM_XCDS, CHUNK_SIZE,  # Hardware Info
+        M,
+        N,
+        K,  # Problem Dimensions
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,  # Tile Dimensions
+        NUM_SMS,
+        NUM_XCDS,
+        CHUNK_SIZE,  # Hardware Info
         USE_CHIPLET_PID,  # Enable chiplet swizzle
     )
 
@@ -216,4 +223,3 @@ def gemm_all_gather(
         ctx = DeviceContext(cur_rank, world_size, heap_bases)
 
         all_gather(tile, src_view, dst_view, 0, ctx)  # gather_dim=0 for rows
-

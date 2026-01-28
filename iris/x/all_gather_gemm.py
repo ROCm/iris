@@ -103,7 +103,9 @@ def all_gather_gemm(
         ALLOW_TF32: Whether to allow TF32 precision
     """
     if not TRITONBLAS_AVAILABLE:
-        tl.static_assert(False, "tritonBLAS is required for all_gather_gemm. Install it from https://github.com/ROCm/tritonBLAS")
+        tl.static_assert(
+            False, "tritonBLAS is required for all_gather_gemm. Install it from https://github.com/ROCm/tritonBLAS"
+        )
 
     # Stride guards
     tl.assume(stride_am > 0)
@@ -150,9 +152,14 @@ def all_gather_gemm(
 
     # Compute Global Grid information once (for output C dimensions)
     pid, num_pid_m, num_pid_n, total_tiles = grid_setup(
-        M, N, K,  # Problem Dimensions (using full K for gathered A)
-        BLOCK_SIZE_M, BLOCK_SIZE_N,  # Tile Dimensions
-        NUM_SMS, NUM_XCDS, CHUNK_SIZE,  # Hardware Info
+        M,
+        N,
+        K,  # Problem Dimensions (using full K for gathered A)
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,  # Tile Dimensions
+        NUM_SMS,
+        NUM_XCDS,
+        CHUNK_SIZE,  # Hardware Info
         USE_CHIPLET_PID,  # Enable chiplet swizzle
     )
 
@@ -195,9 +202,7 @@ def all_gather_gemm(
 
         # Add bias if provided
         if BIAS:
-            bias_vector = tl.load(
-                bias_ptr + row_indices * stride_bias, mask=row_indices < M, other=0.0
-            )
+            bias_vector = tl.load(bias_ptr + row_indices * stride_bias, mask=row_indices < M, other=0.0)
             acc = add_vector(acc, bias_vector[:, None], QUANTIZED=False)
 
         # Convert to output dtype
@@ -214,4 +219,3 @@ def all_gather_gemm(
             stride_cm,
             stride_cn,
         )
-

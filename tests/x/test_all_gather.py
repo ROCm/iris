@@ -45,9 +45,13 @@ def test_x_all_gather_kernel(
         # Create OOP objects for new API
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
-        dst_view = iris.x.TensorView(output_ptr, M * world_size if gather_dim == 0 else M,
-                                      N if gather_dim == 0 else N * world_size,
-                                      stride_out_m, stride_out_n)
+        dst_view = iris.x.TensorView(
+            output_ptr,
+            M * world_size if gather_dim == 0 else M,
+            N if gather_dim == 0 else N * world_size,
+            stride_out_m,
+            stride_out_n,
+        )
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
         iris.x.all_gather(tile, src_view, dst_view, gather_dim, ctx)
@@ -177,11 +181,12 @@ def test_all_gather(gather_dim, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
 
         if rank == 0:
             dim_str = "rows" if gather_dim == 0 else "cols"
-            print(f"✓ All-gather test passed ({dim_str}): {dtype}, M={M}, N={N}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N})")
+            print(
+                f"✓ All-gather test passed ({dim_str}): {dtype}, M={M}, N={N}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N})"
+            )
     finally:
         shmem.barrier()
         del shmem
         import gc
 
         gc.collect()
-

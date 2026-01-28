@@ -161,4 +161,3 @@ def test_all_to_all(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         import gc
 
         gc.collect()
-

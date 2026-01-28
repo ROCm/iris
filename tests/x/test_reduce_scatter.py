@@ -158,4 +158,3 @@ def test_reduce_scatter(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         import gc
 
         gc.collect()
-

@@ -131,7 +131,9 @@ def test_gemm_reduce_scatter(dtype, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_S
         )
 
         if rank == 0:
-            print(f"✓ GEMM+Reduce-Scatter test passed: {dtype}, M={M}, N={N}, K={K}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N},{BLOCK_SIZE_K})")
+            print(
+                f"✓ GEMM+Reduce-Scatter test passed: {dtype}, M={M}, N={N}, K={K}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N},{BLOCK_SIZE_K})"
+            )
     except Exception as e:
         pytest.fail(f"gemm_reduce_scatter failed: {e}")
     finally:
@@ -140,4 +142,3 @@ def test_gemm_reduce_scatter(dtype, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_S
         import gc
 
         gc.collect()
-

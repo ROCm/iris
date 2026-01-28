@@ -178,9 +178,7 @@ def all_reduce_ring(
 
         # Receive and accumulate from previous rank in ring
         if recv_rank != ctx.rank:
-            remote_tile = iris.load(
-                src_view.ptr + ring_offset, ctx.heap_bases, recv_rank, mask=mask, other=0.0
-            )
+            remote_tile = iris.load(src_view.ptr + ring_offset, ctx.heap_bases, recv_rank, mask=mask, other=0.0)
             acc += remote_tile.to(acc_dtype)
 
     # Ring all-gather phase
