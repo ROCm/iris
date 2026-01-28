@@ -199,13 +199,17 @@ def distributed_broadcast_tensor(value_to_broadcast=None, root=0):
         return obj[0]
 
 
-def distributed_barrier():
+def distributed_barrier(group=None):
     """
     Synchronization barrier using PyTorch distributed.
+
+    Args:
+        group (ProcessGroup, optional): The process group to synchronize.
+            If None, uses the default process group (all ranks).
     """
     if not dist.is_initialized():
         raise RuntimeError("PyTorch distributed is not initialized")
-    dist.barrier()
+    dist.barrier(group=group)
 
 
 def init_distributed():

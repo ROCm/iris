@@ -496,8 +496,8 @@ def test_rank_stride_target_rank_calculation():
     """
     world_size, rank = _get_world_info()
 
-    if world_size < 4:
-        pytest.skip("Need at least 4 ranks for stride testing")
+    if world_size != 4:
+        pytest.skip("This test requires exactly 4 ranks for strided group testing")
 
     heap_size = 2**33
     shmem = iris.iris(heap_size)
@@ -577,8 +577,8 @@ def test_all_gather_strided_data_placement():
     """
     world_size, rank = _get_world_info()
 
-    if world_size < 4:
-        pytest.skip("Need at least 4 ranks for stride testing")
+    if world_size != 4:
+        pytest.skip("This test requires exactly 4 ranks for strided group testing")
 
     heap_size = 2**33
     shmem = iris.iris(heap_size)

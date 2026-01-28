@@ -700,11 +700,15 @@ class IrisGluon:
         """
         return self.heap_bases
 
-    def barrier(self):
+    def barrier(self, group=None):
         """
-        Synchronize all ranks using a distributed barrier.
+        Synchronize ranks within the specified group using a distributed barrier.
+
+        Args:
+            group (ProcessGroup, optional): The process group to synchronize.
+                If None, uses the default process group (all ranks).
         """
-        distributed_barrier()
+        distributed_barrier(group=group)
 
     def get_device(self):
         """

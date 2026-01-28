@@ -1096,19 +1096,23 @@ class Iris:
         """
         return self.heap_bases
 
-    def barrier(self, stream=None):
+    def barrier(self, stream=None, group=None):
         """
-        Synchronize all ranks and their CUDA devices.
+        Synchronize ranks within the specified group and their CUDA devices.
 
         This first calls ``torch.cuda.synchronize()`` or ``stream.synchronize()`` to ensure the local GPU has
-        finished all queued work, then performs a global distributed barrier so that all
-        ranks reach the same point before proceeding.
+        finished all queued work, then performs a distributed barrier so that all
+        ranks in the group reach the same point before proceeding.
+
         Args:
             stream: If stream is given: wait only for that stream before barrier. If stream is None: legacy behavior (device-wide sync).
+            group (ProcessGroup, optional): The process group to synchronize.
+                If None, uses the default process group (all ranks).
 
         Example:
             >>> ctx = iris.iris(1 << 20)
             >>> ctx.barrier()  # Synchronize all ranks
+            >>> ctx.barrier(group=my_group)  # Synchronize only ranks in my_group
         """
         # Wait for all GPUs to finish work
         if stream is None:
@@ -1117,7 +1121,7 @@ class Iris:
             stream.synchronize()
 
         # Distributed barrier
-        distributed_barrier()
+        distributed_barrier(group=group)
 
     def get_device(self):
         """
