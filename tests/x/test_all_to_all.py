@@ -18,12 +18,13 @@ import iris.x
 def test_all_to_all_kernel(
     input_ptr,
     output_ptr,
-    M,
-    N,
-    stride_in_m,
-    stride_in_n,
-    stride_out_m,
-    stride_out_n,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    N_per_rank: tl.constexpr,
+    stride_in_m: tl.constexpr,
+    stride_in_n: tl.constexpr,
+    stride_out_m: tl.constexpr,
+    stride_out_n: tl.constexpr,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -40,23 +41,13 @@ def test_all_to_all_kernel(
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
-        iris.x.all_to_all(
-            input_ptr,
-            output_ptr,
-            pid_m,
-            pid_n,
-            M,
-            N,
-            stride_in_m,
-            stride_in_n,
-            stride_out_m,
-            stride_out_n,
-            heap_bases,
-            cur_rank,
-            world_size,
-            BLOCK_SIZE_M,
-            BLOCK_SIZE_N,
-        )
+        # Create OOP objects for new API
+        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
+        dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
+        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+
+        iris.x.all_to_all(tile, src_view, dst_view, N_per_rank, ctx)
 
 
 @pytest.mark.parametrize(
@@ -121,7 +112,8 @@ def test_all_to_all(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         iris_input_tensor,
         iris_output_tensor,
         M,
-        N,
+        N * world_size,  # Total N dimension
+        N,  # N_per_rank
         iris_input_tensor.stride(0),
         iris_input_tensor.stride(1),
         iris_output_tensor.stride(0),

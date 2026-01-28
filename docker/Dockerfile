@@ -34,7 +34,7 @@ RUN pip3 install --upgrade pip && \
 # Clone and install Triton
 WORKDIR $TRITON_PATH
 RUN git clone https://github.com/triton-lang/triton.git $TRITON_PATH
-RUN git checkout 715f6b1d442601436bf8d462db6ff8e17aec8cfb
+RUN git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e
 RUN pip3 install -e .
 ENV PYTHONPATH=$TRITON_PATH
 

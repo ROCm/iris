@@ -18,12 +18,12 @@ import iris.x
 def test_reduce_scatter_kernel(
     input_ptr,
     output_ptr,
-    M,
-    N,
-    stride_in_m,
-    stride_in_n,
-    stride_out_m,
-    stride_out_n,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    stride_in_m: tl.constexpr,
+    stride_in_n: tl.constexpr,
+    stride_out_m: tl.constexpr,
+    stride_out_n: tl.constexpr,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -50,23 +50,13 @@ def test_reduce_scatter_kernel(
             pid_m = tile_id // num_pid_n
             pid_n = tile_id % num_pid_n
 
-            iris.x.reduce_scatter(
-                input_ptr,
-                output_ptr,
-                pid_m,
-                pid_n,
-                M,
-                N,
-                stride_in_m,
-                stride_in_n,
-                stride_out_m,
-                stride_out_n,
-                heap_bases,
-                cur_rank,
-                world_size,
-                BLOCK_SIZE_M,
-                BLOCK_SIZE_N,
-            )
+            # Create OOP objects for new API
+            tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+            src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
+            dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
+            ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+
+            iris.x.reduce_scatter(tile, src_view, dst_view, ctx)
 
 
 @pytest.mark.parametrize(
