@@ -141,7 +141,7 @@ def test_all_to_all(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.all_to_all output doesn't match PyTorch's all_to_all"
         )
-        
+
         # Verify each rank's received chunks contain correct data
         for r in range(world_size):
             start_col = r * N
@@ -152,7 +152,7 @@ def test_all_to_all(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
             assert torch.allclose(chunk_data, torch.full_like(chunk_data, expected_value), atol=atol), (
                 f"Rank {rank}: Data from rank {r} not in correct location or has wrong value"
             )
-        
+
         if rank == 0:
             print(f"✓ All-to-all test passed: {dtype}, M={M}, N={N}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N})")
     finally:

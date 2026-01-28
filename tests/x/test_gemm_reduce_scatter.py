@@ -129,7 +129,7 @@ def test_gemm_reduce_scatter(dtype, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_S
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.gemm_reduce_scatter output doesn't match reference"
         )
-        
+
         if rank == 0:
             print(f"✓ GEMM+Reduce-Scatter test passed: {dtype}, M={M}, N={N}, K={K}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N},{BLOCK_SIZE_K})")
     except Exception as e:

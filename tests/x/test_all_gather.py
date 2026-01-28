@@ -45,8 +45,8 @@ def test_x_all_gather_kernel(
         # Create OOP objects for new API
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
-        dst_view = iris.x.TensorView(output_ptr, M * world_size if gather_dim == 0 else M, 
-                                      N if gather_dim == 0 else N * world_size, 
+        dst_view = iris.x.TensorView(output_ptr, M * world_size if gather_dim == 0 else M,
+                                      N if gather_dim == 0 else N * world_size,
                                       stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
@@ -94,20 +94,20 @@ def test_all_gather(gather_dim, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     pytorch_output_list = [torch.empty_like(pytorch_input_tensor) for _ in range(world_size)]
     shmem.barrier()
     dist.all_gather(pytorch_output_list, pytorch_input_tensor)
-    
+
     if gather_dim == 0:
         # Gather along rows (M dimension)
         pytorch_output_tensor = torch.cat(pytorch_output_list, dim=0)  # Concatenate along dim 0
     else:
         # Gather along columns (N dimension)
         pytorch_output_tensor = torch.cat(pytorch_output_list, dim=1)  # Concatenate along dim 1
-    
+
     torch.cuda.synchronize()
 
     # Set up Iris tensors
     iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
     iris_input_tensor.copy_(pytorch_input_tensor)
-    
+
     if gather_dim == 0:
         iris_output_tensor = shmem.zeros((world_size * M, N), dtype=dtype)
     else:
@@ -152,7 +152,7 @@ def test_all_gather(gather_dim, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.all_gather output doesn't match PyTorch's all_gather"
         )
-        
+
         # Verify each rank's data is in the correct location
         if gather_dim == 0:
             # Gathered along rows
@@ -174,7 +174,7 @@ def test_all_gather(gather_dim, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
                 assert torch.allclose(rank_data, torch.full_like(rank_data, expected_value), atol=atol), (
                     f"Rank {rank}: Data from rank {r} not in correct location or has wrong value"
                 )
-        
+
         if rank == 0:
             dim_str = "rows" if gather_dim == 0 else "cols"
             print(f"✓ All-gather test passed ({dim_str}): {dtype}, M={M}, N={N}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N})")

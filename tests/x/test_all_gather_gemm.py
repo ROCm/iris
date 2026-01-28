@@ -136,7 +136,7 @@ def test_all_gather_gemm(dtype, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.all_gather_gemm output doesn't match reference"
         )
-        
+
         if rank == 0:
             print(f"✓ All-Gather+GEMM test passed: {dtype}, M={M}, N={N}, K={K_total}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N},{BLOCK_SIZE_K})")
     except Exception as e:

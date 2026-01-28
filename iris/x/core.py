@@ -21,7 +21,7 @@ from triton.language.core import _aggregate as aggregate
 def tile_layout(pid_m, pid_n, M, N, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
     """
     Compute the memory layout for a tile.
-    
+
     Args:
         pid_m: Tile coordinate in M dimension
         pid_n: Tile coordinate in N dimension
@@ -29,12 +29,12 @@ def tile_layout(pid_m, pid_n, M, N, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl
         N: Total number of columns in the tensor
         BLOCK_SIZE_M: Block size for M dimension (constexpr)
         BLOCK_SIZE_N: Block size for N dimension (constexpr)
-    
+
     Returns:
         rm: Row indices for this tile (1D tensor of size BLOCK_SIZE_M)
         rn: Column indices for this tile (1D tensor of size BLOCK_SIZE_N)
         mask: Bounds mask for valid elements (2D tensor of shape [BLOCK_SIZE_M, BLOCK_SIZE_N])
-    
+
     The returned indices are optimized with max_contiguous and multiple_of hints
     to enable better vectorization.
     """
@@ -43,14 +43,14 @@ def tile_layout(pid_m, pid_n, M, N, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl
     rn_base = pid_n * BLOCK_SIZE_N
     rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
     rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-    
+
     # Add vectorization hints
     rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
     rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-    
+
     # Create bounds mask
     mask = (rm[:, None] < M) & (rn[None, :] < N)
-    
+
     return rm, rn, mask
 
 
@@ -58,7 +58,7 @@ def tile_layout(pid_m, pid_n, M, N, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl
 def tile_ptr(ptr, M, N, stride_m, stride_n, pid_m, pid_n, BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr):
     """
     Compute pointer tensor and mask for a tile.
-    
+
     Args:
         ptr: Base pointer to tensor data
         M: Number of rows
@@ -69,11 +69,11 @@ def tile_ptr(ptr, M, N, stride_m, stride_n, pid_m, pid_n, BLOCK_SIZE_M: tl.const
         pid_n: Tile coordinate in N dimension
         BLOCK_SIZE_M: Block size for M dimension (constexpr)
         BLOCK_SIZE_N: Block size for N dimension (constexpr)
-    
+
     Returns:
         tile_ptr: Pointer tensor for the tile elements (2D of shape [BLOCK_SIZE_M, BLOCK_SIZE_N])
         mask: Bounds mask for valid elements
-    
+
     The returned pointer can be used directly with tl.load/tl.store or
     iris.load/iris.store for remote access.
     """
@@ -84,18 +84,18 @@ def tile_ptr(ptr, M, N, stride_m, stride_n, pid_m, pid_n, BLOCK_SIZE_M: tl.const
     return tile_ptr, mask
 
 
-@triton.jit  
+@triton.jit
 def offset_ptr(ptr, stride_m, stride_n, offset_m, offset_n):
     """
     Compute offset pointer.
-    
+
     Args:
         ptr: Base pointer to tensor data
         stride_m: Stride in M dimension
         stride_n: Stride in N dimension
         offset_m: Offset in M dimension (rows)
         offset_n: Offset in N dimension (columns)
-    
+
     Returns:
         New pointer with offset applied
     """
@@ -109,12 +109,12 @@ def offset_ptr(ptr, stride_m, stride_n, offset_m, offset_n):
 class Tile:
     """
     Tile storing BOTH runtime coordinates AND compile-time block sizes.
-    
+
     This class uses the @constexpr_function pattern discovered from Triton's gluon examples:
     - Stores runtime coordinates (pid_m, pid_n) as tl.tensor (computed from tl.program_id)
     - Stores compile-time block sizes (block_m, block_n) as tl.constexpr
     - Constructor is decorated with @constexpr_function to execute at compile-time
-    
+
     Example usage:
         pid = tl.program_id(0)
         pid_m = pid // num_tiles_n  # Tensor from arithmetic
@@ -131,7 +131,7 @@ class Tile:
     def __init__(self, pid_m, pid_n, block_m, block_n):
         """
         Create a tile with runtime coordinates and compile-time sizes.
-        
+
         Args:
             pid_m: Tile coordinate in M dimension (tensor from tl.program_id arithmetic)
             pid_n: Tile coordinate in N dimension (tensor from tl.program_id arithmetic)
@@ -147,11 +147,11 @@ class Tile:
     def layout(self, M, N):
         """
         Compute memory layout using stored coordinates.
-        
+
         Args:
             M: Total rows in tensor (can be runtime or constexpr)
             N: Total columns in tensor (can be runtime or constexpr)
-            
+
         Returns:
             rm, rn, mask: Row indices, column indices, and bounds mask
         """
@@ -162,17 +162,17 @@ class Tile:
 class TensorView:
     """
     TensorView storing pointer and tensor metadata.
-    
+
     This works when dimensions and strides are marked as tl.constexpr in the kernel signature!
-    
+
     Example usage (with constexpr dimensions):
         @triton.jit
-        def kernel(ptr, M: tl.constexpr, N: tl.constexpr, 
+        def kernel(ptr, M: tl.constexpr, N: tl.constexpr,
                    stride_m: tl.constexpr, stride_n: tl.constexpr, ...):
             view = TensorView(ptr, M, N, stride_m, stride_n)
             tile = Tile(pid_m, pid_n, BLOCK_M, BLOCK_N)
             ptr, mask = view.tile_ptr(tile)
-    
+
     Note: If M, N, strides are NOT constexpr (runtime kernel args), you cannot store them.
     In that case, use the device functions directly or pass them as method arguments.
     """
@@ -186,7 +186,7 @@ class TensorView:
     def __init__(self, ptr, M, N, stride_m, stride_n):
         """
         Create a tensor view with pointer and constexpr dimensions/strides.
-        
+
         Args:
             ptr: Pointer to tensor data (runtime tensor)
             M: Number of rows (must be constexpr in kernel signature)
@@ -204,10 +204,10 @@ class TensorView:
     def tile_ptr(self, tile: Tile):
         """
         Compute tile pointer and mask using stored dimensions/strides.
-        
+
         Args:
             tile: Tile object with stored coordinates
-            
+
         Returns:
             tile_ptr, mask: Pointer tensor and bounds mask
         """
@@ -218,11 +218,11 @@ class TensorView:
     def offset(self, offset_m=0, offset_n=0):
         """
         Create a new view with pointer offset applied.
-        
+
         Args:
             offset_m: Offset in M dimension (rows)
             offset_n: Offset in N dimension (columns)
-            
+
         Returns:
             New TensorView with offset pointer
         """
@@ -233,11 +233,11 @@ class TensorView:
     def number_of_tiles(self, block_m, block_n):
         """
         Compute the total number of tiles needed to cover the tensor.
-        
+
         Args:
             block_m: Tile size in M dimension (constexpr)
             block_n: Tile size in N dimension (constexpr)
-            
+
         Returns:
             Total number of tiles (num_tiles_m * num_tiles_n)
         """
@@ -250,10 +250,10 @@ class TensorView:
 class DeviceContext:
     """
     Device context encapsulating distributed system information.
-    
+
     This class stores the rank, world size, and heap base pointers needed
     for multi-GPU operations using iris primitives.
-    
+
     Usage:
         ctx = DeviceContext(rank, world_size, heap_bases)
         iris.store(ptr, data, ctx.rank, ctx.target_rank, ctx.heap_bases)
@@ -266,7 +266,7 @@ class DeviceContext:
     def __init__(self, rank, world_size, heap_bases):
         """
         Create a device context for distributed operations.
-        
+
         Args:
             rank: Current rank (must be constexpr in kernel signature)
             world_size: Total number of ranks (must be constexpr in kernel signature)

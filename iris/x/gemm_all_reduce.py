@@ -10,7 +10,6 @@ and then reduces results across all ranks, useful for data-parallel distributed 
 
 import triton
 import triton.language as tl
-import torch
 
 try:
     from tritonblas.kernels.stages.indexing import grid_setup, idx2coord
@@ -194,6 +193,6 @@ def gemm_all_reduce(
         src_view = TensorView(C, M, N, stride_cm, stride_cn)
         dst_view = TensorView(C, M, N, stride_cm, stride_cn)
         ctx = DeviceContext(cur_rank, world_size, heap_bases)
-        
+
         all_reduce_one_shot(tile, src_view, dst_view, ctx)
 

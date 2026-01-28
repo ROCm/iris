@@ -13,7 +13,7 @@ import triton.language as tl
 def chiplet_transform_chunked(pid, num_workgroups: tl.constexpr, num_xcds: tl.constexpr, chunk_size: tl.constexpr):
     """
     Transform program ID to distribute work across XCDs in a chunked pattern.
-    
+
     This utility is used for better load balancing across chiplet architectures.
     """
     if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
@@ -39,7 +39,7 @@ def compute_tile_indices(
 ):
     """
     Compute row and column indices for a tile given pid_m and pid_n.
-    
+
     Returns:
         rm: Row indices for the tile
         rn: Column indices for the tile
@@ -68,7 +68,7 @@ def compute_tile_offsets(
 ):
     """
     Compute input and output offsets for a tile given row/column indices and strides.
-    
+
     Returns:
         input_offset: Offset for input tensor
         output_offset: Offset for output tensor

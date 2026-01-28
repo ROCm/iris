@@ -33,7 +33,7 @@ def all_gather(
         dst_view: TensorView for output tensor.
         dim: Dimension to gather along (0 for M, 1 for N).
         ctx: DeviceContext with rank, world_size, and heap_bases.
-    
+
     Gather dimension behavior:
         - dim=0: Input (M, N) -> Output (world_size * M, N)
           Each rank's data goes to output[rank * M : (rank+1) * M, :]

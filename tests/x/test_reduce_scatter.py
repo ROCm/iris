@@ -143,13 +143,13 @@ def test_reduce_scatter(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.reduce_scatter output doesn't match PyTorch's reduce_scatter"
         )
-        
+
         # Verify the reduction is correct (sum of all ranks)
         expected_sum = sum(float(r + 1) for r in range(world_size))
         assert torch.allclose(iris_output_tensor, torch.full_like(iris_output_tensor, expected_sum), atol=atol), (
             f"Rank {rank}: Reduction result is incorrect, expected {expected_sum}"
         )
-        
+
         if rank == 0:
             print(f"✓ Reduce-scatter test passed: {dtype}, M={M}, N={N}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N})")
     finally:

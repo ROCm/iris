@@ -10,8 +10,6 @@ from all ranks and then computes matrix multiplication, useful for tensor-parall
 
 import triton
 import triton.language as tl
-import torch
-import iris
 
 try:
     from tritonblas.kernels.stages.indexing import grid_setup, idx2coord
@@ -133,20 +131,20 @@ def all_gather_gemm(
     num_tiles_m_gather = tl.cdiv(M, BLOCK_SIZE_M)
     num_tiles_k_gather = tl.cdiv(K_local, BLOCK_SIZE_K)  # Use BLOCK_SIZE_K for K dimension
     total_gather_tiles = num_tiles_m_gather * num_tiles_k_gather
-    
+
     pid_base = tl.program_id(0)
     for gather_tile_id in range(pid_base, total_gather_tiles, NUM_SMS):
         gather_pid_m = gather_tile_id // num_tiles_k_gather
         gather_pid_k = gather_tile_id % num_tiles_k_gather
-        
+
         # Call all_gather with gather_dim=1 for column-wise gathering using OOP API
         tile = Tile(gather_pid_m, gather_pid_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
         src_view = TensorView(A_sharded, M, K_local, stride_am, stride_ak)
         dst_view = TensorView(A_gathered, M, K, stride_ag_m, stride_ag_n)
         ctx = DeviceContext(cur_rank, world_size, heap_bases)
-        
+
         all_gather(tile, src_view, dst_view, 1, ctx)  # gather_dim=1 for columns
-    
+
     # Synchronization barrier to ensure all-gather completes before GEMM
     tl.debug_barrier()
 

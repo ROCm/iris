@@ -10,7 +10,6 @@ and then gathers results from all ranks, useful for distributed training scenari
 
 import triton
 import triton.language as tl
-import torch
 
 try:
     from tritonblas.kernels.stages.indexing import grid_setup, idx2coord
@@ -193,7 +192,7 @@ def gemm_all_gather(
         # Now we need to gather this tile from all ranks
         # all_gather will read each rank's portion from C and write it to
         # the appropriate location in C on all ranks
-        # 
+        #
         # all_gather expects:
         # - input_ptr: source (local rank's data) at shape (M, N)
         # - output_ptr: destination (full result) at shape (world_size * M, N)
@@ -215,6 +214,6 @@ def gemm_all_gather(
         src_view = TensorView(C, M, N, stride_cm, stride_cn)
         dst_view = TensorView(C, M * world_size, N, stride_cm, stride_cn)
         ctx = DeviceContext(cur_rank, world_size, heap_bases)
-        
+
         all_gather(tile, src_view, dst_view, 0, ctx)  # gather_dim=0 for rows
 

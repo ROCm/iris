@@ -10,7 +10,6 @@ and then reduces and scatters results to assigned ranks, useful for column-paral
 
 import triton
 import triton.language as tl
-import torch
 
 try:
     from tritonblas.kernels.stages.indexing import grid_setup, idx2coord
@@ -195,11 +194,11 @@ def gemm_reduce_scatter(
         # Perform reduce-scatter on the computed tile
         # reduce_scatter will read from C_full (full result) on all ranks
         # and write reduced result to C (local portion) only on the assigned rank
-        # 
+        #
         # For reduce-scatter, tiles are assigned using striding:
         # rank 0 gets tiles 0, world_size, 2*world_size, ... in N dimension
         # rank 1 gets tiles 1, world_size+1, 2*world_size+1, ...
-        # 
+        #
         # ALL ranks participate in the reduction, but only the assigned rank stores
 
         # Compute which rank owns this tile
@@ -212,13 +211,13 @@ def gemm_reduce_scatter(
         # Note: reduce_scatter currently stores unconditionally, so we need to call it
         # only for tiles assigned to this rank. In a full implementation, reduce_scatter
         # would check tile ownership internally.
-        
+
         if tile_rank == cur_rank and local_pid_n < num_pid_n_local:
             # This tile belongs to this rank, perform reduce-scatter using OOP API
             tile = Tile(output_coord_m, local_pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
             src_view = TensorView(C_full, M, N, stride_cm_full, stride_cn_full)
             dst_view = TensorView(C, M, N // world_size, stride_cm, stride_cn)
             ctx = DeviceContext(cur_rank, world_size, heap_bases)
-            
+
             reduce_scatter(tile, src_view, dst_view, ctx)
 
