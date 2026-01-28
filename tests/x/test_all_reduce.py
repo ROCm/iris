@@ -15,7 +15,7 @@ import iris.x
 
 
 @triton.jit
-def test_x_all_reduce_atomic_kernel(
+def x_all_reduce_atomic_kernel(
     input_ptr,
     output_ptr,
     M: tl.constexpr,
@@ -51,7 +51,7 @@ def test_x_all_reduce_atomic_kernel(
 
 
 @triton.jit
-def test_x_all_reduce_one_shot_kernel(
+def x_all_reduce_one_shot_kernel(
     input_ptr,
     output_ptr,
     M: tl.constexpr,
@@ -87,7 +87,7 @@ def test_x_all_reduce_one_shot_kernel(
 
 
 @triton.jit
-def test_x_all_reduce_two_shot_kernel(
+def x_all_reduce_two_shot_kernel(
     input_ptr,
     output_ptr,
     M: tl.constexpr,
@@ -123,7 +123,7 @@ def test_x_all_reduce_two_shot_kernel(
 
 
 @triton.jit
-def test_x_all_reduce_spinlock_kernel(
+def x_all_reduce_spinlock_kernel(
     input_ptr,
     output_ptr,
     locks_ptr,
@@ -224,13 +224,13 @@ def test_all_reduce(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
 
     # Select kernel based on variant
     if variant == "atomic":
-        kernel = test_x_all_reduce_atomic_kernel
+        kernel = x_all_reduce_atomic_kernel
     elif variant == "one_shot":
-        kernel = test_x_all_reduce_one_shot_kernel
+        kernel = x_all_reduce_one_shot_kernel
     elif variant == "two_shot":
-        kernel = test_x_all_reduce_two_shot_kernel
+        kernel = x_all_reduce_two_shot_kernel
     elif variant == "spinlock":
-        kernel = test_x_all_reduce_spinlock_kernel
+        kernel = x_all_reduce_spinlock_kernel
     else:
         pytest.fail(f"Unknown variant: {variant}")
 

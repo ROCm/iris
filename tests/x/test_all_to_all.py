@@ -15,7 +15,7 @@ import iris.x
 
 
 @triton.jit
-def test_x_all_to_all_kernel(
+def x_all_to_all_kernel(
     input_ptr,
     output_ptr,
     M: tl.constexpr,
@@ -110,7 +110,7 @@ def test_all_to_all(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     total_tiles = num_pid_m * num_pid_n
     grid = (total_tiles,)
 
-    test_x_all_to_all_kernel[grid](
+    x_all_to_all_kernel[grid](
         iris_input_tensor,
         iris_output_tensor,
         M,
