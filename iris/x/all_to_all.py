@@ -42,37 +42,24 @@ def all_to_all(
     """
     # For each rank, read the appropriate slice and write to output
     for r in range(ctx.world_size):
-        # Source column offset for data destined to rank r
-        src_col_offset = r * N_per_rank + tile.pid_n * tile.block_n
-        src_indices_m = tile.pid_m * tile.block_m + tl.arange(0, tile.block_m)
-        src_indices_n = src_col_offset + tl.arange(0, tile.block_n)
+        # Get source pointer with rank-specific column offset (replaces 9 lines!)
+        src_ptr, mask = src_view.offset_tile_ptr(tile, offset_n=r * N_per_rank)
 
-        # Compute mask
-        mask_m = src_indices_m < src_view.M
-        mask_n = src_indices_n < src_view.N
-        mask = mask_m[:, None] & mask_n[None, :]
-
-        # Compute source offset
-        src_offsets = src_indices_m[:, None] * src_view.stride_m + src_indices_n[None, :] * src_view.stride_n
-
-        # Destination column offset for data coming from rank r
-        dst_col_offset = r * N_per_rank + tile.pid_n * tile.block_n
-        dst_indices_m = tile.pid_m * tile.block_m + tl.arange(0, tile.block_m)
-        dst_indices_n = dst_col_offset + tl.arange(0, tile.block_n)
-        dst_offsets = dst_indices_m[:, None] * dst_view.stride_m + dst_indices_n[None, :] * dst_view.stride_n
+        # Get destination pointer with rank-specific column offset (replaces 4 lines!)
+        dst_ptr, _ = dst_view.offset_tile_ptr(tile, offset_n=r * N_per_rank)
 
         # Read from appropriate rank and write to output
         if r == ctx.rank:
             # Local data: direct copy
-            data = tl.load(src_view.ptr + src_offsets, mask=mask, other=0.0)
-            tl.store(dst_view.ptr + dst_offsets, data, mask=mask)
+            data = tl.load(src_ptr, mask=mask, other=0.0)
+            tl.store(dst_ptr, data, mask=mask)
         else:
             # Remote data: read from rank r
             data = iris.load(
-                src_view.ptr + src_offsets,
+                src_ptr,
                 ctx.rank,  # to_rank (current rank)
                 r,  # from_rank (remote rank)
                 ctx.heap_bases,
                 mask=mask,
             )
-            tl.store(dst_view.ptr + dst_offsets, data, mask=mask)
+            tl.store(dst_ptr, data, mask=mask)

@@ -159,6 +159,23 @@ class Tile:
         """
         return tile_layout(self.pid_m, self.pid_n, M, N, self.block_m, self.block_n)
 
+    @triton.jit
+    def indices(self):
+        """
+        Compute base row and column indices for this tile.
+
+        Returns:
+            rm, rn: Row indices, column indices (without bounds checking)
+
+        Example:
+            rm, rn = tile.indices()
+            rm_offset = rm + offset_rows
+            rn_offset = rn + offset_cols
+        """
+        rm = self.pid_m * self.block_m + tl.arange(0, self.block_m)
+        rn = self.pid_n * self.block_n + tl.arange(0, self.block_n)
+        return rm, rn
+
 
 @aggregate
 class TensorView:
@@ -217,6 +234,86 @@ class TensorView:
         return tile_ptr(
             self.ptr, self.M, self.N, self.stride_m, self.stride_n, tile.pid_m, tile.pid_n, tile.block_m, tile.block_n
         )
+
+    @triton.jit
+    def tile_ptr_from_indices(self, rm, rn, block_m: tl.constexpr, block_n: tl.constexpr):
+        """
+        Compute tile pointer and mask from custom row/column indices.
+
+        This is useful when you need to access a tile at a custom location
+        (e.g., with an offset or transformation applied to the indices).
+
+        Args:
+            rm: Row indices (1D tensor of size block_m)
+            rn: Column indices (1D tensor of size block_n)
+            block_m: Block size in M dimension (constexpr)
+            block_n: Block size in N dimension (constexpr)
+
+        Returns:
+            tile_ptr, mask: Pointer tensor and bounds mask
+
+        Example:
+            # Access tile with offset
+            rm_offset = tile.pid_m * tile.block_m + offset + tl.arange(0, tile.block_m)
+            rn = tile.pid_n * tile.block_n + tl.arange(0, tile.block_n)
+            ptr, mask = view.tile_ptr_from_indices(rm_offset, rn, tile.block_m, tile.block_n)
+        """
+        # Add vectorization hints
+        rm = tl.max_contiguous(tl.multiple_of(rm, block_m), block_m)
+        rn = tl.max_contiguous(tl.multiple_of(rn, block_n), block_n)
+
+        # Create bounds mask
+        mask = (rm[:, None] < self.M) & (rn[None, :] < self.N)
+
+        # Compute pointer offsets
+        offset = rm[:, None] * self.stride_m + rn[None, :] * self.stride_n
+        tile_ptr = self.ptr + offset
+        tile_ptr = tl.multiple_of(tile_ptr, (block_m, block_n))
+
+        return tile_ptr, mask
+
+    @triton.jit
+    def offset_tile_ptr(self, tile: Tile, offset_m=0, offset_n=0, src_mask=None):
+        """
+        Compute tile pointer with row/column offsets applied.
+
+        This is a higher-level convenience method that combines tile.indices(),
+        offset application, and tile_ptr_from_indices() into a single call.
+
+        Args:
+            tile: Tile object with position and block sizes
+            offset_m: Offset to add to row indices (default: 0)
+            offset_n: Offset to add to column indices (default: 0)
+            src_mask: Optional source mask to combine with computed mask (default: None)
+
+        Returns:
+            tile_ptr, mask: Pointer tensor and combined mask
+
+        Example:
+            # Access tile with rank-specific offset
+            ptr, mask = dst_view.offset_tile_ptr(
+                tile, offset_m=rank * M, src_mask=input_mask
+            )
+        """
+        # Get base indices from tile
+        rm, rn = tile.indices()
+
+        # Apply offsets
+        rm_offset = rm + offset_m
+        rn_offset = rn + offset_n
+
+        # Compute pointer and mask
+        tile_ptr, dst_mask = self.tile_ptr_from_indices(
+            rm_offset, rn_offset, tile.block_m, tile.block_n
+        )
+
+        # Combine masks if source mask provided
+        if src_mask is not None:
+            mask = src_mask & dst_mask
+        else:
+            mask = dst_mask
+
+        return tile_ptr, mask
 
     @triton.jit
     def offset(self, offset_m=0, offset_n=0):

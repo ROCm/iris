@@ -172,10 +172,6 @@ def all_reduce_ring(
         # Compute chunk for this step
         chunk_id = (ctx.rank - step - 1) % ctx.world_size
 
-        # Calculate offset for ring algorithm
-        indices_m, indices_n = tile.layout(src_view.M, src_view.N)
-        ring_offset = indices_m[:, None] * src_view.stride_m + indices_n[None, :] * src_view.stride_n
-
         # Receive and accumulate from previous rank in ring
         if recv_rank != ctx.rank:
             remote_tile = iris.load(src_view.ptr + ring_offset, ctx.heap_bases, recv_rank, mask=mask, other=0.0)

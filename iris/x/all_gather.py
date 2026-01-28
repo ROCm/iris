@@ -51,16 +51,16 @@ def all_gather(
         # Gather along M dimension: output is (world_size * M) x N
         # Each rank writes to a different row block
         for r in range(ctx.world_size):
+            # Get destination pointer with rank-specific row offset (1 line replaces 7!)
+            dst_ptr, combined_mask = dst_view.offset_tile_ptr(
+                tile, offset_m=r * src_view.M, src_mask=mask
+            )
+
             if r == ctx.rank:
                 # Write local tile to output
-                out_offset_m = ctx.rank * src_view.M + tile.pid_m * tile.block_m
-                out_offset_n = tile.pid_n * tile.block_n
-                out_indices_m = out_offset_m + tl.arange(0, tile.block_m)
-                out_indices_n = out_offset_n + tl.arange(0, tile.block_n)
-                out_offsets = out_indices_m[:, None] * dst_view.stride_m + out_indices_n[None, :] * dst_view.stride_n
-                tl.store(dst_view.ptr + out_offsets, local_tile, mask=mask)
+                tl.store(dst_ptr, local_tile, mask=combined_mask)
             else:
-                # Read from remote rank
+                # Read from remote rank and write to output
                 remote_tile = iris.load(
                     src_tile_ptr,
                     ctx.rank,  # to_rank (current rank)
@@ -68,27 +68,21 @@ def all_gather(
                     ctx.heap_bases,
                     mask=mask,
                 )
-                # Write to output at rank r's section
-                out_offset_m = r * src_view.M + tile.pid_m * tile.block_m
-                out_offset_n = tile.pid_n * tile.block_n
-                out_indices_m = out_offset_m + tl.arange(0, tile.block_m)
-                out_indices_n = out_offset_n + tl.arange(0, tile.block_n)
-                out_offsets = out_indices_m[:, None] * dst_view.stride_m + out_indices_n[None, :] * dst_view.stride_n
-                tl.store(dst_view.ptr + out_offsets, remote_tile, mask=mask)
+                tl.store(dst_ptr, remote_tile, mask=combined_mask)
     else:
         # Gather along N dimension: output is M x (world_size * N)
         # Each rank writes to a different column block
         for r in range(ctx.world_size):
+            # Get destination pointer with rank-specific column offset (1 line replaces 7!)
+            dst_ptr, combined_mask = dst_view.offset_tile_ptr(
+                tile, offset_n=r * src_view.N, src_mask=mask
+            )
+
             if r == ctx.rank:
                 # Write local tile to output
-                out_offset_m = tile.pid_m * tile.block_m
-                out_offset_n = ctx.rank * src_view.N + tile.pid_n * tile.block_n
-                out_indices_m = out_offset_m + tl.arange(0, tile.block_m)
-                out_indices_n = out_offset_n + tl.arange(0, tile.block_n)
-                out_offsets = out_indices_m[:, None] * dst_view.stride_m + out_indices_n[None, :] * dst_view.stride_n
-                tl.store(dst_view.ptr + out_offsets, local_tile, mask=mask)
+                tl.store(dst_ptr, local_tile, mask=combined_mask)
             else:
-                # Read from remote rank
+                # Read from remote rank and write to output
                 remote_tile = iris.load(
                     src_tile_ptr,
                     ctx.rank,  # to_rank (current rank)
@@ -96,10 +90,4 @@ def all_gather(
                     ctx.heap_bases,
                     mask=mask,
                 )
-                # Write to output at rank r's section
-                out_offset_m = tile.pid_m * tile.block_m
-                out_offset_n = r * src_view.N + tile.pid_n * tile.block_n
-                out_indices_m = out_offset_m + tl.arange(0, tile.block_m)
-                out_indices_n = out_offset_n + tl.arange(0, tile.block_n)
-                out_offsets = out_indices_m[:, None] * dst_view.stride_m + out_indices_n[None, :] * dst_view.stride_n
-                tl.store(dst_view.ptr + out_offsets, remote_tile, mask=mask)
+                tl.store(dst_ptr, remote_tile, mask=combined_mask)
