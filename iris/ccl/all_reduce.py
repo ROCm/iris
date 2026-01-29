@@ -14,7 +14,7 @@ import triton.language as tl
 import torch
 import iris
 from .config import Config
-from .utils import chiplet_transform_chunked
+from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
 
 # Variant types
 VARIANT_ATOMIC = "atomic"
@@ -138,8 +138,11 @@ def persistent_all_reduce_atomic(
     stride_out_m,
     stride_out_n,
     heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
     world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -159,8 +162,9 @@ def persistent_all_reduce_atomic(
         M: Number of rows
         N: Number of columns
         heap_bases: Heap base pointers for all ranks
-        cur_rank: Current rank
-        world_size: Total number of ranks
+        group_rank: Rank within the ProcessGroup (0 to group_size-1), used for tile assignment and comparisons
+        iris_rank: Rank in the iris context, used for iris RMA operations (heap_bases indexing)
+        world_size: Total number of ranks in the group
     """
     pid = tl.program_id(0)
 
@@ -206,19 +210,21 @@ def persistent_all_reduce_atomic(
         data = tl.load(input_ptr_local, mask=mask)
 
         # Atomically add to output buffer on all ranks
-        # Each rank's output tensor is in its own heap, accessible via IPC
-        for target_rank in range(world_size):
-            if target_rank == cur_rank:
-                # For the current rank, use local atomic add
+        # Each rank's output tensor is in its own heap, accessible via RMA
+        for i in range(world_size):
+            target_rank = rank_start + i * rank_stride
+            if i == group_rank:
+                # For the current rank (i == group_rank), use local atomic add
                 # output_ptr is already in current rank's address space
                 tl.atomic_add(output_ptr + output_offset, data, mask=mask)
             else:
                 # For remote ranks, use iris.atomic_add to translate pointer
-                # This accesses the remote rank's heap via IPC
+                # This accesses the remote rank's heap via RMA
+                # Use iris_rank for iris operations (heap_bases indexing)
                 iris.atomic_add(
                     output_ptr + output_offset,
                     data,
-                    cur_rank,
+                    iris_rank,
                     target_rank,
                     heap_bases,
                     mask=mask,
@@ -239,8 +245,11 @@ def persistent_all_reduce_spinlock(
     stride_out_m,
     stride_out_n,
     heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
     world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -297,10 +306,11 @@ def persistent_all_reduce_spinlock(
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
 
-        for remote_rank in range(world_size):
+        for i in range(world_size):
+            remote_rank = rank_start + i * rank_stride
             partial = iris.load(
                 input_ptr + input_offset,
-                cur_rank,
+                iris_rank,
                 remote_rank,
                 heap_bases,
                 mask=mask,
@@ -323,8 +333,11 @@ def persistent_all_reduce_one_shot(
     stride_out_m,
     stride_out_n,
     heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
     world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -372,10 +385,11 @@ def persistent_all_reduce_one_shot(
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
 
-        for remote_rank in range(world_size):
+        for i in range(world_size):
+            remote_rank = rank_start + i * rank_stride
             partial = iris.load(
                 input_ptr + input_offset,
-                cur_rank,
+                iris_rank,
                 remote_rank,
                 heap_bases,
                 mask=mask,
@@ -402,8 +416,12 @@ def persistent_all_reduce_ring(
     stride_out_m,
     stride_out_n,
     heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
     world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    next_rank: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -437,8 +455,8 @@ def persistent_all_reduce_ring(
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
 
-    # Ring topology
-    next_rank = (cur_rank + 1) % world_size
+    # Ring topology: next_rank is passed in from Python side
+    # for group support
 
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
     elem_ty = input_ptr.type.element_ty
@@ -486,7 +504,7 @@ def persistent_all_reduce_ring(
                             remote_flag_ptr,
                             0,
                             0,
-                            cur_rank,
+                            iris_rank,
                             next_rank,
                             heap_bases,
                             sem="acquire",
@@ -499,7 +517,7 @@ def persistent_all_reduce_ring(
                     iris.store(
                         ring_buffer + tile_offset,
                         send_data,
-                        cur_rank,
+                        iris_rank,
                         next_rank,
                         heap_bases,
                         mask=mask,
@@ -508,7 +526,7 @@ def persistent_all_reduce_ring(
                     iris.atomic_xchg(
                         remote_flag_ptr,
                         1,
-                        cur_rank,
+                        iris_rank,
                         next_rank,
                         heap_bases,
                         sem="release",
@@ -542,8 +560,11 @@ def persistent_all_reduce_two_shot(
     stride_out_m,
     stride_out_n,
     heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
     world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -565,13 +586,13 @@ def persistent_all_reduce_two_shot(
 
     tiles_per_rank = tl.cdiv(total_tiles, world_size)
     if DISTRIBUTION == 0:
-        start_tile = cur_rank
+        start_tile = group_rank
         stride = world_size
         remaining = total_tiles - start_tile
         remaining = tl.maximum(remaining, 0)
         max_tile_offset = tl.cdiv(remaining, stride)
     else:
-        start_tile = cur_rank * tiles_per_rank
+        start_tile = group_rank * tiles_per_rank
         stride = 1
         remaining = total_tiles - start_tile
         remaining = tl.maximum(remaining, 0)
@@ -613,44 +634,57 @@ def persistent_all_reduce_two_shot(
         if is_full:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-            start_rank = pid % world_size
-            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases).to(acc_dtype)
+            start_rank_idx = pid % world_size
+            start_rank_global = rank_start + start_rank_idx * rank_stride
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
             for i in tl.static_range(1, world_size):
-                remote_rank = (start_rank + i) % world_size
-                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases).to(acc_dtype)
+                remote_rank_idx = (start_rank_idx + i) % world_size
+                remote_rank = rank_start + remote_rank_idx * rank_stride
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
             tl.store(out_ptr, reduced, cache_modifier=".wt")
 
             for i in tl.static_range(0, world_size):
-                remote_rank = (start_rank + i) % world_size
-                if remote_rank != cur_rank:
-                    iris.store(out_ptr, reduced, cur_rank, remote_rank, heap_bases)
+                remote_rank_idx = (start_rank_idx + i) % world_size
+                remote_rank = rank_start + remote_rank_idx * rank_stride
+                if remote_rank_idx != group_rank:
+                    iris.store(out_ptr, reduced, iris_rank, remote_rank, heap_bases)
 
         # Slow path: MASKED (only boundary tiles land here)
         # This path handles tiles at tensor boundaries where not all elements are valid.
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-            start_rank = pid % world_size
-            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases, mask=mask).to(acc_dtype)
+            start_rank_idx = pid % world_size
+            start_rank_global = rank_start + start_rank_idx * rank_stride
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask).to(acc_dtype)
             for i in tl.static_range(1, world_size):
-                remote_rank = (start_rank + i) % world_size
-                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+                remote_rank_idx = (start_rank_idx + i) % world_size
+                remote_rank = rank_start + remote_rank_idx * rank_stride
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
 
             for i in tl.static_range(0, world_size):
-                remote_rank = (start_rank + i) % world_size
-                if remote_rank != cur_rank:
-                    iris.store(out_ptr, reduced, cur_rank, remote_rank, heap_bases, mask=mask)
+                remote_rank_idx = (start_rank_idx + i) % world_size
+                remote_rank = rank_start + remote_rank_idx * rank_stride
+                if remote_rank_idx != group_rank:
+                    iris.store(out_ptr, reduced, iris_rank, remote_rank, heap_bases, mask=mask)
 
 
 def all_reduce(
-    output_tensor, input_tensor, shmem, config=None, async_op=False, workspace: Optional[AllReduceWorkspace] = None
+    output_tensor,
+    input_tensor,
+    shmem,
+    op=ReduceOp.SUM,
+    group=None,
+    async_op=False,
+    config=None,
+    workspace: Optional[AllReduceWorkspace] = None,
 ):
     """
     Internal all-reduce collective operation implementation.
@@ -666,13 +700,23 @@ def all_reduce(
         output_tensor: Output tensor of shape (M, N) - will contain sum of all inputs
         input_tensor: Input tensor of shape (M, N) - local rank's partial data
         shmem: Iris shmem context
+        op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
+            Default: ReduceOp.SUM.
+        group: ProcessGroup or None. If None, uses all ranks in shmem context.
+               Default: None.
+        async_op: If False, performs a barrier at the end. If True, returns immediately.
+                  Default: False.
         config: Config instance with kernel parameters (default: None).
                 If None, uses default Config values.
                 Set config.all_reduce_variant to choose variant: "atomic", "spinlock", "ring", "two_shot", or "one_shot"
-        async_op: If False, performs a barrier at the end. If True, returns immediately.
-                  Default: False.
         workspace: Optional AllReduceWorkspace instance prepared via all_reduce_preamble.
     """
+    # Validate op parameter
+    if op != ReduceOp.SUM:
+        raise ValueError(
+            f"Only ReduceOp.SUM is currently supported, got {op}. "
+            "Support for other operations (PRODUCT, MAX, MIN, etc.) will be added in a future release."
+        )
     if config is None:
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
 
@@ -684,8 +728,10 @@ def all_reduce(
             "Use default config (use_gluon=False)."
         )
 
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+    # Extract group information
+    # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
+    # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
     M, N = input_tensor.shape[:2]
 
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
@@ -747,8 +793,11 @@ def all_reduce(
             stride_out_m,
             stride_out_n,
             heap_bases,
-            rank,
+            rank_in_group,
+            rank_global,
             world_size,
+            rank_start,
+            rank_stride,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
@@ -774,8 +823,11 @@ def all_reduce(
             stride_out_m,
             stride_out_n,
             heap_bases,
-            rank,
+            rank_in_group,
+            rank_global,
             world_size,
+            rank_start,
+            rank_stride,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
@@ -790,6 +842,19 @@ def all_reduce(
                 "Ring variant requires workspace preparation. Call all_reduce_preamble before all_reduce."
             )
 
+        # Calculate next rank in the ring for group support
+        # next_rank must be a global rank for iris RMA operations
+        if group is None:
+            # Simple case: next rank is just (rank_in_group + 1) % world_size (which equals global rank)
+            next_rank = (rank_in_group + 1) % world_size
+        else:
+            # Group case: get the group ranks and find next in ring
+            import torch.distributed as dist
+
+            group_ranks = dist.get_process_group_ranks(group)
+            next_rank_in_group = (rank_in_group + 1) % world_size
+            next_rank = group_ranks[next_rank_in_group]
+
         persistent_all_reduce_ring[(config.comm_sms,)](
             input_tensor,
             output_tensor,
@@ -802,8 +867,12 @@ def all_reduce(
             stride_out_m,
             stride_out_n,
             heap_bases,
-            rank,
+            rank_in_group,
+            rank_global,
             world_size,
+            rank_start,
+            rank_stride,
+            next_rank,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
@@ -826,8 +895,11 @@ def all_reduce(
             stride_out_m,
             stride_out_n,
             heap_bases,
-            rank,
+            rank_in_group,
+            rank_global,
             world_size,
+            rank_start,
+            rank_stride,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
@@ -850,8 +922,11 @@ def all_reduce(
             stride_out_m,
             stride_out_n,
             heap_bases,
-            rank,
+            rank_in_group,
+            rank_global,
             world_size,
+            rank_start,
+            rank_stride,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,

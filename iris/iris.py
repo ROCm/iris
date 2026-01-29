@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
 Iris: Multi-GPU Communication and Memory Management Framework
@@ -27,7 +27,6 @@ import triton.language as tl
 
 from iris._distributed_helpers import (
     init_distributed,
-    distributed_allgather,
     distributed_barrier,
     distributed_broadcast_scalar,
     distributed_broadcast_tensor,
@@ -36,14 +35,11 @@ from iris.hip import (
     set_device,
     get_cu_count,
     count_devices,
-    get_ipc_handle,
-    open_ipc_handle,
-    get_ipc_handle_size,
 )
+from iris.symmetric_heap import SymmetricHeap
 import numpy as np
 import math
 import torch
-import ctypes
 import logging
 
 # Import logging functionality from the separate logging module
@@ -67,7 +63,7 @@ class Iris:
     """
 
     def __init__(self, heap_size=1 << 30):
-        # Initialize
+        # Initialize distributed environment
         comm, cur_rank, num_ranks = init_distributed()
         num_gpus = count_devices()
 
@@ -79,42 +75,14 @@ class Iris:
         self.cur_rank = cur_rank
         self.gpu_id = gpu_id
         self.heap_size = heap_size
-        self.heap_offset = 0
-        self.alignment = 1024
+
+        # Initialize symmetric heap
+        self.heap = SymmetricHeap(heap_size, gpu_id, cur_rank, num_ranks)
         self.device = f"cuda:{gpu_id}"
-        self.memory_pool = torch.empty(heap_size, device=self.device, dtype=torch.int8)
-
-        heap_base = self.memory_pool.data_ptr()
-        heap_base_ptr = ctypes.c_void_p(heap_base)
-
-        heap_bases = np.zeros(num_ranks, dtype=np.uint64)
-        heap_bases[cur_rank] = heap_base
-        ipc_handle_size = get_ipc_handle_size()
-        ipc_handles = np.zeros((num_ranks, ipc_handle_size), dtype=np.uint8)
-        ipc_handle = get_ipc_handle(heap_base_ptr, cur_rank)
-
-        distributed_barrier()
-
-        all_ipc_handles = distributed_allgather(np.frombuffer(ipc_handle, dtype=np.uint8).copy())
-        heap_base_bytes = np.array([heap_bases[cur_rank]], dtype=np.uint64).tobytes()
-        all_heap_bases_bytes = distributed_allgather(np.frombuffer(heap_base_bytes, dtype=np.uint8).copy())
-        all_heap_bases = np.frombuffer(all_heap_bases_bytes.tobytes(), dtype=np.uint64).reshape(num_ranks, -1)
-
-        distributed_barrier()
-
-        ipc_heap_bases = np.zeros(num_ranks, dtype=np.uintp)
-        for rank in range(num_ranks):
-            if rank != cur_rank:
-                handle = open_ipc_handle(all_ipc_handles[rank], cur_rank)
-                ipc_heap_bases[rank] = int(handle)
-            else:
-                ipc_heap_bases[rank] = heap_bases[rank]
+        self.heap_bases = self.heap.get_heap_bases()
 
         for i in range(num_ranks):
-            self.debug(f"GPU {i}: Heap base {hex(int(ipc_heap_bases[i]))}")
-
-        distributed_barrier()
-        self.heap_bases = torch.from_numpy(ipc_heap_bases).to(device=self.device, dtype=torch.uint64)
+            self.debug(f"GPU {i}: Heap base {hex(int(self.heap_bases[i].item()))}")
 
         distributed_barrier()
 
@@ -261,20 +229,9 @@ class Iris:
             return distributed_broadcast_scalar(value, source_rank)
 
     def __allocate(self, num_elements, dtype):
+        """Allocate memory using the symmetric heap."""
         self.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")
-
-        element_size = torch.tensor([], dtype=dtype).element_size()
-        size_in_bytes = num_elements * element_size
-        aligned_size = math.ceil(size_in_bytes / self.alignment) * self.alignment
-
-        if self.heap_offset + aligned_size > self.heap_size:
-            raise MemoryError("Heap out of memory")
-
-        start = self.heap_offset
-        self.heap_offset += aligned_size
-
-        sub_buffer = self.memory_pool[start : start + size_in_bytes].view(dtype)
-        return sub_buffer.reshape((num_elements,))
+        return self.heap.allocate(num_elements, dtype)
 
     def __parse_size(self, size):
         # Handle nested tuples/lists by flattening them recursively
@@ -1139,19 +1096,23 @@ class Iris:
         """
         return self.heap_bases
 
-    def barrier(self, stream=None):
+    def barrier(self, stream=None, group=None):
         """
-        Synchronize all ranks and their CUDA devices.
+        Synchronize ranks within the specified group and their CUDA devices.
 
         This first calls ``torch.cuda.synchronize()`` or ``stream.synchronize()`` to ensure the local GPU has
-        finished all queued work, then performs a global distributed barrier so that all
-        ranks reach the same point before proceeding.
+        finished all queued work, then performs a distributed barrier so that all
+        ranks in the group reach the same point before proceeding.
+
         Args:
             stream: If stream is given: wait only for that stream before barrier. If stream is None: legacy behavior (device-wide sync).
+            group (ProcessGroup, optional): The process group to synchronize.
+                If None, uses the default process group (all ranks).
 
         Example:
             >>> ctx = iris.iris(1 << 20)
             >>> ctx.barrier()  # Synchronize all ranks
+            >>> ctx.barrier(group=my_group)  # Synchronize only ranks in my_group
         """
         # Wait for all GPUs to finish work
         if stream is None:
@@ -1160,7 +1121,7 @@ class Iris:
             stream.synchronize()
 
         # Distributed barrier
-        distributed_barrier()
+        distributed_barrier(group=group)
 
     def get_device(self):
         """
@@ -1174,7 +1135,7 @@ class Iris:
             >>> device = ctx.get_device()
             >>> print(device)  # cuda:0
         """
-        return self.memory_pool.device
+        return self.heap.get_device()
 
     def get_cu_count(self):
         """
@@ -1455,18 +1416,8 @@ class Iris:
         return tensor_device == iris_device
 
     def __on_symmetric_heap(self, tensor: torch.Tensor):
-        # Special case for empty tensors - they might not have a valid data_ptr
-        if tensor.numel() == 0:
-            self.debug("Empty tensor detected, skipping heap check")
-            return True
-
-        # Convert CUDA pointer to integer for comparison
-        tensor_ptr = int(tensor.data_ptr())
-        heap_base = int(self.heap_bases[self.cur_rank])
-
-        result = tensor_ptr >= heap_base and tensor_ptr < heap_base + self.heap_size
-
-        return result
+        """Check if a tensor is allocated on the symmetric heap."""
+        return self.heap.on_symmetric_heap(tensor)
 
     def __is_valid_device(self, device) -> bool:
         """
@@ -1515,7 +1466,7 @@ class Iris:
             """
             self._iris = iris_instance
 
-        def all_to_all(self, output_tensor, input_tensor, config=None, async_op=False):
+        def all_to_all(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
             All-to-all collective operation.
 
@@ -1526,10 +1477,12 @@ class Iris:
             Args:
                 output_tensor: Output tensor of shape (M, N * world_size)
                 input_tensor: Input tensor of shape (M, N * world_size)
-                config: Config instance with kernel parameters (default: None).
-                        If None, uses default Config values.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
                 async_op: If False, performs a barrier at the end. If True, returns immediately.
                           Default: False.
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
 
             Example:
                 >>> shmem = iris.iris()
@@ -1545,9 +1498,9 @@ class Iris:
             """
             from iris.ccl.all_to_all import all_to_all as _all_to_all
 
-            _all_to_all(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+            _all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
-        def all_gather(self, output_tensor, input_tensor, config=None, async_op=False):
+        def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
             All-gather collective operation.
 
@@ -1558,10 +1511,12 @@ class Iris:
             Args:
                 output_tensor: Output tensor of shape (world_size * M, N) - will contain concatenated inputs
                 input_tensor: Input tensor of shape (M, N) - local rank's data to send
-                config: Config instance with kernel parameters (default: None).
-                        If None, uses default Config values.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
                 async_op: If False, performs a barrier at the end. If True, returns immediately.
                           Default: False.
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
 
             Example:
                 >>> shmem = iris.iris()
@@ -1578,7 +1533,7 @@ class Iris:
             """
             from iris.ccl.all_gather import all_gather as _all_gather
 
-            _all_gather(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+            _all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
@@ -1603,7 +1558,9 @@ class Iris:
                 workspace=workspace,
             )
 
-        def all_reduce(self, output_tensor, input_tensor, config=None, async_op=False, workspace=None):
+        def all_reduce(
+            self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None, workspace=None
+        ):
             """
             All-reduce collective operation.
 
@@ -1613,11 +1570,15 @@ class Iris:
             Args:
                 output_tensor: Output tensor of shape (M, N) - will contain sum of all inputs
                 input_tensor: Input tensor of shape (M, N) - local rank's partial data
+                op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
+                    Default: ReduceOp.SUM.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
                 config: Config instance with kernel parameters (default: None).
                         If None, uses default Config values.
                         Set config.all_reduce_variant to choose variant: "atomic", "ring", or "two_shot"
-                async_op: If False, performs a barrier at the end. If True, returns immediately.
-                          Default: False.
                 workspace: Optional workspace prepared by ``all_reduce_preamble`` to
                            reuse internal buffers across invocations.
 
@@ -1638,17 +1599,24 @@ class Iris:
                 >>> shmem.ccl.all_reduce(output_tensor, input_tensor, async_op=True)
             """
             from iris.ccl.all_reduce import all_reduce as _all_reduce
+            from iris.ccl import ReduceOp
+
+            # Default to SUM if not specified
+            if op is None:
+                op = ReduceOp.SUM
 
             return _all_reduce(
                 output_tensor,
                 input_tensor,
                 self._iris,
-                config=config,
+                op=op,
+                group=group,
                 async_op=async_op,
+                config=config,
                 workspace=workspace,
             )
 
-        def reduce_scatter(self, output_tensor, input_tensor, config=None, async_op=False):
+        def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
             """
             Reduce-scatter collective operation.
 
@@ -1659,11 +1627,15 @@ class Iris:
             Args:
                 output_tensor: Output tensor of shape (M, N) - will contain reduced tiles for this rank
                 input_tensor: Input tensor of shape (M, N) - local rank's partial data
+                op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
+                    Default: ReduceOp.SUM.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
                 config: Config instance with kernel parameters (default: None).
                         If None, uses default Config values.
                         Only supports reduce_scatter_variant="two_shot".
-                async_op: If False, performs a barrier at the end. If True, returns immediately.
-                          Default: False.
 
             Example:
                 >>> shmem = iris.iris()
@@ -1675,8 +1647,15 @@ class Iris:
                 >>> shmem.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
             """
             from iris.ccl.reduce_scatter import reduce_scatter as _reduce_scatter
+            from iris.ccl import ReduceOp
 
-            _reduce_scatter(output_tensor, input_tensor, self._iris, config=config, async_op=async_op)
+            # Default to SUM if not specified
+            if op is None:
+                op = ReduceOp.SUM
+
+            _reduce_scatter(
+                output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
+            )
 
 
 @triton.jit

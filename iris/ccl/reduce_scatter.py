@@ -10,7 +10,7 @@ import triton
 import triton.language as tl
 import iris
 from .config import Config
-from .utils import chiplet_transform_chunked
+from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
 
 
 @triton.jit()
@@ -24,8 +24,11 @@ def persistent_reduce_scatter_two_shot(
     stride_out_m,
     stride_out_n,
     heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
     world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -53,13 +56,13 @@ def persistent_reduce_scatter_two_shot(
 
     tiles_per_rank = tl.cdiv(total_tiles, world_size)
     if DISTRIBUTION == 0:
-        start_tile = cur_rank
+        start_tile = group_rank
         stride = world_size
         remaining = total_tiles - start_tile
         remaining = tl.maximum(remaining, 0)
         max_tile_offset = tl.cdiv(remaining, stride)
     else:
-        start_tile = cur_rank * tiles_per_rank
+        start_tile = group_rank * tiles_per_rank
         stride = 1
         remaining = total_tiles - start_tile
         remaining = tl.maximum(remaining, 0)
@@ -101,11 +104,13 @@ def persistent_reduce_scatter_two_shot(
         # (one with masks and one without). Separate unmasked paths allow the compiler to generate
         # more efficient vectorized instructions.
         if is_full:
-            start_rank = pid % world_size
-            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases).to(acc_dtype)
+            start_rank_idx = pid % world_size
+            start_rank_global = rank_start + start_rank_idx * rank_stride
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
             for i in tl.static_range(1, world_size):
-                remote_rank = (start_rank + i) % world_size
-                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases).to(acc_dtype)
+                remote_rank_idx = (start_rank_idx + i) % world_size
+                remote_rank = rank_start + remote_rank_idx * rank_stride
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
@@ -117,11 +122,13 @@ def persistent_reduce_scatter_two_shot(
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-            start_rank = pid % world_size
-            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases, mask=mask).to(acc_dtype)
+            start_rank_idx = pid % world_size
+            start_rank_global = rank_start + start_rank_idx * rank_stride
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask).to(acc_dtype)
             for i in tl.static_range(1, world_size):
-                remote_rank = (start_rank + i) % world_size
-                acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+                remote_rank_idx = (start_rank_idx + i) % world_size
+                remote_rank = rank_start + remote_rank_idx * rank_stride
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
@@ -129,7 +136,15 @@ def persistent_reduce_scatter_two_shot(
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
 
 
-def reduce_scatter(output_tensor, input_tensor, shmem, config=None, async_op=False):
+def reduce_scatter(
+    output_tensor,
+    input_tensor,
+    shmem,
+    op=ReduceOp.SUM,
+    group=None,
+    async_op=False,
+    config=None,
+):
     """
     Internal reduce-scatter collective operation implementation.
 
@@ -145,11 +160,15 @@ def reduce_scatter(output_tensor, input_tensor, shmem, config=None, async_op=Fal
         output_tensor: Output tensor of shape (M, N) - will contain reduced tiles for this rank
         input_tensor: Input tensor of shape (M, N) - local rank's partial data
         shmem: Iris shmem context
+        op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
+            Default: ReduceOp.SUM.
+        group: ProcessGroup or None. If None, uses all ranks in shmem context.
+               Default: None.
+        async_op: If False, performs a barrier at the end. If True, returns immediately.
+                  Default: False.
         config: Config instance with kernel parameters (default: None).
                 If None, uses default Config values.
                 Only supports reduce_scatter_variant="two_shot".
-        async_op: If False, performs a barrier at the end. If True, returns immediately.
-                  Default: False.
 
     Example:
         >>> shmem = iris.iris()
@@ -160,6 +179,12 @@ def reduce_scatter(output_tensor, input_tensor, shmem, config=None, async_op=Fal
         >>> config = Config(reduce_scatter_variant="two_shot", all_reduce_distribution=1)
         >>> shmem.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
     """
+    # Validate op parameter
+    if op != ReduceOp.SUM:
+        raise ValueError(
+            f"Only ReduceOp.SUM is currently supported, got {op}. "
+            "Support for other operations (PRODUCT, MAX, MIN, etc.) will be added in a future release."
+        )
     if config is None:
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
 
@@ -179,8 +204,10 @@ def reduce_scatter(output_tensor, input_tensor, shmem, config=None, async_op=Fal
             f"Set config.reduce_scatter_variant='two_shot' or use default config."
         )
 
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+    # Extract group information
+    # rank_in_group: position within the group (0, 1, 2, ...) - used for tile assignment
+    # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
     M, N = input_tensor.shape[:2]
 
     # Validate output shape matches input shape
@@ -208,8 +235,11 @@ def reduce_scatter(output_tensor, input_tensor, shmem, config=None, async_op=Fal
         stride_out_m,
         stride_out_n,
         heap_bases,
-        rank,
+        rank_in_group,
+        rank_global,
         world_size,
+        rank_start,
+        rank_stride,
         config.block_size_m,
         config.block_size_n,
         config.swizzle_size,
