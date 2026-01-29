@@ -117,14 +117,10 @@ def all_gather_gemm(
     tl.assume(stride_ag_n > 0)
 
     # Determine accumulator dtype based on output type
-    acc_dtype = tl.int32 if C.type.element_ty != tl.int8 else tl.float32
+    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
 
     # Use chiplet-aware PID mapping if NUM_XCDS > 1
     USE_CHIPLET_PID = NUM_XCDS != 1
-
-    # K_local is the local shard size (K = world_size * K_local)
-    # A_sharded has shape (M, K_local), A_gathered has shape (M, K)
-    K_local = K // world_size
 
     # Perform column-wise all-gather on A_sharded using the generalized all_gather primitive
     # A_sharded: (M, K_local) per rank -> A_gathered: (M, K) where K = world_size * K_local
@@ -202,7 +198,7 @@ def all_gather_gemm(
         # Add bias if provided
         if BIAS:
             bias_vector = tl.load(bias_ptr + row_indices * stride_bias, mask=row_indices < M, other=0.0)
-            acc = add_vector(acc, bias_vector[:, None], QUANTIZED=False)
+            acc = add_vector(acc, bias_vector, QUANTIZED=False)
 
         # Convert to output dtype
         result = convert_dtype(acc, C.type.element_ty)

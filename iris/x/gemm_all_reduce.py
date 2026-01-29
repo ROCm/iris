@@ -110,7 +110,7 @@ def gemm_all_reduce(
     tl.assume(stride_cn > 0)
 
     # Determine accumulator dtype based on output type
-    acc_dtype = tl.int32 if C.type.element_ty != tl.int8 else tl.float32
+    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
 
     # Use chiplet-aware PID mapping if NUM_XCDS > 1
     USE_CHIPLET_PID = NUM_XCDS != 1

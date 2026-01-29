@@ -77,7 +77,6 @@ def test_gemm_all_gather(dtype, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_
     # NUM_SMS, NUM_XCDS, CHUNK_SIZE, etc. based on hardware
     num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
     num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
-    total_tiles = num_pid_m * num_pid_n
     NUM_SMS = 64  # Default number of SMs
     NUM_XCDS = 1  # Default number of XCDs
     CHUNK_SIZE = 1  # Default chunk size

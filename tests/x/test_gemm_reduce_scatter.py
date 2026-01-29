@@ -73,7 +73,6 @@ def test_gemm_reduce_scatter(dtype, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_S
     # Launch gemm_reduce_scatter kernel
     num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
     num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
-    total_tiles = num_pid_m * num_pid_n
     NUM_SMS = 64
     NUM_XCDS = 1
     CHUNK_SIZE = 1
