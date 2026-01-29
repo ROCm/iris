@@ -91,6 +91,18 @@ jobs:
           - test_dir: x
             num_ranks: 4
             gpu_devices: "4,5,6,7"
+          - test_dir: ops
+            num_ranks: 1
+            gpu_devices: "0,1"
+          - test_dir: ops
+            num_ranks: 2
+            gpu_devices: "2,3"
+          - test_dir: ops
+            num_ranks: 4
+            gpu_devices: "4,5,6,7"
+          - test_dir: ops
+            num_ranks: 8
+            gpu_devices: "0,1,2,3,4,5,6,7"
 
     steps:
       - name: Checkout repository
@@ -169,6 +181,18 @@ jobs:
           - test_dir: x
             num_ranks: 4
             gpu_devices: "4,5,6,7"
+          - test_dir: ops
+            num_ranks: 1
+            gpu_devices: "0,1"
+          - test_dir: ops
+            num_ranks: 2
+            gpu_devices: "2,3"
+          - test_dir: ops
+            num_ranks: 4
+            gpu_devices: "4,5,6,7"
+          - test_dir: ops
+            num_ranks: 8
+            gpu_devices: "0,1,2,3,4,5,6,7"
 
     steps:
       - name: Checkout repository
@@ -244,6 +268,18 @@ jobs:
           - test_dir: x
             num_ranks: 4
             gpu_devices: "4,5,6,7"
+          - test_dir: ops
+            num_ranks: 1
+            gpu_devices: "0,1"
+          - test_dir: ops
+            num_ranks: 2
+            gpu_devices: "2,3"
+          - test_dir: ops
+            num_ranks: 4
+            gpu_devices: "4,5,6,7"
+          - test_dir: ops
+            num_ranks: 8
+            gpu_devices: "0,1,2,3,4,5,6,7"
 
     steps:
       - name: Checkout repository
