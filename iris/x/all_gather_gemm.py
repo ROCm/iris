@@ -122,6 +122,10 @@ def all_gather_gemm(
     # Use chiplet-aware PID mapping if NUM_XCDS > 1
     USE_CHIPLET_PID = NUM_XCDS != 1
 
+    # K_local is the local shard size (K = world_size * K_local)
+    # A_sharded has shape (M, K_local), A_gathered has shape (M, K)
+    K_local = K // world_size
+
     # Perform column-wise all-gather on A_sharded using the generalized all_gather primitive
     # A_sharded: (M, K_local) per rank -> A_gathered: (M, K) where K = world_size * K_local
     # Each rank's data goes to columns [cur_rank * K_local : (cur_rank+1) * K_local]
