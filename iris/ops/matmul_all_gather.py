@@ -273,8 +273,7 @@ def matmul_all_gather(
 
     if K != K_B:
         raise ValueError(
-            f"Incompatible matrix dimensions: A is ({M}, {K}), B is ({K_B}, {N}). "
-            f"Inner dimensions must match"
+            f"Incompatible matrix dimensions: A is ({M}, {K}), B is ({K_B}, {N}). Inner dimensions must match"
         )
 
     expected_M = M * world_size

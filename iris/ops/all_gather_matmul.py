@@ -361,15 +361,12 @@ def all_gather_matmul(
         config.num_sms = torch.cuda.get_device_properties(rank).multi_processor_count
 
     # Prepare workspace
-    needs_prepare = (
-        workspace is None
-        or not workspace.matches("all_gather_matmul", (M, N, K), A_sharded.dtype, world_size, "")
+    needs_prepare = workspace is None or not workspace.matches(
+        "all_gather_matmul", (M, N, K), A_sharded.dtype, world_size, ""
     )
 
     if needs_prepare:
-        workspace = all_gather_matmul_preamble(
-            shmem, output_tensor, A_sharded, B, config=config, workspace=workspace
-        )
+        workspace = all_gather_matmul_preamble(shmem, output_tensor, A_sharded, B, config=config, workspace=workspace)
 
     A_gathered = workspace.gathered_buffer
     heap_bases = shmem.get_heap_bases()

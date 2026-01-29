@@ -261,11 +261,7 @@ def matmul_reduce_scatter_preamble(
     workspace.prepared = False
 
     # Allocate full buffer for intermediate GEMM result (M, N)
-    if (
-        workspace.full_buffer is None
-        or workspace.full_buffer.shape != (M, N)
-        or workspace.full_buffer.dtype != dtype
-    ):
+    if workspace.full_buffer is None or workspace.full_buffer.shape != (M, N) or workspace.full_buffer.dtype != dtype:
         workspace.full_buffer = shmem.zeros((M, N), dtype=dtype)
     else:
         workspace.full_buffer.zero_()
@@ -330,8 +326,7 @@ def matmul_reduce_scatter(
 
     if K != K_B:
         raise ValueError(
-            f"Incompatible matrix dimensions: A is ({M}, {K}), B is ({K_B}, {N}). "
-            f"Inner dimensions must match"
+            f"Incompatible matrix dimensions: A is ({M}, {K}), B is ({K_B}, {N}). Inner dimensions must match"
         )
 
     # Validate N is divisible by world_size
@@ -371,9 +366,8 @@ def matmul_reduce_scatter(
         config.num_sms = torch.cuda.get_device_properties(rank).multi_processor_count
 
     # Prepare workspace
-    needs_prepare = (
-        workspace is None
-        or not workspace.matches("matmul_reduce_scatter", (M, N, K), A.dtype, world_size, "")
+    needs_prepare = workspace is None or not workspace.matches(
+        "matmul_reduce_scatter", (M, N, K), A.dtype, world_size, ""
     )
 
     if needs_prepare:

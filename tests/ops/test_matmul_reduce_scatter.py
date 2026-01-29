@@ -13,6 +13,8 @@ import torch
 import torch.distributed as dist
 import iris
 import iris.ops as ops
+
+
 @pytest.mark.parametrize(
     "dtype",
     [
@@ -53,7 +55,7 @@ def test_matmul_reduce_scatter(dtype, M, N, K):
     C_full_local = torch.matmul(A, B)
     C_full_reduced = C_full_local.clone()
     dist.all_reduce(C_full_reduced, op=dist.ReduceOp.SUM)
-    
+
     # Scatter: each rank keeps its portion of columns
     start_col = rank * N_local
     end_col = (rank + 1) * N_local

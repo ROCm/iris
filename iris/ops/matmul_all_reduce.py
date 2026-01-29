@@ -365,9 +365,7 @@ def matmul_all_reduce(
         )
 
     if output_tensor.shape != (M, N):
-        raise ValueError(
-            f"Output tensor shape {output_tensor.shape} doesn't match expected ({M}, {N})"
-        )
+        raise ValueError(f"Output tensor shape {output_tensor.shape} doesn't match expected ({M}, {N})")
 
     if A.dtype != B.dtype or A.dtype != output_tensor.dtype:
         raise ValueError(
@@ -381,8 +379,7 @@ def matmul_all_reduce(
             raise ValueError(f"Bias must be 1D tensor, got shape {bias.shape}")
         if bias.shape[0] not in (M, N):
             raise ValueError(
-                f"Bias shape {bias.shape} incompatible with output shape ({M}, {N}). "
-                f"Bias must be size {M} or {N}"
+                f"Bias shape {bias.shape} incompatible with output shape ({M}, {N}). Bias must be size {M} or {N}"
             )
         if bias.dtype != A.dtype:
             raise ValueError(f"Bias dtype {bias.dtype} doesn't match input dtype {A.dtype}")
@@ -402,9 +399,8 @@ def matmul_all_reduce(
         config.num_sms = torch.cuda.get_device_properties(rank).multi_processor_count
 
     # Prepare workspace if needed
-    needs_prepare = (
-        workspace is None
-        or not workspace.matches("matmul_all_reduce", (M, N, K), A.dtype, world_size, config.all_reduce_variant)
+    needs_prepare = workspace is None or not workspace.matches(
+        "matmul_all_reduce", (M, N, K), A.dtype, world_size, config.all_reduce_variant
     )
 
     if needs_prepare:

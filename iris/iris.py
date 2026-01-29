@@ -190,6 +190,7 @@ class Iris:
         """
         if self._ops is None:
             from iris.ops import OpsNamespace
+
             self._ops = OpsNamespace(self)
         return self._ops
 

@@ -64,9 +64,7 @@ class OpsNamespace:
         """
         self._shmem = shmem
 
-    def matmul_all_reduce(
-        self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None
-    ):
+    def matmul_all_reduce(self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None):
         """
         Fused matrix multiplication and all-reduce.
 
@@ -90,9 +88,7 @@ class OpsNamespace:
         """
         return matmul_all_reduce(self._shmem, output_tensor, A, B, bias, async_op, config, workspace)
 
-    def all_gather_matmul(
-        self, output_tensor, A_sharded, B, bias=None, async_op=False, config=None, workspace=None
-    ):
+    def all_gather_matmul(self, output_tensor, A_sharded, B, bias=None, async_op=False, config=None, workspace=None):
         """
         Fused all-gather and matrix multiplication.
 
@@ -118,9 +114,7 @@ class OpsNamespace:
         """
         return all_gather_matmul(self._shmem, output_tensor, A_sharded, B, bias, async_op, config, workspace)
 
-    def matmul_all_gather(
-        self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None
-    ):
+    def matmul_all_gather(self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None):
         """
         Fused matrix multiplication and all-gather.
 
@@ -146,9 +140,7 @@ class OpsNamespace:
         """
         return matmul_all_gather(self._shmem, output_tensor, A, B, bias, async_op, config, workspace)
 
-    def matmul_reduce_scatter(
-        self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None
-    ):
+    def matmul_reduce_scatter(self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None):
         """
         Fused matrix multiplication and reduce-scatter.
 

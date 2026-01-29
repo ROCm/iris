@@ -90,9 +90,7 @@ class FusedConfig:
         # Validate all_reduce_variant
         valid_variants = ["atomic", "ring", "one_shot", "two_shot", "spinlock"]
         if self.all_reduce_variant not in valid_variants:
-            raise ValueError(
-                f"all_reduce_variant must be one of {valid_variants}, got {self.all_reduce_variant}"
-            )
+            raise ValueError(f"all_reduce_variant must be one of {valid_variants}, got {self.all_reduce_variant}")
 
         # Ring variant requires block_size_n divisible by world_size
         if self.all_reduce_variant == "ring" and world_size is not None:
