@@ -32,6 +32,13 @@ From: rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
     cd \$TRITON_PATH
     git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e 
     pip3 install -e .
+
+    # Clone and install tritonBLAS
+    cd /opt
+    git clone https://github.com/ROCm/tritonBLAS.git
+    cd tritonBLAS
+    git checkout 47768c93acb7f89511d797964b84544c30ab81ad
+    pip3 install -e .
     "
 
 %environment

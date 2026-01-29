@@ -21,6 +21,7 @@ dependencies = [
     "numpy",
     "requests",
     "ruff",
+    "tritonblas @ git+https://github.com/ROCm/tritonBLAS.git@47768c93acb7f89511d797964b84544c30ab81ad",
 ]
 
 [project.urls]
@@ -33,9 +34,6 @@ dev = [
     "pytest",
     "black",
     "mypy",
-]
-gemm = [
-    "tritonblas @ git+https://github.com/ROCm/tritonBLAS.git",
 ]
 
 [tool.setuptools]
