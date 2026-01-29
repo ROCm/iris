@@ -63,54 +63,22 @@ from .all_gather import all_gather
 from .all_to_all import all_to_all
 from .reduce_scatter import reduce_scatter
 
-# Try to import GEMM+Comm primitives (requires tritonBLAS)
-try:
-    from .gemm_all_gather import gemm_all_gather
-    from .gemm_all_reduce import gemm_all_reduce
-    from .all_gather_gemm import all_gather_gemm
-    from .gemm_reduce_scatter import gemm_reduce_scatter
-
-    __all__ = [
-        # Core abstractions
-        "Tile",
-        "TensorView",
-        "DeviceContext",
-        "AllReduceConfig",
-        "tile_layout",
-        "tile_ptr",
-        "offset_ptr",
-        # Collectives
-        "all_reduce_atomic",
-        "all_reduce_ring",
-        "all_reduce_two_shot",
-        "all_reduce_one_shot",
-        "all_reduce_spinlock",
-        "all_gather",
-        "all_to_all",
-        "reduce_scatter",
-        # GEMM+Comm
-        "gemm_all_gather",
-        "gemm_all_reduce",
-        "all_gather_gemm",
-        "gemm_reduce_scatter",
-    ]
-except ImportError:
-    __all__ = [
-        # Core abstractions
-        "Tile",
-        "TensorView",
-        "DeviceContext",
-        "AllReduceConfig",
-        "tile_layout",
-        "tile_ptr",
-        "offset_ptr",
-        # Collectives
-        "all_reduce_atomic",
-        "all_reduce_ring",
-        "all_reduce_two_shot",
-        "all_reduce_one_shot",
-        "all_reduce_spinlock",
-        "all_gather",
-        "all_to_all",
-        "reduce_scatter",
-    ]
+__all__ = [
+    # Core abstractions
+    "Tile",
+    "TensorView",
+    "DeviceContext",
+    "AllReduceConfig",
+    "tile_layout",
+    "tile_ptr",
+    "offset_ptr",
+    # Device-side collectives
+    "all_reduce_atomic",
+    "all_reduce_ring",
+    "all_reduce_two_shot",
+    "all_reduce_one_shot",
+    "all_reduce_spinlock",
+    "all_gather",
+    "all_to_all",
+    "reduce_scatter",
+]

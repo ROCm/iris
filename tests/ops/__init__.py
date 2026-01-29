@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+
+"""
+Test suite for iris.ops high-level fused GEMM+CCL operations.
+"""

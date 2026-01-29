@@ -88,6 +88,9 @@ class Iris:
 
         # Initialize CCL interface
         self.ccl = self.CCL(self)
+        
+        # Lazy initialization for ops interface
+        self._ops = None
 
     def _log_with_rank(self, level, message):
         """Helper method to log with rank information injected into the record."""
@@ -156,6 +159,39 @@ class Iris:
             >>> ctx.error("Failed to allocate memory")  # [Iris] [0/1] Failed to allocate memory
         """
         self._log_with_rank(logging.ERROR, message)
+
+    @property
+    def ops(self):
+        """
+        Access fused GEMM+CCL operations.
+
+        This property provides a namespace for high-level fused operations that combine
+        matrix multiplication with collective communication. Operations automatically infer
+        dimensions, strides, and hardware parameters from input tensors.
+
+        Available operations:
+            - matmul_all_reduce: GEMM + All-Reduce
+            - all_gather_matmul: All-Gather + GEMM  
+            - matmul_all_gather: GEMM + All-Gather
+            - matmul_reduce_scatter: GEMM + Reduce-Scatter
+
+        Returns:
+            OpsNamespace: Namespace with fused operation methods
+
+        Raises:
+            ImportError: If tritonBLAS is not available
+
+        Example:
+            >>> ctx = iris.iris()
+            >>> A = ctx.randn((1024, 512), dtype=torch.float16)
+            >>> B = ctx.randn((512, 2048), dtype=torch.float16)
+            >>> output = ctx.zeros((1024, 2048), dtype=torch.float16)
+            >>> ctx.ops.matmul_all_reduce(output, A, B, ctx)
+        """
+        if self._ops is None:
+            from iris.ops import OpsNamespace
+            self._ops = OpsNamespace(self)
+        return self._ops
 
     def broadcast(self, value, source_rank):
         """

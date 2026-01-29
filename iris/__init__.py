@@ -70,6 +70,9 @@ from . import hip
 # Import experimental features (optional, for users who want experimental APIs)
 from . import experimental
 
+# Import ops module (fused GEMM+CCL operations)
+from . import ops
+
 # Import logging functionality
 from .logging import (
     set_logger_level,
@@ -101,6 +104,7 @@ __all__ = [
     "do_bench",
     "hip",
     "experimental",  # Experimental features including iris_gluon
+    "ops",  # Fused GEMM+CCL operations
     "set_logger_level",
     "logger",
     "DEBUG",
