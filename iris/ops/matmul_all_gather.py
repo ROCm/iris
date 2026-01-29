@@ -315,7 +315,7 @@ def matmul_all_gather(
     # Prepare workspace (no temporary buffers needed - output tensor serves as gather destination)
     if workspace is None:
         workspace = FusedWorkspace()
-    
+
     workspace.operation = "matmul_all_gather"
     workspace.shape = (M, N, K)
     workspace.dtype = A.dtype

@@ -88,7 +88,7 @@ class Iris:
 
         # Initialize CCL interface
         self.ccl = self.CCL(self)
-        
+
         # Lazy initialization for ops interface
         self._ops = None
 
@@ -171,7 +171,7 @@ class Iris:
 
         Available operations:
             - matmul_all_reduce: GEMM + All-Reduce
-            - all_gather_matmul: All-Gather + GEMM  
+            - all_gather_matmul: All-Gather + GEMM
             - matmul_all_gather: GEMM + All-Gather
             - matmul_reduce_scatter: GEMM + Reduce-Scatter
 
