@@ -277,12 +277,7 @@ def persistent_all_reduce_spinlock(
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
-        lock_ptr = locks_ptr + tile_id
-
-        # Acquire lock (spin until we swap 0 -> 1)
-        while tl.atomic_cas(lock_ptr, 0, 1, sem="acquire", scope="sys") != 0:
-            pass
-
+        # Compute tile coordinates
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
         first_pid_m = group_id * GROUP_SIZE_M
@@ -304,22 +299,42 @@ def persistent_all_reduce_spinlock(
         input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
 
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+        # Load local contribution
+        local_data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
 
+        # For each destination rank, do spinlock-protected read-modify-write
         for i in range(world_size):
-            remote_rank = rank_start + i * rank_stride
-            partial = iris.load(
-                input_ptr + input_offset,
+            dest_rank = rank_start + i * rank_stride
+            
+            # Acquire lock for this tile at dest_rank using iris RMA
+            while iris.atomic_cas(locks_ptr + tile_id, 0, 1, iris_rank, dest_rank, heap_bases) != 0:
+                pass
+            
+            # Load current value from dest_rank's output tile
+            current_value = iris.load(
+                output_ptr + output_offset,
                 iris_rank,
-                remote_rank,
+                dest_rank,
                 heap_bases,
                 mask=mask,
             )
-            acc += partial.to(acc_dtype)
-
-        tl.store(output_ptr + output_offset, acc.to(output_ptr.type.element_ty), mask=mask)
-
-        tl.atomic_xchg(lock_ptr, 0, sem="release", scope="sys")
+            
+            # Add our local contribution
+            acc = current_value.to(acc_dtype) + local_data.to(acc_dtype)
+            
+            # Store accumulated result back to dest_rank
+            result = acc.to(output_ptr.type.element_ty)
+            iris.store(
+                output_ptr + output_offset,
+                result,
+                iris_rank,
+                dest_rank,
+                heap_bases,
+                mask=mask,
+            )
+            
+            # Release lock for this tile at dest_rank
+            iris.atomic_xchg(locks_ptr + tile_id, 0, iris_rank, dest_rank, heap_bases)
 
 
 @triton.jit()
