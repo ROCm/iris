@@ -33,7 +33,7 @@ from .config import FusedConfig
 from .workspace import FusedWorkspace
 
 # Import operations
-from .matmul import matmul  # Simple single-GPU GEMM
+# from .matmul import matmul  # Simple single-GPU GEMM - TODO: implement
 from .matmul_all_reduce import matmul_all_reduce, matmul_all_reduce_preamble
 from .all_gather_matmul import all_gather_matmul, all_gather_matmul_preamble
 from .matmul_all_gather import matmul_all_gather
