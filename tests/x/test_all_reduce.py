@@ -59,7 +59,9 @@ def x_all_reduce_atomic_kernel(
 @triton.jit
 def x_all_reduce_one_shot_kernel(
     input_ptr,
+    temp_buffer,
     output_ptr,
+    locks,
     M: tl.constexpr,
     N: tl.constexpr,
     stride_in_m: tl.constexpr,
@@ -83,19 +85,33 @@ def x_all_reduce_one_shot_kernel(
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
-        # Create OOP objects for new API
-        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
+        # Load local tile data from input
+        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        src_ptr = input_ptr + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        local_data = tl.load(src_ptr, mask=mask, other=0.0)
+        
+        # Store to temp_buffer (avoid race condition) and signal ready
+        temp_ptr = temp_buffer + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        tl.store(temp_ptr, local_data, mask=mask)
+        tl.store(locks + tile_id, 1)  # Signal ready
+
+        # Create Tile with data and views
+        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
+        src_view = iris.x.TensorView(temp_buffer, M, N, stride_in_m, stride_in_n)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
-        iris.x.all_reduce_one_shot(tile, src_view, dst_view, ctx)
+        iris.x.all_reduce_one_shot(tile, src_view, dst_view, locks, ctx)
 
 
 @triton.jit
 def x_all_reduce_two_shot_kernel(
     input_ptr,
+    temp_buffer,
     output_ptr,
+    locks,
     M: tl.constexpr,
     N: tl.constexpr,
     stride_in_m: tl.constexpr,
@@ -119,13 +135,25 @@ def x_all_reduce_two_shot_kernel(
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
-        # Create OOP objects for new API
-        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
+        # Load local tile data from input
+        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        src_ptr = input_ptr + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        local_data = tl.load(src_ptr, mask=mask, other=0.0)
+        
+        # Store to temp_buffer (avoid race condition) and signal ready
+        temp_ptr = temp_buffer + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        tl.store(temp_ptr, local_data, mask=mask)
+        tl.store(locks + tile_id, 1)  # Signal ready
+
+        # Create Tile with data and views
+        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
+        src_view = iris.x.TensorView(temp_buffer, M, N, stride_in_m, stride_in_n)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
-        iris.x.all_reduce_two_shot(tile, src_view, dst_view, ctx)
+        iris.x.all_reduce_two_shot(tile, src_view, dst_view, locks, cur_rank, world_size, ctx)
 
 
 @triton.jit
@@ -224,13 +252,18 @@ def test_all_reduce(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     iris_input_tensor.copy_(pytorch_input_tensor)
     iris_output_tensor = shmem.zeros((M, N), dtype=dtype)
 
-    # Prepare workspace if needed
+    # Prepare workspace if needed (locks + temp_buffer for one_shot/two_shot)
     locks = None
-    if variant == "spinlock":
-        num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
-        num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
-        total_tiles = num_pid_m * num_pid_n
+    temp_buffer = None
+    num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
+    num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
+    total_tiles = num_pid_m * num_pid_n
+    
+    if variant in ["spinlock", "one_shot", "two_shot"]:
         locks = shmem.zeros((total_tiles,), dtype=torch.int32)
+        
+    if variant in ["one_shot", "two_shot"]:
+        temp_buffer = shmem.zeros((M, N), dtype=dtype)
 
     shmem.barrier()
 
@@ -247,12 +280,27 @@ def test_all_reduce(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         pytest.fail(f"Unknown variant: {variant}")
 
     # Launch kernel
-    num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
-    num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
-    total_tiles = num_pid_m * num_pid_n
     grid = (total_tiles,)
 
-    if variant == "spinlock":
+    if variant in ["one_shot", "two_shot"]:
+        kernel[grid](
+            iris_input_tensor,
+            temp_buffer,
+            iris_output_tensor,
+            locks,
+            M,
+            N,
+            iris_input_tensor.stride(0),
+            iris_input_tensor.stride(1),
+            iris_output_tensor.stride(0),
+            iris_output_tensor.stride(1),
+            shmem.get_heap_bases(),
+            rank,
+            world_size,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+        )
+    elif variant == "spinlock":
         kernel[grid](
             iris_input_tensor,
             iris_output_tensor,
@@ -269,7 +317,7 @@ def test_all_reduce(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
             BLOCK_SIZE_M,
             BLOCK_SIZE_N,
         )
-    else:
+    else:  # atomic
         kernel[grid](
             iris_input_tensor,
             iris_output_tensor,

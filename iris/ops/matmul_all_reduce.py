@@ -24,6 +24,7 @@ def _fused_matmul_all_reduce_kernel(
     A,
     B,
     C,
+    temp_buffer,
     locks,
     M: tl.constexpr,
     N: tl.constexpr,
@@ -40,13 +41,20 @@ def _fused_matmul_all_reduce_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    VARIANT: tl.constexpr,
 ):
     """
-    Fused GEMM + All-Reduce kernel using spinlock synchronization.
+    Fused GEMM + All-Reduce kernel with configurable all-reduce variant.
 
-    Computes C = A @ B and then performs all-reduce on the result using spinlocks.
+    Computes C = A @ B and then performs all-reduce on the result using the specified variant.
     This is useful for data-parallel distributed training where each rank computes
     a partial result over different data, and then reduces across all ranks.
+    
+    Supported variants:
+    - 'atomic': Fast, lock-free atomic accumulation
+    - 'spinlock': Mutex-based serialized read-modify-write 
+    - 'one_shot': Each rank reduces all tiles (duplicated work, no remote stores)
+    - 'two_shot': Work distribution with reduce-scatter then all-gather pattern
 
     The kernel for each output tile:
     1. Computes GEMM: local_tile = A_tile @ B_tile
@@ -104,13 +112,46 @@ def _fused_matmul_all_reduce_kernel(
     # Convert to output dtype
     c = acc.to(C.dtype.element_ty)
     
-    # Create Tile with computed data and all-reduce it using spinlock across all ranks
+    # Create views and context
     ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
     dst_view = iris.x.TensorView(C, M, N, stride_cm, stride_cn)
-    tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
     
-    # All-reduce using spinlock
-    iris.x.all_reduce_spinlock(tile_obj, dst_view, locks, ctx)
+    # For one_shot and two_shot: store tile to temp_buffer and signal ready with lock
+    if VARIANT == "one_shot" or VARIANT == "two_shot":
+        # Store GEMM result to temp_buffer (avoid race condition with final output)
+        temp_ptr = temp_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+        tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N))
+        
+        # Signal tile is ready by unlocking (set lock to 1)
+        num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
+        tile_id = pid_m * num_tiles_n + pid_n
+        lock_ptr = locks + tile_id
+        tl.store(lock_ptr, 1)  # Signal ready
+        
+        # Create src_view pointing to temp_buffer
+        src_view = iris.x.TensorView(temp_buffer, M, N, stride_cm, stride_cn)
+    
+    # Dispatch to appropriate all-reduce variant
+    if VARIANT == "atomic":
+        # Atomic uses tile.data directly (no intermediate store needed)
+        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+        iris.x.all_reduce_atomic(tile_obj, dst_view, ctx)
+    elif VARIANT == "spinlock":
+        # Spinlock uses tile.data directly and lock for mutual exclusion
+        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+        iris.x.all_reduce_spinlock(tile_obj, dst_view, locks, ctx)
+    elif VARIANT == "one_shot":
+        # one_shot loads from all ranks (data already in memory, locks signal readiness)
+        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+        iris.x.all_reduce_one_shot(tile_obj, src_view, dst_view, locks, ctx)
+    elif VARIANT == "two_shot":
+        # two_shot with work distribution (data in memory, locks signal readiness)
+        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+        iris.x.all_reduce_two_shot(tile_obj, src_view, dst_view, locks, cur_rank, world_size, ctx)
+    # elif VARIANT == "ring":
+    #     # Store locally first and signal ready
+    #     tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+    #     iris.x.all_reduce_ring(tile_obj, src_view, dst_view, locks, ctx)
 
 
 def matmul_all_reduce_preamble(
@@ -153,7 +194,7 @@ def matmul_all_reduce_preamble(
     workspace.shape = (M, N, K)
     workspace.dtype = dtype
     workspace.world_size = world_size
-    workspace.variant = "spinlock"
+    workspace.variant = config.all_reduce_variant
     workspace.prepared = False
 
     # Allocate locks for spinlock-based all-reduce
@@ -161,10 +202,24 @@ def matmul_all_reduce_preamble(
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
     total_tiles = num_pid_m * num_pid_n
 
-    if workspace.locks is None or workspace.locks.numel() != total_tiles:
-        workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
+    # Allocate locks for spinlock, one_shot, and two_shot variants
+    if config.all_reduce_variant in ["spinlock", "one_shot", "two_shot"]:
+        if workspace.locks is None or workspace.locks.numel() != total_tiles:
+            workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
+        else:
+            workspace.locks.zero_()
     else:
-        workspace.locks.zero_()
+        workspace.locks = None
+
+    # Allocate temp buffer for one_shot and two_shot to avoid race conditions
+    # (GEMM results stored here, then reduced to final output)
+    if config.all_reduce_variant in ["one_shot", "two_shot"]:
+        if workspace.temp_buffer is None or workspace.temp_buffer.shape != (M, N):
+            workspace.temp_buffer = shmem.zeros((M, N), dtype=dtype)
+        else:
+            workspace.temp_buffer.zero_()
+    else:
+        workspace.temp_buffer = None
 
     # Zero output tensor
     C.zero_()
@@ -246,7 +301,7 @@ def matmul_all_reduce(
 
     # Prepare workspace if needed
     needs_prepare = workspace is None or not workspace.matches(
-        "matmul_all_reduce", (M, N, K), A.dtype, world_size, "spinlock"
+        "matmul_all_reduce", (M, N, K), A.dtype, world_size, config.all_reduce_variant
     )
 
     if needs_prepare:
@@ -264,6 +319,7 @@ def matmul_all_reduce(
         A,
         B,
         C,
+        workspace.temp_buffer,
         workspace.locks,
         M,
         N,
@@ -280,6 +336,7 @@ def matmul_all_reduce(
         config.block_size_m,
         config.block_size_n,
         config.block_size_k,
+        config.all_reduce_variant,
     )
 
     # Mark workspace as used

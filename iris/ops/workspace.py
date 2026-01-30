@@ -44,6 +44,7 @@ class FusedWorkspace:
     # Temporary buffers (allocated as needed)
     gathered_buffer: Optional[torch.Tensor] = None
     full_buffer: Optional[torch.Tensor] = None
+    temp_buffer: Optional[torch.Tensor] = None  # For one_shot/two_shot race condition fix
     locks: Optional[torch.Tensor] = None
     flags: Optional[torch.Tensor] = None
     ring_buffer: Optional[torch.Tensor] = None
