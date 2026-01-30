@@ -41,13 +41,19 @@ def x_all_reduce_atomic_kernel(
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
-        # Create OOP objects for new API
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
+        # Load local tile data
+        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        src_ptr = input_ptr + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        local_data = tl.load(src_ptr, mask=mask, other=0.0)
+
+        # Create Tile with loaded data and views
+        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
-        iris.x.all_reduce_atomic(tile, src_view, dst_view, ctx)
+        iris.x.all_reduce_atomic(tile, dst_view, ctx)
 
 
 @triton.jit
@@ -78,7 +84,7 @@ def x_all_reduce_one_shot_kernel(
         pid_n = tile_id % num_pid_n
 
         # Create OOP objects for new API
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
@@ -114,7 +120,7 @@ def x_all_reduce_two_shot_kernel(
         pid_n = tile_id % num_pid_n
 
         # Create OOP objects for new API
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
@@ -150,13 +156,19 @@ def x_all_reduce_spinlock_kernel(
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
-        # Create OOP objects for new API
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
+        # Load local tile data
+        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        src_ptr = input_ptr + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        local_data = tl.load(src_ptr, mask=mask, other=0.0)
+
+        # Create Tile with loaded data and views
+        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
-        iris.x.all_reduce_spinlock(tile, src_view, dst_view, locks_ptr, tile_id, ctx)
+        iris.x.all_reduce_spinlock(tile, dst_view, locks_ptr, ctx)
 
 
 @pytest.mark.parametrize(
@@ -326,7 +338,7 @@ def x_all_reduce_ctx_api_kernel(
     variant: tl.constexpr,
     locks_ptr=None,
 ):
-    """Kernel using new ctx.all_reduce() API with AllReduceConfig."""
+    """Kernel using direct all_reduce function calls (ctx methods removed due to Triton limitations)."""
     pid = tl.program_id(0)
     grid_size = tl.num_programs(0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
@@ -338,23 +350,22 @@ def x_all_reduce_ctx_api_kernel(
         pid_n = tile_id % num_pid_n
 
         # Create OOP objects for new API
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
-        # NEW: Call all_reduce with config
-        if variant == "default":
-            # Default (atomic)
-            ctx.all_reduce(tile, src_view, dst_view)
+        # Call all_reduce functions directly (ctx methods don't work due to Triton import restrictions)
+        if variant == "default" or variant == "atomic":
+            iris.x.all_reduce_atomic(tile, src_view, dst_view, ctx)
+        elif variant == "ring":
+            iris.x.all_reduce_ring(tile, src_view, dst_view, ctx)
+        elif variant == "one_shot":
+            iris.x.all_reduce_one_shot(tile, src_view, dst_view, ctx)
+        elif variant == "two_shot":
+            iris.x.all_reduce_two_shot(tile, src_view, dst_view, ctx)
         elif variant == "spinlock":
-            # Spinlock variant needs locks_ptr and tile_id
-            config = iris.x.AllReduceConfig("spinlock", locks_ptr)
-            ctx.all_reduce(tile, src_view, dst_view, config=config, tile_id=tile_id)
-        else:
-            # Other variants (atomic, ring, one_shot, two_shot)
-            config = iris.x.AllReduceConfig(variant)
-            ctx.all_reduce(tile, src_view, dst_view, config=config)
+            iris.x.all_reduce_spinlock(tile, src_view, dst_view, locks_ptr, tile_id, ctx)
 
 
 @pytest.mark.parametrize(
@@ -371,7 +382,7 @@ def x_all_reduce_ctx_api_kernel(
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 @pytest.mark.parametrize("M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(256, 128, 64, 64)])
 def test_all_reduce_ctx_with_config(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
-    """Test ctx.all_reduce() with AllReduceConfig."""
+    """Test all_reduce variants using direct function calls (ctx methods removed)."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
@@ -437,7 +448,7 @@ def test_all_reduce_ctx_with_config(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SI
 
     try:
         assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
-            f"Rank {rank}: ctx.all_reduce({variant}) output doesn't match PyTorch's all_reduce"
+            f"Rank {rank}: all_reduce_{variant}() output doesn't match PyTorch's all_reduce"
         )
 
         # Verify the reduction is correct (sum of all ranks)
@@ -447,7 +458,7 @@ def test_all_reduce_ctx_with_config(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SI
         )
 
         if rank == 0:
-            print(f"✓ ctx.all_reduce({variant}) test passed: {dtype}, M={M}, N={N}")
+            print(f"✓ all_reduce_{variant}() test passed: {dtype}, M={M}, N={N}")
     finally:
         shmem.barrier()
         del shmem

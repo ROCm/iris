@@ -17,84 +17,94 @@ from .core import Tile, TensorView, DeviceContext
 @triton.jit()
 def all_reduce_atomic(
     tile: Tile,
-    src_view: TensorView,
     dst_view: TensorView,
     ctx: DeviceContext,
 ):
     """
     Tile-level all-reduce using atomic operations.
+    
+    Takes a tile with pre-computed data (tile.data) and atomically adds it
+    to the destination on all ranks.
 
     Args:
-        tile: Tile object with position and dimensions.
-        src_view: TensorView for input tensor.
-        dst_view: TensorView for output tensor.
+        tile: Tile object with position, dimensions, and data to reduce (tile.data).
+        dst_view: TensorView for output tensor where reduced result will be written.
         ctx: DeviceContext with rank, world_size, and heap_bases.
+        
+    Example:
+        # After computing a local tile result
+        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)
+        dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
+        iris.x.all_reduce_atomic(tile, dst_view, ctx)
     """
-    # Get tile pointer and mask
-    src_tile_ptr, mask = src_view.tile_ptr(tile)
-    dst_tile_ptr, _ = dst_view.tile_ptr(tile)
-
-    # Load local tile
-    local_tile = tl.load(src_tile_ptr, mask=mask, other=0.0)
-
-    # Initialize output with local data
-    tl.store(dst_tile_ptr, local_tile, mask=mask)
-
-    # Accumulate from all remote ranks using atomics
-    for r in range(ctx.world_size):
-        if r != ctx.rank:
-            remote_tile = iris.load(src_tile_ptr, ctx.rank, r, ctx.heap_bases, mask=mask)
-            iris.atomic_add(dst_tile_ptr, remote_tile, ctx.rank, ctx.rank, ctx.heap_bases, mask=mask)
+    # Get destination tile pointer and mask for this tile position
+    dst_tile_ptr, mask = dst_view.tile_ptr(tile)
+    
+    # Atomically add local tile.data to all ranks' destination
+    for dest_rank in range(ctx.world_size):
+        iris.atomic_add(
+            dst_tile_ptr,
+            tile.data,
+            ctx.rank,      # from_rank (current rank)
+            dest_rank,     # to_rank (destination rank)
+            ctx.heap_bases,
+            mask=mask,
+        )
 
 
 @triton.jit()
 def all_reduce_spinlock(
     tile: Tile,
-    src_view: TensorView,
     dst_view: TensorView,
-    locks_ptr,
-    tile_id,
+    locks,
     ctx: DeviceContext,
 ):
     """
     Tile-level all-reduce using spinlock synchronization.
-
-    Uses atomic locks to ensure only one rank computes the reduction at a time.
+    
+    Similar to atomic-add based all-reduce but uses spinlocks for exclusive
+    access. For each rank's tile, acquires the lock, reads current value,
+    adds local contribution (tile.data), writes back, and releases the lock.
 
     Args:
-        tile: Tile object with position and dimensions.
-        src_view: TensorView for input tensor.
-        dst_view: TensorView for output tensor.
-        locks_ptr: Pointer to locks array (one lock per tile).
-        tile_id: Unique identifier for this tile for lock indexing.
+        tile: Tile object with position, dimensions, and local data (tile.data).
+        dst_view: TensorView for output tensor where reduced result will be written.
+        locks: Pointer to locks array (one lock per tile).
         ctx: DeviceContext with rank, world_size, and heap_bases.
+        
+    Example:
+        # After computing a local tile result
+        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)
+        dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
+        iris.x.all_reduce_spinlock(tile, dst_view, locks_ptr, ctx)
     """
-    lock_ptr = locks_ptr + tile_id
-
-    # Acquire lock (spin until we swap 0 -> 1)
-    while tl.atomic_cas(lock_ptr, 0, 1, sem="acquire", scope="sys") != 0:
-        pass
-
-    # Get tile pointer and mask
-    src_tile_ptr, mask = src_view.tile_ptr(tile)
-    dst_tile_ptr, _ = dst_view.tile_ptr(tile)
-
-    # Load local tile to get dtype
-    local_tile = tl.load(src_tile_ptr, mask=mask, other=0.0)
-
-    # Initialize accumulator
-    acc_dtype = tl.float32 if local_tile.dtype == tl.float16 else local_tile.dtype
-    acc = tl.zeros((tile.block_m, tile.block_n), dtype=acc_dtype)
-
-    # Accumulate from all ranks
-    for remote_rank in range(ctx.world_size):
-        partial = iris.load(src_tile_ptr, ctx.rank, remote_rank, ctx.heap_bases, mask=mask)
-        acc += partial.to(acc_dtype)
-
-    # Store result and release lock
-    result = acc.to(local_tile.dtype)
-    tl.store(dst_tile_ptr, result, mask=mask)
-    tl.atomic_xchg(lock_ptr, 0, sem="release", scope="sys")
+    # Compute tile ID for lock indexing
+    num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)
+    tile_id = tile.pid_m * num_tiles_n + tile.pid_n
+    
+    # Get destination tile pointer and mask
+    dst_tile_ptr, mask = dst_view.tile_ptr(tile)
+    
+    # For each rank, do spinlock-protected read-modify-write using iris RMA
+    for dest_rank in range(ctx.world_size):
+        # Acquire lock for this tile at dest_rank (spin until we swap 0 -> 1)
+        # iris.atomic_cas handles remote rank access automatically
+        while iris.atomic_cas(locks + tile_id, 0, 1, ctx.rank, dest_rank, ctx.heap_bases) != 0:
+            pass
+        
+        # Load current value from dest_rank's tile using iris.load
+        current_value = iris.load(dst_tile_ptr, ctx.rank, dest_rank, ctx.heap_bases, mask=mask)
+        
+        # Add our local contribution
+        acc_dtype = tl.float32 if tile.data.dtype == tl.float16 else tile.data.dtype
+        acc = current_value.to(acc_dtype) + tile.data.to(acc_dtype)
+        
+        # Store accumulated result back to dest_rank (overwriting) using iris.store
+        result = acc.to(tile.data.dtype)
+        iris.store(dst_tile_ptr, result, ctx.rank, dest_rank, ctx.heap_bases, mask=mask)
+        
+        # Release lock for this tile at dest_rank using iris.atomic_xchg
+        iris.atomic_xchg(locks + tile_id, 0, ctx.rank, dest_rank, ctx.heap_bases)
 
 
 @triton.jit()

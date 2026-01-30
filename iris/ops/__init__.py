@@ -33,6 +33,7 @@ from .config import FusedConfig
 from .workspace import FusedWorkspace
 
 # Import operations
+from .matmul import matmul  # Simple single-GPU GEMM
 from .matmul_all_reduce import matmul_all_reduce, matmul_all_reduce_preamble
 from .all_gather_matmul import all_gather_matmul, all_gather_matmul_preamble
 from .matmul_all_gather import matmul_all_gather
@@ -86,7 +87,7 @@ class OpsNamespace:
             >>> output = shmem.zeros((M, N), dtype=torch.float16)
             >>> shmem.ops.matmul_all_reduce(output, A, B)
         """
-        return matmul_all_reduce(self._shmem, output_tensor, A, B, bias, async_op, config, workspace)
+        return matmul_all_reduce(self._shmem, output_tensor, A, B, async_op, config, workspace)
 
     def all_gather_matmul(self, output_tensor, A_sharded, B, bias=None, async_op=False, config=None, workspace=None):
         """
@@ -174,6 +175,7 @@ __all__ = [
     # Namespace
     "OpsNamespace",
     # Operations
+    "matmul",  # Simple single-GPU GEMM
     "matmul_all_reduce",
     "matmul_all_reduce_preamble",
     "all_gather_matmul",

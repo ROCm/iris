@@ -43,7 +43,7 @@ def x_all_to_all_kernel(
         pid_n = tile_id % num_pid_n
 
         # Create OOP objects for new API
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
@@ -180,7 +180,7 @@ def x_all_to_all_ctx_api_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     N_per_rank: tl.constexpr,
 ):
-    """Kernel using new ctx.all_to_all() API."""
+    """Kernel using direct all_to_all() call (ctx methods removed due to Triton limitations)."""
     pid = tl.program_id(0)
     grid_size = tl.num_programs(0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
@@ -191,20 +191,20 @@ def x_all_to_all_ctx_api_kernel(
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
-        # Create OOP objects for new API
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        # Create OOP objects
+        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         src_view = iris.x.TensorView(input_ptr, M, N * world_size, stride_in_m, stride_in_n)
         dst_view = iris.x.TensorView(output_ptr, M, N * world_size, stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
-        # NEW: Call collective on ctx directly
-        ctx.all_to_all(tile, src_view, dst_view, N_per_rank)
+        # Call primitive directly (ctx methods don't work due to Triton import restrictions)
+        iris.x.all_to_all(tile, src_view, dst_view, N_per_rank, ctx)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 @pytest.mark.parametrize("M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(128, 64, 64, 32)])
 def test_all_to_all_ctx_api(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
-    """Test tile-level all-to-all using new ctx.all_to_all() API."""
+    """Test tile-level all-to-all using direct function call (ctx methods removed)."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
@@ -265,11 +265,11 @@ def test_all_to_all_ctx_api(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
 
     try:
         assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
-            f"Rank {rank}: ctx.all_to_all() output doesn't match PyTorch's all_to_all"
+            f"Rank {rank}: all_to_all() output doesn't match PyTorch's all_to_all"
         )
 
         if rank == 0:
-            print(f"✓ ctx.all_to_all() test passed: {dtype}, M={M}, N={N}")
+            print(f"✓ all_to_all() test passed: {dtype}, M={M}, N={N}")
     finally:
         shmem.barrier()
         del shmem

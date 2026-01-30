@@ -16,7 +16,7 @@ Example (API with default algorithms):
     >>>
     >>> @triton.jit
     >>> def my_kernel(input_ptr, output_ptr, ...):
-    >>>     tile = iris.x.Tile(pid_m, pid_n, BLOCK_M, BLOCK_N)
+    >>>     tile = iris.x.TileView(pid_m, pid_n, BLOCK_M, BLOCK_N)
     >>>     src_view = iris.x.TensorView(input_ptr, M, N, stride_m, stride_n)
     >>>     dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
     >>>     ctx = iris.x.DeviceContext(rank, world_size, heap_bases)
@@ -30,7 +30,7 @@ Example (API with default algorithms):
 Example (API with AllReduceConfig for algorithm selection):
     >>> @triton.jit
     >>> def my_kernel(input_ptr, output_ptr, locks_ptr, ...):
-    >>>     tile = iris.x.Tile(pid_m, pid_n, BLOCK_M, BLOCK_N)
+    >>>     tile = iris.x.TileView(pid_m, pid_n, BLOCK_M, BLOCK_N)
     >>>     src_view = iris.x.TensorView(input_ptr, M, N, stride_m, stride_n)
     >>>     dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
     >>>     ctx = iris.x.DeviceContext(rank, world_size, heap_bases)
@@ -51,7 +51,7 @@ Example (Standalone API):
     >>>     iris.x.all_gather(tile, src_view, dst_view, dim, ctx)
 """
 
-from .core import Tile, TensorView, DeviceContext, AllReduceConfig, tile_layout, tile_ptr, offset_ptr
+from .core import Tile, TileView, TensorView, DeviceContext, AllReduceConfig, tile_layout, tile_ptr, offset_ptr
 from .all_reduce import (
     all_reduce_atomic,
     all_reduce_ring,
@@ -59,6 +59,7 @@ from .all_reduce import (
     all_reduce_one_shot,
     all_reduce_spinlock,
 )
+from .gather import gather
 from .all_gather import all_gather
 from .all_to_all import all_to_all
 from .reduce_scatter import reduce_scatter
@@ -66,6 +67,7 @@ from .reduce_scatter import reduce_scatter
 __all__ = [
     # Core abstractions
     "Tile",
+    "TileView",
     "TensorView",
     "DeviceContext",
     "AllReduceConfig",
@@ -78,6 +80,7 @@ __all__ = [
     "all_reduce_two_shot",
     "all_reduce_one_shot",
     "all_reduce_spinlock",
+    "gather",
     "all_gather",
     "all_to_all",
     "reduce_scatter",

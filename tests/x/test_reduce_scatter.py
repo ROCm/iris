@@ -51,7 +51,7 @@ def x_reduce_scatter_kernel(
             pid_n = tile_id % num_pid_n
 
             # Create OOP objects for new API
-            tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+            tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
             src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
             dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
             ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
@@ -177,7 +177,7 @@ def x_reduce_scatter_ctx_api_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     total_tiles: tl.constexpr,
 ):
-    """Kernel using new ctx.reduce_scatter() API."""
+    """Kernel using direct reduce_scatter() call (ctx methods removed due to Triton limitations)."""
     pid = tl.program_id(0)
 
     # Compute which tile this program handles
@@ -192,20 +192,20 @@ def x_reduce_scatter_ctx_api_kernel(
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
-        # Create OOP objects for new API
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        # Create OOP objects
+        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
-        # NEW: Call collective on ctx directly
-        ctx.reduce_scatter(tile, src_view, dst_view)
+        # Call primitive directly (ctx methods don't work due to Triton import restrictions)
+        iris.x.reduce_scatter(tile, src_view, dst_view, ctx)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 @pytest.mark.parametrize("M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(256, 128, 64, 64)])
 def test_reduce_scatter_ctx_api(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
-    """Test tile-level reduce-scatter using new ctx.reduce_scatter() API."""
+    """Test tile-level reduce-scatter using direct function call (ctx methods removed)."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
@@ -265,7 +265,7 @@ def test_reduce_scatter_ctx_api(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
 
     try:
         assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
-            f"Rank {rank}: ctx.reduce_scatter() output doesn't match PyTorch's reduce_scatter"
+            f"Rank {rank}: reduce_scatter() output doesn't match PyTorch's reduce_scatter"
         )
 
         # Verify the reduction is correct (sum of all ranks)
@@ -275,7 +275,7 @@ def test_reduce_scatter_ctx_api(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         )
 
         if rank == 0:
-            print(f"✓ ctx.reduce_scatter() test passed: {dtype}, M={M}, N={N}")
+            print(f"✓ reduce_scatter() test passed: {dtype}, M={M}, N={N}")
     finally:
         shmem.barrier()
         del shmem

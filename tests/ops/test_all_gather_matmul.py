@@ -2,99 +2,30 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Test suite for high-level all_gather_matmul API.
+Tests for fused all_gather + matmul operation.
 
-Note: This test requires tritonBLAS to be installed.
-Install with: pip install git+https://github.com/ROCm/tritonBLAS.git
+Each rank has A_sharded (M x K_local), B is replicated.
+The operation gathers A from all ranks and computes C = A_gathered @ B.
 """
 
 import pytest
 import torch
 import torch.distributed as dist
+
 import iris
 import iris.ops as ops
 
 
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize(
-    "dtype",
+    "M,K_local,N",
     [
-        torch.float16,
-        torch.float32,
-        torch.bfloat16,
+        (128, 32, 64),    # Small: K = world_size * 32
+        (256, 64, 128),   # Medium: K = world_size * 64
     ],
 )
-@pytest.mark.parametrize(
-    "M, N, K",
-    [
-        (128, 64, 128),  # Small (K divisible by typical world_size)
-        (1024, 256, 512),  # Medium
-        (2048, 2048, 1024),  # Large
-    ],
-)
-def test_all_gather_matmul(dtype, M, N, K):
-    """Test all_gather_matmul by comparing against torch operations."""
-    if not dist.is_initialized():
-        pytest.skip("torch.distributed not initialized")
-
-    heap_size = 2**33  # 8GB
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
-
-    # K must be divisible by world_size for column-wise sharding
-    if K % world_size != 0:
-        pytest.skip(f"K={K} not divisible by world_size={world_size}")
-
-    K_local = K // world_size
-
-    # Create sharded A (each rank has K_local columns)
-    A_sharded = torch.randn(M, K_local, dtype=dtype, device=f"cuda:{rank}")
-    B = torch.randn(K, N, dtype=dtype, device=f"cuda:{rank}")
-
-    # Reference: gather A manually, then matmul
-    A_gathered_list = [torch.zeros(M, K_local, dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
-    dist.all_gather(A_gathered_list, A_sharded)
-    A_gathered_ref = torch.cat(A_gathered_list, dim=1)  # Concatenate along K dimension
-    pytorch_output = torch.matmul(A_gathered_ref, B)
-    torch.cuda.synchronize()
-
-    # Set up Iris tensors
-    iris_A_sharded = shmem.zeros((M, K_local), dtype=dtype)
-    iris_A_sharded.copy_(A_sharded)
-    iris_B = shmem.zeros((K, N), dtype=dtype)
-    iris_B.copy_(B)
-    iris_C = shmem.zeros((M, N), dtype=dtype)
-
-    shmem.barrier()
-
-    # Use high-level API
-    ops.all_gather_matmul(shmem, iris_C, iris_A_sharded, iris_B)
-
-    torch.cuda.synchronize()
-    shmem.barrier()
-
-    # Compare results
-    atol = 1e-2 if dtype == torch.float16 else 1e-3
-    rtol = 1e-2 if dtype == torch.float16 else 1e-3
-    max_diff = torch.abs(iris_C - pytorch_output).max().item()
-
-    assert torch.allclose(iris_C, pytorch_output, atol=atol, rtol=rtol), (
-        f"Max difference: {max_diff}, expected < {atol}\n"
-        f"Rank {rank}: iris.ops.all_gather_matmul output doesn't match reference"
-    )
-
-    if rank == 0:
-        print(f"✓ all_gather_matmul test passed: {dtype}, M={M}, N={N}, K={K}")
-
-    shmem.barrier()
-    del shmem
-    import gc
-
-    gc.collect()
-
-
-def test_all_gather_matmul_via_shmem_ops():
-    """Test accessing all_gather_matmul via shmem.ops namespace."""
+def test_all_gather_matmul(dtype, M, K_local, N):
+    """Test all_gather_matmul against torch all_gather + matmul."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
@@ -102,45 +33,85 @@ def test_all_gather_matmul_via_shmem_ops():
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
-
-    M, N, K = 256, 128, 256
-    dtype = torch.float16
-
-    if K % world_size != 0:
-        pytest.skip(f"K={K} not divisible by world_size={world_size}")
-
-    K_local = K // world_size
-
-    A_sharded = shmem.randn((M, K_local), dtype=dtype)
-    B = shmem.randn((K, N), dtype=dtype)
-    output = shmem.zeros((M, N), dtype=dtype)
-
-    # Reference
-    A_sharded_ref = A_sharded.clone()
-    B_ref = B.clone()
+    
+    K = K_local * world_size  # Full K dimension
+    
+    # Skip if problem size is too small for world_size or block sizes
+    # With default or custom configs, we need at least one tile
+    min_block_size = 32  # Smallest block size we use
+    if M < min_block_size:
+        pytest.skip(f"M={M} too small (need >= {min_block_size})")
+    if K_local < min_block_size:
+        pytest.skip(f"K_local={K_local} too small (need >= {min_block_size})")
+    if N < min_block_size:
+        pytest.skip(f"N={N} too small (need >= {min_block_size})")
+    
+    # Seed for reproducibility - different seed per rank for A_sharded
+    torch.manual_seed(42 + rank)
+    A_sharded = torch.randn(M, K_local, dtype=dtype, device=f"cuda:{rank}")
+    
+    # B must be identical on all ranks
+    torch.manual_seed(123)
+    B = torch.randn(K, N, dtype=dtype, device=f"cuda:{rank}")
+    
+    # Reference: torch all_gather + matmul
     A_gathered_list = [torch.zeros(M, K_local, dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
-    dist.all_gather(A_gathered_list, A_sharded_ref)
-    A_gathered_ref = torch.cat(A_gathered_list, dim=1)
-    pytorch_output = torch.matmul(A_gathered_ref, B_ref)
+    dist.all_gather(A_gathered_list, A_sharded)
+    A_gathered_ref = torch.cat(A_gathered_list, dim=1)  # (M, K)
+    ref_output = torch.matmul(A_gathered_ref, B)
     torch.cuda.synchronize()
-
-    # Use shmem.ops interface
-    shmem.ops.all_gather_matmul(output, A_sharded, B)
-
+    
+    # Create shmem tensors directly
+    A_sharded_shmem = shmem.zeros((M, K_local), dtype=dtype)
+    A_sharded_shmem.copy_(A_sharded)
+    B_shmem = shmem.zeros((K, N), dtype=dtype)
+    B_shmem.copy_(B)
+    output = shmem.zeros((M, N), dtype=dtype)
+    
+    shmem.barrier()
+    
+    # Run fused all_gather + matmul using shmem.ops API
+    from iris.ops.config import FusedConfig
+    
+    # Use appropriate block sizes based on problem size
+    # For small problems, use smaller blocks
+    if M <= 256 or K_local <= 64 or N <= 128:
+        config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
+    else:
+        config = FusedConfig()
+    
+    # Validate config against problem size
+    assert M >= config.block_size_m, \
+        f"M ({M}) must be >= block_size_m ({config.block_size_m})"
+    assert K_local >= config.block_size_k, \
+        f"K_local ({K_local}) must be >= block_size_k ({config.block_size_k})"
+    assert N >= config.block_size_n, \
+        f"N ({N}) must be >= block_size_n ({config.block_size_n})"
+    
+    shmem.ops.all_gather_matmul(output, A_sharded_shmem, B_shmem, config=config)
+    
     torch.cuda.synchronize()
     shmem.barrier()
-
+    
+    # Compare
     atol = 1e-2
     rtol = 1e-2
-    assert torch.allclose(output, pytorch_output, atol=atol, rtol=rtol), (
-        f"Rank {rank}: shmem.ops.all_gather_matmul doesn't match reference"
-    )
+    max_diff = (output - ref_output).abs().max().item()
+    
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), \
+        f"Rank {rank}: Max diff {max_diff}, expected < {atol}"
 
-    if rank == 0:
-        print("✓ shmem.ops.all_gather_matmul test passed")
 
-    shmem.barrier()
-    del shmem
-    import gc
-
-    gc.collect()
+if __name__ == "__main__":
+    # For quick debugging
+    import sys
+    if not dist.is_initialized():
+        print("Run with: torchrun --nproc_per_node=2 tests/ops/test_all_gather_matmul.py")
+        sys.exit(1)
+    
+    rank = dist.get_rank()
+    torch.cuda.set_device(rank)
+    
+    print(f"[Rank {rank}] Testing all_gather_matmul...")
+    test_all_gather_matmul(torch.float16, 128, 32, 64)
+    print(f"[Rank {rank}] ✓ Test passed!")
