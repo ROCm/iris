@@ -156,10 +156,10 @@ def all_reduce_one_shot(
     for remote_rank in range(ctx.world_size):
         if remote_rank != ctx.rank:
             # Wait for remote tile to be ready (spin on lock == 1)
-            # Don't acquire lock, just check readiness (avoid deadlock)
+            # Use atomic_add with 0 to check readiness (consumer uses acquire semantics on read)
             lock_ptr = locks + tile_id
-            # Use atomic_add with 0 to read lock value without modifying it
-            while iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases) != 1:
+            # Spin wait until ready
+            while iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="gpu") != 1:
                 pass  # Spin wait until ready
             
             # Load remote tile data from temp buffer
@@ -286,9 +286,10 @@ def all_reduce_two_shot(
         for remote_rank in range(ctx.world_size):
             if remote_rank != ctx.rank:
                 # Wait for remote tile to be ready (spin on lock == 1)
+                # Use atomic_add with 0 to check readiness (consumer uses acquire semantics on read)
                 lock_ptr = locks + tile_id
-                # Use atomic_add with 0 to read lock value without modifying it
-                while iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases) != 1:
+                # Spin wait until ready
+                while iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="gpu") != 1:
                     pass  # Spin wait until ready
                 
                 # Load remote tile data from temp buffer

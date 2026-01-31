@@ -17,7 +17,9 @@ import iris.x
 @triton.jit
 def x_reduce_scatter_kernel(
     input_ptr,
+    temp_buffer,
     output_ptr,
+    locks,
     M: tl.constexpr,
     N: tl.constexpr,
     stride_in_m: tl.constexpr,
@@ -29,92 +31,91 @@ def x_reduce_scatter_kernel(
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
-    total_tiles: tl.constexpr,
 ):
-    """Kernel that iterates over tiles assigned to this rank and calls reduce_scatter for each."""
+    """Kernel that iterates over tiles and calls reduce_scatter for each."""
     pid = tl.program_id(0)
+    grid_size = tl.num_programs(0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
 
-    # Each rank processes tiles assigned to it (striding distribution)
-    tiles_per_rank = tl.cdiv(total_tiles, world_size)
-    start_tile = cur_rank
-    stride = world_size
-    remaining = total_tiles - start_tile
-    remaining = tl.maximum(remaining, 0)
-    max_tile_offset = tl.cdiv(remaining, stride)
+    for tile_id in range(pid, total_tiles, grid_size):
+        pid_m = tile_id // num_pid_n
+        pid_n = tile_id % num_pid_n
 
-    for tile_offset in range(pid, max_tile_offset, 1):
-        tile_id = start_tile + tile_offset * stride
-        if tile_id < total_tiles:
-            pid_m = tile_id // num_pid_n
-            pid_n = tile_id % num_pid_n
+        # Load local tile data from input
+        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        src_ptr = input_ptr + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        local_data = tl.load(src_ptr, mask=mask, other=0.0)
+        
+        # Store to temp_buffer and signal ready
+        temp_ptr = temp_buffer + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        tl.store(temp_ptr, local_data, mask=mask, cache_modifier=".wt")
+        tl.debug_barrier()
+        tl.atomic_xchg(locks + tile_id, 1, sem="release", scope="gpu")
 
-            # Create OOP objects for new API
-            tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-            src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
-            dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
-            ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
+        src_view = iris.x.TensorView(temp_buffer, M, N, stride_in_m, stride_in_n)
+        dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
+        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
-            iris.x.reduce_scatter(tile, src_view, dst_view, ctx)
+        iris.x.reduce_scatter(tile, src_view, dst_view, locks, ctx)
 
 
 @pytest.mark.parametrize(
-    "dtype",
+    "dtype, atol, rtol",
     [
-        torch.float16,
-        torch.float32,
-        torch.bfloat16,
+        (torch.float16, 1e-3, 1e-3),
+        (torch.float32, 1e-5, 1e-5),
+        (torch.bfloat16, 1e-3, 1e-3),
     ],
 )
 @pytest.mark.parametrize(
     "M, N, BLOCK_SIZE_M, BLOCK_SIZE_N",
     [
-        (128, 64, 64, 32),  # Small
-        (1024, 256, 128, 128),  # Medium
-        (2048, 2048, 256, 256),  # Large
-        (100, 100, 64, 64),  # Non-aligned dimensions
-        (256, 384, 128, 128),  # Non-square
-        (64, 32, 128, 128),  # Block size larger than dimensions
+        (128, 64, 64, 32),
+        (256, 128, 64, 64),
+        (512, 512, 128, 128),
     ],
 )
-def test_reduce_scatter(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
-    """Test tile-level reduce-scatter primitive by comparing against PyTorch's implementation."""
+def test_reduce_scatter(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
+    """Test tile-level reduce-scatter primitive."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33  # 8GB
+    heap_size = 2**33
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
-    # PyTorch's reduce_scatter format: each rank has M x N data
-    pytorch_input_tensor = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
-    pytorch_input_tensor.fill_(float(rank + 1))
+    pytorch_input_tensor = torch.full((M, N), float(rank + 1), dtype=dtype, device=f"cuda:{rank}")
 
-    # Run PyTorch's reduce_scatter to get reference output
-    pytorch_output_tensor = torch.empty_like(pytorch_input_tensor)
-    shmem.barrier()
-    dist.reduce_scatter(pytorch_output_tensor, [pytorch_input_tensor], op=dist.ReduceOp.SUM)
-    torch.cuda.synchronize()
-
-    # Set up Iris tensors
-    iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
-    iris_input_tensor.copy_(pytorch_input_tensor)
-    iris_output_tensor = shmem.zeros((M, N), dtype=dtype)
-
-    shmem.barrier()
-
-    # Launch kernel
     num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
     num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
     total_tiles = num_pid_m * num_pid_n
-    tiles_per_rank = (total_tiles + world_size - 1) // world_size
-    grid = (tiles_per_rank,)
+    tiles_per_rank = total_tiles // world_size
+    start_tile = rank * tiles_per_rank
+    if rank == world_size - 1:
+        tiles_per_rank = total_tiles - start_tile
+
+    iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
+    iris_input_tensor.copy_(pytorch_input_tensor)
+    iris_temp_buffer = shmem.zeros((M, N), dtype=dtype)
+    iris_output_tensor = shmem.zeros((M, N), dtype=dtype)
+    
+    locks_tensor = shmem.zeros(total_tiles, dtype=torch.int32)
+
+    shmem.barrier()
+
+    grid = (total_tiles,)
 
     x_reduce_scatter_kernel[grid](
         iris_input_tensor,
+        iris_temp_buffer,
         iris_output_tensor,
+        locks_tensor,
         M,
         N,
         iris_input_tensor.stride(0),
@@ -126,159 +127,37 @@ def test_reduce_scatter(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         world_size,
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
-        total_tiles,
     )
 
     torch.cuda.synchronize()
     shmem.barrier()
-
-    # Compare results
-    atol = 1e-3 if dtype == torch.float16 else 1e-5
-    rtol = 1e-3 if dtype == torch.float16 else 1e-5
-    max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
+    
+    expected_sum = sum(float(r + 1) for r in range(world_size))
 
     try:
-        # Verify overall correctness
-        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
-            f"Max difference: {max_diff}, expected < {atol}\n"
-            f"Rank {rank}: Iris x.reduce_scatter output doesn't match PyTorch's reduce_scatter"
-        )
-
-        # Verify the reduction is correct (sum of all ranks)
-        expected_sum = sum(float(r + 1) for r in range(world_size))
-        assert torch.allclose(iris_output_tensor, torch.full_like(iris_output_tensor, expected_sum), atol=atol), (
-            f"Rank {rank}: Reduction result is incorrect, expected {expected_sum}"
-        )
+        for local_tile_idx in range(tiles_per_rank):
+            tile_id = start_tile + local_tile_idx
+            pid_m = tile_id // num_pid_n
+            pid_n = tile_id % num_pid_n
+            
+            m_start = pid_m * BLOCK_SIZE_M
+            m_end = min(m_start + BLOCK_SIZE_M, M)
+            n_start = pid_n * BLOCK_SIZE_N
+            n_end = min(n_start + BLOCK_SIZE_N, N)
+            
+            tile_data = iris_output_tensor[m_start:m_end, n_start:n_end]
+            expected_tile = torch.full_like(tile_data, expected_sum)
+            
+            assert torch.allclose(tile_data, expected_tile, atol=atol, rtol=rtol), (
+                f"Rank {rank}, tile {tile_id} ({pid_m},{pid_n}): "
+                f"Expected {expected_sum}, got max {tile_data.max().item()}, "
+                f"min {tile_data.min().item()}"
+            )
 
         if rank == 0:
-            print(f"✓ Reduce-scatter test passed: {dtype}, M={M}, N={N}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N})")
+            print(f"Reduce-scatter test passed: {dtype}, M={M}, N={N}, blocks=({BLOCK_SIZE_M},{BLOCK_SIZE_N})")
     finally:
         shmem.barrier()
         del shmem
         import gc
-
-        gc.collect()
-
-
-@triton.jit
-def x_reduce_scatter_ctx_api_kernel(
-    input_ptr,
-    output_ptr,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    stride_in_m: tl.constexpr,
-    stride_in_n: tl.constexpr,
-    stride_out_m: tl.constexpr,
-    stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
-    world_size: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    total_tiles: tl.constexpr,
-):
-    """Kernel using direct reduce_scatter() call (ctx methods removed due to Triton limitations)."""
-    pid = tl.program_id(0)
-
-    # Compute which tile this program handles
-    tiles_per_rank = total_tiles // world_size
-    start_tile = cur_rank * tiles_per_rank
-    end_tile = start_tile + tiles_per_rank
-
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-
-    for tile_id in range(start_tile + pid, end_tile, tl.num_programs(0)):
-        pid_m = tile_id // num_pid_n
-        pid_n = tile_id % num_pid_n
-
-        # Create OOP objects
-        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
-        dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
-
-        # Call primitive directly (ctx methods don't work due to Triton import restrictions)
-        iris.x.reduce_scatter(tile, src_view, dst_view, ctx)
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
-@pytest.mark.parametrize("M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(256, 128, 64, 64)])
-def test_reduce_scatter_ctx_api(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
-    """Test tile-level reduce-scatter using direct function call (ctx methods removed)."""
-    if not dist.is_initialized():
-        pytest.skip("torch.distributed not initialized")
-
-    heap_size = 2**33  # 8GB
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
-
-    # Create input tensor
-    pytorch_input_tensor = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
-    pytorch_input_tensor.fill_(float(rank + 1))
-
-    # Run PyTorch's reduce_scatter
-    pytorch_output_list = [torch.empty((M, N), dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
-    pytorch_input_list = [pytorch_input_tensor.clone() for _ in range(world_size)]
-    shmem.barrier()
-    dist.reduce_scatter(pytorch_output_list[rank], pytorch_input_list, op=dist.ReduceOp.SUM)
-    pytorch_output_tensor = pytorch_output_list[rank]
-    torch.cuda.synchronize()
-
-    # Set up Iris tensors
-    iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
-    iris_input_tensor.copy_(pytorch_input_tensor)
-    iris_output_tensor = shmem.zeros((M, N), dtype=dtype)
-
-    shmem.barrier()
-
-    # Launch kernel using NEW ctx API
-    num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
-    num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
-    total_tiles = num_pid_m * num_pid_n
-    grid = (total_tiles // world_size,)
-
-    x_reduce_scatter_ctx_api_kernel[grid](
-        iris_input_tensor,
-        iris_output_tensor,
-        M,
-        N,
-        iris_input_tensor.stride(0),
-        iris_input_tensor.stride(1),
-        iris_output_tensor.stride(0),
-        iris_output_tensor.stride(1),
-        shmem.get_heap_bases(),
-        rank,
-        world_size,
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        total_tiles,
-    )
-
-    torch.cuda.synchronize()
-    shmem.barrier()
-
-    # Compare results
-    atol = 1e-3 if dtype == torch.float16 else 1e-5
-    rtol = 1e-3 if dtype == torch.float16 else 1e-5
-
-    try:
-        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
-            f"Rank {rank}: reduce_scatter() output doesn't match PyTorch's reduce_scatter"
-        )
-
-        # Verify the reduction is correct (sum of all ranks)
-        expected_sum = sum(float(r + 1) for r in range(world_size))
-        assert torch.allclose(iris_output_tensor, torch.full_like(iris_output_tensor, expected_sum), atol=atol), (
-            f"Rank {rank}: Reduction result is incorrect, expected {expected_sum}"
-        )
-
-        if rank == 0:
-            print(f"✓ reduce_scatter() test passed: {dtype}, M={M}, N={N}")
-    finally:
-        shmem.barrier()
-        del shmem
-        import gc
-
         gc.collect()

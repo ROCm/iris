@@ -16,20 +16,18 @@ import iris.ops as ops
 
 
 @pytest.mark.parametrize(
-    "dtype",
+    "dtype, atol, rtol",
     [
-        torch.float16,
-        torch.float32,
-        torch.bfloat16,
+        (torch.float16, 0.2, 0.01),
+        (torch.float32, 0.3, 0.01),
+        (torch.bfloat16, 1.5, 0.02),
     ],
 )
 @pytest.mark.parametrize(
     "M, N, K",
     [
-        (128, 64, 32),  # Small
-        (1024, 256, 512),  # Medium
-        # TODO: Large sizes timeout with spinlock due to high lock contention
-        # (2048, 2048, 1024),  # Large - spinlock too slow for large sizes
+        (128, 64, 32),
+        (1024, 256, 512),
     ],
 )
 @pytest.mark.parametrize(
@@ -39,10 +37,9 @@ import iris.ops as ops
         "spinlock",
         "one_shot",
         "two_shot",
-        # "ring",  # TODO: Ring variant not yet tested
     ],
 )
-def test_matmul_all_reduce(dtype, M, N, K, variant):
+def test_matmul_all_reduce(dtype, atol, rtol, M, N, K, variant):
     """Test matmul_all_reduce by comparing against torch.matmul + dist.all_reduce."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -87,14 +84,6 @@ def test_matmul_all_reduce(dtype, M, N, K, variant):
     torch.cuda.synchronize()
     shmem.barrier()
 
-    # Compare results
-    # Note: These are accumulation errors from atomic ops across tiles and floating point precision
-    if dtype == torch.float16:
-        atol, rtol = 0.2, 0.01
-    elif dtype == torch.bfloat16:
-        atol, rtol = 1.5, 0.02  # bfloat16 has much lower precision
-    else:  # float32
-        atol, rtol = 0.3, 0.01
     max_diff = torch.abs(iris_C - pytorch_output).max().item()
 
     assert torch.allclose(iris_C, pytorch_output, atol=atol, rtol=rtol), (

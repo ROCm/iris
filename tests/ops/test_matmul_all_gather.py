@@ -16,22 +16,22 @@ import iris.ops as ops
 
 
 @pytest.mark.parametrize(
-    "dtype",
+    "dtype, atol, rtol",
     [
-        torch.float16,
-        torch.float32,
-        torch.bfloat16,
+        (torch.float16, 0.5, 0.01),
+        (torch.float32, 0.5, 0.01),
+        (torch.bfloat16, 0.5, 0.01),
     ],
 )
 @pytest.mark.parametrize(
     "M, N, K",
     [
-        (64, 64, 32),  # Small (M divisible by typical world_size)
-        (512, 256, 512),  # Medium
-        (1024, 2048, 1024),  # Large
+        (64, 64, 32),
+        (512, 256, 512),
+        (1024, 2048, 1024),
     ],
 )
-def test_matmul_all_gather(dtype, M, N, K):
+def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
     """Test matmul_all_gather using shmem.ops API with proper config."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -100,10 +100,6 @@ def test_matmul_all_gather(dtype, M, N, K):
     torch.cuda.synchronize()
     shmem.barrier()
 
-    # Compare results - GEMM has numerical differences due to accumulation order
-    # Use generous tolerances for all dtypes
-    atol = 0.5  # For large matrices, accumulation differences can be significant
-    rtol = 0.01
     max_diff = torch.abs(output - pytorch_output).max().item()
 
     assert torch.allclose(output, pytorch_output, atol=atol, rtol=rtol), (

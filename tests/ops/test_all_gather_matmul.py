@@ -16,15 +16,20 @@ import iris
 import iris.ops as ops
 
 
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float16, 1e-2, 1e-2),
+    ],
+)
 @pytest.mark.parametrize(
     "M,K_local,N",
     [
-        (128, 32, 64),    # Small: K = world_size * 32
-        (256, 64, 128),   # Medium: K = world_size * 64
+        (128, 32, 64),
+        (256, 64, 128),
     ],
 )
-def test_all_gather_matmul(dtype, M, K_local, N):
+def test_all_gather_matmul(dtype, atol, rtol, M, K_local, N):
     """Test all_gather_matmul against torch all_gather + matmul."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -93,9 +98,6 @@ def test_all_gather_matmul(dtype, M, K_local, N):
     torch.cuda.synchronize()
     shmem.barrier()
     
-    # Compare
-    atol = 1e-2
-    rtol = 1e-2
     max_diff = (output - ref_output).abs().max().item()
     
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), \

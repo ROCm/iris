@@ -120,13 +120,15 @@ def _fused_matmul_all_reduce_kernel(
     if VARIANT == "one_shot" or VARIANT == "two_shot":
         # Store GEMM result to temp_buffer (avoid race condition with final output)
         temp_ptr = temp_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N))
+        tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
+        tl.debug_barrier() # Ensures all stores are visible before the atomic_xchg
         
         # Signal tile is ready by unlocking (set lock to 1)
+        # Use atomic_xchg with release semantics to ensure memory ordering
         num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
         tile_id = pid_m * num_tiles_n + pid_n
         lock_ptr = locks + tile_id
-        tl.store(lock_ptr, 1)  # Signal ready
+        tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
         
         # Create src_view pointing to temp_buffer
         src_view = iris.x.TensorView(temp_buffer, M, N, stride_cm, stride_cn)

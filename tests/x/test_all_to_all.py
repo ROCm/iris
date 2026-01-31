@@ -52,11 +52,11 @@ def x_all_to_all_kernel(
 
 
 @pytest.mark.parametrize(
-    "dtype",
+    "dtype, atol, rtol",
     [
-        torch.float16,
-        torch.float32,
-        torch.bfloat16,
+        (torch.float16, 1e-3, 1e-3),
+        (torch.float32, 1e-5, 1e-5),
+        (torch.bfloat16, 1e-3, 1e-3),
     ],
 )
 @pytest.mark.parametrize(
@@ -70,7 +70,7 @@ def x_all_to_all_kernel(
         (64, 32, 128, 128),  # Block size larger than dimensions
     ],
 )
-def test_all_to_all(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
+def test_all_to_all(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     """Test tile-level all-to-all primitive by comparing against PyTorch's implementation."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -130,13 +130,9 @@ def test_all_to_all(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     torch.cuda.synchronize()
     shmem.barrier()
 
-    # Compare results
-    atol = 1e-3 if dtype == torch.float16 else 1e-5
-    rtol = 1e-3 if dtype == torch.float16 else 1e-5
     max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
 
     try:
-        # Verify overall correctness
         assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.all_to_all output doesn't match PyTorch's all_to_all"
@@ -201,9 +197,15 @@ def x_all_to_all_ctx_api_kernel(
         iris.x.all_to_all(tile, src_view, dst_view, N_per_rank, ctx)
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float16, 1e-3, 1e-3),
+        (torch.float32, 1e-5, 1e-5),
+    ],
+)
 @pytest.mark.parametrize("M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(128, 64, 64, 32)])
-def test_all_to_all_ctx_api(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
+def test_all_to_all_ctx_api(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     """Test tile-level all-to-all using direct function call (ctx methods removed)."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -258,10 +260,6 @@ def test_all_to_all_ctx_api(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
 
     torch.cuda.synchronize()
     shmem.barrier()
-
-    # Compare results
-    atol = 1e-3 if dtype == torch.float16 else 1e-5
-    rtol = 1e-3 if dtype == torch.float16 else 1e-5
 
     try:
         assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (

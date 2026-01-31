@@ -59,7 +59,7 @@ class FusedConfig:
     allow_tf32: bool = True
 
     # CCL-specific parameters
-    all_reduce_variant: str = "one_shot"  # atomic, ring, one_shot, two_shot, spinlock
+    all_reduce_variant: str = "two_shot"  # atomic, ring, one_shot, two_shot, spinlock
     all_reduce_num_rings: int = 1
 
     def validate(self, world_size: Optional[int] = None):

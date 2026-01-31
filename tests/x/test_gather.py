@@ -59,9 +59,15 @@ def gather_kernel(
         tl.store(out_ptr, data, mask=mask)
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float16, 1e-3, 1e-3),
+        (torch.float32, 1e-5, 1e-5),
+    ],
+)
 @pytest.mark.parametrize("M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(256, 128, 64, 64)])
-def test_gather_from_specific_rank(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
+def test_gather_from_specific_rank(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     """Test gather primitive pulling from a specific rank."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -111,12 +117,11 @@ def test_gather_from_specific_rank(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     output_tensor.copy_(shmem_output)
     torch.cuda.synchronize()
 
-    # Verify: All ranks should have rank 0's data
     torch.manual_seed(42 + source_rank)
     expected = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
 
     assert torch.allclose(
-        output_tensor, expected, atol=1e-3, rtol=1e-3
+        output_tensor, expected, atol=atol, rtol=rtol
     ), f"Rank {rank}: gather from rank {source_rank} failed"
 
 
@@ -168,9 +173,15 @@ def gather_accumulate_kernel(
         tl.store(out_ptr, result, mask=mask)
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float16, 1e-2, 1e-2),
+        (torch.float32, 1e-5, 1e-5),
+    ],
+)
 @pytest.mark.parametrize("M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(256, 128, 64, 64)])
-def test_gather_accumulate_pattern(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
+def test_gather_accumulate_pattern(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     """Test gather used in accumulation pattern (like all-reduce sum)."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -213,10 +224,9 @@ def test_gather_accumulate_pattern(dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     output_tensor.copy_(shmem_output)
     torch.cuda.synchronize()
 
-    # Expected: sum of all rank values = 0 + 1 + 2 + ... + (world_size - 1)
     expected_sum = sum(range(world_size))
     expected = torch.full((M, N), float(expected_sum), dtype=dtype, device=f"cuda:{rank}")
 
     assert torch.allclose(
-        output_tensor, expected, atol=1e-2, rtol=1e-2
+        output_tensor, expected, atol=atol, rtol=rtol
     ), f"Rank {rank}: gather accumulate pattern failed"

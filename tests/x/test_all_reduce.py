@@ -94,8 +94,9 @@ def x_all_reduce_one_shot_kernel(
         
         # Store to temp_buffer (avoid race condition) and signal ready
         temp_ptr = temp_buffer + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-        tl.store(temp_ptr, local_data, mask=mask)
-        tl.store(locks + tile_id, 1)  # Signal ready
+        tl.store(temp_ptr, local_data, mask=mask, cache_modifier=".wt")
+        tl.debug_barrier() # Ensures all stores are visible before the atomic_xchg
+        tl.atomic_xchg(locks + tile_id, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
 
         # Create Tile with data and views
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
@@ -144,8 +145,9 @@ def x_all_reduce_two_shot_kernel(
         
         # Store to temp_buffer (avoid race condition) and signal ready
         temp_ptr = temp_buffer + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-        tl.store(temp_ptr, local_data, mask=mask)
-        tl.store(locks + tile_id, 1)  # Signal ready
+        tl.store(temp_ptr, local_data, mask=mask, cache_modifier=".wt")
+        tl.debug_barrier() # Ensures all stores are visible before the atomic_xchg
+        tl.atomic_xchg(locks + tile_id, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
 
         # Create Tile with data and views
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
@@ -209,11 +211,11 @@ def x_all_reduce_spinlock_kernel(
     ],
 )
 @pytest.mark.parametrize(
-    "dtype",
+    "dtype, atol, rtol",
     [
-        torch.float16,
-        torch.float32,
-        torch.bfloat16,
+        (torch.float16, 1e-3, 1e-3),
+        (torch.float32, 1e-5, 1e-5),
+        (torch.bfloat16, 1e-3, 1e-3),
     ],
 )
 @pytest.mark.parametrize(
@@ -227,7 +229,7 @@ def x_all_reduce_spinlock_kernel(
         (64, 32, 128, 128),  # Block size larger than dimensions
     ],
 )
-def test_all_reduce(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
+def test_all_reduce(variant, dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     """Test tile-level all-reduce primitives by comparing against PyTorch's implementation."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -337,13 +339,9 @@ def test_all_reduce(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     torch.cuda.synchronize()
     shmem.barrier()
 
-    # Compare results
-    atol = 1e-3 if dtype == torch.float16 else 1e-5
-    rtol = 1e-3 if dtype == torch.float16 else 1e-5
     max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
 
     try:
-        # Verify overall correctness
         assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank}: Iris x.all_reduce_{variant} output doesn't match PyTorch's all_reduce"
@@ -419,7 +417,7 @@ def x_all_reduce_ctx_api_kernel(
 @pytest.mark.parametrize(
     "variant",
     [
-        "default",  # No config, uses default atomic
+        "default",
         "atomic",
         "ring",
         "one_shot",
@@ -427,9 +425,15 @@ def x_all_reduce_ctx_api_kernel(
         "spinlock",
     ],
 )
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float16, 1e-3, 1e-3),
+        (torch.float32, 1e-5, 1e-5),
+    ],
+)
 @pytest.mark.parametrize("M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(256, 128, 64, 64)])
-def test_all_reduce_ctx_with_config(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
+def test_all_reduce_ctx_with_config(variant, dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     """Test all_reduce variants using direct function calls (ctx methods removed)."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -489,10 +493,6 @@ def test_all_reduce_ctx_with_config(variant, dtype, M, N, BLOCK_SIZE_M, BLOCK_SI
 
     torch.cuda.synchronize()
     shmem.barrier()
-
-    # Compare results
-    atol = 1e-3 if dtype == torch.float16 else 1e-5
-    rtol = 1e-3 if dtype == torch.float16 else 1e-5
 
     try:
         assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
