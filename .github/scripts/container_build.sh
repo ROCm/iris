@@ -19,6 +19,15 @@ else
     exit 1
 fi
 
+# Check /dev/shm size
+shm_size_gb=$(df /dev/shm | tail -1 | awk '{print int($2/1024/1024)}')
+if [ $shm_size_gb -lt 64 ]; then
+    echo "❌ ERROR: /dev/shm is too small (${shm_size_gb}GB < 64GB)"
+    echo "Fix: mount -o remount,size=64G /dev/shm"
+    exit 1
+fi
+echo "✅ /dev/shm size OK (${shm_size_gb}GB)"
+
 # Build based on detected runtime
 if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     echo "[INFO] Building with Apptainer..."
