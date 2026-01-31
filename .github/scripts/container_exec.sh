@@ -70,6 +70,9 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     # Build exec command
     EXEC_CMD="apptainer exec --overlay ${OVERLAY} --no-home --cleanenv"
     
+    # Set required RCCL environment variable for ROCm
+    EXEC_CMD="$EXEC_CMD --env HSA_NO_SCRATCH_RECLAIM=1"
+    
     # Add GPU selection if specified
     if [ -n "$GPU_DEVICES" ]; then
         EXEC_CMD="$EXEC_CMD --env HIP_VISIBLE_DEVICES=${GPU_DEVICES}"
@@ -116,6 +119,9 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     
     RUN_CMD="$RUN_CMD -e HOME=/iris_workspace"
     RUN_CMD="$RUN_CMD --entrypoint bash"
+    
+    # Set required RCCL environment variable for ROCm
+    RUN_CMD="$RUN_CMD -e HSA_NO_SCRATCH_RECLAIM=1"
     
     # Add GPU selection if specified
     if [ -n "$GPU_DEVICES" ]; then

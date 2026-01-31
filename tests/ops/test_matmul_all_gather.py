@@ -76,14 +76,20 @@ def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
     # Use appropriate block sizes based on problem size
     from iris.ops.config import FusedConfig
     
-    # For small problems (M_local < 64 or K < 64), use smaller blocks
+    # Select config based on actual problem dimensions
+    # Ensure block sizes don't exceed actual dimensions
     if M_local <= 64 or K <= 64 or N <= 64:
+        # Small problems - use 32x32x32 blocks
         config = FusedConfig(block_size_m=32, block_size_n=32, block_size_k=32)
-    elif dtype == torch.float32:
-        # Use smaller block sizes for fp32 (needs less shared memory)
+    elif M_local <= 128 or K <= 128 or N <= 128:
+        # Medium problems - use 64x64x32 blocks
         config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
+    elif dtype == torch.float32:
+        # Larger problems with fp32 - use 128x128x64 blocks
+        config = FusedConfig(block_size_m=128, block_size_n=128, block_size_k=64)
     else:
-        config = None
+        # Larger problems with fp16/bf16 - use 128x128x64 blocks
+        config = FusedConfig(block_size_m=128, block_size_n=128, block_size_k=64)
     
     # Validate config against problem size
     if config is not None:

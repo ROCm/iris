@@ -10,7 +10,8 @@ SHELL ["/bin/bash", "-c"]
 ENV TRITON_PATH=/opt/triton \
     ROCM_PATH=/opt/rocm \
     OMPI_MCA_mtl="^ofi" \
-    OMPI_MCA_pml="ob1"
+    OMPI_MCA_pml="ob1" \
+    HSA_NO_SCRATCH_RECLAIM=1
 
 ENV LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH \
     PATH="$ROCM_PATH/bin:$PATH"
