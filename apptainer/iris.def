@@ -30,7 +30,7 @@ From: rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
     cd /opt
     git clone https://github.com/triton-lang/triton.git \$TRITON_PATH
     cd \$TRITON_PATH
-    git checkout aafec417bded34db6308f5b3d6023daefae43905 
+    git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e 
     pip3 install -e .
     "
 
