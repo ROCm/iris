@@ -44,7 +44,8 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     REBUILD_NEEDED=true
     if [ -f "$IMAGE_PATH" ] && [ -f "$CHECKSUM_FILE" ]; then
         OLD_CHECKSUM=$(head -n1 "$CHECKSUM_FILE" 2>/dev/null)
-        if [ -n "$OLD_CHECKSUM" ] && [ "$OLD_CHECKSUM" = "$NEW_CHECKSUM" ]; then
+        # Validate checksum format (64 hex characters for SHA256)
+        if [[ "$OLD_CHECKSUM" =~ ^[a-f0-9]{64}$ ]] && [ "$OLD_CHECKSUM" = "$NEW_CHECKSUM" ]; then
             echo "[INFO] Def file unchanged (checksum: $NEW_CHECKSUM)"
             echo "[INFO] Skipping rebuild, using existing image at $IMAGE_PATH"
             REBUILD_NEEDED=false
@@ -58,11 +59,15 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     
     # Build the image if needed
     if [ "$REBUILD_NEEDED" = true ]; then
-        apptainer build "$IMAGE_PATH" "$DEF_FILE"
-        # Store the checksum
-        echo "$NEW_CHECKSUM" > "$CHECKSUM_FILE"
-        echo "[INFO] Built image: $IMAGE_PATH"
-        echo "[INFO] Checksum saved: $NEW_CHECKSUM"
+        if apptainer build "$IMAGE_PATH" "$DEF_FILE"; then
+            # Store the checksum only if build succeeded
+            echo "$NEW_CHECKSUM" > "$CHECKSUM_FILE"
+            echo "[INFO] Built image: $IMAGE_PATH"
+            echo "[INFO] Checksum saved: $NEW_CHECKSUM"
+        else
+            echo "[ERROR] Apptainer build failed"
+            exit 1
+        fi
     fi
     
 elif [ "$CONTAINER_RUNTIME" = "docker" ]; then

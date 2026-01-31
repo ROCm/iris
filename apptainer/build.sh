@@ -27,7 +27,8 @@ NEW_CHECKSUM=$(sha256sum "$DEF_FILE" | awk '{print $1}')
 REBUILD_NEEDED=true
 if [ -f "$IMAGE_PATH" ] && [ -f "$CHECKSUM_FILE" ]; then
     OLD_CHECKSUM=$(head -n1 "$CHECKSUM_FILE" 2>/dev/null)
-    if [ -n "$OLD_CHECKSUM" ] && [ "$OLD_CHECKSUM" = "$NEW_CHECKSUM" ]; then
+    # Validate checksum format (64 hex characters for SHA256)
+    if [[ "$OLD_CHECKSUM" =~ ^[a-f0-9]{64}$ ]] && [ "$OLD_CHECKSUM" = "$NEW_CHECKSUM" ]; then
         echo "Def file unchanged (checksum: $NEW_CHECKSUM)"
         echo "Skipping rebuild of $IMAGE_NAME"
         REBUILD_NEEDED=false
@@ -41,9 +42,13 @@ fi
 
 # Build the image if needed
 if [ "$REBUILD_NEEDED" = true ]; then
-    apptainer build "$IMAGE_PATH" "$DEF_FILE"
-    # Store the checksum
-    echo "$NEW_CHECKSUM" > "$CHECKSUM_FILE"
-    echo "Built image: $IMAGE_NAME"
-    echo "Checksum saved: $NEW_CHECKSUM"
+    if apptainer build "$IMAGE_PATH" "$DEF_FILE"; then
+        # Store the checksum only if build succeeded
+        echo "$NEW_CHECKSUM" > "$CHECKSUM_FILE"
+        echo "Built image: $IMAGE_NAME"
+        echo "Checksum saved: $NEW_CHECKSUM"
+    else
+        echo "Error: Apptainer build failed"
+        exit 1
+    fi
 fi
