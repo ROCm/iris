@@ -26,12 +26,43 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     # Create persistent Apptainer directory
     mkdir -p ~/apptainer
     
-    # Build Apptainer image from definition file (only if it doesn't exist)
-    if [ ! -f ~/apptainer/iris-dev.sif ]; then
-        echo "[INFO] Building new Apptainer image..."
-        apptainer build ~/apptainer/iris-dev.sif apptainer/iris.def
+    # Define paths
+    IMAGE_PATH=~/apptainer/iris-dev.sif
+    DEF_FILE=apptainer/iris.def
+    CHECKSUM_FILE=~/apptainer/iris-dev.sif.checksum
+    
+    # Verify def file exists
+    if [ ! -f "$DEF_FILE" ]; then
+        echo "[ERROR] Definition file $DEF_FILE not found"
+        exit 1
+    fi
+    
+    # Calculate checksum of the def file
+    NEW_CHECKSUM=$(sha256sum "$DEF_FILE" | awk '{print $1}')
+    
+    # Check if image exists and has a valid checksum
+    REBUILD_NEEDED=true
+    if [ -f "$IMAGE_PATH" ] && [ -f "$CHECKSUM_FILE" ]; then
+        OLD_CHECKSUM=$(head -n1 "$CHECKSUM_FILE" 2>/dev/null)
+        if [ -n "$OLD_CHECKSUM" ] && [ "$OLD_CHECKSUM" = "$NEW_CHECKSUM" ]; then
+            echo "[INFO] Def file unchanged (checksum: $NEW_CHECKSUM)"
+            echo "[INFO] Skipping rebuild, using existing image at $IMAGE_PATH"
+            REBUILD_NEEDED=false
+        else
+            echo "[INFO] Def file changed (old: ${OLD_CHECKSUM:-<invalid>}, new: $NEW_CHECKSUM)"
+            echo "[INFO] Rebuilding Apptainer image..."
+        fi
     else
-        echo "[INFO] Using existing Apptainer image at ~/apptainer/iris-dev.sif"
+        echo "[INFO] Image or checksum not found, building new Apptainer image..."
+    fi
+    
+    # Build the image if needed
+    if [ "$REBUILD_NEEDED" = true ]; then
+        apptainer build "$IMAGE_PATH" "$DEF_FILE"
+        # Store the checksum
+        echo "$NEW_CHECKSUM" > "$CHECKSUM_FILE"
+        echo "[INFO] Built image: $IMAGE_PATH"
+        echo "[INFO] Checksum saved: $NEW_CHECKSUM"
     fi
     
 elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
