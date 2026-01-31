@@ -14,19 +14,25 @@ CHECKSUM_FILE="$IMAGE_DIR/${IMAGE_NAME}.checksum"
 # Create images directory if it doesn't exist
 mkdir -p "$IMAGE_DIR"
 
+# Verify def file exists
+if [ ! -f "$DEF_FILE" ]; then
+    echo "Error: Definition file $DEF_FILE not found"
+    exit 1
+fi
+
 # Calculate checksum of the def file
 NEW_CHECKSUM=$(sha256sum "$DEF_FILE" | awk '{print $1}')
 
 # Check if image exists and has a valid checksum
 REBUILD_NEEDED=true
 if [ -f "$IMAGE_PATH" ] && [ -f "$CHECKSUM_FILE" ]; then
-    OLD_CHECKSUM=$(cat "$CHECKSUM_FILE")
-    if [ "$OLD_CHECKSUM" = "$NEW_CHECKSUM" ]; then
+    OLD_CHECKSUM=$(cat "$CHECKSUM_FILE" 2>/dev/null | head -n1)
+    if [ -n "$OLD_CHECKSUM" ] && [ "$OLD_CHECKSUM" = "$NEW_CHECKSUM" ]; then
         echo "Def file unchanged (checksum: $NEW_CHECKSUM)"
         echo "Skipping rebuild of $IMAGE_NAME"
         REBUILD_NEEDED=false
     else
-        echo "Def file changed (old: $OLD_CHECKSUM, new: $NEW_CHECKSUM)"
+        echo "Def file changed (old: ${OLD_CHECKSUM:-<invalid>}, new: $NEW_CHECKSUM)"
         echo "Rebuilding $IMAGE_NAME"
     fi
 else
