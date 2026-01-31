@@ -26,7 +26,7 @@ NEW_CHECKSUM=$(sha256sum "$DEF_FILE" | awk '{print $1}')
 # Check if image exists and has a valid checksum
 REBUILD_NEEDED=true
 if [ -f "$IMAGE_PATH" ] && [ -f "$CHECKSUM_FILE" ]; then
-    OLD_CHECKSUM=$(cat "$CHECKSUM_FILE" 2>/dev/null | head -n1)
+    OLD_CHECKSUM=$(head -n1 "$CHECKSUM_FILE" 2>/dev/null)
     if [ -n "$OLD_CHECKSUM" ] && [ "$OLD_CHECKSUM" = "$NEW_CHECKSUM" ]; then
         echo "Def file unchanged (checksum: $NEW_CHECKSUM)"
         echo "Skipping rebuild of $IMAGE_NAME"
