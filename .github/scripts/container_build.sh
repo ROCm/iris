@@ -20,8 +20,8 @@ else
 fi
 
 # Check /dev/shm size
-shm_size_gb=$(df /dev/shm | tail -1 | awk '{print int($2/1024/1024)}')
-if [ $shm_size_gb -lt 64 ]; then
+shm_size_gb=$(df -k /dev/shm | tail -1 | awk '{print int($2/1024/1024)}')
+if [ "${shm_size_gb:-0}" -lt 64 ]; then
     echo "❌ ERROR: /dev/shm is too small (${shm_size_gb}GB < 64GB)"
     echo "Fix: mount -o remount,size=64G /dev/shm"
     exit 1
