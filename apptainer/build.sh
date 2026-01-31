@@ -42,7 +42,7 @@ fi
 
 # Build the image if needed
 if [ "$REBUILD_NEEDED" = true ]; then
-    if apptainer build "$IMAGE_PATH" "$DEF_FILE"; then
+    if apptainer build --force "$IMAGE_PATH" "$DEF_FILE"; then
         # Store the checksum only if build succeeded
         echo "$NEW_CHECKSUM" > "$CHECKSUM_FILE"
         echo "Built image: $IMAGE_NAME"
