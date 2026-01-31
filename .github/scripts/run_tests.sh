@@ -4,7 +4,7 @@
 #
 # Run Iris tests in a container
 # Usage: run_tests.sh <test_dir> <num_ranks> [gpu_devices] [install_method]
-#   test_dir: subdirectory under tests/ (e.g., examples, unittests, ccl, ops, x)
+#   test_dir: subdirectory under tests/ (e.g., examples, unittests, ccl)
 #   num_ranks: number of GPU ranks (1, 2, 4, or 8)
 #   gpu_devices: comma-separated GPU device IDs (optional)
 #   install_method: pip install method - "git", "editable", or "install" (optional, default: "editable")
@@ -22,7 +22,7 @@ INSTALL_METHOD=${4:-"editable"}
 if [ -z "$TEST_DIR" ] || [ -z "$NUM_RANKS" ]; then
     echo "[ERROR] Missing required arguments"
     echo "Usage: $0 <test_dir> <num_ranks> [gpu_devices] [install_method]"
-    echo "  test_dir: examples, unittests, ccl, ops, or x"
+    echo "  test_dir: examples, unittests, x or ccl"
     echo "  num_ranks: 1, 2, 4, or 8"
     echo "  install_method: git, editable, or install (default: editable)"
     exit 1
@@ -68,24 +68,6 @@ fi
     echo \"Installing iris using method: $INSTALL_METHOD\"
     $INSTALL_CMD
     
-    # Install tritonBLAS (now required for iris.ops)
-    echo \"Installing tritonBLAS (required dependency)...\"
-    # Try to clone and install in editable mode (more reliable)
-    if [ ! -d \"/tmp/tritonBLAS\" ]; then
-        echo \"Cloning tritonBLAS repository...\"
-        cd /tmp && git clone https://github.com/ROCm/tritonBLAS.git 2>&1 | tail -3
-    fi
-    if [ -d \"/tmp/tritonBLAS\" ]; then
-        cd /tmp/tritonBLAS
-        # Checkout specific commit
-        git checkout 47768c93acb7f89511d797964b84544c30ab81ad 2>&1 | tail -2
-        echo \"Installing tritonBLAS in editable mode...\"
-        pip install -e . 2>&1 | tail -3
-    else
-        echo \"Warning: Could not clone tritonBLAS, trying pip install from git...\"
-        pip install git+https://github.com/ROCm/tritonBLAS.git@47768c93acb7f89511d797964b84544c30ab81ad 2>&1 | tail -3 || echo \"Warning: Could not install tritonBLAS\"
-    fi
-    
     # Run tests in the specified directory
     for test_file in tests/$TEST_DIR/test_*.py; do
         if [ -f \"\$test_file\" ]; then
@@ -94,4 +76,3 @@ fi
         fi
     done
 "
-
