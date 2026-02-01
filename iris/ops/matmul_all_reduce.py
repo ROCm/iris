@@ -24,7 +24,7 @@ def _fused_matmul_all_reduce_kernel(
     A,
     B,
     C,
-    temp_buffer,
+    aux_buffer,
     locks,
     M: tl.constexpr,
     N: tl.constexpr,
@@ -116,10 +116,10 @@ def _fused_matmul_all_reduce_kernel(
     ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
     dst_view = iris.x.TensorView(C, M, N, stride_cm, stride_cn)
     
-    # For one_shot and two_shot: store tile to temp_buffer and signal ready with lock
+    # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock
     if VARIANT == "one_shot" or VARIANT == "two_shot":
-        # Store GEMM result to temp_buffer (avoid race condition with final output)
-        temp_ptr = temp_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+        # Store GEMM result to aux_buffer (avoid race condition with final output)
+        temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
         tl.debug_barrier() # Ensures all stores are visible before the atomic_xchg
         
@@ -130,8 +130,8 @@ def _fused_matmul_all_reduce_kernel(
         lock_ptr = locks + tile_id
         tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
         
-        # Create src_view pointing to temp_buffer
-        src_view = iris.x.TensorView(temp_buffer, M, N, stride_cm, stride_cn)
+        # Create src_view pointing to aux_buffer
+        src_view = iris.x.TensorView(aux_buffer, M, N, stride_cm, stride_cn)
     
     # Dispatch to appropriate all-reduce variant
     if VARIANT == "atomic":
@@ -213,15 +213,15 @@ def matmul_all_reduce_preamble(
     else:
         workspace.locks = None
 
-    # Allocate temp buffer for one_shot and two_shot to avoid race conditions
+    # Allocate auxiliary buffer for one_shot and two_shot to avoid race conditions
     # (GEMM results stored here, then reduced to final output)
     if config.all_reduce_variant in ["one_shot", "two_shot"]:
-        if workspace.temp_buffer is None or workspace.temp_buffer.shape != (M, N):
-            workspace.temp_buffer = shmem.zeros((M, N), dtype=dtype)
+        if workspace.aux_buffer is None or workspace.aux_buffer.shape != (M, N):
+            workspace.aux_buffer = shmem.zeros((M, N), dtype=dtype)
         else:
-            workspace.temp_buffer.zero_()
+            workspace.aux_buffer.zero_()
     else:
-        workspace.temp_buffer = None
+        workspace.aux_buffer = None
 
     # Zero output tensor
     C.zero_()
@@ -321,7 +321,7 @@ def matmul_all_reduce(
         A,
         B,
         C,
-        workspace.temp_buffer,
+        workspace.aux_buffer,
         workspace.locks,
         M,
         N,

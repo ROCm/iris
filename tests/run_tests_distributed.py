@@ -7,10 +7,14 @@ Simple wrapper to run pytest tests within a single distributed process group.
 This avoids the overhead of creating/destroying process groups for each test case.
 """
 
+import os
 import sys
 import torch.multiprocessing as mp
 import torch.distributed as dist
 import socket
+
+# Set required environment variable for RCCL on ROCm
+os.environ.setdefault("HSA_NO_SCRATCH_RECLAIM", "1")
 
 
 def _find_free_port():

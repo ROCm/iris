@@ -25,12 +25,9 @@ class FusedWorkspace:
         world_size: Number of ranks in the communicator
         variant: Algorithm variant (for operations that support multiple variants)
 
-        # Temporary buffers for different operations
-        gathered_buffer: Buffer for all-gather operations (M*world_size, K) or (M, K*world_size)
-        full_buffer: Buffer for reduce-scatter operations (M, N) before scattering
-        locks: Lock array for spinlock variant
-        flags: Flag array for ring variant
-        ring_buffer: Ring buffer for ring variant
+        # Temporary buffers
+        aux_buffer: Generic auxiliary buffer for intermediate results (gathered data, temp results, etc.)
+        locks: Lock array for spinlock synchronization
 
         prepared: Whether workspace has been initialized for current operation
     """
@@ -42,12 +39,8 @@ class FusedWorkspace:
     variant: str = ""
 
     # Temporary buffers (allocated as needed)
-    gathered_buffer: Optional[torch.Tensor] = None
-    full_buffer: Optional[torch.Tensor] = None
-    temp_buffer: Optional[torch.Tensor] = None  # For one_shot/two_shot race condition fix
-    locks: Optional[torch.Tensor] = None
-    flags: Optional[torch.Tensor] = None
-    ring_buffer: Optional[torch.Tensor] = None
+    aux_buffer: Optional[torch.Tensor] = None  # Generic buffer for intermediate results
+    locks: Optional[torch.Tensor] = None  # Synchronization primitives
 
     prepared: bool = False
 
@@ -87,9 +80,6 @@ class FusedWorkspace:
 
     def clear(self):
         """Free all allocated buffers."""
-        self.gathered_buffer = None
-        self.full_buffer = None
+        self.aux_buffer = None
         self.locks = None
-        self.flags = None
-        self.ring_buffer = None
         self.prepared = False

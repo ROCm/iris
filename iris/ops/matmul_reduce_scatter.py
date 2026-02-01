@@ -24,7 +24,7 @@ def _fused_matmul_reduce_scatter_kernel(
     A,
     B,
     C,
-    temp_buffer,
+    aux_buffer,
     locks,
     M: tl.constexpr,
     N: tl.constexpr,
@@ -52,7 +52,7 @@ def _fused_matmul_reduce_scatter_kernel(
         A: Pointer to input matrix A of shape (M, K) - replicated across ranks
         B: Pointer to input matrix B of shape (K, N) - replicated across ranks
         C: Pointer to output matrix C of shape (M, N) - will contain reduced result for assigned tiles
-        temp_buffer: Temporary buffer for intermediate GEMM results
+        aux_buffer: Auxiliary buffer for intermediate GEMM results
         locks: Pointer to locks array (one lock per tile)
         M: Number of rows in A and C
         N: Number of columns in B and C
@@ -92,7 +92,7 @@ def _fused_matmul_reduce_scatter_kernel(
     
     c = acc.to(C.dtype.element_ty)
     
-    temp_ptr = temp_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+    temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
     tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
     tl.debug_barrier()
     
@@ -101,7 +101,7 @@ def _fused_matmul_reduce_scatter_kernel(
     tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")
     
     tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-    src_view = iris.x.TensorView(temp_buffer, M, N, stride_cm, stride_cn)
+    src_view = iris.x.TensorView(aux_buffer, M, N, stride_cm, stride_cn)
     dst_view = iris.x.TensorView(C, M, N, stride_cm, stride_cn)
     ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
     
@@ -160,10 +160,10 @@ def matmul_reduce_scatter_preamble(
     else:
         workspace.locks.zero_()
 
-    if workspace.temp_buffer is None or workspace.temp_buffer.shape != (M, N):
-        workspace.temp_buffer = shmem.zeros((M, N), dtype=dtype)
+    if workspace.aux_buffer is None or workspace.aux_buffer.shape != (M, N):
+        workspace.aux_buffer = shmem.zeros((M, N), dtype=dtype)
     else:
-        workspace.temp_buffer.zero_()
+        workspace.aux_buffer.zero_()
 
     C.zero_()
     shmem.barrier()
@@ -221,7 +221,7 @@ def matmul_reduce_scatter(
         A,
         B,
         C,
-        workspace.temp_buffer,
+        workspace.aux_buffer,
         workspace.locks,
         M,
         N,

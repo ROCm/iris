@@ -192,7 +192,6 @@ def all_gather_matmul_preamble(
         shape=(M, N, K),
         dtype=A_sharded.dtype,
         world_size=world_size,
-        gathered_buffer=None,
         prepared=True,
     )
 
