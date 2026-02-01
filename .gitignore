@@ -9,6 +9,8 @@ results/
 build/
 rocSHMEM/
 *.sif
+*.sif.checksum
+apptainer/images/
 .vscode/
 __pycache__/
 *.so
