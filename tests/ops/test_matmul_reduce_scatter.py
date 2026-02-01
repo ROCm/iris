@@ -85,8 +85,7 @@ def test_matmul_reduce_scatter(dtype, atol, rtol, M, N, K):
 
         max_diff = torch.abs(iris_tile - ref_tile).max().item()
         assert torch.allclose(iris_tile, ref_tile, atol=atol, rtol=rtol), (
-            f"Rank {rank}, tile {tile_id} ({pid_m},{pid_n}): "
-            f"Max diff: {max_diff}, expected < {atol}"
+            f"Rank {rank}, tile {tile_id} ({pid_m},{pid_n}): Max diff: {max_diff}, expected < {atol}"
         )
 
     if rank == 0:
@@ -95,6 +94,7 @@ def test_matmul_reduce_scatter(dtype, atol, rtol, M, N, K):
     shmem.barrier()
     del shmem
     import gc
+
     gc.collect()
 
 
@@ -134,6 +134,7 @@ def test_matmul_reduce_scatter_semantics(dtype, atol, rtol):
 
     config = ops.FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
     from iris.ops.matmul_reduce_scatter import matmul_reduce_scatter
+
     matmul_reduce_scatter(shmem, output, A, B, config=config)
 
     torch.cuda.synchronize()
@@ -164,9 +165,7 @@ def test_matmul_reduce_scatter_semantics(dtype, atol, rtol):
         output_tile = output[m_start:m_end, n_start:n_end]
         ref_tile = C_ref[m_start:m_end, n_start:n_end]
 
-        assert torch.allclose(output_tile, ref_tile, atol=atol, rtol=rtol), (
-            f"Rank {rank}, tile {tile_id}: mismatch"
-        )
+        assert torch.allclose(output_tile, ref_tile, atol=atol, rtol=rtol), f"Rank {rank}, tile {tile_id}: mismatch"
 
     if rank == 0:
         print("matmul_reduce_scatter semantics verified")
@@ -174,4 +173,5 @@ def test_matmul_reduce_scatter_semantics(dtype, atol, rtol):
     shmem.barrier()
     del shmem
     import gc
+
     gc.collect()

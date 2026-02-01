@@ -71,6 +71,7 @@ def test_matmul_all_reduce(dtype, atol, rtol, M, N, K, variant):
 
     # Select appropriate config based on problem size
     from iris.ops.config import FusedConfig
+
     if M <= 128 or K <= 64 or N <= 128:
         config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant=variant)
     elif dtype == torch.float32:

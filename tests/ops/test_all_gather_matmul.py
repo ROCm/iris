@@ -85,12 +85,9 @@ def test_all_gather_matmul(dtype, atol, rtol, M, K_local, N):
         config = FusedConfig()
 
     # Validate config against problem size
-    assert M >= config.block_size_m, \
-        f"M ({M}) must be >= block_size_m ({config.block_size_m})"
-    assert K_local >= config.block_size_k, \
-        f"K_local ({K_local}) must be >= block_size_k ({config.block_size_k})"
-    assert N >= config.block_size_n, \
-        f"N ({N}) must be >= block_size_n ({config.block_size_n})"
+    assert M >= config.block_size_m, f"M ({M}) must be >= block_size_m ({config.block_size_m})"
+    assert K_local >= config.block_size_k, f"K_local ({K_local}) must be >= block_size_k ({config.block_size_k})"
+    assert N >= config.block_size_n, f"N ({N}) must be >= block_size_n ({config.block_size_n})"
 
     shmem.ops.all_gather_matmul(output, A_sharded_shmem, B_shmem, config=config)
 
@@ -99,13 +96,15 @@ def test_all_gather_matmul(dtype, atol, rtol, M, K_local, N):
 
     max_diff = (output - ref_output).abs().max().item()
 
-    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), \
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
         f"Rank {rank}: Max diff {max_diff}, expected < {atol}"
+    )
 
 
 if __name__ == "__main__":
     # For quick debugging
     import sys
+
     if not dist.is_initialized():
         print("Run with: torchrun --nproc_per_node=2 tests/ops/test_all_gather_matmul.py")
         sys.exit(1)

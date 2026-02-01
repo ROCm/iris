@@ -92,12 +92,9 @@ def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
 
     # Validate config against problem size
     if config is not None:
-        assert M_local >= config.block_size_m, \
-            f"M_local ({M_local}) must be >= block_size_m ({config.block_size_m})"
-        assert K >= config.block_size_k, \
-            f"K ({K}) must be >= block_size_k ({config.block_size_k})"
-        assert N >= config.block_size_n, \
-            f"N ({N}) must be >= block_size_n ({config.block_size_n})"
+        assert M_local >= config.block_size_m, f"M_local ({M_local}) must be >= block_size_m ({config.block_size_m})"
+        assert K >= config.block_size_k, f"K ({K}) must be >= block_size_k ({config.block_size_k})"
+        assert N >= config.block_size_n, f"N ({N}) must be >= block_size_n ({config.block_size_n})"
 
     # Use shmem.ops API with proper config
     shmem.ops.matmul_all_gather(output, A_local, B, config=config)

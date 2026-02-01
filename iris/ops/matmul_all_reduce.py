@@ -121,7 +121,7 @@ def _fused_matmul_all_reduce_kernel(
         # Store GEMM result to aux_buffer (avoid race condition with final output)
         temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
-        tl.debug_barrier() # Ensures all stores are visible before the atomic_xchg
+        tl.debug_barrier()  # Ensures all stores are visible before the atomic_xchg
 
         # Signal tile is ready by unlocking (set lock to 1)
         # Use atomic_xchg with release semantics to ensure memory ordering
@@ -283,9 +283,7 @@ def matmul_all_reduce(
         raise ValueError(f"Output tensor shape {C.shape} doesn't match expected ({M}, {N})")
 
     if A.dtype != B.dtype or A.dtype != C.dtype:
-        raise ValueError(
-            f"All tensors must have same dtype, got A:{A.dtype}, B:{B.dtype}, C:{C.dtype}"
-        )
+        raise ValueError(f"All tensors must have same dtype, got A:{A.dtype}, B:{B.dtype}, C:{C.dtype}")
 
     # Validate block sizes match problem dimensions
     assert M >= config.block_size_m, f"M={M} too small for block_size_m={config.block_size_m}"

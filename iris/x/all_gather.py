@@ -12,6 +12,7 @@ import triton.language as tl
 import iris
 from .core import Tile, TensorView, DeviceContext
 
+
 @triton.jit()
 def all_gather(
     tile: Tile,

@@ -95,7 +95,7 @@ def x_all_reduce_one_shot_kernel(
         # Store to temp_buffer (avoid race condition) and signal ready
         temp_ptr = temp_buffer + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         tl.store(temp_ptr, local_data, mask=mask, cache_modifier=".wt")
-        tl.debug_barrier() # Ensures all stores are visible before the atomic_xchg
+        tl.debug_barrier()  # Ensures all stores are visible before the atomic_xchg
         tl.atomic_xchg(locks + tile_id, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
 
         # Create Tile with data and views
@@ -146,7 +146,7 @@ def x_all_reduce_two_shot_kernel(
         # Store to temp_buffer (avoid race condition) and signal ready
         temp_ptr = temp_buffer + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         tl.store(temp_ptr, local_data, mask=mask, cache_modifier=".wt")
-        tl.debug_barrier() # Ensures all stores are visible before the atomic_xchg
+        tl.debug_barrier()  # Ensures all stores are visible before the atomic_xchg
         tl.atomic_xchg(locks + tile_id, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
 
         # Create Tile with data and views

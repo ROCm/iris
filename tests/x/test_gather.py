@@ -120,9 +120,9 @@ def test_gather_from_specific_rank(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_
     torch.manual_seed(42 + source_rank)
     expected = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
 
-    assert torch.allclose(
-        output_tensor, expected, atol=atol, rtol=rtol
-    ), f"Rank {rank}: gather from rank {source_rank} failed"
+    assert torch.allclose(output_tensor, expected, atol=atol, rtol=rtol), (
+        f"Rank {rank}: gather from rank {source_rank} failed"
+    )
 
 
 @triton.jit
@@ -227,6 +227,6 @@ def test_gather_accumulate_pattern(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_
     expected_sum = sum(range(world_size))
     expected = torch.full((M, N), float(expected_sum), dtype=dtype, device=f"cuda:{rank}")
 
-    assert torch.allclose(
-        output_tensor, expected, atol=atol, rtol=rtol
-    ), f"Rank {rank}: gather accumulate pattern failed"
+    assert torch.allclose(output_tensor, expected, atol=atol, rtol=rtol), (
+        f"Rank {rank}: gather accumulate pattern failed"
+    )

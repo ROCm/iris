@@ -305,11 +305,11 @@ def persistent_all_reduce_spinlock(
         # For each destination rank, do spinlock-protected read-modify-write
         for i in range(world_size):
             dest_rank = rank_start + i * rank_stride
-            
+
             # Acquire lock for this tile at dest_rank using iris RMA
             while iris.atomic_cas(locks_ptr + tile_id, 0, 1, iris_rank, dest_rank, heap_bases) != 0:
                 pass
-            
+
             # Load current value from dest_rank's output tile
             current_value = iris.load(
                 output_ptr + output_offset,
@@ -318,10 +318,10 @@ def persistent_all_reduce_spinlock(
                 heap_bases,
                 mask=mask,
             )
-            
+
             # Add our local contribution
             acc = current_value.to(acc_dtype) + local_data.to(acc_dtype)
-            
+
             # Store accumulated result back to dest_rank
             result = acc.to(output_ptr.type.element_ty)
             iris.store(
@@ -332,7 +332,7 @@ def persistent_all_reduce_spinlock(
                 heap_bases,
                 mask=mask,
             )
-            
+
             # Release lock for this tile at dest_rank
             iris.atomic_xchg(locks_ptr + tile_id, 0, iris_rank, dest_rank, heap_bases)
 

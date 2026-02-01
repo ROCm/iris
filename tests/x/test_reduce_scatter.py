@@ -160,4 +160,5 @@ def test_reduce_scatter(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()

@@ -147,11 +147,7 @@ def _fused_all_gather_matmul_kernel(
 
         # Add bias if provided using tritonBLAS
         if BIAS:
-            bias_vector = tl.load(
-                bias_ptr + rm * stride_bias,
-                mask=rm < M,
-                other=0.0
-            )
+            bias_vector = tl.load(bias_ptr + rm * stride_bias, mask=rm < M, other=0.0)
             acc = add_vector(acc, bias_vector, QUANTIZED=False)
 
         # Convert to output dtype using tritonBLAS
@@ -163,9 +159,8 @@ def _fused_all_gather_matmul_kernel(
             + (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))[:, None] * stride_cm
             + (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))[None, :] * stride_cn
         )
-        mask = (
-            ((pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))[:, None] < M) &
-            ((pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))[None, :] < N)
+        mask = ((pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M))[:, None] < M) & (
+            (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N))[None, :] < N
         )
         tl.store(C_ptr, c, mask=mask)
 
@@ -221,16 +216,14 @@ def all_gather_matmul(
 
     # Validate problem size against block sizes
     assert M >= config.block_size_m, (
-        f"M ({M}) must be >= block_size_m ({config.block_size_m}). "
-        f"Use smaller block sizes for small problems."
+        f"M ({M}) must be >= block_size_m ({config.block_size_m}). Use smaller block sizes for small problems."
     )
     assert K_local >= config.block_size_k, (
         f"K_local ({K_local}) must be >= block_size_k ({config.block_size_k}). "
         f"Use smaller block sizes for small problems."
     )
     assert N >= config.block_size_n, (
-        f"N ({N}) must be >= block_size_n ({config.block_size_n}). "
-        f"Use smaller block sizes for small problems."
+        f"N ({N}) must be >= block_size_n ({config.block_size_n}). Use smaller block sizes for small problems."
     )
 
     if workspace is None:

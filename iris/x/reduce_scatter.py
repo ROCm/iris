@@ -70,7 +70,9 @@ def reduce_scatter(
         for remote_rank in range(ctx.world_size):
             if remote_rank != ctx.rank:
                 lock_ptr = locks + tile_id
-                while iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="gpu") != 1:
+                while (
+                    iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="gpu") != 1
+                ):
                     pass
 
                 partial = iris.load(src_tile_ptr, ctx.rank, remote_rank, ctx.heap_bases, mask=mask)

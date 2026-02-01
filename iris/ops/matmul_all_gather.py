@@ -26,9 +26,9 @@ from .workspace import FusedWorkspace
 
 @triton.jit()
 def _fused_matmul_all_gather_kernel(
-    A,          # (M_local, K) - each rank's local input
-    B,          # (K, N) - replicated across ranks
-    C_gathered, # (M, N) - gathered output (M = M_local * world_size)
+    A,  # (M_local, K) - each rank's local input
+    B,  # (K, N) - replicated across ranks
+    C_gathered,  # (M, N) - gathered output (M = M_local * world_size)
     bias_ptr,
     M_local: tl.constexpr,
     M: tl.constexpr,
@@ -141,11 +141,7 @@ def _fused_matmul_all_gather_kernel(
 
         # Add bias if provided using tritonBLAS
         if BIAS:
-            bias_vector = tl.load(
-                bias_ptr + rm * stride_bias,
-                mask=rm < M_local,
-                other=0.0
-            )
+            bias_vector = tl.load(bias_ptr + rm * stride_bias, mask=rm < M_local, other=0.0)
             acc = add_vector(acc, bias_vector, QUANTIZED=False)
 
         # Convert to output dtype using tritonBLAS
@@ -242,12 +238,10 @@ def matmul_all_gather(
         f"Use smaller block sizes for small problems."
     )
     assert K >= config.block_size_k, (
-        f"K ({K}) must be >= block_size_k ({config.block_size_k}). "
-        f"Use smaller block sizes for small problems."
+        f"K ({K}) must be >= block_size_k ({config.block_size_k}). Use smaller block sizes for small problems."
     )
     assert N >= config.block_size_n, (
-        f"N ({N}) must be >= block_size_n ({config.block_size_n}). "
-        f"Use smaller block sizes for small problems."
+        f"N ({N}) must be >= block_size_n ({config.block_size_n}). Use smaller block sizes for small problems."
     )
 
     # Allocate workspace if not provided

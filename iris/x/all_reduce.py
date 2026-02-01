@@ -45,8 +45,8 @@ def all_reduce_atomic(
         iris.atomic_add(
             dst_tile_ptr,
             tile.data,
-            ctx.rank,      # from_rank (current rank)
-            dest_rank,     # to_rank (destination rank)
+            ctx.rank,  # from_rank (current rank)
+            dest_rank,  # to_rank (destination rank)
             ctx.heap_bases,
             mask=mask,
         )
@@ -289,7 +289,9 @@ def all_reduce_two_shot(
                 # Use atomic_add with 0 to check readiness (consumer uses acquire semantics on read)
                 lock_ptr = locks + tile_id
                 # Spin wait until ready
-                while iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="gpu") != 1:
+                while (
+                    iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="gpu") != 1
+                ):
                     pass  # Spin wait until ready
 
                 # Load remote tile data from temp buffer
@@ -306,8 +308,8 @@ def all_reduce_two_shot(
                 iris.store(
                     dst_tile_ptr,
                     result,
-                    ctx.rank,      # from_rank (current rank with reduced result)
-                    dest_rank,     # to_rank (destination rank)
+                    ctx.rank,  # from_rank (current rank with reduced result)
+                    dest_rank,  # to_rank (destination rank)
                     ctx.heap_bases,
                     mask=mask,
                 )

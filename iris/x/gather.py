@@ -56,8 +56,8 @@ def gather(
         # Remote load using RMA
         tile_data = iris.load(
             src_tile_ptr,
-            ctx.rank,      # to_rank (current rank)
-            source_rank,   # from_rank (source rank)
+            ctx.rank,  # to_rank (current rank)
+            source_rank,  # from_rank (source rank)
             ctx.heap_bases,
             mask=mask,
         )
