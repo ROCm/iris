@@ -78,6 +78,7 @@ class IrisDeviceCtx:
     num_ranks: gl.tensor
     heap_bases: gl.tensor
 
+    @gluon.constexpr_function
     def __init__(self, cur_rank, num_ranks, heap_bases):
         self.cur_rank = cur_rank
         self.num_ranks = num_ranks
