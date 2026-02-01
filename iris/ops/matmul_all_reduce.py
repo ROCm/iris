@@ -49,10 +49,10 @@ def _fused_matmul_all_reduce_kernel(
     Computes C = A @ B and then performs all-reduce on the result using the specified variant.
     This is useful for data-parallel distributed training where each rank computes
     a partial result over different data, and then reduces across all ranks.
-    
+
     Supported variants:
     - 'atomic': Fast, lock-free atomic accumulation
-    - 'spinlock': Mutex-based serialized read-modify-write 
+    - 'spinlock': Mutex-based serialized read-modify-write
     - 'one_shot': Each rank reduces all tiles (duplicated work, no remote stores)
     - 'two_shot': Work distribution with reduce-scatter then all-gather pattern
 
@@ -82,57 +82,57 @@ def _fused_matmul_all_reduce_kernel(
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    
+
     # Compute which tile this program handles
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
-    
+
     # Compute row and column indices for this tile
     rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    
+
     # Initialize accumulator for GEMM
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    
+
     # GEMM loop over K dimension
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-        
+
         # Load A tile
         A_ptr = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
         a = tl.load(A_ptr, mask=(rm[:, None] < M) & (rk[None, :] < K), other=0.0)
-        
+
         # Load B tile
         B_ptr = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
         b = tl.load(B_ptr, mask=(rk[:, None] < K) & (rn[None, :] < N), other=0.0)
-        
+
         # Accumulate
         acc += tl.dot(a, b)
-    
+
     # Convert to output dtype
     c = acc.to(C.dtype.element_ty)
-    
+
     # Create views and context
     ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
     dst_view = iris.x.TensorView(C, M, N, stride_cm, stride_cn)
-    
+
     # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock
     if VARIANT == "one_shot" or VARIANT == "two_shot":
         # Store GEMM result to aux_buffer (avoid race condition with final output)
         temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
         tl.debug_barrier() # Ensures all stores are visible before the atomic_xchg
-        
+
         # Signal tile is ready by unlocking (set lock to 1)
         # Use atomic_xchg with release semantics to ensure memory ordering
         num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
         tile_id = pid_m * num_tiles_n + pid_n
         lock_ptr = locks + tile_id
         tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
-        
+
         # Create src_view pointing to aux_buffer
         src_view = iris.x.TensorView(aux_buffer, M, N, stride_cm, stride_cn)
-    
+
     # Dispatch to appropriate all-reduce variant
     if VARIANT == "atomic":
         # Atomic uses tile.data directly (no intermediate store needed)

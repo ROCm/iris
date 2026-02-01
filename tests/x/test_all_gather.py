@@ -48,7 +48,7 @@ def x_all_gather_kernel(
         mask = (rm[:, None] < M) & (rn[None, :] < N)
         src_ptr = input_ptr + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         local_data = tl.load(src_ptr, mask=mask, other=0.0)
-        
+
         # Create Tile with loaded data and views
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
         dst_view = iris.x.TensorView(
@@ -91,7 +91,7 @@ def test_all_gather(gather_dim, dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZ
     """Test tile-level all-gather primitive by comparing against PyTorch's implementation."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
-    
+
     # Skip if block size is larger than dimensions
     # (new all_gather requires tile.data shape to match block size)
     if BLOCK_SIZE_M > M or BLOCK_SIZE_N > N:
@@ -234,7 +234,7 @@ def x_all_gather_ctx_api_kernel(
         mask = (rm[:, None] < M) & (rn[None, :] < N)
         src_ptr = input_ptr + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         local_data = tl.load(src_ptr, mask=mask, other=0.0)
-        
+
         # Create Tile with loaded data and views
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
         dst_view = iris.x.TensorView(
@@ -263,7 +263,7 @@ def test_all_gather_ctx_api(gather_dim, dtype, atol, rtol, M, N, BLOCK_SIZE_M, B
     """Test tile-level all-gather using direct function call (ctx methods removed)."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
-    
+
     # Skip if block size is larger than dimensions
     if BLOCK_SIZE_M > M or BLOCK_SIZE_N > N:
         pytest.skip(f"Block size ({BLOCK_SIZE_M}x{BLOCK_SIZE_N}) larger than dimensions ({M}x{N})")

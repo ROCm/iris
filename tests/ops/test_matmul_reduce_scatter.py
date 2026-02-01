@@ -23,7 +23,7 @@ import iris.ops as ops
 def test_matmul_reduce_scatter(dtype, atol, rtol, M, N, K):
     """
     Test matmul_reduce_scatter by comparing against torch matmul + all_reduce.
-    
+
     Note: We use all_reduce for reference because our tile-based reduce_scatter
     is semantically equivalent to: matmul -> all_reduce -> each rank keeps assigned tiles.
     PyTorch's reduce_scatter operates on different semantics (scatter along dimensions).
@@ -69,20 +69,20 @@ def test_matmul_reduce_scatter(dtype, atol, rtol, M, N, K):
     # Adjust tolerance for 8 ranks due to accumulation error
     if world_size == 8 and dtype == torch.float32:
         atol = 2e-1
-    
+
     for local_tile_idx in range(tiles_per_rank):
         tile_id = start_tile + local_tile_idx
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
-        
+
         m_start = pid_m * config.block_size_m
         m_end = min(m_start + config.block_size_m, M)
         n_start = pid_n * config.block_size_n
         n_end = min(n_start + config.block_size_n, N)
-        
+
         iris_tile = iris_C[m_start:m_end, n_start:n_end]
         ref_tile = C_reduced[m_start:m_end, n_start:n_end]
-        
+
         max_diff = torch.abs(iris_tile - ref_tile).max().item()
         assert torch.allclose(iris_tile, ref_tile, atol=atol, rtol=rtol), (
             f"Rank {rank}, tile {tile_id} ({pid_m},{pid_n}): "
@@ -109,7 +109,7 @@ def test_matmul_reduce_scatter_semantics(dtype, atol, rtol):
     """
     Test that matmul_reduce_scatter is equivalent to:
     result = matmul(A, B)
-    reduced = all_reduce(result)  
+    reduced = all_reduce(result)
     each rank keeps its assigned tile block
     """
     if not dist.is_initialized():
@@ -150,20 +150,20 @@ def test_matmul_reduce_scatter_semantics(dtype, atol, rtol):
     # Adjust tolerance for 8 ranks
     if world_size == 8 and dtype == torch.float32:
         atol = 2e-1
-    
+
     for local_tile_idx in range(tiles_per_rank):
         tile_id = start_tile + local_tile_idx
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
-        
+
         m_start = pid_m * config.block_size_m
         m_end = min(m_start + config.block_size_m, M)
         n_start = pid_n * config.block_size_n
         n_end = min(n_start + config.block_size_n, N)
-        
+
         output_tile = output[m_start:m_end, n_start:n_end]
         ref_tile = C_ref[m_start:m_end, n_start:n_end]
-        
+
         assert torch.allclose(output_tile, ref_tile, atol=atol, rtol=rtol), (
             f"Rank {rank}, tile {tile_id}: mismatch"
         )

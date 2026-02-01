@@ -91,7 +91,7 @@ def x_all_reduce_one_shot_kernel(
         mask = (rm[:, None] < M) & (rn[None, :] < N)
         src_ptr = input_ptr + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         local_data = tl.load(src_ptr, mask=mask, other=0.0)
-        
+
         # Store to temp_buffer (avoid race condition) and signal ready
         temp_ptr = temp_buffer + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         tl.store(temp_ptr, local_data, mask=mask, cache_modifier=".wt")
@@ -142,7 +142,7 @@ def x_all_reduce_two_shot_kernel(
         mask = (rm[:, None] < M) & (rn[None, :] < N)
         src_ptr = input_ptr + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         local_data = tl.load(src_ptr, mask=mask, other=0.0)
-        
+
         # Store to temp_buffer (avoid race condition) and signal ready
         temp_ptr = temp_buffer + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         tl.store(temp_ptr, local_data, mask=mask, cache_modifier=".wt")
@@ -260,10 +260,10 @@ def test_all_reduce(variant, dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N
     num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
     num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
     total_tiles = num_pid_m * num_pid_n
-    
+
     if variant in ["spinlock", "one_shot", "two_shot"]:
         locks = shmem.zeros((total_tiles,), dtype=torch.int32)
-        
+
     if variant in ["one_shot", "two_shot"]:
         temp_buffer = shmem.zeros((M, N), dtype=dtype)
 

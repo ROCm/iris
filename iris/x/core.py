@@ -430,14 +430,14 @@ class AllReduceConfig:
         # For variants that don't need locks (atomic, ring, one_shot, two_shot):
         dummy_locks = tl.zeros((1,), dtype=tl.int32)
         config = AllReduceConfig(0, dummy_locks)  # 0 = atomic
-        
+
         # For spinlock variant that needs locks:
         locks = shmem.zeros(num_tiles, dtype=torch.int32)
         config = AllReduceConfig(4, locks)  # 4 = spinlock
 
         # Then in kernel:
         ctx.all_reduce(tile, src_view, dst_view, config=config, tile_id=tile_id)
-        
+
     Variant codes:
         0 = atomic
         1 = ring

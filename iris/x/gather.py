@@ -26,20 +26,20 @@ def gather(
 ):
     """
     Tile-level gather from a specific rank.
-    
+
     Loads a tile from source_rank's memory and returns it directly.
     Unlike all_gather, this does NOT store the tile - it's meant to be
     immediately consumed by the caller (e.g., in a GEMM dot product).
-    
+
     Args:
         tile: Tile object with position and dimensions.
         src_view: TensorView for source tensor on source_rank.
         source_rank: Specific rank to load from (constexpr).
         ctx: DeviceContext with rank, world_size, and heap_bases.
-    
+
     Returns:
         Loaded tile data as a tensor.
-    
+
     Example usage in fused GEMM:
         for source_rank in range(world_size):
             a = gather(tile, src_view, source_rank, ctx)
@@ -48,7 +48,7 @@ def gather(
     """
     # Get tile pointer and mask
     src_tile_ptr, mask = src_view.tile_ptr(tile)
-    
+
     if source_rank == ctx.rank:
         # Local load
         tile_data = tl.load(src_tile_ptr, mask=mask, other=0.0)
@@ -61,5 +61,5 @@ def gather(
             ctx.heap_bases,
             mask=mask,
         )
-    
+
     return tile_data

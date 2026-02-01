@@ -70,41 +70,41 @@ def _fused_matmul_reduce_scatter_kernel(
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    
+
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
-    
+
     rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    
+
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    
+
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-        
+
         A_ptr = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
         a = tl.load(A_ptr, mask=(rm[:, None] < M) & (rk[None, :] < K), other=0.0)
-        
+
         B_ptr = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
         b = tl.load(B_ptr, mask=(rk[:, None] < K) & (rn[None, :] < N), other=0.0)
-        
+
         acc += tl.dot(a, b)
-    
+
     c = acc.to(C.dtype.element_ty)
-    
+
     temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
     tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
     tl.debug_barrier()
-    
+
     tile_id = pid_m * num_pid_n + pid_n
     lock_ptr = locks + tile_id
     tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")
-    
+
     tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
     src_view = iris.x.TensorView(aux_buffer, M, N, stride_cm, stride_cn)
     dst_view = iris.x.TensorView(C, M, N, stride_cm, stride_cn)
     ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
-    
+
     iris.x.reduce_scatter(tile_obj, src_view, dst_view, locks, ctx)
 
 

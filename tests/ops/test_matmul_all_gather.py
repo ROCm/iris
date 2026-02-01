@@ -12,7 +12,6 @@ import pytest
 import torch
 import torch.distributed as dist
 import iris
-import iris.ops as ops
 
 
 @pytest.mark.parametrize(
@@ -46,7 +45,7 @@ def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
         pytest.skip(f"M={M} not divisible by world_size={world_size}")
 
     M_local = M // world_size
-    
+
     # Skip if problem size is too small for world_size
     # With default or custom configs, we need at least one tile per rank
     min_block_size = 32  # Smallest block size we use
@@ -75,7 +74,7 @@ def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
 
     # Use appropriate block sizes based on problem size
     from iris.ops.config import FusedConfig
-    
+
     # Select config based on actual problem dimensions
     # Ensure block sizes don't exceed actual dimensions
     if M_local <= 64 or K <= 64 or N <= 64:
@@ -90,7 +89,7 @@ def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
     else:
         # Larger problems with fp16/bf16 - use 128x128x64 blocks
         config = FusedConfig(block_size_m=128, block_size_n=128, block_size_k=64)
-    
+
     # Validate config against problem size
     if config is not None:
         assert M_local >= config.block_size_m, \
@@ -99,7 +98,7 @@ def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
             f"K ({K}) must be >= block_size_k ({config.block_size_k})"
         assert N >= config.block_size_n, \
             f"N ({N}) must be >= block_size_n ({config.block_size_n})"
-    
+
     # Use shmem.ops API with proper config
     shmem.ops.matmul_all_gather(output, A_local, B, config=config)
 

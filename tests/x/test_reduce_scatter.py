@@ -49,7 +49,7 @@ def x_reduce_scatter_kernel(
         mask = (rm[:, None] < M) & (rn[None, :] < N)
         src_ptr = input_ptr + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         local_data = tl.load(src_ptr, mask=mask, other=0.0)
-        
+
         # Store to temp_buffer and signal ready
         temp_ptr = temp_buffer + rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         tl.store(temp_ptr, local_data, mask=mask, cache_modifier=".wt")
@@ -104,7 +104,7 @@ def test_reduce_scatter(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     iris_input_tensor.copy_(pytorch_input_tensor)
     iris_temp_buffer = shmem.zeros((M, N), dtype=dtype)
     iris_output_tensor = shmem.zeros((M, N), dtype=dtype)
-    
+
     locks_tensor = shmem.zeros(total_tiles, dtype=torch.int32)
 
     shmem.barrier()
@@ -131,7 +131,7 @@ def test_reduce_scatter(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
 
     torch.cuda.synchronize()
     shmem.barrier()
-    
+
     expected_sum = sum(float(r + 1) for r in range(world_size))
 
     try:
@@ -139,15 +139,15 @@ def test_reduce_scatter(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
             tile_id = start_tile + local_tile_idx
             pid_m = tile_id // num_pid_n
             pid_n = tile_id % num_pid_n
-            
+
             m_start = pid_m * BLOCK_SIZE_M
             m_end = min(m_start + BLOCK_SIZE_M, M)
             n_start = pid_n * BLOCK_SIZE_N
             n_end = min(n_start + BLOCK_SIZE_N, N)
-            
+
             tile_data = iris_output_tensor[m_start:m_end, n_start:n_end]
             expected_tile = torch.full_like(tile_data, expected_sum)
-            
+
             assert torch.allclose(tile_data, expected_tile, atol=atol, rtol=rtol), (
                 f"Rank {rank}, tile {tile_id} ({pid_m},{pid_n}): "
                 f"Expected {expected_sum}, got max {tile_data.max().item()}, "

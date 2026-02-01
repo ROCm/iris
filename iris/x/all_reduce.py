@@ -22,7 +22,7 @@ def all_reduce_atomic(
 ):
     """
     Tile-level all-reduce using atomic operations.
-    
+
     Takes a tile with pre-computed data (tile.data) and atomically adds it
     to the destination on all ranks.
 
@@ -30,7 +30,7 @@ def all_reduce_atomic(
         tile: Tile object with position, dimensions, and data to reduce (tile.data).
         dst_view: TensorView for output tensor where reduced result will be written.
         ctx: DeviceContext with rank, world_size, and heap_bases.
-        
+
     Example:
         # After computing a local tile result
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)
@@ -39,7 +39,7 @@ def all_reduce_atomic(
     """
     # Get destination tile pointer and mask for this tile position
     dst_tile_ptr, mask = dst_view.tile_ptr(tile)
-    
+
     # Atomically add local tile.data to all ranks' destination
     for dest_rank in range(ctx.world_size):
         iris.atomic_add(
@@ -61,7 +61,7 @@ def all_reduce_spinlock(
 ):
     """
     Tile-level all-reduce using spinlock synchronization.
-    
+
     Similar to atomic-add based all-reduce but uses spinlocks for exclusive
     access. For each rank's tile, acquires the lock, reads current value,
     adds local contribution (tile.data), writes back, and releases the lock.
@@ -71,7 +71,7 @@ def all_reduce_spinlock(
         dst_view: TensorView for output tensor where reduced result will be written.
         locks: Pointer to locks array (one lock per tile).
         ctx: DeviceContext with rank, world_size, and heap_bases.
-        
+
     Example:
         # After computing a local tile result
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)
@@ -81,28 +81,28 @@ def all_reduce_spinlock(
     # Compute tile ID for lock indexing
     num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)
     tile_id = tile.pid_m * num_tiles_n + tile.pid_n
-    
+
     # Get destination tile pointer and mask
     dst_tile_ptr, mask = dst_view.tile_ptr(tile)
-    
+
     # For each rank, do spinlock-protected read-modify-write using iris RMA
     for dest_rank in range(ctx.world_size):
         # Acquire lock for this tile at dest_rank (spin until we swap 0 -> 1)
         # iris.atomic_cas handles remote rank access automatically
         while iris.atomic_cas(locks + tile_id, 0, 1, ctx.rank, dest_rank, ctx.heap_bases) != 0:
             pass
-        
+
         # Load current value from dest_rank's tile using iris.load
         current_value = iris.load(dst_tile_ptr, ctx.rank, dest_rank, ctx.heap_bases, mask=mask)
-        
+
         # Add our local contribution
         acc_dtype = tl.float32 if tile.data.dtype == tl.float16 else tile.data.dtype
         acc = current_value.to(acc_dtype) + tile.data.to(acc_dtype)
-        
+
         # Store accumulated result back to dest_rank (overwriting) using iris.store
         result = acc.to(tile.data.dtype)
         iris.store(dst_tile_ptr, result, ctx.rank, dest_rank, ctx.heap_bases, mask=mask)
-        
+
         # Release lock for this tile at dest_rank using iris.atomic_xchg
         iris.atomic_xchg(locks + tile_id, 0, ctx.rank, dest_rank, ctx.heap_bases)
 
@@ -120,7 +120,7 @@ def all_reduce_one_shot(
 
     Each rank reads from all ranks (including itself) and computes the reduction locally.
     All ranks do all tiles (duplicated work), but no remote stores needed.
-    
+
     Uses locks as ready flags (producer-consumer): each rank waits for remote tiles
     to be ready (lock == 1) before loading.
 
@@ -130,7 +130,7 @@ def all_reduce_one_shot(
         dst_view: TensorView for output tensor where reduced result will be written locally.
         locks: Pointer to lock array (one per tile) used as ready flags.
         ctx: DeviceContext with rank, world_size, and heap_bases.
-        
+
     Example:
         # After computing and storing a local tile result and signaling ready
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)
@@ -141,7 +141,7 @@ def all_reduce_one_shot(
     # Get tile pointers and mask
     src_tile_ptr, mask = src_view.tile_ptr(tile)
     dst_tile_ptr, _ = dst_view.tile_ptr(tile)
-    
+
     # Compute tile ID for lock indexing
     num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)
     tile_id = tile.pid_m * num_tiles_n + tile.pid_n
@@ -161,7 +161,7 @@ def all_reduce_one_shot(
             # Spin wait until ready
             while iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="gpu") != 1:
                 pass  # Spin wait until ready
-            
+
             # Load remote tile data from temp buffer
             partial = iris.load(src_tile_ptr, ctx.rank, remote_rank, ctx.heap_bases, mask=mask)
             acc += partial.to(acc_dtype)
@@ -240,9 +240,9 @@ def all_reduce_two_shot(
 
     Each rank reduces only its assigned tiles (no duplicated work), then scatters
     the result to all other ranks.
-    
+
     Uses locks as ready flags: before loading, wait for remote tiles to be ready (lock == 1).
-    
+
     Phase 1: If this tile is rank's responsibility, load from all ranks and reduce locally
     Phase 2: Scatter reduced tile to all ranks using iris.store
 
@@ -254,7 +254,7 @@ def all_reduce_two_shot(
         start_tile: Starting tile ID for this rank's responsibility.
         stride: Stride between tiles this rank is responsible for.
         ctx: DeviceContext with rank, world_size, and heap_bases.
-        
+
     Example (interleaved distribution):
         # Rank 0 handles tiles 0, 2, 4, ... (start_tile=0, stride=2)
         # Rank 1 handles tiles 1, 3, 5, ... (start_tile=1, stride=2)
@@ -266,20 +266,20 @@ def all_reduce_two_shot(
     # Compute tile ID
     num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)
     tile_id = tile.pid_m * num_tiles_n + tile.pid_n
-    
+
     # Check if this tile is this rank's responsibility
     # Tile is responsible if: (tile_id - start_tile) % stride == 0 and tile_id >= start_tile
     is_responsible = (tile_id >= start_tile) and ((tile_id - start_tile) % stride == 0)
-    
+
     if is_responsible:
         # Phase 1: Reduce - load from all ranks and accumulate locally
         src_tile_ptr, mask = src_view.tile_ptr(tile)
         dst_tile_ptr, _ = dst_view.tile_ptr(tile)
-        
+
         # Initialize accumulator with local tile data (already in registers)
         acc_dtype = tl.float32 if tile.data.dtype == tl.float16 else tile.data.dtype
         acc = tile.data.to(acc_dtype)
-        
+
         # Gather partials from all remote ranks and accumulate
         # Note: Skip current rank - tile.data already contains local contribution
         #       (avoids race condition where we might load our own final result instead of partial)
@@ -291,15 +291,15 @@ def all_reduce_two_shot(
                 # Spin wait until ready
                 while iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="gpu") != 1:
                     pass  # Spin wait until ready
-                
+
                 # Load remote tile data from temp buffer
                 partial = iris.load(src_tile_ptr, ctx.rank, remote_rank, ctx.heap_bases, mask=mask)
                 acc += partial.to(acc_dtype)
-        
+
         # Store reduced result locally
         result = acc.to(tile.data.dtype)
         tl.store(dst_tile_ptr, result, mask=mask)
-        
+
         # Phase 2: Scatter - broadcast reduced tile to all ranks
         for dest_rank in range(ctx.world_size):
             if dest_rank != ctx.rank:
