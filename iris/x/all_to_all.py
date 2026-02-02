@@ -57,8 +57,8 @@ def all_to_all(
             # Remote data: read from rank r
             data = iris.load(
                 src_ptr,
-                ctx.rank,  # to_rank (current rank)
-                r,  # from_rank (remote rank)
+                r,  # from_rank (remote rank we're reading from)
+                ctx.rank,  # to_rank (current rank doing the read)
                 ctx.heap_bases,
                 mask=mask,
             )

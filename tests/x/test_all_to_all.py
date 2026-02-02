@@ -222,7 +222,7 @@ def test_all_to_all_ctx_api(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N)
 
     # Run PyTorch's all_to_all
     pytorch_output_list = [torch.empty((M, N), dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
-    pytorch_input_list = [pytorch_input_tensor[:, r * N : (r + 1) * N] for r in range(world_size)]
+    pytorch_input_list = [pytorch_input_tensor[:, r * N : (r + 1) * N].contiguous() for r in range(world_size)]
     shmem.barrier()
     dist.all_to_all(pytorch_output_list, pytorch_input_list)
     pytorch_output_tensor = torch.cat(pytorch_output_list, dim=1)
