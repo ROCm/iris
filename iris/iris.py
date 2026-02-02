@@ -194,7 +194,7 @@ class Iris:
             self._ops = OpsNamespace(self)
         return self._ops
 
-    def broadcast(self, value, source_rank):
+    def broadcast(self, value, source_rank=0):
         """
         Broadcast a value from one rank to all ranks.
 
