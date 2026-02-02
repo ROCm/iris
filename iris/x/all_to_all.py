@@ -40,25 +40,26 @@ def all_to_all(
         Rank i sends columns [j*N_per_rank:(j+1)*N_per_rank] to rank j
         Rank i receives into columns [j*N_per_rank:(j+1)*N_per_rank] from rank j
     """
-    # For each rank, read the appropriate slice and write to output
+    # For each remote rank, read the data that rank sent to us
     for r in range(ctx.world_size):
-        # Get source pointer with rank-specific column offset (replaces 9 lines!)
-        src_ptr, mask = src_view.offset_tile_ptr(tile, offset_n=r * N_per_rank)
+        # Read from rank r's column for current rank (ctx.rank)
+        # Rank r has data destined for us in column [ctx.rank * N_per_rank]
+        src_ptr, mask = src_view.offset_tile_ptr(tile, offset_n=ctx.rank * N_per_rank)
 
-        # Get destination pointer with rank-specific column offset (replaces 4 lines!)
+        # Write to our output column r (data from rank r)
         dst_ptr, _ = dst_view.offset_tile_ptr(tile, offset_n=r * N_per_rank)
 
         # Read from appropriate rank and write to output
         if r == ctx.rank:
-            # Local data: direct copy
+            # Local data: direct copy from our own column
             data = tl.load(src_ptr, mask=mask, other=0.0)
             tl.store(dst_ptr, data, mask=mask)
         else:
-            # Remote data: read from rank r
+            # Remote data: read from rank r's memory
             data = iris.load(
                 src_ptr,
-                r,  # from_rank (remote rank we're reading from)
                 ctx.rank,  # to_rank (current rank doing the read)
+                r,  # from_rank (remote rank we're reading from)
                 ctx.heap_bases,
                 mask=mask,
             )
