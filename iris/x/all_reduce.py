@@ -89,7 +89,7 @@ def all_reduce_spinlock(
     for dest_rank in range(ctx.world_size):
         # Acquire lock for this tile at dest_rank (spin until we swap 0 -> 1)
         # iris.atomic_cas handles remote rank access automatically
-        while iris.atomic_cas(locks + tile_id, 0, 1, ctx.rank, dest_rank, ctx.heap_bases) != 0:
+        while iris.atomic_cas(locks + tile_id, 0, 1, ctx.rank, dest_rank, ctx.heap_bases, sem="acquire", scope="sys") != 0:
             pass
 
         # Load current value from dest_rank's tile using iris.load
@@ -104,7 +104,7 @@ def all_reduce_spinlock(
         iris.store(dst_tile_ptr, result, ctx.rank, dest_rank, ctx.heap_bases, mask=mask)
 
         # Release lock for this tile at dest_rank using iris.atomic_xchg
-        iris.atomic_xchg(locks + tile_id, 0, ctx.rank, dest_rank, ctx.heap_bases)
+        iris.atomic_xchg(locks + tile_id, 0, ctx.rank, dest_rank, ctx.heap_bases, sem="release", scope="sys")
 
 
 @triton.jit()
@@ -159,7 +159,7 @@ def all_reduce_one_shot(
             # Use atomic_add with 0 to check readiness (consumer uses acquire semantics on read)
             lock_ptr = locks + tile_id
             # Spin wait until ready
-            while iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="gpu") != 1:
+            while iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="sys") != 1:
                 pass  # Spin wait until ready
 
             # Load remote tile data from temp buffer
@@ -290,7 +290,7 @@ def all_reduce_two_shot(
                 lock_ptr = locks + tile_id
                 # Spin wait until ready
                 while (
-                    iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="gpu") != 1
+                    iris.atomic_add(lock_ptr, 0, ctx.rank, remote_rank, ctx.heap_bases, sem="acquire", scope="sys") != 1
                 ):
                     pass  # Spin wait until ready
 

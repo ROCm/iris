@@ -44,8 +44,8 @@ def x_all_to_all_kernel(
 
         # Create OOP objects for new API
         tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
-        dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
+        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)  # N is total N
+        dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)  # N is total N
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
 
         iris.x.all_to_all(tile, src_view, dst_view, N_per_rank, ctx)
@@ -88,13 +88,13 @@ def test_all_to_all(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         pytorch_input_tensor[:, r * N : (r + 1) * N].fill_(float(r + 1))
 
     # Run PyTorch's all_to_all to get reference output
-    pytorch_output_tensor = torch.empty_like(pytorch_input_tensor)
     shmem.barrier()
     # PyTorch all_to_all: split input into chunks, send chunk i to rank i
     # Make chunks contiguous as required by PyTorch dist.all_to_all
     input_chunks = [chunk.contiguous() for chunk in torch.chunk(pytorch_input_tensor, world_size, dim=1)]
-    output_chunks = [chunk.contiguous() for chunk in torch.chunk(pytorch_output_tensor, world_size, dim=1)]
+    output_chunks = [torch.empty(M, N, dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
     dist.all_to_all(output_chunks, input_chunks)
+    pytorch_output_tensor = torch.cat(output_chunks, dim=1)
     torch.cuda.synchronize()
 
     # Set up Iris tensors
@@ -106,7 +106,7 @@ def test_all_to_all(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
 
     # Launch kernel
     num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
-    num_pid_n = (N + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
+    num_pid_n = ((N * world_size) + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N  # Use total N dimension
     total_tiles = num_pid_m * num_pid_n
     grid = (total_tiles,)
 
@@ -139,14 +139,17 @@ def test_all_to_all(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         )
 
         # Verify each rank's received chunks contain correct data
+        # In all-to-all, rank dst receives chunk dst from each rank src
+        # Since all ranks filled chunk i with value (i+1), each rank should receive
+        # its own chunk number from all other ranks
         for r in range(world_size):
             start_col = r * N
             end_col = (r + 1) * N
             chunk_data = iris_output_tensor[:, start_col:end_col]
-            # Data in this chunk should be from rank r, which is filled with value (r+1)
-            expected_value = float(r + 1)
+            # This chunk contains data from rank r. Rank r sent us chunk 'rank' which has value (rank+1)
+            expected_value = float(rank + 1)
             assert torch.allclose(chunk_data, torch.full_like(chunk_data, expected_value), atol=atol), (
-                f"Rank {rank}: Data from rank {r} not in correct location or has wrong value"
+                f"Rank {rank}: Data from rank {r} (chunk {rank}) should have value {expected_value}"
             )
 
         if rank == 0:
@@ -159,118 +162,3 @@ def test_all_to_all(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         gc.collect()
 
 
-@triton.jit
-def x_all_to_all_ctx_api_kernel(
-    input_ptr,
-    output_ptr,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    stride_in_m: tl.constexpr,
-    stride_in_n: tl.constexpr,
-    stride_out_m: tl.constexpr,
-    stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
-    world_size: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    N_per_rank: tl.constexpr,
-):
-    """Kernel using direct all_to_all() call (ctx methods removed due to Triton limitations)."""
-    pid = tl.program_id(0)
-    grid_size = tl.num_programs(0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N * world_size, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
-
-    for tile_id in range(pid, total_tiles, grid_size):
-        pid_m = tile_id // num_pid_n
-        pid_n = tile_id % num_pid_n
-
-        # Create OOP objects
-        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.TensorView(input_ptr, M, N * world_size, stride_in_m, stride_in_n)
-        dst_view = iris.x.TensorView(output_ptr, M, N * world_size, stride_out_m, stride_out_n)
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
-
-        # Call primitive directly (ctx methods don't work due to Triton import restrictions)
-        iris.x.all_to_all(tile, src_view, dst_view, N_per_rank, ctx)
-
-
-@pytest.mark.parametrize(
-    "dtype, atol, rtol",
-    [
-        (torch.float16, 1e-3, 1e-3),
-        (torch.float32, 1e-5, 1e-5),
-    ],
-)
-@pytest.mark.parametrize("M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(128, 64, 64, 32)])
-def test_all_to_all_ctx_api(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
-    """Test tile-level all-to-all using direct function call (ctx methods removed)."""
-    if not dist.is_initialized():
-        pytest.skip("torch.distributed not initialized")
-
-    heap_size = 2**33  # 8GB
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
-
-    # Create input tensor (M x N*world_size)
-    pytorch_input_tensor = torch.randn(M, N * world_size, dtype=dtype, device=f"cuda:{rank}")
-    for r in range(world_size):
-        pytorch_input_tensor[:, r * N : (r + 1) * N].fill_(float(rank + 1))
-
-    # Run PyTorch's all_to_all
-    pytorch_output_list = [torch.empty((M, N), dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
-    pytorch_input_list = [pytorch_input_tensor[:, r * N : (r + 1) * N].contiguous() for r in range(world_size)]
-    shmem.barrier()
-    dist.all_to_all(pytorch_output_list, pytorch_input_list)
-    pytorch_output_tensor = torch.cat(pytorch_output_list, dim=1)
-    torch.cuda.synchronize()
-
-    # Set up Iris tensors
-    iris_input_tensor = shmem.zeros((M, N * world_size), dtype=dtype)
-    iris_input_tensor.copy_(pytorch_input_tensor)
-    iris_output_tensor = shmem.zeros((M, N * world_size), dtype=dtype)
-
-    shmem.barrier()
-
-    # Launch kernel using NEW ctx API
-    num_pid_m = (M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
-    num_pid_n = (N * world_size + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
-    total_tiles = num_pid_m * num_pid_n
-    grid = (total_tiles,)
-
-    x_all_to_all_ctx_api_kernel[grid](
-        iris_input_tensor,
-        iris_output_tensor,
-        M,
-        N * world_size,
-        iris_input_tensor.stride(0),
-        iris_input_tensor.stride(1),
-        iris_output_tensor.stride(0),
-        iris_output_tensor.stride(1),
-        shmem.get_heap_bases(),
-        rank,
-        world_size,
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        N,
-    )
-
-    torch.cuda.synchronize()
-    shmem.barrier()
-
-    try:
-        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
-            f"Rank {rank}: all_to_all() output doesn't match PyTorch's all_to_all"
-        )
-
-        if rank == 0:
-            print(f"✓ all_to_all() test passed: {dtype}, M={M}, N={N}")
-    finally:
-        shmem.barrier()
-        del shmem
-        import gc
-
-        gc.collect()
