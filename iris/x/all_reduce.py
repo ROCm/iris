@@ -103,7 +103,9 @@ def all_reduce_spinlock(
 
         # Store accumulated result back to dest_rank (overwriting) using iris.store
         result = acc.to(tile.data.dtype)
-        iris.store(dst_tile_ptr, result, ctx.rank, dest_rank, ctx.heap_bases, mask=mask) # Should be cache-modifier ".wt"
+        iris.store(
+            dst_tile_ptr, result, ctx.rank, dest_rank, ctx.heap_bases, mask=mask
+        )  # Should be cache-modifier ".wt"
         tl.debug_barrier()
 
         # Release lock for this tile at dest_rank using iris.atomic_xchg
