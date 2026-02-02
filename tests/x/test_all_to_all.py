@@ -160,5 +160,3 @@ def test_all_to_all(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         import gc
 
         gc.collect()
-
-

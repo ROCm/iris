@@ -307,7 +307,10 @@ def persistent_all_reduce_spinlock(
             dest_rank = rank_start + i * rank_stride
 
             # Acquire lock for this tile at dest_rank using iris RMA
-            while iris.atomic_cas(locks_ptr + tile_id, 0, 1, iris_rank, dest_rank, heap_bases, sem="acquire", scope="sys") != 0:
+            while (
+                iris.atomic_cas(locks_ptr + tile_id, 0, 1, iris_rank, dest_rank, heap_bases, sem="acquire", scope="sys")
+                != 0
+            ):
                 pass
 
             # Load current value from dest_rank's output tile

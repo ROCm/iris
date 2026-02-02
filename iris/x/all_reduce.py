@@ -89,7 +89,9 @@ def all_reduce_spinlock(
     for dest_rank in range(ctx.world_size):
         # Acquire lock for this tile at dest_rank (spin until we swap 0 -> 1)
         # iris.atomic_cas handles remote rank access automatically
-        while iris.atomic_cas(locks + tile_id, 0, 1, ctx.rank, dest_rank, ctx.heap_bases, sem="acquire", scope="sys") != 0:
+        while (
+            iris.atomic_cas(locks + tile_id, 0, 1, ctx.rank, dest_rank, ctx.heap_bases, sem="acquire", scope="sys") != 0
+        ):
             pass
 
         # Load current value from dest_rank's tile using iris.load

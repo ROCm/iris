@@ -96,7 +96,11 @@ def all_to_all(
 
         # Destination mask
         dst_mask_m = dst_indices_m < dst_view.M
-        dst_mask_n = (dst_indices_n >= output_col_start + offset_in_tile) & (dst_indices_n < output_col_start + offset_in_tile + num_cols) & (dst_indices_n < dst_view.N)
+        dst_mask_n = (
+            (dst_indices_n >= output_col_start + offset_in_tile)
+            & (dst_indices_n < output_col_start + offset_in_tile + num_cols)
+            & (dst_indices_n < dst_view.N)
+        )
         dst_mask = dst_mask_m[:, None] & dst_mask_n[None, :]
 
         # Combined mask
