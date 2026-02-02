@@ -34,7 +34,8 @@ import iris.ops as ops
     "variant",
     [
         "atomic",
-        "spinlock",
+        # TODO enable these tests when support for cache-modifiers is in place.
+        # "spinlock",
         "one_shot",
         "two_shot",
     ],

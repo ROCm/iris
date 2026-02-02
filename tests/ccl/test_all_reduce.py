@@ -19,7 +19,8 @@ from iris.ccl import Config
         # "ring",
         "two_shot",
         "one_shot",
-        "spinlock",
+        # TODO enable these tests when support for cache-modifiers is in place.
+        # "spinlock",
     ],
 )
 @pytest.mark.parametrize(

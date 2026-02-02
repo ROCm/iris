@@ -98,7 +98,8 @@ def _get_my_group(groups, rank):
         "atomic",
         "two_shot",
         "one_shot",
-        "spinlock",
+        # TODO enable these tests when support for cache-modifiers is in place.
+        # "spinlock",
     ],
 )
 @pytest.mark.parametrize("group_type", ["consecutive", "strided"])

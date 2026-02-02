@@ -207,7 +207,8 @@ def x_all_reduce_spinlock_kernel(
         "atomic",
         "one_shot",
         "two_shot",
-        "spinlock",
+        # TODO enable these tests when support for cache-modifiers is in place.
+        # "spinlock",
     ],
 )
 @pytest.mark.parametrize(
