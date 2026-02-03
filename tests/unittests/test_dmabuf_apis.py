@@ -142,7 +142,8 @@ def test_dmabuf_with_offset():
     torch.cuda.empty_cache()
 
     # Allocate first tensor - this creates the caching allocator buffer
-    tensor1 = torch.tensor([100.0, 101.0, 102.0, 103.0, 104.0], dtype=torch.float32, device="cuda")
+    # Intentionally unused, but forces tensor2 to be suballocated with offset
+    _tensor1 = torch.tensor([100.0, 101.0, 102.0, 103.0, 104.0], dtype=torch.float32, device="cuda")
 
     # Allocate second tensor - this will be suballocated from same buffer with offset
     tensor2 = torch.tensor([200.0, 201.0, 202.0, 203.0, 204.0], dtype=torch.float32, device="cuda")
@@ -156,6 +157,8 @@ def test_dmabuf_with_offset():
     assert base_size > 0
 
     # Verify offset is non-zero (tensor2 is suballocated after tensor1)
+    # Note: With tritonBLAS loaded (via iris.ops), the caching allocator has
+    # already allocated memory, so this offset is reliably non-zero in our tests.
     offset = ptr2 - base_ptr
     assert offset > 0, f"Expected non-zero offset for suballocated tensor, got {offset}"
 

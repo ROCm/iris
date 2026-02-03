@@ -340,6 +340,9 @@ def import_dmabuf_handle(fd, size, original_ptr=None, base_ptr=None):
         from the caching allocator, as hipMemGetHandleForAddressRange exports the
         entire allocator buffer, not just the specific tensor's memory.
 
+        If only one parameter is provided (but not both), offset correction is skipped
+        and mapped_base is returned directly.
+
     Returns:
         Mapped GPU address (integer). If original_ptr and base_ptr are provided,
         returns the offset-corrected address to match the original pointer's position
@@ -418,7 +421,15 @@ def import_dmabuf_handle(fd, size, original_ptr=None, base_ptr=None):
     # If original_ptr and base_ptr are provided, calculate the offset and return
     # the correctly positioned pointer in the mapped address space
     if original_ptr is not None and base_ptr is not None:
-        offset = original_ptr - base_ptr
+        # Normalize to integers to support both raw ints and ctypes pointers
+        original_ptr_int = original_ptr if isinstance(original_ptr, int) else original_ptr.value
+        base_ptr_int = base_ptr if isinstance(base_ptr, int) else base_ptr.value
+
+        # Calculate and validate offset
+        offset = original_ptr_int - base_ptr_int
+        if offset < 0:
+            raise ValueError(f"Invalid offset: original_ptr ({original_ptr_int}) < base_ptr ({base_ptr_int})")
+
         return mapped_base + offset
 
     return mapped_base
