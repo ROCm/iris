@@ -21,7 +21,7 @@ Example (Traditional Functional API):
     >>> import iris
     >>> ctx = iris.iris(heap_size=2**30)  # 1GB heap
     >>> tensor = ctx.zeros(1024, 1024, dtype=torch.float32)
-    >>> 
+    >>>
     >>> @triton.jit
     >>> def kernel(buffer, heap_bases, rank, world_size):
     >>>     data = iris.load(buffer, rank, remote_rank, heap_bases)
@@ -31,7 +31,7 @@ Example (Object-Oriented DeviceContext API):
     >>> from iris import DeviceContext
     >>> ctx = iris.iris(heap_size=2**30)
     >>> context_tensor = ctx.get_device_context()
-    >>> 
+    >>>
     >>> @triton.jit
     >>> def kernel(context_tensor, rank: tl.constexpr, world_size: tl.constexpr):
     >>>     device_ctx = DeviceContext.initialize(context_tensor, rank, world_size)
@@ -40,6 +40,7 @@ Example (Object-Oriented DeviceContext API):
 
 import triton
 import triton.language as tl
+from triton.language.core import _aggregate as aggregate
 
 from iris._distributed_helpers import (
     init_distributed,
@@ -1773,9 +1774,6 @@ def __translate(ptr, from_rank, to_rank, heap_bases):
     return translated_ptr
 
 
-from triton.language.core import _aggregate as aggregate
-
-
 @aggregate
 class DeviceContext:
     """
@@ -1922,7 +1920,7 @@ class DeviceContext:
 
         This method performs a remote load operation by translating `from_ptr` from the current
         rank's address space to the `from_rank`'s address space, loading the data, and storing
-        it to `to_ptr` in the current rank's local memory. If the current rank and `from_rank` 
+        it to `to_ptr` in the current rank's local memory. If the current rank and `from_rank`
         are the same, this performs a local copy operation.
 
         Args:
@@ -2018,7 +2016,7 @@ class DeviceContext:
 
         This method performs an atomic addition operation by translating the pointer
         from the current rank's address space to the `to_rank`'s address space and atomically
-        adding the provided data to the `to_rank` memory location. If the current rank and 
+        adding the provided data to the `to_rank` memory location. If the current rank and
         `to_rank` are the same, this performs a local atomic addition operation.
 
         Args:
