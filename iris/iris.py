@@ -1793,6 +1793,7 @@ def copy(
     cur_rank,
     heap_bases,
     mask=None,
+    other=None,
     load_cache_modifier=None,
     store_cache_modifier=None,
 ):
@@ -1812,6 +1813,7 @@ def copy(
         cur_rank (int): The rank ID issuing the copy operation. Must be either `from_rank` or `to_rank`.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load from the translated src_ptr[idx] and do not store to dst_ptr[idx]. Defaults to None.
+        other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
 
         load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
             - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
@@ -1854,7 +1856,7 @@ def copy(
     translated_src = tl.cast(from_base_byte + src_offset, src_ptr.dtype)
     translated_dst = tl.cast(to_base_byte + dst_offset, src_ptr.dtype)
 
-    data = tl.load(translated_src, mask=mask, cache_modifier=load_cache_modifier)
+    data = tl.load(translated_src, mask=mask, other=other, cache_modifier=load_cache_modifier)
     tl.store(translated_dst, data, mask=mask, cache_modifier=store_cache_modifier)
 
 

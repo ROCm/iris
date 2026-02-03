@@ -222,7 +222,7 @@ class IrisDeviceCtx:
         gl.store(translated_to_ptr, data, mask=mask)
 
     @gluon.jit
-    def copy(self, src_ptr, dst_ptr, from_rank, to_rank, mask=None):
+    def copy(self, src_ptr, dst_ptr, from_rank, to_rank, mask=None, other=None):
         """
         Copies data from the specified rank's memory into the destination rank's memory.
 
@@ -238,6 +238,7 @@ class IrisDeviceCtx:
             from_rank: The rank ID that owns `src_ptr` (source rank)
             to_rank: The rank ID that will receive the data (destination rank)
             mask: Optional mask for conditional operations
+            other: Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined.
 
         Example:
             >>> # Copy from rank 1 to rank 0 (current rank must be either 1 or 0)
@@ -259,7 +260,7 @@ class IrisDeviceCtx:
         translated_src = tl.cast(from_base_byte + src_offset, src_ptr.dtype)
         translated_dst = tl.cast(to_base_byte + dst_offset, src_ptr.dtype)
 
-        data = gl.load(translated_src, mask=mask)
+        data = gl.load(translated_src, mask=mask, other=other)
         gl.store(translated_dst, data, mask=mask)
 
     @gluon.jit
