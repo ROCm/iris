@@ -169,6 +169,7 @@ def test_dmabuf_with_offset():
             def __init__(self, ptr, size):
                 self.ptr = ptr
                 self.size = size
+
             @property
             def __cuda_array_interface__(self):
                 return {
@@ -183,8 +184,7 @@ def test_dmabuf_with_offset():
         torch.cuda.synchronize()
 
         # This is the critical test - without offset correction, we'd get tensor1's data!
-        assert torch.allclose(tensor2, mapped_tensor), \
-            f"Expected {tensor2.tolist()}, got {mapped_tensor.tolist()}"
+        assert torch.allclose(tensor2, mapped_tensor), f"Expected {tensor2.tolist()}, got {mapped_tensor.tolist()}"
 
     finally:
         os.close(fd)

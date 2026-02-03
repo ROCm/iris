@@ -102,7 +102,7 @@ class TorchAllocator(BaseAllocator):
             heap_base = self.get_base_address()
 
             # Pack metadata: (base_ptr, base_size, heap_ptr) as three 64-bit unsigned ints
-            my_metadata = struct.pack('QQQ', my_base, my_size, heap_base)
+            my_metadata = struct.pack("QQQ", my_base, my_size, heap_base)
 
             # Use context manager for automatic cleanup
             with managed_fd(my_fd):
@@ -121,7 +121,7 @@ class TorchAllocator(BaseAllocator):
                         send_fd(sock, my_fd, payload=my_metadata)
 
                     # Unpack peer's metadata
-                    peer_base, peer_size, peer_heap = struct.unpack('QQQ', peer_metadata)
+                    peer_base, peer_size, peer_heap = struct.unpack("QQQ", peer_metadata)
 
                     # Use context manager for peer handle and import the DMA-BUF
                     with managed_fd(peer_handle):
@@ -131,9 +131,9 @@ class TorchAllocator(BaseAllocator):
                         # peer_size is the size of their allocation buffer
                         mapped_addr = import_dmabuf_handle(
                             peer_handle,
-                            peer_size,      # Import the full base allocation
-                            peer_heap,      # Original heap pointer (for offset calculation)
-                            peer_base       # Base of allocation (for offset calculation)
+                            peer_size,  # Import the full base allocation
+                            peer_heap,  # Original heap pointer (for offset calculation)
+                            peer_base,  # Base of allocation (for offset calculation)
                         )
                         heap_bases_array[peer] = mapped_addr
 
