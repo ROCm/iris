@@ -142,7 +142,7 @@ class IrisDeviceCtx:
         return translated_ptr
 
     @gluon.jit
-    def load(self, pointer, from_rank, mask=None):
+    def load(self, pointer, from_rank, mask=None, other=None):
         """
         Loads a value from the specified rank's memory location to the current rank.
 
@@ -150,6 +150,7 @@ class IrisDeviceCtx:
             pointer: Pointer in the `from_rank`'s address space
             from_rank: The rank ID from which to read the data
             mask: Optional mask for conditional loading
+            other: Value to return for masked-out elements. If not provided, the result for masked-out elements is undefined.
 
         Returns:
             The loaded value from the target memory location
@@ -159,7 +160,7 @@ class IrisDeviceCtx:
             >>> data = ctx.load(buffer + offsets, 1, mask=mask)
         """
         translated_ptr = self._translate(pointer, self.cur_rank, from_rank)
-        result = gl.load(translated_ptr, mask=mask)
+        result = gl.load(translated_ptr, mask=mask, other=other)
         return result
 
     @gluon.jit
@@ -181,7 +182,7 @@ class IrisDeviceCtx:
         gl.store(translated_ptr, value, mask=mask)
 
     @gluon.jit
-    def get(self, from_ptr, to_ptr, from_rank, mask=None):
+    def get(self, from_ptr, to_ptr, from_rank, mask=None, other=None):
         """
         Copies data from the specified rank's memory to the current rank's local memory.
 
@@ -190,17 +191,18 @@ class IrisDeviceCtx:
             to_ptr: Pointer to local memory in current rank
             from_rank: The rank ID from which to read the data
             mask: Optional mask for conditional operations
+            other: Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined.
 
         Example:
             >>> # Copy from rank 1 to current rank's local memory
             >>> ctx.get(remote_ptr + offsets, local_ptr + offsets, 1, mask=mask)
         """
         translated_from_ptr = self._translate(from_ptr, self.cur_rank, from_rank)
-        data = gl.load(translated_from_ptr, mask=mask)
+        data = gl.load(translated_from_ptr, mask=mask, other=other)
         gl.store(to_ptr, data, mask=mask)
 
     @gluon.jit
-    def put(self, from_ptr, to_ptr, to_rank, mask=None):
+    def put(self, from_ptr, to_ptr, to_rank, mask=None, other=None):
         """
         Copies data from the current rank's local memory to the specified rank's memory.
 
@@ -209,13 +211,14 @@ class IrisDeviceCtx:
             to_ptr: Pointer to remote memory in `to_rank`'s address space
             to_rank: The rank ID to which the data will be written
             mask: Optional mask for conditional operations
+            other: Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined.
 
         Example:
             >>> # Copy from current rank's local memory to rank 1
             >>> ctx.put(local_ptr + offsets, remote_ptr + offsets, 1, mask=mask)
         """
         translated_to_ptr = self._translate(to_ptr, self.cur_rank, to_rank)
-        data = gl.load(from_ptr, mask=mask)
+        data = gl.load(from_ptr, mask=mask, other=other)
         gl.store(translated_to_ptr, data, mask=mask)
 
     @gluon.jit

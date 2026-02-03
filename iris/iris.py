@@ -1688,7 +1688,7 @@ def __translate(ptr, from_rank, to_rank, heap_bases):
 
 
 @triton.jit
-def load(pointer, to_rank, from_rank, heap_bases, mask=None, cache_modifier=None, volatile=False):
+def load(pointer, to_rank, from_rank, heap_bases, mask=None, other=None, cache_modifier=None, volatile=False):
     """
     Loads a value from the specified rank's memory location.
 
@@ -1708,6 +1708,7 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None, cache_modifier=None
         from_rank (int): The rank ID from which to read the data.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address pointer[idx]. Defaults to None.
+        other (Block, optional): Value to return for masked-out elements. If not provided, the result for masked-out elements is undefined. Defaults to None.
         cache_modifier (str, optional): Controls cache behavior of the load.
 
             Supported values:
@@ -1733,7 +1734,7 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None, cache_modifier=None
         >>>     return data
     """
     translated_ptr = __translate(pointer, to_rank, from_rank, heap_bases)
-    result = tl.load(translated_ptr, mask=mask, cache_modifier=cache_modifier, volatile=volatile)
+    result = tl.load(translated_ptr, mask=mask, other=other, cache_modifier=cache_modifier, volatile=volatile)
     return result
 
 
@@ -1859,7 +1860,15 @@ def copy(
 
 @triton.jit
 def get(
-    from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None, load_cache_modifier=None, store_cache_modifier=None
+    from_ptr,
+    to_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    other=None,
+    load_cache_modifier=None,
+    store_cache_modifier=None,
 ):
     """
     Copies data from the specified rank's memory to the current rank's local memory.
@@ -1876,6 +1885,7 @@ def get(
         to_rank (int): The current rank ID where the data will be stored.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
+        other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
 
         load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
             - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
@@ -1902,14 +1912,22 @@ def get(
     """
     translated_from_ptr = __translate(from_ptr, from_rank, to_rank, heap_bases)
 
-    data = tl.load(translated_from_ptr, mask=mask, cache_modifier=load_cache_modifier)
+    data = tl.load(translated_from_ptr, mask=mask, other=other, cache_modifier=load_cache_modifier)
 
     tl.store(to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
 
 
 @triton.jit
 def put(
-    from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None, load_cache_modifier=None, store_cache_modifier=None
+    from_ptr,
+    to_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    other=None,
+    load_cache_modifier=None,
+    store_cache_modifier=None,
 ):
     """
     Copies data from the current rank's local memory to the specified rank's memory.
@@ -1925,6 +1943,7 @@ def put(
         to_rank (int): The `to_rank` ID to which the data will be written.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
+        other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
 
         load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
             - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
@@ -1951,7 +1970,7 @@ def put(
     """
     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases)
 
-    data = tl.load(from_ptr, mask=mask, cache_modifier=load_cache_modifier)
+    data = tl.load(from_ptr, mask=mask, other=other, cache_modifier=load_cache_modifier)
 
     tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
 
