@@ -75,7 +75,7 @@ def test_dmabuf_export_import_roundtrip():
     assert fd >= 0
     assert base_ptr > 0
     assert base_size > 0
-    
+
     # Verify that offset handling is being tested
     # When iris.ops is imported (loading tritonBLAS), it allocates ~64MB of CUDA memory.
     # Subsequent allocations are suballocated from the caching allocator, resulting in
@@ -137,33 +137,33 @@ def test_dmabuf_with_offset():
     """Test DMA-BUF with non-zero offset (caching allocator suballocation)."""
     from iris.hip import export_dmabuf_handle, import_dmabuf_handle
     import os
-    
+
     # Empty cache first to ensure clean state
     torch.cuda.empty_cache()
-    
+
     # Allocate first tensor - this creates the caching allocator buffer
     tensor1 = torch.tensor([100.0, 101.0, 102.0, 103.0, 104.0], dtype=torch.float32, device="cuda")
-    
+
     # Allocate second tensor - this will be suballocated from same buffer with offset
     tensor2 = torch.tensor([200.0, 201.0, 202.0, 203.0, 204.0], dtype=torch.float32, device="cuda")
     ptr2 = tensor2.data_ptr()
     size2 = tensor2.element_size() * tensor2.numel()
-    
+
     # Export tensor2 - should get base of allocator buffer, not tensor2's address
     fd, base_ptr, base_size = export_dmabuf_handle(ptr2, size2)
     assert fd >= 0
     assert base_ptr > 0
     assert base_size > 0
-    
+
     # Verify offset is non-zero (tensor2 is suballocated after tensor1)
     offset = ptr2 - base_ptr
     assert offset > 0, f"Expected non-zero offset for suballocated tensor, got {offset}"
-    
+
     try:
         # Import with offset correction
         mapped_ptr = import_dmabuf_handle(fd, base_size, ptr2, base_ptr)
         assert mapped_ptr > 0
-        
+
         # Create tensor view and verify data matches
         class CUDAArrayInterface:
             def __init__(self, ptr, size):
@@ -177,15 +177,15 @@ def test_dmabuf_with_offset():
                     "data": (self.ptr, False),
                     "version": 3,
                 }
-        
+
         cuda_array = CUDAArrayInterface(mapped_ptr, size2)
         mapped_tensor = torch.as_tensor(cuda_array, device="cuda")
         torch.cuda.synchronize()
-        
+
         # This is the critical test - without offset correction, we'd get tensor1's data!
         assert torch.allclose(tensor2, mapped_tensor), \
             f"Expected {tensor2.tolist()}, got {mapped_tensor.tolist()}"
-    
+
     finally:
         os.close(fd)
 

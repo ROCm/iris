@@ -269,7 +269,7 @@ def export_dmabuf_handle(ptr, size):
             - fd: File descriptor (integer) for the DMA-BUF handle
             - base_ptr: Base address of the allocation containing ptr
             - base_size: Size of the base allocation
-        
+
         The base_ptr and base_size are needed because hipMemGetHandleForAddressRange
         exports the entire allocation buffer, not just the requested range. When
         importing, you'll need these to calculate the correct offset.
@@ -282,21 +282,21 @@ def export_dmabuf_handle(ptr, size):
 
     ptr_int = ptr if isinstance(ptr, int) else ptr.value
     ptr_arg = ctypes.c_void_p(ptr_int)
-    
+
     # First, get the base address and size of the allocation containing this pointer
     # This is needed because hipMemGetHandleForAddressRange exports the entire
     # allocation buffer (e.g., PyTorch's caching allocator buffer), not just the
     # specific memory range requested.
     base_ptr = ctypes.c_void_p()
     base_size = ctypes.c_size_t()
-    
+
     gpu_runtime.hipMemGetAddressRange.restype = ctypes.c_int
     gpu_runtime.hipMemGetAddressRange.argtypes = [
         ctypes.POINTER(ctypes.c_void_p),  # pbase
         ctypes.POINTER(ctypes.c_size_t),  # psize
         ctypes.c_void_p,  # dptr
     ]
-    
+
     err = gpu_runtime.hipMemGetAddressRange(ctypes.byref(base_ptr), ctypes.byref(base_size), ptr_arg)
     if err != 0:
         gpu_try(err)
@@ -333,7 +333,7 @@ def import_dmabuf_handle(fd, size, original_ptr=None, base_ptr=None):
         size: Size of the memory range to map (typically the base_size from export)
         original_ptr: Optional. The original pointer that was exported.
         base_ptr: Optional. The base address of the allocation (from export).
-        
+
         If both original_ptr and base_ptr are provided, the function will calculate
         the offset (original_ptr - base_ptr) and return the correctly offset pointer
         in the mapped address space. This is needed when exporting PyTorch tensors
@@ -414,11 +414,11 @@ def import_dmabuf_handle(fd, size, original_ptr=None, base_ptr=None):
         gpu_try(err)
 
     mapped_base = dev_ptr.value
-    
+
     # If original_ptr and base_ptr are provided, calculate the offset and return
     # the correctly positioned pointer in the mapped address space
     if original_ptr is not None and base_ptr is not None:
         offset = original_ptr - base_ptr
         return mapped_base + offset
-    
+
     return mapped_base

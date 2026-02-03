@@ -100,7 +100,7 @@ class TorchAllocator(BaseAllocator):
             # Get shareable handle for our memory pool
             my_fd, my_base, my_size = self.get_shareable_handle()
             heap_base = self.get_base_address()
-            
+
             # Pack metadata: (base_ptr, base_size, heap_ptr) as three 64-bit unsigned ints
             my_metadata = struct.pack('QQQ', my_base, my_size, heap_base)
 
@@ -119,7 +119,7 @@ class TorchAllocator(BaseAllocator):
                     else:
                         peer_handle, peer_metadata = recv_fd(sock, payload_size=24)  # 3 * 8 bytes
                         send_fd(sock, my_fd, payload=my_metadata)
-                    
+
                     # Unpack peer's metadata
                     peer_base, peer_size, peer_heap = struct.unpack('QQQ', peer_metadata)
 
@@ -130,7 +130,7 @@ class TorchAllocator(BaseAllocator):
                         # peer_base is the base of their allocation buffer
                         # peer_size is the size of their allocation buffer
                         mapped_addr = import_dmabuf_handle(
-                            peer_handle, 
+                            peer_handle,
                             peer_size,      # Import the full base allocation
                             peer_heap,      # Original heap pointer (for offset calculation)
                             peer_base       # Base of allocation (for offset calculation)
