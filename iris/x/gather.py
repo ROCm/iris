@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
 Tile-level gather primitive for Iris.
@@ -14,7 +14,8 @@ Use `gather` when you want to consume the tile immediately without materializing
 import triton
 import triton.language as tl
 import iris
-from .core import Tile, TensorView, DeviceContext
+from iris.iris import DeviceContext
+from .core import Tile, TensorView
 
 
 @triton.jit()

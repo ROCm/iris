@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
 Core abstractions for iris.x tile-level primitives.
@@ -462,52 +462,6 @@ class AllReduceConfig:
         self.locks_ptr = locks_ptr
 
 
-@aggregate
-class DeviceContext:
-    """
-    Device context encapsulating distributed system information.
 
-    This class stores the rank, world size, and heap base pointers needed
-    for multi-GPU operations using iris primitives.
-
-    IMPORTANT: Triton does not allow imports inside @triton.jit functions,
-    so collective methods cannot be added to this class. Instead, call the
-    collective primitives directly:
-
-    Usage:
-        from iris.x.all_gather import all_gather
-        from iris.x.all_reduce import all_reduce_one_shot
-        from iris.x.reduce_scatter import reduce_scatter
-
-        @triton.jit
-        def my_kernel(..., heap_bases, rank, world_size, ...):
-            ctx = DeviceContext(rank, world_size, heap_bases)
-
-            # Call primitives directly with ctx as the last argument
-            all_gather(tile, src_view, dst_view, dim, ctx)
-            all_reduce_one_shot(tile, src_view, dst_view, ctx)
-            reduce_scatter(tile, src_view, dst_view, ctx)
-
-    Attributes:
-        rank: Current rank (constexpr)
-        world_size: Total number of ranks (constexpr)
-        heap_bases: Heap base pointers for all ranks (tensor)
-    """
-
-    rank: tl.constexpr
-    world_size: tl.constexpr
-    heap_bases: tl.tensor
-
-    @triton.constexpr_function
-    def __init__(self, rank, world_size, heap_bases):
-        """
-        Create a device context for distributed operations.
-
-        Args:
-            rank: Current rank (must be constexpr in kernel signature)
-            world_size: Total number of ranks (must be constexpr in kernel signature)
-            heap_bases: Heap base pointers for all ranks (runtime tensor)
-        """
-        self.rank = tl.constexpr(rank)
-        self.world_size = tl.constexpr(world_size)
-        self.heap_bases = heap_bases
+__all__ = ['TileView', 'Tile', 'TensorView', 'AllReduceConfig',
+           'tile_layout', 'tile_ptr', 'offset_ptr']
