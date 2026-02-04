@@ -25,7 +25,7 @@ def x_all_to_all_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -46,7 +46,7 @@ def x_all_to_all_kernel(
         tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)  # N is total N
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)  # N is total N
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         iris.x.all_to_all(tile, src_view, dst_view, N_per_rank, ctx)
 
@@ -120,7 +120,7 @@ def test_all_to_all(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         iris_input_tensor.stride(1),
         iris_output_tensor.stride(0),
         iris_output_tensor.stride(1),
-        shmem.get_heap_bases(),
+        shmem.get_device_context(),
         rank,
         world_size,
         BLOCK_SIZE_M,

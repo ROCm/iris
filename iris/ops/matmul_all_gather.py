@@ -41,7 +41,7 @@ def _fused_matmul_all_gather_kernel(
     stride_cm_gathered: tl.constexpr,
     stride_cn_gathered: tl.constexpr,
     stride_bias: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -148,7 +148,7 @@ def _fused_matmul_all_gather_kernel(
         c = convert_dtype(acc, C_gathered.type.element_ty)
 
         # Create DeviceContext and destination TensorView for all-gather
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
         dst_view = iris.x.TensorView(C_gathered, M, N, stride_cm_gathered, stride_cn_gathered)
         tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
 
@@ -288,7 +288,7 @@ def matmul_all_gather(
         stride_cm_gathered,
         stride_cn_gathered,
         stride_bias,
-        shmem.heap_bases,
+        shmem.get_device_context(),
         rank,
         world_size,
         config.block_size_m,
