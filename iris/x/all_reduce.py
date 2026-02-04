@@ -236,8 +236,6 @@ def all_reduce_two_shot(
     src_view: TensorView,
     dst_view: TensorView,
     locks,
-    start_tile: tl.constexpr,
-    stride: tl.constexpr,
     ctx: DeviceContext,
 ):
     """
@@ -247,6 +245,7 @@ def all_reduce_two_shot(
     the result to all other ranks.
 
     Uses locks as ready flags: before loading, wait for remote tiles to be ready (lock == 1).
+    Uses interleaved distribution: rank handles tiles where tile_id % world_size == rank.
 
     Phase 1: If this tile is rank's responsibility, load from all ranks and reduce locally
     Phase 2: Scatter reduced tile to all ranks using iris.store
@@ -256,25 +255,21 @@ def all_reduce_two_shot(
         src_view: TensorView for source tensor (to load remote data).
         dst_view: TensorView for output tensor where reduced result will be written.
         locks: Pointer to lock array (one per tile) used as ready flags.
-        start_tile: Starting tile ID for this rank's responsibility.
-        stride: Stride between tiles this rank is responsible for.
         ctx: DeviceContext with rank, world_size, and heap_bases.
 
-    Example (interleaved distribution):
-        # Rank 0 handles tiles 0, 2, 4, ... (start_tile=0, stride=2)
-        # Rank 1 handles tiles 1, 3, 5, ... (start_tile=1, stride=2)
+    Example:
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)
         src_view = iris.x.TensorView(input_ptr, M, N, stride_m, stride_n)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
-        iris.x.all_reduce_two_shot(tile, src_view, dst_view, locks, rank, world_size, ctx)
+        iris.x.all_reduce_two_shot(tile, src_view, dst_view, locks, ctx)
     """
     # Compute tile ID
     num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)
     tile_id = tile.pid_m * num_tiles_n + tile.pid_n
 
     # Check if this tile is this rank's responsibility
-    # Tile is responsible if: (tile_id - start_tile) % stride == 0 and tile_id >= start_tile
-    is_responsible = (tile_id >= start_tile) and ((tile_id - start_tile) % stride == 0)
+    # Using interleaved distribution: rank handles tiles where tile_id % world_size == rank
+    is_responsible = (tile_id % ctx.world_size) == ctx.rank
 
     if is_responsible:
         # Phase 1: Reduce - load from all ranks and accumulate locally

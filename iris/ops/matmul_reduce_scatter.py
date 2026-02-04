@@ -35,8 +35,8 @@ def _fused_matmul_reduce_scatter_kernel(
     stride_ak,
     stride_bk,
     stride_bn,
-    stride_cm: tl.constexpr,
-    stride_cn: tl.constexpr,
+    stride_cm,
+    stride_cn,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -72,11 +72,9 @@ def _fused_matmul_reduce_scatter_kernel(
         EVEN_K: Whether K is evenly divisible by BLOCK_SIZE_K
     """
     pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
+    pid_m = pid // num_tiles_n
+    pid_n = pid % num_tiles_n
 
     # ═══════════════════════════════════════════════════════════════════════
     # GEMM using tritonblas stages
@@ -93,20 +91,25 @@ def _fused_matmul_reduce_scatter_kernel(
     # Get row and column indices from tile
     rm, rn = out_tile.indices()
 
-    c = acc.to(C.dtype.element_ty)
+    c = acc.to(C.type.element_ty)
 
+    # Store GEMM result to aux_buffer
     temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
     tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
     tl.debug_barrier()
 
-    tile_id = pid_m * num_pid_n + pid_n
+    # Signal tile is ready
+    tile_id = pid_m * num_tiles_n + pid_n
     lock_ptr = locks + tile_id
     tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")
 
+    # Create tile object and context
     tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-    src_view = iris.x.TensorView(aux_buffer, M, N, stride_cm, stride_cn)
-    dst_view = iris.x.TensorView(C, M, N, stride_cm, stride_cn)
     ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+
+    # Create tensor views for source and destination
+    src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
+    dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
     iris.x.reduce_scatter(tile_obj, src_view, dst_view, locks, ctx)
 

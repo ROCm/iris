@@ -16,9 +16,7 @@ import triton.language as tl
 import iris
 import iris.x
 
-from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view, Tile
-from tritonblas.kernels.stages.algorithms.binary import add_vector
-from tritonblas.kernels.stages.algorithms.unary import convert_dtype
+from tritonblas.kernels.stages import GemmContext, ScheduleContext
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
@@ -30,17 +28,17 @@ def _fused_all_gather_matmul_kernel(
     B,
     C,
     bias_ptr,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    K: tl.constexpr,
-    K_local: tl.constexpr,
-    stride_am: tl.constexpr,
-    stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr,
-    stride_bn: tl.constexpr,
-    stride_cm: tl.constexpr,
-    stride_cn: tl.constexpr,
-    stride_bias: tl.constexpr,
+    M,
+    N,
+    K,
+    K_local,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_bias,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -50,6 +48,7 @@ def _fused_all_gather_matmul_kernel(
     GROUP_SIZE_M: tl.constexpr,
     NUM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
+    NUM_K_BLOCKS_LOCAL: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
@@ -64,9 +63,6 @@ def _fused_all_gather_matmul_kernel(
         even_k=EVEN_K, allow_tf32=ALLOW_TF32,
     )
     sched = ScheduleContext(M, N, K, gemm_ctx)
-    
-    # Create B tensor view for loading
-    tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
 
     # Persistent loop over output tiles using scheduler
     start, total, stride = sched.persistent_tile_range()
@@ -81,30 +77,37 @@ def _fused_all_gather_matmul_kernel(
 
         # Create DeviceContext and TensorView for gather operations
         iris_ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
-        src_view = iris.x.TensorView(A_sharded, M, K_local, stride_am, stride_ak)
+        src_view = iris.x.make_tensor_view(A_sharded, M, K_local, stride_am, stride_ak)
+
+        # Precompute B column offsets for this output tile (constant across K iterations)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
         # Loop over all ranks to pull and accumulate
         # Note: K = world_size * K_local, so we iterate over each rank's K_local contribution
         for source_rank_id in range(world_size):
-            loop_k_local = tl.cdiv(K_local, BLOCK_SIZE_K)
-            if not EVEN_K:
-                loop_k_local -= 1
+            # Use pre-computed loop bound (constexpr for static unrolling)
+            loop_k_local = NUM_K_BLOCKS_LOCAL if EVEN_K else NUM_K_BLOCKS_LOCAL - 1
 
             # Loop over K dimension for this rank's shard
             for k_block_idx in range(0, loop_k_local):
                 k_offset = k_block_idx * BLOCK_SIZE_K
 
                 # Create tile view for this K block
-                tile_k = k_offset // BLOCK_SIZE_K
+                # Promote tile_k to tensor (TileView expects tl.tensor for pid_n)
+                tile_k = pid_m * 0 + k_offset // BLOCK_SIZE_K
                 k_tile = iris.x.TileView(pid_m, tile_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
 
                 # Pull A tile from source_rank_id using gather primitive
                 a = iris.x.gather(k_tile, src_view, source_rank_id, iris_ctx)
 
-                # Load B tile using tritonblas - compute global K index
-                global_k_idx = source_rank_id * tl.cdiv(K_local, BLOCK_SIZE_K) + k_block_idx
-                b_tile = Tile(global_k_idx, pid_n, BLOCK_SIZE_K, BLOCK_SIZE_N)
-                b = tensorB.load(b_tile, boundary=False)
+                # Load B tile using direct pointer arithmetic
+                # Compute global K row index for B matrix
+                global_k_offset = source_rank_id * K_local + k_block_idx * BLOCK_SIZE_K
+                rk = global_k_offset + tl.arange(0, BLOCK_SIZE_K)
+                rk = tl.max_contiguous(tl.multiple_of(rk % K, BLOCK_SIZE_K), BLOCK_SIZE_K)
+                B_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+                b = tl.load(B_ptrs)
 
                 # Accumulate
                 if ALLOW_TF32:
@@ -115,30 +118,33 @@ def _fused_all_gather_matmul_kernel(
             # Handle remaining K elements if not evenly divisible
             if not EVEN_K:
                 k_offset = loop_k_local * BLOCK_SIZE_K
-                tile_k = k_offset // BLOCK_SIZE_K
+                # Promote tile_k to tensor (TileView expects tl.tensor for pid_n)
+                tile_k = pid_m * 0 + k_offset // BLOCK_SIZE_K
                 k_tile = iris.x.TileView(pid_m, tile_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
 
                 # Pull A tile from source_rank_id using gather primitive
                 a = iris.x.gather(k_tile, src_view, source_rank_id, iris_ctx)
 
                 # Load B tile with boundary handling
-                global_k_idx = source_rank_id * tl.cdiv(K_local, BLOCK_SIZE_K) + loop_k_local
-                b_tile = Tile(global_k_idx, pid_n, BLOCK_SIZE_K, BLOCK_SIZE_N)
-                b = tensorB.load(b_tile, boundary=True)
+                global_k_offset = source_rank_id * K_local + loop_k_local * BLOCK_SIZE_K
+                rk = global_k_offset + tl.arange(0, BLOCK_SIZE_K)
+                B_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+                b_mask = (rk[:, None] < K) & (rn[None, :] < N)
+                b = tl.load(B_ptrs, mask=b_mask, other=0.0)
 
                 if ALLOW_TF32:
                     acc = tl.dot(a, b, acc, allow_tf32=True)
                 else:
                     acc += tl.dot(a, b, allow_tf32=False)
 
-        # Add bias if provided using tritonBLAS
+        # Add bias if provided
         if BIAS:
             rm, _ = out_tile.indices()
             bias_vector = tl.load(bias_ptr + rm * stride_bias, mask=rm < M, other=0.0)
-            acc = add_vector(acc, bias_vector, QUANTIZED=False)
+            acc = acc + bias_vector[:, None]
 
-        # Convert to output dtype using tritonBLAS
-        c = convert_dtype(acc, C.type.element_ty)
+        # Convert to output dtype
+        c = acc.to(C.type.element_ty)
 
         # Store result using tritonblas Tile
         rm, rn = out_tile.indices()
@@ -232,6 +238,7 @@ def all_gather_matmul(
         num_sms = props.multi_processor_count
 
     even_k = K_local % config.block_size_k == 0
+    num_k_blocks_local = (K_local + config.block_size_k - 1) // config.block_size_k
 
     # Launch single fused kernel
     grid = (num_sms,)
@@ -260,6 +267,7 @@ def all_gather_matmul(
         config.group_size_m,
         num_sms,
         config.num_xcds,
+        num_k_blocks_local,
         use_bias,
         even_k,
         config.allow_tf32,

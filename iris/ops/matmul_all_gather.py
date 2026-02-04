@@ -18,8 +18,6 @@ import iris
 import iris.x
 
 from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view
-from tritonblas.kernels.stages.algorithms.binary import add_vector
-from tritonblas.kernels.stages.algorithms.unary import convert_dtype
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
@@ -31,17 +29,17 @@ def _fused_matmul_all_gather_kernel(
     B,  # (K, N) - replicated across ranks
     C_gathered,  # (M, N) - gathered output (M = M_local * world_size)
     bias_ptr,
-    M_local: tl.constexpr,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    K: tl.constexpr,
-    stride_am: tl.constexpr,
-    stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr,
-    stride_bn: tl.constexpr,
-    stride_cm_gathered: tl.constexpr,
-    stride_cn_gathered: tl.constexpr,
-    stride_bias: tl.constexpr,
+    M_local,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm_gathered,
+    stride_cn_gathered,
+    stride_bias,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -82,18 +80,18 @@ def _fused_matmul_all_gather_kernel(
         # GEMM using tritonblas stages
         acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
 
-        # Add bias if provided using tritonBLAS
+        # Add bias if provided
         if BIAS:
             rm, _ = out_tile.indices()
             bias_vector = tl.load(bias_ptr + rm * stride_bias, mask=rm < M_local, other=0.0)
-            acc = add_vector(acc, bias_vector, QUANTIZED=False)
+            acc = acc + bias_vector[:, None]
 
-        # Convert to output dtype using tritonBLAS
-        c = convert_dtype(acc, C_gathered.type.element_ty)
+        # Convert to output dtype
+        c = acc.to(C_gathered.type.element_ty)
 
         # Create DeviceContext and destination TensorView for all-gather
         ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
-        dst_view = iris.x.TensorView(C_gathered, M, N, stride_cm_gathered, stride_cn_gathered)
+        dst_view = iris.x.make_tensor_view(C_gathered, M, N, stride_cm_gathered, stride_cn_gathered)
         tile_obj = iris.x.Tile(out_tile.pid_m, out_tile.pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
 
         # Scatter this tile to all ranks using iris.x.all_gather

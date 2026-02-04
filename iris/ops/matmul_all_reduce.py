@@ -35,8 +35,8 @@ def _fused_matmul_all_reduce_kernel(
     stride_ak,
     stride_bk,
     stride_bn,
-    stride_cm: tl.constexpr,
-    stride_cn: tl.constexpr,
+    stride_cm,
+    stride_cn,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -82,14 +82,11 @@ def _fused_matmul_all_reduce_kernel(
         BLOCK_SIZE_K: Block size for K dimension
         EVEN_K: Whether K is evenly divisible by BLOCK_SIZE_K
     """
-    # Get program ID and compute grid dimensions
+    # Get program ID and compute which tile this program handles
     pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-
-    # Compute which tile this program handles
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
+    pid_m = pid // num_tiles_n
+    pid_n = pid % num_tiles_n
 
     # ═══════════════════════════════════════════════════════════════════════
     # GEMM using tritonblas stages
@@ -107,14 +104,22 @@ def _fused_matmul_all_reduce_kernel(
     rm, rn = out_tile.indices()
 
     # Convert to output dtype
-    c = acc.to(C.dtype.element_ty)
+    c = acc.to(C.type.element_ty)
 
-    # Create views and context
+    # Create context and destination view (always needed)
     ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
-    dst_view = iris.x.TensorView(C, M, N, stride_cm, stride_cn)
+    dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
-    # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock
-    if VARIANT == "one_shot" or VARIANT == "two_shot":
+    # Create tile object once for all variants
+    tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+
+    # Dispatch to appropriate all-reduce variant
+    if VARIANT == "atomic":
+        iris.x.all_reduce_atomic(tile_obj, dst_view, ctx)
+    elif VARIANT == "spinlock":
+        iris.x.all_reduce_spinlock(tile_obj, dst_view, locks, ctx)
+    elif VARIANT == "one_shot" or VARIANT == "two_shot":
+        # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock
         # Store GEMM result to aux_buffer (avoid race condition with final output)
         temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
@@ -122,35 +127,17 @@ def _fused_matmul_all_reduce_kernel(
 
         # Signal tile is ready by unlocking (set lock to 1)
         # Use atomic_xchg with release semantics to ensure memory ordering
-        num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
         tile_id = pid_m * num_tiles_n + pid_n
         lock_ptr = locks + tile_id
         tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
 
-        # Create src_view pointing to aux_buffer
-        src_view = iris.x.TensorView(aux_buffer, M, N, stride_cm, stride_cn)
+        # Create source view only when needed (aux_buffer is not None)
+        src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
 
-    # Dispatch to appropriate all-reduce variant
-    if VARIANT == "atomic":
-        # Atomic uses tile.data directly (no intermediate store needed)
-        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-        iris.x.all_reduce_atomic(tile_obj, dst_view, ctx)
-    elif VARIANT == "spinlock":
-        # Spinlock uses tile.data directly and lock for mutual exclusion
-        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-        iris.x.all_reduce_spinlock(tile_obj, dst_view, locks, ctx)
-    elif VARIANT == "one_shot":
-        # one_shot loads from all ranks (data already in memory, locks signal readiness)
-        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-        iris.x.all_reduce_one_shot(tile_obj, src_view, dst_view, locks, ctx)
-    elif VARIANT == "two_shot":
-        # two_shot with work distribution (data in memory, locks signal readiness)
-        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-        iris.x.all_reduce_two_shot(tile_obj, src_view, dst_view, locks, cur_rank, world_size, ctx)
-    # elif VARIANT == "ring":
-    #     # Store locally first and signal ready
-    #     tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-    #     iris.x.all_reduce_ring(tile_obj, src_view, dst_view, locks, ctx)
+        if VARIANT == "one_shot":
+            iris.x.all_reduce_one_shot(tile_obj, src_view, dst_view, locks, ctx)
+        elif VARIANT == "two_shot":
+            iris.x.all_reduce_two_shot(tile_obj, src_view, dst_view, locks, ctx)
 
 
 def matmul_all_reduce_preamble(

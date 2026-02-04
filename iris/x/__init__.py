@@ -51,7 +51,7 @@ Example (Standalone API):
     >>>     iris.x.all_gather(tile, src_view, dst_view, dim, ctx)
 """
 
-from .core import Tile, TileView, TensorView, DeviceContext, AllReduceConfig, tile_layout, tile_ptr, offset_ptr
+from .core import Tile, TileView, TensorView, DeviceContext, AllReduceConfig, tile_layout, tile_ptr, offset_ptr, make_tensor_view
 from .all_reduce import (
     all_reduce_atomic,
     all_reduce_ring,
@@ -69,6 +69,7 @@ __all__ = [
     "Tile",
     "TileView",
     "TensorView",
+    "make_tensor_view",
     "DeviceContext",
     "AllReduceConfig",
     "tile_layout",
