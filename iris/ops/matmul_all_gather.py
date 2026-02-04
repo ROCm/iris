@@ -65,9 +65,14 @@ def _fused_matmul_all_gather_kernel(
     tensorA = make_tensor_view(A, M_local, K, stride_am, stride_ak)
     tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
     gemm_ctx = GemmContext(
-        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
-        num_sms=NUM_SMS, num_xcds=NUM_XCDS, group_size_m=GROUP_SIZE_M,
-        even_k=EVEN_K, allow_tf32=ALLOW_TF32,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=NUM_SMS,
+        num_xcds=NUM_XCDS,
+        group_size_m=GROUP_SIZE_M,
+        even_k=EVEN_K,
+        allow_tf32=ALLOW_TF32,
     )
     sched = ScheduleContext(M_local, N, K, gemm_ctx)
 
