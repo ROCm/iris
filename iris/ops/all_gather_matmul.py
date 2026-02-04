@@ -40,7 +40,7 @@ def _fused_all_gather_matmul_kernel(
     stride_cm: tl.constexpr,
     stride_cn: tl.constexpr,
     stride_bias: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -93,7 +93,7 @@ def _fused_all_gather_matmul_kernel(
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
 
         # Create DeviceContext and TensorView for gather operations
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
         src_view = iris.x.TensorView(A_sharded, M, K_local, stride_am, stride_ak)
 
         # Loop over all ranks to pull and accumulate
@@ -269,7 +269,7 @@ def all_gather_matmul(
         stride_cm,
         stride_cn,
         stride_bias,
-        shmem.heap_bases,
+        shmem.get_device_context(),
         rank,
         world_size,
         config.block_size_m,

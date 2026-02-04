@@ -24,7 +24,7 @@ def x_all_reduce_atomic_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -51,7 +51,7 @@ def x_all_reduce_atomic_kernel(
         # Create Tile with loaded data and views
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         iris.x.all_reduce_atomic(tile, dst_view, ctx)
 
@@ -68,7 +68,7 @@ def x_all_reduce_one_shot_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -102,7 +102,7 @@ def x_all_reduce_one_shot_kernel(
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
         src_view = iris.x.TensorView(temp_buffer, M, N, stride_in_m, stride_in_n)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         iris.x.all_reduce_one_shot(tile, src_view, dst_view, locks, ctx)
 
@@ -119,7 +119,7 @@ def x_all_reduce_two_shot_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -153,7 +153,7 @@ def x_all_reduce_two_shot_kernel(
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
         src_view = iris.x.TensorView(temp_buffer, M, N, stride_in_m, stride_in_n)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         iris.x.all_reduce_two_shot(tile, src_view, dst_view, locks, cur_rank, world_size, ctx)
 
@@ -169,7 +169,7 @@ def x_all_reduce_spinlock_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -196,7 +196,7 @@ def x_all_reduce_spinlock_kernel(
         # Create Tile with loaded data and views
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
         dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         iris.x.all_reduce_spinlock(tile, dst_view, locks_ptr, ctx)
 
@@ -297,7 +297,7 @@ def test_all_reduce(variant, dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N
             iris_input_tensor.stride(1),
             iris_output_tensor.stride(0),
             iris_output_tensor.stride(1),
-            shmem.get_heap_bases(),
+            shmem.get_device_context(),
             rank,
             world_size,
             BLOCK_SIZE_M,
@@ -314,7 +314,7 @@ def test_all_reduce(variant, dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N
             iris_input_tensor.stride(1),
             iris_output_tensor.stride(0),
             iris_output_tensor.stride(1),
-            shmem.get_heap_bases(),
+            shmem.get_device_context(),
             rank,
             world_size,
             BLOCK_SIZE_M,
@@ -330,7 +330,7 @@ def test_all_reduce(variant, dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N
             iris_input_tensor.stride(1),
             iris_output_tensor.stride(0),
             iris_output_tensor.stride(1),
-            shmem.get_heap_bases(),
+            shmem.get_device_context(),
             rank,
             world_size,
             BLOCK_SIZE_M,

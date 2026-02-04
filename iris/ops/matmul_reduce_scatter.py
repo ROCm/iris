@@ -35,7 +35,7 @@ def _fused_matmul_reduce_scatter_kernel(
     stride_bn: tl.constexpr,
     stride_cm: tl.constexpr,
     stride_cn: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -103,7 +103,7 @@ def _fused_matmul_reduce_scatter_kernel(
     tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
     src_view = iris.x.TensorView(aux_buffer, M, N, stride_cm, stride_cn)
     dst_view = iris.x.TensorView(C, M, N, stride_cm, stride_cn)
-    ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
     iris.x.reduce_scatter(tile_obj, src_view, dst_view, locks, ctx)
 
@@ -232,7 +232,7 @@ def matmul_reduce_scatter(
         B.stride(1),
         C.stride(0),
         C.stride(1),
-        shmem.get_heap_bases(),
+        shmem.get_device_context(),
         rank,
         world_size,
         config.block_size_m,

@@ -24,7 +24,7 @@ def x_all_gather_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -58,7 +58,7 @@ def x_all_gather_kernel(
             stride_out_m,
             stride_out_n,
         )
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         iris.x.all_gather(tile, dst_view, gather_dim, ctx)
 
@@ -146,7 +146,7 @@ def test_all_gather(gather_dim, dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZ
         iris_input_tensor.stride(1),
         iris_output_tensor.stride(0),
         iris_output_tensor.stride(1),
-        shmem.get_heap_bases(),
+        shmem.get_device_context(),
         rank,
         world_size,
         BLOCK_SIZE_M,
@@ -210,7 +210,7 @@ def x_all_gather_ctx_api_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -244,7 +244,7 @@ def x_all_gather_ctx_api_kernel(
             stride_out_m,
             stride_out_n,
         )
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         # Call primitive directly (ctx methods don't work due to Triton import restrictions)
         iris.x.all_gather(tile, dst_view, gather_dim, ctx)
@@ -315,7 +315,7 @@ def test_all_gather_ctx_api(gather_dim, dtype, atol, rtol, M, N, BLOCK_SIZE_M, B
         iris_input_tensor.stride(1),
         iris_output_tensor.stride(0),
         iris_output_tensor.stride(1),
-        shmem.get_heap_bases(),
+        shmem.get_device_context(),
         rank,
         world_size,
         BLOCK_SIZE_M,
