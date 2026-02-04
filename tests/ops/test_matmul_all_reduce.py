@@ -20,7 +20,7 @@ import iris.ops as ops
     [
         (torch.float16, 0.2, 0.01),
         (torch.float32, 0.3, 0.01),
-        (torch.bfloat16, 1.5, 0.02),
+        (torch.bfloat16, 2.5, 0.02),  # Increased from 1.5 to 2.5 for 8-rank tests
     ],
 )
 @pytest.mark.parametrize(

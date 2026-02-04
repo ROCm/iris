@@ -18,11 +18,13 @@ def test_dmabuf_export():
     ptr = tensor.data_ptr()
     size = tensor.element_size() * tensor.numel()
 
-    # Export the DMA-BUF FD
-    fd = export_dmabuf_handle(ptr, size)
+    # Export the DMA-BUF FD (returns fd, base_ptr, base_size)
+    fd, base_ptr, base_size = export_dmabuf_handle(ptr, size)
 
-    # Verify we got a valid file descriptor
+    # Verify we got valid values
     assert fd >= 0, f"Expected valid FD, got {fd}"
+    assert base_ptr > 0, f"Expected valid base_ptr, got {base_ptr}"
+    assert base_size > 0, f"Expected valid base_size, got {base_size}"
 
     # Close the FD
     import os
@@ -40,13 +42,15 @@ def test_dmabuf_import():
     ptr = tensor.data_ptr()
     size = tensor.element_size() * tensor.numel()
 
-    # Export the DMA-BUF FD
-    fd = export_dmabuf_handle(ptr, size)
+    # Export the DMA-BUF FD (returns fd, base_ptr, base_size)
+    fd, base_ptr, base_size = export_dmabuf_handle(ptr, size)
     assert fd >= 0
+    assert base_ptr > 0
+    assert base_size > 0
 
     try:
-        # Import the DMA-BUF FD
-        mapped_ptr = import_dmabuf_handle(fd, size)
+        # Import the DMA-BUF FD with offset correction
+        mapped_ptr = import_dmabuf_handle(fd, base_size, ptr, base_ptr)
 
         # Verify we got a valid pointer
         assert mapped_ptr > 0, f"Expected valid pointer, got {mapped_ptr}"
@@ -66,13 +70,24 @@ def test_dmabuf_export_import_roundtrip():
     ptr = tensor.data_ptr()
     size = tensor.element_size() * tensor.numel()
 
-    # Export the DMA-BUF FD
-    fd = export_dmabuf_handle(ptr, size)
+    # Export the DMA-BUF FD (returns fd, base_ptr, base_size)
+    fd, base_ptr, base_size = export_dmabuf_handle(ptr, size)
     assert fd >= 0
+    assert base_ptr > 0
+    assert base_size > 0
+
+    # Verify that offset handling is being tested
+    # When iris.ops is imported (loading tritonBLAS), it allocates ~64MB of CUDA memory.
+    # Subsequent allocations are suballocated from the caching allocator, resulting in
+    # non-zero offsets. This ensures our offset correction code is properly exercised.
+    offset = ptr - base_ptr
+    # Note: offset may be 0 if this is the first allocation, but with iris.ops loaded,
+    # it should typically be non-zero. We don't assert this to avoid test flakiness,
+    # but we document it for clarity.
 
     try:
-        # Import the DMA-BUF FD
-        mapped_ptr = import_dmabuf_handle(fd, size)
+        # Import the DMA-BUF FD with offset correction
+        mapped_ptr = import_dmabuf_handle(fd, base_size, ptr, base_ptr)
         assert mapped_ptr > 0
 
         # Create a tensor view from the mapped pointer
@@ -116,6 +131,66 @@ def test_iris_symmetric_heap_creation():
     assert tensor.shape == (100,)
     assert tensor.device.type == "cuda"
     assert torch.all(tensor == 0)
+
+
+def test_dmabuf_with_offset():
+    """Test DMA-BUF with non-zero offset (caching allocator suballocation)."""
+    from iris.hip import export_dmabuf_handle, import_dmabuf_handle
+    import os
+
+    # Empty cache first to ensure clean state
+    torch.cuda.empty_cache()
+
+    # Allocate first tensor - this creates the caching allocator buffer
+    # Intentionally unused, but forces tensor2 to be suballocated with offset
+    _tensor1 = torch.tensor([100.0, 101.0, 102.0, 103.0, 104.0], dtype=torch.float32, device="cuda")
+
+    # Allocate second tensor - this will be suballocated from same buffer with offset
+    tensor2 = torch.tensor([200.0, 201.0, 202.0, 203.0, 204.0], dtype=torch.float32, device="cuda")
+    ptr2 = tensor2.data_ptr()
+    size2 = tensor2.element_size() * tensor2.numel()
+
+    # Export tensor2 - should get base of allocator buffer, not tensor2's address
+    fd, base_ptr, base_size = export_dmabuf_handle(ptr2, size2)
+    assert fd >= 0
+    assert base_ptr > 0
+    assert base_size > 0
+
+    # Verify offset is non-zero (tensor2 is suballocated after tensor1)
+    # Note: With tritonBLAS loaded (via iris.ops), the caching allocator has
+    # already allocated memory, so this offset is reliably non-zero in our tests.
+    offset = ptr2 - base_ptr
+    assert offset > 0, f"Expected non-zero offset for suballocated tensor, got {offset}"
+
+    try:
+        # Import with offset correction
+        mapped_ptr = import_dmabuf_handle(fd, base_size, ptr2, base_ptr)
+        assert mapped_ptr > 0
+
+        # Create tensor view and verify data matches
+        class CUDAArrayInterface:
+            def __init__(self, ptr, size):
+                self.ptr = ptr
+                self.size = size
+
+            @property
+            def __cuda_array_interface__(self):
+                return {
+                    "shape": (self.size // 4,),
+                    "typestr": "<f4",
+                    "data": (self.ptr, False),
+                    "version": 3,
+                }
+
+        cuda_array = CUDAArrayInterface(mapped_ptr, size2)
+        mapped_tensor = torch.as_tensor(cuda_array, device="cuda")
+        torch.cuda.synchronize()
+
+        # This is the critical test - without offset correction, we'd get tensor1's data!
+        assert torch.allclose(tensor2, mapped_tensor), f"Expected {tensor2.tolist()}, got {mapped_tensor.tolist()}"
+
+    finally:
+        os.close(fd)
 
 
 def test_dmabuf_multirank_exchange():
