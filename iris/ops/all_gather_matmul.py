@@ -69,9 +69,6 @@ def _fused_all_gather_matmul_kernel(
     )
     sched = ScheduleContext(M, N, K, gemm_ctx)
 
-    # Create B tensor view for loading
-    tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
-
     # Persistent loop over output tiles using scheduler
     start, total, stride = sched.persistent_tile_range()
     for tile_id in range(start, total, stride):
