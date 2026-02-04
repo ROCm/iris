@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
+
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
@@ -26,13 +28,13 @@ def _fused_matmul_all_reduce_kernel(
     C,
     aux_buffer,
     locks,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    K: tl.constexpr,
-    stride_am: tl.constexpr,
-    stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr,
-    stride_bn: tl.constexpr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
     stride_cm: tl.constexpr,
     stride_cn: tl.constexpr,
     heap_bases: tl.tensor,
@@ -41,6 +43,7 @@ def _fused_matmul_all_reduce_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    EVEN_K: tl.constexpr,
     VARIANT: tl.constexpr,
 ):
     """
@@ -57,8 +60,8 @@ def _fused_matmul_all_reduce_kernel(
     - 'two_shot': Work distribution with reduce-scatter then all-gather pattern
 
     The kernel for each output tile:
-    1. Computes GEMM: local_tile = A_tile @ B_tile
-    2. Uses spinlock-protected read-modify-write to accumulate to all ranks
+    1. Computes GEMM using tritonblas GemmContext
+    2. Uses the specified variant for all-reduce across ranks
 
     Args:
         A: Pointer to input matrix A of shape (M, K) - local rank's data
@@ -77,6 +80,7 @@ def _fused_matmul_all_reduce_kernel(
         BLOCK_SIZE_M: Block size for M dimension
         BLOCK_SIZE_N: Block size for N dimension
         BLOCK_SIZE_K: Block size for K dimension
+        EVEN_K: Whether K is evenly divisible by BLOCK_SIZE_K
     """
     # Get program ID and compute grid dimensions
     pid = tl.program_id(axis=0)
@@ -87,27 +91,20 @@ def _fused_matmul_all_reduce_kernel(
     pid_m = pid // num_pid_n
     pid_n = pid % num_pid_n
 
-    # Compute row and column indices for this tile
-    rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    # ═══════════════════════════════════════════════════════════════════════
+    # GEMM using tritonblas stages
+    # ═══════════════════════════════════════════════════════════════════════
+    tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
+    tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
+    gemm_ctx = GemmContext(
+        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
+        num_sms=1, even_k=EVEN_K,
+    )
+    out_tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+    acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
 
-    # Initialize accumulator for GEMM
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-    # GEMM loop over K dimension
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-
-        # Load A tile
-        A_ptr = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-        a = tl.load(A_ptr, mask=(rm[:, None] < M) & (rk[None, :] < K), other=0.0)
-
-        # Load B tile
-        B_ptr = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-        b = tl.load(B_ptr, mask=(rk[:, None] < K) & (rn[None, :] < N), other=0.0)
-
-        # Accumulate
-        acc += tl.dot(a, b)
+    # Get row and column indices from tile (needed for one_shot/two_shot variants)
+    rm, rn = out_tile.indices()
 
     # Convert to output dtype
     c = acc.to(C.dtype.element_ty)
@@ -315,6 +312,8 @@ def matmul_all_reduce(
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
     grid = (num_pid_m * num_pid_n,)
 
+    even_k = K % config.block_size_k == 0
+
     _fused_matmul_all_reduce_kernel[grid](
         A,
         B,
@@ -336,6 +335,7 @@ def matmul_all_reduce(
         config.block_size_m,
         config.block_size_n,
         config.block_size_k,
+        even_k,
         config.all_reduce_variant,
     )
 
