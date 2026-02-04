@@ -84,8 +84,11 @@ def _fused_matmul_reduce_scatter_kernel(
     tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
     tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
     gemm_ctx = GemmContext(
-        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
-        num_sms=1, even_k=EVEN_K,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=1,
+        even_k=EVEN_K,
     )
     out_tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
     acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)

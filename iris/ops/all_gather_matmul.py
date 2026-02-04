@@ -59,12 +59,17 @@ def _fused_all_gather_matmul_kernel(
     # Create tritonblas context and scheduler for GEMM configuration
     # ═══════════════════════════════════════════════════════════════════════
     gemm_ctx = GemmContext(
-        BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
-        num_sms=NUM_SMS, num_xcds=NUM_XCDS, group_size_m=GROUP_SIZE_M,
-        even_k=EVEN_K, allow_tf32=ALLOW_TF32,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=NUM_SMS,
+        num_xcds=NUM_XCDS,
+        group_size_m=GROUP_SIZE_M,
+        even_k=EVEN_K,
+        allow_tf32=ALLOW_TF32,
     )
     sched = ScheduleContext(M, N, K, gemm_ctx)
-    
+
     # Create B tensor view for loading
     tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
 
