@@ -202,7 +202,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     for k in ["gemm"]:
         kernel_timing[k]["ms"] = 0
         kernel_timing[k]["experiments"] = 0
-    
+
     if args["validate"]:
         shmem.info("Validating...")
         # Validate global result

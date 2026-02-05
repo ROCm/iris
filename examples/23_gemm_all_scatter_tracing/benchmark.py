@@ -207,7 +207,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     for i in range(num_warmup_iters):
         run_experiment(enable_tracing=False)
         ctx.barrier()
-    
+
     # If tracing enabled, reset and run one clean iteration
     if args["trace"]:
         ctx.tracing.reset()

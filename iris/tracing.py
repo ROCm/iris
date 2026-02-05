@@ -29,7 +29,7 @@ EVENT_NAMES = {
     10: "atomic_and",
     11: "atomic_or",
     12: "atomic_min",
-    13: "atomic_max"
+    13: "atomic_max",
 }
 
 
@@ -69,17 +69,17 @@ class Tracing:
 
         # Allocate trace buffers (Structure of Arrays for better memory access)
         self.trace_buffers = {
-            'event_id': torch.zeros(max_events, dtype=torch.int32, device=device),
-            'pid': torch.zeros(max_events, dtype=torch.int32, device=device),
-            'pid_m': torch.zeros(max_events, dtype=torch.int32, device=device),
-            'pid_n': torch.zeros(max_events, dtype=torch.int32, device=device),
-            'cur_rank': torch.zeros(max_events, dtype=torch.int32, device=device),
-            'target_rank': torch.zeros(max_events, dtype=torch.int32, device=device),
-            'xcc_id': torch.zeros(max_events, dtype=torch.int32, device=device),
-            'cu_id': torch.zeros(max_events, dtype=torch.int32, device=device),
-            'timestamp': torch.zeros(max_events, dtype=torch.int64, device=device),
-            'address': torch.zeros(max_events, dtype=torch.int64, device=device),
-            'duration_cycles': torch.zeros(max_events, dtype=torch.int64, device=device),
+            "event_id": torch.zeros(max_events, dtype=torch.int32, device=device),
+            "pid": torch.zeros(max_events, dtype=torch.int32, device=device),
+            "pid_m": torch.zeros(max_events, dtype=torch.int32, device=device),
+            "pid_n": torch.zeros(max_events, dtype=torch.int32, device=device),
+            "cur_rank": torch.zeros(max_events, dtype=torch.int32, device=device),
+            "target_rank": torch.zeros(max_events, dtype=torch.int32, device=device),
+            "xcc_id": torch.zeros(max_events, dtype=torch.int32, device=device),
+            "cu_id": torch.zeros(max_events, dtype=torch.int32, device=device),
+            "timestamp": torch.zeros(max_events, dtype=torch.int64, device=device),
+            "address": torch.zeros(max_events, dtype=torch.int64, device=device),
+            "duration_cycles": torch.zeros(max_events, dtype=torch.int64, device=device),
         }
 
         # Atomic counter for event indexing
@@ -130,16 +130,16 @@ class Tracing:
         trace_events = []
 
         for i in range(num_events):
-            event_id = int(self.trace_buffers['event_id'][i].item())
+            event_id = int(self.trace_buffers["event_id"][i].item())
             event_name = EVENT_NAMES.get(event_id, f"unknown_{event_id}")
 
-            pid = int(self.trace_buffers['pid'][i].item())
-            cur_rank = int(self.trace_buffers['cur_rank'][i].item())
-            target_rank = int(self.trace_buffers['target_rank'][i].item())
-            xcc_id = int(self.trace_buffers['xcc_id'][i].item())
-            cu_id = int(self.trace_buffers['cu_id'][i].item())
-            begin_ts = int(self.trace_buffers['timestamp'][i].item())
-            end_ts = int(self.trace_buffers['duration_cycles'][i].item())
+            pid = int(self.trace_buffers["pid"][i].item())
+            cur_rank = int(self.trace_buffers["cur_rank"][i].item())
+            target_rank = int(self.trace_buffers["target_rank"][i].item())
+            xcc_id = int(self.trace_buffers["xcc_id"][i].item())
+            cu_id = int(self.trace_buffers["cu_id"][i].item())
+            begin_ts = int(self.trace_buffers["timestamp"][i].item())
+            end_ts = int(self.trace_buffers["duration_cycles"][i].item())
 
             # Compute duration (0 = instant event)
             duration_cycles = (end_ts - begin_ts) if end_ts > 0 else 0
@@ -153,13 +153,13 @@ class Tracing:
                 "tid": f"XCC{xcc_id}_CU{cu_id}",
                 "args": {
                     "program_id": pid,
-                    "pid_m": int(self.trace_buffers['pid_m'][i].item()),
-                    "pid_n": int(self.trace_buffers['pid_n'][i].item()),
+                    "pid_m": int(self.trace_buffers["pid_m"][i].item()),
+                    "pid_n": int(self.trace_buffers["pid_n"][i].item()),
                     "target_rank": target_rank,
-                    "address": hex(int(self.trace_buffers['address'][i].item())),
+                    "address": hex(int(self.trace_buffers["address"][i].item())),
                     "xcc_id": xcc_id,
                     "cu_id": cu_id,
-                }
+                },
             }
 
             # Duration event or instant event?
@@ -177,7 +177,7 @@ class Tracing:
             "name": "process_name",
             "ph": "M",
             "pid": self.iris.cur_rank,
-            "args": {"name": f"Rank {self.iris.cur_rank}"}
+            "args": {"name": f"Rank {self.iris.cur_rank}"},
         }
         trace_events.append(metadata)
 
@@ -223,11 +223,11 @@ class Tracing:
                 "rank": self.iris.cur_rank,
                 "world_size": self.iris.num_ranks,
                 "time_unit": "raw cycles (s_memrealtime @ 100MHz)",
-                **system_metadata
-            }
+                **system_metadata,
+            },
         }
-        per_rank_filename = filename.replace('.json', f'_rank{self.iris.cur_rank}.json')
-        with open(per_rank_filename, 'w') as f:
+        per_rank_filename = filename.replace(".json", f"_rank{self.iris.cur_rank}.json")
+        with open(per_rank_filename, "w") as f:
             json.dump(per_rank_data, f, indent=2)
         self.iris.info(f"Exported rank {self.iris.cur_rank} trace to {per_rank_filename}")
 
@@ -240,8 +240,8 @@ class Tracing:
         events_tensor = torch.ByteTensor(list(events_bytes)).cuda()
 
         # Gather event counts to rank 0
-        event_counts = torch.tensor([len(events_bytes)], dtype=torch.int64, device='cuda')
-        all_event_counts = [torch.zeros(1, dtype=torch.int64, device='cuda') for _ in range(self.iris.num_ranks)]
+        event_counts = torch.tensor([len(events_bytes)], dtype=torch.int64, device="cuda")
+        all_event_counts = [torch.zeros(1, dtype=torch.int64, device="cuda") for _ in range(self.iris.num_ranks)]
         dist.all_gather(all_event_counts, event_counts)
 
         # Rank 0: gather and merge all events
@@ -253,20 +253,20 @@ class Tracing:
                     all_events.extend(trace_events)
                 else:
                     recv_size = all_event_counts[rank_id].item()
-                    recv_tensor = torch.zeros(recv_size, dtype=torch.uint8, device='cuda')
+                    recv_tensor = torch.zeros(recv_size, dtype=torch.uint8, device="cuda")
                     dist.recv(recv_tensor, src=rank_id)
                     recv_bytes = bytes(recv_tensor.cpu().numpy())
                     rank_events = pickle.loads(recv_bytes)
                     all_events.extend(rank_events)
 
             # Align timestamps: find minimum timestamp across all events
-            all_timestamps = [e['ts'] for e in all_events if e.get('ph') != 'M']
+            all_timestamps = [e["ts"] for e in all_events if e.get("ph") != "M"]
             if all_timestamps:
                 min_ts = min(all_timestamps)
                 # Shift all timestamps to start from 0
                 for event in all_events:
-                    if event.get('ph') != 'M':
-                        event['ts'] = event['ts'] - min_ts
+                    if event.get("ph") != "M":
+                        event["ts"] = event["ts"] - min_ts
 
             merged_data = {
                 "traceEvents": all_events,
@@ -279,12 +279,12 @@ class Tracing:
                     "world_size": self.iris.num_ranks,
                     "timestamp_offset": min_ts if all_timestamps else 0,
                     "aligned": "minimum timestamp across all ranks",
-                    **system_metadata
-                }
+                    **system_metadata,
+                },
             }
 
             # Write merged file
-            with open(filename, 'w') as f:
+            with open(filename, "w") as f:
                 json.dump(merged_data, f, indent=2)
 
             self.iris.info(f"Exported {len(all_events)} merged trace events to {filename} (aligned)")

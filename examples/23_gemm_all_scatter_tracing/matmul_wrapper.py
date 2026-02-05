@@ -7,7 +7,6 @@ import triton
 from gemm_all_scatter import persistent_gemm_all_scatter
 from examples.common.utils import is_triton_interpret_set
 import iris
-from iris import TraceEvent
 
 gemm_kernel = persistent_gemm_all_scatter
 
@@ -132,7 +131,7 @@ class matmul(torch.autograd.Function):
         if matmul._debug and not is_triton_interpret_set():
             matmul._registers = kk.n_regs
             matmul._spills = kk.n_spills
-            matmul._asm = kk.asm['amdgcn']
+            matmul._asm = kk.asm["amdgcn"]
 
         return c
 

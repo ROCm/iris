@@ -96,6 +96,7 @@ class TraceEvent:
         - atomic_min (12): Atomic minimum
         - atomic_max (13): Atomic maximum
     """
+
     # Data movement operations
     load: tl.constexpr
     store: tl.constexpr
@@ -1225,7 +1226,6 @@ class Iris:
         """
         return self.heap_bases
 
-
     def get_device_context(self):
         """
         Get the device context tensor for DeviceContext initialization.
@@ -1878,6 +1878,7 @@ class DeviceTracing:
         counter (tl.tensor): Atomic counter for event indexing
         buf_* (tl.tensor): Trace buffer pointers
     """
+
     enabled: tl.constexpr
     max_events: tl.constexpr
     counter: tl.tensor
@@ -1894,9 +1895,23 @@ class DeviceTracing:
     buf_duration_cycles: tl.tensor
 
     @triton.constexpr_function
-    def __init__(self, enabled=False, max_events=0, counter=None, buf_event_id=None, buf_pid=None,
-                 buf_pid_m=None, buf_pid_n=None, buf_cur_rank=None, buf_target_rank=None,
-                 buf_xcc_id=None, buf_cu_id=None, buf_timestamp=None, buf_address=None, buf_duration_cycles=None):
+    def __init__(
+        self,
+        enabled=False,
+        max_events=0,
+        counter=None,
+        buf_event_id=None,
+        buf_pid=None,
+        buf_pid_m=None,
+        buf_pid_n=None,
+        buf_cur_rank=None,
+        buf_target_rank=None,
+        buf_xcc_id=None,
+        buf_cu_id=None,
+        buf_timestamp=None,
+        buf_address=None,
+        buf_duration_cycles=None,
+    ):
         """Initialize device tracing context."""
         self.enabled = tl.constexpr(enabled)
         self.max_events = tl.constexpr(max_events)
@@ -2097,13 +2112,22 @@ class DeviceContext:
             trace_buf_duration_cycles = tl.cast(tl.load(context_tensor + base_idx + 10), tl.pointer_type(tl.int64))
 
             # Create DeviceTracing instance
-            device_tracing = DeviceTracing(enabled=tracing, max_events=max_events, counter=trace_counter,
-                                          buf_event_id=trace_buf_event_id, buf_pid=trace_buf_pid,
-                                          buf_pid_m=trace_buf_pid_m, buf_pid_n=trace_buf_pid_n,
-                                          buf_cur_rank=trace_buf_cur_rank, buf_target_rank=trace_buf_target_rank,
-                                          buf_xcc_id=trace_buf_xcc_id, buf_cu_id=trace_buf_cu_id,
-                                          buf_timestamp=trace_buf_timestamp, buf_address=trace_buf_address,
-                                          buf_duration_cycles=trace_buf_duration_cycles)
+            device_tracing = DeviceTracing(
+                enabled=tracing,
+                max_events=max_events,
+                counter=trace_counter,
+                buf_event_id=trace_buf_event_id,
+                buf_pid=trace_buf_pid,
+                buf_pid_m=trace_buf_pid_m,
+                buf_pid_n=trace_buf_pid_n,
+                buf_cur_rank=trace_buf_cur_rank,
+                buf_target_rank=trace_buf_target_rank,
+                buf_xcc_id=trace_buf_xcc_id,
+                buf_cu_id=trace_buf_cu_id,
+                buf_timestamp=trace_buf_timestamp,
+                buf_address=trace_buf_address,
+                buf_duration_cycles=trace_buf_duration_cycles,
+            )
 
             return DeviceContext(rank, world_size, heap_bases, device_tracing)
         else:
@@ -2113,13 +2137,22 @@ class DeviceContext:
             null_ptr_i32 = zero_i32  # Dummy pointer, never dereferenced
             null_ptr_i64 = zero_i64  # Dummy pointer, never dereferenced
 
-            device_tracing = DeviceTracing(enabled=False, max_events=0, counter=null_ptr_i32,
-                                          buf_event_id=null_ptr_i32, buf_pid=null_ptr_i32,
-                                          buf_pid_m=null_ptr_i32, buf_pid_n=null_ptr_i32,
-                                          buf_cur_rank=null_ptr_i32, buf_target_rank=null_ptr_i32,
-                                          buf_xcc_id=null_ptr_i32, buf_cu_id=null_ptr_i32,
-                                          buf_timestamp=null_ptr_i64, buf_address=null_ptr_i64,
-                                          buf_duration_cycles=null_ptr_i64)
+            device_tracing = DeviceTracing(
+                enabled=False,
+                max_events=0,
+                counter=null_ptr_i32,
+                buf_event_id=null_ptr_i32,
+                buf_pid=null_ptr_i32,
+                buf_pid_m=null_ptr_i32,
+                buf_pid_n=null_ptr_i32,
+                buf_cur_rank=null_ptr_i32,
+                buf_target_rank=null_ptr_i32,
+                buf_xcc_id=null_ptr_i32,
+                buf_cu_id=null_ptr_i32,
+                buf_timestamp=null_ptr_i64,
+                buf_address=null_ptr_i64,
+                buf_duration_cycles=null_ptr_i64,
+            )
 
             return DeviceContext(rank, world_size, heap_bases, device_tracing)
 
@@ -2493,7 +2526,6 @@ class DeviceContext:
         """
         translated_ptr = self._translate(pointer, self.rank, to_rank)
         return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
 
 
 @triton.jit

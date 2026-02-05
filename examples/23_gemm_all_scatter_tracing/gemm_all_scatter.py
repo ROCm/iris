@@ -6,7 +6,6 @@ import triton.language as tl
 from examples.common.utils import read_realtime
 
 
-import iris
 from iris import DeviceContext, TraceEvent
 
 
@@ -47,7 +46,7 @@ def persistent_gemm_all_scatter(
 ):
     # Initialize DeviceContext with tracing
     ctx = DeviceContext.initialize(context_tensor, cur_rank, world_size, tracing=TRACING)
-    
+
     pid = tl.program_id(0)
 
     if NUM_XCDS != 1:
@@ -140,7 +139,7 @@ def persistent_gemm_all_scatter(
         # Store local result first (needed for put operations)
         C_ptr = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_ptr, c, mask=sub_mask)
-        
+
         # Store data to the global result using DeviceContext
         for remote_rank in range(world_size):
             if remote_rank == cur_rank:
@@ -149,11 +148,18 @@ def persistent_gemm_all_scatter(
             else:
                 # Record duration event around remote store (compiles away if tracing=False)
                 # Pass 2D pointer tensor directly - record_event_start will extract the base address
-                handle = ctx.tracing.record_event_start(cur_rank, event_id=TraceEvent().put, target_rank=remote_rank, address=c_global + global_offset, pid_m=pid_m, pid_n=pid_n)
-                
+                handle = ctx.tracing.record_event_start(
+                    cur_rank,
+                    event_id=TraceEvent().put,
+                    target_rank=remote_rank,
+                    address=c_global + global_offset,
+                    pid_m=pid_m,
+                    pid_n=pid_n,
+                )
+
                 # Use DeviceContext.put for remote stores
                 # Put from local C to remote c_global
                 ctx.put(C_ptr, c_global + global_offset, to_rank=remote_rank, mask=sub_mask)
-                
+
                 # End duration event
                 ctx.tracing.record_event_end(handle)
