@@ -30,8 +30,7 @@ def parse_args():
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
     parser.add_argument("-t", "--trace_tiles", action="store_true", help="Enable tile-tracing mode")
-    parser.add_argument("--enable_tracing", action="store_true", help="Enable device tracing")
-    parser.add_argument("--compare_asm", action="store_true", help="Compare assembly with and without tracing")
+    parser.add_argument("--trace", action="store_true", help="Enable device tracing")
     parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking mode")
     parser.add_argument(
         "--datatype",
@@ -80,7 +79,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     world_size = ctx.get_num_ranks()
 
     # Enable device tracing if requested
-    if args["enable_tracing"]:
+    if args["trace"]:
         ctx.tracing.enable(max_events=1_000_000)
         ctx.info("Device tracing enabled")
 
@@ -117,7 +116,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     json_writer = JSONWriter(args["output_file"])
     json_writer.add_field("world_size", world_size)
-    json_writer.add_field("enable_tracing", args["enable_tracing"])
+    json_writer.add_field("enable_tracing", args["trace"])
 
     # Splitting
     args["n"] = args["n"] // world_size
@@ -203,71 +202,14 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # Synchronize across all GPUs
     ctx.barrier()
 
-    # Compare assembly if requested
-    if args["compare_asm"] and rank == 0:
-        ctx.info("="*80)
-        ctx.info("ASSEMBLY COMPARISON")
-        ctx.info("="*80)
-        
-        # Run with tracing disabled
-        matmul.set_debug(True)
-        run_experiment(enable_tracing=False)
-        asm_no_trace = matmul.get_matmul_asm()
-        regs_no_trace = matmul.get_matmul_registers()
-        spills_no_trace = matmul.get_matmul_spills()
-        
-        ctx.info(f"\nTRACING=False:")
-        ctx.info(f"  Registers: {regs_no_trace}")
-        ctx.info(f"  Spills: {spills_no_trace}")
-        ctx.info(f"  Assembly size: {len(asm_no_trace)} bytes")
-        
-        # Enable tracing and regenerate context tensor
-        ctx.tracing.enable(max_events=1_000_000)
-        context_tensor = ctx.get_device_context()
-        
-        # Run with tracing enabled
-        run_experiment(enable_tracing=True)
-        asm_with_trace = matmul.get_matmul_asm()
-        regs_with_trace = matmul.get_matmul_registers()
-        spills_with_trace = matmul.get_matmul_spills()
-        
-        ctx.info(f"\nTRACING=True:")
-        ctx.info(f"  Registers: {regs_with_trace}")
-        ctx.info(f"  Spills: {spills_with_trace}")
-        ctx.info(f"  Assembly size: {len(asm_with_trace)} bytes")
-        
-        ctx.info(f"\nDifference:")
-        ctx.info(f"  Δ Registers: {regs_with_trace - regs_no_trace}")
-        ctx.info(f"  Δ Spills: {spills_with_trace - spills_no_trace}")
-        ctx.info(f"  Δ Assembly: {len(asm_with_trace) - len(asm_no_trace)} bytes")
-        
-        # Write assembly to files
-        with open(f"gemm_no_trace_rank{rank}.s", "w") as f:
-            f.write(asm_no_trace)
-        with open(f"gemm_with_trace_rank{rank}.s", "w") as f:
-            f.write(asm_with_trace)
-        
-        ctx.info(f"\nAssembly saved to gemm_no_trace_rank{rank}.s and gemm_with_trace_rank{rank}.s")
-        ctx.info("="*80)
-        
-        json_writer.add_field("regs_no_trace", regs_no_trace)
-        json_writer.add_field("regs_with_trace", regs_with_trace)
-        json_writer.add_field("spills_no_trace", spills_no_trace)
-        json_writer.add_field("spills_with_trace", spills_with_trace)
-        json_writer.add_field("asm_size_no_trace", len(asm_no_trace))
-        json_writer.add_field("asm_size_with_trace", len(asm_with_trace))
-        
-        ctx.barrier()
-        return
-
-    # Warmup (always without tracing to avoid warmup overhead in trace)
+    # Warmup
     num_warmup_iters = 10
     for i in range(num_warmup_iters):
         run_experiment(enable_tracing=False)
         ctx.barrier()
     
     # If tracing enabled, reset and run one clean iteration
-    if args["enable_tracing"]:
+    if args["trace"]:
         ctx.tracing.reset()
         ctx.barrier()
         run_experiment(enable_tracing=True)
@@ -305,10 +247,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         matmul.set_debug(False)
         ctx.info("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
-        triton_ms = iris.do_bench(lambda: run_experiment(enable_tracing=args["enable_tracing"]), ctx.barrier)
+        triton_ms = iris.do_bench(lambda: run_experiment(enable_tracing=args["trace"]), ctx.barrier)
         triton_tflops = perf(triton_ms)
         algo_string = "all_scatter"
-        tracing_str = " (with tracing)" if args["enable_tracing"] else ""
+        tracing_str = " (with tracing)" if args["trace"] else ""
         ctx.info(
             f"tile matmul + {algo_string}{tracing_str} (total_tiles={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
         )
@@ -334,7 +276,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         timestamps.to_json(filename, gpu_freq)
 
     # Export device traces if enabled
-    if args["enable_tracing"]:
+    if args["trace"]:
         ctx.barrier()  # Ensure all kernels finished
         # Export per-rank and merged trace
         ctx.tracing.export("device_trace.json", merge=True)
