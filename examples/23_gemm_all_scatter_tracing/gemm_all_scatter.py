@@ -37,7 +37,7 @@ def persistent_gemm_all_scatter(
     NUM_XCDS: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
-    context_tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     TRACING: tl.constexpr = False,

@@ -25,7 +25,7 @@ def x_all_to_all_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    context_tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,

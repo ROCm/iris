@@ -35,7 +35,7 @@ def _fused_matmul_all_reduce_kernel(
     stride_bn: tl.constexpr,
     stride_cm: tl.constexpr,
     stride_cn: tl.constexpr,
-    context_tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,

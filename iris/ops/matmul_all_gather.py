@@ -41,7 +41,7 @@ def _fused_matmul_all_gather_kernel(
     stride_cm_gathered: tl.constexpr,
     stride_cn_gathered: tl.constexpr,
     stride_bias: tl.constexpr,
-    context_tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
