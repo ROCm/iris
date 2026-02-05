@@ -30,6 +30,8 @@ def parse_args():
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
     parser.add_argument("-t", "--trace_tiles", action="store_true", help="Enable tile-tracing mode")
+    parser.add_argument("--enable_tracing", action="store_true", help="Enable device tracing")
+    parser.add_argument("--compare_asm", action="store_true", help="Compare assembly with and without tracing")
     parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking mode")
     parser.add_argument(
         "--datatype",
@@ -73,9 +75,17 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     )
 
     # Main benchmark logic
-    shmem = iris.iris(args["heap_size"])
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+    ctx = iris.iris(args["heap_size"])
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
+
+    # Enable device tracing if requested
+    if args["enable_tracing"]:
+        ctx.tracing.enable(max_events=1_000_000)
+        ctx.info("Device tracing enabled")
+
+    # Get device context
+    context_tensor = ctx.get_device_context()
 
     # Set default SM values if not provided
     if args["gemm_sms"] is None:
@@ -98,8 +108,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     assert args["n"] % world_size == 0, f"N ({args['n']}) must be divisible by world size ({world_size})."
     assert args["k"] % world_size == 0, f"K ({args['k']}) must be divisible by world size ({world_size})."
 
-    A = shmem.randn(args["m"], args["k"], device="cuda", dtype=datatype)
-    B = shmem.randn(args["n"], args["k"], device="cuda", dtype=datatype).T
+    A = ctx.randn(args["m"], args["k"], device="cuda", dtype=datatype)
+    B = ctx.randn(args["n"], args["k"], device="cuda", dtype=datatype).T
 
     args["M"] = args["m"]
     args["N"] = args["n"]
@@ -107,6 +117,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     json_writer = JSONWriter(args["output_file"])
     json_writer.add_field("world_size", world_size)
+    json_writer.add_field("enable_tracing", args["enable_tracing"])
 
     # Splitting
     args["n"] = args["n"] // world_size
@@ -116,8 +127,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     for key, value in args.items():
         json_writer.add_field(key, value)
 
-    global_C = shmem.zeros((args["M"], args["N"]), device="cuda", dtype=A.dtype)
-    local_C = shmem.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
+    global_C = ctx.zeros((args["M"], args["N"]), device="cuda", dtype=A.dtype)
+    local_C = ctx.zeros((args["m"], args["n"]), device="cuda", dtype=A.dtype)
 
     total_blocks_M = triton.cdiv(args["m"], args["BLK_M"])
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
@@ -141,16 +152,16 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # Allocate Timestamps
     timestamps = Timestamps(num_tiles=total_tiles)
 
-    def run_experiment():
+    def run_experiment(enable_tracing=False):
         nonlocal local_C
         nonlocal global_C
         nonlocal kernel_timing
 
-        shmem.barrier()
+        ctx.barrier()
 
         if args["trace_tiles"]:
             timestamps.reset()
-            shmem.barrier()
+            ctx.barrier()
 
         torch.cuda.nvtx.range_push("GEMM + Communication")
         torch.cuda.nvtx.range_push("GEMM")
@@ -170,8 +181,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                 args["BLK_K"],
                 args["gsize_m"],
                 args["num_stages"],
-                shmem.get_heap_bases(),
+                context_tensor,
                 "gfx942",
+                enable_tracing,
                 args["trace_tiles"],
                 timestamps.mm_begin_timestamp,
                 timestamps.mm_end_timestamp,
@@ -180,7 +192,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             kernel_timing["gemm"]["experiments"] += 1
 
         torch.cuda.nvtx.range_pop()
-        shmem.barrier()
+        ctx.barrier()
 
         for k in ["gemm"]:
             ms = kernel_timing[k]["start_event"].elapsed_time(kernel_timing[k]["end_event"])
@@ -189,30 +201,94 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         torch.cuda.nvtx.range_pop()
 
     # Synchronize across all GPUs
-    shmem.barrier()
+    ctx.barrier()
 
-    # Enable debug mode to capture assembly metrics (before warmup)
-    matmul.set_debug(True)
+    # Compare assembly if requested
+    if args["compare_asm"] and rank == 0:
+        ctx.info("="*80)
+        ctx.info("ASSEMBLY COMPARISON")
+        ctx.info("="*80)
+        
+        # Run with tracing disabled
+        matmul.set_debug(True)
+        run_experiment(enable_tracing=False)
+        asm_no_trace = matmul.get_matmul_asm()
+        regs_no_trace = matmul.get_matmul_registers()
+        spills_no_trace = matmul.get_matmul_spills()
+        
+        ctx.info(f"\nTRACING=False:")
+        ctx.info(f"  Registers: {regs_no_trace}")
+        ctx.info(f"  Spills: {spills_no_trace}")
+        ctx.info(f"  Assembly size: {len(asm_no_trace)} bytes")
+        
+        # Enable tracing and regenerate context tensor
+        ctx.tracing.enable(max_events=1_000_000)
+        context_tensor = ctx.get_device_context()
+        
+        # Run with tracing enabled
+        run_experiment(enable_tracing=True)
+        asm_with_trace = matmul.get_matmul_asm()
+        regs_with_trace = matmul.get_matmul_registers()
+        spills_with_trace = matmul.get_matmul_spills()
+        
+        ctx.info(f"\nTRACING=True:")
+        ctx.info(f"  Registers: {regs_with_trace}")
+        ctx.info(f"  Spills: {spills_with_trace}")
+        ctx.info(f"  Assembly size: {len(asm_with_trace)} bytes")
+        
+        ctx.info(f"\nDifference:")
+        ctx.info(f"  Δ Registers: {regs_with_trace - regs_no_trace}")
+        ctx.info(f"  Δ Spills: {spills_with_trace - spills_no_trace}")
+        ctx.info(f"  Δ Assembly: {len(asm_with_trace) - len(asm_no_trace)} bytes")
+        
+        # Write assembly to files
+        with open(f"gemm_no_trace_rank{rank}.s", "w") as f:
+            f.write(asm_no_trace)
+        with open(f"gemm_with_trace_rank{rank}.s", "w") as f:
+            f.write(asm_with_trace)
+        
+        ctx.info(f"\nAssembly saved to gemm_no_trace_rank{rank}.s and gemm_with_trace_rank{rank}.s")
+        ctx.info("="*80)
+        
+        json_writer.add_field("regs_no_trace", regs_no_trace)
+        json_writer.add_field("regs_with_trace", regs_with_trace)
+        json_writer.add_field("spills_no_trace", spills_no_trace)
+        json_writer.add_field("spills_with_trace", spills_with_trace)
+        json_writer.add_field("asm_size_no_trace", len(asm_no_trace))
+        json_writer.add_field("asm_size_with_trace", len(asm_with_trace))
+        
+        ctx.barrier()
+        return
 
-    # Warmup
-    run_experiment()
-
-    shmem.barrier()
+    # Warmup (always without tracing to avoid warmup overhead in trace)
+    num_warmup_iters = 10
+    for i in range(num_warmup_iters):
+        run_experiment(enable_tracing=False)
+        ctx.barrier()
+    
+    # If tracing enabled, reset and run one clean iteration
+    if args["enable_tracing"]:
+        ctx.tracing.reset()
+        ctx.barrier()
+        run_experiment(enable_tracing=True)
+        ctx.barrier()
+        ctx.info(f"Captured clean trace after {num_warmup_iters} warmup iterations")
 
     for k in ["gemm"]:
         kernel_timing[k]["ms"] = 0
         kernel_timing[k]["experiments"] = 0
-    
+
     if args["validate"]:
-        shmem.info("Validating...")
+        ctx.info("Validating...")
+        matmul.set_debug(True)
         # Validate global result
-        success = validate_gemm(A, B, global_C, shmem)
+        success = validate_gemm(A, B, global_C, ctx)
         passed_str = "passed" if success else "failed"
-        shmem.info(f"Final C validation {passed_str}.")
+        ctx.info(f"Final C validation {passed_str}.")
 
         # Wait for all to finish validation
-        shmem.barrier()
-        shmem.info("Validating local C...")
+        ctx.barrier()
+        ctx.info("Validating local C...")
 
         json_writer.add_field("success", success)
 
@@ -223,17 +299,18 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             json_writer.add_field("gemm_registers", gemm_registers)
             json_writer.add_field("gemm_spills", gemm_spills)
 
-        shmem.info("Validation completed")
+        ctx.info("Validation completed")
 
     if args["benchmark"]:
         matmul.set_debug(False)
-        shmem.info("Benchmarking...")
+        ctx.info("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
-        triton_ms = iris.do_bench(run_experiment, shmem.barrier)
+        triton_ms = iris.do_bench(lambda: run_experiment(enable_tracing=args["enable_tracing"]), ctx.barrier)
         triton_tflops = perf(triton_ms)
         algo_string = "all_scatter"
-        shmem.info(
-            f"tile matmul + {algo_string} (total_tiles={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
+        tracing_str = " (with tracing)" if args["enable_tracing"] else ""
+        ctx.info(
+            f"tile matmul + {algo_string}{tracing_str} (total_tiles={total_tiles}): {triton_ms:.3f} ms  {triton_tflops:.3f} tflops"
         )
 
         json_writer.add_field("tflops", triton_tflops)
@@ -244,7 +321,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             json_writer.add_field(k + "_experiments", kernel_timing[k]["experiments"])
 
         # Wait for all to finish benchmarking
-        shmem.barrier()
+        ctx.barrier()
 
     if rank == 0:
         json_writer.flush()
@@ -256,7 +333,13 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         filename = f"gemm_tiles_{algo_string}_trace_rank{rank}.json"
         timestamps.to_json(filename, gpu_freq)
 
-    shmem.barrier()
+    # Export device traces if enabled
+    if args["enable_tracing"]:
+        ctx.barrier()  # Ensure all kernels finished
+        # Export per-rank and merged trace
+        ctx.tracing.export("device_trace.json", merge=True)
+
+    ctx.barrier()
 
     dist.barrier()
     dist.destroy_process_group()
