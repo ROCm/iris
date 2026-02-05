@@ -1966,7 +1966,7 @@ class DeviceTracing:
     def record_event_start(self, cur_rank, event_id, target_rank, address, pid_m=0, pid_n=0):
         """
         Start recording a duration event - returns event handle.
-        
+
         Note on address parameter:
         - `address` may be a scalar pointer or a tensor of pointers
         - For scalar pointers and 1D tensors, `tl.min` safely returns the base

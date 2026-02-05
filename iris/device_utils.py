@@ -16,10 +16,10 @@ import triton.language as tl
 def read_realtime():
     """
     Read GPU wall clock timestamp from s_memrealtime.
-    
+
     Returns a 64-bit timestamp from a constant 100MHz clock (not affected
     by power modes or core clock frequency changes).
-    
+
     Returns:
         int64: Current timestamp in cycles (100MHz constant clock)
     """
@@ -40,7 +40,7 @@ def read_realtime():
 def get_xcc_id():
     """
     Get XCC (GPU chiplet) ID.
-    
+
     Returns:
         int32: XCC ID for the current execution
     """
@@ -59,7 +59,7 @@ def get_xcc_id():
 def get_cu_id():
     """
     Get Compute Unit ID.
-    
+
     Returns:
         int32: CU ID for the current execution
     """
@@ -78,7 +78,7 @@ def get_cu_id():
 def get_se_id():
     """
     Get Shader Engine ID.
-    
+
     Returns:
         int32: SE ID for the current execution
     """
