@@ -36,14 +36,14 @@ EVENT_NAMES = {
 class Tracing:
     """
     Manages device-side event tracing for an Iris instance.
-    
+
     Handles trace buffer allocation, event capture, and export to Perfetto format.
     """
-    
+
     def __init__(self, iris_instance):
         """
         Initialize tracing manager.
-        
+
         Args:
             iris_instance: Parent Iris instance
         """
@@ -52,21 +52,21 @@ class Tracing:
         self.max_events = 0
         self.trace_buffers = {}
         self.trace_counter = None
-    
+
     def enable(self, max_events=1_000_000):
         """
         Enable device-side event tracing.
-        
+
         Allocates trace buffers to store events recorded by DeviceContext.
-        
+
         Args:
             max_events (int): Maximum number of events to record. Default: 1,000,000
         """
         self.enabled = True
         self.max_events = max_events
-        
+
         device = self.iris.device
-        
+
         # Allocate trace buffers (Structure of Arrays for better memory access)
         self.trace_buffers = {
             'event_id': torch.zeros(max_events, dtype=torch.int32, device=device),
@@ -81,38 +81,38 @@ class Tracing:
             'address': torch.zeros(max_events, dtype=torch.int64, device=device),
             'duration_cycles': torch.zeros(max_events, dtype=torch.int64, device=device),
         }
-        
+
         # Atomic counter for event indexing
         self.trace_counter = torch.zeros(1, dtype=torch.int32, device=device)
-        
+
         self.iris.info(f"Device tracing enabled with max {max_events} events")
-    
+
     def reset(self):
         """
         Reset trace counter to start a new trace capture.
-        
+
         Clears the event counter but keeps buffers allocated.
         """
         if not self.enabled:
             self.iris.warning("Tracing not enabled. Call tracing.enable() first.")
             return
-        
+
         self.trace_counter.zero_()
         self.iris.debug("Trace buffers reset")
-    
+
     def _collect_system_metadata(self):
         """Collect system and GPU metadata."""
         try:
             device_name = torch.cuda.get_device_name(self.iris.cur_rank)
-        except:
+        except Exception:
             device_name = "Unknown GPU"
-        
+
         try:
             total_memory = torch.cuda.get_device_properties(self.iris.cur_rank).total_memory
             total_memory_gb = total_memory / (1024**3)
-        except:
+        except Exception:
             total_memory_gb = 0
-        
+
         return {
             "process_name": os.path.basename(sys.argv[0]) if sys.argv else "unknown",
             "command_line": " ".join(sys.argv),
@@ -124,15 +124,15 @@ class Tracing:
             "gpu_num_xcc": hip.get_num_xcc(self.iris.cur_rank),
             "rocm_version": hip.get_rocm_version(),
         }
-    
+
     def _build_trace_events(self, num_events):
         """Build Perfetto trace events from captured data."""
         trace_events = []
-        
+
         for i in range(num_events):
             event_id = int(self.trace_buffers['event_id'][i].item())
             event_name = EVENT_NAMES.get(event_id, f"unknown_{event_id}")
-            
+
             pid = int(self.trace_buffers['pid'][i].item())
             cur_rank = int(self.trace_buffers['cur_rank'][i].item())
             target_rank = int(self.trace_buffers['target_rank'][i].item())
@@ -140,10 +140,10 @@ class Tracing:
             cu_id = int(self.trace_buffers['cu_id'][i].item())
             begin_ts = int(self.trace_buffers['timestamp'][i].item())
             end_ts = int(self.trace_buffers['duration_cycles'][i].item())
-            
+
             # Compute duration (0 = instant event)
             duration_cycles = (end_ts - begin_ts) if end_ts > 0 else 0
-            
+
             # Perfetto event structure
             perfetto_event = {
                 "name": event_name,
@@ -161,7 +161,7 @@ class Tracing:
                     "cu_id": cu_id,
                 }
             }
-            
+
             # Duration event or instant event?
             if duration_cycles > 0:
                 perfetto_event["ph"] = "X"  # Complete event
@@ -169,9 +169,9 @@ class Tracing:
             else:
                 perfetto_event["ph"] = "i"  # Instant event
                 perfetto_event["s"] = "t"
-            
+
             trace_events.append(perfetto_event)
-        
+
         # Add metadata event for this rank
         metadata = {
             "name": "process_name",
@@ -180,39 +180,39 @@ class Tracing:
             "args": {"name": f"Rank {self.iris.cur_rank}"}
         }
         trace_events.append(metadata)
-        
+
         return trace_events
-    
+
     def export(self, filename="trace.json", merge=False):
         """
         Export collected trace events to Perfetto/Chrome Trace Event Format.
-        
+
         All timestamps are in raw cycles from s_memrealtime (100MHz constant clock).
         View the output at: https://ui.perfetto.dev
-        
+
         Args:
             filename (str): Output JSON filename. Default: "trace.json"
             merge (bool): If True, rank 0 collects and merges traces from all ranks
                          with timestamp alignment. If False, each rank exports its own file.
-        
+
         Returns:
             dict: Trace data (merged on rank 0 if merge=True, per-rank otherwise)
         """
         import torch.distributed as dist
-        
+
         if not self.enabled:
             self.iris.warning("Tracing not enabled. Call tracing.enable() first.")
             return {}
-        
+
         # Get actual event count
         num_events = min(self.trace_counter.item(), self.max_events)
-        
+
         # Collect metadata
         system_metadata = self._collect_system_metadata()
-        
+
         # Build trace events
         trace_events = self._build_trace_events(num_events)
-        
+
         # Write per-rank file
         per_rank_data = {
             "traceEvents": trace_events,
@@ -230,24 +230,24 @@ class Tracing:
         with open(per_rank_filename, 'w') as f:
             json.dump(per_rank_data, f, indent=2)
         self.iris.info(f"Exported rank {self.iris.cur_rank} trace to {per_rank_filename}")
-        
+
         # If not merging, return per-rank data
         if not merge:
             return per_rank_data
-        
+
         # Merging logic: serialize and gather events from all ranks
         events_bytes = pickle.dumps(trace_events)
         events_tensor = torch.ByteTensor(list(events_bytes)).cuda()
-        
+
         # Gather event counts to rank 0
         event_counts = torch.tensor([len(events_bytes)], dtype=torch.int64, device='cuda')
         all_event_counts = [torch.zeros(1, dtype=torch.int64, device='cuda') for _ in range(self.iris.num_ranks)]
         dist.all_gather(all_event_counts, event_counts)
-        
+
         # Rank 0: gather and merge all events
         if self.iris.cur_rank == 0:
             all_events = []
-            
+
             for rank_id in range(self.iris.num_ranks):
                 if rank_id == 0:
                     all_events.extend(trace_events)
@@ -258,7 +258,7 @@ class Tracing:
                     recv_bytes = bytes(recv_tensor.cpu().numpy())
                     rank_events = pickle.loads(recv_bytes)
                     all_events.extend(rank_events)
-            
+
             # Align timestamps: find minimum timestamp across all events
             all_timestamps = [e['ts'] for e in all_events if e.get('ph') != 'M']
             if all_timestamps:
@@ -267,7 +267,7 @@ class Tracing:
                 for event in all_events:
                     if event.get('ph') != 'M':
                         event['ts'] = event['ts'] - min_ts
-            
+
             merged_data = {
                 "traceEvents": all_events,
                 "displayTimeUnit": "ns",
@@ -282,14 +282,14 @@ class Tracing:
                     **system_metadata
                 }
             }
-            
+
             # Write merged file
             with open(filename, 'w') as f:
                 json.dump(merged_data, f, indent=2)
-            
+
             self.iris.info(f"Exported {len(all_events)} merged trace events to {filename} (aligned)")
-            self.iris.info(f"View at: https://ui.perfetto.dev")
-            
+            self.iris.info("View at: https://ui.perfetto.dev")
+
             return merged_data
         else:
             # Other ranks: send events to rank 0

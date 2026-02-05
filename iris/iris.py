@@ -73,10 +73,10 @@ from examples.common.utils import read_realtime, get_xcc_id, get_cu_id
 class TraceEvent:
     """
     Trace event type enumeration for iris remote memory operations.
-    
+
     Usage:
         >>> ctx.record_event(event_id=TraceEvent().put, target_rank=1, address=ptr)
-    
+
     Available event types:
         Data Movement:
         - load (0): Remote load operation
@@ -84,7 +84,7 @@ class TraceEvent:
         - get (2): Remote read (pull from remote to local)
         - put (3): Remote write (push from local to remote)
         - copy (4): Peer-to-peer copy between ranks
-        
+
         Atomic Operations:
         - atomic_add (5): Atomic addition
         - atomic_sub (6): Atomic subtraction
@@ -102,7 +102,7 @@ class TraceEvent:
     get: tl.constexpr
     put: tl.constexpr
     copy: tl.constexpr
-    
+
     # Atomic operations
     atomic_add: tl.constexpr
     atomic_sub: tl.constexpr
@@ -113,7 +113,7 @@ class TraceEvent:
     atomic_or: tl.constexpr
     atomic_min: tl.constexpr
     atomic_max: tl.constexpr
-    
+
     @triton.constexpr_function
     def __init__(self):
         # Data movement
@@ -122,7 +122,7 @@ class TraceEvent:
         self.get = tl.constexpr(2)
         self.put = tl.constexpr(3)
         self.copy = tl.constexpr(4)
-        
+
         # Atomics
         self.atomic_add = tl.constexpr(5)
         self.atomic_sub = tl.constexpr(6)
@@ -1868,10 +1868,10 @@ def __translate(ptr, from_rank, to_rank, heap_bases):
 class DeviceTracing:
     """
     Device-side tracing API for capturing events in Triton kernels.
-    
+
     Provides methods for recording trace events with zero overhead when disabled.
     Access via `ctx.tracing.record_event_start()` etc.
-    
+
     Attributes:
         enabled (tl.constexpr): Whether tracing is enabled
         max_events (tl.constexpr): Maximum number of events
@@ -1892,7 +1892,7 @@ class DeviceTracing:
     buf_timestamp: tl.tensor
     buf_address: tl.tensor
     buf_duration_cycles: tl.tensor
-    
+
     @triton.constexpr_function
     def __init__(self, enabled=False, max_events=0, counter=None, buf_event_id=None, buf_pid=None,
                  buf_pid_m=None, buf_pid_n=None, buf_cur_rank=None, buf_target_rank=None,
@@ -1912,7 +1912,7 @@ class DeviceTracing:
         self.buf_timestamp = buf_timestamp
         self.buf_address = buf_address
         self.buf_duration_cycles = buf_duration_cycles
-    
+
     @triton.jit
     def record_event(self, cur_rank, event_id, target_rank, address, pid_m=0, pid_n=0):
         """Record an instant trace event."""
@@ -1933,7 +1933,7 @@ class DeviceTracing:
             tl.store(self.buf_cu_id + event_idx, cu_id)
             address_int = tl.cast(address, tl.uint64)
             tl.store(self.buf_address + event_idx, address_int)
-    
+
     @triton.jit
     def record_event_start(self, cur_rank, event_id, target_rank, address, pid_m=0, pid_n=0):
         """Start recording a duration event - returns event handle."""
@@ -1960,7 +1960,7 @@ class DeviceTracing:
             return event_idx
         else:
             return 0
-    
+
     @triton.jit
     def record_event_end(self, event_handle):
         """Finish recording a duration event - captures end timestamp."""
@@ -2078,10 +2078,10 @@ class DeviceContext:
             trace_info_idx = 2 + world_size + 1  # Skip: cur_rank, num_ranks, heap_bases, trace_enabled flag
             max_events = tl.load(context_tensor + trace_info_idx + 0)
             trace_counter_ptr = tl.load(context_tensor + trace_info_idx + 1)
-            
+
             # Cast trace_counter_ptr to pointer type
             trace_counter = tl.cast(trace_counter_ptr, tl.pointer_type(tl.int32))
-            
+
             # Extract trace buffer pointers (11 buffers)
             base_idx = trace_info_idx + 2
             trace_buf_event_id = tl.cast(tl.load(context_tensor + base_idx + 0), tl.pointer_type(tl.int32))
@@ -2095,7 +2095,7 @@ class DeviceContext:
             trace_buf_timestamp = tl.cast(tl.load(context_tensor + base_idx + 8), tl.pointer_type(tl.int64))
             trace_buf_address = tl.cast(tl.load(context_tensor + base_idx + 9), tl.pointer_type(tl.int64))
             trace_buf_duration_cycles = tl.cast(tl.load(context_tensor + base_idx + 10), tl.pointer_type(tl.int64))
-            
+
             # Create DeviceTracing instance
             device_tracing = DeviceTracing(enabled=tracing, max_events=max_events, counter=trace_counter,
                                           buf_event_id=trace_buf_event_id, buf_pid=trace_buf_pid,
@@ -2104,7 +2104,7 @@ class DeviceContext:
                                           buf_xcc_id=trace_buf_xcc_id, buf_cu_id=trace_buf_cu_id,
                                           buf_timestamp=trace_buf_timestamp, buf_address=trace_buf_address,
                                           buf_duration_cycles=trace_buf_duration_cycles)
-            
+
             return DeviceContext(rank, world_size, heap_bases, device_tracing)
         else:
             # When tracing disabled, create dummy DeviceTracing with null pointers (compiler optimizes this away)
@@ -2112,7 +2112,7 @@ class DeviceContext:
             zero_i64 = tl.zeros([1], dtype=tl.int64)
             null_ptr_i32 = zero_i32  # Dummy pointer, never dereferenced
             null_ptr_i64 = zero_i64  # Dummy pointer, never dereferenced
-            
+
             device_tracing = DeviceTracing(enabled=False, max_events=0, counter=null_ptr_i32,
                                           buf_event_id=null_ptr_i32, buf_pid=null_ptr_i32,
                                           buf_pid_m=null_ptr_i32, buf_pid_n=null_ptr_i32,
@@ -2120,7 +2120,7 @@ class DeviceContext:
                                           buf_xcc_id=null_ptr_i32, buf_cu_id=null_ptr_i32,
                                           buf_timestamp=null_ptr_i64, buf_address=null_ptr_i64,
                                           buf_duration_cycles=null_ptr_i64)
-            
+
             return DeviceContext(rank, world_size, heap_bases, device_tracing)
 
     @triton.jit
