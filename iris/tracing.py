@@ -244,6 +244,9 @@ class Tracing:
         all_event_counts = [torch.zeros(1, dtype=torch.int64, device="cuda") for _ in range(self.iris.num_ranks)]
         dist.all_gather(all_event_counts, event_counts)
 
+        # Synchronize before point-to-point communication to ensure proper ordering
+        dist.barrier()
+
         # Rank 0: gather and merge all events
         if self.iris.cur_rank == 0:
             all_events = []

@@ -79,10 +79,6 @@ class matmul(torch.autograd.Function):
         mfma = 16
         kpack = 1
 
-        total_blocks_M = triton.cdiv(M, BLK_M)
-        total_blocks_N = triton.cdiv(N, BLK_N)
-        iters_per_tile = triton.cdiv(K, BLK_K)
-        total_tiles = total_blocks_M * total_blocks_N
         even_k = K % BLK_K == 0
         use_bias = False
 

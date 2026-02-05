@@ -191,9 +191,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # Synchronize across all GPUs
     shmem.barrier()
 
-    # Enable debug mode to capture assembly metrics (before warmup)
-    matmul.set_debug(True)
-
     # Warmup
     run_experiment()
 
@@ -205,6 +202,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
     if args["validate"]:
         shmem.info("Validating...")
+        matmul.set_debug(True)
         # Validate global result
         success = validate_gemm(A, B, global_C, shmem)
         passed_str = "passed" if success else "failed"

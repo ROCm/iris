@@ -154,59 +154,6 @@ def is_triton_interpret_set():
     return "TRITON_INTERPRET" in os.environ
 
 
-@triton.jit
-def read_realtime():
-    """Read GPU wall clock timestamp."""
-    tmp = tl.inline_asm_elementwise(
-        asm="""s_waitcnt vmcnt(0)
-        s_memrealtime $0
-        s_waitcnt lgkmcnt(0)""",
-        constraints=("=s"),
-        args=[],
-        dtype=tl.int64,
-        is_pure=False,
-        pack=1,
-    )
-    return tmp
-
-
-@triton.jit
-def get_xcc_id():
-    """Get XCC (GPU chiplet) ID."""
-    xcc_id = tl.inline_asm_elementwise(
-        asm="s_getreg_b32 $0, hwreg(HW_REG_XCC_ID, 0, 16)",
-        constraints=("=s"),
-        args=[],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
-    return xcc_id
-
-
-@triton.jit
-def get_cu_id():
-    """Get Compute Unit ID."""
-    cu_id = tl.inline_asm_elementwise(
-        asm="s_getreg_b32 $0, hwreg(HW_REG_HW_ID, 8, 4)",
-        constraints=("=s"),
-        args=[],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
-    return cu_id
-
-
-@triton.jit
-def get_se_id():
-    """Get Shader Engine ID."""
-    se_id = tl.inline_asm_elementwise(
-        asm="s_getreg_b32 $0, hwreg(HW_REG_HW_ID, 13, 3)",
-        constraints=("=s"),
-        args=[],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
-    return se_id
+# Re-export device utility functions from iris module
+# These are kept here for backward compatibility with existing examples
+from iris.device_utils import read_realtime, get_xcc_id, get_cu_id, get_se_id

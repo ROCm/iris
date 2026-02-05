@@ -64,9 +64,7 @@ from .logging import logger
 
 # Import tracing functionality
 from .tracing import Tracing
-
-# Import tracing helper functions
-from examples.common.utils import read_realtime, get_xcc_id, get_cu_id
+from .device_utils import read_realtime, get_xcc_id, get_cu_id
 
 
 @aggregate
@@ -1260,7 +1258,20 @@ class Iris:
 
         # Add tracing info if enabled
         if self.tracing.enabled:
-            trace_buffer_ptrs = [buf.data_ptr() for buf in self.tracing.trace_buffers.values()]
+            # Explicit buffer ordering (must match DeviceContext.initialize extraction order)
+            trace_buffer_ptrs = [
+                self.tracing.trace_buffers["event_id"].data_ptr(),
+                self.tracing.trace_buffers["pid"].data_ptr(),
+                self.tracing.trace_buffers["pid_m"].data_ptr(),
+                self.tracing.trace_buffers["pid_n"].data_ptr(),
+                self.tracing.trace_buffers["cur_rank"].data_ptr(),
+                self.tracing.trace_buffers["target_rank"].data_ptr(),
+                self.tracing.trace_buffers["xcc_id"].data_ptr(),
+                self.tracing.trace_buffers["cu_id"].data_ptr(),
+                self.tracing.trace_buffers["timestamp"].data_ptr(),
+                self.tracing.trace_buffers["address"].data_ptr(),
+                self.tracing.trace_buffers["duration_cycles"].data_ptr(),
+            ]
             context_data += [
                 1,  # trace_enabled = 1 (true)
                 self.tracing.max_events,
@@ -1934,44 +1945,58 @@ class DeviceTracing:
         if self.enabled:
             timestamp = read_realtime()
             event_idx = tl.atomic_add(self.counter, 1)
-            tl.store(self.buf_timestamp + event_idx, timestamp)
-            tl.store(self.buf_event_id + event_idx, event_id)
-            pid = tl.program_id(0)
-            tl.store(self.buf_pid + event_idx, pid)
-            tl.store(self.buf_pid_m + event_idx, pid_m)
-            tl.store(self.buf_pid_n + event_idx, pid_n)
-            tl.store(self.buf_cur_rank + event_idx, cur_rank)
-            tl.store(self.buf_target_rank + event_idx, target_rank)
-            xcc_id = get_xcc_id()
-            cu_id = get_cu_id()
-            tl.store(self.buf_xcc_id + event_idx, xcc_id)
-            tl.store(self.buf_cu_id + event_idx, cu_id)
-            address_int = tl.cast(address, tl.uint64)
-            tl.store(self.buf_address + event_idx, address_int)
+            # Bounds check: only record if we have space
+            if event_idx < self.max_events:
+                tl.store(self.buf_timestamp + event_idx, timestamp)
+                tl.store(self.buf_event_id + event_idx, event_id)
+                pid = tl.program_id(0)
+                tl.store(self.buf_pid + event_idx, pid)
+                tl.store(self.buf_pid_m + event_idx, pid_m)
+                tl.store(self.buf_pid_n + event_idx, pid_n)
+                tl.store(self.buf_cur_rank + event_idx, cur_rank)
+                tl.store(self.buf_target_rank + event_idx, target_rank)
+                xcc_id = get_xcc_id()
+                cu_id = get_cu_id()
+                tl.store(self.buf_xcc_id + event_idx, xcc_id)
+                tl.store(self.buf_cu_id + event_idx, cu_id)
+                address_int = tl.cast(address, tl.uint64)
+                tl.store(self.buf_address + event_idx, address_int)
 
     @triton.jit
     def record_event_start(self, cur_rank, event_id, target_rank, address, pid_m=0, pid_n=0):
-        """Start recording a duration event - returns event handle."""
+        """
+        Start recording a duration event - returns event handle.
+        
+        Note on address parameter:
+        - `address` may be a scalar pointer or a tensor of pointers
+        - For scalar pointers and 1D tensors, `tl.min` safely returns the base
+        - For higher-dimensional pointer tensors, this assumes all elements are
+          derived from a single base pointer using non-negative strides and
+          monotonically increasing offsets (e.g., standard row-major layouts)
+        - Arbitrary negative-stride or complex layouts are not supported and
+          may result in an incorrect base address being recorded
+        """
         if self.enabled:
             event_idx = tl.atomic_add(self.counter, 1)
-            tl.store(self.buf_event_id + event_idx, event_id)
-            pid = tl.program_id(0)
-            tl.store(self.buf_pid + event_idx, pid)
-            tl.store(self.buf_pid_m + event_idx, pid_m)
-            tl.store(self.buf_pid_n + event_idx, pid_n)
-            tl.store(self.buf_cur_rank + event_idx, cur_rank)
-            tl.store(self.buf_target_rank + event_idx, target_rank)
-            xcc_id = get_xcc_id()
-            cu_id = get_cu_id()
-            tl.store(self.buf_xcc_id + event_idx, xcc_id)
-            tl.store(self.buf_cu_id + event_idx, cu_id)
-            address_int = tl.cast(address, tl.uint64)
-            # For 2D tensors, extract minimum address (base)
-            # For scalar pointers, tl.min returns the scalar
-            address_int = tl.min(address_int)
-            tl.store(self.buf_address + event_idx, address_int)
-            begin_ts = read_realtime()
-            tl.store(self.buf_timestamp + event_idx, begin_ts)
+            # Bounds check: only record if we have space
+            if event_idx < self.max_events:
+                tl.store(self.buf_event_id + event_idx, event_id)
+                pid = tl.program_id(0)
+                tl.store(self.buf_pid + event_idx, pid)
+                tl.store(self.buf_pid_m + event_idx, pid_m)
+                tl.store(self.buf_pid_n + event_idx, pid_n)
+                tl.store(self.buf_cur_rank + event_idx, cur_rank)
+                tl.store(self.buf_target_rank + event_idx, target_rank)
+                xcc_id = get_xcc_id()
+                cu_id = get_cu_id()
+                tl.store(self.buf_xcc_id + event_idx, xcc_id)
+                tl.store(self.buf_cu_id + event_idx, cu_id)
+                address_int = tl.cast(address, tl.uint64)
+                # Extract base address (minimum for standard row-major layouts)
+                address_int = tl.min(address_int)
+                tl.store(self.buf_address + event_idx, address_int)
+                begin_ts = read_realtime()
+                tl.store(self.buf_timestamp + event_idx, begin_ts)
             return event_idx
         else:
             return 0
