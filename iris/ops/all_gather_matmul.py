@@ -263,7 +263,7 @@ def all_gather_matmul(
         stride_cm,
         stride_cn,
         stride_bias,
-        shmem.heap_bases,
+        shmem.get_device_context(),
         rank,
         world_size,
         config.block_size_m,
