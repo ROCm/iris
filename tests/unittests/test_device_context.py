@@ -101,16 +101,15 @@ def device_context_atomic_cas_kernel(
 
 
 @triton.jit
-def device_context_get_put_kernel(
+def device_context_get_kernel(
     context_tensor,
     source,
     local_buffer,
-    target,
     cur_rank: tl.constexpr,
     num_ranks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Test DeviceContext.get() and put() methods."""
+    """Test DeviceContext.get() method."""
     ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
@@ -121,6 +120,26 @@ def device_context_get_put_kernel(
     mask = offsets < BLOCK_SIZE
 
     ctx.get(source + offsets, local_buffer + offsets, from_rank=partner, mask=mask)
+
+
+@triton.jit
+def device_context_put_kernel(
+    context_tensor,
+    local_buffer,
+    target,
+    cur_rank: tl.constexpr,
+    num_ranks: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Test DeviceContext.put() method."""
+    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+
+    pid = tl.program_id(0)
+    partner = int((cur_rank + num_ranks // 2) % num_ranks)
+
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < BLOCK_SIZE
 
     ctx.put(local_buffer + offsets, target + offsets, to_rank=partner, mask=mask)
 
@@ -321,8 +340,8 @@ def test_device_context_atomic_cas():
         16,
     ],
 )
-def test_device_context_get_put(BLOCK_SIZE):
-    """Test DeviceContext.get() and put() work correctly."""
+def test_device_context_get(BLOCK_SIZE):
+    """Test DeviceContext.get() works correctly."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -331,12 +350,52 @@ def test_device_context_get_put(BLOCK_SIZE):
     context_tensor = ctx.get_device_context()
     source = ctx.full((BLOCK_SIZE,), cur_rank, dtype=torch.float32)
     local_buffer = ctx.zeros((BLOCK_SIZE,), dtype=torch.float32)
+
+    ctx.barrier()
+
+    grid = lambda meta: (1,)
+    device_context_get_kernel[grid](context_tensor, source, local_buffer, cur_rank, num_ranks, BLOCK_SIZE)
+    ctx.barrier()
+
+    expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda") * partner
+
+    try:
+        torch.testing.assert_close(local_buffer, expected, rtol=0, atol=0)
+    except AssertionError as e:
+        print(e)
+        print("Expected:", expected)
+        print("Actual:", local_buffer)
+        raise
+    finally:
+        ctx.barrier()
+        del ctx
+        import gc
+
+        gc.collect()
+
+
+@pytest.mark.parametrize(
+    "BLOCK_SIZE",
+    [
+        8,
+        16,
+    ],
+)
+def test_device_context_put(BLOCK_SIZE):
+    """Test DeviceContext.put() works correctly."""
+    ctx = iris.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    cur_rank = ctx.get_rank()
+    partner = int((cur_rank + num_ranks // 2) % num_ranks)
+
+    context_tensor = ctx.get_device_context()
+    local_buffer = ctx.full((BLOCK_SIZE,), cur_rank, dtype=torch.float32)
     target = ctx.zeros((BLOCK_SIZE,), dtype=torch.float32)
 
     ctx.barrier()
 
     grid = lambda meta: (1,)
-    device_context_get_put_kernel[grid](context_tensor, source, local_buffer, target, cur_rank, num_ranks, BLOCK_SIZE)
+    device_context_put_kernel[grid](context_tensor, local_buffer, target, cur_rank, num_ranks, BLOCK_SIZE)
     ctx.barrier()
 
     expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda") * partner
