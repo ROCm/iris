@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
-import triton
 import triton.language as tl
 import torch
 
@@ -156,4 +155,3 @@ def is_triton_interpret_set():
 
 # Re-export device utility functions from iris module
 # These are kept here for backward compatibility with existing examples
-from iris.device_utils import read_realtime, get_xcc_id, get_cu_id, get_se_id

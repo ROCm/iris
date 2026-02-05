@@ -2,7 +2,6 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import torch
-import triton
 
 from gemm_all_scatter import persistent_gemm_all_scatter
 from examples.common.utils import is_triton_interpret_set
