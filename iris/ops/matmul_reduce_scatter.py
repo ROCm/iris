@@ -37,7 +37,7 @@ def _fused_matmul_reduce_scatter_kernel(
     stride_bn,
     stride_cm,
     stride_cn,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -63,7 +63,7 @@ def _fused_matmul_reduce_scatter_kernel(
         stride_am, stride_ak: Strides for A tensor
         stride_bk, stride_bn: Strides for B tensor
         stride_cm, stride_cn: Strides for C tensor
-        heap_bases: Heap base pointers for all ranks
+        context_tensor: Device context tensor for RMA operations
         cur_rank: Current rank
         world_size: Total number of ranks
         BLOCK_SIZE_M: Block size for M dimension
@@ -108,7 +108,7 @@ def _fused_matmul_reduce_scatter_kernel(
 
     # Create tile object and context
     tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-    ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
     # Create tensor views for source and destination
     src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
@@ -243,7 +243,7 @@ def matmul_reduce_scatter(
         B.stride(1),
         C.stride(0),
         C.stride(1),
-        shmem.get_heap_bases(),
+        shmem.get_device_context(),
         rank,
         world_size,
         config.block_size_m,

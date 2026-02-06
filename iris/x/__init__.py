@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
 iris-x: Device-side tile-level primitives for fine-grained compute and collective operations.
@@ -19,7 +19,7 @@ Example (API with default algorithms):
     >>>     tile = iris.x.TileView(pid_m, pid_n, BLOCK_M, BLOCK_N)
     >>>     src_view = iris.x.TensorView(input_ptr, M, N, stride_m, stride_n)
     >>>     dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
-    >>>     ctx = iris.x.DeviceContext(rank, world_size, heap_bases)
+    >>>     ctx = iris.DeviceContext.initialize(context_tensor, rank, world_size)
     >>>
     >>>     # Call collectives on ctx directly (default algorithms)
     >>>     ctx.all_reduce(tile, src_view, dst_view)
@@ -33,7 +33,7 @@ Example (API with AllReduceConfig for algorithm selection):
     >>>     tile = iris.x.TileView(pid_m, pid_n, BLOCK_M, BLOCK_N)
     >>>     src_view = iris.x.TensorView(input_ptr, M, N, stride_m, stride_n)
     >>>     dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
-    >>>     ctx = iris.x.DeviceContext(rank, world_size, heap_bases)
+    >>>     ctx = iris.DeviceContext.initialize(context_tensor, rank, world_size)
     >>>
     >>>     # Use ring algorithm
     >>>     config = iris.x.AllReduceConfig("ring")
@@ -55,7 +55,6 @@ from .core import (
     Tile,
     TileView,
     TensorView,
-    DeviceContext,
     AllReduceConfig,
     tile_layout,
     tile_ptr,
@@ -79,12 +78,11 @@ __all__ = [
     "Tile",
     "TileView",
     "TensorView",
-    "make_tensor_view",
-    "DeviceContext",
     "AllReduceConfig",
     "tile_layout",
     "tile_ptr",
     "offset_ptr",
+    "make_tensor_view",
     # Device-side collectives
     "all_reduce_atomic",
     "all_reduce_ring",

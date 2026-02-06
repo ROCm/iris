@@ -37,7 +37,7 @@ def _fused_matmul_all_reduce_kernel(
     stride_bn,
     stride_cm,
     stride_cn,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -74,7 +74,7 @@ def _fused_matmul_all_reduce_kernel(
         stride_am, stride_ak: Strides for A tensor
         stride_bk, stride_bn: Strides for B tensor
         stride_cm, stride_cn: Strides for C tensor
-        heap_bases: Heap base pointers for all ranks
+        context_tensor: Device context tensor for RMA operations
         cur_rank: Current rank
         world_size: Total number of ranks
         BLOCK_SIZE_M: Block size for M dimension
@@ -109,8 +109,8 @@ def _fused_matmul_all_reduce_kernel(
     # Convert to output dtype
     c = acc.to(C.type.element_ty)
 
-    # Create context and destination view (always needed)
-    ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+    # Create views and context
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
     dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
     # Create tile object once for all variants
@@ -294,8 +294,8 @@ def matmul_all_reduce(
     if needs_prepare:
         workspace = matmul_all_reduce_preamble(shmem, C, A, B, config=config, workspace=workspace)
 
-    # Get heap bases for RMA
-    heap_bases = shmem.get_heap_bases()
+    # Get device context for RMA
+    device_context = shmem.get_device_context()
 
     # Launch kernel
     num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
@@ -319,7 +319,7 @@ def matmul_all_reduce(
         stride_bn,
         stride_cm,
         stride_cn,
-        heap_bases,
+        device_context,
         rank,
         world_size,
         config.block_size_m,

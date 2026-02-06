@@ -39,7 +39,7 @@ def _fused_all_gather_matmul_kernel(
     stride_cm,
     stride_cn,
     stride_bias,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -81,7 +81,7 @@ def _fused_all_gather_matmul_kernel(
         acc = gemm_ctx.init_accumulator()
 
         # Create DeviceContext and TensorView for gather operations
-        iris_ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
         src_view = iris.x.make_tensor_view(A_sharded, M, K_local, stride_am, stride_ak)
 
         # Precompute B column offsets for this output tile (constant across K iterations)
@@ -104,7 +104,7 @@ def _fused_all_gather_matmul_kernel(
                 k_tile = iris.x.TileView(pid_m, tile_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
 
                 # Pull A tile from source_rank_id using gather primitive
-                a = iris.x.gather(k_tile, src_view, source_rank_id, iris_ctx)
+                a = iris.x.gather(k_tile, src_view, source_rank_id, ctx)
 
                 # Load B tile using direct pointer arithmetic
                 # Compute global K row index for B matrix
@@ -128,7 +128,7 @@ def _fused_all_gather_matmul_kernel(
                 k_tile = iris.x.TileView(pid_m, tile_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
 
                 # Pull A tile from source_rank_id using gather primitive
-                a = iris.x.gather(k_tile, src_view, source_rank_id, iris_ctx)
+                a = iris.x.gather(k_tile, src_view, source_rank_id, ctx)
 
                 # Load B tile with boundary handling
                 global_k_offset = source_rank_id * K_local + loop_k_local * BLOCK_SIZE_K

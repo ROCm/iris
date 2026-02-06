@@ -3,17 +3,17 @@
 
 import triton
 import triton.language as tl
+
+from iris import DeviceContext, TraceEvent
 from iris.device_utils import read_realtime
 
 
-import iris
-
-
 @triton.jit()
-def persistent_gemm(
+def persistent_gemm_all_scatter(
     A,
     B,
     C,
+    c_global,
     bias_ptr,
     M,
     N,
@@ -24,26 +24,32 @@ def persistent_gemm(
     stride_bn,
     stride_cm,
     stride_cn,
+    stride_cm_global,
+    stride_cn_global,
     stride_bias,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    GEMM_SMS: tl.constexpr,
+    NUM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
+    TRACING: tl.constexpr = False,
     COLLECT_TIMESTAMPS: tl.constexpr = False,
     mm_begin_timestamp_ptr: tl.tensor = None,
     mm_end_timestamp_ptr: tl.tensor = None,
 ):
+    # Initialize DeviceContext with tracing
+    ctx = DeviceContext.initialize(context_tensor, cur_rank, world_size, tracing=TRACING)
+
     pid = tl.program_id(0)
 
     if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (GEMM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+        pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
@@ -57,7 +63,7 @@ def persistent_gemm(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
-    for tile_id in range(pid, total_tiles, GEMM_SMS):
+    for tile_id in range(pid, total_tiles, NUM_SMS):
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
             tl.atomic_min(mm_begin_timestamp_ptr + tile_id, timestamp)
@@ -122,63 +128,36 @@ def persistent_gemm(
         # This is because each rank is computing a portion of the N-dimension
         # locally and then scattering it to all other ranks to complete
         # the global N-dimension.
-        global_offset = rm[:, None] * stride_cm + (rn[None, :] + cur_rank * N) * stride_cn
+        global_offset = rm[:, None] * stride_cm_global + (rn[None, :] + cur_rank * N) * stride_cn_global
 
         # Timestamp for GEMM before store
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
-        tl.store(C + global_offset, c, mask=sub_mask, cache_modifier=".wt")
+        # Store local result first (needed for put operations)
+        C_ptr = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+        tl.store(C_ptr, c, mask=sub_mask)
 
-
-@triton.jit()
-def persistent_all_scatter(
-    C,
-    M,
-    N,
-    stride_cm_global,
-    stride_cn_global,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    COMM_SMS: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
-    heap_bases: tl.tensor,
-    cur_rank: tl.constexpr,
-    world_size: tl.constexpr,
-    COLLECT_TIMESTAMPS: tl.constexpr = False,
-    mm_begin_timestamp_ptr: tl.tensor = None,
-    mm_end_timestamp_ptr: tl.tensor = None,
-):
-    pid = tl.program_id(0)
-
-    if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (COMM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
-
-    for tile_id in range(pid, total_tiles, COMM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
-
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
-
-        # Begin: See the if segment for explanation:
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        sub_mask = (rm[:, None] < M) & (rn[None, :] < N)
-        global_offset = rm[:, None] * stride_cm_global + (rn[None, :] + cur_rank * N) * stride_cn_global
-        # End: masks/offset calculations.
-
+        # Store data to the global result using DeviceContext
         for remote_rank in range(world_size):
-            if remote_rank != cur_rank:
-                iris.put(C + global_offset, C + global_offset, cur_rank, remote_rank, heap_bases, mask=sub_mask)
+            if remote_rank == cur_rank:
+                # For the current rank, we can use store
+                tl.store(c_global + global_offset, c, mask=sub_mask)
+            else:
+                # Record duration event around remote store (compiles away if tracing=False)
+                # Pass 2D pointer tensor; record_event_start takes min as representative address
+                handle = ctx.tracing.record_event_start(
+                    event_id=TraceEvent().put,
+                    target_rank=remote_rank,
+                    address=c_global + global_offset,
+                    pid_m=pid_m,
+                    pid_n=pid_n,
+                )
+
+                # Use DeviceContext.put for remote stores
+                # Put from local C to remote c_global
+                ctx.put(C_ptr, c_global + global_offset, to_rank=remote_rank, mask=sub_mask)
+
+                # End duration event
+                ctx.tracing.record_event_end(handle)

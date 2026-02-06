@@ -12,6 +12,7 @@ import math
 import numpy as np
 import torch
 from typing import Optional, Dict
+import struct
 
 from .base import BaseAllocator
 from iris.hip import export_dmabuf_handle, import_dmabuf_handle
@@ -74,12 +75,12 @@ class TorchAllocator(BaseAllocator):
         sub_buffer = self.memory_pool[start : start + size_in_bytes].view(dtype)
         return sub_buffer.reshape((num_elements,))
 
-    def get_shareable_handle(self) -> int:
+    def get_shareable_handle(self) -> tuple:
         """
         Get a shareable handle for the memory pool.
 
         Returns:
-            DMA-BUF file descriptor
+            tuple: (fd, base_ptr, base_size) from export_dmabuf_handle
         """
         heap_base = self.get_base_address()
         return export_dmabuf_handle(heap_base, self.heap_size)
@@ -97,27 +98,43 @@ class TorchAllocator(BaseAllocator):
 
         if connections is not None:
             # Get shareable handle for our memory pool
-            my_handle = self.get_shareable_handle()
+            my_fd, my_base, my_size = self.get_shareable_handle()
+            heap_base = self.get_base_address()
+
+            # Pack metadata: (base_ptr, base_size, heap_ptr) as three 64-bit unsigned ints
+            my_metadata = struct.pack("QQQ", my_base, my_size, heap_base)
 
             # Use context manager for automatic cleanup
-            with managed_fd(my_handle):
+            with managed_fd(my_fd):
                 # Exchange handles with all peers
                 for peer, sock in connections.items():
                     if peer == self.cur_rank:
                         continue
 
                     # To avoid deadlock, higher rank sends first
+                    # Send FD along with metadata (base_ptr, base_size, heap_ptr)
                     if self.cur_rank > peer:
-                        send_fd(sock, my_handle)
-                        peer_handle, _ = recv_fd(sock)
+                        send_fd(sock, my_fd, payload=my_metadata)
+                        peer_handle, peer_metadata = recv_fd(sock, payload_size=24)  # 3 * 8 bytes
                     else:
-                        peer_handle, _ = recv_fd(sock)
-                        send_fd(sock, my_handle)
+                        peer_handle, peer_metadata = recv_fd(sock, payload_size=24)  # 3 * 8 bytes
+                        send_fd(sock, my_fd, payload=my_metadata)
+
+                    # Unpack peer's metadata
+                    peer_base, peer_size, peer_heap = struct.unpack("QQQ", peer_metadata)
 
                     # Use context manager for peer handle and import the DMA-BUF
                     with managed_fd(peer_handle):
-                        # Import peer's memory via DMA-BUF and get mapped address
-                        mapped_addr = import_dmabuf_handle(peer_handle, self.heap_size)
+                        # Import peer's memory via DMA-BUF with proper offset correction
+                        # peer_heap is where their heap starts (what they want us to use)
+                        # peer_base is the base of their allocation buffer
+                        # peer_size is the size of their allocation buffer
+                        mapped_addr = import_dmabuf_handle(
+                            peer_handle,
+                            peer_size,  # Import the full base allocation
+                            peer_heap,  # Original heap pointer (for offset calculation)
+                            peer_base,  # Base of allocation (for offset calculation)
+                        )
                         heap_bases_array[peer] = mapped_addr
 
             # Set our own base

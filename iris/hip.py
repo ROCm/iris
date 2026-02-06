@@ -265,7 +265,14 @@ def export_dmabuf_handle(ptr, size):
         size: Size of the memory range in bytes
 
     Returns:
-        File descriptor (integer) for the DMA-BUF handle
+        tuple: (fd, base_ptr, base_size) where:
+            - fd: File descriptor (integer) for the DMA-BUF handle
+            - base_ptr: Base address of the allocation containing ptr
+            - base_size: Size of the base allocation
+
+        The base_ptr and base_size are needed because hipMemGetHandleForAddressRange
+        exports the entire allocation buffer, not just the requested range. When
+        importing, you'll need these to calculate the correct offset.
 
     Raises:
         RuntimeError: If export fails or backend doesn't support it
@@ -273,8 +280,28 @@ def export_dmabuf_handle(ptr, size):
     if not _is_amd_backend:
         raise RuntimeError("DMA-BUF export only supported on AMD/HIP backend")
 
+    ptr_int = ptr if isinstance(ptr, int) else ptr.value
+    ptr_arg = ctypes.c_void_p(ptr_int)
+
+    # First, get the base address and size of the allocation containing this pointer
+    # This is needed because hipMemGetHandleForAddressRange exports the entire
+    # allocation buffer (e.g., PyTorch's caching allocator buffer), not just the
+    # specific memory range requested.
+    base_ptr = ctypes.c_void_p()
+    base_size = ctypes.c_size_t()
+
+    gpu_runtime.hipMemGetAddressRange.restype = ctypes.c_int
+    gpu_runtime.hipMemGetAddressRange.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),  # pbase
+        ctypes.POINTER(ctypes.c_size_t),  # psize
+        ctypes.c_void_p,  # dptr
+    ]
+
+    err = gpu_runtime.hipMemGetAddressRange(ctypes.byref(base_ptr), ctypes.byref(base_size), ptr_arg)
+    if err != 0:
+        gpu_try(err)
+
     fd = ctypes.c_int(-1)
-    ptr_arg = ctypes.c_void_p(ptr) if isinstance(ptr, int) else ptr
 
     # Configure function signature to avoid truncation
     gpu_runtime.hipMemGetHandleForAddressRange.restype = ctypes.c_int
@@ -287,24 +314,39 @@ def export_dmabuf_handle(ptr, size):
     ]
 
     # hipMemRangeHandleTypeDmaBufFd = 1
+    # Note: We pass the original ptr and size, but ROCm will export the entire
+    # base allocation buffer. The fd will refer to the base buffer.
     err = gpu_runtime.hipMemGetHandleForAddressRange(ctypes.byref(fd), ptr_arg, size, 1, 0)
 
     if err != 0:
         gpu_try(err)  # Will raise with error message
 
-    return fd.value
+    return (fd.value, base_ptr.value, base_size.value)
 
 
-def import_dmabuf_handle(fd, size):
+def import_dmabuf_handle(fd, size, original_ptr=None, base_ptr=None):
     """
     Import a DMA-BUF file descriptor and map it to a GPU address.
 
     Args:
         fd: DMA-BUF file descriptor
-        size: Size of the memory range in bytes
+        size: Size of the memory range to map (typically the base_size from export)
+        original_ptr: Optional. The original pointer that was exported.
+        base_ptr: Optional. The base address of the allocation (from export).
+
+        If both original_ptr and base_ptr are provided, the function will calculate
+        the offset (original_ptr - base_ptr) and return the correctly offset pointer
+        in the mapped address space. This is needed when exporting PyTorch tensors
+        from the caching allocator, as hipMemGetHandleForAddressRange exports the
+        entire allocator buffer, not just the specific tensor's memory.
+
+        If only one parameter is provided (but not both), offset correction is skipped
+        and mapped_base is returned directly.
 
     Returns:
-        Mapped GPU address (integer)
+        Mapped GPU address (integer). If original_ptr and base_ptr are provided,
+        returns the offset-corrected address to match the original pointer's position
+        within the mapped buffer.
 
     Raises:
         RuntimeError: If import fails or backend doesn't support it
@@ -374,4 +416,20 @@ def import_dmabuf_handle(fd, size):
     if err != 0:
         gpu_try(err)
 
-    return dev_ptr.value
+    mapped_base = dev_ptr.value
+
+    # If original_ptr and base_ptr are provided, calculate the offset and return
+    # the correctly positioned pointer in the mapped address space
+    if original_ptr is not None and base_ptr is not None:
+        # Normalize to integers to support both raw ints and ctypes pointers
+        original_ptr_int = original_ptr if isinstance(original_ptr, int) else original_ptr.value
+        base_ptr_int = base_ptr if isinstance(base_ptr, int) else base_ptr.value
+
+        # Calculate and validate offset
+        offset = original_ptr_int - base_ptr_int
+        if offset < 0:
+            raise ValueError(f"Invalid offset: original_ptr ({original_ptr_int}) < base_ptr ({base_ptr_int})")
+
+        return mapped_base + offset
+
+    return mapped_base
