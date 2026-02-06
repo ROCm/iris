@@ -487,4 +487,4 @@ class AllReduceConfig:
         self.locks_ptr = locks_ptr
 
 
-__all__ = ["TileView", "Tile", "TensorView", "AllReduceConfig", "tile_layout", "tile_ptr", "offset_ptr"]
+__all__ = ["TileView", "Tile", "TensorView", "AllReduceConfig", "tile_layout", "tile_ptr", "offset_ptr", "make_tensor_view"]
