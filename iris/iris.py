@@ -1906,7 +1906,7 @@ class DeviceContext:
             >>>
             >>>     # With tracing
             >>>     ctx = DeviceContext.initialize(context_tensor, rank, world_size, tracing=True)
-            >>>     ctx.tracing.record_event_start(rank, event_id=TraceEvent().put, target_rank=1, address=ptr)
+            >>>     ctx.tracing.record_event_start(event_id=TraceEvent().put, target_rank=1, address=ptr)
         """
         # Extract heap bases (from index 2 onwards)
         heap_bases = context_tensor + 2  # Offset pointer to start at heap bases
@@ -1937,6 +1937,7 @@ class DeviceContext:
             # Create DeviceTracing instance
             device_tracing = DeviceTracing(
                 enabled=tracing,
+                rank=rank,
                 max_events=max_events,
                 counter=trace_counter,
                 buf_event_id=trace_buf_event_id,
@@ -1960,6 +1961,7 @@ class DeviceContext:
             max_events_zero = tl.full((), 0, dtype=tl.int32)
             device_tracing = DeviceTracing(
                 enabled=False,
+                rank=rank,
                 max_events=max_events_zero,
                 counter=dummy_ptr_i32,
                 buf_event_id=dummy_ptr_i32,

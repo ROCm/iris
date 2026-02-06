@@ -27,6 +27,7 @@ class _DeviceTracingCls:
     """
 
     enabled: tl.constexpr
+    rank: tl.constexpr  # current rank (from ctx)
     max_events: tl.tensor  # scalar (0-dim)
     counter: tl.tensor  # pointer to int32
     buf_event_id: tl.tensor
@@ -44,6 +45,7 @@ class _DeviceTracingCls:
     def __init__(
         self,
         enabled,
+        rank,
         max_events,
         counter,
         buf_event_id,
@@ -60,6 +62,7 @@ class _DeviceTracingCls:
     ):
         """Construct DeviceTracing (called from DeviceContext.initialize)."""
         self.enabled = enabled
+        self.rank = rank
         self.max_events = max_events
         self.counter = counter
         self.buf_event_id = buf_event_id
@@ -77,7 +80,6 @@ class _DeviceTracingCls:
     @triton.jit
     def record_event_start(
         self,
-        cur_rank,
         event_id: tl.constexpr,
         target_rank,
         address,
@@ -88,6 +90,7 @@ class _DeviceTracingCls:
         Record start of a traced operation. Returns a handle for record_event_end.
 
         Only stores when event_idx.item() < max_events (bounds check).
+        cur_rank is taken from the tracing context (ctx.rank).
         """
         if not self.enabled:
             # Return dummy handle; record_event_end will no-op (0 < max_events is false when disabled)
@@ -99,7 +102,7 @@ class _DeviceTracingCls:
             tl.store(self.buf_pid + event_idx, tl.program_id(0))
             tl.store(self.buf_pid_m + event_idx, pid_m)
             tl.store(self.buf_pid_n + event_idx, pid_n)
-            tl.store(self.buf_cur_rank + event_idx, cur_rank)
+            tl.store(self.buf_cur_rank + event_idx, self.rank)
             tl.store(self.buf_target_rank + event_idx, target_rank)
             tl.store(self.buf_xcc_id + event_idx, device_utils.get_xcc_id())
             tl.store(self.buf_cu_id + event_idx, device_utils.get_cu_id())

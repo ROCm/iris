@@ -26,7 +26,6 @@ def device_context_tracing_1d_address_kernel(
     offsets = tl.arange(0, BLOCK_SIZE)
     address_1d = dummy_buffer + offsets
     handle = ctx.tracing.record_event_start(
-        cur_rank,
         event_id=TraceEvent().put,
         target_rank=(cur_rank + 1) % num_ranks,
         address=address_1d,

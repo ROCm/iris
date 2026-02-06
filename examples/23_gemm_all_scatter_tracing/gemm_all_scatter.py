@@ -148,7 +148,6 @@ def persistent_gemm_all_scatter(
                 # Record duration event around remote store (compiles away if tracing=False)
                 # Pass 2D pointer tensor; record_event_start takes min as representative address
                 handle = ctx.tracing.record_event_start(
-                    cur_rank,
                     event_id=TraceEvent().put,
                     target_rank=remote_rank,
                     address=c_global + global_offset,
