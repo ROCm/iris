@@ -60,10 +60,8 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
         fi
         DEF_CHECKSUM=$(sha256sum "$DEF_FILE" | awk '{print $1}')
         
-        if [ -f ~/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif ]; then
-            IMAGE=~/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif
-        elif [ -f apptainer/images/iris.sif ]; then
-            IMAGE="apptainer/images/iris.sif"
+        if [ -f "${HOME}/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif" ]; then
+            IMAGE="${HOME}/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif"
         else
             echo "[ERROR] Apptainer image not found" >&2
             exit 1

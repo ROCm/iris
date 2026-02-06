@@ -43,11 +43,11 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     DEF_CHECKSUM=$(sha256sum "$DEF_FILE" | awk '{print $1}')
     
     # Create persistent Apptainer directory with checksum subdirectory
-    mkdir -p ~/iris-apptainer-images/${DEF_CHECKSUM}
+    mkdir -p "${HOME}/iris-apptainer-images/${DEF_CHECKSUM}"
     
     # Define paths
-    IMAGE_PATH=~/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif
-    CHECKSUM_FILE=~/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif.checksum
+    IMAGE_PATH="${HOME}/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif"
+    CHECKSUM_FILE="${HOME}/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif.checksum"
     
     # Check if image exists and has a valid checksum
     REBUILD_NEEDED=true
