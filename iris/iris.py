@@ -63,7 +63,7 @@ import logging
 from .logging import logger
 
 # Import tracing functionality
-from .tracing import Tracing, DeviceTracing
+from .tracing import Tracing, TraceEvent, DeviceTracing  # noqa: F401  re-export for iris.TraceEvent
 
 
 class Iris:
