@@ -17,8 +17,8 @@ Example (API with default algorithms):
     >>> @triton.jit
     >>> def my_kernel(input_ptr, output_ptr, ...):
     >>>     tile = iris.x.TileView(pid_m, pid_n, BLOCK_M, BLOCK_N)
-    >>>     src_view = iris.x.TensorView(input_ptr, M, N, stride_m, stride_n)
-    >>>     dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
+    >>>     src_view = iris.x.make_tensor_view(input_ptr, M, N, stride_m, stride_n)
+    >>>     dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_m, stride_n)
     >>>     ctx = iris.DeviceContext.initialize(context_tensor, rank, world_size)
     >>>
     >>>     # Call collectives on ctx directly (default algorithms)
@@ -31,8 +31,8 @@ Example (API with AllReduceConfig for algorithm selection):
     >>> @triton.jit
     >>> def my_kernel(input_ptr, output_ptr, locks_ptr, ...):
     >>>     tile = iris.x.TileView(pid_m, pid_n, BLOCK_M, BLOCK_N)
-    >>>     src_view = iris.x.TensorView(input_ptr, M, N, stride_m, stride_n)
-    >>>     dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
+    >>>     src_view = iris.x.make_tensor_view(input_ptr, M, N, stride_m, stride_n)
+    >>>     dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_m, stride_n)
     >>>     ctx = iris.DeviceContext.initialize(context_tensor, rank, world_size)
     >>>
     >>>     # Use ring algorithm

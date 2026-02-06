@@ -35,7 +35,7 @@ def all_reduce_atomic(
     Example:
         # After computing a local tile result
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)
-        dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
+        dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_m, stride_n)
         iris.x.all_reduce_atomic(tile, dst_view, ctx)
     """
     # Get destination tile pointer and mask for this tile position
@@ -76,7 +76,7 @@ def all_reduce_spinlock(
     Example:
         # After computing a local tile result
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)
-        dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
+        dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_m, stride_n)
         iris.x.all_reduce_spinlock(tile, dst_view, locks_ptr, ctx)
     """
     # Compute tile ID for lock indexing
@@ -140,8 +140,8 @@ def all_reduce_one_shot(
     Example:
         # After computing and storing a local tile result and signaling ready
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_m, stride_n)
-        dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
+        src_view = iris.x.make_tensor_view(input_ptr, M, N, stride_m, stride_n)
+        dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_m, stride_n)
         iris.x.all_reduce_one_shot(tile, src_view, dst_view, locks, ctx)
     """
     # Get tile pointers and mask
@@ -260,8 +260,8 @@ def all_reduce_two_shot(
 
     Example:
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_m, stride_n)
-        dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
+        src_view = iris.x.make_tensor_view(input_ptr, M, N, stride_m, stride_n)
+        dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_m, stride_n)
         iris.x.all_reduce_two_shot(tile, src_view, dst_view, locks, ctx)
     """
     # Compute tile ID

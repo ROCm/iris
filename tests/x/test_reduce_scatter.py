@@ -57,8 +57,8 @@ def x_reduce_scatter_kernel(
         tl.atomic_xchg(locks + tile_id, 1, sem="release", scope="gpu")
 
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        src_view = iris.x.TensorView(temp_buffer, M, N, stride_in_m, stride_in_n)
-        dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
+        src_view = iris.x.make_tensor_view(temp_buffer, M, N, stride_in_m, stride_in_n)
+        dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         iris.x.reduce_scatter(tile, src_view, dst_view, locks, ctx)
