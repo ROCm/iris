@@ -48,19 +48,26 @@ fi
 
 # Execute based on detected runtime
 if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
-    # Get image identifier from environment or use default
-    IMAGE_IDENTIFIER=${DOCKER_IMAGE_NAME:-"iris-dev"}
-    
     # Find image
     if [ -n "$CUSTOM_IMAGE" ]; then
         IMAGE="$CUSTOM_IMAGE"
-    elif [ -f ~/iris-apptainer-images/${IMAGE_IDENTIFIER}/iris-dev.sif ]; then
-        IMAGE=~/iris-apptainer-images/${IMAGE_IDENTIFIER}/iris-dev.sif
-    elif [ -f apptainer/images/iris.sif ]; then
-        IMAGE="apptainer/images/iris.sif"
     else
-        echo "[ERROR] Apptainer image not found" >&2
-        exit 1
+        # Calculate checksum of def file to find the correct subdirectory
+        DEF_FILE=apptainer/iris.def
+        if [ ! -f "$DEF_FILE" ]; then
+            echo "[ERROR] Definition file $DEF_FILE not found" >&2
+            exit 1
+        fi
+        DEF_CHECKSUM=$(sha256sum "$DEF_FILE" | awk '{print $1}')
+        
+        if [ -f ~/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif ]; then
+            IMAGE=~/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif
+        elif [ -f apptainer/images/iris.sif ]; then
+            IMAGE="apptainer/images/iris.sif"
+        else
+            echo "[ERROR] Apptainer image not found" >&2
+            exit 1
+        fi
     fi
     
     # Create temporary overlay in workspace with unique name based on PID and timestamp
