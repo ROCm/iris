@@ -48,11 +48,14 @@ fi
 
 # Execute based on detected runtime
 if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
+    # Get image identifier from environment or use default
+    IMAGE_IDENTIFIER=${DOCKER_IMAGE_NAME:-"iris-dev"}
+    
     # Find image
     if [ -n "$CUSTOM_IMAGE" ]; then
         IMAGE="$CUSTOM_IMAGE"
-    elif [ -f ~/iris-apptainer-images/iris-dev.sif ]; then
-        IMAGE=~/iris-apptainer-images/iris-dev.sif
+    elif [ -f ~/iris-apptainer-images/${IMAGE_IDENTIFIER}/iris-dev.sif ]; then
+        IMAGE=~/iris-apptainer-images/${IMAGE_IDENTIFIER}/iris-dev.sif
     elif [ -f apptainer/images/iris.sif ]; then
         IMAGE="apptainer/images/iris.sif"
     else

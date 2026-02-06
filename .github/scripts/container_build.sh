@@ -32,13 +32,16 @@ echo "✅ /dev/shm size OK (${shm_size_gb}GB)"
 if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     echo "[INFO] Building with Apptainer..."
     
-    # Create persistent Apptainer directory
-    mkdir -p ~/iris-apptainer-images
+    # Get image identifier from environment or use default
+    IMAGE_IDENTIFIER=${DOCKER_IMAGE_NAME:-"iris-dev"}
+    
+    # Create persistent Apptainer directory with image identifier subdirectory
+    mkdir -p ~/iris-apptainer-images/${IMAGE_IDENTIFIER}
     
     # Define paths
-    IMAGE_PATH=~/iris-apptainer-images/iris-dev.sif
+    IMAGE_PATH=~/iris-apptainer-images/${IMAGE_IDENTIFIER}/iris-dev.sif
     DEF_FILE=apptainer/iris.def
-    CHECKSUM_FILE=~/iris-apptainer-images/iris-dev.sif.checksum
+    CHECKSUM_FILE=~/iris-apptainer-images/${IMAGE_IDENTIFIER}/iris-dev.sif.checksum
     
     # Verify def file exists
     if [ ! -f "$DEF_FILE" ]; then
