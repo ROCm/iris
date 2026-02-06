@@ -426,7 +426,8 @@ def test_device_context_initialize():
     assert context_tensor is not None
     assert isinstance(context_tensor, torch.Tensor)
     assert context_tensor.dtype == torch.int64
-    assert context_tensor.shape[0] == 2 + num_ranks
+    # At least [cur_rank, num_ranks, heap_base_0, ...]; layout may add more (e.g. tracing)
+    assert context_tensor.shape[0] >= 2 + num_ranks
     assert context_tensor[0].item() == cur_rank
     assert context_tensor[1].item() == num_ranks
 
