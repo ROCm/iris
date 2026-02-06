@@ -63,8 +63,7 @@ import logging
 from .logging import logger
 
 # Import tracing functionality
-from .tracing import Tracing, TraceEvent, DeviceTracing
-from .device_utils import read_realtime, get_xcc_id, get_cu_id
+from .tracing import Tracing, DeviceTracing
 
 
 class Iris:
