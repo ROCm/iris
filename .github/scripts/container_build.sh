@@ -33,12 +33,12 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     echo "[INFO] Building with Apptainer..."
     
     # Create persistent Apptainer directory
-    mkdir -p ~/apptainer
+    mkdir -p ~/iris-apptainer-images
     
     # Define paths
-    IMAGE_PATH=~/apptainer/iris-dev.sif
+    IMAGE_PATH=~/iris-apptainer-images/iris-dev.sif
     DEF_FILE=apptainer/iris.def
-    CHECKSUM_FILE=~/apptainer/iris-dev.sif.checksum
+    CHECKSUM_FILE=~/iris-apptainer-images/iris-dev.sif.checksum
     
     # Verify def file exists
     if [ ! -f "$DEF_FILE" ]; then

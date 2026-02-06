@@ -51,8 +51,8 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     # Find image
     if [ -n "$CUSTOM_IMAGE" ]; then
         IMAGE="$CUSTOM_IMAGE"
-    elif [ -f ~/apptainer/iris-dev.sif ]; then
-        IMAGE=~/apptainer/iris-dev.sif
+    elif [ -f ~/iris-apptainer-images/iris-dev.sif ]; then
+        IMAGE=~/iris-apptainer-images/iris-dev.sif
     elif [ -f apptainer/images/iris.sif ]; then
         IMAGE="apptainer/images/iris.sif"
     else
