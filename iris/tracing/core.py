@@ -1,8 +1,5 @@
 """
-Device-side tracing support for Iris.
-
-This module provides tracing functionality to capture and export device-side events
-for debugging and performance analysis.
+Device-side tracing core: buffer allocation, capture, and export.
 """
 
 import torch
@@ -11,26 +8,9 @@ import pickle
 import sys
 import os
 import socket
-from . import hip
 
-
-# Event type IDs to names mapping
-EVENT_NAMES = {
-    0: "load",
-    1: "store",
-    2: "get",
-    3: "put",
-    4: "copy",
-    5: "atomic_add",
-    6: "atomic_sub",
-    7: "atomic_cas",
-    8: "atomic_xchg",
-    9: "atomic_xor",
-    10: "atomic_and",
-    11: "atomic_or",
-    12: "atomic_min",
-    13: "atomic_max",
-}
+from .. import hip
+from .events import EVENT_NAMES
 
 
 class Tracing:

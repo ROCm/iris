@@ -63,75 +63,8 @@ import logging
 from .logging import logger
 
 # Import tracing functionality
-from .tracing import Tracing
+from .tracing import Tracing, TraceEvent, DeviceTracing
 from .device_utils import read_realtime, get_xcc_id, get_cu_id
-
-
-@aggregate
-class TraceEvent:
-    """
-    Trace event type enumeration for iris remote memory operations.
-
-    Usage:
-        >>> ctx.record_event(event_id=TraceEvent().put, target_rank=1, address=ptr)
-
-    Available event types:
-        Data Movement:
-        - load (0): Remote load operation
-        - store (1): Remote store operation
-        - get (2): Remote read (pull from remote to local)
-        - put (3): Remote write (push from local to remote)
-        - copy (4): Peer-to-peer copy between ranks
-
-        Atomic Operations:
-        - atomic_add (5): Atomic addition
-        - atomic_sub (6): Atomic subtraction
-        - atomic_cas (7): Atomic compare-and-swap
-        - atomic_xchg (8): Atomic exchange
-        - atomic_xor (9): Atomic XOR
-        - atomic_and (10): Atomic AND
-        - atomic_or (11): Atomic OR
-        - atomic_min (12): Atomic minimum
-        - atomic_max (13): Atomic maximum
-    """
-
-    # Data movement operations
-    load: tl.constexpr
-    store: tl.constexpr
-    get: tl.constexpr
-    put: tl.constexpr
-    copy: tl.constexpr
-
-    # Atomic operations
-    atomic_add: tl.constexpr
-    atomic_sub: tl.constexpr
-    atomic_cas: tl.constexpr
-    atomic_xchg: tl.constexpr
-    atomic_xor: tl.constexpr
-    atomic_and: tl.constexpr
-    atomic_or: tl.constexpr
-    atomic_min: tl.constexpr
-    atomic_max: tl.constexpr
-
-    @triton.constexpr_function
-    def __init__(self):
-        # Data movement
-        self.load = tl.constexpr(0)
-        self.store = tl.constexpr(1)
-        self.get = tl.constexpr(2)
-        self.put = tl.constexpr(3)
-        self.copy = tl.constexpr(4)
-
-        # Atomics
-        self.atomic_add = tl.constexpr(5)
-        self.atomic_sub = tl.constexpr(6)
-        self.atomic_cas = tl.constexpr(7)
-        self.atomic_xchg = tl.constexpr(8)
-        self.atomic_xor = tl.constexpr(9)
-        self.atomic_and = tl.constexpr(10)
-        self.atomic_or = tl.constexpr(11)
-        self.atomic_min = tl.constexpr(12)
-        self.atomic_max = tl.constexpr(13)
 
 
 class Iris:
@@ -1876,140 +1809,6 @@ def __translate(ptr, from_rank, to_rank, heap_bases):
 
 
 @aggregate
-class DeviceTracing:
-    """
-    Device-side tracing API for capturing events in Triton kernels.
-
-    Provides methods for recording trace events with zero overhead when disabled.
-    Access via `ctx.tracing.record_event_start()` etc.
-
-    Attributes:
-        enabled (tl.constexpr): Whether tracing is enabled
-        max_events (tl.constexpr): Maximum number of events
-        counter (tl.tensor): Atomic counter for event indexing
-        buf_* (tl.tensor): Trace buffer pointers
-    """
-
-    enabled: tl.constexpr
-    max_events: tl.constexpr
-    counter: tl.tensor
-    buf_event_id: tl.tensor
-    buf_pid: tl.tensor
-    buf_pid_m: tl.tensor
-    buf_pid_n: tl.tensor
-    buf_cur_rank: tl.tensor
-    buf_target_rank: tl.tensor
-    buf_xcc_id: tl.tensor
-    buf_cu_id: tl.tensor
-    buf_timestamp: tl.tensor
-    buf_address: tl.tensor
-    buf_duration_cycles: tl.tensor
-
-    @triton.constexpr_function
-    def __init__(
-        self,
-        enabled=False,
-        max_events=0,
-        counter=None,
-        buf_event_id=None,
-        buf_pid=None,
-        buf_pid_m=None,
-        buf_pid_n=None,
-        buf_cur_rank=None,
-        buf_target_rank=None,
-        buf_xcc_id=None,
-        buf_cu_id=None,
-        buf_timestamp=None,
-        buf_address=None,
-        buf_duration_cycles=None,
-    ):
-        """Initialize device tracing context."""
-        self.enabled = tl.constexpr(enabled)
-        self.max_events = tl.constexpr(max_events)
-        self.counter = counter
-        self.buf_event_id = buf_event_id
-        self.buf_pid = buf_pid
-        self.buf_pid_m = buf_pid_m
-        self.buf_pid_n = buf_pid_n
-        self.buf_cur_rank = buf_cur_rank
-        self.buf_target_rank = buf_target_rank
-        self.buf_xcc_id = buf_xcc_id
-        self.buf_cu_id = buf_cu_id
-        self.buf_timestamp = buf_timestamp
-        self.buf_address = buf_address
-        self.buf_duration_cycles = buf_duration_cycles
-
-    @triton.jit
-    def record_event(self, cur_rank, event_id, target_rank, address, pid_m=0, pid_n=0):
-        """Record an instant trace event."""
-        if self.enabled:
-            timestamp = read_realtime()
-            event_idx = tl.atomic_add(self.counter, 1)
-            # Bounds check: only record if we have space
-            if event_idx < self.max_events:
-                tl.store(self.buf_timestamp + event_idx, timestamp)
-                tl.store(self.buf_event_id + event_idx, event_id)
-                pid = tl.program_id(0)
-                tl.store(self.buf_pid + event_idx, pid)
-                tl.store(self.buf_pid_m + event_idx, pid_m)
-                tl.store(self.buf_pid_n + event_idx, pid_n)
-                tl.store(self.buf_cur_rank + event_idx, cur_rank)
-                tl.store(self.buf_target_rank + event_idx, target_rank)
-                xcc_id = get_xcc_id()
-                cu_id = get_cu_id()
-                tl.store(self.buf_xcc_id + event_idx, xcc_id)
-                tl.store(self.buf_cu_id + event_idx, cu_id)
-                address_int = tl.cast(address, tl.uint64)
-                tl.store(self.buf_address + event_idx, address_int)
-
-    @triton.jit
-    def record_event_start(self, cur_rank, event_id, target_rank, address, pid_m=0, pid_n=0):
-        """
-        Start recording a duration event - returns event handle.
-
-        Note on address parameter:
-        - `address` may be a scalar pointer or a tensor of pointers
-        - For scalar pointers and 1D tensors, `tl.min` safely returns the base
-        - For higher-dimensional pointer tensors, this assumes all elements are
-          derived from a single base pointer using non-negative strides and
-          monotonically increasing offsets (e.g., standard row-major layouts)
-        - Arbitrary negative-stride or complex layouts are not supported and
-          may result in an incorrect base address being recorded
-        """
-        if self.enabled:
-            event_idx = tl.atomic_add(self.counter, 1)
-            # Bounds check: only record if we have space
-            if event_idx < self.max_events:
-                tl.store(self.buf_event_id + event_idx, event_id)
-                pid = tl.program_id(0)
-                tl.store(self.buf_pid + event_idx, pid)
-                tl.store(self.buf_pid_m + event_idx, pid_m)
-                tl.store(self.buf_pid_n + event_idx, pid_n)
-                tl.store(self.buf_cur_rank + event_idx, cur_rank)
-                tl.store(self.buf_target_rank + event_idx, target_rank)
-                xcc_id = get_xcc_id()
-                cu_id = get_cu_id()
-                tl.store(self.buf_xcc_id + event_idx, xcc_id)
-                tl.store(self.buf_cu_id + event_idx, cu_id)
-                address_int = tl.cast(address, tl.uint64)
-                # Extract base address (minimum for standard row-major layouts)
-                address_int = tl.min(address_int)
-                tl.store(self.buf_address + event_idx, address_int)
-                begin_ts = read_realtime()
-                tl.store(self.buf_timestamp + event_idx, begin_ts)
-            return event_idx
-        else:
-            return 0
-
-    @triton.jit
-    def record_event_end(self, event_handle):
-        """Finish recording a duration event - captures end timestamp."""
-        if self.enabled:
-            end_ts = read_realtime()
-            tl.store(self.buf_duration_cycles + event_handle, end_ts)
-
-
-@aggregate
 class DeviceContext:
     """
     Device-side context that encapsulates rank and heap_bases for ergonomic Iris operations.
@@ -2156,27 +1955,25 @@ class DeviceContext:
 
             return DeviceContext(rank, world_size, heap_bases, device_tracing)
         else:
-            # When tracing disabled, create dummy DeviceTracing with null pointers (compiler optimizes this away)
-            zero_i32 = tl.zeros([1], dtype=tl.int32)
-            zero_i64 = tl.zeros([1], dtype=tl.int64)
-            null_ptr_i32 = zero_i32  # Dummy pointer, never dereferenced
-            null_ptr_i64 = zero_i64  # Dummy pointer, never dereferenced
-
+            # When tracing disabled, use dummy pointers (never dereferenced; we return early in record_*)
+            dummy_ptr_i32 = tl.cast(context_tensor, tl.pointer_type(tl.int32))
+            dummy_ptr_i64 = tl.cast(context_tensor, tl.pointer_type(tl.int64))
+            max_events_zero = tl.full((), 0, dtype=tl.int32)
             device_tracing = DeviceTracing(
                 enabled=False,
-                max_events=0,
-                counter=null_ptr_i32,
-                buf_event_id=null_ptr_i32,
-                buf_pid=null_ptr_i32,
-                buf_pid_m=null_ptr_i32,
-                buf_pid_n=null_ptr_i32,
-                buf_cur_rank=null_ptr_i32,
-                buf_target_rank=null_ptr_i32,
-                buf_xcc_id=null_ptr_i32,
-                buf_cu_id=null_ptr_i32,
-                buf_timestamp=null_ptr_i64,
-                buf_address=null_ptr_i64,
-                buf_duration_cycles=null_ptr_i64,
+                max_events=max_events_zero,
+                counter=dummy_ptr_i32,
+                buf_event_id=dummy_ptr_i32,
+                buf_pid=dummy_ptr_i32,
+                buf_pid_m=dummy_ptr_i32,
+                buf_pid_n=dummy_ptr_i32,
+                buf_cur_rank=dummy_ptr_i32,
+                buf_target_rank=dummy_ptr_i32,
+                buf_xcc_id=dummy_ptr_i32,
+                buf_cu_id=dummy_ptr_i32,
+                buf_timestamp=dummy_ptr_i64,
+                buf_address=dummy_ptr_i64,
+                buf_duration_cycles=dummy_ptr_i64,
             )
 
             return DeviceContext(rank, world_size, heap_bases, device_tracing)

@@ -146,7 +146,7 @@ def persistent_gemm_all_scatter(
                 tl.store(c_global + global_offset, c, mask=sub_mask)
             else:
                 # Record duration event around remote store (compiles away if tracing=False)
-                # Pass 2D pointer tensor directly - record_event_start will extract the base address
+                # Pass 2D pointer tensor; record_event_start takes min as representative address
                 handle = ctx.tracing.record_event_start(
                     cur_rank,
                     event_id=TraceEvent().put,

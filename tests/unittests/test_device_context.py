@@ -6,7 +6,34 @@ import triton
 import triton.language as tl
 import pytest
 import iris
-from iris import DeviceContext
+from iris import DeviceContext, TraceEvent
+
+
+@triton.jit
+def device_context_tracing_1d_address_kernel(
+    context_tensor,
+    dummy_buffer,
+    cur_rank: tl.constexpr,
+    num_ranks: tl.constexpr,
+    TRACING: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr = 4,
+):
+    """Test ctx.tracing.record_event_start/end with a 1D address (block of pointers)."""
+    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks, tracing=TRACING)
+    if not TRACING:
+        return
+    # 1D block of pointers: dummy_buffer + offsets
+    offsets = tl.arange(0, BLOCK_SIZE)
+    address_1d = dummy_buffer + offsets
+    handle = ctx.tracing.record_event_start(
+        cur_rank,
+        event_id=TraceEvent().put,
+        target_rank=(cur_rank + 1) % num_ranks,
+        address=address_1d,
+        pid_m=tl.program_id(0),
+        pid_n=0,
+    )
+    ctx.tracing.record_event_end(handle)
 
 
 @triton.jit
@@ -413,6 +440,37 @@ def test_device_context_put(BLOCK_SIZE):
         import gc
 
         gc.collect()
+
+
+def test_device_context_tracing_1d_address():
+    """Test record_event_start/end with a 1D address (tl.min on 1D block should still work)."""
+    ctx = iris.iris(1 << 20)
+    ctx.tracing.enable(max_events=1000)
+    context_tensor = ctx.get_device_context()
+    cur_rank = ctx.get_rank()
+    num_ranks = ctx.get_num_ranks()
+
+    # Dummy buffer only to form 1D pointer block; never read/write
+    dummy_buffer = ctx.zeros((16,), dtype=torch.int64)
+
+    ctx.barrier()
+
+    device_context_tracing_1d_address_kernel[(1,)](
+        context_tensor,
+        dummy_buffer,
+        cur_rank=cur_rank,
+        num_ranks=num_ranks,
+        TRACING=True,
+    )
+    ctx.barrier()
+
+    # Verify we recorded at least one event
+    assert ctx.tracing.trace_counter.item() >= 1
+    ctx.barrier()
+    del ctx
+    import gc
+
+    gc.collect()
 
 
 def test_device_context_initialize():
