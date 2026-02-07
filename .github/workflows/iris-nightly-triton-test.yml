@@ -33,8 +33,8 @@ jobs:
       - name: Modify Apptainer def file to use latest Triton
         run: |
           echo "Modifying apptainer/iris.def to use latest Triton from main branch"
-          # Replace the specific commit checkout with main branch
-          sed -i 's/git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e/git checkout main/' apptainer/iris.def
+          # Replace any 40-character hex commit checkout with main branch
+          sed -i 's/git checkout [0-9a-f]\{40\}/git checkout main/' apptainer/iris.def
           echo "Modified iris.def:"
           grep -A2 -B2 "git checkout" apptainer/iris.def
 
@@ -159,6 +159,9 @@ jobs:
           .github/scripts/container_exec.sh $GPU_ARG --image "$NIGHTLY_IMAGE" "
               set -e
               
+              # tritonBLAS version to use
+              TRITONBLAS_COMMIT=\"47768c93acb7f89511d797964b84544c30ab81ad\"
+              
               # Install tritonBLAS if not already installed
               echo \"Checking for tritonBLAS...\"
               if ! python -c 'import tritonblas' 2>/dev/null; then
@@ -167,11 +170,11 @@ jobs:
                   if [ ! -d \"\$TRITONBLAS_DIR\" ]; then
                       git clone https://github.com/ROCm/tritonBLAS.git \"\$TRITONBLAS_DIR\"
                       cd \"\$TRITONBLAS_DIR\"
-                      git checkout 47768c93acb7f89511d797964b84544c30ab81ad
+                      git checkout \"\$TRITONBLAS_COMMIT\"
                   else
                       cd \"\$TRITONBLAS_DIR\"
                       git fetch
-                      git checkout 47768c93acb7f89511d797964b84544c30ab81ad
+                      git checkout \"\$TRITONBLAS_COMMIT\"
                   fi
                   pip install -e .
                   cd ..
