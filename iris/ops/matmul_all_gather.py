@@ -17,8 +17,7 @@ import triton.language as tl
 import iris
 import iris.x
 
-from tritonblas.kernels.stages.algorithms.binary import add_vector
-from tritonblas.kernels.stages.algorithms.unary import convert_dtype
+from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
@@ -30,17 +29,17 @@ def _fused_matmul_all_gather_kernel(
     B,  # (K, N) - replicated across ranks
     C_gathered,  # (M, N) - gathered output (M = M_local * world_size)
     bias_ptr,
-    M_local: tl.constexpr,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    K: tl.constexpr,
-    stride_am: tl.constexpr,
-    stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr,
-    stride_bn: tl.constexpr,
-    stride_cm_gathered: tl.constexpr,
-    stride_cn_gathered: tl.constexpr,
-    stride_bias: tl.constexpr,
+    M_local,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm_gathered,
+    stride_cn_gathered,
+    stride_bias,
     context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -60,97 +59,45 @@ def _fused_matmul_all_gather_kernel(
     Computes local GEMM tile and immediately scatters to all ranks.
     No intermediate buffer needed - direct from registers to remote memory.
     """
-    pid = tl.program_id(0)
+    # ═══════════════════════════════════════════════════════════════════════
+    # Create tritonblas views, context, and scheduler for GEMM
+    # ═══════════════════════════════════════════════════════════════════════
+    tensorA = make_tensor_view(A, M_local, K, stride_am, stride_ak)
+    tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
+    gemm_ctx = GemmContext(
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=NUM_SMS,
+        num_xcds=NUM_XCDS,
+        group_size_m=GROUP_SIZE_M,
+        even_k=EVEN_K,
+        allow_tf32=ALLOW_TF32,
+    )
+    sched = ScheduleContext(M_local, N, K, gemm_ctx)
 
-    # Handle multi-XCD devices
-    if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+    # Persistent loop over local tiles using scheduler
+    start, total, stride = sched.persistent_tile_range()
+    for tile_id in range(start, total, stride):
+        # Get tile coordinates with swizzling from scheduler
+        out_tile = sched.get_tile_from_idx(tile_id)
 
-    num_pid_m = tl.cdiv(M_local, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
+        # GEMM using tritonblas stages
+        acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
 
-    tl.assume(stride_am > 0)
-    tl.assume(stride_ak > 0)
-    tl.assume(stride_bk > 0)
-    tl.assume(stride_bn > 0)
-    tl.assume(stride_cm_gathered > 0)
-    tl.assume(stride_cn_gathered > 0)
-
-    acc_dtype = tl.int32 if C_gathered.type.element_ty == tl.int8 else tl.float32
-
-    # Persistent loop over local tiles
-    for tile_id in range(pid, total_tiles, NUM_SMS):
-        # Compute tile coordinates with swizzling
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
-
-        # Compute row and column indices for local tile
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M_local
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-        # Initialize accumulator
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-
-        # Compute number of K tiles
-        loop_k = tl.cdiv(K, BLOCK_SIZE_K)
-        if not EVEN_K:
-            loop_k -= 1
-
-        # GEMM loop over K dimension
-        for k_tile_idx in range(0, loop_k):
-            k_offset = k_tile_idx * BLOCK_SIZE_K
-            rk = k_offset + tl.arange(0, BLOCK_SIZE_K)
-
-            # Load A tile
-            A_ptr = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            a = tl.load(tl.multiple_of(A_ptr, (1, 16)))
-
-            # Load B tile
-            B_ptr = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-            b = tl.load(tl.multiple_of(B_ptr, (16, 1)))
-
-            # Accumulate
-            if ALLOW_TF32:
-                acc = tl.dot(a, b, acc, allow_tf32=True)
-            else:
-                acc += tl.dot(a, b, allow_tf32=False)
-
-        # Handle remaining K elements if not evenly divisible
-        if not EVEN_K:
-            k_offset = loop_k * BLOCK_SIZE_K
-            rk = k_offset + tl.arange(0, BLOCK_SIZE_K)
-            rk_mask = rk < K
-
-            A_ptr = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            a = tl.load(tl.multiple_of(A_ptr, (1, 16)), mask=rk_mask[None, :], other=0.0)
-
-            B_ptr = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-            b = tl.load(tl.multiple_of(B_ptr, (16, 1)), mask=rk_mask[:, None], other=0.0)
-
-            if ALLOW_TF32:
-                acc = tl.dot(a, b, acc, allow_tf32=True)
-            else:
-                acc += tl.dot(a, b, allow_tf32=False)
-
-        # Add bias if provided using tritonBLAS
+        # Add bias if provided
         if BIAS:
+            rm, _ = out_tile.indices()
             bias_vector = tl.load(bias_ptr + rm * stride_bias, mask=rm < M_local, other=0.0)
-            acc = add_vector(acc, bias_vector, QUANTIZED=False)
+            acc = acc + bias_vector[:, None]
 
-        # Convert to output dtype using tritonBLAS
-        c = convert_dtype(acc, C_gathered.type.element_ty)
+        # Convert to output dtype
+        c = acc.to(C_gathered.type.element_ty)
 
         # Create DeviceContext and destination TensorView for all-gather
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
-        dst_view = iris.x.TensorView(C_gathered, M, N, stride_cm_gathered, stride_cn_gathered)
-        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+        dst_view = iris.x.make_tensor_view(C_gathered, M, N, stride_cm_gathered, stride_cn_gathered)
+        tile_obj = iris.x.Tile(out_tile.pid_m, out_tile.pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
 
         # Scatter this tile to all ranks using iris.x.all_gather
         # dim=0 means scatter along M dimension (rows)

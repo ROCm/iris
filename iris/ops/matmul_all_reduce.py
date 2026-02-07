@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
+
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
@@ -26,21 +28,22 @@ def _fused_matmul_all_reduce_kernel(
     C,
     aux_buffer,
     locks,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    K: tl.constexpr,
-    stride_am: tl.constexpr,
-    stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr,
-    stride_bn: tl.constexpr,
-    stride_cm: tl.constexpr,
-    stride_cn: tl.constexpr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
     context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    EVEN_K: tl.constexpr,
     VARIANT: tl.constexpr,
 ):
     """
@@ -57,8 +60,8 @@ def _fused_matmul_all_reduce_kernel(
     - 'two_shot': Work distribution with reduce-scatter then all-gather pattern
 
     The kernel for each output tile:
-    1. Computes GEMM: local_tile = A_tile @ B_tile
-    2. Uses spinlock-protected read-modify-write to accumulate to all ranks
+    1. Computes GEMM using tritonblas GemmContext
+    2. Uses the specified variant for all-reduce across ranks
 
     Args:
         A: Pointer to input matrix A of shape (M, K) - local rank's data
@@ -71,53 +74,55 @@ def _fused_matmul_all_reduce_kernel(
         stride_am, stride_ak: Strides for A tensor
         stride_bk, stride_bn: Strides for B tensor
         stride_cm, stride_cn: Strides for C tensor
-        heap_bases: Heap base pointers for all ranks
+        context_tensor: Device context tensor for RMA operations
         cur_rank: Current rank
         world_size: Total number of ranks
         BLOCK_SIZE_M: Block size for M dimension
         BLOCK_SIZE_N: Block size for N dimension
         BLOCK_SIZE_K: Block size for K dimension
+        EVEN_K: Whether K is evenly divisible by BLOCK_SIZE_K
     """
-    # Get program ID and compute grid dimensions
+    # Get program ID and compute which tile this program handles
     pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
+    pid_m = pid // num_tiles_n
+    pid_n = pid % num_tiles_n
 
-    # Compute which tile this program handles
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    # ═══════════════════════════════════════════════════════════════════════
+    # GEMM using tritonblas stages
+    # ═══════════════════════════════════════════════════════════════════════
+    tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
+    tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
+    gemm_ctx = GemmContext(
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=1,
+        even_k=EVEN_K,
+    )
+    out_tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+    acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
 
-    # Compute row and column indices for this tile
-    rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-
-    # Initialize accumulator for GEMM
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-    # GEMM loop over K dimension
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-
-        # Load A tile
-        A_ptr = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-        a = tl.load(A_ptr, mask=(rm[:, None] < M) & (rk[None, :] < K), other=0.0)
-
-        # Load B tile
-        B_ptr = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-        b = tl.load(B_ptr, mask=(rk[:, None] < K) & (rn[None, :] < N), other=0.0)
-
-        # Accumulate
-        acc += tl.dot(a, b)
+    # Get row and column indices from tile (needed for one_shot/two_shot variants)
+    rm, rn = out_tile.indices()
 
     # Convert to output dtype
-    c = acc.to(C.dtype.element_ty)
+    c = acc.to(C.type.element_ty)
 
     # Create views and context
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
-    dst_view = iris.x.TensorView(C, M, N, stride_cm, stride_cn)
+    dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
-    # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock
-    if VARIANT == "one_shot" or VARIANT == "two_shot":
+    # Create tile object once for all variants
+    tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+
+    # Dispatch to appropriate all-reduce variant
+    if VARIANT == "atomic":
+        iris.x.all_reduce_atomic(tile_obj, dst_view, ctx)
+    elif VARIANT == "spinlock":
+        iris.x.all_reduce_spinlock(tile_obj, dst_view, locks, ctx)
+    elif VARIANT == "one_shot" or VARIANT == "two_shot":
+        # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock
         # Store GEMM result to aux_buffer (avoid race condition with final output)
         temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
@@ -125,35 +130,17 @@ def _fused_matmul_all_reduce_kernel(
 
         # Signal tile is ready by unlocking (set lock to 1)
         # Use atomic_xchg with release semantics to ensure memory ordering
-        num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
         tile_id = pid_m * num_tiles_n + pid_n
         lock_ptr = locks + tile_id
         tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
 
-        # Create src_view pointing to aux_buffer
-        src_view = iris.x.TensorView(aux_buffer, M, N, stride_cm, stride_cn)
+        # Create source view only when needed (aux_buffer is not None)
+        src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
 
-    # Dispatch to appropriate all-reduce variant
-    if VARIANT == "atomic":
-        # Atomic uses tile.data directly (no intermediate store needed)
-        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-        iris.x.all_reduce_atomic(tile_obj, dst_view, ctx)
-    elif VARIANT == "spinlock":
-        # Spinlock uses tile.data directly and lock for mutual exclusion
-        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-        iris.x.all_reduce_spinlock(tile_obj, dst_view, locks, ctx)
-    elif VARIANT == "one_shot":
-        # one_shot loads from all ranks (data already in memory, locks signal readiness)
-        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-        iris.x.all_reduce_one_shot(tile_obj, src_view, dst_view, locks, ctx)
-    elif VARIANT == "two_shot":
-        # two_shot with work distribution (data in memory, locks signal readiness)
-        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-        iris.x.all_reduce_two_shot(tile_obj, src_view, dst_view, locks, cur_rank, world_size, ctx)
-    # elif VARIANT == "ring":
-    #     # Store locally first and signal ready
-    #     tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-    #     iris.x.all_reduce_ring(tile_obj, src_view, dst_view, locks, ctx)
+        if VARIANT == "one_shot":
+            iris.x.all_reduce_one_shot(tile_obj, src_view, dst_view, locks, ctx)
+        elif VARIANT == "two_shot":
+            iris.x.all_reduce_two_shot(tile_obj, src_view, dst_view, locks, ctx)
 
 
 def matmul_all_reduce_preamble(
@@ -315,6 +302,8 @@ def matmul_all_reduce(
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
     grid = (num_pid_m * num_pid_n,)
 
+    even_k = K % config.block_size_k == 0
+
     _fused_matmul_all_reduce_kernel[grid](
         A,
         B,
@@ -336,6 +325,7 @@ def matmul_all_reduce(
         config.block_size_m,
         config.block_size_n,
         config.block_size_k,
+        even_k,
         config.all_reduce_variant,
     )
 

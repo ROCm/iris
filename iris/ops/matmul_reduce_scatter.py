@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
+
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
@@ -26,21 +28,22 @@ def _fused_matmul_reduce_scatter_kernel(
     C,
     aux_buffer,
     locks,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    K: tl.constexpr,
-    stride_am: tl.constexpr,
-    stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr,
-    stride_bn: tl.constexpr,
-    stride_cm: tl.constexpr,
-    stride_cn: tl.constexpr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
     context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    EVEN_K: tl.constexpr,
 ):
     """
     Fused GEMM + Reduce-Scatter kernel.
@@ -60,50 +63,56 @@ def _fused_matmul_reduce_scatter_kernel(
         stride_am, stride_ak: Strides for A tensor
         stride_bk, stride_bn: Strides for B tensor
         stride_cm, stride_cn: Strides for C tensor
-        heap_bases: Heap base pointers for all ranks
+        context_tensor: Device context tensor for RMA operations
         cur_rank: Current rank
         world_size: Total number of ranks
         BLOCK_SIZE_M: Block size for M dimension
         BLOCK_SIZE_N: Block size for N dimension
         BLOCK_SIZE_K: Block size for K dimension
+        EVEN_K: Whether K is evenly divisible by BLOCK_SIZE_K
     """
     pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
+    pid_m = pid // num_tiles_n
+    pid_n = pid % num_tiles_n
 
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    # ═══════════════════════════════════════════════════════════════════════
+    # GEMM using tritonblas stages
+    # ═══════════════════════════════════════════════════════════════════════
+    tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
+    tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
+    gemm_ctx = GemmContext(
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=1,
+        even_k=EVEN_K,
+    )
+    out_tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+    acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
 
-    rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    # Get row and column indices from tile
+    rm, rn = out_tile.indices()
 
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    c = acc.to(C.type.element_ty)
 
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-
-        A_ptr = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-        a = tl.load(A_ptr, mask=(rm[:, None] < M) & (rk[None, :] < K), other=0.0)
-
-        B_ptr = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-        b = tl.load(B_ptr, mask=(rk[:, None] < K) & (rn[None, :] < N), other=0.0)
-
-        acc += tl.dot(a, b)
-
-    c = acc.to(C.dtype.element_ty)
-
+    # Store GEMM result to aux_buffer
     temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
     tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
     tl.debug_barrier()
 
-    tile_id = pid_m * num_pid_n + pid_n
+    # Signal tile is ready
+    tile_id = pid_m * num_tiles_n + pid_n
     lock_ptr = locks + tile_id
     tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")
 
+    # Create tile object and context
     tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-    src_view = iris.x.TensorView(aux_buffer, M, N, stride_cm, stride_cn)
-    dst_view = iris.x.TensorView(C, M, N, stride_cm, stride_cn)
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+
+    # Create tensor views for source and destination
+    src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
+    dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
     iris.x.reduce_scatter(tile_obj, src_view, dst_view, locks, ctx)
 
@@ -217,6 +226,8 @@ def matmul_reduce_scatter(
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
     grid = (num_pid_m * num_pid_n,)
 
+    even_k = K % config.block_size_k == 0
+
     _fused_matmul_reduce_scatter_kernel[grid](
         A,
         B,
@@ -238,6 +249,7 @@ def matmul_reduce_scatter(
         config.block_size_m,
         config.block_size_n,
         config.block_size_k,
+        even_k,
     )
 
     if not async_op:

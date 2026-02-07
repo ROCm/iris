@@ -51,7 +51,7 @@ def x_all_gather_kernel(
 
         # Create Tile with loaded data and views
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        dst_view = iris.x.TensorView(
+        dst_view = iris.x.make_tensor_view(
             output_ptr,
             M * world_size if gather_dim == 0 else M,
             N if gather_dim == 0 else N * world_size,
@@ -237,7 +237,7 @@ def x_all_gather_ctx_api_kernel(
 
         # Create Tile with loaded data and views
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        dst_view = iris.x.TensorView(
+        dst_view = iris.x.make_tensor_view(
             output_ptr,
             M * world_size if gather_dim == 0 else M,
             N if gather_dim == 0 else N * world_size,

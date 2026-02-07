@@ -43,7 +43,7 @@ def gather_kernel(
 
         # Create tile and views
         tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
+        src_view = iris.x.make_tensor_view(input_ptr, M, N, stride_in_m, stride_in_n)
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         # Use gather to pull tile from source_rank
@@ -153,7 +153,7 @@ def gather_accumulate_kernel(
         pid_n = tile_id % num_pid_n
 
         tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
+        src_view = iris.x.make_tensor_view(input_ptr, M, N, stride_in_m, stride_in_n)
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         # Accumulate data from all ranks

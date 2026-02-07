@@ -246,48 +246,73 @@ class Tile:
         return rm, rn
 
 
+@triton.jit
+def make_tensor_view(ptr, M, N, stride_m, stride_n):
+    """
+    Factory function to create a TensorView inside a JIT context.
+
+    This wrapper is needed because @triton.constexpr_function constructors
+    require a JIT context for proper semantic handling. It also converts
+    int/constexpr values to tensors using the +0 trick.
+
+    Args:
+        ptr: Pointer to tensor data
+        M: Number of rows
+        N: Number of columns
+        stride_m: Stride in M dimension
+        stride_n: Stride in N dimension
+
+    Returns:
+        TensorView instance
+    """
+    # Convert to tensor if needed (handles constexpr ints like stride=1)
+    # The +0 trick promotes int/constexpr to tensor in JIT context
+    M_t = M + 0
+    N_t = N + 0
+    stride_m_t = stride_m + 0
+    stride_n_t = stride_n + 0
+    return TensorView(ptr, M_t, N_t, stride_m_t, stride_n_t)
+
+
 @aggregate
 class TensorView:
     """
     TensorView storing pointer and tensor metadata.
 
-    This works when dimensions and strides are marked as tl.constexpr in the kernel signature!
+    Dimensions and strides are stored directly - when passed from kernel
+    parameters (non-constexpr), they are already tensors.
 
-    Example usage (with constexpr dimensions):
+    Example usage:
         @triton.jit
-        def kernel(ptr, M: tl.constexpr, N: tl.constexpr,
-                   stride_m: tl.constexpr, stride_n: tl.constexpr, ...):
-            view = TensorView(ptr, M, N, stride_m, stride_n)
+        def kernel(ptr, M, N, stride_m, stride_n, ...):
+            view = make_tensor_view(ptr, M, N, stride_m, stride_n)
             tile = Tile(pid_m, pid_n, BLOCK_M, BLOCK_N)
             ptr, mask = view.tile_ptr(tile)
-
-    Note: If M, N, strides are NOT constexpr (runtime kernel args), you cannot store them.
-    In that case, use the device functions directly or pass them as method arguments.
     """
 
     ptr: tl.tensor
-    M: tl.constexpr
-    N: tl.constexpr
-    stride_m: tl.constexpr
-    stride_n: tl.constexpr
+    M: tl.tensor
+    N: tl.tensor
+    stride_m: tl.tensor
+    stride_n: tl.tensor
 
     @triton.constexpr_function
     def __init__(self, ptr, M, N, stride_m, stride_n):
         """
-        Create a tensor view with pointer and constexpr dimensions/strides.
+        Create a tensor view with pointer and dimensions/strides.
 
         Args:
-            ptr: Pointer to tensor data (runtime tensor)
-            M: Number of rows (must be constexpr in kernel signature)
-            N: Number of columns (must be constexpr in kernel signature)
-            stride_m: Stride in M dimension (must be constexpr in kernel signature)
-            stride_n: Stride in N dimension (must be constexpr in kernel signature)
+            ptr: Pointer to tensor data
+            M: Number of rows (tensor from kernel parameter)
+            N: Number of columns (tensor from kernel parameter)
+            stride_m: Stride in M dimension (tensor from kernel parameter)
+            stride_n: Stride in N dimension (tensor from kernel parameter)
         """
         self.ptr = ptr
-        self.M = tl.constexpr(M)
-        self.N = tl.constexpr(N)
-        self.stride_m = tl.constexpr(stride_m)
-        self.stride_n = tl.constexpr(stride_n)
+        self.M = M
+        self.N = N
+        self.stride_m = stride_m
+        self.stride_n = stride_n
 
     @triton.jit
     def tile_ptr(self, tile: Tile):
@@ -462,4 +487,13 @@ class AllReduceConfig:
         self.locks_ptr = locks_ptr
 
 
-__all__ = ["TileView", "Tile", "TensorView", "AllReduceConfig", "tile_layout", "tile_ptr", "offset_ptr"]
+__all__ = [
+    "TileView",
+    "Tile",
+    "TensorView",
+    "AllReduceConfig",
+    "tile_layout",
+    "tile_ptr",
+    "offset_ptr",
+    "make_tensor_view",
+]
