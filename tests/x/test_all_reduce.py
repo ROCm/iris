@@ -155,7 +155,7 @@ def x_all_reduce_two_shot_kernel(
         dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
-        iris.x.all_reduce_two_shot(tile, src_view, dst_view, locks, cur_rank, world_size, ctx)
+        iris.x.all_reduce_two_shot(tile, src_view, dst_view, locks, ctx)
 
 
 @triton.jit
