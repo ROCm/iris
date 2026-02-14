@@ -86,6 +86,7 @@ acquire_gpus() {
     
     local attempt=0
     
+    echo "[GPU-ALLOC] Configuration: MAX_GPUS=$MAX_GPUS, MAX_RETRIES=$MAX_RETRIES, RETRY_DELAY=$RETRY_DELAY" >&2
     echo "[GPU-ALLOC] Requesting $num_gpus GPU(s)..." >&2
     
     while [ "$attempt" -lt "$MAX_RETRIES" ]; do
@@ -158,7 +159,7 @@ acquire_gpus() {
     done
     
     # If we got here, allocation failed
-    echo "[GPU-ALLOC ERROR] Failed to allocate $num_gpus GPU(s) after $MAX_RETRIES attempts" >&2
+    echo "[GPU-ALLOC ERROR] Failed to allocate $num_gpus GPU(s) after $attempt attempts (MAX_RETRIES=$MAX_RETRIES)" >&2
     return 1
 }
 
