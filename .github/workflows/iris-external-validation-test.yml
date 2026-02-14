@@ -47,10 +47,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cleanup lingering ports before tests
-        run: |
-          bash .github/scripts/cleanup_ports.sh
-
       - name: Run External Validation Test
         run: |
           set -e
@@ -90,10 +86,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Cleanup lingering ports before tests
-        run: |
-          bash .github/scripts/cleanup_ports.sh
 
       - name: Run External Gluon Validation Test
         run: |

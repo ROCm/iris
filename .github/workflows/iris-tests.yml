@@ -91,10 +91,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cleanup lingering ports before tests
-        run: |
-          bash .github/scripts/cleanup_ports.sh
-
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (git install)
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -164,10 +160,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cleanup lingering ports before tests
-        run: |
-          bash .github/scripts/cleanup_ports.sh
-
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (editable install)
         run: |
           set -e
@@ -233,10 +225,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Cleanup lingering ports before tests
-        run: |
-          bash .github/scripts/cleanup_ports.sh
 
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (pip install)
         run: |
