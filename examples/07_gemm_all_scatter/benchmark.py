@@ -281,12 +281,19 @@ def main():
         ]
 
         # Pass all original arguments except --num_ranks (torchrun handles this)
+        skip_next = False
         for arg in sys.argv[1:]:
-            if not arg.startswith("-r") and not arg.startswith("--num_ranks"):
-                cmd.append(arg)
-            elif arg.startswith("-r") or arg.startswith("--num_ranks"):
-                # Skip -r/--num_ranks and its value
+            if skip_next:
+                skip_next = False
                 continue
+            if arg in ["-r", "--num_ranks"]:
+                # Skip this flag and the next argument (its value)
+                skip_next = True
+                continue
+            elif arg.startswith("-r=") or arg.startswith("--num_ranks="):
+                # Skip combined flag=value format
+                continue
+            cmd.append(arg)
 
         # Run torchrun
         result = subprocess.run(cmd)
