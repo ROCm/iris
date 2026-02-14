@@ -44,10 +44,9 @@ echo "[PERF-BENCHMARK] Using GPUs: $GPU_DEVICES"
     
     cd /iris_workspace
     pip install -e .
-    python examples/${EXAMPLE_PATH}/benchmark.py \
+    torchrun --nproc_per_node=8 examples/${EXAMPLE_PATH}/benchmark.py \
         --benchmark \
         --validate \
-        -r 8 \
         ${BENCHMARK_ARGS} \
         --output_file perf_result.json
 "
