@@ -43,15 +43,11 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Use GPU allocator if GPU_DEVICES not provided
-USE_ALLOCATOR=0
+# GPU_DEVICES should be provided by workflow-level acquire_gpus.sh step
+# or via command-line argument for backward compatibility
 if [ -z "$GPU_DEVICES" ]; then
-    USE_ALLOCATOR=1
-    echo "[RUN-TESTS] Using GPU allocator to acquire $NUM_RANKS GPU(s)"
-    source "$SCRIPT_DIR/gpu_allocator.sh"
-    acquire_gpus "$NUM_RANKS"
-    enable_gpu_cleanup_trap
-    echo "[RUN-TESTS] Allocated GPUs: $GPU_DEVICES"
+    echo "[RUN-TESTS] WARNING: No GPUs allocated. GPU_DEVICES not set."
+    echo "[RUN-TESTS] Tests may fail if they require GPUs."
 fi
 
 # Build GPU argument
@@ -114,10 +110,5 @@ EXIT_CODE=0
     done
 " || { EXIT_CODE=$?; }
 
-# Release GPUs if we allocated them
-if [ $USE_ALLOCATOR -eq 1 ]; then
-    echo "[RUN-TESTS] Releasing allocated GPUs"
-    release_gpus
-fi
-
+# GPU cleanup is now handled by workflow-level release_gpus.sh step
 exit $EXIT_CODE

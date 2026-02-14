@@ -20,8 +20,12 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Use GPU_DEVICES from environment if set, otherwise default to all 8 GPUs
+GPU_DEVICES=${GPU_DEVICES:-"0,1,2,3,4,5,6,7"}
+echo "[PERF-BENCHMARK] Using GPUs: $GPU_DEVICES"
+
 # Run benchmark in container
-"$SCRIPT_DIR/container_exec.sh" --gpus "0,1,2,3,4,5,6,7" "
+"$SCRIPT_DIR/container_exec.sh" --gpus "$GPU_DEVICES" "
     set -e
     
     # Install tritonBLAS (required dependency)

@@ -91,6 +91,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Acquire GPUs
+        run: |
+          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
+
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (git install)
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -105,6 +109,11 @@ jobs:
             "git"
           echo "::endgroup::"
           echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (git) passed!"
+
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
 
   test-editable:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, editable install)
@@ -160,6 +169,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Acquire GPUs
+        run: |
+          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
+
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (editable install)
         run: |
           set -e
@@ -171,6 +184,11 @@ jobs:
             "editable"
           echo "::endgroup::"
           echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (editable) passed!"
+
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
 
   test-install:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, pip install)
@@ -226,6 +244,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Acquire GPUs
+        run: |
+          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
+
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (pip install)
         run: |
           set -e
@@ -237,4 +259,9 @@ jobs:
             "install"
           echo "::endgroup::"
           echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (install) passed!"
+
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
 

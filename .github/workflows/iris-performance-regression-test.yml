@@ -74,6 +74,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Acquire GPUs
+        run: |
+          bash .github/scripts/acquire_gpus.sh 8
+
       - name: Run ${{ matrix.example_name }} Benchmark (8 ranks)
         run: |
           set -e
@@ -84,4 +88,9 @@ jobs:
             "${{ matrix.tflops_threshold }}" \
             ${{ matrix.benchmark_args }}
           echo "::endgroup::"
+
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
 

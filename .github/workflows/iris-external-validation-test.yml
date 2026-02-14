@@ -47,6 +47,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Acquire GPUs
+        run: |
+          bash .github/scripts/acquire_gpus.sh 2
+
       - name: Run External Validation Test
         run: |
           set -e
@@ -78,6 +82,11 @@ jobs:
 
           echo "✅ External validation test passed!"
 
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
+
   external-gluon-validation-test:
     name: External Gluon Validation Test
     needs: build-container-image
@@ -87,12 +96,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Acquire GPUs
+        run: |
+          bash .github/scripts/acquire_gpus.sh 2
+
       - name: Run External Gluon Validation Test
         run: |
           set -e
 
           echo "::group::Running external gluon validation test"
-          bash .github/scripts/container_exec.sh --gpus "0,1" "
+          bash .github/scripts/container_exec.sh --gpus "$GPU_DEVICES" "
             set -e
             
             # Install tritonBLAS (required dependency)
@@ -117,3 +130,8 @@ jobs:
           echo "::endgroup::"
 
           echo "✅ External gluon validation test passed!"
+
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
