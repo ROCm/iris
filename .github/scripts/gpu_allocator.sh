@@ -15,10 +15,11 @@
 # Usage:
 #   source gpu_allocator.sh
 #   acquire_gpus <num_gpus>  # Blocks until GPUs available, sets GPU_DEVICES and ALLOCATED_GPU_START
+#   enable_gpu_cleanup_trap  # Optional: enable automatic cleanup on EXIT
 #   # ... run your job with HIP_VISIBLE_DEVICES=$GPU_DEVICES ...
 #   release_gpus             # Releases allocated GPUs back to pool
 
-set -e
+# Note: Do not modify caller's shell options (e.g., set -e) when sourced.
 
 # Configuration
 GPU_STATE_FILE="${GPU_STATE_FILE:-/tmp/iris_gpu_state}"
@@ -27,15 +28,30 @@ MAX_GPUS="${MAX_GPUS:-8}"
 RETRY_DELAY="${RETRY_DELAY:-2}"
 MAX_RETRIES="${MAX_RETRIES:-300}"  # 10 minutes with 2s delay
 
-# Initialize GPU state file if it doesn't exist
+# Initialize GPU state file and validate its contents
 init_gpu_state() {
-    # Use flock to ensure atomic initialization
+    # Use flock to ensure atomic initialization and validation
     (
         flock -x 200
+
         if [ ! -f "$GPU_STATE_FILE" ]; then
             # Initialize with next available GPU index at 0
             echo "0" > "$GPU_STATE_FILE"
             echo "[GPU-ALLOC] Initialized GPU state: next available GPU 0" >&2
+        else
+            # Validate existing state file contents
+            local current_state
+            current_state=$(cat "$GPU_STATE_FILE" 2>/dev/null || echo "")
+
+            # Ensure the state is a non-negative integer
+            if ! [[ "$current_state" =~ ^[0-9]+$ ]]; then
+                echo "0" > "$GPU_STATE_FILE"
+                echo "[GPU-ALLOC] Detected invalid GPU state ('$current_state'); reset to 0" >&2
+            # Ensure the state is within [0, MAX_GPUS]
+            elif [ "$current_state" -lt 0 ] || [ "$current_state" -gt "$MAX_GPUS" ]; then
+                echo "0" > "$GPU_STATE_FILE"
+                echo "[GPU-ALLOC] Detected out-of-range GPU state ($current_state); reset to 0" >&2
+            fi
         fi
     ) 200>"$GPU_LOCK_FILE"
 }
@@ -73,8 +89,10 @@ acquire_gpus() {
     echo "[GPU-ALLOC] Requesting $num_gpus GPU(s)..." >&2
     
     while [ "$attempt" -lt "$MAX_RETRIES" ]; do
-        # Try to allocate GPUs atomically
-        local success=0
+        # Try to allocate GPUs atomically and capture the start index
+        local allocated_start=""
+        local result_file
+        result_file=$(mktemp)
         
         (
             flock -x 200
@@ -89,6 +107,9 @@ acquire_gpus() {
                 # Allocate GPUs by updating next available index
                 echo "$end_idx" > "$GPU_STATE_FILE"
                 
+                # Write the starting index to the result file while holding the lock
+                echo "$next_gpu" > "$result_file"
+                
                 echo "[GPU-ALLOC] Allocated GPUs $next_gpu-$((end_idx - 1)) (next available: $end_idx)" >&2
                 exit 0
             else
@@ -96,13 +117,14 @@ acquire_gpus() {
                 echo "[GPU-ALLOC] Need GPUs $next_gpu-$((end_idx - 1)) but only 0-$((MAX_GPUS - 1)) available" >&2
                 exit 1
             fi
-        ) 200>"$GPU_LOCK_FILE" && success=1 || success=0
+        ) 200>"$GPU_LOCK_FILE"
         
-        if [ $success -eq 1 ]; then
-            # Calculate the actual start index from the updated state
-            local next_available
-            next_available=$(cat "$GPU_STATE_FILE")
-            local allocated_start=$((next_available - num_gpus))
+        local lock_exit_code=$?
+        
+        if [ $lock_exit_code -eq 0 ]; then
+            # Read the allocated start index from the result file
+            allocated_start=$(cat "$result_file")
+            rm -f "$result_file"
             
             # Build GPU_DEVICES string
             local gpu_devices=""
@@ -122,6 +144,8 @@ acquire_gpus() {
             
             echo "[GPU-ALLOC] Set GPU_DEVICES=$GPU_DEVICES" >&2
             return 0
+        else
+            rm -f "$result_file"
         fi
         
         # Sleep before retry
@@ -170,10 +194,10 @@ release_gpus() {
             echo "[GPU-ALLOC] Released GPUs. Next available GPU: $start_to_release" >&2
         else
             # GPUs released out of order - this can happen with parallel jobs
-            # For simplicity, we just reset to 0 when we detect this
-            # This isn't perfect but ensures we don't leak GPUs
-            echo "0" > "$GPU_STATE_FILE"
-            echo "[GPU-ALLOC] Released GPUs (out of order). Reset next available to 0" >&2
+            # With only a single "next index" pointer, we cannot safely reuse these
+            # GPUs without risking overlapping allocations. Leave the state unchanged
+            # to preserve isolation; this may underutilize some GPUs but is safe.
+            echo "[GPU-ALLOC] Released GPUs (out of order). Leaving next available at $next_gpu to avoid overlap" >&2
         fi
     ) 200>"$GPU_LOCK_FILE"
 }
@@ -186,5 +210,27 @@ cleanup_gpus() {
     fi
 }
 
-# Register cleanup handler
-trap cleanup_gpus EXIT
+# Enable cleanup handler for the caller's shell.
+# This should be called after a successful acquire_gpus invocation.
+# It composes with any existing EXIT trap instead of overwriting it.
+enable_gpu_cleanup_trap() {
+    # Avoid installing the trap multiple times
+    if [ "${GPU_ALLOC_CLEANUP_TRAP_ENABLED:-0}" -eq 1 ]; then
+        return 0
+    fi
+
+    GPU_ALLOC_CLEANUP_TRAP_ENABLED=1
+    export GPU_ALLOC_CLEANUP_TRAP_ENABLED
+
+    # Capture any existing EXIT trap so we can chain it
+    local existing_exit_trap
+    existing_exit_trap=$(trap -p EXIT | sed -n "s/^trap -- '\(.*\)' EXIT$/\1/p")
+
+    if [ -n "$existing_exit_trap" ]; then
+        # First run cleanup_gpus, then the previously registered EXIT handler
+        # shellcheck disable=SC2064
+        trap "cleanup_gpus; $existing_exit_trap" EXIT
+    else
+        trap cleanup_gpus EXIT
+    fi
+}

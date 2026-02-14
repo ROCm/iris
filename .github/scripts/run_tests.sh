@@ -16,7 +16,7 @@ set -e
 
 TEST_DIR=$1
 NUM_RANKS=$2
-GPU_DEVICES=${3:-""}
+GPU_DEVICES=${3:-${GPU_DEVICES:-""}}
 INSTALL_METHOD=${4:-"editable"}
 
 if [ -z "$TEST_DIR" ] || [ -z "$NUM_RANKS" ]; then
@@ -50,6 +50,7 @@ if [ -z "$GPU_DEVICES" ]; then
     echo "[RUN-TESTS] Using GPU allocator to acquire $NUM_RANKS GPU(s)"
     source "$SCRIPT_DIR/gpu_allocator.sh"
     acquire_gpus "$NUM_RANKS"
+    enable_gpu_cleanup_trap
     echo "[RUN-TESTS] Allocated GPUs: $GPU_DEVICES"
 fi
 
