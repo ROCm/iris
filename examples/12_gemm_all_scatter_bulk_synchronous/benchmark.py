@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
-import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
-import triton
-import random
 import argparse
 import math
+import os
+import random
+import subprocess
+import sys
+
+import torch
+import torch.distributed as dist
+import triton
 
 from examples.common.utils import JSONWriter, Timestamps, is_triton_interpret_set
 from examples.common.validation import validate_gemm
@@ -67,16 +70,15 @@ def parse_args():
     return vars(parser.parse_args())
 
 
-def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
-    """Worker function for PyTorch distributed execution."""
+def _worker(args: dict):
+    """Worker function for torchrun distributed execution."""
+    # When running under torchrun, RANK and WORLD_SIZE are set
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(
-        backend=backend,
-        init_method=init_url,
-        world_size=world_size,
-        rank=local_rank,
-        device_id=torch.device(f"cuda:{local_rank}"),
-    )
+    dist.init_process_group(backend=backend)
 
     shmem = iris.iris(args["heap_size"])
     rank = shmem.get_rank()
@@ -302,15 +304,33 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 def main():
     args = parse_args()
 
-    num_ranks = args["num_ranks"]
-
-    init_url = "tcp://127.0.0.1:29500"
-    mp.spawn(
-        fn=_worker,
-        args=(num_ranks, init_url, args),
-        nprocs=num_ranks,
-        join=True,
-    )
+    # Check if running under torchrun (worker mode)
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        # Running as a torchrun worker - execute directly
+        _worker(args)
+    else:
+        # Running as launcher - use torchrun to spawn workers
+        num_ranks = args["num_ranks"]
+        
+        # Build torchrun command
+        cmd = [
+            "torchrun",
+            f"--nproc_per_node={num_ranks}",
+            "--standalone",
+            sys.argv[0],  # Re-invoke this script
+        ]
+        
+        # Pass all original arguments except --num_ranks (torchrun handles this)
+        for arg in sys.argv[1:]:
+            if not arg.startswith("-r") and not arg.startswith("--num_ranks"):
+                cmd.append(arg)
+            elif arg.startswith("-r") or arg.startswith("--num_ranks"):
+                # Skip -r/--num_ranks and its value
+                continue
+        
+        # Run torchrun
+        result = subprocess.run(cmd)
+        sys.exit(result.returncode)
 
 
 if __name__ == "__main__":
