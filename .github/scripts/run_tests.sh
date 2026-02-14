@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
-# Run Iris tests in a container
+# Run Iris tests in a container with automatic GPU allocation
 # Usage: run_tests.sh <test_dir> <num_ranks> [gpu_devices] [install_method]
 #   test_dir: subdirectory under tests/ (e.g., examples, unittests, ccl)
 #   num_ranks: number of GPU ranks (1, 2, 4, or 8)
-#   gpu_devices: comma-separated GPU device IDs (optional)
+#   gpu_devices: comma-separated GPU device IDs (optional, if not provided will use allocator)
 #   install_method: pip install method - "git", "editable", or "install" (optional, default: "editable")
 #     - "git": pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
 #     - "editable": pip install -e .
@@ -43,7 +43,18 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Build GPU argument if provided
+# Use GPU allocator if GPU_DEVICES not provided
+USE_ALLOCATOR=0
+if [ -z "$GPU_DEVICES" ]; then
+    USE_ALLOCATOR=1
+    echo "[RUN-TESTS] Using GPU allocator to acquire $NUM_RANKS GPU(s)"
+    source "$SCRIPT_DIR/gpu_allocator.sh"
+    acquire_gpus "$NUM_RANKS"
+    GPU_DEVICES="$ALLOCATED_GPUS"
+    echo "[RUN-TESTS] Allocated GPUs: $GPU_DEVICES"
+fi
+
+# Build GPU argument
 GPU_ARG=""
 if [ -n "$GPU_DEVICES" ]; then
     GPU_ARG="--gpus $GPU_DEVICES"
@@ -63,6 +74,7 @@ elif [ "$INSTALL_METHOD" = "install" ]; then
 fi
 
 # Run tests in container
+EXIT_CODE=0
 "$SCRIPT_DIR/container_exec.sh" $GPU_ARG "
     set -e
     
@@ -99,4 +111,12 @@ fi
             python tests/run_tests_distributed.py --num_ranks $NUM_RANKS \"\$test_file\" -v --tb=short --durations=10
         fi
     done
-"
+" || EXIT_CODE=$?
+
+# Release GPUs if we allocated them
+if [ $USE_ALLOCATOR -eq 1 ]; then
+    echo "[RUN-TESTS] Releasing allocated GPUs"
+    release_gpus
+fi
+
+exit $EXIT_CODE

@@ -48,64 +48,44 @@ jobs:
           # Test each subdirectory with each rank count using git install
           - test_dir: examples
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: examples
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: examples
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: examples
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: unittests
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: unittests
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: unittests
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: unittests
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: ccl
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: ccl
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: ccl
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: ccl
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: x
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: x
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: x
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: x
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: ops
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: ops
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: ops
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: ops
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
 
     steps:
       - name: Checkout repository
@@ -125,7 +105,7 @@ jobs:
           bash .github/scripts/run_tests.sh \
             "${{ matrix.test_dir }}" \
             "${{ matrix.num_ranks }}" \
-            "${{ matrix.gpu_devices }}" \
+            "" \
             "git"
           echo "::endgroup::"
           echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (git) passed!"
@@ -141,64 +121,44 @@ jobs:
           # Test each subdirectory with each rank count using editable install
           - test_dir: examples
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: examples
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: examples
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: examples
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: unittests
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: unittests
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: unittests
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: unittests
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: ccl
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: ccl
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: ccl
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: ccl
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: x
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: x
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: x
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: x
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: ops
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: ops
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: ops
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: ops
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
 
     steps:
       - name: Checkout repository
@@ -215,7 +175,7 @@ jobs:
           bash .github/scripts/run_tests.sh \
             "${{ matrix.test_dir }}" \
             "${{ matrix.num_ranks }}" \
-            "${{ matrix.gpu_devices }}" \
+            "" \
             "editable"
           echo "::endgroup::"
           echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (editable) passed!"
@@ -231,64 +191,44 @@ jobs:
           # Test each subdirectory with each rank count using pip install
           - test_dir: examples
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: examples
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: examples
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: examples
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: unittests
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: unittests
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: unittests
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: unittests
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: ccl
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: ccl
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: ccl
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: ccl
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: x
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: x
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: x
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: x
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: ops
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: ops
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: ops
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: ops
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
 
     steps:
       - name: Checkout repository
@@ -305,7 +245,7 @@ jobs:
           bash .github/scripts/run_tests.sh \
             "${{ matrix.test_dir }}" \
             "${{ matrix.num_ranks }}" \
-            "${{ matrix.gpu_devices }}" \
+            "" \
             "install"
           echo "::endgroup::"
           echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (install) passed!"
