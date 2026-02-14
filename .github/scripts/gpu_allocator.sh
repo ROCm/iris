@@ -25,8 +25,8 @@
 GPU_STATE_FILE="${GPU_STATE_FILE:-/tmp/iris_gpu_state}"
 GPU_LOCK_FILE="${GPU_STATE_FILE}.lock"
 MAX_GPUS="${MAX_GPUS:-8}"
-RETRY_DELAY="${RETRY_DELAY:-2}"
-MAX_RETRIES="${MAX_RETRIES:-300}"  # 10 minutes with 2s delay
+RETRY_DELAY="${RETRY_DELAY:-240}"  # 4 minutes between checks
+MAX_RETRIES="${MAX_RETRIES:-15}"   # 1 hour total wait time (15 * 4 min)
 
 # Initialize GPU state file and validate its contents
 init_gpu_state() {

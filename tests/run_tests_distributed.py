@@ -3,64 +3,50 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Simple wrapper to run pytest tests within a single distributed process group.
-This avoids the overhead of creating/destroying process groups for each test case.
+Simple wrapper to run pytest tests within a single distributed process group using torchrun.
+This avoids port conflicts by leveraging torchrun's automatic port management.
 """
 
 import os
 import sys
-import torch.multiprocessing as mp
-import torch.distributed as dist
-import socket
 
 # Set required environment variable for RCCL on ROCm
 os.environ.setdefault("HSA_NO_SCRATCH_RECLAIM", "1")
 
 
-def _find_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-
-def _distributed_worker(rank, world_size, test_file, pytest_args, init_method):
-    """Worker function that runs pytest within a distributed process group."""
-    # Set the correct GPU for this specific process
-    # When ROCR_VISIBLE_DEVICES is set, devices are remapped, so rank 0 should use device 0, etc.
+def _distributed_worker_main():
+    """Main function for distributed worker that runs pytest."""
     import torch
-
+    import torch.distributed as dist
+    
+    # torchrun sets these environment variables automatically
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    
+    # Set the correct GPU for this specific process
     if torch.cuda.is_available():
-        torch.cuda.set_device(rank)
-
-    # Initialize distributed once for all tests
+        torch.cuda.set_device(local_rank)
+    
+    # Initialize distributed - torchrun already set up the environment
     dist.init_process_group(
         backend="nccl",
-        init_method=init_method,
         rank=rank,
         world_size=world_size,
-        device_id=torch.device(f"cuda:{rank}"),
+        device_id=torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else None,
     )
-
+    
     try:
         # Import and run pytest directly
         import pytest
-        import sys
-
-        # Set up sys.argv for pytest
-        original_argv = sys.argv[:]
-        sys.argv = ["pytest", test_file] + pytest_args
-
-        try:
-            # Run pytest directly in this process
-            exit_code = pytest.main([test_file] + pytest_args)
-            # If tests failed, exit with the failure code
-            if exit_code != 0:
-                sys.exit(exit_code)
-            return exit_code
-        finally:
-            # Restore original argv
-            sys.argv = original_argv
-
+        
+        # Get pytest args from environment (set by launcher)
+        pytest_args_str = os.environ.get("PYTEST_ARGS", "")
+        pytest_args = pytest_args_str.split() if pytest_args_str else []
+        
+        # Run pytest
+        exit_code = pytest.main(pytest_args)
+        sys.exit(exit_code)
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -71,7 +57,13 @@ def main():
         print("Usage: python run_tests_distributed.py [--num_ranks N] [pytest_args...] <test_file>")
         sys.exit(1)
 
-    # Get number of ranks from args or default to 2
+    # Check if we're being called as a torchrun worker
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        # We're running inside torchrun - execute as worker
+        _distributed_worker_main()
+        return
+
+    # We're the launcher - parse args and start torchrun
     num_ranks = 2
     args = sys.argv[1:]
 
@@ -90,27 +82,34 @@ def main():
     test_file = args[0]
     pytest_args = args[1:]  # Everything after the test file
 
-    print(f"Running {test_file} with {num_ranks} ranks")
-    print(f"args={args}, test_file={test_file}, pytest_args={pytest_args}")
+    print(f"Running {test_file} with {num_ranks} ranks using torchrun")
 
-    # Find a free port for this test run to avoid conflicts with parallel runs
-    free_port = _find_free_port()
-    init_method = f"tcp://127.0.0.1:{free_port}"
-    print(f"Using init_method: {init_method}")
+    # Build pytest arguments string
+    pytest_cmd_args = [test_file] + pytest_args
+    pytest_args_str = " ".join(pytest_cmd_args)
 
-    # Run all tests within a single distributed process group
+    # Set environment variable for worker to read
+    os.environ["PYTEST_ARGS"] = pytest_args_str
+
+    # Build torchrun command - it will re-invoke this script as a worker
+    import subprocess
+    
+    torchrun_cmd = [
+        "torchrun",
+        f"--nproc_per_node={num_ranks}",
+        "--standalone",  # Single-node training
+        __file__,  # Re-invoke this script
+        "--worker-mode",  # Dummy arg to distinguish from launcher
+    ]
+
+    print(f"Executing: {' '.join(torchrun_cmd)}")
+
+    # Run torchrun and return its exit code
     try:
-        mp.spawn(
-            _distributed_worker,
-            args=(num_ranks, test_file, pytest_args, init_method),
-            nprocs=num_ranks,
-            join=True,
-        )
-    except SystemExit as e:
-        # Catch sys.exit() from worker and return same exit code
-        sys.exit(e.code if isinstance(e.code, int) else 1)
-    except Exception:
-        # Any other unhandled exception = failure
+        result = subprocess.run(torchrun_cmd, check=False, env=os.environ.copy())
+        sys.exit(result.returncode)
+    except Exception as e:
+        print(f"Error running torchrun: {e}")
         sys.exit(1)
 
 
