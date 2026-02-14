@@ -18,16 +18,16 @@ def _distributed_worker_main():
     """Main function for distributed worker that runs pytest."""
     import torch
     import torch.distributed as dist
-    
+
     # torchrun sets these environment variables automatically
     rank = int(os.environ.get("RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    
+
     # Set the correct GPU for this specific process
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
-    
+
     # Initialize distributed - torchrun already set up the environment
     dist.init_process_group(
         backend="nccl",
@@ -35,15 +35,15 @@ def _distributed_worker_main():
         world_size=world_size,
         device_id=torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else None,
     )
-    
+
     try:
         # Import and run pytest directly
         import pytest
-        
+
         # Get pytest args from environment (set by launcher)
         pytest_args_str = os.environ.get("PYTEST_ARGS", "")
         pytest_args = pytest_args_str.split() if pytest_args_str else []
-        
+
         # Run pytest
         exit_code = pytest.main(pytest_args)
         sys.exit(exit_code)
@@ -93,7 +93,7 @@ def main():
 
     # Build torchrun command - it will re-invoke this script as a worker
     import subprocess
-    
+
     torchrun_cmd = [
         "torchrun",
         f"--nproc_per_node={num_ranks}",
