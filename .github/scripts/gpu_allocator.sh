@@ -63,104 +63,13 @@ acquire_gpus() {
     init_gpu_state
     
     local attempt=0
-    local allocated=""
     
     echo "[GPU-ALLOC] Requesting $num_gpus GPU(s)..." >&2
     
-    while [ $attempt -lt $MAX_RETRIES ]; do
-        # Try to allocate GPUs atomically
-        (
-            flock -x 200
-            
-            # Read current free GPUs
-            local free_gpus=$(cat "$GPU_STATE_FILE")
-            
-            # Convert comma-separated list to array
-            IFS=',' read -ra gpu_array <<< "$free_gpus"
-            
-            # Check if we have enough free GPUs
-            if [ ${#gpu_array[@]} -ge $num_gpus ]; then
-                # Allocate first N GPUs
-                allocated=""
-                local remaining=""
-                
-                for i in "${!gpu_array[@]}"; do
-                    if [ $i -lt $num_gpus ]; then
-                        # Allocate this GPU
-                        if [ -z "$allocated" ]; then
-                            allocated="${gpu_array[$i]}"
-                        else
-                            allocated="$allocated,${gpu_array[$i]}"
-                        fi
-                    else
-                        # Keep this GPU in free pool
-                        if [ -z "$remaining" ]; then
-                            remaining="${gpu_array[$i]}"
-                        else
-                            remaining="$remaining,${gpu_array[$i]}"
-                        fi
-                    fi
-                done
-                
-                # Update state file with remaining GPUs
-                echo "$remaining" > "$GPU_STATE_FILE"
-                
-                # Export allocated GPUs
-                echo "$allocated"
-                echo "[GPU-ALLOC] Allocated GPUs: $allocated (remaining: $remaining)" >&2
-                exit 0
-            else
-                # Not enough GPUs available
-                echo "[GPU-ALLOC] Only ${#gpu_array[@]} GPU(s) available, need $num_gpus. Retrying..." >&2
-                exit 1
-            fi
-        ) 200>"$GPU_LOCK_FILE" && break || true
-        
-        # Sleep before retry
-        attempt=$((attempt + 1))
-        if [ $attempt -lt $MAX_RETRIES ]; then
-            sleep $RETRY_DELAY
-        fi
-    done
-    
-    # Check if we successfully allocated
-    allocated=$(
-        flock -s 200
-        # Re-read to get the allocation result from the subshell
-        # We need to track this differently
-        cat "$GPU_STATE_FILE" 2>/dev/null || true
-    ) 200>"$GPU_LOCK_FILE" || true
-    
-    # If we got here without breaking, allocation failed
-    if [ $attempt -ge $MAX_RETRIES ]; then
-        echo "[GPU-ALLOC ERROR] Failed to allocate $num_gpus GPU(s) after $MAX_RETRIES attempts" >&2
-        return 1
-    fi
-    
-    # The allocation was successful - we need to return the allocated GPUs
-    # This is a bit tricky because we're in a subshell
-    # Let's refactor to use a different approach
-}
-
-# Better implementation of acquire_gpus that properly returns the allocated GPUs
-acquire_gpus() {
-    local num_gpus="$1"
-    
-    if [ -z "$num_gpus" ] || [ "$num_gpus" -lt 1 ] || [ "$num_gpus" -gt "$MAX_GPUS" ]; then
-        echo "[GPU-ALLOC ERROR] Invalid GPU count: $num_gpus (must be 1-$MAX_GPUS)" >&2
-        return 1
-    fi
-    
-    # Initialize state if needed
-    init_gpu_state
-    
-    local attempt=0
-    
-    echo "[GPU-ALLOC] Requesting $num_gpus GPU(s)..." >&2
-    
-    while [ $attempt -lt $MAX_RETRIES ]; do
+    while [ "$attempt" -lt "$MAX_RETRIES" ]; do
         # Create temporary file for allocation result
-        local result_file=$(mktemp)
+        local result_file
+        result_file=$(mktemp)
         
         # Try to allocate GPUs atomically
         local success=0
@@ -168,19 +77,20 @@ acquire_gpus() {
             flock -x 200
             
             # Read current free GPUs
-            local free_gpus=$(cat "$GPU_STATE_FILE")
+            local free_gpus
+            free_gpus=$(cat "$GPU_STATE_FILE")
             
             # Convert comma-separated list to array
             IFS=',' read -ra gpu_array <<< "$free_gpus"
             
             # Check if we have enough free GPUs
-            if [ ${#gpu_array[@]} -ge $num_gpus ]; then
+            if [ ${#gpu_array[@]} -ge "$num_gpus" ]; then
                 # Allocate first N GPUs
                 local allocated=""
                 local remaining=""
                 
                 for i in "${!gpu_array[@]}"; do
-                    if [ $i -lt $num_gpus ]; then
+                    if [ "$i" -lt "$num_gpus" ]; then
                         # Allocate this GPU
                         if [ -z "$allocated" ]; then
                             allocated="${gpu_array[$i]}"
@@ -223,9 +133,9 @@ acquire_gpus() {
         
         # Sleep before retry
         attempt=$((attempt + 1))
-        if [ $attempt -lt $MAX_RETRIES ]; then
+        if [ "$attempt" -lt "$MAX_RETRIES" ]; then
             echo "[GPU-ALLOC] Retrying... (attempt $((attempt + 1))/$MAX_RETRIES)" >&2
-            sleep $RETRY_DELAY
+            sleep "$RETRY_DELAY"
         fi
     done
     
@@ -244,24 +154,33 @@ release_gpus() {
     
     echo "[GPU-ALLOC] Releasing GPUs: $ALLOCATED_GPUS" >&2
     
+    # Save the GPUs to release before entering subshell
+    local gpus_to_release="$ALLOCATED_GPUS"
+    
+    # Unset immediately to prevent double-release
+    unset ALLOCATED_GPUS
+    
     (
         flock -x 200
         
         # Read current free GPUs
-        local free_gpus=$(cat "$GPU_STATE_FILE")
+        local free_gpus
+        free_gpus=$(cat "$GPU_STATE_FILE")
         
         # Add allocated GPUs back to free pool
         if [ -z "$free_gpus" ]; then
-            free_gpus="$ALLOCATED_GPUS"
+            free_gpus="$gpus_to_release"
         else
-            free_gpus="$free_gpus,$ALLOCATED_GPUS"
+            free_gpus="$free_gpus,$gpus_to_release"
         fi
         
         # Sort GPUs numerically for consistency
         # Convert to array, sort, convert back
         IFS=',' read -ra gpu_array <<< "$free_gpus"
-        IFS=$'\n' sorted=($(sort -n <<<"${gpu_array[*]}"))
-        unset IFS
+        local sorted=()
+        while IFS= read -r line; do
+            sorted+=("$line")
+        done < <(printf '%s\n' "${gpu_array[@]}" | sort -n)
         
         # Join back with commas
         local sorted_gpus=""
@@ -276,8 +195,6 @@ release_gpus() {
         echo "$sorted_gpus" > "$GPU_STATE_FILE"
         echo "[GPU-ALLOC] Released GPUs. Free GPUs: $sorted_gpus" >&2
     ) 200>"$GPU_LOCK_FILE"
-    
-    unset ALLOCATED_GPUS
 }
 
 # Clean up function to ensure GPUs are released

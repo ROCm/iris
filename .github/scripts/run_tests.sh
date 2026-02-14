@@ -75,6 +75,7 @@ fi
 
 # Run tests in container
 EXIT_CODE=0
+# shellcheck disable=SC2086
 "$SCRIPT_DIR/container_exec.sh" $GPU_ARG "
     set -e
     
