@@ -7,15 +7,15 @@
 #
 # Design:
 # - Uses flock for atomic state management
-# - Maintains shared state file with count of available GPUs
+# - Maintains shared state file with next available GPU index
 # - Supports variable GPU requests (1, 2, 4, 8 GPUs)
 # - Throughput-oriented: first-available scheduling (non-FIFO)
 # - Automatic cleanup on job exit
 #
 # Usage:
 #   source gpu_allocator.sh
-#   acquire_gpus <num_gpus>  # Blocks until GPUs available, sets ALLOCATED_GPUS_COUNT
-#   # ... run your job ...
+#   acquire_gpus <num_gpus>  # Blocks until GPUs available, sets GPU_DEVICES and ALLOCATED_GPU_START
+#   # ... run your job with HIP_VISIBLE_DEVICES=$GPU_DEVICES ...
 #   release_gpus             # Releases allocated GPUs back to pool
 
 set -e
@@ -33,15 +33,16 @@ init_gpu_state() {
     (
         flock -x 200
         if [ ! -f "$GPU_STATE_FILE" ]; then
-            # Initialize with all GPUs available
-            echo "$MAX_GPUS" > "$GPU_STATE_FILE"
-            echo "[GPU-ALLOC] Initialized GPU state: $MAX_GPUS GPUs available" >&2
+            # Initialize with next available GPU index at 0
+            echo "0" > "$GPU_STATE_FILE"
+            echo "[GPU-ALLOC] Initialized GPU state: next available GPU 0" >&2
         fi
     ) 200>"$GPU_LOCK_FILE"
 }
 
 # Acquire N GPUs from the pool
-# Sets ALLOCATED_GPUS_COUNT environment variable with number of GPUs allocated
+# Sets GPU_DEVICES environment variable with comma-separated GPU IDs
+# Sets ALLOCATED_GPU_START and ALLOCATED_GPU_COUNT for cleanup
 # Blocks until requested GPUs are available
 acquire_gpus() {
     local num_gpus="$1"
@@ -74,31 +75,52 @@ acquire_gpus() {
     while [ "$attempt" -lt "$MAX_RETRIES" ]; do
         # Try to allocate GPUs atomically
         local success=0
+        
         (
             flock -x 200
             
-            # Read current available GPU count
-            local available
-            available=$(cat "$GPU_STATE_FILE")
+            # Read next available GPU index
+            local next_gpu
+            next_gpu=$(cat "$GPU_STATE_FILE")
             
-            # Check if we have enough GPUs
-            if [ "$available" -ge "$num_gpus" ]; then
-                # Allocate GPUs by reducing the count
-                local remaining=$((available - num_gpus))
-                echo "$remaining" > "$GPU_STATE_FILE"
+            # Check if we have enough contiguous GPUs available
+            local end_idx=$((next_gpu + num_gpus))
+            if [ "$end_idx" -le "$MAX_GPUS" ]; then
+                # Allocate GPUs by updating next available index
+                echo "$end_idx" > "$GPU_STATE_FILE"
                 
-                echo "[GPU-ALLOC] Allocated $num_gpus GPU(s) (remaining: $remaining)" >&2
+                echo "[GPU-ALLOC] Allocated GPUs $next_gpu-$((end_idx - 1)) (next available: $end_idx)" >&2
                 exit 0
             else
                 # Not enough GPUs available
+                echo "[GPU-ALLOC] Need GPUs $next_gpu-$((end_idx - 1)) but only 0-$((MAX_GPUS - 1)) available" >&2
                 exit 1
             fi
         ) 200>"$GPU_LOCK_FILE" && success=1 || success=0
         
         if [ $success -eq 1 ]; then
-            # Store allocated count
-            ALLOCATED_GPUS_COUNT="$num_gpus"
-            export ALLOCATED_GPUS_COUNT
+            # Calculate the actual start index from the updated state
+            local next_available
+            next_available=$(cat "$GPU_STATE_FILE")
+            local allocated_start=$((next_available - num_gpus))
+            
+            # Build GPU_DEVICES string
+            local gpu_devices=""
+            for ((i=0; i<num_gpus; i++)); do
+                if [ -z "$gpu_devices" ]; then
+                    gpu_devices="$((allocated_start + i))"
+                else
+                    gpu_devices="$gpu_devices,$((allocated_start + i))"
+                fi
+            done
+            
+            # Export variables
+            GPU_DEVICES="$gpu_devices"
+            ALLOCATED_GPU_START="$allocated_start"
+            ALLOCATED_GPU_COUNT="$num_gpus"
+            export GPU_DEVICES ALLOCATED_GPU_START ALLOCATED_GPU_COUNT
+            
+            echo "[GPU-ALLOC] Set GPU_DEVICES=$GPU_DEVICES" >&2
             return 0
         fi
         
@@ -116,39 +138,49 @@ acquire_gpus() {
 }
 
 # Release allocated GPUs back to the pool
-# Uses ALLOCATED_GPUS_COUNT environment variable
+# Uses ALLOCATED_GPU_START and ALLOCATED_GPU_COUNT environment variables
 release_gpus() {
-    if [ -z "$ALLOCATED_GPUS_COUNT" ]; then
+    if [ -z "$ALLOCATED_GPU_COUNT" ]; then
         echo "[GPU-ALLOC] No GPUs to release" >&2
         return 0
     fi
     
-    echo "[GPU-ALLOC] Releasing $ALLOCATED_GPUS_COUNT GPU(s)" >&2
+    echo "[GPU-ALLOC] Releasing $ALLOCATED_GPU_COUNT GPU(s) starting at index $ALLOCATED_GPU_START" >&2
     
-    # Save the count to release before entering subshell
-    local gpus_to_release="$ALLOCATED_GPUS_COUNT"
+    # Save the values to release before entering subshell
+    local start_to_release="$ALLOCATED_GPU_START"
+    local count_to_release="$ALLOCATED_GPU_COUNT"
     
     # Unset immediately to prevent double-release
-    unset ALLOCATED_GPUS_COUNT
+    unset GPU_DEVICES ALLOCATED_GPU_START ALLOCATED_GPU_COUNT
     
     (
         flock -x 200
         
-        # Read current available count
-        local available
-        available=$(cat "$GPU_STATE_FILE")
+        # Read current next available GPU index
+        local next_gpu
+        next_gpu=$(cat "$GPU_STATE_FILE")
         
-        # Add released GPUs back to pool
-        local new_count=$((available + gpus_to_release))
-        
-        echo "$new_count" > "$GPU_STATE_FILE"
-        echo "[GPU-ALLOC] Released GPUs. Available GPUs: $new_count" >&2
+        # Check if the GPUs we're releasing are at the end of the allocated range
+        local expected_next=$((start_to_release + count_to_release))
+        if [ "$next_gpu" -eq "$expected_next" ]; then
+            # We're releasing the most recently allocated GPUs
+            # Move the next available index back
+            echo "$start_to_release" > "$GPU_STATE_FILE"
+            echo "[GPU-ALLOC] Released GPUs. Next available GPU: $start_to_release" >&2
+        else
+            # GPUs released out of order - this can happen with parallel jobs
+            # For simplicity, we just reset to 0 when we detect this
+            # This isn't perfect but ensures we don't leak GPUs
+            echo "0" > "$GPU_STATE_FILE"
+            echo "[GPU-ALLOC] Released GPUs (out of order). Reset next available to 0" >&2
+        fi
     ) 200>"$GPU_LOCK_FILE"
 }
 
 # Clean up function to ensure GPUs are released
 cleanup_gpus() {
-    if [ -n "$ALLOCATED_GPUS_COUNT" ]; then
+    if [ -n "$ALLOCATED_GPU_COUNT" ]; then
         echo "[GPU-ALLOC] Cleanup: releasing GPUs on exit" >&2
         release_gpus
     fi

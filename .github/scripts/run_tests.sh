@@ -50,10 +50,10 @@ if [ -z "$GPU_DEVICES" ]; then
     echo "[RUN-TESTS] Using GPU allocator to acquire $NUM_RANKS GPU(s)"
     source "$SCRIPT_DIR/gpu_allocator.sh"
     acquire_gpus "$NUM_RANKS"
-    echo "[RUN-TESTS] Allocated $ALLOCATED_GPUS_COUNT GPU(s)"
+    echo "[RUN-TESTS] Allocated GPUs: $GPU_DEVICES"
 fi
 
-# Build GPU argument if GPU_DEVICES explicitly provided
+# Build GPU argument
 GPU_ARG=""
 if [ -n "$GPU_DEVICES" ]; then
     GPU_ARG="--gpus $GPU_DEVICES"
