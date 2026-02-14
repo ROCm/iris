@@ -151,8 +151,19 @@ acquire_gpus 2
 alloc2="$ALLOCATED_GPUS"
 echo "  Allocation 2: $alloc2"
 
-# Verify they don't overlap
-if [[ "$alloc1" == *"$alloc2"* ]] || [[ "$alloc2" == *"$alloc1"* ]]; then
+# Verify they don't overlap - check individual GPU IDs
+IFS=',' read -ra gpus1 <<< "$alloc1"
+IFS=',' read -ra gpus2 <<< "$alloc2"
+overlap=0
+for g1 in "${gpus1[@]}"; do
+    for g2 in "${gpus2[@]}"; do
+        if [ "$g1" = "$g2" ]; then
+            overlap=1
+            break 2
+        fi
+    done
+done
+if [ $overlap -eq 1 ]; then
     echo "❌ FAIL: Allocations overlap: $alloc1 and $alloc2"
     exit 1
 else

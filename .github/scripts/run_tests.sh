@@ -112,7 +112,7 @@ EXIT_CODE=0
             python tests/run_tests_distributed.py --num_ranks $NUM_RANKS \"\$test_file\" -v --tb=short --durations=10
         fi
     done
-" || EXIT_CODE=$?
+" || { EXIT_CODE=$?; }
 
 # Release GPUs if we allocated them
 if [ $USE_ALLOCATOR -eq 1 ]; then

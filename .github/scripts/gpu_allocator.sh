@@ -54,7 +54,20 @@ init_gpu_state() {
 acquire_gpus() {
     local num_gpus="$1"
     
-    if [ -z "$num_gpus" ] || [ "$num_gpus" -lt 1 ] || [ "$num_gpus" -gt "$MAX_GPUS" ]; then
+    # Validate input is provided and is numeric
+    if [ -z "$num_gpus" ]; then
+        echo "[GPU-ALLOC ERROR] GPU count not specified" >&2
+        return 1
+    fi
+    
+    # Check if numeric
+    if ! [[ "$num_gpus" =~ ^[0-9]+$ ]]; then
+        echo "[GPU-ALLOC ERROR] GPU count must be a number: $num_gpus" >&2
+        return 1
+    fi
+    
+    # Validate range
+    if [ "$num_gpus" -lt 1 ] || [ "$num_gpus" -gt "$MAX_GPUS" ]; then
         echo "[GPU-ALLOC ERROR] Invalid GPU count: $num_gpus (must be 1-$MAX_GPUS)" >&2
         return 1
     fi
