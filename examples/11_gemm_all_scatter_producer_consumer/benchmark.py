@@ -76,7 +76,7 @@ def _worker(args: dict):
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
-    
+
     backend = "nccl" if torch.cuda.is_available() else "gloo"
     dist.init_process_group(backend=backend)
 
@@ -315,7 +315,7 @@ def main():
     else:
         # Running as launcher - use torchrun to spawn workers
         num_ranks = args["num_ranks"]
-        
+
         # Build torchrun command
         cmd = [
             "torchrun",
@@ -323,7 +323,7 @@ def main():
             "--standalone",
             sys.argv[0],  # Re-invoke this script
         ]
-        
+
         # Pass all original arguments except --num_ranks (torchrun handles this)
         for arg in sys.argv[1:]:
             if not arg.startswith("-r") and not arg.startswith("--num_ranks"):
@@ -331,7 +331,7 @@ def main():
             elif arg.startswith("-r") or arg.startswith("--num_ranks"):
                 # Skip -r/--num_ranks and its value
                 continue
-        
+
         # Run torchrun
         result = subprocess.run(cmd)
         sys.exit(result.returncode)
