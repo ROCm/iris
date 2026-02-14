@@ -26,15 +26,13 @@ acquire_gpus "$NUM_GPUS"
 echo "[ACQUIRE-GPUS] Allocated GPUs: $GPU_DEVICES"
 echo "[ACQUIRE-GPUS] GPU allocation details:"
 echo "  GPU_DEVICES=$GPU_DEVICES"
-echo "  ALLOCATED_GPU_START=$ALLOCATED_GPU_START"
-echo "  ALLOCATED_GPU_COUNT=$ALLOCATED_GPU_COUNT"
+echo "  ALLOCATED_GPU_BITMAP=$ALLOCATED_GPU_BITMAP"
 
 # Export to GITHUB_ENV so subsequent steps can use these variables
 if [ -n "$GITHUB_ENV" ]; then
     {
         echo "GPU_DEVICES=$GPU_DEVICES"
-        echo "ALLOCATED_GPU_START=$ALLOCATED_GPU_START"
-        echo "ALLOCATED_GPU_COUNT=$ALLOCATED_GPU_COUNT"
+        echo "ALLOCATED_GPU_BITMAP=$ALLOCATED_GPU_BITMAP"
     } >> "$GITHUB_ENV"
     echo "[ACQUIRE-GPUS] Exported variables to GITHUB_ENV"
 else
