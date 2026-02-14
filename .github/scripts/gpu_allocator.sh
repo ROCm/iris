@@ -114,7 +114,8 @@ acquire_gpus() {
                 exit 0
             else
                 # Not enough GPUs available
-                echo "[GPU-ALLOC] Need GPUs $next_gpu-$((end_idx - 1)) but only 0-$((MAX_GPUS - 1)) available" >&2
+                local available_count=$((MAX_GPUS - next_gpu))
+                echo "[GPU-ALLOC] Not enough GPUs: need $num_gpus, only $available_count available (next free GPU: $next_gpu)" >&2
                 exit 1
             fi
         ) 200>"$GPU_LOCK_FILE"
