@@ -93,6 +93,7 @@ acquire_gpus() {
         # Try to allocate GPUs atomically and capture the start index
         local allocated_start=""
         local result_file
+        local lock_exit_code
         result_file=$(mktemp)
         
         (
@@ -119,11 +120,9 @@ acquire_gpus() {
                 echo "[GPU-ALLOC] Not enough GPUs: need $num_gpus, only $available_count available (next free GPU: $next_gpu)" >&2
                 exit 1
             fi
-        ) 200>"$GPU_LOCK_FILE"
+        ) 200>"$GPU_LOCK_FILE" && lock_exit_code=0 || lock_exit_code=$?
         
-        local lock_exit_code=$?
-        
-        if [ $lock_exit_code -eq 0 ]; then
+        if [ "$lock_exit_code" -eq 0 ]; then
             # Read the allocated start index from the result file
             allocated_start=$(cat "$result_file")
             rm -f "$result_file"
