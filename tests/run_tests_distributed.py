@@ -98,7 +98,6 @@ def main():
         f"--nproc_per_node={num_ranks}",
         "--standalone",  # Single-node training
         __file__,  # Re-invoke this script
-        "--worker-mode",  # Dummy arg to distinguish from launcher
     ]
 
     print(f"Executing: {' '.join(torchrun_cmd)}")

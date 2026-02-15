@@ -17,6 +17,7 @@ env:
 jobs:
   build-container-image:
     runs-on: [self-hosted, mi3xx]
+    timeout-minutes: 180
 
     steps:
       - name: Checkout repository
@@ -41,6 +42,7 @@ jobs:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, git install)
     needs: build-container-image
     runs-on: [self-hosted, mi3xx]
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -119,6 +121,7 @@ jobs:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, editable install)
     needs: [build-container-image, test-git]
     runs-on: [self-hosted, mi3xx]
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
