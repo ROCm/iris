@@ -27,8 +27,8 @@
 GPU_STATE_FILE="${GPU_STATE_FILE:-/tmp/iris_gpu_state}"
 GPU_LOCK_FILE="${GPU_STATE_FILE}.lock"
 MAX_GPUS="${MAX_GPUS:-8}"
-RETRY_DELAY="${RETRY_DELAY:-120}"  # 2 minutes between checks
-MAX_RETRIES="${MAX_RETRIES:-60}"   # 2 hours total wait time (60 * 2 min)
+RETRY_DELAY="${RETRY_DELAY:-60}"   # 1 minute between checks
+MAX_RETRIES="${MAX_RETRIES:-180}"  # 3 hours total wait time (180 * 1 min)
 
 # Initialize GPU state file and validate its contents
 # State format: 8-bit bitmap where bit N=1 means GPU N is allocated
