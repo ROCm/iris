@@ -75,29 +75,6 @@ EXIT_CODE=0
 "$SCRIPT_DIR/container_exec.sh" $GPU_ARG "
     set -e
     
-    # Install tritonBLAS if not already installed (required for iris/ops)
-    echo \"Checking for tritonBLAS...\"
-    if ! python -c 'import tritonblas' 2>/dev/null; then
-        echo \"Installing tritonBLAS...\"
-        # Use workspace directory for tritonBLAS since /opt may not be writable
-        TRITONBLAS_DIR=\"./tritonblas_install\"
-        if [ ! -d \"\$TRITONBLAS_DIR\" ]; then
-            git clone https://github.com/ROCm/tritonBLAS.git \"\$TRITONBLAS_DIR\"
-            cd \"\$TRITONBLAS_DIR\"
-            git checkout 47768c93acb7f89511d797964b84544c30ab81ad
-        else
-            cd \"\$TRITONBLAS_DIR\"
-            git fetch
-            git checkout 47768c93acb7f89511d797964b84544c30ab81ad
-        fi
-        # Install with dependencies
-        pip install -e .
-        cd ..
-        echo \"tritonBLAS installed successfully\"
-    else
-        echo \"tritonBLAS already installed\"
-    fi
-    
     echo \"Installing iris using method: $INSTALL_METHOD\"
     $INSTALL_CMD
     

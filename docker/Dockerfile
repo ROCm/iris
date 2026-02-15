@@ -39,13 +39,6 @@ RUN git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e
 RUN pip3 install -e .
 ENV PYTHONPATH=$TRITON_PATH
 
-# Install tritonBLAS
-WORKDIR /opt
-RUN git clone https://github.com/ROCm/tritonBLAS.git && \
-    cd tritonBLAS && \
-    git checkout 47768c93acb7f89511d797964b84544c30ab81ad && \
-    pip3 install -e .
-
 # Set up workspace
 WORKDIR /workspace
 

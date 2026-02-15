@@ -8,7 +8,6 @@ From: rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
     /bin/bash -c "
     # Set environment variables
     export TRITON_PATH=/opt/triton
-    export TRITONBLAS_PATH=/opt/tritonBLAS
     export ROCM_PATH=/opt/rocm
     export LD_LIBRARY_PATH=\$ROCM_PATH/lib:\$LD_LIBRARY_PATH
     export PATH=\"\$ROCM_PATH/bin:\$PATH\"
@@ -33,21 +32,13 @@ From: rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
     cd \$TRITON_PATH
     git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e 
     pip3 install -e .
-
-    # Clone and install tritonBLAS
-    cd /opt
-    git clone https://github.com/ROCm/tritonBLAS.git
-    cd tritonBLAS
-    git checkout 47768c93acb7f89511d797964b84544c30ab81ad
-    pip3 install -e .
     "
 
 %environment
     # Define environment variables
     export TRITON_PATH=/opt/triton
-    export TRITONBLAS_PATH=/opt/tritonBLAS
     export ROCM_PATH=/opt/rocm
-    export PYTHONPATH=$TRITON_PATH:$TRITONBLAS_PATH
+    export PYTHONPATH=$TRITON_PATH
     export LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH
     export PATH="$ROCM_PATH/bin:$PATH"
     export OMPI_MCA_mtl="^ofi"

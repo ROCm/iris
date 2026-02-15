@@ -61,20 +61,6 @@ jobs:
           bash .github/scripts/container_exec.sh "
             set -e
             
-            # Install tritonBLAS (required dependency)
-            echo \"Installing tritonBLAS...\"
-            if [ ! -d \"/tmp/tritonBLAS\" ]; then
-                cd /tmp && git clone https://github.com/ROCm/tritonBLAS.git 2>&1 | tail -3
-            fi
-            if [ -d \"/tmp/tritonBLAS\" ]; then
-                cd /tmp/tritonBLAS
-                git checkout 47768c93acb7f89511d797964b84544c30ab81ad 2>&1 | tail -2
-                pip install -e . 2>&1 | tail -3
-            else
-                echo \"Warning: Could not clone tritonBLAS, trying pip install from git...\"
-                pip install git+https://github.com/ROCm/tritonBLAS.git@47768c93acb7f89511d797964b84544c30ab81ad 2>&1 | tail -3
-            fi
-            
             cd /iris_workspace
             pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
             wget -O test_iris_distributed.py https://gist.githubusercontent.com/mawad-amd/6375dc078e39e256828f379e03310ec7/raw/0827d023eaf8e9755b17cbe8ab06f2ce258e746a/test_iris_distributed.py
@@ -109,20 +95,6 @@ jobs:
           echo "::group::Running external gluon validation test"
           bash .github/scripts/container_exec.sh --gpus "$GPU_DEVICES" "
             set -e
-            
-            # Install tritonBLAS (required dependency)
-            echo \"Installing tritonBLAS...\"
-            if [ ! -d \"/tmp/tritonBLAS\" ]; then
-                cd /tmp && git clone https://github.com/ROCm/tritonBLAS.git 2>&1 | tail -3
-            fi
-            if [ -d \"/tmp/tritonBLAS\" ]; then
-                cd /tmp/tritonBLAS
-                git checkout 47768c93acb7f89511d797964b84544c30ab81ad 2>&1 | tail -2
-                pip install -e . 2>&1 | tail -3
-            else
-                echo \"Warning: Could not clone tritonBLAS, trying pip install from git...\"
-                pip install git+https://github.com/ROCm/tritonBLAS.git@47768c93acb7f89511d797964b84544c30ab81ad 2>&1 | tail -3
-            fi
             
             cd /iris_workspace
             pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}

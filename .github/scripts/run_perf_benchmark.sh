@@ -28,20 +28,6 @@ echo "[PERF-BENCHMARK] Using GPUs: $GPU_DEVICES"
 "$SCRIPT_DIR/container_exec.sh" --gpus "$GPU_DEVICES" "
     set -e
     
-    # Install tritonBLAS (required dependency)
-    echo \"Installing tritonBLAS...\"
-    if [ ! -d \"/tmp/tritonBLAS\" ]; then
-        cd /tmp && git clone https://github.com/ROCm/tritonBLAS.git 2>&1 | tail -3
-    fi
-    if [ -d \"/tmp/tritonBLAS\" ]; then
-        cd /tmp/tritonBLAS
-        git checkout 47768c93acb7f89511d797964b84544c30ab81ad 2>&1 | tail -2
-        pip install -e . 2>&1 | tail -3
-    else
-        echo \"Warning: Could not clone tritonBLAS, trying pip install from git...\"
-        pip install git+https://github.com/ROCm/tritonBLAS.git@47768c93acb7f89511d797964b84544c30ab81ad 2>&1 | tail -3
-    fi
-    
     cd /iris_workspace
     pip install -e .
     torchrun --nproc_per_node=8 examples/${EXAMPLE_PATH}/benchmark.py \
