@@ -105,7 +105,7 @@ EXIT_CODE=0
     for test_file in tests/$TEST_DIR/test_*.py; do
         if [ -f \"\$test_file\" ]; then
             echo \"Testing: \$test_file with $NUM_RANKS ranks (install: $INSTALL_METHOD)\"
-            python tests/run_tests_distributed.py --num_ranks $NUM_RANKS \"\$test_file\" -v --tb=short --durations=10
+            torchrun --nproc_per_node=$NUM_RANKS --standalone tests/run_tests_distributed.py \"\$test_file\" -v --tb=short --durations=10
         fi
     done
 " || { EXIT_CODE=$?; }
