@@ -3,10 +3,8 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Simple wrapper to run pytest tests within a single distributed process group using torchrun.
-This avoids port conflicts by leveraging torchrun's automatic port management.
+Simple wrapper to run pytest tests using torchrun, which manages distributed process groups and avoids port conflicts through automatic port allocation.
 """
-
 import os
 import sys
 

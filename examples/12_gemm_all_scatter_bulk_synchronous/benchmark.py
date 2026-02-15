@@ -306,7 +306,7 @@ def main():
     args = parse_args()
 
     # Check if running with torchrun (detected by environment variables)
-    if "RANK" in os.environ or "LOCAL_RANK" in os.environ:
+    if "RANK" in os.environ and "LOCAL_RANK" in os.environ:
         # torchrun handles process spawning, so call _worker directly
         print("Detected torchrun execution mode")
         rank = int(os.environ.get("RANK", 0))
