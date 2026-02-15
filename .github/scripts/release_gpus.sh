@@ -12,7 +12,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Check if we have GPU allocation details
-if [ -z "$GPU_DEVICES" ] && [ -z "$ALLOCATED_GPU_START" ] && [ -z "$ALLOCATED_GPU_COUNT" ]; then
+if [ -z "$GPU_DEVICES" ] && [ -z "$ALLOCATED_GPU_BITMAP" ]; then
     echo "[RELEASE-GPUS] No GPU allocation found, nothing to release"
     exit 0
 fi
@@ -20,8 +20,7 @@ fi
 echo "[RELEASE-GPUS] Releasing GPUs"
 echo "[RELEASE-GPUS] GPU allocation details:"
 echo "  GPU_DEVICES=$GPU_DEVICES"
-echo "  ALLOCATED_GPU_START=$ALLOCATED_GPU_START"
-echo "  ALLOCATED_GPU_COUNT=$ALLOCATED_GPU_COUNT"
+echo "  ALLOCATED_GPU_BITMAP=$ALLOCATED_GPU_BITMAP"
 
 source "$SCRIPT_DIR/gpu_allocator.sh"
 release_gpus

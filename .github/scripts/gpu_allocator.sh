@@ -224,27 +224,4 @@ cleanup_gpus() {
     fi
 }
 
-# Enable cleanup handler for the caller's shell.
-# This should be called after a successful acquire_gpus invocation.
-# It composes with any existing EXIT trap instead of overwriting it.
-enable_gpu_cleanup_trap() {
-    # Avoid installing the trap multiple times
-    if [ "${GPU_ALLOC_CLEANUP_TRAP_ENABLED:-0}" -eq 1 ]; then
-        return 0
-    fi
 
-    GPU_ALLOC_CLEANUP_TRAP_ENABLED=1
-    export GPU_ALLOC_CLEANUP_TRAP_ENABLED
-
-    # Capture any existing EXIT trap so we can chain it
-    local existing_exit_trap
-    existing_exit_trap=$(trap -p EXIT | sed -n "s/^trap -- '\(.*\)' EXIT$/\1/p")
-
-    if [ -n "$existing_exit_trap" ]; then
-        # First run cleanup_gpus, then the previously registered EXIT handler
-        # shellcheck disable=SC2064
-        trap "cleanup_gpus; $existing_exit_trap" EXIT
-    else
-        trap cleanup_gpus EXIT
-    fi
-}
