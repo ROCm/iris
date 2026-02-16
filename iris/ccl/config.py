@@ -31,6 +31,10 @@ class Config:
         num_xcds: Number of XCCs. If None, auto-detected from system (default: None)
         use_gluon: If True, use Gluon-based implementation (default: False)
                    Gluon provides better control over warp-level traffic shaping
+        all_gather_variant: Variant for all-gather operation (default: "persistent")
+                           Options: "persistent", "partitioned"
+                           - "persistent": Each PID handles multiple tiles and sends to all ranks
+                           - "partitioned": PIDs partitioned across ranks, eliminates inner loop
         all_reduce_variant: Variant for all-reduce operation (default: "atomic")
                            Options: "atomic", "ring", "two_shot", "one_shot", "spinlock"
         all_reduce_distribution: Distribution for two-shot all-reduce (default: 0)
@@ -57,6 +61,10 @@ class Config:
         >>> # All-reduce with ring variant
         >>> config = Config(all_reduce_variant="ring")
         >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
+
+        >>> # All-gather with partitioned variant
+        >>> config = Config(all_gather_variant="partitioned")
+        >>> shmem.ccl.all_gather(output_tensor, input_tensor, config=config)
     """
 
     block_size_m: int = 32
@@ -66,6 +74,7 @@ class Config:
     num_xcds: int | None = None
     chunk_size: int | None = None
     use_gluon: bool = False
+    all_gather_variant: str = "persistent"
     all_reduce_variant: str = "two_shot"
     all_reduce_distribution: int = 1
     all_reduce_num_rings: int = 1
@@ -91,6 +100,10 @@ class Config:
             raise ValueError(f"comm_sms must be positive, got {self.comm_sms}")
         if self.num_xcds <= 0:
             raise ValueError(f"num_xcds must be positive, got {self.num_xcds}")
+        if self.all_gather_variant not in ["persistent", "partitioned"]:
+            raise ValueError(
+                f"all_gather_variant must be one of: 'persistent', 'partitioned', got {self.all_gather_variant}"
+            )
         if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock"]:
             raise ValueError(
                 f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'spinlock', got {self.all_reduce_variant}"
