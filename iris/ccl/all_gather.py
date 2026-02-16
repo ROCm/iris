@@ -379,4 +379,3 @@ def all_gather(
 
     if not async_op:
         shmem.barrier()
-

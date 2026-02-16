@@ -164,4 +164,3 @@ def test_all_gather_partitioned(dtype, M, N):
         import gc
 
         gc.collect()
-

@@ -86,7 +86,7 @@ class Timestamps:
         self.comm_end_timestamp.fill_(self.min_ts)
 
     def to_json(self, filename, gpu_freq):
-        cycles_to_us = lambda cycles: (cycles / gpu_freq)
+        cycles_to_us = lambda cycles: cycles / gpu_freq
 
         gemm_begin_us = cycles_to_us(self.mm_begin_timestamp.cpu().numpy())
         gemm_end_us = cycles_to_us(self.mm_end_timestamp.cpu().numpy())
