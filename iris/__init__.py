@@ -67,6 +67,9 @@ from .util import (
     do_bench,
 )
 
+# Import benchmarking utilities
+from . import bench
+
 from . import hip
 
 # Import experimental features (optional, for users who want experimental APIs)
@@ -106,6 +109,7 @@ __all__ = [
     "atomic_min",
     "atomic_max",
     "do_bench",
+    "bench",  # Benchmarking utilities
     "hip",
     "experimental",  # Experimental features including iris_gluon
     "ops",  # Fused GEMM+CCL operations
