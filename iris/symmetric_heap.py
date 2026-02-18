@@ -133,6 +133,7 @@ class SymmetricHeap:
         """
         return self.on_symmetric_heap(tensor)
 
+
     def get_heap_bases(self) -> torch.Tensor:
         """Get heap base addresses for all ranks as a tensor."""
         return self.heap_bases
