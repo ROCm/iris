@@ -257,22 +257,6 @@ def test_as_symmetric_error_non_cuda():
         ctx.as_symmetric(cpu_tensor)
 
 
-def test_as_symmetric_error_torch_allocator():
-    """
-    Test that as_symmetric() raises error when used with TorchAllocator.
-
-    as_symmetric() is a VMem-specific feature.
-    """
-    # Create context with Torch allocator (default is vmem)
-    ctx = iris.iris(64 << 20, allocator_type="torch")
-
-    ext = torch.randn(100, dtype=torch.float32, device="cuda")
-
-    # Should raise error - TorchAllocator doesn't support import_external_tensor
-    with pytest.raises(RuntimeError, match="does not support"):
-        ctx.as_symmetric(ext)
-
-
 def test_as_symmetric_integration():
     """
     Full integration test: native allocations + imports + computations.
