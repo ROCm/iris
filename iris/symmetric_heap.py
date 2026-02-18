@@ -111,6 +111,28 @@ class SymmetricHeap:
         """
         return self.allocator.owns_tensor(tensor)
 
+    def is_symmetric(self, tensor: torch.Tensor) -> bool:
+        """
+        Check if a tensor is allocated on the symmetric heap.
+
+        This method provides a public API to check whether a tensor resides in the
+        symmetric heap, making it accessible for RMA operations across ranks.
+
+        Args:
+            tensor: PyTorch tensor to check
+
+        Returns:
+            True if tensor is on the symmetric heap, False otherwise
+
+        Example:
+            >>> ctx = iris.iris(heap_size=2**30)
+            >>> symmetric_tensor = ctx.zeros(1000, dtype=torch.float32)
+            >>> external_tensor = torch.zeros(1000, dtype=torch.float32, device='cuda')
+            >>> ctx.heap.is_symmetric(symmetric_tensor)  # True
+            >>> ctx.heap.is_symmetric(external_tensor)   # False
+        """
+        return self.on_symmetric_heap(tensor)
+
     def get_heap_bases(self) -> torch.Tensor:
         """Get heap base addresses for all ranks as a tensor."""
         return self.heap_bases

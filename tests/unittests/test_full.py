@@ -44,7 +44,7 @@ def test_full_basic(fill_value, size):
     assert torch.all(result == fill_value)
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 def test_full_dtype_inference():
@@ -54,19 +54,19 @@ def test_full_dtype_inference():
     result_int = shmem.full((2, 3), 42)
     assert result_int.dtype == torch.int64
     assert torch.all(result_int == 42)
-    assert shmem._Iris__on_symmetric_heap(result_int)
+    assert shmem.is_symmetric(result_int)
 
     # Test float fill_value (should infer default float dtype)
     result_float = shmem.full((2, 3), 3.141592)
     assert result_float.dtype == torch.get_default_dtype()
     assert torch.allclose(result_float, torch.tensor(3.141592))
-    assert shmem._Iris__on_symmetric_heap(result_float)
+    assert shmem.is_symmetric(result_float)
 
     # Test explicit dtype override
     result_explicit = shmem.full((2, 3), 42, dtype=torch.float32)
     assert result_explicit.dtype == torch.float32
     assert torch.all(result_explicit == 42)
-    assert shmem._Iris__on_symmetric_heap(result_explicit)
+    assert shmem.is_symmetric(result_explicit)
 
 
 @pytest.mark.parametrize(
@@ -85,7 +85,7 @@ def test_full_requires_grad(requires_grad):
     # Verify requires_grad is set
     assert result.requires_grad == requires_grad
     assert torch.all(result == 1.5)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 def test_full_device_handling():
@@ -95,26 +95,26 @@ def test_full_device_handling():
     result = shmem.full((3, 3), 2.5)
     assert str(result.device) == str(shmem.get_device())
     assert torch.all(result == 2.5)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test explicit device
     result = shmem.full((3, 3), 2.5, device=shmem.device)
     assert str(result.device) == str(shmem.get_device())
     assert torch.all(result == 2.5)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test that "cuda" shorthand works (should use current CUDA device)
     if shmem.device.startswith("cuda:"):
         result = shmem.full((3, 3), 2.5, device="cuda")
         assert str(result.device) == str(shmem.get_device())
         assert torch.all(result == 2.5)
-        assert shmem._Iris__on_symmetric_heap(result)
+        assert shmem.is_symmetric(result)
 
     # Test None device defaults to Iris device
     result = shmem.full((3, 3), 2.5, device=None)
     assert str(result.device) == str(shmem.get_device())
     assert torch.all(result == 2.5)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test that different device throws error
     different_device = "cpu"  # CPU is always different from CUDA
@@ -136,7 +136,7 @@ def test_full_layout_handling():
     result = shmem.full((2, 4), 1.0, layout=torch.strided)
     assert result.layout == torch.strided
     assert torch.all(result == 1.0)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test that unsupported layout throws error
     with pytest.raises(ValueError):
@@ -154,7 +154,7 @@ def test_full_out_parameter():
     assert result.data_ptr() == out_tensor.data_ptr()
     assert torch.allclose(result, torch.tensor(3.141592))
     assert result.shape == (2, 3)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test with different dtype out tensor
     out_tensor_int = shmem._Iris__allocate(6, torch.int32)
@@ -162,7 +162,7 @@ def test_full_out_parameter():
     assert result_int.data_ptr() == out_tensor_int.data_ptr()
     assert result_int.dtype == torch.int32
     assert torch.all(result_int == 42)
-    assert shmem._Iris__on_symmetric_heap(result_int)
+    assert shmem.is_symmetric(result_int)
 
 
 def test_full_size_variations():
@@ -172,25 +172,25 @@ def test_full_size_variations():
     result1 = shmem.full((5,), 2.0)
     assert result1.shape == (5,)
     assert torch.all(result1 == 2.0)
-    assert shmem._Iris__on_symmetric_heap(result1)
+    assert shmem.is_symmetric(result1)
 
     # Test multiple dimensions
     result2 = shmem.full((2, 3, 4), 1.5)
     assert result2.shape == (2, 3, 4)
     assert torch.all(result2 == 1.5)
-    assert shmem._Iris__on_symmetric_heap(result2)
+    assert shmem.is_symmetric(result2)
 
     # Test with tuple as single argument
     result3 = shmem.full((3, 4), 0.5)
     assert result3.shape == (3, 4)
     assert torch.all(result3 == 0.5)
-    assert shmem._Iris__on_symmetric_heap(result3)
+    assert shmem.is_symmetric(result3)
 
     # Test with list as single argument
     result4 = shmem.full([2, 5], -1.0)
     assert result4.shape == (2, 5)
     assert torch.all(result4 == -1.0)
-    assert shmem._Iris__on_symmetric_heap(result4)
+    assert shmem.is_symmetric(result4)
 
 
 def test_full_edge_cases():
@@ -200,28 +200,28 @@ def test_full_edge_cases():
     empty_result = shmem.full((0,), 1.0)
     assert empty_result.shape == (0,)
     assert empty_result.numel() == 0
-    assert shmem._Iris__on_symmetric_heap(empty_result)
+    assert shmem.is_symmetric(empty_result)
 
     # Single element tensor
     single_result = shmem.full((1,), 5.0)
     assert single_result.shape == (1,)
     assert single_result.numel() == 1
     assert single_result[0] == 5.0
-    assert shmem._Iris__on_symmetric_heap(single_result)
+    assert shmem.is_symmetric(single_result)
 
     # Large tensor
     large_result = shmem.full((100, 100), 0.1)
     assert large_result.shape == (100, 100)
     assert large_result.numel() == 10000
     assert torch.all(large_result == 0.1)
-    assert shmem._Iris__on_symmetric_heap(large_result)
+    assert shmem.is_symmetric(large_result)
 
     # Zero-dimensional tensor (scalar)
     scalar_result = shmem.full((), 2.718)
     assert scalar_result.shape == ()
     assert scalar_result.numel() == 1
     assert torch.allclose(scalar_result, torch.tensor(2.718))
-    assert shmem._Iris__on_symmetric_heap(scalar_result)
+    assert shmem.is_symmetric(scalar_result)
 
 
 def test_full_pytorch_equivalence():
@@ -280,7 +280,7 @@ def test_full_parameter_combinations(params):
     else:
         # For integer dtypes, the fill value gets truncated
         assert torch.all(result == 2)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Verify dtype if specified
     if "dtype" in params:
@@ -315,7 +315,7 @@ def test_full_symmetric_heap_shapes_dtypes(size, fill_value, dtype):
     result = shmem.full(size, fill_value, dtype=dtype)
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result), (
+    assert shmem.is_symmetric(result), (
         f"Tensor with size {size}, fill_value {fill_value}, dtype {dtype} is NOT on symmetric heap!"
     )
 
@@ -331,7 +331,7 @@ def test_full_symmetric_heap_dtype_override(dtype):
     shmem = iris.iris(1 << 20)
 
     result = shmem.full((3, 3), 1.5, dtype=dtype)
-    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
     assert result.dtype == dtype
 
 
@@ -341,20 +341,20 @@ def test_full_symmetric_heap_other_params():
 
     # Test with requires_grad
     result = shmem.full((3, 3), 1.5, dtype=torch.float32, requires_grad=True)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
 
     # Test with device override
     result = shmem.full((3, 3), 1.5, device=shmem.device)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with device override is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with device override is NOT on symmetric heap!"
 
     # Test with layout override (only strided is supported)
     result = shmem.full((3, 3), 1.5, layout=torch.strided)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with layout override is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with layout override is NOT on symmetric heap!"
 
     # Test with out parameter
     out_tensor = shmem._Iris__allocate(9, torch.float32)
     result = shmem.full((3, 3), 1.5, out=out_tensor)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with out parameter is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with out parameter is NOT on symmetric heap!"
 
 
 def test_full_invalid_output_tensor():
@@ -412,7 +412,7 @@ def test_full_examples():
     expected = torch.tensor([[3.141592, 3.141592, 3.141592], [3.141592, 3.141592, 3.141592]], device=result.device)
     assert result.shape == (2, 3)
     assert torch.allclose(result, expected)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 def test_full_different_fill_values():
@@ -436,7 +436,7 @@ def test_full_different_fill_values():
         result = shmem.full((2, 2), fill_value)
         assert result.dtype == expected_dtype
         assert torch.allclose(result, torch.tensor(fill_value, dtype=expected_dtype))
-        assert shmem._Iris__on_symmetric_heap(result)
+        assert shmem.is_symmetric(result)
 
 
 def test_full_dtype_override():
@@ -447,10 +447,10 @@ def test_full_dtype_override():
     result = shmem.full((2, 2), 42, dtype=torch.float32)
     assert result.dtype == torch.float32
     assert torch.allclose(result, torch.tensor(42.0, dtype=torch.float32))
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Float fill_value with int dtype
     result = shmem.full((2, 2), 3.14, dtype=torch.int32)
     assert result.dtype == torch.int32
     assert torch.all(result == 3)  # Truncated to int
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)

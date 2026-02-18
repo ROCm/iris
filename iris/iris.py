@@ -733,6 +733,37 @@ class Iris:
         """
         return self.heap.as_symmetric(external_tensor)
 
+    def is_symmetric(self, tensor: torch.Tensor) -> bool:
+        """
+        Check if a tensor is allocated on the symmetric heap.
+
+        This method checks whether a tensor resides in the symmetric heap, making it
+        accessible for RMA operations across ranks. Use this to validate tensors before
+        performing distributed operations.
+
+        Args:
+            tensor (torch.Tensor): PyTorch tensor to check
+
+        Returns:
+            bool: True if tensor is on the symmetric heap, False otherwise
+
+        Example:
+            >>> ctx = iris.iris(heap_size=2**30)
+            >>> # Create a symmetric tensor
+            >>> symmetric_tensor = ctx.zeros(1000, dtype=torch.float32)
+            >>> ctx.is_symmetric(symmetric_tensor)  # True
+            >>>
+            >>> # Create an external tensor (not on symmetric heap)
+            >>> external_tensor = torch.zeros(1000, dtype=torch.float32, device='cuda')
+            >>> ctx.is_symmetric(external_tensor)   # False
+            >>>
+            >>> # Import external tensor (only with vmem allocator)
+            >>> ctx_vmem = iris.iris(allocator_type='vmem')
+            >>> imported = ctx_vmem.as_symmetric(external_tensor)
+            >>> ctx_vmem.is_symmetric(imported)      # True
+        """
+        return self.heap.is_symmetric(tensor)
+
     def full(self, size, fill_value, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
         """
         Creates a tensor of size size filled with fill_value. The tensor's dtype is inferred from fill_value.
@@ -1352,7 +1383,7 @@ class Iris:
             raise RuntimeError(
                 f"The output tensor is not on the same device as the Iris instance. The Iris instance is on device {self.device} but the output tensor is on device {tensor.device}"
             )
-        if not self.__on_symmetric_heap(tensor):
+        if not self.is_symmetric(tensor):
             raise RuntimeError(
                 f"The output tensor is not on the symmetric heap. The Iris instance is on heap base {self.heap_bases[self.cur_rank]} but the output tensor is on heap base {tensor.data_ptr()}"
             )

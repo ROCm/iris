@@ -1133,12 +1133,39 @@ class IrisGluon:
         if out.dtype != dtype:
             raise RuntimeError(f"The output tensor has dtype {out.dtype}, but {dtype} is required")
 
-        if not self.__on_symmetric_heap(out):
+        if not self.is_symmetric(out):
             raise RuntimeError("The output tensor is not on the symmetric heap")
 
     def __on_symmetric_heap(self, tensor):
         """Check if tensor is allocated on the symmetric heap."""
         return self.heap.on_symmetric_heap(tensor)
+
+    def is_symmetric(self, tensor: torch.Tensor) -> bool:
+        """
+        Check if a tensor is allocated on the symmetric heap.
+
+        This method checks whether a tensor resides in the symmetric heap, making it
+        accessible for RMA operations across ranks. Use this to validate tensors before
+        performing distributed operations.
+
+        Args:
+            tensor (torch.Tensor): PyTorch tensor to check
+
+        Returns:
+            bool: True if tensor is on the symmetric heap, False otherwise
+
+        Example:
+            >>> import iris.experimental.iris_gluon as iris_gl
+            >>> ctx = iris_gl.iris(heap_size=2**30)
+            >>> # Create a symmetric tensor
+            >>> symmetric_tensor = ctx.zeros(1000, dtype=torch.float32)
+            >>> ctx.is_symmetric(symmetric_tensor)  # True
+            >>>
+            >>> # Create an external tensor (not on symmetric heap)
+            >>> external_tensor = torch.zeros(1000, dtype=torch.float32, device='cuda')
+            >>> ctx.is_symmetric(external_tensor)   # False
+        """
+        return self.heap.is_symmetric(tensor)
 
 
 def iris(heap_size=1 << 30):

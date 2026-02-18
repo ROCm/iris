@@ -42,7 +42,7 @@ def test_linspace_basic(dtype, start, end, steps):
     assert torch.allclose(result[-1], torch.tensor(end, dtype=dtype))
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 def test_linspace_default_dtype():
@@ -52,7 +52,7 @@ def test_linspace_default_dtype():
     result = shmem.linspace(0.0, 1.0, 5)
     expected_dtype = torch.get_default_dtype()
     assert result.dtype == expected_dtype
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 @pytest.mark.parametrize(
@@ -70,7 +70,7 @@ def test_linspace_requires_grad(requires_grad):
 
     # Verify requires_grad is set
     assert result.requires_grad == requires_grad
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 def test_linspace_device_handling():
@@ -79,23 +79,23 @@ def test_linspace_device_handling():
     # Test default behavior (should use Iris device)
     result = shmem.linspace(0.0, 1.0, 5)
     assert str(result.device) == str(shmem.get_device())
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test explicit device
     result = shmem.linspace(0.0, 1.0, 5, device=shmem.device)
     assert str(result.device) == str(shmem.get_device())
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test that "cuda" shorthand works (should use current CUDA device)
     if shmem.device.startswith("cuda:"):
         result = shmem.linspace(0.0, 1.0, 5, device="cuda")
         assert str(result.device) == str(shmem.get_device())
-        assert shmem._Iris__on_symmetric_heap(result)
+        assert shmem.is_symmetric(result)
 
     # Test None device defaults to Iris device
     result = shmem.linspace(0.0, 1.0, 5, device=None)
     assert str(result.device) == str(shmem.get_device())
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test that different device throws error
     different_device = "cpu"  # CPU is always different from CUDA
@@ -116,7 +116,7 @@ def test_linspace_layout_handling():
     # Test with strided layout (default)
     result = shmem.linspace(0.0, 1.0, 5, layout=torch.strided)
     assert result.layout == torch.strided
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test that unsupported layout throws error
     with pytest.raises(ValueError):
@@ -135,14 +135,14 @@ def test_linspace_out_parameter():
     assert result.shape == (5,)
     assert torch.allclose(result[0], torch.tensor(0.0))
     assert torch.allclose(result[-1], torch.tensor(1.0))
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test with different dtype out tensor
     out_tensor_float64 = shmem._Iris__allocate(5, torch.float64)
     result_float64 = shmem.linspace(0.0, 1.0, 5, dtype=torch.float64, out=out_tensor_float64)
     assert result_float64.data_ptr() == out_tensor_float64.data_ptr()
     assert result_float64.dtype == torch.float64
-    assert shmem._Iris__on_symmetric_heap(result_float64)
+    assert shmem.is_symmetric(result_float64)
 
 
 def test_linspace_steps_variations():
@@ -152,24 +152,24 @@ def test_linspace_steps_variations():
     result1 = shmem.linspace(0.0, 1.0, 1)
     assert result1.shape == (1,)
     assert torch.allclose(result1[0], torch.tensor(0.0))
-    assert shmem._Iris__on_symmetric_heap(result1)
+    assert shmem.is_symmetric(result1)
 
     # Test multiple steps
     result2 = shmem.linspace(0.0, 1.0, 10)
     assert result2.shape == (10,)
     assert torch.allclose(result2[0], torch.tensor(0.0))
     assert torch.allclose(result2[-1], torch.tensor(1.0))
-    assert shmem._Iris__on_symmetric_heap(result2)
+    assert shmem.is_symmetric(result2)
 
     # Test with tuple as steps argument
     result3 = shmem.linspace(0.0, 1.0, (5,))
     assert result3.shape == (5,)
-    assert shmem._Iris__on_symmetric_heap(result3)
+    assert shmem.is_symmetric(result3)
 
     # Test with list as steps argument
     result4 = shmem.linspace(0.0, 1.0, [5])
     assert result4.shape == (5,)
-    assert shmem._Iris__on_symmetric_heap(result4)
+    assert shmem.is_symmetric(result4)
 
 
 def test_linspace_edge_cases():
@@ -179,28 +179,28 @@ def test_linspace_edge_cases():
     single_result = shmem.linspace(5.0, 5.0, 1)
     assert single_result.shape == (1,)
     assert torch.allclose(single_result[0], torch.tensor(5.0))
-    assert shmem._Iris__on_symmetric_heap(single_result)
+    assert shmem.is_symmetric(single_result)
 
     # Two steps
     two_result = shmem.linspace(0.0, 1.0, 2)
     assert two_result.shape == (2,)
     assert torch.allclose(two_result[0], torch.tensor(0.0))
     assert torch.allclose(two_result[1], torch.tensor(1.0))
-    assert shmem._Iris__on_symmetric_heap(two_result)
+    assert shmem.is_symmetric(two_result)
 
     # Large number of steps
     large_result = shmem.linspace(0.0, 100.0, 1000)
     assert large_result.shape == (1000,)
     assert torch.allclose(large_result[0], torch.tensor(0.0))
     assert torch.allclose(large_result[-1], torch.tensor(100.0))
-    assert shmem._Iris__on_symmetric_heap(large_result)
+    assert shmem.is_symmetric(large_result)
 
     # Negative range
     neg_result = shmem.linspace(-10.0, -5.0, 6)
     assert neg_result.shape == (6,)
     assert torch.allclose(neg_result[0], torch.tensor(-10.0))
     assert torch.allclose(neg_result[-1], torch.tensor(-5.0))
-    assert shmem._Iris__on_symmetric_heap(neg_result)
+    assert shmem.is_symmetric(neg_result)
 
 
 def test_linspace_pytorch_equivalence():
@@ -252,7 +252,7 @@ def test_linspace_parameter_combinations(params):
     assert result.shape == (5,)
     assert torch.allclose(result[0], torch.tensor(0.0, dtype=result.dtype))
     assert torch.allclose(result[-1], torch.tensor(1.0, dtype=result.dtype))
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Verify dtype if specified
     if "dtype" in params:
@@ -285,7 +285,7 @@ def test_linspace_symmetric_heap_shapes_dtypes(start, end, steps, dtype):
     result = shmem.linspace(start, end, steps, dtype=dtype)
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result), (
+    assert shmem.is_symmetric(result), (
         f"Tensor with start={start}, end={end}, steps={steps}, dtype={dtype} is NOT on symmetric heap!"
     )
 
@@ -302,7 +302,7 @@ def test_linspace_symmetric_heap_dtype_override(dtype):
     shmem = iris.iris(1 << 20)
 
     result = shmem.linspace(0.0, 1.0, 5, dtype=dtype)
-    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
     assert result.dtype == dtype
 
 
@@ -312,20 +312,20 @@ def test_linspace_symmetric_heap_other_params():
 
     # Test with requires_grad
     result = shmem.linspace(0.0, 1.0, 5, dtype=torch.float32, requires_grad=True)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
 
     # Test with device override
     result = shmem.linspace(0.0, 1.0, 5, device=shmem.device)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with device override is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with device override is NOT on symmetric heap!"
 
     # Test with layout override (only strided is supported)
     result = shmem.linspace(0.0, 1.0, 5, layout=torch.strided)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with layout override is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with layout override is NOT on symmetric heap!"
 
     # Test with out parameter
     out_tensor = shmem._Iris__allocate(5, torch.float32)
     result = shmem.linspace(0.0, 1.0, 5, out=out_tensor)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with out parameter is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with out parameter is NOT on symmetric heap!"
 
 
 def test_linspace_invalid_output_tensor():
@@ -407,12 +407,12 @@ def test_linspace_complex_numbers():
     assert result.dtype == torch.complex64
     assert torch.allclose(result[0], torch.tensor(0.0 + 0.0j, dtype=torch.complex64))
     assert torch.allclose(result[-1], torch.tensor(1.0 + 1.0j, dtype=torch.complex64))
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test with complex dtype inference
     result = shmem.linspace(0.0 + 0.0j, 1.0 + 1.0j, 5)
     assert result.dtype == torch.complex64  # Should infer complex dtype
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 def test_linspace_tensor_inputs():
@@ -427,7 +427,7 @@ def test_linspace_tensor_inputs():
     assert result.shape == (5,)
     assert torch.allclose(result[0], torch.tensor(0.0))
     assert torch.allclose(result[-1], torch.tensor(1.0))
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test with complex tensor inputs
     start_complex = torch.tensor(0.0 + 0.0j, device="cuda")
@@ -436,7 +436,7 @@ def test_linspace_tensor_inputs():
     result_complex = shmem.linspace(start_complex, end_complex, 5)
     assert result_complex.shape == (5,)
     assert result_complex.dtype == torch.complex64
-    assert shmem._Iris__on_symmetric_heap(result_complex)
+    assert shmem.is_symmetric(result_complex)
 
 
 def test_linspace_accuracy():
@@ -473,4 +473,4 @@ def test_linspace_deterministic_behavior():
     assert result.shape == (5,)
     assert torch.allclose(result[0], torch.tensor(0.0))
     assert torch.allclose(result[-1], torch.tensor(1.0))
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)

@@ -36,7 +36,7 @@ def test_randn_basic(dtype, size):
     assert result.dtype == dtype
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 def test_randn_default_dtype():
@@ -46,7 +46,7 @@ def test_randn_default_dtype():
     result = shmem.randn(2, 3)
     expected_dtype = torch.get_default_dtype()
     assert result.dtype == expected_dtype
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 @pytest.mark.parametrize(
@@ -64,7 +64,7 @@ def test_randn_requires_grad(requires_grad):
 
     # Verify requires_grad is set
     assert result.requires_grad == requires_grad
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 def test_randn_device_handling():
@@ -73,23 +73,23 @@ def test_randn_device_handling():
     # Test default behavior (should use Iris device)
     result = shmem.randn(3, 3)
     assert str(result.device) == str(shmem.get_device())
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test explicit device
     result = shmem.randn(3, 3, device=shmem.device)
     assert str(result.device) == str(shmem.get_device())
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test that "cuda" shorthand works (should use current CUDA device)
     if shmem.device.startswith("cuda:"):
         result = shmem.randn(3, 3, device="cuda")
         assert str(result.device) == str(shmem.get_device())
-        assert shmem._Iris__on_symmetric_heap(result)
+        assert shmem.is_symmetric(result)
 
     # Test None device defaults to Iris device
     result = shmem.randn(3, 3, device=None)
     assert str(result.device) == str(shmem.get_device())
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test that different device throws error
     different_device = "cpu"  # CPU is always different from CUDA
@@ -111,7 +111,7 @@ def test_randn_layout_handling():
     # Test with strided layout (default)
     result = shmem.randn(2, 4, layout=torch.strided)
     assert result.layout == torch.strided
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 def test_randn_out_parameter():
@@ -124,14 +124,14 @@ def test_randn_out_parameter():
     # Should share the same underlying data (same data_ptr)
     assert result.data_ptr() == out_tensor.data_ptr()
     assert result.shape == (2, 3)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test with different dtype out tensor (float32)
     out_tensor_float = shmem._Iris__allocate(6, torch.float32)
     result_float = shmem.randn(2, 3, dtype=torch.float32, out=out_tensor_float)
     assert result_float.data_ptr() == out_tensor_float.data_ptr()
     assert result_float.dtype == torch.float32
-    assert shmem._Iris__on_symmetric_heap(result_float)
+    assert shmem.is_symmetric(result_float)
 
 
 def test_randn_size_variations():
@@ -140,22 +140,22 @@ def test_randn_size_variations():
     # Test single dimension
     result1 = shmem.randn(5)
     assert result1.shape == (5,)
-    assert shmem._Iris__on_symmetric_heap(result1)
+    assert shmem.is_symmetric(result1)
 
     # Test multiple dimensions
     result2 = shmem.randn(2, 3, 4)
     assert result2.shape == (2, 3, 4)
-    assert shmem._Iris__on_symmetric_heap(result2)
+    assert shmem.is_symmetric(result2)
 
     # Test with tuple as single argument
     result3 = shmem.randn((3, 4))
     assert result3.shape == (3, 4)
-    assert shmem._Iris__on_symmetric_heap(result3)
+    assert shmem.is_symmetric(result3)
 
     # Test with list as single argument
     result4 = shmem.randn([2, 5])
     assert result4.shape == (2, 5)
-    assert shmem._Iris__on_symmetric_heap(result4)
+    assert shmem.is_symmetric(result4)
 
 
 def test_randn_edge_cases():
@@ -165,25 +165,25 @@ def test_randn_edge_cases():
     empty_result = shmem.randn(0)
     assert empty_result.shape == (0,)
     assert empty_result.numel() == 0
-    assert shmem._Iris__on_symmetric_heap(empty_result)
+    assert shmem.is_symmetric(empty_result)
 
     # Single element tensor
     single_result = shmem.randn(1)
     assert single_result.shape == (1,)
     assert single_result.numel() == 1
-    assert shmem._Iris__on_symmetric_heap(single_result)
+    assert shmem.is_symmetric(single_result)
 
     # Large tensor
     large_result = shmem.randn(50, 50)
     assert large_result.shape == (50, 50)
     assert large_result.numel() == 2500
-    assert shmem._Iris__on_symmetric_heap(large_result)
+    assert shmem.is_symmetric(large_result)
 
     # Zero-dimensional tensor (scalar)
     scalar_result = shmem.randn(())
     assert scalar_result.shape == ()
     assert scalar_result.numel() == 1
-    assert shmem._Iris__on_symmetric_heap(scalar_result)
+    assert shmem.is_symmetric(scalar_result)
 
 
 def test_randn_pytorch_equivalence():
@@ -230,7 +230,7 @@ def test_randn_parameter_combinations(params):
 
     # Verify basic functionality
     assert result.shape == (3, 3)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Verify dtype if specified
     if "dtype" in params:
@@ -265,7 +265,7 @@ def test_randn_symmetric_heap_shapes_dtypes(size, dtype):
     result = shmem.randn(*size, dtype=dtype)
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with size {size}, dtype {dtype} is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), f"Tensor with size {size}, dtype {dtype} is NOT on symmetric heap!"
 
     # Also verify basic functionality
     assert result.shape == size
@@ -278,7 +278,7 @@ def test_randn_symmetric_heap_dtype_override(dtype):
     shmem = iris.iris(1 << 20)
 
     result = shmem.randn(3, 3, dtype=dtype)
-    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
     assert result.dtype == dtype
 
 
@@ -288,20 +288,20 @@ def test_randn_symmetric_heap_other_params():
 
     # Test with requires_grad
     result = shmem.randn(3, 3, dtype=torch.float32, requires_grad=True)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
 
     # Test with device override
     result = shmem.randn(3, 3, device=shmem.device)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with device override is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with device override is NOT on symmetric heap!"
 
     # Test with layout override (only strided is supported)
     result = shmem.randn(3, 3, layout=torch.strided)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with layout override is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with layout override is NOT on symmetric heap!"
 
     # Test with out parameter
     out_tensor = shmem._Iris__allocate(9, torch.float32)
     result = shmem.randn(3, 3, out=out_tensor)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with out parameter is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with out parameter is NOT on symmetric heap!"
 
 
 def test_randn_invalid_output_tensor():
@@ -382,12 +382,12 @@ def test_randn_generator():
     generator.manual_seed(42)
     result1 = shmem.randn(3, 3, generator=generator)
     assert result1.shape == (3, 3)
-    assert shmem._Iris__on_symmetric_heap(result1)
+    assert shmem.is_symmetric(result1)
 
     # Test without generator (should still work)
     result2 = shmem.randn(3, 3)
     assert result2.shape == (3, 3)
-    assert shmem._Iris__on_symmetric_heap(result2)
+    assert shmem.is_symmetric(result2)
 
     # Test that generator produces reproducible results
     generator1 = torch.Generator(device="cuda")
@@ -409,12 +409,12 @@ def test_randn_pin_memory():
     # Test with pin_memory=True
     result = shmem.randn(3, 3, pin_memory=True)
     assert result.shape == (3, 3)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test with pin_memory=False
     result = shmem.randn(3, 3, pin_memory=False)
     assert result.shape == (3, 3)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Note: pin_memory is ignored for GPU tensors, so we just verify it doesn't cause errors
 
@@ -428,7 +428,7 @@ def test_randn_deterministic_behavior():
     try:
         result = shmem.randn(3, 3)
         assert result.shape == (3, 3)
-        assert shmem._Iris__on_symmetric_heap(result)
+        assert shmem.is_symmetric(result)
     finally:
         torch.use_deterministic_algorithms(False)
 
@@ -440,9 +440,9 @@ def test_randn_examples():
     # Example 1: torch.randn(4)
     result1 = shmem.randn(4)
     assert result1.shape == (4,)
-    assert shmem._Iris__on_symmetric_heap(result1)
+    assert shmem.is_symmetric(result1)
 
     # Example 2: torch.randn(2, 3)
     result2 = shmem.randn(2, 3)
     assert result2.shape == (2, 3)
-    assert shmem._Iris__on_symmetric_heap(result2)
+    assert shmem.is_symmetric(result2)
