@@ -13,3 +13,9 @@ APIs on `IrisGluon` that create and initialize tensors on the Iris symmetric hea
 .. automethod:: iris.experimental.iris_gluon.IrisGluon.full
 ```
 
+## Symmetric Heap Utilities
+
+```{eval-rst}
+.. automethod:: iris.experimental.iris_gluon.IrisGluon.is_symmetric
+```
+
