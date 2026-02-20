@@ -35,4 +35,6 @@ Explore the API by section:
 - [Iris Class](class.md)
 - [Tensor Creation](tensor-creation.md)
 - [Device Functions](device-functions.md)
+- [Collective Communication (CCL)](ccl.md)
+- [Fused GEMM + CCL Operations](ops.md)
 

@@ -50,22 +50,5 @@ Broadcast data from a source rank to all ranks. This method automatically detect
 .. automethod:: iris.experimental.iris_gluon.IrisGluon.broadcast
 ```
 
-## Collective Communication Operations
 
-The `ccl` attribute on the `IrisGluon` instance provides collective communication operations:
-
-### all_to_all
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.CCL.all_to_all
-```
-
-### all_gather
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.CCL.all_gather
-```
-
-### reduce_scatter
-```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.CCL.reduce_scatter
-```
 
