@@ -268,3 +268,44 @@ jobs:
         run: |
           bash .github/scripts/release_gpus.sh
 
+  test-new-examples:
+    name: New examples (${{ matrix.num_ranks }} ranks, ${{ matrix.install_method }})
+    needs: build-container-image
+    runs-on: [self-hosted, mi3xx]
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - num_ranks: 2
+            install_method: editable
+          - num_ranks: 4
+            install_method: editable
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Acquire GPUs
+        run: |
+          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
+
+      - name: Run new examples with ${{ matrix.num_ranks }} ranks (${{ matrix.install_method }})
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -e
+          echo "::group::Running new examples with ${{ matrix.num_ranks }} ranks (install: ${{ matrix.install_method }})"
+          bash .github/scripts/run_new_examples.sh \
+            "${{ matrix.num_ranks }}" \
+            "${{ matrix.install_method }}"
+          echo "::endgroup::"
+          echo "✅ New examples with ${{ matrix.num_ranks }} ranks passed!"
+
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
