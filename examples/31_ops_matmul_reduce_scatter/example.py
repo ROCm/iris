@@ -13,6 +13,7 @@ Run with:
     torchrun --nproc_per_node=<num_gpus> --standalone example.py
 """
 
+import gc
 import os
 
 import torch
@@ -22,7 +23,12 @@ import iris
 from iris.ops import FusedConfig
 
 
-def run(shmem):
+def main():
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+
+    shmem = iris.iris(heap_size=2**31)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
@@ -71,22 +77,10 @@ def run(shmem):
         print(f"iris.ops.matmul_reduce_scatter: {world_size} ranks, A ({M},{K}), B ({K},{N}), dtype {dtype}")
         print(f"  Rank 0 verified tiles {start_tile}..{end_tile - 1} ✓")
 
-
-def main():
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
-
-    shmem = iris.iris(heap_size=2**31)
-    try:
-        run(shmem)
-    finally:
-        shmem.barrier()
-        del shmem
-        import gc
-
-        gc.collect()
-        dist.destroy_process_group()
+    shmem.barrier()
+    del shmem
+    gc.collect()
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
