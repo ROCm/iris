@@ -1288,20 +1288,6 @@ class Iris:
         """
         return tensor_creation.apply_memory_format(self.__allocate, tensor, size, memory_format, input_tensor)
 
-    def __create_tensor_with_strides(self, original_tensor: torch.Tensor, size: tuple, strides: tuple) -> torch.Tensor:
-        """
-        Create a new tensor with the specified strides while keeping the data on the symmetric heap.
-
-        Args:
-            original_tensor: The original tensor (source of data and heap allocation)
-            size: The tensor's size/dimensions
-            strides: The desired strides for the new memory format
-
-        Returns:
-            A new tensor with the specified strides, data copied from original, on the same heap
-        """
-        return tensor_creation._create_tensor_with_strides(self.__allocate, original_tensor, size, strides)
-
     def __apply_layout(self, tensor: torch.Tensor, layout: torch.layout) -> torch.Tensor:
         """
         Apply the requested layout to a tensor.
@@ -1314,36 +1300,6 @@ class Iris:
             Tensor with the requested layout
         """
         return tensor_creation.apply_layout(tensor, layout)
-
-    def __tensor_on_device(self, tensor: torch.Tensor):
-        # Get the Iris device from memory_pool.device
-        iris_device = self.get_device()
-        tensor_device = tensor.device
-
-        # For CUDA devices, check if they're compatible
-        if tensor_device.type == "cuda" and iris_device.type == "cuda":
-            if iris_device.index is None:
-                return True
-            return tensor_device.index == iris_device.index
-
-        # For non-CUDA devices, they must be exactly equal
-        return tensor_device == iris_device
-
-    def __on_symmetric_heap(self, tensor: torch.Tensor):
-        """Check if a tensor is allocated on the symmetric heap."""
-        return self.heap.on_symmetric_heap(tensor)
-
-    def __is_valid_device(self, device) -> bool:
-        """
-        Check if the requested device is compatible with this Iris instance.
-
-        Args:
-            device: The requested device (can be string, torch.device, or None)
-
-        Returns:
-            bool: True if the device is compatible, False otherwise
-        """
-        return tensor_creation.is_valid_device(device, self.get_device())
 
     class CCL:
         """

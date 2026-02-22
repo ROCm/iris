@@ -799,11 +799,6 @@ class IrisGluon:
         else:
             return distributed_broadcast_scalar(data, src_rank)
 
-    def __allocate(self, num_elements, dtype):
-        """Internal method to allocate memory from the symmetric heap."""
-        self.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")
-        return self.heap.allocate(num_elements, dtype)
-
     def zeros(
         self,
         *size,
@@ -974,10 +969,6 @@ class IrisGluon:
             requires_grad=requires_grad,
             memory_format=memory_format,
         )
-
-    def __on_symmetric_heap(self, tensor):
-        """Check if tensor is allocated on the symmetric heap."""
-        return self.heap.on_symmetric_heap(tensor)
 
     def is_symmetric(self, tensor: torch.Tensor) -> bool:
         """
