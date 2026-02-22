@@ -119,7 +119,7 @@ def test_arange_out_parameter():
     shmem = iris.iris(1 << 20)
 
     # Test with out parameter
-    out_tensor = shmem._Iris__allocate(3, torch.int64)
+    out_tensor = shmem.heap.allocate(3, torch.int64)
     result = shmem.arange(3, out=out_tensor)
 
     # Should return the same tensor object
@@ -128,7 +128,7 @@ def test_arange_out_parameter():
     assert shmem.is_symmetric(result)
 
     # Test with different dtype out tensor
-    out_tensor_float = shmem._Iris__allocate(3, torch.float32)
+    out_tensor_float = shmem.heap.allocate(3, torch.float32)
     result_float = shmem.arange(3, dtype=torch.float32, out=out_tensor_float)
     assert result_float is out_tensor_float
     assert result_float.dtype == torch.float32

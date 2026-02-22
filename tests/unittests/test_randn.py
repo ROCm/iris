@@ -118,7 +118,7 @@ def test_randn_out_parameter():
     shmem = iris.iris(1 << 20)
 
     # Test with out parameter
-    out_tensor = shmem._Iris__allocate(6, torch.float32)
+    out_tensor = shmem.heap.allocate(6, torch.float32)
     result = shmem.randn(2, 3, out=out_tensor)
 
     # Should share the same underlying data (same data_ptr)
@@ -127,7 +127,7 @@ def test_randn_out_parameter():
     assert shmem.is_symmetric(result)
 
     # Test with different dtype out tensor (float32)
-    out_tensor_float = shmem._Iris__allocate(6, torch.float32)
+    out_tensor_float = shmem.heap.allocate(6, torch.float32)
     result_float = shmem.randn(2, 3, dtype=torch.float32, out=out_tensor_float)
     assert result_float.data_ptr() == out_tensor_float.data_ptr()
     assert result_float.dtype == torch.float32
@@ -299,7 +299,7 @@ def test_randn_symmetric_heap_other_params():
     assert shmem.is_symmetric(result), "Tensor with layout override is NOT on symmetric heap!"
 
     # Test with out parameter
-    out_tensor = shmem._Iris__allocate(9, torch.float32)
+    out_tensor = shmem.heap.allocate(9, torch.float32)
     result = shmem.randn(3, 3, out=out_tensor)
     assert shmem.is_symmetric(result), "Tensor with out parameter is NOT on symmetric heap!"
 
@@ -309,12 +309,12 @@ def test_randn_invalid_output_tensor():
     shmem = iris.iris(1 << 20)
 
     # Test with wrong size output tensor
-    wrong_size_tensor = shmem._Iris__allocate(4, torch.float32)  # Wrong size for (3, 3)
+    wrong_size_tensor = shmem.heap.allocate(4, torch.float32)  # Wrong size for (3, 3)
     with pytest.raises(RuntimeError):
         shmem.randn(3, 3, out=wrong_size_tensor)
 
     # Test with wrong dtype output tensor
-    wrong_dtype_tensor = shmem._Iris__allocate(9, torch.float64)  # Wrong dtype
+    wrong_dtype_tensor = shmem.heap.allocate(9, torch.float64)  # Wrong dtype
     with pytest.raises(RuntimeError):
         shmem.randn(3, 3, dtype=torch.float32, out=wrong_dtype_tensor)
 

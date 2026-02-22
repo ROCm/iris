@@ -25,6 +25,21 @@ from .logging import logger
 # ---------------------------------------------------------------------------
 
 
+def allocate(heap, num_elements: int, dtype: torch.dtype) -> torch.Tensor:
+    """Allocate a flat tensor on *heap*.
+
+    Args:
+        heap: Symmetric heap exposing ``allocate(num_elements, dtype)``.
+        num_elements (int): Number of elements to allocate.
+        dtype (:class:`torch.dtype`): Element type.
+
+    Returns:
+        :class:`torch.Tensor`: Flat tensor on the symmetric heap.
+    """
+    logger.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")
+    return heap.allocate(num_elements, dtype)
+
+
 def parse_size(size):
     """Parse a *size* argument and return ``(size_tuple, num_elements)``.
 
@@ -122,7 +137,7 @@ def apply_layout(tensor: torch.Tensor, layout: torch.layout) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
-def _create_tensor_with_strides(allocate_fn, original_tensor: torch.Tensor, size: tuple, strides: tuple):
+def _create_tensor_with_strides(heap, original_tensor: torch.Tensor, size: tuple, strides: tuple):
     """Allocate a symmetric-heap tensor with the given *size* and *strides*.
 
     Creates a temporary tensor to establish the desired layout, copies data
@@ -130,8 +145,7 @@ def _create_tensor_with_strides(allocate_fn, original_tensor: torch.Tensor, size
     view of a freshly heap-allocated buffer with the requested strides.
 
     Args:
-        allocate_fn: Callable ``(num_elements, dtype) -> torch.Tensor`` that
-            allocates flat storage on the symmetric heap.
+        heap: Symmetric heap exposing ``allocate(num_elements, dtype)``.
         original_tensor (:class:`torch.Tensor`): Source tensor (contiguous).
         size (tuple): Target shape.
         strides (tuple): Target strides.
@@ -176,7 +190,7 @@ def _create_tensor_with_strides(allocate_fn, original_tensor: torch.Tensor, size
     temp_tensor.copy_(permuted)
 
     num_elements = math.prod(size)
-    heap_tensor = allocate_fn(num_elements, original_tensor.dtype)
+    heap_tensor = allocate(heap, num_elements, original_tensor.dtype)
     heap_tensor = heap_tensor.reshape(size)
     heap_tensor.copy_(temp_tensor)
     del temp_tensor
@@ -185,7 +199,7 @@ def _create_tensor_with_strides(allocate_fn, original_tensor: torch.Tensor, size
 
 
 def apply_memory_format(
-    allocate_fn,
+    heap,
     tensor: torch.Tensor,
     size: tuple,
     memory_format: torch.memory_format,
@@ -194,8 +208,8 @@ def apply_memory_format(
     """Apply *memory_format* to *tensor*, keeping it on the symmetric heap.
 
     Args:
-        allocate_fn: Callable ``(num_elements, dtype) -> torch.Tensor`` for
-            heap allocation (used when a new stride layout requires a copy).
+        heap: Symmetric heap exposing ``allocate(num_elements, dtype)`` (used
+            when a new stride layout requires a copy).
         tensor (:class:`torch.Tensor`): Tensor to reformat.
         size (tuple): Shape of *tensor*.
         memory_format (:class:`torch.memory_format`): Desired memory format.
@@ -211,11 +225,11 @@ def apply_memory_format(
 
     if memory_format == torch.channels_last and len(size) == 4:
         N, C, H, W = size[0], size[1], size[2], size[3]
-        return _create_tensor_with_strides(allocate_fn, tensor, size, (C * H * W, 1, C * W, C))
+        return _create_tensor_with_strides(heap, tensor, size, (C * H * W, 1, C * W, C))
 
     if memory_format == torch.channels_last_3d and len(size) == 5:
         N, C, D, H, W = size[0], size[1], size[2], size[3], size[4]
-        return _create_tensor_with_strides(allocate_fn, tensor, size, (C * D * H * W, 1, C * D * W, C * W, C))
+        return _create_tensor_with_strides(heap, tensor, size, (C * D * H * W, 1, C * D * W, C * W, C))
 
     if memory_format == torch.preserve_format:
         if input_tensor is not None:
@@ -223,11 +237,11 @@ def apply_memory_format(
             if len(size) == 4 and len(input_strides) == 4 and input_strides[1] == 1:
                 input_shape = input_tensor.shape
                 if len(input_shape) == 4:
-                    return _create_tensor_with_strides(allocate_fn, tensor, input_shape, input_strides)
+                    return _create_tensor_with_strides(heap, tensor, input_shape, input_strides)
             elif len(size) == 5 and len(input_strides) == 5 and input_strides[1] == 1:
                 input_shape = input_tensor.shape
                 if len(input_shape) == 5:
-                    return _create_tensor_with_strides(allocate_fn, tensor, input_shape, input_strides)
+                    return _create_tensor_with_strides(heap, tensor, input_shape, input_strides)
         return tensor
 
     # Unsupported format or dimension combination – fall back to contiguous
@@ -271,7 +285,7 @@ def zeros(heap, iris_device, size, *, out=None, dtype=None, layout=torch.strided
         out.zero_()
         tensor = out.view(size)
     else:
-        tensor = heap.allocate(num_elements, dtype)
+        tensor = allocate(heap, num_elements, dtype)
         tensor.zero_()
         tensor = tensor.reshape(size)
 
@@ -313,7 +327,7 @@ def ones(heap, iris_device, size, *, out=None, dtype=None, layout=torch.strided,
         out.fill_(1)
         tensor = out.view(size)
     else:
-        tensor = heap.allocate(num_elements, dtype)
+        tensor = allocate(heap, num_elements, dtype)
         tensor.fill_(1)
         tensor = tensor.reshape(size)
 
@@ -374,7 +388,7 @@ def full(
         out.fill_(fill_value)
         tensor = out.view(size)
     else:
-        tensor = heap.allocate(num_elements, dtype)
+        tensor = allocate(heap, num_elements, dtype)
         tensor.fill_(fill_value)
         tensor = tensor.reshape(size)
 
@@ -428,11 +442,11 @@ def zeros_like(
     size = input.size()
     num_elements = input.numel()
 
-    new_tensor = heap.allocate(num_elements, dtype)
+    new_tensor = allocate(heap, num_elements, dtype)
     new_tensor.zero_()
     new_tensor = new_tensor.reshape(size)
 
-    new_tensor = apply_memory_format(heap.allocate, new_tensor, size, memory_format, input)
+    new_tensor = apply_memory_format(heap, new_tensor, size, memory_format, input)
     new_tensor = apply_layout(new_tensor, layout)
 
     if requires_grad:

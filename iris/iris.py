@@ -304,11 +304,6 @@ class Iris:
         else:
             return distributed_broadcast_scalar(value, source_rank)
 
-    def __allocate(self, num_elements, dtype):
-        """Allocate memory using the symmetric heap."""
-        self.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")
-        return self.heap.allocate(num_elements, dtype)
-
     def __parse_size(self, size):
         return tensor_creation.parse_size(size)
 
@@ -426,7 +421,7 @@ class Iris:
             self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
             tensor = out
         else:
-            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
+            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
 
         target_device = tensor.device
         arange_tensor = torch.arange(start, end, step, dtype=dtype, device=target_device)
@@ -561,7 +556,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
+            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
             # Generate random data and copy to tensor
             random_data = torch.randn(num_elements, generator=generator, dtype=dtype, device=device, layout=layout)
             tensor.copy_(random_data)
@@ -739,7 +734,7 @@ class Iris:
         """
         self.debug(f"uniform: size = {size}, low = {low}, high = {high}, dtype = {dtype}")
         size, num_elements = self.__parse_size(size)
-        tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
+        tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
         tensor.uniform_(low, high)
         return tensor.reshape(size)
 
@@ -811,7 +806,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
+            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
             # Reshape to the desired size
             tensor = tensor.reshape(size)
 
@@ -893,7 +888,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
+            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
             # Reshape to the desired size
             tensor = tensor.reshape(size)
 
@@ -993,7 +988,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
+            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
             # Reshape to the desired size
             tensor = tensor.reshape(size)
 
@@ -1074,7 +1069,7 @@ class Iris:
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
-            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
+            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
             # Reshape to the desired size
             tensor = tensor.reshape(size)
 
@@ -1286,7 +1281,7 @@ class Iris:
             memory_format: The desired memory format
             input_tensor: The original input tensor (needed for preserve_format detection)
         """
-        return tensor_creation.apply_memory_format(self.__allocate, tensor, size, memory_format, input_tensor)
+        return tensor_creation.apply_memory_format(self.heap, tensor, size, memory_format, input_tensor)
 
     def __apply_layout(self, tensor: torch.Tensor, layout: torch.layout) -> torch.Tensor:
         """
