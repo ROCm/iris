@@ -304,9 +304,6 @@ class Iris:
         else:
             return distributed_broadcast_scalar(value, source_rank)
 
-    def __parse_size(self, size):
-        return tensor_creation.parse_size(size)
-
     def zeros_like(
         self, input, *, dtype=None, layout=None, device=None, requires_grad=False, memory_format=torch.preserve_format
     ):
@@ -415,10 +412,10 @@ class Iris:
             device = self.device
 
         # Validate device compatibility with Iris
-        self.__throw_if_invalid_device(device)
+        tensor_creation.throw_if_invalid_device(device, self.get_device())
 
         if out is not None:
-            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
             tensor = out
         else:
             tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
@@ -428,7 +425,7 @@ class Iris:
 
         tensor[:] = arange_tensor
 
-        tensor = self.__apply_layout(tensor, layout)
+        tensor = tensor_creation.apply_layout(tensor, layout)
 
         if requires_grad:
             tensor.requires_grad_()
@@ -542,14 +539,14 @@ class Iris:
             device = self.device
 
         # Validate device compatibility with Iris
-        self.__throw_if_invalid_device(device)
+        tensor_creation.throw_if_invalid_device(device, self.get_device())
 
         # Parse size and calculate number of elements
-        size, num_elements = self.__parse_size(size)
+        size, num_elements = tensor_creation.parse_size(size)
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
-            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
             # Generate random data and copy to out tensor
             random_data = torch.randn(num_elements, generator=generator, dtype=dtype, device=device, layout=layout)
             out.copy_(random_data)
@@ -564,7 +561,7 @@ class Iris:
             tensor = tensor.reshape(size)
 
         # Apply the requested layout
-        tensor = self.__apply_layout(tensor, layout)
+        tensor = tensor_creation.apply_layout(tensor, layout)
 
         # Set requires_grad if specified
         if requires_grad:
@@ -733,7 +730,7 @@ class Iris:
             >>> print(tensor[0])  # tensor([0.1234, 0.5678, 0.9012], device='cuda:0')
         """
         self.debug(f"uniform: size = {size}, low = {low}, high = {high}, dtype = {dtype}")
-        size, num_elements = self.__parse_size(size)
+        size, num_elements = tensor_creation.parse_size(size)
         tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
         tensor.uniform_(low, high)
         return tensor.reshape(size)
@@ -795,14 +792,14 @@ class Iris:
             device = self.device
 
         # Validate device compatibility with Iris
-        self.__throw_if_invalid_device(device)
+        tensor_creation.throw_if_invalid_device(device, self.get_device())
 
         # Parse size and calculate number of elements
-        size, num_elements = self.__parse_size(size)
+        size, num_elements = tensor_creation.parse_size(size)
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
-            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
@@ -811,10 +808,10 @@ class Iris:
             tensor = tensor.reshape(size)
 
         # Apply the requested memory format
-        tensor = self.__apply_memory_format(tensor, size, memory_format)
+        tensor = tensor_creation.apply_memory_format(self.heap, tensor, size, memory_format)
 
         # Apply the requested layout
-        tensor = self.__apply_layout(tensor, layout)
+        tensor = tensor_creation.apply_layout(tensor, layout)
 
         # Set requires_grad if specified
         if requires_grad:
@@ -877,14 +874,14 @@ class Iris:
             device = self.device
 
         # Validate device compatibility with Iris
-        self.__throw_if_invalid_device(device)
+        tensor_creation.throw_if_invalid_device(device, self.get_device())
 
         # Parse size and calculate number of elements
-        size, num_elements = self.__parse_size(size)
+        size, num_elements = tensor_creation.parse_size(size)
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
-            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
@@ -903,7 +900,7 @@ class Iris:
             torch.randint(low, high, size, out=tensor, dtype=dtype, device=target_device)
 
         # Apply the requested layout
-        tensor = self.__apply_layout(tensor, layout)
+        tensor = tensor_creation.apply_layout(tensor, layout)
 
         # Set requires_grad if specified
         if requires_grad:
@@ -959,7 +956,7 @@ class Iris:
             device = self.device
 
         # Validate device compatibility with Iris
-        self.__throw_if_invalid_device(device)
+        tensor_creation.throw_if_invalid_device(device, self.get_device())
 
         # Parse steps and extract the integer value
         if isinstance(steps, (tuple, list)):
@@ -971,7 +968,7 @@ class Iris:
                     steps_int = steps_int[0]
             else:
                 # Multi-element tuple/list - use __parse_size for compatibility
-                size, num_elements = self.__parse_size(steps)
+                size, num_elements = tensor_creation.parse_size(steps)
                 steps_int = num_elements
         else:
             # steps is a single integer
@@ -984,7 +981,7 @@ class Iris:
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
-            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
@@ -998,7 +995,7 @@ class Iris:
         torch.linspace(start, end, steps_int, out=tensor, dtype=dtype, device=target_device)
 
         # Apply the requested layout
-        tensor = self.__apply_layout(tensor, layout)
+        tensor = tensor_creation.apply_layout(tensor, layout)
 
         # Set requires_grad if specified
         if requires_grad:
@@ -1058,14 +1055,14 @@ class Iris:
             device = self.device
 
         # Validate device compatibility with Iris
-        self.__throw_if_invalid_device(device)
+        tensor_creation.throw_if_invalid_device(device, self.get_device())
 
         # Parse size and calculate number of elements
-        size, num_elements = self.__parse_size(size)
+        size, num_elements = tensor_creation.parse_size(size)
 
         # If out is provided, use it; otherwise allocate new tensor
         if out is not None:
-            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
+            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
             # Create a reshaped view of the out tensor
             tensor = out.view(size)
         else:
@@ -1083,7 +1080,7 @@ class Iris:
             torch.rand(size, out=tensor, dtype=dtype, device=device)
 
         # Apply the requested layout
-        tensor = self.__apply_layout(tensor, layout)
+        tensor = tensor_creation.apply_layout(tensor, layout)
 
         # Set requires_grad if specified
         if requires_grad:
@@ -1252,49 +1249,6 @@ class Iris:
             >>> print(f"Total ranks: {num_ranks}")  # Total ranks: 1
         """
         return self.num_ranks
-
-    def __throw_if_invalid_output_tensor(self, tensor: torch.Tensor, num_elements: int, dtype: torch.dtype):
-        tensor_creation.throw_if_invalid_output_tensor(self.heap, tensor, num_elements, dtype)
-
-    def __throw_if_invalid_device(self, device):
-        """
-        Throw a RuntimeError if the requested device is not compatible with this Iris instance.
-
-        Args:
-            device: The requested device (can be string, torch.device, or None)
-
-        Raises:
-            RuntimeError: If the device is not compatible
-        """
-        tensor_creation.throw_if_invalid_device(device, self.get_device())
-
-    def __apply_memory_format(
-        self, tensor: torch.Tensor, size: tuple, memory_format: torch.memory_format, input_tensor: torch.Tensor = None
-    ):
-        """
-        Apply the requested memory format to a tensor by setting appropriate strides.
-        This keeps the tensor on the symmetric heap while changing how PyTorch interprets the memory layout.
-
-        Args:
-            tensor: The tensor to modify
-            size: The tensor's size/dimensions
-            memory_format: The desired memory format
-            input_tensor: The original input tensor (needed for preserve_format detection)
-        """
-        return tensor_creation.apply_memory_format(self.heap, tensor, size, memory_format, input_tensor)
-
-    def __apply_layout(self, tensor: torch.Tensor, layout: torch.layout) -> torch.Tensor:
-        """
-        Apply the requested layout to a tensor.
-
-        Args:
-            tensor: The tensor to modify
-            layout: The desired layout
-
-        Returns:
-            Tensor with the requested layout
-        """
-        return tensor_creation.apply_layout(tensor, layout)
 
     class CCL:
         """
