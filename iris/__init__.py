@@ -73,6 +73,7 @@ from .tensor_utils import (
 from . import hip
 from . import experimental
 from . import ops
+from . import tensor_creation
 from .logging import (
     set_logger_level,
     logger,
@@ -106,6 +107,7 @@ __all__ = [
     "hip",
     "experimental",
     "ops",
+    "tensor_creation",
     "set_logger_level",
     "logger",
     "DEBUG",

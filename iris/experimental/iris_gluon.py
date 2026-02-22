@@ -52,12 +52,14 @@ from iris.hip import (
 )
 from iris.symmetric_heap import SymmetricHeap
 import numpy as np
-import math
 import torch
 import logging
 
 # Import logging functionality from the separate logging module
 from ..logging import logger
+
+# Import shared tensor-creation helpers
+from .. import tensor_creation
 
 
 @aggregate
@@ -804,46 +806,23 @@ class IrisGluon:
 
     def __parse_size(self, size):
         """Parse size parameter and calculate number of elements."""
-        # Handle nested tuples/lists by flattening them recursively
-        while len(size) == 1 and isinstance(size[0], (tuple, list)):
-            size = size[0]
-        num_elements = math.prod(size)
-        return size, num_elements
+        return tensor_creation.parse_size(size)
 
     def __throw_if_invalid_device(self, device):
         """Check if the requested device is compatible with this Iris instance."""
-        if not self.__is_valid_device(device):
-            raise ValueError(
-                f"Requested device {device} does not match Iris device {self.get_device()}. "
-                f"All Iris tensors must be on the same device as the Iris symmetric heap."
-            )
+        tensor_creation.throw_if_invalid_device(device, self.get_device())
 
     def __is_valid_device(self, device) -> bool:
         """Check if the requested device is compatible with this Iris instance."""
-        if device is None:
-            return True  # None means use default device
-
-        # Convert device strings to torch.device objects for proper comparison
-        requested_device = torch.device(device) if isinstance(device, str) else device
-        iris_device = self.get_device()
-
-        # Check if both are CUDA devices
-        if requested_device.type == "cuda" and iris_device.type == "cuda":
-            # Check if index matches or if requested is "cuda" (any index)
-            if requested_device.index is None:
-                return True
-            else:
-                return requested_device.index == iris_device.index
-
-        # For non-CUDA devices, always return False
-        return False
+        return tensor_creation.is_valid_device(device, self.get_device())
 
     def __apply_layout(self, tensor, layout):
         """Apply the requested layout to the tensor."""
-        if layout == torch.strided:
-            return tensor
-        else:
-            raise ValueError(f"Unsupported layout: {layout}")
+        return tensor_creation.apply_layout(tensor, layout)
+
+    def __throw_if_invalid_output_tensor(self, out, num_elements, dtype):
+        """Check if the output tensor is valid."""
+        tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
 
     def zeros(
         self,
@@ -867,37 +846,17 @@ class IrisGluon:
         Returns:
             torch.Tensor: Zero-initialized tensor on the symmetric heap
         """
-        # Use global default dtype if None is provided
-        if dtype is None:
-            dtype = torch.get_default_dtype()
-
-        # Use current device if none specified
-        if device is None:
-            device = self.device
-
-        # Validate device compatibility with Iris
-        self.__throw_if_invalid_device(device)
-
-        # Parse size and calculate number of elements
-        size, num_elements = self.__parse_size(size)
-
-        # Allocate memory from symmetric heap
-        tensor = self.__allocate(num_elements, dtype)
-
-        # Zero-initialize
-        tensor.zero_()
-
-        # Reshape to the desired size
-        tensor = tensor.reshape(size)
-
-        # Apply the requested layout
-        tensor = self.__apply_layout(tensor, layout)
-
-        # Set requires_grad if specified
-        if requires_grad:
-            tensor.requires_grad_()
-
-        return tensor
+        self.debug(f"zeros: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
+        return tensor_creation.zeros(
+            self.heap,
+            self.get_device(),
+            size,
+            out=out,
+            dtype=dtype,
+            layout=layout,
+            device=device,
+            requires_grad=requires_grad,
+        )
 
     def ones(
         self,
@@ -934,43 +893,16 @@ class IrisGluon:
             >>> print(tensor[0])  # tensor([1., 1., 1.], device='cuda:0')
         """
         self.debug(f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
-
-        # Use global default dtype if None is provided
-        if dtype is None:
-            dtype = torch.get_default_dtype()
-
-        # Use current device if none specified
-        if device is None:
-            device = self.device
-
-        # Validate device compatibility with Iris
-        self.__throw_if_invalid_device(device)
-
-        # Parse size and calculate number of elements
-        size, num_elements = self.__parse_size(size)
-
-        # If out is provided, use it; otherwise allocate new tensor
-        if out is not None:
-            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
-            # Fill with ones
-            out.fill_(1)
-            # Create a reshaped view of the out tensor
-            tensor = out.view(size)
-        else:
-            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
-            # Fill with ones
-            tensor.fill_(1)
-            # Reshape to the desired size
-            tensor = tensor.reshape(size)
-
-        # Apply the requested layout
-        tensor = self.__apply_layout(tensor, layout)
-
-        # Set requires_grad if specified
-        if requires_grad:
-            tensor.requires_grad_()
-
-        return tensor
+        return tensor_creation.ones(
+            self.heap,
+            self.get_device(),
+            size,
+            out=out,
+            dtype=dtype,
+            layout=layout,
+            device=device,
+            requires_grad=requires_grad,
+        )
 
     def full(
         self,
@@ -1011,50 +943,17 @@ class IrisGluon:
         self.debug(
             f"full: size = {size}, fill_value = {fill_value}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
         )
-
-        # Infer dtype from fill_value if not provided
-        if dtype is None:
-            if isinstance(fill_value, (int, float)):
-                if isinstance(fill_value, float):
-                    dtype = torch.get_default_dtype()
-                else:
-                    dtype = torch.int64
-            else:
-                # For other types (like tensors), use their dtype
-                dtype = torch.get_default_dtype()
-
-        # Use current device if none specified
-        if device is None:
-            device = self.device
-
-        # Validate device compatibility with Iris
-        self.__throw_if_invalid_device(device)
-
-        # Parse size and calculate number of elements
-        size, num_elements = self.__parse_size(size)
-
-        # If out is provided, use it; otherwise allocate new tensor
-        if out is not None:
-            self.__throw_if_invalid_output_tensor(out, num_elements, dtype)
-            # Fill with the specified value
-            out.fill_(fill_value)
-            # Create a reshaped view of the out tensor
-            tensor = out.view(size)
-        else:
-            tensor = self.__allocate(num_elements=num_elements, dtype=dtype)
-            # Fill with the specified value
-            tensor.fill_(fill_value)
-            # Reshape to the desired size
-            tensor = tensor.reshape(size)
-
-        # Apply the requested layout
-        tensor = self.__apply_layout(tensor, layout)
-
-        # Set requires_grad if specified
-        if requires_grad:
-            tensor.requires_grad_()
-
-        return tensor
+        return tensor_creation.full(
+            self.heap,
+            self.get_device(),
+            size,
+            fill_value,
+            out=out,
+            dtype=dtype,
+            layout=layout,
+            device=device,
+            requires_grad=requires_grad,
+        )
 
     def zeros_like(
         self,
@@ -1093,48 +992,16 @@ class IrisGluon:
         self.debug(
             f"zeros_like: input_shape = {input.shape}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
         )
-
-        # Use input's properties as defaults if not specified
-        if dtype is None:
-            dtype = input.dtype
-        if layout is None:
-            layout = input.layout
-        if device is None:
-            device = input.device
-
-        # Validate device compatibility with Iris
-        self.__throw_if_invalid_device(device)
-
-        # Get the size from input tensor
-        size = input.size()
-        num_elements = input.numel()
-
-        # Allocate new tensor with the same size
-        new_tensor = self.__allocate(num_elements, dtype)
-        new_tensor.zero_()
-
-        # Reshape to match input size
-        new_tensor = new_tensor.reshape(size)
-
-        # Apply the requested layout
-        new_tensor = self.__apply_layout(new_tensor, layout)
-
-        # Set requires_grad if specified
-        if requires_grad:
-            new_tensor.requires_grad_()
-
-        return new_tensor
-
-    def __throw_if_invalid_output_tensor(self, out, num_elements, dtype):
-        """Check if the output tensor is valid."""
-        if out.numel() != num_elements:
-            raise RuntimeError(f"The output tensor has {out.numel()} elements, but {num_elements} are required")
-
-        if out.dtype != dtype:
-            raise RuntimeError(f"The output tensor has dtype {out.dtype}, but {dtype} is required")
-
-        if not self.is_symmetric(out):
-            raise RuntimeError("The output tensor is not on the symmetric heap")
+        return tensor_creation.zeros_like(
+            self.heap,
+            self.get_device(),
+            input,
+            dtype=dtype,
+            layout=layout,
+            device=device,
+            requires_grad=requires_grad,
+            memory_format=memory_format,
+        )
 
     def __on_symmetric_heap(self, tensor):
         """Check if tensor is allocated on the symmetric heap."""
