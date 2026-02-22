@@ -132,6 +132,24 @@ def apply_layout(tensor: torch.Tensor, layout: torch.layout) -> torch.Tensor:
     raise ValueError(f"Layout {layout} not supported. Only torch.strided is currently supported.")
 
 
+def _normalize_steps(steps) -> int:
+    """Normalise *steps* to a plain ``int``.
+
+    Accepts an integer, a single-element tuple/list (possibly nested once),
+    or a multi-element sequence (where the total number of elements is used).
+    """
+    if isinstance(steps, (tuple, list)):
+        if len(steps) == 1:
+            inner = steps[0]
+            if isinstance(inner, (tuple, list)):
+                inner = inner[0]
+            return int(inner)
+        else:
+            _, num_elements = parse_size(steps)
+            return num_elements
+    return int(steps)
+
+
 # ---------------------------------------------------------------------------
 # Memory-format helper (used by zeros_like)
 # ---------------------------------------------------------------------------
@@ -452,3 +470,380 @@ def zeros_like(
     if requires_grad:
         new_tensor.requires_grad_()
     return new_tensor
+
+
+def empty(
+    heap,
+    iris_device,
+    size,
+    *,
+    out=None,
+    dtype=None,
+    layout=torch.strided,
+    device=None,
+    requires_grad=False,
+    memory_format=torch.contiguous_format,
+):
+    """Allocate an uninitialised tensor on *heap*.
+
+    Args:
+        heap: Symmetric heap (``allocate`` / ``is_symmetric``).
+        iris_device (:class:`torch.device`): Device of the heap.
+        size (tuple): Shape of the tensor.
+
+    Keyword Args:
+        out (:class:`torch.Tensor`, optional): Pre-allocated output tensor.
+        dtype (:class:`torch.dtype`, optional): Defaults to
+            :func:`torch.get_default_dtype`.
+        layout (:class:`torch.layout`): Default :data:`torch.strided`.
+        device: Must be compatible with *iris_device* or ``None``.
+        requires_grad (bool): Default ``False``.
+        memory_format (:class:`torch.memory_format`): Default
+            :data:`torch.contiguous_format`.
+
+    Returns:
+        :class:`torch.Tensor`: Uninitialised tensor on the symmetric heap.
+    """
+    logger.debug(f"empty: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
+    if dtype is None:
+        dtype = torch.get_default_dtype()
+    if device is None:
+        device = iris_device
+    throw_if_invalid_device(device, iris_device)
+    size, num_elements = parse_size(size)
+
+    if out is not None:
+        throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
+        tensor = out.view(size)
+    else:
+        tensor = allocate(heap, num_elements, dtype)
+        tensor = tensor.reshape(size)
+
+    tensor = apply_memory_format(heap, tensor, size, memory_format)
+    tensor = apply_layout(tensor, layout)
+    if requires_grad:
+        tensor.requires_grad_()
+    return tensor
+
+
+def uniform(heap, iris_device, size, low=0.0, high=1.0, dtype=torch.float):
+    """Allocate a tensor filled with uniform random values on *heap*.
+
+    Args:
+        heap: Symmetric heap (``allocate`` / ``is_symmetric``).
+        iris_device (:class:`torch.device`): Device of the heap.
+        size: Shape of the tensor.
+        low (float): Lower bound of the distribution. Default ``0.0``.
+        high (float): Upper bound of the distribution. Default ``1.0``.
+        dtype (:class:`torch.dtype`): Default :data:`torch.float`.
+
+    Returns:
+        :class:`torch.Tensor`: Tensor on the symmetric heap.
+    """
+    logger.debug(f"uniform: size = {size}, low = {low}, high = {high}, dtype = {dtype}")
+    size, num_elements = parse_size(size)
+    tensor = allocate(heap, num_elements, dtype)
+    tensor.uniform_(low, high)
+    return tensor.reshape(size)
+
+
+def randn(
+    heap,
+    iris_device,
+    size,
+    *,
+    generator=None,
+    out=None,
+    dtype=None,
+    layout=torch.strided,
+    device=None,
+    requires_grad=False,
+):
+    """Allocate a tensor filled with standard-normal random values on *heap*.
+
+    Args:
+        heap: Symmetric heap (``allocate`` / ``is_symmetric``).
+        iris_device (:class:`torch.device`): Device of the heap.
+        size (tuple): Shape of the tensor.
+
+    Keyword Args:
+        generator (:class:`torch.Generator`, optional): RNG.
+        out (:class:`torch.Tensor`, optional): Pre-allocated output tensor.
+        dtype (:class:`torch.dtype`, optional): Defaults to
+            :func:`torch.get_default_dtype`.
+        layout (:class:`torch.layout`): Default :data:`torch.strided`.
+        device: Must be compatible with *iris_device* or ``None``.
+        requires_grad (bool): Default ``False``.
+
+    Returns:
+        :class:`torch.Tensor`: Tensor on the symmetric heap.
+    """
+    logger.debug(f"randn: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
+    if dtype is None:
+        dtype = torch.get_default_dtype()
+    if device is None:
+        device = iris_device
+    throw_if_invalid_device(device, iris_device)
+    size, num_elements = parse_size(size)
+
+    if out is not None:
+        throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
+        random_data = torch.randn(num_elements, generator=generator, dtype=dtype, device=device, layout=layout)
+        out.copy_(random_data)
+        tensor = out.view(size)
+    else:
+        tensor = allocate(heap, num_elements, dtype)
+        random_data = torch.randn(num_elements, generator=generator, dtype=dtype, device=device, layout=layout)
+        tensor.copy_(random_data)
+        tensor = tensor.reshape(size)
+
+    tensor = apply_layout(tensor, layout)
+    if requires_grad:
+        tensor.requires_grad_()
+    return tensor
+
+
+def rand(
+    heap,
+    iris_device,
+    size,
+    *,
+    generator=None,
+    out=None,
+    dtype=None,
+    layout=torch.strided,
+    device=None,
+    requires_grad=False,
+):
+    """Allocate a tensor filled with uniform random values in [0, 1) on *heap*.
+
+    Args:
+        heap: Symmetric heap (``allocate`` / ``is_symmetric``).
+        iris_device (:class:`torch.device`): Device of the heap.
+        size (tuple): Shape of the tensor.
+
+    Keyword Args:
+        generator (:class:`torch.Generator`, optional): RNG.
+        out (:class:`torch.Tensor`, optional): Pre-allocated output tensor.
+        dtype (:class:`torch.dtype`, optional): Defaults to
+            :func:`torch.get_default_dtype`.
+        layout (:class:`torch.layout`): Default :data:`torch.strided`.
+        device: Must be compatible with *iris_device* or ``None``.
+        requires_grad (bool): Default ``False``.
+
+    Returns:
+        :class:`torch.Tensor`: Tensor on the symmetric heap.
+    """
+    logger.debug(f"rand: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
+    if dtype is None:
+        dtype = torch.get_default_dtype()
+    if device is None:
+        device = iris_device
+    throw_if_invalid_device(device, iris_device)
+    size, num_elements = parse_size(size)
+
+    if out is not None:
+        throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
+        tensor = out.view(size)
+    else:
+        tensor = allocate(heap, num_elements, dtype)
+        tensor = tensor.reshape(size)
+
+    if generator is not None:
+        torch.rand(size, generator=generator, out=tensor, dtype=dtype, device=device)
+    else:
+        torch.rand(size, out=tensor, dtype=dtype, device=device)
+
+    tensor = apply_layout(tensor, layout)
+    if requires_grad:
+        tensor.requires_grad_()
+    return tensor
+
+
+def randint(
+    heap,
+    iris_device,
+    low,
+    high,
+    size,
+    *,
+    generator=None,
+    out=None,
+    dtype=None,
+    layout=torch.strided,
+    device=None,
+    requires_grad=False,
+):
+    """Allocate a tensor filled with random integers in [*low*, *high*) on *heap*.
+
+    Args:
+        heap: Symmetric heap (``allocate`` / ``is_symmetric``).
+        iris_device (:class:`torch.device`): Device of the heap.
+        low (int): Lower bound (inclusive).
+        high (int): Upper bound (exclusive).
+        size (tuple): Shape of the tensor.
+
+    Keyword Args:
+        generator (:class:`torch.Generator`, optional): RNG.
+        out (:class:`torch.Tensor`, optional): Pre-allocated output tensor.
+        dtype (:class:`torch.dtype`, optional): Defaults to :data:`torch.int64`.
+        layout (:class:`torch.layout`): Default :data:`torch.strided`.
+        device: Must be compatible with *iris_device* or ``None``.
+        requires_grad (bool): Default ``False``.
+
+    Returns:
+        :class:`torch.Tensor`: Tensor on the symmetric heap.
+    """
+    logger.debug(f"randint: low = {low}, high = {high}, size = {size}, dtype = {dtype}, device = {device}")
+    if dtype is None:
+        dtype = torch.int64
+    if device is None:
+        device = iris_device
+    throw_if_invalid_device(device, iris_device)
+    size, num_elements = parse_size(size)
+
+    if out is not None:
+        throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
+        tensor = out.view(size)
+    else:
+        tensor = allocate(heap, num_elements, dtype)
+        tensor = tensor.reshape(size)
+
+    if generator is not None:
+        torch.randint(low, high, size, generator=generator, out=tensor, dtype=dtype, device=device)
+    else:
+        torch.randint(low, high, size, out=tensor, dtype=dtype, device=device)
+
+    tensor = apply_layout(tensor, layout)
+    if requires_grad:
+        tensor.requires_grad_()
+    return tensor
+
+
+def arange(
+    heap,
+    iris_device,
+    start,
+    end,
+    step,
+    *,
+    out=None,
+    dtype=None,
+    layout=torch.strided,
+    device=None,
+    requires_grad=False,
+):
+    """Allocate a 1-D tensor with evenly spaced values on *heap*.
+
+    Args:
+        heap: Symmetric heap (``allocate`` / ``is_symmetric``).
+        iris_device (:class:`torch.device`): Device of the heap.
+        start: Starting value.
+        end: Ending value (exclusive).
+        step: Step between elements.
+
+    Keyword Args:
+        out (:class:`torch.Tensor`, optional): Pre-allocated output tensor.
+        dtype (:class:`torch.dtype`, optional): Inferred from inputs when ``None``.
+        layout (:class:`torch.layout`): Default :data:`torch.strided`.
+        device: Must be compatible with *iris_device* or ``None``.
+        requires_grad (bool): Default ``False``.
+
+    Returns:
+        :class:`torch.Tensor`: Tensor on the symmetric heap.
+    """
+    logger.debug(f"arange: start = {start}, end = {end}, step = {step}, dtype = {dtype}, device = {device}")
+    if step == 0:
+        raise ValueError("step must be non-zero")
+    if step > 0 and start >= end:
+        raise ValueError(f"Invalid range: start >= end with positive step (start={start}, end={end}, step={step})")
+    elif step < 0 and start <= end:
+        raise ValueError(f"Invalid range: start <= end with negative step (start={start}, end={end}, step={step})")
+
+    num_elements = math.ceil((end - start) / step)
+
+    if dtype is None:
+        if any(isinstance(x, float) for x in [start, end, step]):
+            dtype = torch.get_default_dtype()
+        else:
+            dtype = torch.int64
+    if device is None:
+        device = iris_device
+    throw_if_invalid_device(device, iris_device)
+
+    if out is not None:
+        throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
+        tensor = out
+    else:
+        tensor = allocate(heap, num_elements, dtype)
+
+    values = torch.arange(start, end, step, dtype=dtype, device=tensor.device)
+    tensor[:] = values
+    tensor = apply_layout(tensor, layout)
+    if requires_grad:
+        tensor.requires_grad_()
+    return tensor
+
+
+def linspace(
+    heap,
+    iris_device,
+    start,
+    end,
+    steps,
+    *,
+    out=None,
+    dtype=None,
+    layout=torch.strided,
+    device=None,
+    requires_grad=False,
+):
+    """Allocate a 1-D tensor of *steps* linearly-spaced values on *heap*.
+
+    Args:
+        heap: Symmetric heap (``allocate`` / ``is_symmetric``).
+        iris_device (:class:`torch.device`): Device of the heap.
+        start: Start of the interval.
+        end: End of the interval (inclusive).
+        steps (int): Number of points.
+
+    Keyword Args:
+        out (:class:`torch.Tensor`, optional): Pre-allocated output tensor.
+        dtype (:class:`torch.dtype`, optional): Defaults to
+            :func:`torch.get_default_dtype` (or the corresponding complex dtype).
+        layout (:class:`torch.layout`): Default :data:`torch.strided`.
+        device: Must be compatible with *iris_device* or ``None``.
+        requires_grad (bool): Default ``False``.
+
+    Returns:
+        :class:`torch.Tensor`: Tensor on the symmetric heap.
+    """
+    logger.debug(f"linspace: start = {start}, end = {end}, steps = {steps}, dtype = {dtype}, device = {device}")
+    if dtype is None:
+        start_is_complex = isinstance(start, complex) or (hasattr(start, "dtype") and torch.is_complex(start))
+        end_is_complex = isinstance(end, complex) or (hasattr(end, "dtype") and torch.is_complex(end))
+        if start_is_complex or end_is_complex:
+            dtype = torch.complex64 if torch.get_default_dtype() == torch.float32 else torch.complex128
+        else:
+            dtype = torch.get_default_dtype()
+    if device is None:
+        device = iris_device
+    throw_if_invalid_device(device, iris_device)
+
+    # Normalise steps to a plain int
+    steps_int = _normalize_steps(steps)
+    size = (steps_int,)
+    num_elements = steps_int
+
+    if out is not None:
+        throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
+        tensor = out.view(size)
+    else:
+        tensor = allocate(heap, num_elements, dtype)
+        tensor = tensor.reshape(size)
+
+    torch.linspace(start, end, steps_int, out=tensor, dtype=dtype, device=device)
+    tensor = apply_layout(tensor, layout)
+    if requires_grad:
+        tensor.requires_grad_()
+    return tensor

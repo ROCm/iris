@@ -55,7 +55,6 @@ from iris.hip import (
 )
 from iris.symmetric_heap import SymmetricHeap
 import numpy as np
-import math
 import torch
 import logging
 
@@ -380,57 +379,22 @@ class Iris:
             >>> tensor = ctx.arange(0, 10, 2)  # [0, 2, 4, 6, 8]
             >>> print(tensor.shape)  # torch.Size([5])
         """
-        self.debug(f"arange: start = {start}, end = {end}, step = {step}, dtype = {dtype}, device = {device}")
-
         # Handle the case where only one argument is provided (end)
         if end is None:
             end = start
             start = 0
-
-        # Validate inputs
-        if step == 0:
-            raise ValueError("step must be non-zero")
-
-        # Validate step direction consistency
-        if step > 0 and start >= end:
-            raise ValueError(f"Invalid range: start >= end with positive step (start={start}, end={end}, step={step})")
-        elif step < 0 and start <= end:
-            raise ValueError(f"Invalid range: start <= end with negative step (start={start}, end={end}, step={step})")
-
-        # Calculate the number of elements
-        num_elements = math.ceil((end - start) / step)
-
-        # Infer dtype if not provided
-        if dtype is None:
-            if any(isinstance(x, float) for x in [start, end, step]):
-                dtype = torch.get_default_dtype()
-            else:
-                dtype = torch.int64
-
-        # Use current device if none specified
-        if device is None:
-            device = self.device
-
-        # Validate device compatibility with Iris
-        tensor_creation.throw_if_invalid_device(device, self.get_device())
-
-        if out is not None:
-            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
-            tensor = out
-        else:
-            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
-
-        target_device = tensor.device
-        arange_tensor = torch.arange(start, end, step, dtype=dtype, device=target_device)
-
-        tensor[:] = arange_tensor
-
-        tensor = tensor_creation.apply_layout(tensor, layout)
-
-        if requires_grad:
-            tensor.requires_grad_()
-
-        return tensor
+        return tensor_creation.arange(
+            self.heap,
+            self.get_device(),
+            start,
+            end,
+            step,
+            out=out,
+            dtype=dtype,
+            layout=layout,
+            device=device,
+            requires_grad=requires_grad,
+        )
 
     def zeros(self, *size, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
         """
@@ -526,48 +490,17 @@ class Iris:
             >>> print(tensor.shape)  # torch.Size([2, 3])
             >>> print(tensor[0])  # tensor([ 0.3982, -0.0059, -0.4365], device='cuda:0')
         """
-        self.debug(
-            f"randn: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}, pin_memory = {pin_memory}"
+        return tensor_creation.randn(
+            self.heap,
+            self.get_device(),
+            size,
+            generator=generator,
+            out=out,
+            dtype=dtype,
+            layout=layout,
+            device=device,
+            requires_grad=requires_grad,
         )
-
-        # Use global default dtype if None is provided
-        if dtype is None:
-            dtype = torch.get_default_dtype()
-
-        # Use current device if none specified
-        if device is None:
-            device = self.device
-
-        # Validate device compatibility with Iris
-        tensor_creation.throw_if_invalid_device(device, self.get_device())
-
-        # Parse size and calculate number of elements
-        size, num_elements = tensor_creation.parse_size(size)
-
-        # If out is provided, use it; otherwise allocate new tensor
-        if out is not None:
-            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
-            # Generate random data and copy to out tensor
-            random_data = torch.randn(num_elements, generator=generator, dtype=dtype, device=device, layout=layout)
-            out.copy_(random_data)
-            # Create a reshaped view of the out tensor
-            tensor = out.view(size)
-        else:
-            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
-            # Generate random data and copy to tensor
-            random_data = torch.randn(num_elements, generator=generator, dtype=dtype, device=device, layout=layout)
-            tensor.copy_(random_data)
-            # Reshape to the desired size
-            tensor = tensor.reshape(size)
-
-        # Apply the requested layout
-        tensor = tensor_creation.apply_layout(tensor, layout)
-
-        # Set requires_grad if specified
-        if requires_grad:
-            tensor.requires_grad_()
-
-        return tensor
 
     def ones(self, *size, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
         """
@@ -729,11 +662,7 @@ class Iris:
             >>> print(tensor.shape)  # torch.Size([2, 3])
             >>> print(tensor[0])  # tensor([0.1234, 0.5678, 0.9012], device='cuda:0')
         """
-        self.debug(f"uniform: size = {size}, low = {low}, high = {high}, dtype = {dtype}")
-        size, num_elements = tensor_creation.parse_size(size)
-        tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
-        tensor.uniform_(low, high)
-        return tensor.reshape(size)
+        return tensor_creation.uniform(self.heap, self.get_device(), size, low, high, dtype)
 
     def empty(
         self,
@@ -779,45 +708,17 @@ class Iris:
             >>> tensor = ctx.empty(2, 3)
             >>> print(tensor.shape)  # torch.Size([2, 3])
         """
-        self.debug(
-            f"empty: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}, pin_memory = {pin_memory}"
+        return tensor_creation.empty(
+            self.heap,
+            self.get_device(),
+            size,
+            out=out,
+            dtype=dtype,
+            layout=layout,
+            device=device,
+            requires_grad=requires_grad,
+            memory_format=memory_format,
         )
-
-        # Use global default dtype if None is provided
-        if dtype is None:
-            dtype = torch.get_default_dtype()
-
-        # Use current device if none specified
-        if device is None:
-            device = self.device
-
-        # Validate device compatibility with Iris
-        tensor_creation.throw_if_invalid_device(device, self.get_device())
-
-        # Parse size and calculate number of elements
-        size, num_elements = tensor_creation.parse_size(size)
-
-        # If out is provided, use it; otherwise allocate new tensor
-        if out is not None:
-            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
-            # Create a reshaped view of the out tensor
-            tensor = out.view(size)
-        else:
-            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
-            # Reshape to the desired size
-            tensor = tensor.reshape(size)
-
-        # Apply the requested memory format
-        tensor = tensor_creation.apply_memory_format(self.heap, tensor, size, memory_format)
-
-        # Apply the requested layout
-        tensor = tensor_creation.apply_layout(tensor, layout)
-
-        # Set requires_grad if specified
-        if requires_grad:
-            tensor.requires_grad_()
-
-        return tensor
 
     def randint(
         self, *args, generator=None, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False
@@ -849,64 +750,27 @@ class Iris:
             >>> print(tensor.shape)  # torch.Size([2, 3])
             >>> print(tensor[0])  # tensor([7, 2, 9], device='cuda:0')
         """
-        self.debug(f"randint: args = {args}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
-
         # Parse arguments to determine low, high, and size
-        # PyTorch randint signatures:
-        # randint(high, size) - where high is the upper bound and size is the shape
-        # randint(low, high, size) - where low and high are bounds, size is the shape
         if len(args) == 2:
-            # randint(high, size)
             high, size = args
             low = 0
         elif len(args) == 3:
-            # randint(low, high, size)
             low, high, size = args
         else:
             raise ValueError(f"randint expects 2 or 3 positional arguments, got {len(args)}")
-
-        # Use default dtype if None is provided
-        if dtype is None:
-            dtype = torch.int64
-
-        # Use current device if none specified
-        if device is None:
-            device = self.device
-
-        # Validate device compatibility with Iris
-        tensor_creation.throw_if_invalid_device(device, self.get_device())
-
-        # Parse size and calculate number of elements
-        size, num_elements = tensor_creation.parse_size(size)
-
-        # If out is provided, use it; otherwise allocate new tensor
-        if out is not None:
-            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
-            # Create a reshaped view of the out tensor
-            tensor = out.view(size)
-        else:
-            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
-            # Reshape to the desired size
-            tensor = tensor.reshape(size)
-
-        # Generate random integers using PyTorch's randint
-        # Use specified device or fall back to current device
-        target_device = device if device is not None else self.device
-
-        # Handle generator parameter
-        if generator is not None:
-            torch.randint(low, high, size, generator=generator, out=tensor, dtype=dtype, device=target_device)
-        else:
-            torch.randint(low, high, size, out=tensor, dtype=dtype, device=target_device)
-
-        # Apply the requested layout
-        tensor = tensor_creation.apply_layout(tensor, layout)
-
-        # Set requires_grad if specified
-        if requires_grad:
-            tensor.requires_grad_()
-
-        return tensor
+        return tensor_creation.randint(
+            self.heap,
+            self.get_device(),
+            low,
+            high,
+            size,
+            generator=generator,
+            out=out,
+            dtype=dtype,
+            layout=layout,
+            device=device,
+            requires_grad=requires_grad,
+        )
 
     def linspace(self, start, end, steps, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
         """
@@ -935,73 +799,18 @@ class Iris:
             >>> tensor = ctx.linspace(0, 10, 5)  # [0, 2.5, 5, 7.5, 10]
             >>> print(tensor) # tensor([ 0.0000,  2.5000,  5.0000,  7.5000, 10.0000], device='cuda:0')
         """
-        self.debug(
-            f"linspace: start = {start}, end = {end}, steps = {steps}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
+        return tensor_creation.linspace(
+            self.heap,
+            self.get_device(),
+            start,
+            end,
+            steps,
+            out=out,
+            dtype=dtype,
+            layout=layout,
+            device=device,
+            requires_grad=requires_grad,
         )
-
-        # Use global default dtype if None is provided
-        if dtype is None:
-            # Check if start or end are complex numbers
-            start_is_complex = isinstance(start, complex) or (hasattr(start, "dtype") and torch.is_complex(start))
-            end_is_complex = isinstance(end, complex) or (hasattr(end, "dtype") and torch.is_complex(end))
-
-            if start_is_complex or end_is_complex:
-                # Infer complex dtype based on default dtype
-                dtype = torch.complex64 if torch.get_default_dtype() == torch.float32 else torch.complex128
-            else:
-                dtype = torch.get_default_dtype()
-
-        # Use current device if none specified
-        if device is None:
-            device = self.device
-
-        # Validate device compatibility with Iris
-        tensor_creation.throw_if_invalid_device(device, self.get_device())
-
-        # Parse steps and extract the integer value
-        if isinstance(steps, (tuple, list)):
-            if len(steps) == 1:
-                # Single-element tuple/list like (5,) or [5]
-                steps_int = steps[0]
-                # Handle nested tuples like ((5,),)
-                if isinstance(steps_int, (tuple, list)):
-                    steps_int = steps_int[0]
-            else:
-                # Multi-element tuple/list - use __parse_size for compatibility
-                size, num_elements = tensor_creation.parse_size(steps)
-                steps_int = num_elements
-        else:
-            # steps is a single integer
-            steps_int = steps
-
-        # Ensure steps_int is an integer
-        steps_int = int(steps_int)
-        size = (steps_int,)
-        num_elements = steps_int
-
-        # If out is provided, use it; otherwise allocate new tensor
-        if out is not None:
-            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
-            # Create a reshaped view of the out tensor
-            tensor = out.view(size)
-        else:
-            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
-            # Reshape to the desired size
-            tensor = tensor.reshape(size)
-
-        # Generate linspace using PyTorch's linspace
-        # Use specified device or fall back to current device
-        target_device = device if device is not None else self.device
-        torch.linspace(start, end, steps_int, out=tensor, dtype=dtype, device=target_device)
-
-        # Apply the requested layout
-        tensor = tensor_creation.apply_layout(tensor, layout)
-
-        # Set requires_grad if specified
-        if requires_grad:
-            tensor.requires_grad_()
-
-        return tensor
 
     def rand(
         self,
@@ -1042,51 +851,17 @@ class Iris:
             >>> print(tensor.shape)  # torch.Size([2, 3])
             >>> print(tensor[0])  # tensor([0.1234, 0.5678, 0.9012], device='cuda:0')
         """
-        self.debug(
-            f"rand: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}, pin_memory = {pin_memory}"
+        return tensor_creation.rand(
+            self.heap,
+            self.get_device(),
+            size,
+            generator=generator,
+            out=out,
+            dtype=dtype,
+            layout=layout,
+            device=device,
+            requires_grad=requires_grad,
         )
-
-        # Use global default dtype if None is provided
-        if dtype is None:
-            dtype = torch.get_default_dtype()
-
-        # Use current device if none specified
-        if device is None:
-            device = self.device
-
-        # Validate device compatibility with Iris
-        tensor_creation.throw_if_invalid_device(device, self.get_device())
-
-        # Parse size and calculate number of elements
-        size, num_elements = tensor_creation.parse_size(size)
-
-        # If out is provided, use it; otherwise allocate new tensor
-        if out is not None:
-            tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
-            # Create a reshaped view of the out tensor
-            tensor = out.view(size)
-        else:
-            tensor = tensor_creation.allocate(self.heap, num_elements, dtype)
-            # Reshape to the desired size
-            tensor = tensor.reshape(size)
-
-        # Generate random numbers using PyTorch's rand
-        # Use specified device (already validated and set above)
-
-        # Handle generator parameter
-        if generator is not None:
-            torch.rand(size, generator=generator, out=tensor, dtype=dtype, device=device)
-        else:
-            torch.rand(size, out=tensor, dtype=dtype, device=device)
-
-        # Apply the requested layout
-        tensor = tensor_creation.apply_layout(tensor, layout)
-
-        # Set requires_grad if specified
-        if requires_grad:
-            tensor.requires_grad_()
-
-        return tensor
 
     def __deallocate(self, pointer):
         pass
