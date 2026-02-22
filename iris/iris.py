@@ -339,9 +339,6 @@ class Iris:
             >>> zeros_tensor = ctx.zeros_like(input_tensor)
             >>> print(zeros_tensor.shape)  # torch.Size([2, 3])
         """
-        self.debug(
-            f"zeros_like: input_shape = {input.shape}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
-        )
         return tensor_creation.zeros_like(
             self.heap,
             self.get_device(),
@@ -469,7 +466,6 @@ class Iris:
             >>> print(tensor.shape)  # torch.Size([2, 3])
             >>> print(tensor[0])  # tensor([0., 0., 0.], device='cuda:0')
         """
-        self.debug(f"zeros: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
         return tensor_creation.zeros(
             self.heap,
             self.get_device(),
@@ -607,7 +603,6 @@ class Iris:
             >>> print(tensor.shape)  # torch.Size([2, 3])
             >>> print(tensor[0])  # tensor([1., 1., 1.], device='cuda:0')
         """
-        self.debug(f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
         return tensor_creation.ones(
             self.heap,
             self.get_device(),
@@ -711,9 +706,6 @@ class Iris:
             >>> print(tensor.shape)  # torch.Size([2, 3])
             >>> print(tensor[0])  # tensor([3.1400, 3.1400, 3.1400], device='cuda:0')
         """
-        self.debug(
-            f"full: size = {size}, fill_value = {fill_value}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
-        )
         return tensor_creation.full(
             self.heap,
             self.get_device(),

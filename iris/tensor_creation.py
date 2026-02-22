@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
 Tensor creation abstraction for symmetric-heap tensors.
@@ -16,6 +16,8 @@ functions so that the logic lives in exactly one place.
 import math
 
 import torch
+
+from .logging import logger
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +258,7 @@ def zeros(heap, iris_device, size, *, out=None, dtype=None, layout=torch.strided
     Returns:
         :class:`torch.Tensor`: Zero tensor on the symmetric heap.
     """
+    logger.debug(f"zeros: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
     if dtype is None:
         dtype = torch.get_default_dtype()
     if device is None:
@@ -297,6 +300,7 @@ def ones(heap, iris_device, size, *, out=None, dtype=None, layout=torch.strided,
     Returns:
         :class:`torch.Tensor`: Ones tensor on the symmetric heap.
     """
+    logger.debug(f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
     if dtype is None:
         dtype = torch.get_default_dtype()
     if device is None:
@@ -350,6 +354,9 @@ def full(
     Returns:
         :class:`torch.Tensor`: Filled tensor on the symmetric heap.
     """
+    logger.debug(
+        f"full: size = {size}, fill_value = {fill_value}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
+    )
     if dtype is None:
         if isinstance(fill_value, float):
             dtype = torch.get_default_dtype()
@@ -407,6 +414,9 @@ def zeros_like(
     Returns:
         :class:`torch.Tensor`: Zero tensor on the symmetric heap.
     """
+    logger.debug(
+        f"zeros_like: input_shape = {input.shape}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
+    )
     if dtype is None:
         dtype = input.dtype
     if layout is None:

@@ -804,26 +804,6 @@ class IrisGluon:
         self.debug(f"allocate: num_elements = {num_elements}, dtype = {dtype}")
         return self.heap.allocate(num_elements, dtype)
 
-    def __parse_size(self, size):
-        """Parse size parameter and calculate number of elements."""
-        return tensor_creation.parse_size(size)
-
-    def __throw_if_invalid_device(self, device):
-        """Check if the requested device is compatible with this Iris instance."""
-        tensor_creation.throw_if_invalid_device(device, self.get_device())
-
-    def __is_valid_device(self, device) -> bool:
-        """Check if the requested device is compatible with this Iris instance."""
-        return tensor_creation.is_valid_device(device, self.get_device())
-
-    def __apply_layout(self, tensor, layout):
-        """Apply the requested layout to the tensor."""
-        return tensor_creation.apply_layout(tensor, layout)
-
-    def __throw_if_invalid_output_tensor(self, out, num_elements, dtype):
-        """Check if the output tensor is valid."""
-        tensor_creation.throw_if_invalid_output_tensor(self.heap, out, num_elements, dtype)
-
     def zeros(
         self,
         *size,
@@ -846,7 +826,6 @@ class IrisGluon:
         Returns:
             torch.Tensor: Zero-initialized tensor on the symmetric heap
         """
-        self.debug(f"zeros: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
         return tensor_creation.zeros(
             self.heap,
             self.get_device(),
@@ -892,7 +871,6 @@ class IrisGluon:
             >>> print(tensor.shape)  # torch.Size([2, 3])
             >>> print(tensor[0])  # tensor([1., 1., 1.], device='cuda:0')
         """
-        self.debug(f"ones: size = {size}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}")
         return tensor_creation.ones(
             self.heap,
             self.get_device(),
@@ -940,9 +918,6 @@ class IrisGluon:
             >>> print(tensor.shape)  # torch.Size([2, 3])
             >>> print(tensor[0])  # tensor([3.1400, 3.1400, 3.1400], device='cuda:0')
         """
-        self.debug(
-            f"full: size = {size}, fill_value = {fill_value}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
-        )
         return tensor_creation.full(
             self.heap,
             self.get_device(),
@@ -989,9 +964,6 @@ class IrisGluon:
             >>> zeros_tensor = ctx.zeros_like(input_tensor)
             >>> print(zeros_tensor.shape)  # torch.Size([2, 3])
         """
-        self.debug(
-            f"zeros_like: input_shape = {input.shape}, dtype = {dtype}, device = {device}, requires_grad = {requires_grad}"
-        )
         return tensor_creation.zeros_like(
             self.heap,
             self.get_device(),
