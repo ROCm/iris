@@ -283,6 +283,8 @@ jobs:
             install_method: editable
           - num_ranks: 4
             install_method: editable
+          - num_ranks: 8
+            install_method: editable
 
     steps:
       - name: Checkout repository
