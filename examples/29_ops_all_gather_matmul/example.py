@@ -65,7 +65,7 @@ def main():
         ctx.info(f"all_gather_matmul: world_size={world_size}, A_sharded=({M},{K_local}), B=({K},{N}), dtype={dtype}")
 
     if args["validate"]:
-        A_shards = [torch.zeros(M, K_local, dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
+        A_shards = [torch.zeros(M, K_local, dtype=dtype, device=A_sharded.device) for _ in range(world_size)]
         dist.all_gather(A_shards, A_sharded)
         A_full = torch.cat(A_shards, dim=1)
         ref = torch.matmul(A_full.float(), B.clone().float()).to(dtype)

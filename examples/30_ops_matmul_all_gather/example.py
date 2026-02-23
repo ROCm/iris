@@ -26,7 +26,7 @@ def parse_args():
         description="Fused matmul + all-gather example",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-m", type=int, default=512, help="Total rows (must be divisible by world_size)")
+    parser.add_argument("-m", type=int, default=4096, help="Total rows (must be divisible by world_size)")
     parser.add_argument("-n", type=int, default=128, help="Columns of B")
     parser.add_argument("-k", type=int, default=256, help="Inner dimension")
     parser.add_argument("--heap_size", type=int, default=1 << 31, help="Iris heap size")
@@ -50,9 +50,10 @@ def main():
     dtype = dtype_map[args["datatype"]]
     M, K, N = args["m"], args["k"], args["n"]
 
-    assert M % world_size == 0, (
-        f"M ({M}) must be divisible by world_size ({world_size}). Please adjust -m to be a multiple of {world_size}."
-    )
+    if M % world_size != 0:
+        raise ValueError(
+            f"M ({M}) must be divisible by world_size ({world_size}). Please adjust -m to be a multiple of {world_size}."
+        )
     M_local = M // world_size
 
     torch.manual_seed(42 + rank)
@@ -70,7 +71,7 @@ def main():
 
     if args["validate"]:
         C_local = torch.matmul(A_local.float(), B.clone().float()).to(dtype)
-        C_shards = [torch.zeros(M_local, N, dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
+        C_shards = [torch.zeros(M_local, N, dtype=dtype, device=C_local.device) for _ in range(world_size)]
         dist.all_gather(C_shards, C_local)
         ref = torch.cat(C_shards, dim=0)
         assert torch.allclose(output.float(), ref.float(), atol=1.0, rtol=0.05), (
