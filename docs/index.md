@@ -212,6 +212,7 @@ For other setup methods, see the [Installation Guide](getting-started/installati
 - **[API Reference](reference/api-reference.md)**: Structured API documentation
 - **[Triton APIs](reference/triton/overview.md)**: Standard Iris APIs with Triton
 - **[Gluon APIs (Experimental)](reference/gluon/overview.md)**: Cleaner API with Gluon decorators
+- **[Talks and Papers](reference/talks-and-papers.md)**: Publications and presentations about Iris
 
 ## Supported GPUs
 
