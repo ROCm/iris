@@ -5,17 +5,20 @@ Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 # Talks and Papers
 
-This page collects publications, conference talks, and video presentations related to Iris.
+This page collects publications, conference talks, and videos related to Iris.
 
 ## Papers
 
 ### Iris: First-Class Multi-GPU Programming Experience in Triton
 
-**Authors**: Muhammad Awad, Muhammad Osama, Brandon Potter
+> Muhammad Awad, Muhammad Osama, Brandon Potter — *arXiv, November 2025*
 
-**Published**: November 2025 · [arXiv:2511.12500](https://arxiv.org/abs/2511.12500)
+Introduces the Iris framework and its SHMEM-like Remote Memory Access (RMA) APIs for multi-GPU programming inside Triton kernels, demonstrating programmability and competitive performance on AMD MI300X GPUs.
 
-Introduces the Iris framework, its programming model, and the SHMEM-like Remote Memory Access (RMA) APIs built on top of Triton. The paper demonstrates performance on AMD MI300X GPUs for communication-intensive workloads.
+- 📄 [arXiv:2511.12500](https://arxiv.org/abs/2511.12500)
+- 🔖 DOI: [10.48550/arXiv.2511.12500](https://doi.org/10.48550/arXiv.2511.12500)
+
+**BibTeX**
 
 ```bibtex
 @misc{Awad:2025:IFM,
@@ -33,11 +36,14 @@ Introduces the Iris framework, its programming model, and the SHMEM-like Remote 
 
 ### Eliminating Multi-GPU Performance Taxes: A Systems Approach to Efficient Distributed LLMs
 
-**Authors**: Octavian Alexandru Trifan, Karthik Sangaiah, Muhammad Awad, Muhammad Osama, Sumanth Gudaparthi, Alexandru Nicolau, Alexander Veidenbaum, Ganesh Dasika
+> Octavian Alexandru Trifan, Karthik Sangaiah, Muhammad Awad, Muhammad Osama, Sumanth Gudaparthi, Alexandru Nicolau, Alexander Veidenbaum, Ganesh Dasika — *arXiv, November 2025*
 
-**Published**: November 2025 · [arXiv:2511.02168](https://arxiv.org/abs/2511.02168)
+Presents a systems-level approach for reducing communication overhead in distributed large language model inference, leveraging Iris for fine-grained GPU-to-GPU data movement.
 
-Presents a systems approach to reducing communication overheads in distributed large language model inference, leveraging Iris for fine-grained compute and communication overlap.
+- 📄 [arXiv:2511.02168](https://arxiv.org/abs/2511.02168)
+- 🔖 DOI: [10.48550/arXiv.2511.02168](https://doi.org/10.48550/arXiv.2511.02168)
+
+**BibTeX**
 
 ```bibtex
 @misc{Trifan:2025:EMT,
@@ -53,7 +59,9 @@ Presents a systems approach to reducing communication overheads in distributed l
 
 ---
 
-### Software Release
+## Software Citation
+
+If you use the Iris software directly, please also cite the software release:
 
 ```bibtex
 @software{Awad:2025:IFM:Software,
@@ -66,33 +74,30 @@ Presents a systems approach to reducing communication overheads in distributed l
 }
 ```
 
-## Talks
+---
 
-### GPU Mode – Iris: Multi-GPU Programming Made Easier
+## Talks and Videos
 
-**Date**: September 12, 2025
+### Iris at GPU Mode — September 2025
 
-Iris was presented at the [GPU Mode](https://www.youtube.com/@GPUMODE) community meetup, covering the motivation, design, and performance results of the framework.
+Iris was presented at the GPU Mode meetup, covering the design of the RMA API, the symmetric heap, and performance results on multi-GPU workloads.
 
-- 🎬 [Watch the talk on YouTube](https://www.youtube.com/watch?v=i6Y2EelEC04)
-- 📄 [Download the slides](https://github.com/ROCm/iris/blob/main/docs/slides/Awad-Osama-Potter%20-%20Iris%20Multi-GPU%20Programming%20Made%20Easier%20(GPU%20Mode).pdf)
+- 🎬 [Watch on YouTube](https://www.youtube.com/watch?v=i6Y2EelEC04)
+- 📊 [Slides (PDF)](https://github.com/ROCm/iris/blob/main/docs/slides/Awad-Osama-Potter%20-%20Iris%20Multi-GPU%20Programming%20Made%20Easier%20(GPU%20Mode).pdf)
 
 ---
 
-### AMD Distributed Inference Kernel Contest – Iris Introduction (Chinese)
+### Iris All-Scatter Taxonomy — August 2025
 
-**Date**: September 16, 2025
-
-An introduction to Iris presented in Chinese for participants of the AMD Distributed Inference Kernel Contest.
-
-- 🎬 [Watch on YouTube](https://youtu.be/wW14w1QNrY8)
-
----
-
-### Iris All-Scatter Taxonomy
-
-**Date**: August 14, 2025
-
-A deep dive into the taxonomy of All-Scatter communication patterns and how Iris models them. See the accompanying [Taxonomy documentation](../conceptual/taxonomy.md) for written details.
+A deep-dive video on the taxonomy of multi-GPU programming patterns, with a focus on All-Scatter and GEMM + communication overlap.
 
 - 🎬 [Watch on YouTube](https://youtu.be/fYMdPe9UpHE)
+- 📖 [Taxonomy Documentation](../conceptual/taxonomy.md)
+
+---
+
+### Iris Presented in Chinese — September 2025
+
+Iris was presented in Chinese for participants of the AMD Distributed Inference Kernel Contest.
+
+- 🎬 [Watch on YouTube](https://youtu.be/wW14w1QNrY8)
