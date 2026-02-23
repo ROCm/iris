@@ -49,6 +49,7 @@ __pycache__/
 *.pyzwz
 
 !.devcontainer/devcontainer.json
+!.github/scripts/examples_config.json
 
 
 resources/

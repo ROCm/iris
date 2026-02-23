@@ -45,6 +45,16 @@ EXIT_CODE=0
     # Run new examples (numbered 24 and above)
     for example_file in examples/2[4-9]_*/example.py examples/3[0-9]_*/example.py; do
         if [ -f \"\$example_file\" ]; then
+            # Check examples_config.json in CI scripts dir for rank requirements
+            example_name=\$(basename \$(dirname \"\$example_file\"))
+            config_file=\".github/scripts/examples_config.json\"
+            if [ -f \"\$config_file\" ]; then
+                required_ranks=\$(python3 -c \"import json; d=json.load(open('\$config_file')); print(d.get('\$example_name', {}).get('required_ranks',''))\" 2>/dev/null)
+                if [ -n \"\$required_ranks\" ] && [ \"\$required_ranks\" != \"$NUM_RANKS\" ]; then
+                    echo \"Skipping: \$example_file (requires \$required_ranks ranks, got $NUM_RANKS)\"
+                    continue
+                fi
+            fi
             echo \"Running: \$example_file with $NUM_RANKS ranks\"
             torchrun --nproc_per_node=$NUM_RANKS --standalone \"\$example_file\"
         fi
