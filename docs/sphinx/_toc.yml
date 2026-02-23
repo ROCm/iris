@@ -12,6 +12,7 @@ subtrees:
     - file: conceptual/taxonomy.md
   - caption: Reference
     entries:
+    - file: reference/talks-and-papers.md
     - file: reference/api-reference.md
       entries:
       - file: reference/triton/overview.md
@@ -19,6 +20,8 @@ subtrees:
         - file: reference/triton/class.md
         - file: reference/triton/tensor-creation.md
         - file: reference/triton/device-functions.md
+        - file: reference/triton/ccl.md
+        - file: reference/triton/ops.md
       - file: reference/gluon/overview.md
         entries:
         - file: reference/gluon/class.md
