@@ -12,7 +12,6 @@ subtrees:
     - file: conceptual/taxonomy.md
   - caption: Reference
     entries:
-    - file: reference/talks-and-papers.md
     - file: reference/api-reference.md
       entries:
       - file: reference/triton/overview.md
