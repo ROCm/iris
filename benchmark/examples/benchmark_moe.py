@@ -22,6 +22,7 @@ Run:
 """
 
 import argparse
+import functools
 import json
 import os
 import sys
@@ -45,14 +46,21 @@ def _load_example_modules():
     sys.path.insert(0, str(example_dir))
 
     from expert_assignment import make_expt_assignment, make_expt_dict_uniform
-    from moe import mixture_of_expt_epsharded, mixture_of_expt_nosharded
+    from moe import MoeFusionConfig, mixture_of_expt_epsharded, mixture_of_expt_nosharded
 
-    return make_expt_assignment, make_expt_dict_uniform, mixture_of_expt_epsharded, mixture_of_expt_nosharded
+    return (
+        make_expt_assignment,
+        make_expt_dict_uniform,
+        MoeFusionConfig,
+        mixture_of_expt_epsharded,
+        mixture_of_expt_nosharded,
+    )
 
 
 (
     make_expt_assignment,
     make_expt_dict_uniform,
+    MoeFusionConfig,
     mixture_of_expt_epsharded,
     mixture_of_expt_nosharded,
 ) = _load_example_modules()
@@ -114,11 +122,45 @@ def parse_args():
 
     parser.add_argument("--output_dir", type=str, default="benchmark/results/moe", help="Output directory")
     parser.add_argument("--output_file", type=str, default="benchmark_moe.json", help="Output JSON filename")
+    parser.add_argument(
+        "--fusion_mode",
+        type=str,
+        default="unfused",
+        choices=[
+            "unfused",
+            "fused_grouped_matmul_convert_ep_to_dp",
+            "fused_convert_dp_to_ep_grouped_matmul",
+            "fused_convert_dp_to_ep_grouped_matmul__grouped_matmul_convert_ep_to_dp",
+        ],
+        help="MoE fusion mode selector",
+    )
     return parser.parse_args()
 
 
 def _dtype_from_str(s: str) -> torch.dtype:
     return {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[s]
+
+
+def _run_dist_once(
+    x_dp_local,
+    l_dp_local,
+    w_ep_local,
+    b_ep_local,
+    expt_assignment,
+    n_expts_act,
+    shmem,
+    fusion_config,
+):
+    return mixture_of_expt_epsharded(
+        x_dp_local,
+        l_dp_local,
+        w_ep_local,
+        b_ep_local,
+        expt_assignment,
+        n_expts_act,
+        shmem,
+        fusion_config=fusion_config,
+    )
 
 
 def _worker(rank: int, world_size: int, init_url: str, args):
@@ -137,6 +179,7 @@ def _worker(rank: int, world_size: int, init_url: str, args):
         ws = shmem.get_num_ranks()
         device = torch.device(f"cuda:{rank}")
         dtype = _dtype_from_str(args.datatype)
+        fusion_config = MoeFusionConfig.from_mode_name(args.fusion_mode)
 
         if args.n_expts_tot % ws != 0:
             raise ValueError(f"n_expts_tot ({args.n_expts_tot}) must be divisible by world_size ({ws})")
@@ -183,16 +226,17 @@ def _worker(rank: int, world_size: int, init_url: str, args):
             w_ep_local = w_global[expt_assignment.expt_boolmask[rank]].contiguous()
             b_ep_local = b_global[expt_assignment.expt_boolmask[rank]].contiguous()
 
-            def run_dist():
-                return mixture_of_expt_epsharded(
-                    x_dp_local,
-                    l_dp_local,
-                    w_ep_local,
-                    b_ep_local,
-                    expt_assignment,
-                    args.n_expts_act,
-                    shmem,
-                )
+            run_dist = functools.partial(
+                _run_dist_once,
+                x_dp_local,
+                l_dp_local,
+                w_ep_local,
+                b_ep_local,
+                expt_assignment,
+                args.n_expts_act,
+                shmem,
+                fusion_config,
+            )
 
             if args.validate or args.compare_single_gpu:
                 y_ref = mixture_of_expt_nosharded(
@@ -212,6 +256,7 @@ def _worker(rank: int, world_size: int, init_url: str, args):
                 "n_expts_tot": args.n_expts_tot,
                 "n_expts_act": args.n_expts_act,
                 "dtype": args.datatype,
+                "fusion_mode": fusion_config.mode_name(),
             }
 
             if args.validate:

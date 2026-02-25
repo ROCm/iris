@@ -37,7 +37,8 @@ MOE = _load_module("moe_31_moe", EXAMPLE_DIR / "moe.py")
 
 
 @pytest.mark.parametrize("n_tokens,d_model,n_expts_act", [(128, 64, 2)])
-def test_expert_sharded_moe_matches_reference(n_tokens, d_model, n_expts_act):
+@pytest.mark.parametrize("fusion_mode", ["unfused", "fused_grouped_matmul_convert_ep_to_dp"])
+def test_expert_sharded_moe_matches_reference(n_tokens, d_model, n_expts_act, fusion_mode):
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
@@ -79,6 +80,7 @@ def test_expert_sharded_moe_matches_reference(n_tokens, d_model, n_expts_act):
         b_ep_local = b_global[expt_assignment.expt_boolmask[rank]].contiguous()
 
         shmem.barrier()
+        fusion_config = MOE.MoeFusionConfig.from_mode_name(fusion_mode)
         z_dp_local = MOE.mixture_of_expt_epsharded(
             x_dp_local,
             l_dp_local,
@@ -87,6 +89,7 @@ def test_expert_sharded_moe_matches_reference(n_tokens, d_model, n_expts_act):
             expt_assignment,
             n_expts_act,
             shmem,
+            fusion_config=fusion_config,
         )
 
         y_global_tri = torch.empty_like(y_global_ref)

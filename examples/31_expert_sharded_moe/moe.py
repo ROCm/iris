@@ -11,6 +11,8 @@ Implements:
   mixture_of_expt_epsharded  -- expert-parallel 8-step pipeline using iris
 """
 
+from dataclasses import dataclass
+
 import torch
 import triton
 import triton.language as tl
@@ -21,6 +23,7 @@ from topk import topk, _make_bitmatrix_metadata
 from dispatch import convert_dp_to_ep
 from combine import convert_ep_to_dp
 from grouped_matmul import grouped_matmul
+from fused_exp_matmul_ep_to_dp import fused_exp_matmul_ep_to_dp
 from reduce import reduce
 
 
@@ -70,6 +73,9 @@ def _allgather_iris(local_tensor, shmem):
     rest = list(src.shape[1:])
     global_shape = [n_local * world_size] + rest
     buf = shmem.zeros(global_shape, dtype=work_dtype)
+    # Match the other communication wrappers: ensure every rank has
+    # allocated its destination heap buffer before remote stores begin.
+    shmem.barrier()
     heap_bases = shmem.get_heap_bases()
 
     src_flat = src.view(-1)
@@ -151,6 +157,39 @@ def mixture_of_expt_nosharded(x_global, l_global, w_global, b_global, n_expts_ac
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class MoeFusionConfig:
+    """Fusion mode selector for expert-sharded MoE pipeline."""
+
+    fuse_convert_dp_to_ep_grouped_matmul: bool = False
+    fuse_grouped_matmul_convert_ep_to_dp: bool = False
+
+    def mode_name(self) -> str:
+        parts: list[str] = []
+        if self.fuse_convert_dp_to_ep_grouped_matmul:
+            parts.append("convert_dp_to_ep_grouped_matmul")
+        if self.fuse_grouped_matmul_convert_ep_to_dp:
+            parts.append("grouped_matmul_convert_ep_to_dp")
+        if not parts:
+            return "unfused"
+        return "fused_" + "__".join(parts)
+
+    @staticmethod
+    def from_mode_name(name: str) -> "MoeFusionConfig":
+        if name == "unfused":
+            return MoeFusionConfig()
+        if name == "fused_grouped_matmul_convert_ep_to_dp":
+            return MoeFusionConfig(fuse_grouped_matmul_convert_ep_to_dp=True)
+        if name == "fused_convert_dp_to_ep_grouped_matmul":
+            return MoeFusionConfig(fuse_convert_dp_to_ep_grouped_matmul=True)
+        if name == "fused_convert_dp_to_ep_grouped_matmul__grouped_matmul_convert_ep_to_dp":
+            return MoeFusionConfig(
+                fuse_convert_dp_to_ep_grouped_matmul=True,
+                fuse_grouped_matmul_convert_ep_to_dp=True,
+            )
+        raise ValueError(f"Unknown fusion mode name: {name}")
+
+
 def mixture_of_expt_epsharded(
     x_dp_local,
     l_dp_local,
@@ -159,6 +198,7 @@ def mixture_of_expt_epsharded(
     expt_assignment,
     n_expts_act,
     shmem,
+    fusion_config: MoeFusionConfig | None = None,
 ):
     """Expert-parallel MoE forward using iris symmetric heap.
 
@@ -221,25 +261,41 @@ def mixture_of_expt_epsharded(
     # ------------------------------------------------------------------
     # Step 5: Remap ragged metadata to local expert view
     # ------------------------------------------------------------------
-    expt_map = expt_assignment.expt_map[rank, :]
+    expt_map = expt_assignment.expt_map[rank, :].contiguous()
     y_ep_local_metadata = remap_ragged_tensor_metadata(x_global_metadata, expt_map)
 
-    # ------------------------------------------------------------------
-    # Step 6: Expert matmul (local compute)
-    # ------------------------------------------------------------------
-    y_ep_local = grouped_matmul(y_ep_local, w_ep_local, b_ep_local, y_ep_local_metadata)
+    fusion_config = fusion_config or MoeFusionConfig()
+    if fusion_config.fuse_convert_dp_to_ep_grouped_matmul:
+        raise NotImplementedError(
+            "Fusion mode convert_dp_to_ep_grouped_matmul is not implemented yet."
+        )
 
     # ------------------------------------------------------------------
-    # Step 7: EP -> DP combine (all-to-all via iris.store)
+    # grouped_matmul + convert_ep_to_dp (select fused/unfused variant)
     # ------------------------------------------------------------------
     flat_expt_indx = active_indx.to(torch.int32).reshape(-1)
-    y_dp_local = convert_ep_to_dp(
-        y_ep_local,
-        expt_assignment,
-        flat_expt_indx,
-        combine_indx,
-        shmem,
-    )
+    if fusion_config.fuse_grouped_matmul_convert_ep_to_dp:
+        torch.cuda.synchronize()
+        shmem.barrier()
+        y_dp_local = fused_exp_matmul_ep_to_dp(
+            y_ep_local,
+            w_ep_local,
+            b_ep_local,
+            expt_assignment,
+            expt_map,
+            flat_expt_indx,
+            combine_indx,
+            shmem,
+        )
+    else:
+        y_ep_local = grouped_matmul(y_ep_local, w_ep_local, b_ep_local, y_ep_local_metadata)
+        y_dp_local = convert_ep_to_dp(
+            y_ep_local,
+            expt_assignment,
+            flat_expt_indx,
+            combine_indx,
+            shmem,
+        )
 
     # ------------------------------------------------------------------
     # Step 8: Reduce (unweighted sum, masked)
