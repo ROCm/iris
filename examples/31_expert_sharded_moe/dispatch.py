@@ -12,7 +12,6 @@ scatters the token's activation row into that rank's destination buffer
 via iris.store.
 """
 
-import torch
 import triton
 import triton.language as tl
 import iris

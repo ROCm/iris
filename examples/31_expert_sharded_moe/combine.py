@@ -15,7 +15,6 @@ Destination buffer shape per rank: (n_slots_per_rank, d_model) where
 n_slots_per_rank = n_tokens_global // world_size.
 """
 
-import torch
 import triton
 import triton.language as tl
 import iris

@@ -16,7 +16,6 @@ import triton
 import triton.language as tl
 import iris
 
-from expert_assignment import ExptAssignment
 from ragged_metadata import make_ragged_tensor_metadata, remap_ragged_tensor_metadata
 from topk import topk, _make_bitmatrix_metadata
 from dispatch import convert_dp_to_ep

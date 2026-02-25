@@ -50,7 +50,8 @@ def run_worker(rank, world_size, init_url, args):
         _run_moe_example(rank, world_size, shmem, args)
     finally:
         del shmem
-        import gc; gc.collect()
+        import gc
+        gc.collect()
         dist.destroy_process_group()
 
 
