@@ -19,10 +19,16 @@ import triton.language as tl
 
 @triton.jit
 def _reduce_kernel(
-    Y_ptr, stride_y_t, stride_y_a, stride_y_d,
-    Z_ptr, stride_z_t, stride_z_d,
+    Y_ptr,
+    stride_y_t,
+    stride_y_a,
+    stride_y_d,
+    Z_ptr,
+    stride_z_t,
+    stride_z_d,
     Mask_ptr,
-    n_tokens, d_model,
+    n_tokens,
+    d_model,
     N_EXPTS_ACT: tl.constexpr,
     BLOCK_D: tl.constexpr,
     HAS_MASK: tl.constexpr,
@@ -40,11 +46,13 @@ def _reduce_kernel(
         if HAS_MASK:
             m = tl.load(
                 Mask_ptr + pid_t * N_EXPTS_ACT * d_model + act * d_model + offs_d,
-                mask=mask_d, other=0,
+                mask=mask_d,
+                other=0,
             ).to(tl.int1)
         y = tl.load(
             Y_ptr + pid_t * stride_y_t + act * stride_y_a + offs_d * stride_y_d,
-            mask=mask_d, other=0.0,
+            mask=mask_d,
+            other=0.0,
         ).to(tl.float32)
         if HAS_MASK:
             y = tl.where(m, y, 0.0)
@@ -84,10 +92,16 @@ def reduce(
     grid = (n_tokens, triton.cdiv(d_model, BLOCK_D))
 
     _reduce_kernel[grid](
-        y, y.stride(0), y.stride(1), y.stride(2),
-        z, z.stride(0), z.stride(1),
+        y,
+        y.stride(0),
+        y.stride(1),
+        y.stride(2),
+        z,
+        z.stride(0),
+        z.stride(1),
         mask if mask is not None else y,
-        n_tokens, d_model,
+        n_tokens,
+        d_model,
         N_EXPTS_ACT=k,
         BLOCK_D=BLOCK_D,
         HAS_MASK=(mask is not None),

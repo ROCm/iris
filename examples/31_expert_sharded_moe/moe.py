@@ -28,10 +28,12 @@ from reduce import reduce
 # Iris all-gather helper (push model)
 # ---------------------------------------------------------------------------
 
+
 @triton.jit
 def _allgather_push_kernel(
     src_ptr,
-    dst_ptr, dst_offset,
+    dst_ptr,
+    dst_offset,
     src_numel,
     heap_bases,
     CUR_RANK: tl.constexpr,
@@ -77,7 +79,10 @@ def _allgather_iris(local_tensor, shmem):
     BLOCK = min(triton.next_power_of_2(numel), 1024)
     grid = (triton.cdiv(numel, BLOCK),)
     _allgather_push_kernel[grid](
-        src_flat, buf.view(-1), elem_offset, numel,
+        src_flat,
+        buf.view(-1),
+        elem_offset,
+        numel,
         heap_bases,
         CUR_RANK=rank,
         N_RANKS=world_size,
@@ -92,6 +97,7 @@ def _allgather_iris(local_tensor, shmem):
 # ---------------------------------------------------------------------------
 # Reference: single-device MoE (no sharding)
 # ---------------------------------------------------------------------------
+
 
 def mixture_of_expt_nosharded(x_global, l_global, w_global, b_global, n_expts_act):
     """Reference MoE on a single device using our own kernels.
@@ -143,6 +149,7 @@ def mixture_of_expt_nosharded(x_global, l_global, w_global, b_global, n_expts_ac
 # ---------------------------------------------------------------------------
 # Distributed: expert-parallel MoE using iris
 # ---------------------------------------------------------------------------
+
 
 def mixture_of_expt_epsharded(
     x_dp_local,
@@ -204,7 +211,11 @@ def mixture_of_expt_epsharded(
     # Step 4: DP -> EP dispatch (all-to-all via iris.store)
     # ------------------------------------------------------------------
     y_ep_local = convert_dp_to_ep(
-        x_dp_local, expt_assignment, active_indx, dispatch_indx, shmem,
+        x_dp_local,
+        expt_assignment,
+        active_indx,
+        dispatch_indx,
+        shmem,
     )
 
     # ------------------------------------------------------------------
@@ -223,7 +234,11 @@ def mixture_of_expt_epsharded(
     # ------------------------------------------------------------------
     flat_expt_indx = active_indx.to(torch.int32).reshape(-1)
     y_dp_local = convert_ep_to_dp(
-        y_ep_local, expt_assignment, flat_expt_indx, combine_indx, shmem,
+        y_ep_local,
+        expt_assignment,
+        flat_expt_indx,
+        combine_indx,
+        shmem,
     )
 
     # ------------------------------------------------------------------
@@ -231,7 +246,7 @@ def mixture_of_expt_epsharded(
     # ------------------------------------------------------------------
     y_dp_local = y_dp_local.view(-1, n_expts_act, d_model)
     y_mask = (dispatch_indx != -1).view(n_tokens_global, n_expts_act, 1)
-    local_mask = y_mask[rank * n_tokens_local:(rank + 1) * n_tokens_local]
+    local_mask = y_mask[rank * n_tokens_local : (rank + 1) * n_tokens_local]
     local_mask = local_mask.expand_as(y_dp_local).contiguous()
     z_dp_local, _ = reduce(y_dp_local, dim=1, mask=local_mask)
 

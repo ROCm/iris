@@ -22,9 +22,13 @@ import iris
 
 @triton.jit
 def _convert_ep_to_dp(
-    dst_ptr, dst_stride_m,
-    src_ptr, src_stride_m, src_shape_n,
-    expt_filter_ptr, expt_filter_stride_m,
+    dst_ptr,
+    dst_stride_m,
+    src_ptr,
+    src_stride_m,
+    src_shape_n,
+    expt_filter_ptr,
+    expt_filter_stride_m,
     expt_indx_ptr,
     dst_row_indx_ptr,
     n_slots_per_rank,
@@ -54,7 +58,8 @@ def _convert_ep_to_dp(
         mask_n = start_n + offs_n < src_shape_n
         src = tl.load(
             src_ptr + pid_m * src_stride_m + start_n + offs_n,
-            mask=mask_n, other=0.0,
+            mask=mask_n,
+            other=0.0,
         )
         dst_off = dst_indx_local * dst_stride_m + start_n + offs_n
         for r in tl.static_range(N_RANKS):
@@ -88,9 +93,13 @@ def convert_ep_to_dp(src, expt_assignment, expt_indx, topk_indx, shmem):
     grid = (n_tokens_global,)
 
     _convert_ep_to_dp[grid](
-        dst_local, dst_local.stride(0),
-        src, src.stride(0), src.shape[1],
-        expt_bitmask, expt_bitmask.stride(0),
+        dst_local,
+        dst_local.stride(0),
+        src,
+        src.stride(0),
+        src.shape[1],
+        expt_bitmask,
+        expt_bitmask.stride(0),
         expt_indx,
         topk_indx,
         n_tokens_local,

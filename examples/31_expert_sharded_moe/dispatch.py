@@ -19,11 +19,17 @@ import iris
 
 @triton.jit
 def _convert_dp_to_ep(
-    dst_ptr, dst_stride_m,
-    src_ptr, src_stride_m, src_shape_n,
-    expt_filter_ptr, expt_filter_stride_m,
-    expt_indx_ptr, expt_indx_stride_m,
-    dst_row_indx_ptr, dst_row_indx_stride_m,
+    dst_ptr,
+    dst_stride_m,
+    src_ptr,
+    src_stride_m,
+    src_shape_n,
+    expt_filter_ptr,
+    expt_filter_stride_m,
+    expt_indx_ptr,
+    expt_indx_stride_m,
+    dst_row_indx_ptr,
+    dst_row_indx_stride_m,
     n_tokens_local,
     heap_bases,
     SRC_RANK: tl.constexpr,
@@ -54,7 +60,8 @@ def _convert_dp_to_ep(
                 mask_n = start_n + offs_n < src_shape_n
                 src = tl.load(
                     src_ptr + off_m_local * src_stride_m + start_n + offs_n,
-                    mask=mask_n, other=0.0,
+                    mask=mask_n,
+                    other=0.0,
                 )
                 dst_off = dst_row * dst_stride_m + start_n + offs_n
                 for r in tl.static_range(N_RANKS):
@@ -88,11 +95,17 @@ def convert_dp_to_ep(src, expt_assignment, expt_indx, gate_indx, shmem):
     grid = (n_tokens_local,)
 
     _convert_dp_to_ep[grid](
-        dst_local, dst_local.stride(0),
-        src, src.stride(0), src.shape[1],
-        expt_bitmask, expt_bitmask.stride(0),
-        expt_indx, expt_indx.stride(0),
-        gate_indx, n_expt_act,
+        dst_local,
+        dst_local.stride(0),
+        src,
+        src.stride(0),
+        src.shape[1],
+        expt_bitmask,
+        expt_bitmask.stride(0),
+        expt_indx,
+        expt_indx.stride(0),
+        gate_indx,
+        n_expt_act,
         n_tokens_local,
         shmem.get_heap_bases(),
         SRC_RANK=shmem.get_rank(),

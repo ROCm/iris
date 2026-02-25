@@ -40,8 +40,10 @@ def parse_args():
 
 def run_worker(rank, world_size, init_url, args):
     dist.init_process_group(
-        backend="nccl", init_method=init_url,
-        world_size=world_size, rank=rank,
+        backend="nccl",
+        init_method=init_url,
+        world_size=world_size,
+        rank=rank,
         device_id=torch.device(f"cuda:{rank}"),
     )
     torch.cuda.set_device(rank)
@@ -51,6 +53,7 @@ def run_worker(rank, world_size, init_url, args):
     finally:
         del shmem
         import gc
+
         gc.collect()
         dist.destroy_process_group()
 
@@ -99,7 +102,11 @@ def _run_moe_example(rank, world_size, shmem, args):
     if rank == 0:
         print("Computing reference (non-sharded) MoE...")
     y_global_ref = mixture_of_expt_nosharded(
-        x_global, l_global, w_global, b_global, n_expts_act,
+        x_global,
+        l_global,
+        w_global,
+        b_global,
+        n_expts_act,
     )
 
     first = rank * n_tokens_local
@@ -115,9 +122,12 @@ def _run_moe_example(rank, world_size, shmem, args):
         print("Running expert-sharded MoE pipeline...")
 
     z_dp_local = mixture_of_expt_epsharded(
-        x_dp_local, l_dp_local,
-        w_ep_local, b_ep_local,
-        expt_assignment, n_expts_act,
+        x_dp_local,
+        l_dp_local,
+        w_ep_local,
+        b_ep_local,
+        expt_assignment,
+        n_expts_act,
         shmem,
     )
 
@@ -144,8 +154,10 @@ def _run_moe_example(rank, world_size, shmem, args):
 
         try:
             torch.testing.assert_close(
-                y_global_ref, y_global_tri,
-                atol=args.atol, rtol=args.rtol,
+                y_global_ref,
+                y_global_tri,
+                atol=args.atol,
+                rtol=args.rtol,
             )
             print("PASSED: sharded MoE matches reference")
         except AssertionError as e:
@@ -156,10 +168,12 @@ def _run_moe_example(rank, world_size, shmem, args):
 
 def main():
     args = parse_args()
-    assert args.n_tokens % args.num_ranks == 0, \
+    assert args.n_tokens % args.num_ranks == 0, (
         f"n_tokens ({args.n_tokens}) must be divisible by num_ranks ({args.num_ranks})"
-    assert args.n_expts_tot % args.num_ranks == 0, \
+    )
+    assert args.n_expts_tot % args.num_ranks == 0, (
         f"n_expts_tot ({args.n_expts_tot}) must be divisible by num_ranks ({args.num_ranks})"
+    )
 
     init_url = "tcp://127.0.0.1:29504"
     mp.spawn(
@@ -172,4 +186,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -23,8 +23,9 @@ class RaggedTensorMetadata:
         slice_sizes = [3, 0, 5, 2]
         slice_offs  = [0, 3, 3, 8, 10]
     """
-    slice_sizes: torch.Tensor   # (n_slices,) int32
-    slice_offs: torch.Tensor    # (n_slices + 1,) int32
+
+    slice_sizes: torch.Tensor  # (n_slices,) int32
+    slice_offs: torch.Tensor  # (n_slices + 1,) int32
 
     @property
     def n_slices(self) -> int:
