@@ -59,9 +59,7 @@ def _fused_exp_matmul_ep_to_dp_kernel(
     # Ownership check: mirrors combine.py exactly using bitmask.
     dst_expt_indx = tl.load(expt_indx_ptr + dst_indx_global).to(tl.int32)
     expt_filter_ptr_local = expt_filter_ptr + SRC_RANK * expt_filter_stride_m
-    has_dst_expt = (
-        tl.load(expt_filter_ptr_local + dst_expt_indx // 32) >> (dst_expt_indx % 32)
-    ) & 1
+    has_dst_expt = (tl.load(expt_filter_ptr_local + dst_expt_indx // 32) >> (dst_expt_indx % 32)) & 1
     if not has_dst_expt.to(tl.int1):
         return
 
@@ -83,15 +81,8 @@ def _fused_exp_matmul_ep_to_dp_kernel(
             x_ptrs = x_ptr + pid_m * x_stride_m + offs_k * x_stride_k
             x = tl.load(x_ptrs, mask=mask_k, other=0.0).to(tl.float32)
 
-            w_ptrs = (
-                w_ptr
-                + local_expt * w_stride_e
-                + offs_k[:, None] * w_stride_k
-                + cur_n[None, :] * w_stride_n
-            )
-            w = tl.load(
-                w_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0
-            ).to(tl.float32)
+            w_ptrs = w_ptr + local_expt * w_stride_e + offs_k[:, None] * w_stride_k + cur_n[None, :] * w_stride_n
+            w = tl.load(w_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0).to(tl.float32)
             acc += tl.sum(x[:, None] * w, axis=0)
 
         if HAS_BIAS:
@@ -105,9 +96,7 @@ def _fused_exp_matmul_ep_to_dp_kernel(
                 if r == SRC_RANK:
                     tl.store(dst_ptr + dst_off, out, mask=mask_n)
                 else:
-                    iris.store(
-                        dst_ptr + dst_off, out, SRC_RANK, r, heap_bases, mask=mask_n
-                    )
+                    iris.store(dst_ptr + dst_off, out, SRC_RANK, r, heap_bases, mask=mask_n)
 
 
 def fused_exp_matmul_ep_to_dp(

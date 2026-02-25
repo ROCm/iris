@@ -266,9 +266,7 @@ def mixture_of_expt_epsharded(
 
     fusion_config = fusion_config or MoeFusionConfig()
     if fusion_config.fuse_convert_dp_to_ep_grouped_matmul:
-        raise NotImplementedError(
-            "Fusion mode convert_dp_to_ep_grouped_matmul is not implemented yet."
-        )
+        raise NotImplementedError("Fusion mode convert_dp_to_ep_grouped_matmul is not implemented yet.")
 
     # ------------------------------------------------------------------
     # grouped_matmul + convert_ep_to_dp (select fused/unfused variant)

@@ -110,7 +110,9 @@ def parse_args():
     )
 
     parser.add_argument("--benchmark", action="store_true", help="Run timing benchmark")
-    parser.add_argument("--validate", action="store_true", help="Validate distributed output vs single-device reference")
+    parser.add_argument(
+        "--validate", action="store_true", help="Validate distributed output vs single-device reference"
+    )
     parser.add_argument(
         "--compare_single_gpu",
         action="store_true",
@@ -206,9 +208,7 @@ def _worker(rank: int, world_size: int, init_url: str, args):
             torch.manual_seed(0)
             x_global = torch.randn(n_tokens, args.d_model, device=device, dtype=dtype)
             l_global = torch.rand(n_tokens, args.n_expts_tot, device=device, dtype=torch.float32)
-            w_global = torch.randn(
-                args.n_expts_tot, args.d_model, args.d_model, device=device, dtype=dtype
-            )
+            w_global = torch.randn(args.n_expts_tot, args.d_model, args.d_model, device=device, dtype=dtype)
             b_global = torch.randn(args.n_expts_tot, args.d_model, device=device, dtype=torch.float32)
 
             dist.broadcast(x_global, src=0)
@@ -239,9 +239,7 @@ def _worker(rank: int, world_size: int, init_url: str, args):
             )
 
             if args.validate or args.compare_single_gpu:
-                y_ref = mixture_of_expt_nosharded(
-                    x_global, l_global, w_global, b_global, args.n_expts_act
-                )
+                y_ref = mixture_of_expt_nosharded(x_global, l_global, w_global, b_global, args.n_expts_act)
 
             # Warmup one run for graph/kernels.
             z_dp_local = run_dist()
@@ -277,10 +275,9 @@ def _worker(rank: int, world_size: int, init_url: str, args):
 
             if args.compare_single_gpu:
                 if rank == 0:
+
                     def run_ref():
-                        return mixture_of_expt_nosharded(
-                            x_global, l_global, w_global, b_global, args.n_expts_act
-                        )
+                        return mixture_of_expt_nosharded(x_global, l_global, w_global, b_global, args.n_expts_act)
 
                     ref_ms = iris.do_bench(
                         run_ref,
@@ -305,11 +302,7 @@ def _worker(rank: int, world_size: int, init_url: str, args):
                         if args.compare_single_gpu and "single_gpu_ref_ms" in result
                         else ""
                     )
-                    + (
-                        f" max_diff={result.get('validate_max_diff', 0.0):.4f}"
-                        if args.validate
-                        else ""
-                    )
+                    + (f" max_diff={result.get('validate_max_diff', 0.0):.4f}" if args.validate else "")
                 )
                 results.append(result)
 
