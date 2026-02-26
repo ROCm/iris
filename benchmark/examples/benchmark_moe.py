@@ -145,8 +145,10 @@ def _dtype_from_str(s: str) -> torch.dtype:
 
 def _make_heap_resetter(allocator, offset):
     """Return a callable that resets the bump allocator to *offset*."""
+
     def _reset():
         allocator.heap_offset = offset
+
     return _reset
 
 

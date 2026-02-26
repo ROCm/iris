@@ -85,16 +85,11 @@ def _fused_exp_matmul_ep_to_dp_kernel(
         valid_dst = mask_m & (dst_indx_globals >= 0)
 
         safe_dst_indx = tl.where(valid_dst, dst_indx_globals, tl.zeros_like(dst_indx_globals))
-        dst_expt_indxs = tl.load(
-            expt_indx_ptr + safe_dst_indx, mask=valid_dst, other=0
-        ).to(tl.int32)
+        dst_expt_indxs = tl.load(expt_indx_ptr + safe_dst_indx, mask=valid_dst, other=0).to(tl.int32)
 
         expt_filter_ptr_local = expt_filter_ptr + SRC_RANK * expt_filter_stride_m
         has_dst_expts = (
-            (
-                tl.load(expt_filter_ptr_local + dst_expt_indxs // 32, mask=valid_dst, other=0)
-                >> (dst_expt_indxs % 32)
-            )
+            (tl.load(expt_filter_ptr_local + dst_expt_indxs // 32, mask=valid_dst, other=0) >> (dst_expt_indxs % 32))
             & 1
         ).to(tl.int1)
 
@@ -114,10 +109,7 @@ def _fused_exp_matmul_ep_to_dp_kernel(
             x = tl.load(x_ptrs, mask=mask_m[:, None] & mask_k[None, :], other=0.0)
 
             w_ptrs = (
-                w_ptr
-                + local_expert_id_64 * w_stride_e
-                + offs_k[:, None] * w_stride_k
-                + offs_n[None, :] * w_stride_n
+                w_ptr + local_expert_id_64 * w_stride_e + offs_k[:, None] * w_stride_k + offs_n[None, :] * w_stride_n
             )
             w = tl.load(w_ptrs, mask=mask_k[:, None] & mask_n[None, :], other=0.0)
 
