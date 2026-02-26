@@ -2,20 +2,26 @@ name: Copilot Setup Steps
 
 on:
   workflow_dispatch:
+  issue_comment:
+    types: [created, edited]
 
 jobs:
   copilot-setup-steps:
-    runs-on: [self-hosted, copilot]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request && contains(github.event.comment.body, '@copilot'))
+    runs-on: [self-hosted, copilot, apptainer, iris]
 
     permissions:
       contents: read
+      pull-requests: read
 
     timeout-minutes: 59
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
+
       - name: Create task venv for Copilot
         run: |
           python3 -m venv $GITHUB_WORKSPACE/.venv
