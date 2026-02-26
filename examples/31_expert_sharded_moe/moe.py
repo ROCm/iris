@@ -284,6 +284,7 @@ def mixture_of_expt_epsharded(
             flat_expt_indx,
             combine_indx,
             shmem,
+            ragged_metadata=y_ep_local_metadata,
         )
     else:
         y_ep_local = grouped_matmul(y_ep_local, w_ep_local, b_ep_local, y_ep_local_metadata)

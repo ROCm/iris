@@ -143,6 +143,13 @@ def _dtype_from_str(s: str) -> torch.dtype:
     return {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[s]
 
 
+def _make_heap_resetter(allocator, offset):
+    """Return a callable that resets the bump allocator to *offset*."""
+    def _reset():
+        allocator.heap_offset = offset
+    return _reset
+
+
 def _run_dist_once(
     x_dp_local,
     l_dp_local,
@@ -195,8 +202,10 @@ def _worker(rank: int, world_size: int, init_url: str, args):
             os.makedirs(args.output_dir, exist_ok=True)
 
         results: list[dict] = []
+        sweep_heap_base = shmem.heap.allocator.heap_offset
 
         for bpe in sweep:
+            shmem.heap.allocator.heap_offset = sweep_heap_base
             n_tokens = bpe * args.n_expts_tot // args.n_expts_act
             if n_tokens % ws != 0:
                 if rank == 0:
@@ -264,13 +273,20 @@ def _worker(rank: int, world_size: int, init_url: str, args):
                 result["validate_pass"] = bool(torch.allclose(y_ref, y_tri, atol=1e-2, rtol=1e-2))
 
             if args.benchmark:
+                heap_snapshot = shmem.heap.allocator.heap_offset
+                reset_heap = _make_heap_resetter(shmem.heap.allocator, heap_snapshot)
+                saved_refresh = shmem.heap.refresh_peer_access
+                shmem.heap.refresh_peer_access = lambda: None
                 dist_ms = iris.do_bench(
                     run_dist,
                     barrier_fn=shmem.barrier,
+                    preamble_fn=reset_heap,
                     n_warmup=args.warmup,
                     n_repeat=args.repeat,
                     return_mode="mean",
                 )
+                shmem.heap.refresh_peer_access = saved_refresh
+                reset_heap()
                 result["dist_ms"] = float(dist_ms)
 
             if args.compare_single_gpu:

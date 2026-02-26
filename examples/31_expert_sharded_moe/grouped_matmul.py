@@ -58,7 +58,9 @@ def _grouped_matmul_kernel(
     if expert_id >= n_experts:
         return
 
-    slice_off = tl.load(SliceOffs_ptr + expert_id)
+    # int64 to prevent pointer-offset overflow when n_experts * K * N > 2^31
+    expert_id = expert_id.to(tl.int64)
+    slice_off = tl.load(SliceOffs_ptr + expert_id).to(tl.int64)
     slice_size = tl.load(SliceSizes_ptr + expert_id)
     if slice_size == 0:
         return
