@@ -265,9 +265,15 @@ def _worker(rank: int, world_size: int, init_url: str, args):
                     shmem.heap.allocator.heap_offset = sweep_heap_base
                     td = [] if rank == 0 else None
                     mixture_of_expt_epsharded(
-                        x_dp_local, l_dp_local, w_ep_local, b_ep_local,
-                        expt_assignment, args.n_expts_act, shmem,
-                        fusion_config=fusion_config, timing_dict=td,
+                        x_dp_local,
+                        l_dp_local,
+                        w_ep_local,
+                        b_ep_local,
+                        expt_assignment,
+                        args.n_expts_act,
+                        shmem,
+                        fusion_config=fusion_config,
+                        timing_dict=td,
                     )
                     if rank == 0:
                         for j in range(1, len(td)):
@@ -275,8 +281,10 @@ def _worker(rank: int, world_size: int, init_url: str, args):
                             ms = td[j - 1][1].elapsed_time(td[j][1])
                             stage_ms.setdefault(key, []).append(ms)
                 if rank == 0:
-                    print("  [breakdown bpe={}] ".format(bpe) + "  ".join(
-                        "{}={:.2f}ms".format(k, sum(v) / len(v)) for k, v in stage_ms.items()))
+                    print(
+                        "  [breakdown bpe={}] ".format(bpe)
+                        + "  ".join("{}={:.2f}ms".format(k, sum(v) / len(v)) for k, v in stage_ms.items())
+                    )
 
             result = {
                 "world_size": ws,
