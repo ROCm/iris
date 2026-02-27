@@ -73,6 +73,7 @@ def _fused_exp_matmul_ep_to_dp_kernel(
 
     n_m_tiles = tl.cdiv(slice_size, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_N), BLOCK_N)
     mask_n = offs_n < N
 
     for pid_m in range(0, n_m_tiles):
@@ -173,9 +174,9 @@ def fused_exp_matmul_ep_to_dp(
     dst_local = shmem.zeros((n_slots_per_rank, d_model), dtype=x_ep_local.dtype)
     shmem.barrier()
 
-    BLOCK_M = 32
+    BLOCK_M = 128
     BLOCK_N = min(triton.next_power_of_2(N), 128)
-    BLOCK_K = min(triton.next_power_of_2(K), 128)
+    BLOCK_K = min(triton.next_power_of_2(K), 64)
 
     n_n_tiles = triton.cdiv(N, BLOCK_N)
     grid = (n_n_tiles * n_local_experts,)
@@ -210,6 +211,8 @@ def fused_exp_matmul_ep_to_dp(
         HAS_BIAS=(b_ep_local is not None),
         SRC_RANK=shmem.get_rank(),
         N_RANKS=shmem.get_num_ranks(),
+        num_warps=8,
+        num_stages=2,
     )
 
     torch.cuda.synchronize()

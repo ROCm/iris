@@ -72,6 +72,7 @@ def _grouped_matmul_kernel(
         mask_m = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) < slice_size
 
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_N), BLOCK_N)
         mask_n = offs_n < N
 
         acc = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -120,9 +121,9 @@ def grouped_matmul(
 
     y = torch.zeros((total_tokens, N), dtype=x.dtype, device=device)
 
-    BLOCK_M = 32
+    BLOCK_M = 128
     BLOCK_N = min(triton.next_power_of_2(N), 128)
-    BLOCK_K = min(triton.next_power_of_2(K), 128)
+    BLOCK_K = min(triton.next_power_of_2(K), 64)
 
     n_n_tiles = triton.cdiv(N, BLOCK_N)
     grid = (n_n_tiles * n_experts,)
@@ -150,5 +151,9 @@ def grouped_matmul(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        num_warps=8,
+        num_stages=2,
+        matrix_instr_nonkdim=16,
+        kpack=1,
     )
     return y

@@ -121,6 +121,7 @@ def parse_args():
 
     parser.add_argument("--warmup", type=int, default=25, help="Warmup iterations for do_bench")
     parser.add_argument("--repeat", type=int, default=100, help="Benchmark iterations for do_bench")
+    parser.add_argument("--breakdown", action="store_true", help="Print per-stage timing breakdown (rank 0)")
 
     parser.add_argument("--output_dir", type=str, default="benchmark/results/moe", help="Output directory")
     parser.add_argument("--output_file", type=str, default="benchmark_moe.json", help="Output JSON filename")
@@ -256,6 +257,26 @@ def _worker(rank: int, world_size: int, init_url: str, args):
             z_dp_local = run_dist()
             y_tri = torch.empty((n_tokens, args.d_model), dtype=dtype, device=device)
             dist.all_gather_into_tensor(y_tri, z_dp_local.contiguous())
+
+            if args.breakdown:
+                N_BREAKDOWN_ITERS = 5
+                stage_ms = {}
+                for _ in range(N_BREAKDOWN_ITERS):
+                    shmem.heap.allocator.heap_offset = sweep_heap_base
+                    td = [] if rank == 0 else None
+                    mixture_of_expt_epsharded(
+                        x_dp_local, l_dp_local, w_ep_local, b_ep_local,
+                        expt_assignment, args.n_expts_act, shmem,
+                        fusion_config=fusion_config, timing_dict=td,
+                    )
+                    if rank == 0:
+                        for j in range(1, len(td)):
+                            key = td[j][0]
+                            ms = td[j - 1][1].elapsed_time(td[j][1])
+                            stage_ms.setdefault(key, []).append(ms)
+                if rank == 0:
+                    print("  [breakdown bpe={}] ".format(bpe) + "  ".join(
+                        "{}={:.2f}ms".format(k, sum(v) / len(v)) for k, v in stage_ms.items()))
 
             result = {
                 "world_size": ws,

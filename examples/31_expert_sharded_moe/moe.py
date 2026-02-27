@@ -199,6 +199,7 @@ def mixture_of_expt_epsharded(
     n_expts_act,
     shmem,
     fusion_config: MoeFusionConfig | None = None,
+    timing_dict: dict | None = None,
 ):
     """Expert-parallel MoE forward using iris symmetric heap.
 
@@ -221,15 +222,27 @@ def mixture_of_expt_epsharded(
     n_expts_tot = l_dp_local.shape[1]
     device = x_dp_local.device
 
+    def _tick(label):
+        """Record a cuda event for timing breakdown. timing_dict is a list of (label, event) pairs."""
+        if timing_dict is not None:
+            torch.cuda.synchronize()
+            ev = torch.cuda.Event(enable_timing=True)
+            ev.record()
+            timing_dict.append((label, ev))
+
+    _tick("start")
+
     # ------------------------------------------------------------------
     # Step 1: Top-k routing (local) + all-gather via iris
     # ------------------------------------------------------------------
     local_topk = topk(l_dp_local, n_expts_act, apply_softmax=True)
+    _tick("topk")
 
     vals_global = _allgather_iris(local_topk.vals, shmem)
     # Keep routing indices in int32 after gather. We observed rank-dependent
     # corruption when converting gathered index buffers back to int16.
     indx_global = _allgather_iris(local_topk.indx.contiguous().to(torch.int32), shmem)
+    _tick("allgather")
 
     # ------------------------------------------------------------------
     # Step 2: Extract routing metadata from global topk
@@ -246,6 +259,7 @@ def mixture_of_expt_epsharded(
     # ------------------------------------------------------------------
     n_active = int(expt_sizes.sum().item())
     x_global_metadata = make_ragged_tensor_metadata(expt_sizes, n_active)
+    _tick("metadata")
 
     # ------------------------------------------------------------------
     # Step 4: DP -> EP dispatch (all-to-all via iris.store)
@@ -257,6 +271,7 @@ def mixture_of_expt_epsharded(
         dispatch_indx,
         shmem,
     )
+    _tick("dispatch")
 
     # ------------------------------------------------------------------
     # Step 5: Remap ragged metadata to local expert view
@@ -286,8 +301,10 @@ def mixture_of_expt_epsharded(
             shmem,
             ragged_metadata=y_ep_local_metadata,
         )
+        _tick("fused_matmul_scatter")
     else:
         y_ep_local = grouped_matmul(y_ep_local, w_ep_local, b_ep_local, y_ep_local_metadata)
+        _tick("matmul")
         y_dp_local = convert_ep_to_dp(
             y_ep_local,
             expt_assignment,
@@ -295,6 +312,7 @@ def mixture_of_expt_epsharded(
             combine_indx,
             shmem,
         )
+        _tick("combine")
 
     # ------------------------------------------------------------------
     # Step 8: Reduce (unweighted sum, masked)
@@ -304,6 +322,7 @@ def mixture_of_expt_epsharded(
     local_mask = y_mask[rank * n_tokens_local : (rank + 1) * n_tokens_local]
     local_mask = local_mask.expand_as(y_dp_local).contiguous()
     z_dp_local, _ = reduce(y_dp_local, dim=1, mask=local_mask)
+    _tick("reduce")
 
     torch.cuda.synchronize()
     return z_dp_local
