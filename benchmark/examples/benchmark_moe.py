@@ -281,16 +281,13 @@ def _worker(rank: int, world_size: int, init_url: str, args):
                             ms = td[j - 1][1].elapsed_time(td[j][1])
                             stage_ms.setdefault(key, []).append(ms)
                 if rank == 0:
-                    total_avg = sum(sum(v)/len(v) for v in stage_ms.values())
+                    total_avg = sum(sum(v) / len(v) for v in stage_ms.values())
                     parts = []
                     for k, v in stage_ms.items():
                         avg = sum(v) / len(v)
                         pct = 100 * avg / total_avg if total_avg > 0 else 0
                         parts.append("{}={:.2f}ms ({:.1f}%)".format(k, avg, pct))
-                    print(
-                        "  [breakdown bpe={} total={:.2f}ms] ".format(bpe, total_avg)
-                        + "  ".join(parts)
-                    )
+                    print("  [breakdown bpe={} total={:.2f}ms] ".format(bpe, total_avg) + "  ".join(parts))
 
             result = {
                 "world_size": ws,

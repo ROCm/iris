@@ -1997,7 +1997,9 @@ def put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None, hint: tl.co
 
 
 @triton.jit
-def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+def atomic_add(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic add at the specified rank's memory location.
 
@@ -2034,7 +2036,9 @@ def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
 
 @triton.jit
-def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+def atomic_sub(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Atomically subtracts data from the specified rank's memory location.
 
@@ -2109,7 +2113,9 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
 
 
 @triton.jit
-def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+def atomic_xchg(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic exchange at the specified rank's memory location.
 
@@ -2146,7 +2152,9 @@ def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=Non
 
 
 @triton.jit
-def atomic_xor(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+def atomic_xor(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic xor at the specified rank's memory location.
 
@@ -2183,7 +2191,9 @@ def atomic_xor(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
 
 @triton.jit
-def atomic_and(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+def atomic_and(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic and at the specified rank's memory location.
 
@@ -2257,7 +2267,9 @@ def atomic_or(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None,
 
 
 @triton.jit
-def atomic_min(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+def atomic_min(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic min at the specified rank's memory location.
 
@@ -2294,7 +2306,9 @@ def atomic_min(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
 
 
 @triton.jit
-def atomic_max(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+def atomic_max(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic max at the specified rank's memory location.
 
