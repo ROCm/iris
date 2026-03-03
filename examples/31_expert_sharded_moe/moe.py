@@ -210,6 +210,9 @@ def mixture_of_expt_epsharded(
     fusion_config: MoeFusionConfig | None = None,
     timing_dict: dict | None = None,
     gemm_sms: int | None = None,
+    block_m: int | None = None,
+    block_n: int | None = None,
+    block_k: int | None = None,
 ):
     """Expert-parallel MoE forward using iris symmetric heap.
 
@@ -221,6 +224,12 @@ def mixture_of_expt_epsharded(
         expt_assignment: ExptAssignment mapping experts to ranks.
         n_expts_act: k (experts per token).
         shmem: iris.Iris instance.
+        fusion_config: MoeFusionConfig controlling which stages are fused.
+        timing_dict: optional list to collect (label, cuda_event) pairs.
+        gemm_sms: GEMM CU count for WG-specialized kernel (default: auto).
+        block_m: M-dim tile size for WG kernel (default: 128).
+        block_n: N-dim tile size for WG kernel (default: auto from d_model).
+        block_k: K-dim tile size for WG kernel (default: auto from d_model).
 
     Returns:
         (n_tokens_local, d_model) output for this rank's tokens.
@@ -344,6 +353,9 @@ def mixture_of_expt_epsharded(
                 shmem,
                 ragged_metadata=y_ep_local_metadata,
                 gemm_sms=gemm_sms,
+                block_m=block_m,
+                block_n=block_n,
+                block_k=block_k,
             )
             _tick("wg_fused_matmul_scatter")
         else:

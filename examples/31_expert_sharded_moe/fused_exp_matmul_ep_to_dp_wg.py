@@ -19,8 +19,6 @@ Grid: (NUM_SMS,) -- one persistent program per CU.
 Lock granularity: one lock per (expert, N-tile, M-tile) triple.
 """
 
-import math
-
 import torch
 import triton
 import triton.language as tl
@@ -189,6 +187,33 @@ def _wg_fused_exp_matmul_ep_to_dp_kernel(
                                 iris.store(dst_ptrs_2d, out, SRC_RANK, r, heap_bases, mask=store_mask, hint=(1, 16))
 
 
+def _heuristic_wg_config(num_sms: int, avg_bpe: int) -> tuple[int, int]:
+    """Select (gemm_sms, block_m) heuristically based on avg tokens-per-expert.
+
+    Heuristic derived from a tune sweep on MI300X (304 CUs, 8 ranks) across
+    bpe ∈ {64, 128, 256, 512, 1024} with block_m ∈ {32, 64, 128, 256} and
+    gemm_sms ∈ {¼, ½, ¾} × num_sms:
+
+      bpe ≤ 64  → gemm_sms = num_sms // 2,     block_m = 128
+      bpe ≤ 128 → gemm_sms = 3 * num_sms // 4,  block_m = 128
+      bpe > 128 → gemm_sms = 3 * num_sms // 4,  block_m = 256
+
+    Args:
+        num_sms: Total CU count on the device.
+        avg_bpe: Average number of tokens routed per local expert
+                 (n_slots_per_rank // n_local_experts).
+
+    Returns:
+        (gemm_sms, block_m) tuple.
+    """
+    if avg_bpe <= 64:
+        return max(1, num_sms // 2), 128
+    elif avg_bpe <= 128:
+        return max(1, 3 * num_sms // 4), 128
+    else:
+        return max(1, 3 * num_sms // 4), 256
+
+
 def wg_fused_exp_matmul_ep_to_dp(
     x_ep_local: torch.Tensor,
     w_ep_local: torch.Tensor,
@@ -200,6 +225,9 @@ def wg_fused_exp_matmul_ep_to_dp(
     shmem,
     ragged_metadata: RaggedTensorMetadata | None = None,
     gemm_sms: int | None = None,
+    block_m: int | None = None,
+    block_n: int | None = None,
+    block_k: int | None = None,
 ) -> torch.Tensor:
     """WG-specialized fused expert matmul + EP->DP scatter.
 
@@ -216,7 +244,14 @@ def wg_fused_exp_matmul_ep_to_dp(
         combine_indx: (n_total_slots,) col_sorted_indx.
         shmem: iris.Iris instance.
         ragged_metadata: local-expert-view ragged metadata.
-        gemm_sms: Number of CUs for GEMM path. Default: 2^floor(log2(cu_count)).
+        gemm_sms: Number of CUs for GEMM path.
+            Default: auto-selected by _heuristic_wg_config based on avg bpe.
+        block_m: GEMM tile size along the M (token) dimension.
+            Default: auto-selected by _heuristic_wg_config based on avg bpe.
+        block_n: GEMM tile size along the N (output) dimension.
+            Default: min(triton.next_power_of_2(N), 128).
+        block_k: GEMM tile size along the K (reduction) dimension.
+            Default: min(triton.next_power_of_2(K), 64).
 
     Returns:
         (n_slots_per_rank, d_model) DP-local combined output.
@@ -228,9 +263,21 @@ def wg_fused_exp_matmul_ep_to_dp(
     K = d_model
     N = d_model
 
-    BLOCK_M = 128
-    BLOCK_N = min(triton.next_power_of_2(N), 128)
-    BLOCK_K = min(triton.next_power_of_2(K), 64)
+    device = x_ep_local.device
+    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+
+    # Derive heuristic defaults for gemm_sms / block_m when not specified.
+    if gemm_sms is None or block_m is None:
+        avg_bpe = n_slots_per_rank // max(n_local_experts, 1)
+        h_gemm_sms, h_block_m = _heuristic_wg_config(num_sms, avg_bpe)
+        if gemm_sms is None:
+            gemm_sms = h_gemm_sms
+        if block_m is None:
+            block_m = h_block_m
+
+    BLOCK_M = block_m
+    BLOCK_N = block_n if block_n is not None else min(triton.next_power_of_2(N), 128)
+    BLOCK_K = block_k if block_k is not None else min(triton.next_power_of_2(K), 64)
 
     max_slice_size = int(ragged_metadata.slice_sizes.max().item())
     max_m_tiles = triton.cdiv(max_slice_size, BLOCK_M)
@@ -241,12 +288,6 @@ def wg_fused_exp_matmul_ep_to_dp(
         shmem.barrier()
         shmem.barrier()
         return dst_local
-
-    device = x_ep_local.device
-    cu_count = torch.cuda.get_device_properties(device).multi_processor_count
-    num_sms = cu_count
-    if gemm_sms is None:
-        gemm_sms = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
 
     y_buf = torch.zeros((n_total_slots, N), dtype=x_ep_local.dtype, device=device)
     dst_local = shmem.zeros((n_slots_per_rank, d_model), dtype=x_ep_local.dtype)
