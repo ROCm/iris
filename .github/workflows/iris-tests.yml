@@ -16,7 +16,7 @@ env:
 
 jobs:
   build-container-image:
-    runs-on: [self-hosted, mi3xx]
+    runs-on: [linux-mi325-8gpu-ossci-rad]
     timeout-minutes: 180
 
     steps:
@@ -41,7 +41,7 @@ jobs:
   test-git:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, git install)
     needs: build-container-image
-    runs-on: [self-hosted, mi3xx]
+    runs-on: [linux-mi325-8gpu-ossci-rad]
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -120,7 +120,7 @@ jobs:
   test-editable:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, editable install)
     needs: [build-container-image, test-git]
-    runs-on: [self-hosted, mi3xx]
+    runs-on: [linux-mi325-8gpu-ossci-rad]
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -196,7 +196,7 @@ jobs:
   test-install:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, pip install)
     needs: [build-container-image, test-editable]
-    runs-on: [self-hosted, mi3xx]
+    runs-on: [linux-mi325-8gpu-ossci-rad]
     strategy:
       fail-fast: false
       matrix:
@@ -271,7 +271,7 @@ jobs:
   test-new-examples:
     name: New examples (${{ matrix.num_ranks }} ranks, ${{ matrix.install_method }})
     needs: build-container-image
-    runs-on: [self-hosted, mi3xx]
+    runs-on: [linux-mi325-8gpu-ossci-rad]
     timeout-minutes: 180
     permissions:
       contents: read

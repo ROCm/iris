@@ -16,7 +16,7 @@ env:
 
 jobs:
   build-container-image:
-    runs-on: [self-hosted, mi3xx]
+    runs-on: [linux-mi325-8gpu-ossci-rad]
     timeout-minutes: 180
 
     steps:
@@ -42,7 +42,7 @@ jobs:
   external-validation-test:
     name: External Validation Test
     needs: build-container-image
-    runs-on: [self-hosted, mi3xx]
+    runs-on: [linux-mi325-8gpu-ossci-rad]
     timeout-minutes: 180
 
     steps:
@@ -78,7 +78,7 @@ jobs:
   external-gluon-validation-test:
     name: External Gluon Validation Test
     needs: build-container-image
-    runs-on: [self-hosted, mi3xx]
+    runs-on: [linux-mi325-8gpu-ossci-rad]
 
     steps:
       - name: Checkout repository
