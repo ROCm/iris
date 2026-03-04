@@ -83,14 +83,19 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     echo "[INFO] Checking Docker images..."
     # Use GitHub variable if set, otherwise default to iris-dev
     IMAGE_NAME=${DOCKER_IMAGE_NAME:-"iris-dev"}
-    
+
     # Check if the image exists
     if docker image inspect "$IMAGE_NAME" &> /dev/null; then
         echo "[INFO] Using existing Docker image: $IMAGE_NAME"
     else
-        echo "[WARNING] Docker image $IMAGE_NAME not found"
-        echo "[INFO] Please build it using: ./build_triton_image.sh"
-        echo "[INFO] Or pull it if available from registry"
+        echo "[INFO] Docker image $IMAGE_NAME not found, building..."
+        DOCKER_DIR="$(dirname "$(realpath "$0")")/../../docker"
+        if docker build -t "$IMAGE_NAME" "$DOCKER_DIR"; then
+            echo "[INFO] Built Docker image: $IMAGE_NAME"
+        else
+            echo "[ERROR] Docker build failed"
+            exit 1
+        fi
     fi
 fi
 
