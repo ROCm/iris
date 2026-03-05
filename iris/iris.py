@@ -1268,31 +1268,16 @@ class Iris:
                 output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
             )
 @triton.jit
-def __translate(ptr, from_rank, to_rank, heap_bases):
+def __translate(ptr, from_rank, to_rank, heap_bases, hint: tl.constexpr = None):
     from_base = tl.load(heap_bases + from_rank)
     to_base = tl.load(heap_bases + to_rank)
-    # convert to int to compute difference
     ptr_int = tl.cast(ptr, tl.uint64)
-    # Find the offset from from_rank heap
     offset = ptr_int - from_base
-    # Byte cast for byte offset addition
     to_base_byte = tl.cast(to_base, tl.pointer_type(tl.int8))
-    # Find the offset into the to_rank heap
     translated_ptr_byte = to_base_byte + offset
-    # Cast to_base back to pointer type
     translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
-
-    # Optimization to vectorize the load/store
-    # We can't do this in general because we don't know the shape of the tensor or block sizes
-    # ptr = tl.max_contiguous(tl.multiple_of(ptr, (16, 16)), (16, 32))
-
-    # 0 You can use this if your block sizes are multiples of 32.
-    # Largest vectorized load instruction is dwordx4 (128-bits)
-    # translated_ptr = tl.multiple_of(translated_ptr, (32, 32))
-    # translated_ptr = tl.max_contiguous(translated_ptr, (1, 32))
-
-    # ptr = tl.max_contiguous(tl.multiple_of(ptr, 512), 512)
-    # translated_ptr = tl.max_contiguous(tl.multiple_of(translated_ptr, 512), 512)
+    if hint is not None:
+        translated_ptr = tl.max_contiguous(tl.multiple_of(translated_ptr, hint), hint)
     return translated_ptr
 @aggregate
 class DeviceContext:
@@ -1467,12 +1452,12 @@ class DeviceContext:
             return DeviceContext(rank, world_size, heap_bases, device_tracing)
 
     @triton.jit
-    def _translate(self, ptr, from_rank, to_rank):
+    def _translate(self, ptr, from_rank, to_rank, hint: tl.constexpr = None):
         """Internal pointer translation between rank address spaces."""
-        return __translate(ptr, from_rank, to_rank, self.heap_bases)
+        return __translate(ptr, from_rank, to_rank, self.heap_bases, hint)
 
     @triton.jit
-    def load(self, pointer, from_rank, mask=None):
+    def load(self, pointer, from_rank, mask=None, hint: tl.constexpr = None):
         """
         Loads a value from the specified rank's memory location.
 
@@ -1485,6 +1470,7 @@ class DeviceContext:
             pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `from_rank`'s address space.
             from_rank (int): The rank ID from which to read the data.
             mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address pointer[idx]. Defaults to None.
+            hint (int or tuple, optional): Vectorization hint for the translated pointer. Defaults to None.
 
         Returns:
             Block: The loaded value from the target memory location.
@@ -1492,12 +1478,12 @@ class DeviceContext:
         Example:
             >>> data = ctx.load(buffer + offsets, from_rank=1, mask=mask)
         """
-        translated_ptr = self._translate(pointer, self.rank, from_rank)
+        translated_ptr = self._translate(pointer, self.rank, from_rank, hint)
         result = tl.load(translated_ptr, mask=mask)
         return result
 
     @triton.jit
-    def store(self, pointer, value, to_rank, mask=None):
+    def store(self, pointer, value, to_rank, mask=None, hint: tl.constexpr = None):
         """
         Writes data to the specified rank's memory location.
 
@@ -1518,11 +1504,11 @@ class DeviceContext:
         Example:
             >>> ctx.store(buffer + offsets, values, to_rank=1, mask=mask)
         """
-        translated_ptr = self._translate(pointer, self.rank, to_rank)
+        translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         tl.store(translated_ptr, value, mask=mask)
 
     @triton.jit
-    def get(self, from_ptr, to_ptr, from_rank, mask=None):
+    def get(self, from_ptr, to_ptr, from_rank, mask=None, hint: tl.constexpr = None):
         """
         Copies data from the specified rank's memory into current rank's local memory.
 
@@ -1543,12 +1529,12 @@ class DeviceContext:
         Example:
             >>> ctx.get(remote_ptr + offsets, local_ptr + offsets, from_rank=1, mask=mask)
         """
-        translated_from_ptr = self._translate(from_ptr, self.rank, from_rank)
+        translated_from_ptr = self._translate(from_ptr, self.rank, from_rank, hint)
         data = tl.load(translated_from_ptr, mask=mask)
         tl.store(to_ptr, data, mask=mask)
 
     @triton.jit
-    def put(self, from_ptr, to_ptr, to_rank, mask=None):
+    def put(self, from_ptr, to_ptr, to_rank, mask=None, hint: tl.constexpr = None):
         """
         Copies data from current rank's local memory to the specified rank's memory.
 
@@ -1569,12 +1555,12 @@ class DeviceContext:
         Example:
             >>> ctx.put(local_ptr + offsets, remote_ptr + offsets, to_rank=1, mask=mask)
         """
-        translated_to_ptr = self._translate(to_ptr, self.rank, to_rank)
+        translated_to_ptr = self._translate(to_ptr, self.rank, to_rank, hint)
         data = tl.load(from_ptr, mask=mask)
         tl.store(translated_to_ptr, data, mask=mask)
 
     @triton.jit
-    def copy(self, src_ptr, dst_ptr, from_rank, to_rank, mask=None):
+    def copy(self, src_ptr, dst_ptr, from_rank, to_rank, mask=None, hint: tl.constexpr = None):
         """
         Copies data from one rank's memory to another rank's memory.
 
@@ -1614,11 +1600,15 @@ class DeviceContext:
         translated_src = tl.cast(from_base_byte + src_offset, src_ptr.dtype)
         translated_dst = tl.cast(to_base_byte + dst_offset, src_ptr.dtype)
 
+        if hint is not None:
+            translated_src = tl.max_contiguous(tl.multiple_of(translated_src, hint), hint)
+            translated_dst = tl.max_contiguous(tl.multiple_of(translated_dst, hint), hint)
+
         data = tl.load(translated_src, mask=mask)
         tl.store(translated_dst, data, mask=mask)
 
     @triton.jit
-    def atomic_add(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
+    def atomic_add(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
         """
         Performs an atomic add at the specified rank's memory location.
 
@@ -1641,11 +1631,11 @@ class DeviceContext:
         Example:
             >>> old_val = ctx.atomic_add(counter, 1, to_rank=1)
         """
-        translated_ptr = self._translate(pointer, self.rank, to_rank)
+        translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_sub(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
+    def atomic_sub(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
         """
         Atomically subtracts data from the specified rank's memory location.
 
@@ -1665,11 +1655,11 @@ class DeviceContext:
         Returns:
             Block: The data stored at pointer before the atomic operation.
         """
-        translated_ptr = self._translate(pointer, self.rank, to_rank)
+        translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_cas(self, pointer, cmp, val, to_rank, sem=None, scope=None):
+    def atomic_cas(self, pointer, cmp, val, to_rank, sem=None, scope=None, hint: tl.constexpr = None):
         """
         Performs an atomic compare-and-swap at the specified rank's memory location.
 
@@ -1690,11 +1680,11 @@ class DeviceContext:
         Returns:
             Block: The data stored at pointer before the atomic operation.
         """
-        translated_ptr = self._translate(pointer, self.rank, to_rank)
+        translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_xchg(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
+    def atomic_xchg(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
         """
         Performs an atomic exchange at the specified rank's memory location.
 
@@ -1714,11 +1704,11 @@ class DeviceContext:
         Returns:
             Block: The data stored at pointer before the atomic operation.
         """
-        translated_ptr = self._translate(pointer, self.rank, to_rank)
+        translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_xchg(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_xor(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
+    def atomic_xor(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
         """
         Performs an atomic XOR at the specified rank's memory location.
 
@@ -1738,11 +1728,11 @@ class DeviceContext:
         Returns:
             Block: The data stored at pointer before the atomic operation.
         """
-        translated_ptr = self._translate(pointer, self.rank, to_rank)
+        translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_xor(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_and(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
+    def atomic_and(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
         """
         Performs an atomic AND at the specified rank's memory location.
 
@@ -1762,11 +1752,11 @@ class DeviceContext:
         Returns:
             Block: The data stored at pointer before the atomic operation.
         """
-        translated_ptr = self._translate(pointer, self.rank, to_rank)
+        translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_and(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_or(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
+    def atomic_or(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
         """
         Performs an atomic OR at the specified rank's memory location.
 
@@ -1786,11 +1776,11 @@ class DeviceContext:
         Returns:
             Block: The data stored at pointer before the atomic operation.
         """
-        translated_ptr = self._translate(pointer, self.rank, to_rank)
+        translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_or(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_min(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
+    def atomic_min(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
         """
         Performs an atomic minimum at the specified rank's memory location.
 
@@ -1810,11 +1800,11 @@ class DeviceContext:
         Returns:
             Block: The data stored at pointer before the atomic operation.
         """
-        translated_ptr = self._translate(pointer, self.rank, to_rank)
+        translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_min(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_max(self, pointer, val, to_rank, mask=None, sem=None, scope=None):
+    def atomic_max(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
         """
         Performs an atomic maximum at the specified rank's memory location.
 
@@ -1834,10 +1824,10 @@ class DeviceContext:
         Returns:
             Block: The data stored at pointer before the atomic operation.
         """
-        translated_ptr = self._translate(pointer, self.rank, to_rank)
+        translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 @triton.jit
-def load(pointer, to_rank, from_rank, heap_bases, mask=None):
+def load(pointer, to_rank, from_rank, heap_bases, mask=None, hint: tl.constexpr = None):
     """
     Loads a value from the specified rank's memory location.
 
@@ -1852,6 +1842,7 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None):
         from_rank (int): The rank ID from which to read the data.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address pointer[idx]. Defaults to None.
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
 
     Returns:
         Block: The loaded value from the target memory location.
@@ -1865,11 +1856,11 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None):
         >>>     data = iris.load(ptr, cur_rank, remote_rank, heap_bases)
         >>>     return data
     """
-    translated_ptr = __translate(pointer, to_rank, from_rank, heap_bases)
+    translated_ptr = __translate(pointer, to_rank, from_rank, heap_bases, hint)
     result = tl.load(translated_ptr, mask=mask)
     return result
 @triton.jit
-def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
+def store(pointer, value, from_rank, to_rank, heap_bases, mask=None, hint: tl.constexpr = None):
     """
     Writes data to the specified rank's memory location.
 
@@ -1885,6 +1876,7 @@ def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
         to_rank (int): The rank ID to which the data will be written.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not store the data at address pointer[idx]. Defaults to None.
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
 
     Returns:
         None
@@ -1898,10 +1890,10 @@ def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
         >>>     value = 42
         >>>     iris.store(ptr, value, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     tl.store(translated_ptr, value, mask=mask)
 @triton.jit
-def copy(src_ptr, dst_ptr, from_rank, to_rank, cur_rank, heap_bases, mask=None):
+def copy(src_ptr, dst_ptr, from_rank, to_rank, cur_rank, heap_bases, mask=None, hint: tl.constexpr = None):
     """
     Copies data from the specified rank's memory into the destination rank's memory.
     This function performs the transfer by translating `src_ptr` from the `from_rank`'s address
@@ -1918,6 +1910,7 @@ def copy(src_ptr, dst_ptr, from_rank, to_rank, cur_rank, heap_bases, mask=None):
         cur_rank (int): The rank ID issuing the copy operation. Must be either `from_rank` or `to_rank`.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load from the translated src_ptr[idx] and do not store to dst_ptr[idx]. Defaults to None.
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointers. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
 
     Returns:
         None
@@ -1947,10 +1940,14 @@ def copy(src_ptr, dst_ptr, from_rank, to_rank, cur_rank, heap_bases, mask=None):
     translated_src = tl.cast(from_base_byte + src_offset, src_ptr.dtype)
     translated_dst = tl.cast(to_base_byte + dst_offset, src_ptr.dtype)
 
+    if hint is not None:
+        translated_src = tl.max_contiguous(tl.multiple_of(translated_src, hint), hint)
+        translated_dst = tl.max_contiguous(tl.multiple_of(translated_dst, hint), hint)
+
     data = tl.load(translated_src, mask=mask)
     tl.store(translated_dst, data, mask=mask)
 @triton.jit
-def get(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
+def get(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None, hint: tl.constexpr = None):
     """
     Copies data from the specified rank's memory to the current rank's local memory.
 
@@ -1966,6 +1963,7 @@ def get(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
         to_rank (int): The current rank ID where the data will be stored.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
 
     Returns:
         None
@@ -1977,13 +1975,13 @@ def get(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
         >>>     to_rank = 0
         >>>     iris.get(remote_ptr, local_ptr, from_rank, to_rank, heap_bases)
     """
-    translated_from_ptr = __translate(from_ptr, from_rank, to_rank, heap_bases)
+    translated_from_ptr = __translate(from_ptr, from_rank, to_rank, heap_bases, hint)
 
     data = tl.load(translated_from_ptr, mask=mask)
 
     tl.store(to_ptr, data, mask=mask)
 @triton.jit
-def put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
+def put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None, hint: tl.constexpr = None):
     """
     Copies data from the current rank's local memory to the specified rank's memory.
     This function performs a memory write operation by loading data from the current
@@ -1998,6 +1996,7 @@ def put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
         to_rank (int): The `to_rank` ID to which the data will be written.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
 
     Returns:
         None
@@ -2009,13 +2008,15 @@ def put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
         >>>     to_rank = 1
         >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases)
     """
-    translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases)
+    translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
 
     data = tl.load(from_ptr, mask=mask)
 
     tl.store(translated_to_ptr, data, mask=mask)
 @triton.jit
-def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+def atomic_add(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic add at the specified rank's memory location.
 
@@ -2033,6 +2034,7 @@ def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
@@ -2046,10 +2048,12 @@ def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         >>>     increment = 5
         >>>     old_val = iris.atomic_add(ptr, increment, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 @triton.jit
-def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+def atomic_sub(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Atomically subtracts data from the specified rank's memory location.
 
@@ -2067,6 +2071,7 @@ def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". Defaults to "acq_rel".
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
 
     Returns:
         Block: The value at the memory location before the atomic subtraction.
@@ -2080,10 +2085,10 @@ def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         >>>     decrement = 3
         >>>     old_val = iris.atomic_sub(ptr, decrement, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 @triton.jit
-def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scope=None):
+def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scope=None, hint: tl.constexpr = None):
     """
     Atomically compares and exchanges the specified rank's memory location.
 
@@ -2101,6 +2106,7 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". Defaults to "acq_rel".
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
 
     Returns:
         Block: The value contained at the memory location before the atomic operation attempt.
@@ -2115,10 +2121,12 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
         >>>     new_val = 42
         >>>     old_val = iris.atomic_cas(ptr, expected, new_val, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
 @triton.jit
-def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+def atomic_xchg(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic exchange at the specified rank's memory location.
 
@@ -2136,6 +2144,7 @@ def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=Non
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
@@ -2149,10 +2158,12 @@ def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=Non
         >>>     new_value = 99
         >>>     old_val = iris.atomic_xchg(ptr, new_value, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_xchg(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 @triton.jit
-def atomic_xor(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+def atomic_xor(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic xor at the specified rank's memory location.
 
@@ -2170,6 +2181,7 @@ def atomic_xor(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
@@ -2183,10 +2195,12 @@ def atomic_xor(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         >>>     mask_val = 0xFF
         >>>     old_val = iris.atomic_xor(ptr, mask_val, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_xor(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 @triton.jit
-def atomic_and(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+def atomic_and(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic and at the specified rank's memory location.
 
@@ -2204,6 +2218,7 @@ def atomic_and(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
@@ -2217,10 +2232,10 @@ def atomic_and(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         >>>     mask_val = 0x0F
         >>>     old_val = iris.atomic_and(ptr, mask_val, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_and(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 @triton.jit
-def atomic_or(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+def atomic_or(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
     """
     Performs an atomic or at the specified rank's memory location.
 
@@ -2238,6 +2253,7 @@ def atomic_or(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None,
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
@@ -2251,10 +2267,12 @@ def atomic_or(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None,
         >>>     mask_val = 0xF0
         >>>     old_val = iris.atomic_or(ptr, mask_val, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_or(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 @triton.jit
-def atomic_min(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+def atomic_min(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic min at the specified rank's memory location.
 
@@ -2272,6 +2290,7 @@ def atomic_min(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
@@ -2285,10 +2304,12 @@ def atomic_min(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         >>>     new_val = 10
         >>>     old_val = iris.atomic_min(ptr, new_val, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_min(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 @triton.jit
-def atomic_max(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
+def atomic_max(
+    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+):
     """
     Performs an atomic max at the specified rank's memory location.
 
@@ -2306,6 +2327,7 @@ def atomic_max(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         mask (Block of triton.int1, optional): If mask[idx] is false, do not perform the atomic operation at address pointer[idx]. Defaults to None.
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
+        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
@@ -2319,7 +2341,7 @@ def atomic_max(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
         >>>     new_val = 100
         >>>     old_val = iris.atomic_max(ptr, new_val, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 def iris(heap_size=1 << 30, allocator_type="torch"):
     """
