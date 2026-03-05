@@ -16,8 +16,6 @@ from triton.language.core import _aggregate as aggregate
 from .. import device_utils
 
 
-
-
 class _DeviceTracingCls:
     """
     Device-side tracing: records events into SoA buffers from inside Triton kernels.
@@ -128,13 +126,13 @@ class _DeviceTracingCls:
 
         event_idx = tl.atomic_add(self.counter, 1)
         op_index = tl.atomic_add(self.op_index_counter, 1)
-        
+
         # Calculate payload_size from mask and datatype
         if mask is not None:
             # Count True values in mask (True=1, False=0, so sum gives count of elements)
             mask_i32 = tl.cast(mask, tl.int32)
             num_elements = tl.sum(mask_i32)
-            
+
             # Get element type from address pointer and calculate size in bytes
             # address can be 1D or 2D block of pointers, all with same element type
             # For blocks, use .dtype instead of .type (like in test_atomic_xchg_triton.py)
@@ -148,7 +146,7 @@ class _DeviceTracingCls:
         else:
             # No mask provided, set to 0 to indicate unknown size
             payload_size = tl.full((), 0, dtype=tl.int32)
-        
+
         if event_idx.item() < self.max_events.item():
             tl.store(self.buf_event_id + event_idx, event_id)
             tl.store(self.buf_pid + event_idx, tl.program_id(0))
