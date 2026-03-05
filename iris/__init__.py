@@ -63,7 +63,7 @@ from .iris import (
 
 from .util import (
     do_bench,
-    is_simulation_env,
+    get_device_id_for_rank,
 )
 
 from .tensor_utils import (
@@ -87,7 +87,7 @@ from .logging import (
 __all__ = [
     "Iris",
     "iris",
-    "is_simulation_env",
+    "get_device_id_for_rank",
     "DeviceContext",
     "TraceEvent",
     "load",

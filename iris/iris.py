@@ -67,8 +67,6 @@ from .tracing import Tracing, TraceEvent, DeviceTracing  # noqa: F401  re-export
 # Import shared tensor-creation helpers
 from . import tensor_creation
 from .util import is_simulation_env
-
-
 class Iris:
     """
     Main Iris class for multi-GPU communication and memory management.
@@ -92,6 +90,7 @@ class Iris:
     def __init__(self, heap_size=1 << 30, allocator_type="torch"):
         if is_simulation_env():
             allocator_type = "torch"
+
         # Initialize distributed environment
         comm, cur_rank, num_ranks = init_distributed()
         num_gpus = count_devices()
@@ -1013,6 +1012,24 @@ class Iris:
         """
         return get_cu_count(self.gpu_id)
 
+    def get_device_id(self):
+        """
+        Get the device ID used by this Iris instance.
+
+        In simulation mode, this may differ from the local rank if multiple
+        ranks share a single GPU. This is the device ID that was set during
+        Iris initialization.
+
+        Returns:
+            int: The GPU device ID used by this Iris instance.
+
+        Example:
+            >>> ctx = iris.iris(1 << 20)
+            >>> device_id = ctx.get_device_id()
+            >>> print(f"Using GPU {device_id}")  # Using GPU 0
+        """
+        return self.gpu_id
+
     def get_rank(self):
         """
         Get this process's rank id in the distributed communicator.
@@ -1250,8 +1267,6 @@ class Iris:
             _reduce_scatter(
                 output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
             )
-
-
 @triton.jit
 def __translate(ptr, from_rank, to_rank, heap_bases):
     from_base = tl.load(heap_bases + from_rank)
@@ -1279,8 +1294,6 @@ def __translate(ptr, from_rank, to_rank, heap_bases):
     # ptr = tl.max_contiguous(tl.multiple_of(ptr, 512), 512)
     # translated_ptr = tl.max_contiguous(tl.multiple_of(translated_ptr, 512), 512)
     return translated_ptr
-
-
 @aggregate
 class DeviceContext:
     """
@@ -1823,8 +1836,6 @@ class DeviceContext:
         """
         translated_ptr = self._translate(pointer, self.rank, to_rank)
         return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
 @triton.jit
 def load(pointer, to_rank, from_rank, heap_bases, mask=None):
     """
@@ -1857,8 +1868,6 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None):
     translated_ptr = __translate(pointer, to_rank, from_rank, heap_bases)
     result = tl.load(translated_ptr, mask=mask)
     return result
-
-
 @triton.jit
 def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
     """
@@ -1891,8 +1900,6 @@ def store(pointer, value, from_rank, to_rank, heap_bases, mask=None):
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     tl.store(translated_ptr, value, mask=mask)
-
-
 @triton.jit
 def copy(src_ptr, dst_ptr, from_rank, to_rank, cur_rank, heap_bases, mask=None):
     """
@@ -1942,8 +1949,6 @@ def copy(src_ptr, dst_ptr, from_rank, to_rank, cur_rank, heap_bases, mask=None):
 
     data = tl.load(translated_src, mask=mask)
     tl.store(translated_dst, data, mask=mask)
-
-
 @triton.jit
 def get(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
     """
@@ -1977,8 +1982,6 @@ def get(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
     data = tl.load(translated_from_ptr, mask=mask)
 
     tl.store(to_ptr, data, mask=mask)
-
-
 @triton.jit
 def put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
     """
@@ -2011,8 +2014,6 @@ def put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None):
     data = tl.load(from_ptr, mask=mask)
 
     tl.store(translated_to_ptr, data, mask=mask)
-
-
 @triton.jit
 def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
     """
@@ -2047,8 +2048,6 @@ def atomic_add(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
 @triton.jit
 def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
     """
@@ -2083,8 +2082,6 @@ def atomic_sub(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
 @triton.jit
 def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scope=None):
     """
@@ -2120,8 +2117,6 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
-
-
 @triton.jit
 def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
     """
@@ -2156,8 +2151,6 @@ def atomic_xchg(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=Non
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_xchg(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
 @triton.jit
 def atomic_xor(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
     """
@@ -2192,8 +2185,6 @@ def atomic_xor(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_xor(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
 @triton.jit
 def atomic_and(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
     """
@@ -2228,8 +2219,6 @@ def atomic_and(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_and(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
 @triton.jit
 def atomic_or(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
     """
@@ -2264,8 +2253,6 @@ def atomic_or(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None,
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_or(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
 @triton.jit
 def atomic_min(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
     """
@@ -2300,8 +2287,6 @@ def atomic_min(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_min(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
 @triton.jit
 def atomic_max(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None):
     """
@@ -2336,8 +2321,6 @@ def atomic_max(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases)
     return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
 def iris(heap_size=1 << 30, allocator_type="torch"):
     """
     Create and return an Iris instance with the specified heap size.

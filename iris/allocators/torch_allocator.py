@@ -40,7 +40,11 @@ class TorchAllocator(BaseAllocator):
         """
         super().__init__(heap_size, device_id, cur_rank, num_ranks)
 
-        self.device = f"cuda:{device_id}"
+        # In simulation, use "cuda" instead of "cuda:{device_id}" to avoid device-specific issues
+        if is_simulation_env():
+            self.device = f"cuda"
+        else:
+            self.device = f"cuda:{device_id}"
         if is_simulation_env():
             import json
 
