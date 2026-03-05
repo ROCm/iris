@@ -60,10 +60,14 @@ class Tracing:
             "timestamp": torch.zeros(max_events, dtype=torch.int64, device=device),
             "address": torch.zeros(max_events, dtype=torch.int64, device=device),
             "duration_cycles": torch.zeros(max_events, dtype=torch.int64, device=device),
+            "op_index": torch.zeros(max_events, dtype=torch.int32, device=device),
+            "payload_size": torch.zeros(max_events, dtype=torch.int32, device=device),
         }
 
         # Atomic counter for event indexing
         self.trace_counter = torch.zeros(1, dtype=torch.int32, device=device)
+        # Atomic counter for operation indexing (tracks operation order)
+        self.op_index_counter = torch.zeros(1, dtype=torch.int32, device=device)
 
         self.iris.info(f"Device tracing enabled with max {max_events} events")
 
@@ -71,13 +75,14 @@ class Tracing:
         """
         Reset trace counter to start a new trace capture.
 
-        Clears the event counter but keeps buffers allocated.
+        Clears the event counter and operation index counter but keeps buffers allocated.
         """
         if not self.enabled:
             self.iris.warning("Tracing not enabled. Call tracing.enable() first.")
             return
 
         self.trace_counter.zero_()
+        self.op_index_counter.zero_()
         self.iris.debug("Trace buffers reset")
 
     def _collect_system_metadata(self):
@@ -139,6 +144,8 @@ class Tracing:
                     "address": hex(int(self.trace_buffers["address"][i].item())),
                     "xcc_id": xcc_id,
                     "cu_id": cu_id,
+                    "op_index": int(self.trace_buffers["op_index"][i].item()),
+                    "payload_size": int(self.trace_buffers["payload_size"][i].item()),
                 },
             }
 
@@ -198,11 +205,31 @@ class Tracing:
             "traceEvents": trace_events,
             "displayTimeUnit": "ns",
             "metadata": {
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "num_events": num_events,
                 "rank": self.iris.cur_rank,
                 "world_size": self.iris.num_ranks,
                 "time_unit": "raw cycles (s_memrealtime @ 100MHz)",
+                "fields": {
+                    "name": "Event type name (e.g., 'put', 'get', 'load', 'store')",
+                    "cat": "Event category (always 'iris')",
+                    "ts": "Start timestamp in raw cycles",
+                    "pid": "Process ID (current rank)",
+                    "tid": "Thread ID (XCC{id}_CU{id})",
+                    "ph": "Phase: 'X' for complete events, 'i' for instant events",
+                    "dur": "Duration in cycles (only for complete events)",
+                    "args": {
+                        "program_id": "Triton program ID (block ID)",
+                        "pid_m": "Program ID in M dimension",
+                        "pid_n": "Program ID in N dimension",
+                        "target_rank": "Target rank for the operation",
+                        "address": "Memory address (hex) - min of address block",
+                        "xcc_id": "XCC (chiplet) ID where event occurred",
+                        "cu_id": "Compute Unit ID where event occurred",
+                        "op_index": "Operation index (0, 1, 2, ...) - automatically tracked",
+                        "payload_size": "Payload size in bytes - automatically calculated from mask and datatype",
+                    },
+                },
                 **system_metadata,
             },
         }
@@ -255,13 +282,33 @@ class Tracing:
                 "traceEvents": all_events,
                 "displayTimeUnit": "ns",
                 "metadata": {
-                    "schema_version": "1.0",
+                    "schema_version": "1.1",
                     "total_events": len(all_events),
                     "max_events": self.max_events,
                     "time_unit": "cycles (s_memrealtime @ 100MHz)",
                     "world_size": self.iris.num_ranks,
                     "timestamp_offset": min_ts if all_timestamps else 0,
                     "aligned": "minimum timestamp across all ranks",
+                    "fields": {
+                        "name": "Event type name (e.g., 'put', 'get', 'load', 'store')",
+                        "cat": "Event category (always 'iris')",
+                        "ts": "Start timestamp in raw cycles",
+                        "pid": "Process ID (current rank)",
+                        "tid": "Thread ID (XCC{id}_CU{id})",
+                        "ph": "Phase: 'X' for complete events, 'i' for instant events",
+                        "dur": "Duration in cycles (only for complete events)",
+                        "args": {
+                            "program_id": "Triton program ID (block ID)",
+                            "pid_m": "Program ID in M dimension",
+                            "pid_n": "Program ID in N dimension",
+                            "target_rank": "Target rank for the operation",
+                            "address": "Memory address (hex) - min of address block",
+                            "xcc_id": "XCC (chiplet) ID where event occurred",
+                            "cu_id": "Compute Unit ID where event occurred",
+                            "op_index": "Operation index (0, 1, 2, ...) - automatically tracked",
+                            "payload_size": "Payload size in bytes - automatically calculated from mask and datatype",
+                        },
+                    },
                     **system_metadata,
                 },
             }

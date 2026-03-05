@@ -147,12 +147,15 @@ def persistent_gemm_all_scatter(
             else:
                 # Record duration event around remote store (compiles away if tracing=False)
                 # Pass 2D pointer tensor; record_event_start takes min as representative address
+                # op_index is automatically tracked internally (0, 1, 2, ...)
+                # payload_size is automatically calculated from mask
                 handle = ctx.tracing.record_event_start(
                     event_id=TraceEvent().put,
                     target_rank=remote_rank,
                     address=c_global + global_offset,
                     pid_m=pid_m,
                     pid_n=pid_n,
+                    mask=sub_mask,
                 )
 
                 # Use DeviceContext.put for remote stores
