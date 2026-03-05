@@ -56,3 +56,5 @@ resources/
 gpucore.*
 logs/
 *.cap
+hsakmt_counters.csv
+core
