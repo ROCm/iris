@@ -300,6 +300,7 @@ def zeros(heap, iris_device, size, *, out=None, dtype=None, layout=torch.strided
 
     # In simulation, avoid GPU kernel operations which trigger HIP errors
     from iris.util import is_simulation_env
+
     if is_simulation_env():
         # Allocate and leave as-is (memory is already zero-initialized)
         if out is not None:
@@ -602,6 +603,7 @@ def randn(
     # In simulation, avoid GPU kernel operations which trigger HIP errors
     # Create data on CPU and copy to GPU to avoid kernel execution
     from iris.util import is_simulation_env
+
     if is_simulation_env():
         if out is not None:
             throw_if_invalid_output_tensor(heap, out, num_elements, dtype)

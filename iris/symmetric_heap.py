@@ -15,6 +15,8 @@ import os
 from iris.allocators import TorchAllocator, VMemAllocator
 from iris.fd_passing import setup_fd_infrastructure
 from iris._distributed_helpers import distributed_allgather
+
+
 class SymmetricHeap:
     """
     High-level symmetric heap abstraction.
@@ -67,6 +69,7 @@ class SymmetricHeap:
         heap_bases_array = np.zeros(self.num_ranks, dtype=np.int64)
         # Create on CPU first, then move to device to avoid FFM ioctl issue
         from iris.util import is_simulation_env
+
         if is_simulation_env():
             self.heap_bases = torch.tensor(heap_bases_array, device="cpu", dtype=torch.int64)
             self.heap_bases = self.heap_bases.to(device)
@@ -180,6 +183,7 @@ class SymmetricHeap:
             if hasattr(self.allocator, "establish_peer_access"):
                 # In simulation, all ranks share the same device, so skip peer access setup
                 from iris.util import is_simulation_env
+
                 if is_simulation_env():
                     # Just set heap_bases directly from all_bases_arr
                     for r in range(self.num_ranks):

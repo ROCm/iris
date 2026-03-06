@@ -59,7 +59,9 @@ def distributed_allgather(data):
     data_tensor = torch.from_numpy(data)
     # Gloo doesn't support uint64, so use object collective for uint64 with gloo
     # For int64 with gloo, we can use tensor collective (gloo supports int64)
-    use_tensor_collective = (backend != "nccl" or _nccl_dtype_supported(data_tensor)) and not (backend == "gloo" and data_tensor.dtype == torch.uint64)
+    use_tensor_collective = (backend != "nccl" or _nccl_dtype_supported(data_tensor)) and not (
+        backend == "gloo" and data_tensor.dtype == torch.uint64
+    )
 
     if use_tensor_collective:
         data_tensor = data_tensor.to(device)
@@ -155,6 +157,8 @@ def distributed_broadcast_scalar(value=None, root=0):
     val_t = torch.from_numpy(np_val).to(device)
     dist.broadcast(val_t, src=root)
     return val_t.to("cpu").item()
+
+
 def distributed_broadcast_tensor(value_to_broadcast=None, root=0):
     """
     Broadcast a tensor/array from root to all ranks.
