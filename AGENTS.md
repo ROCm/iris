@@ -22,13 +22,15 @@ pip install -e ".[dev]"
 
 ### Accessing Triton Source Code
 
-If you need to reference Triton source code, first check whether it is already installed:
+> **Important**: Always read the Triton source code before attempting any Triton-related task. Do not guess at APIs, behavior, or error causes — read the source directly. The source code will show you working examples, explain error messages, and reveal workarounds.
+
+First check whether Triton is already installed:
 
 ```bash
 pip show triton
 ```
 
-The `Location` field in the output shows where the package is installed. If Triton is not found, clone it in shallow mode:
+The `Location` field in the output shows where the package is installed. Browse the source at that path. If Triton is not found, clone it in shallow mode:
 
 ```bash
 git clone --depth 1 https://github.com/triton-lang/triton
