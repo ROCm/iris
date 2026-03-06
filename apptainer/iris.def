@@ -32,6 +32,9 @@ From: rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
     cd \$TRITON_PATH
     git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e 
     pip3 install -e .
+
+    # Make the venv writable by all
+    chmod -R 777 /opt/venv
     "
 
 %environment
