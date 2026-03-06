@@ -123,6 +123,7 @@ __all__ = [
 # Only patch if in simulation mode
 if is_simulation_env():
     import torch
+
     _original_set_device = torch.cuda.set_device
 
     def _patched_set_device(device):

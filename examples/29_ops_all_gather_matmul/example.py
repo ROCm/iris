@@ -22,6 +22,7 @@ import torch.distributed as dist
 
 import iris
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Fused all-gather + matmul example",
