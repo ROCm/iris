@@ -20,6 +20,20 @@ Install Iris in development mode:
 pip install -e ".[dev]"
 ```
 
+### Accessing Triton Source Code
+
+If you need to reference Triton source code, first check whether it is already installed:
+
+```bash
+pip show triton
+```
+
+The `Location` field in the output shows where the package is installed. If Triton is not found, clone it in shallow mode:
+
+```bash
+git clone --depth 1 https://github.com/triton-lang/triton
+```
+
 ## Code Style
 
 - Use `ruff` for linting and formatting (configured in `pyproject.toml`).
