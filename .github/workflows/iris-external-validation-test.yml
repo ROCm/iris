@@ -17,7 +17,7 @@ env:
 jobs:
   external-validation-test:
     name: External Validation Test
-    runs-on: [linux-mi325-8gpu-ossci-rad]
+    runs-on: [self-hosted, mi3xx, linux-mi325-8gpu-ossci-rad]
     timeout-minutes: 180
 
     steps:
@@ -67,7 +67,7 @@ jobs:
 
   external-gluon-validation-test:
     name: External Gluon Validation Test
-    runs-on: [linux-mi325-8gpu-ossci-rad]
+    runs-on: [self-hosted, mi3xx, linux-mi325-8gpu-ossci-rad]
 
     steps:
       - name: Checkout repository
