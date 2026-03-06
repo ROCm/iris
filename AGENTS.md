@@ -14,33 +14,11 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations on AM
 
 ## Dev Environment Setup
 
-### Prerequisites
-
-- AMD GPU with ROCm 6.3.1+ support
-- Python 3.10+, PyTorch 2.0+ (ROCm version)
-- Triton (see [installation docs](docs/getting-started/installation.md) for the verified commit)
-- Docker or Apptainer (recommended for containerized development)
-
-### Docker Compose (Recommended)
-
-```bash
-# Build and start development container (takes 45-60 minutes — do NOT cancel)
-docker compose up --build -d
-
-# Attach to the running container
-docker attach iris-dev
-
-# Install Iris in development mode
-cd iris && pip install -e ".[dev]"
-```
-
-### Local Install
+Install Iris in development mode:
 
 ```bash
 pip install -e ".[dev]"
 ```
-
-> **Note**: Requires an AMD GPU with ROCm/HIP toolkit installed.
 
 ## Code Style
 
@@ -70,18 +48,6 @@ python tests/run_tests_distributed.py tests/unittests/test_load_triton.py --num_
 ```
 
 > **Environment note**: The test runner sets `HSA_NO_SCRATCH_RECLAIM=1` automatically, which is required for RCCL on ROCm.
-
-### Without AMD GPUs
-
-If you don't have AMD GPU access you can still contribute:
-
-1. Edit code locally and push to a branch.
-2. The CI pipeline (`.github/workflows/`) will run the full test suite against real hardware.
-3. Run linting locally to catch style issues before CI:
-
-```bash
-ruff check . --fix && ruff format .
-```
 
 ## Repository Structure
 
