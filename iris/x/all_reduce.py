@@ -313,7 +313,7 @@ def all_reduce_two_shot(
                     dest_rank,  # to_rank (destination rank)
                     ctx.heap_bases,
                     mask=mask,
-                    hint=(tile.block_m, tile.block_n),
+                    hint=(1, tile.block_n),
                 )
 
 

@@ -334,7 +334,7 @@ def persistent_all_reduce_spinlock(
                 dest_rank,
                 heap_bases,
                 mask=mask,
-                hint=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+                hint=(1, BLOCK_SIZE_N),
             )
 
             # Release lock for this tile at dest_rank
@@ -540,7 +540,7 @@ def persistent_all_reduce_ring(
                         next_rank,
                         heap_bases,
                         mask=mask,
-                        hint=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+                        hint=(1, BLOCK_SIZE_N),
                     )
                     tl.debug_barrier()
                     iris.atomic_xchg(
@@ -670,7 +670,7 @@ def persistent_all_reduce_two_shot(
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
                 if remote_rank_idx != group_rank:
-                    iris.store(out_ptr, reduced, iris_rank, remote_rank, heap_bases, hint=(BLOCK_SIZE_M, BLOCK_SIZE_N))
+                    iris.store(out_ptr, reduced, iris_rank, remote_rank, heap_bases, hint=(1, BLOCK_SIZE_N))
 
         # Slow path: MASKED (only boundary tiles land here)
         # This path handles tiles at tensor boundaries where not all elements are valid.
@@ -700,7 +700,7 @@ def persistent_all_reduce_two_shot(
                         remote_rank,
                         heap_bases,
                         mask=mask,
-                        hint=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+                        hint=(1, BLOCK_SIZE_N),
                     )
 
 

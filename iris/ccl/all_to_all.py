@@ -144,7 +144,7 @@ def persistent_all_to_all(
                         iris_rank,
                         target_rank,
                         heap_bases,
-                        hint=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+                        hint=(1, BLOCK_SIZE_N),
                     )
 
         # Slow path: MASKED (only boundary tiles land here)
@@ -184,7 +184,7 @@ def persistent_all_to_all(
                         target_rank,
                         heap_bases,
                         mask=mask,
-                        hint=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+                        hint=(1, BLOCK_SIZE_N),
                     )
 
 
