@@ -72,5 +72,4 @@ def all_gather(
             dest_rank,  # to_rank (destination rank)
             ctx.heap_bases,
             mask=combined_mask,
-            hint=(tile.block_m, tile.block_n),
         )
