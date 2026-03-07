@@ -17,7 +17,7 @@ env:
 jobs:
   performance-test:
     name: ${{ matrix.example_name }}
-    runs-on: [self-hosted, mi3xx, linux-mi325-8gpu-ossci-rad]
+    runs-on: [self-hosted, linux-mi325-8gpu-ossci-rad]
     timeout-minutes: 180
     strategy:
       fail-fast: false
