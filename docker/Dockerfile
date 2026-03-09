@@ -28,9 +28,8 @@ RUN apt-get update && \
 RUN groupadd -r video 2>/dev/null || true && \
     groupadd -r render 2>/dev/null || true
 
-# Make the venv writable by all    
+# Make the venv writable by all
 RUN chmod -R 777 /opt/venv
-    
 # Install Python packages with pip
 RUN pip3 install --upgrade pip && \
     pip3 install wheel jupyter
