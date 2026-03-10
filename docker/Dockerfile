@@ -22,7 +22,7 @@ ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
 # Install system packages
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    git wget ninja-build cmake python3-pip python3-dev build-essential && \
+    git wget ninja-build cmake python3-pip python3-dev build-essential libdwarf-dev && \
     rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -r video 2>/dev/null || true && \
