@@ -31,6 +31,13 @@ Repository = "https://github.com/ROCm/iris"
 Documentation = "https://rocm.github.io/iris/"
 
 [project.optional-dependencies]
+nvidia = [
+    "nvidia-ml-py", # Install via `pip install iris[nvidia]` on NVIDIA system.
+]
+amd = [
+    # amdsmi is provided by the ROCm system package
+    # Listed here for completeness
+]
 dev = [
     "pytest",
     "black",
