@@ -1942,7 +1942,7 @@ def store(
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not store the data at address pointer[idx]. Defaults to None.
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
-        cache_modifier (str, optional): Controls cache behavior of the store. Only effective for local stores (when `from_rank == to_rank`). Supported values are:
+        cache_modifier (str, optional): Controls cache behavior of the store. Ignored for remote stores (when `from_rank != to_rank`) as cache modifiers are not supported for cross-GPU memory operations. Supported values are:
 
             - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
             - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
