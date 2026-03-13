@@ -13,7 +13,6 @@ def kernel(
     data,
     results,
     destination_rank: tl.constexpr,
-    num_ranks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     heap_bases: tl.tensor,
     cache_modifier: tl.constexpr,
@@ -28,32 +27,34 @@ def kernel(
     # Load the data from src for this block
     value = tl.load(data + offsets, mask=mask)
 
-    # Store data to all ranks with the specified cache modifier
-    for dst_rank in range(num_ranks):
-        if cache_modifier is None:
-            iris.store(results + offsets, value, destination_rank, dst_rank, heap_bases, mask=mask)
-        else:
-            iris.store(
-                results + offsets,
-                value,
-                destination_rank,
-                dst_rank,
-                heap_bases,
-                mask=mask,
-                cache_modifier=cache_modifier,
-            )
+    # Store data locally (same rank) with the specified cache modifier.
+    # Cache modifiers only apply to local stores; remote stores do not support them.
+    if cache_modifier is None:
+        iris.store(results + offsets, value, destination_rank, destination_rank, heap_bases, mask=mask)
+    else:
+        iris.store(
+            results + offsets,
+            value,
+            destination_rank,
+            destination_rank,
+            heap_bases,
+            mask=mask,
+            cache_modifier=cache_modifier,
+        )
 
 
 # Define cache modifiers for store operations
-# Based on the provided cache modifier descriptions
 CACHE_MODIFIERS = [None, "", ".wb", ".cg", ".cs", ".wt"]
 
 
 @pytest.mark.parametrize("cache_modifier", CACHE_MODIFIERS)
 def test_store_cache_modifiers(cache_modifier):
-    """Test store with various cache modifiers."""
+    """Test local store with various cache modifiers.
+
+    Cache modifiers are only effective for local stores (from_rank == to_rank).
+    Remote stores do not support cache modifiers.
+    """
     shmem = iris.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
     heap_bases = shmem.get_heap_bases()
     destination_rank = shmem.get_rank()
 
@@ -64,7 +65,7 @@ def test_store_cache_modifiers(cache_modifier):
     shmem.barrier()
 
     grid = lambda meta: (1,)
-    kernel[grid](src, results, destination_rank, num_ranks, BLOCK_SIZE, heap_bases, cache_modifier)
+    kernel[grid](src, results, destination_rank, BLOCK_SIZE, heap_bases, cache_modifier)
     shmem.barrier()
 
     # Verify the result

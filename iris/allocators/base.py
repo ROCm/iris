@@ -6,7 +6,6 @@ Base allocator interface for Iris symmetric heap management.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any
 import torch
 
 
@@ -14,8 +13,8 @@ class BaseAllocator(ABC):
     """
     Abstract base class for Iris memory allocators.
 
-    Allocators manage GPU memory for the symmetric heap and handle
-    inter-process memory sharing.
+    Allocators manage GPU memory allocation for a single device.
+    Inter-process coordination is handled by SymmetricHeap.
     """
 
     def __init__(self, heap_size: int, device_id: int, cur_rank: int, num_ranks: int):
@@ -33,6 +32,17 @@ class BaseAllocator(ABC):
         self.cur_rank = cur_rank
         self.num_ranks = num_ranks
         self.heap_offset = 0
+
+    def get_minimum_allocation_size(self) -> int:
+        """
+        Minimum size in bytes for a single allocation.
+        Callers must request at least this many bytes (or the allocator will bump);
+        the allocator uses this for tracking actual size for deallocation.
+
+        Returns:
+            Minimum allocation size in bytes (default 0).
+        """
+        return 0
 
     @abstractmethod
     def get_base_address(self) -> int:
@@ -60,43 +70,12 @@ class BaseAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_shareable_handle(self) -> Any:
-        """
-        Get a shareable handle for inter-process communication.
-
-        Returns:
-            Shareable handle (implementation-specific: FD, IPC handle, etc.)
-        """
-        pass
-
-    @abstractmethod
-    def establish_peer_access(self, all_bases: Dict[int, int], connections: Optional[Dict] = None):
-        """
-        Establish access to peer memory for symmetric addressing.
-
-        Args:
-            all_bases: Dictionary mapping rank -> base address
-            connections: Optional peer connections for handle exchange
-        """
-        pass
-
-    @abstractmethod
     def get_device(self) -> torch.device:
         """
         Get the torch device for this allocator.
 
         Returns:
             PyTorch device object
-        """
-        pass
-
-    @abstractmethod
-    def get_heap_bases(self) -> torch.Tensor:
-        """
-        Get heap base addresses for all ranks as a tensor.
-
-        Returns:
-            Tensor of shape (num_ranks,) with base addresses
         """
         pass
 

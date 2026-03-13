@@ -227,9 +227,9 @@ def test_zeros_like_memory_format():
     )
 
     # Verify all results are on the symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result_4d)
-    assert shmem._Iris__on_symmetric_heap(result_5d)
-    assert shmem._Iris__on_symmetric_heap(result_preserve_channels_last)
+    assert shmem.is_symmetric(result_4d)
+    assert shmem.is_symmetric(result_5d)
+    assert shmem.is_symmetric(result_preserve_channels_last)
 
 
 def test_channels_last_format_shape_preservation():
@@ -285,8 +285,8 @@ def test_channels_last_format_shape_preservation():
     )
 
     # Verify tensors are on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result_4d)
-    assert shmem._Iris__on_symmetric_heap(result_5d)
+    assert shmem.is_symmetric(result_4d)
+    assert shmem.is_symmetric(result_5d)
 
 
 def test_zeros_like_pytorch_equivalence():
@@ -345,9 +345,9 @@ def test_zeros_like_edge_cases():
     assert torch.all(large_result == 0)
 
     # Verify all edge case results are on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(empty_result)
-    assert shmem._Iris__on_symmetric_heap(single_result)
-    assert shmem._Iris__on_symmetric_heap(large_result)
+    assert shmem.is_symmetric(empty_result)
+    assert shmem.is_symmetric(single_result)
+    assert shmem.is_symmetric(large_result)
 
 
 @pytest.mark.parametrize(
@@ -382,7 +382,7 @@ def test_zeros_like_parameter_combinations(params):
         assert result.requires_grad == params["requires_grad"]
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 @pytest.mark.parametrize(
@@ -422,7 +422,7 @@ def test_zeros_like_symmetric_heap_shapes_dtypes(shape, dtype):
         result = shmem.zeros_like(input_tensor, memory_format=memory_format)
 
         # Verify tensor is on symmetric heap
-        assert shmem._Iris__on_symmetric_heap(result), (
+        assert shmem.is_symmetric(result), (
             f"Tensor with shape {shape}, dtype {dtype}, memory_format {memory_format} is NOT on symmetric heap!"
         )
 
@@ -440,7 +440,7 @@ def test_zeros_like_symmetric_heap_dtype_override(dtype):
     input_tensor = shmem.full((3, 3), 1, dtype=torch.float32)
 
     result = shmem.zeros_like(input_tensor, dtype=dtype)
-    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
     assert result.dtype == dtype
 
 
@@ -451,12 +451,12 @@ def test_zeros_like_symmetric_heap_other_params():
 
     # Test with requires_grad
     result = shmem.zeros_like(input_tensor, requires_grad=True)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
 
     # Test with device override
     result = shmem.zeros_like(input_tensor, device=shmem.device)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with device override is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with device override is NOT on symmetric heap!"
 
     # Test with layout override (only strided is supported)
     result = shmem.zeros_like(input_tensor, layout=torch.strided)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with layout override is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with layout override is NOT on symmetric heap!"

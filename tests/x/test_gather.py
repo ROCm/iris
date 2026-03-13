@@ -23,7 +23,7 @@ def gather_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     source_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -43,8 +43,8 @@ def gather_kernel(
 
         # Create tile and views
         tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        src_view = iris.x.make_tensor_view(input_ptr, M, N, stride_in_m, stride_in_n)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         # Use gather to pull tile from source_rank
         data = iris.x.gather(tile, src_view, source_rank, ctx)
@@ -105,7 +105,7 @@ def test_gather_from_specific_rank(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_
         shmem_input.stride(1),
         shmem_output.stride(0),
         shmem_output.stride(1),
-        shmem.heap_bases,
+        shmem.get_device_context(),
         rank,
         source_rank,
         world_size,
@@ -135,7 +135,7 @@ def gather_accumulate_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -153,8 +153,8 @@ def gather_accumulate_kernel(
         pid_n = tile_id % num_pid_n
 
         tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.TensorView(input_ptr, M, N, stride_in_m, stride_in_n)
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        src_view = iris.x.make_tensor_view(input_ptr, M, N, stride_in_m, stride_in_n)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         # Accumulate data from all ranks
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
@@ -213,7 +213,7 @@ def test_gather_accumulate_pattern(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_
         shmem_input.stride(1),
         shmem_output.stride(0),
         shmem_output.stride(1),
-        shmem.heap_bases,
+        shmem.get_device_context(),
         rank,
         world_size,
         BLOCK_SIZE_M,

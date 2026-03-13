@@ -26,7 +26,7 @@ def x_reduce_scatter_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -57,9 +57,9 @@ def x_reduce_scatter_kernel(
         tl.atomic_xchg(locks + tile_id, 1, sem="release", scope="gpu")
 
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        src_view = iris.x.TensorView(temp_buffer, M, N, stride_in_m, stride_in_n)
-        dst_view = iris.x.TensorView(output_ptr, M, N, stride_out_m, stride_out_n)
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        src_view = iris.x.make_tensor_view(temp_buffer, M, N, stride_in_m, stride_in_n)
+        dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_out_m, stride_out_n)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         iris.x.reduce_scatter(tile, src_view, dst_view, locks, ctx)
 
@@ -122,7 +122,7 @@ def test_reduce_scatter(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
         iris_input_tensor.stride(1),
         iris_output_tensor.stride(0),
         iris_output_tensor.stride(1),
-        shmem.get_heap_bases(),
+        shmem.get_device_context(),
         rank,
         world_size,
         BLOCK_SIZE_M,

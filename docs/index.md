@@ -209,6 +209,7 @@ For other setup methods, see the [Installation Guide](getting-started/installati
 - **[Taxonomy](conceptual/taxonomy.md)**: Multi-GPU programming patterns
 
 ### 📖 **Reference**
+- **[Talks and Papers](reference/talks-and-papers.md)**: Publications, conference talks, and videos
 - **[API Reference](reference/api-reference.md)**: Structured API documentation
 - **[Triton APIs](reference/triton/overview.md)**: Standard Iris APIs with Triton
 - **[Gluon APIs (Experimental)](reference/gluon/overview.md)**: Cleaner API with Gluon decorators

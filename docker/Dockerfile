@@ -22,12 +22,14 @@ ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
 # Install system packages
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    git wget ninja-build cmake python3-pip python3-dev build-essential && \
+    git wget ninja-build cmake python3-pip python3-dev build-essential libdwarf-dev && \
     rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -r video 2>/dev/null || true && \
     groupadd -r render 2>/dev/null || true
 
+# Make the venv writable by all
+RUN chmod -R 777 /opt/venv
 # Install Python packages with pip
 RUN pip3 install --upgrade pip && \
     pip3 install wheel jupyter
@@ -38,13 +40,6 @@ RUN git clone https://github.com/triton-lang/triton.git $TRITON_PATH
 RUN git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e
 RUN pip3 install -e .
 ENV PYTHONPATH=$TRITON_PATH
-
-# Install tritonBLAS
-WORKDIR /opt
-RUN git clone https://github.com/ROCm/tritonBLAS.git && \
-    cd tritonBLAS && \
-    git checkout 47768c93acb7f89511d797964b84544c30ab81ad && \
-    pip3 install -e .
 
 # Set up workspace
 WORKDIR /workspace

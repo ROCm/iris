@@ -32,34 +32,34 @@ echo "✅ /dev/shm size OK (${shm_size_gb}GB)"
 if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     echo "[INFO] Building with Apptainer..."
     
-    # Create persistent Apptainer directory
-    mkdir -p ~/apptainer
-    
-    # Define paths
-    IMAGE_PATH=~/apptainer/iris-dev.sif
-    DEF_FILE=apptainer/iris.def
-    CHECKSUM_FILE=~/apptainer/iris-dev.sif.checksum
-    
     # Verify def file exists
+    DEF_FILE=apptainer/iris.def
     if [ ! -f "$DEF_FILE" ]; then
         echo "[ERROR] Definition file $DEF_FILE not found"
         exit 1
     fi
     
-    # Calculate checksum of the def file
-    NEW_CHECKSUM=$(sha256sum "$DEF_FILE" | awk '{print $1}')
+    # Calculate checksum of the def file to use as subdirectory name
+    DEF_CHECKSUM=$(sha256sum "$DEF_FILE" | awk '{print $1}')
+    
+    # Create persistent Apptainer directory with checksum subdirectory
+    mkdir -p "${HOME}/iris-apptainer-images/${DEF_CHECKSUM}"
+    
+    # Define paths
+    IMAGE_PATH="${HOME}/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif"
+    CHECKSUM_FILE="${HOME}/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif.checksum"
     
     # Check if image exists and has a valid checksum
     REBUILD_NEEDED=true
     if [ -f "$IMAGE_PATH" ] && [ -f "$CHECKSUM_FILE" ]; then
         OLD_CHECKSUM=$(head -n1 "$CHECKSUM_FILE" 2>/dev/null)
         # Validate checksum format (64 hex characters for SHA256)
-        if [[ "$OLD_CHECKSUM" =~ ^[a-f0-9]{64}$ ]] && [ "$OLD_CHECKSUM" = "$NEW_CHECKSUM" ]; then
-            echo "[INFO] Def file unchanged (checksum: $NEW_CHECKSUM)"
+        if [[ "$OLD_CHECKSUM" =~ ^[a-f0-9]{64}$ ]] && [ "$OLD_CHECKSUM" = "$DEF_CHECKSUM" ]; then
+            echo "[INFO] Def file unchanged (checksum: $DEF_CHECKSUM)"
             echo "[INFO] Skipping rebuild, using existing image at $IMAGE_PATH"
             REBUILD_NEEDED=false
         else
-            echo "[INFO] Def file changed (old: ${OLD_CHECKSUM:-<invalid>}, new: $NEW_CHECKSUM)"
+            echo "[INFO] Def file changed (old: ${OLD_CHECKSUM:-<invalid>}, new: $DEF_CHECKSUM)"
             echo "[INFO] Rebuilding Apptainer image..."
         fi
     else
@@ -70,9 +70,9 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     if [ "$REBUILD_NEEDED" = true ]; then
         if apptainer build --force "$IMAGE_PATH" "$DEF_FILE"; then
             # Store the checksum only if build succeeded
-            echo "$NEW_CHECKSUM" > "$CHECKSUM_FILE"
+            echo "$DEF_CHECKSUM" > "$CHECKSUM_FILE"
             echo "[INFO] Built image: $IMAGE_PATH"
-            echo "[INFO] Checksum saved: $NEW_CHECKSUM"
+            echo "[INFO] Checksum saved: $DEF_CHECKSUM"
         else
             echo "[ERROR] Apptainer build failed"
             exit 1
@@ -83,14 +83,19 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     echo "[INFO] Checking Docker images..."
     # Use GitHub variable if set, otherwise default to iris-dev
     IMAGE_NAME=${DOCKER_IMAGE_NAME:-"iris-dev"}
-    
+
     # Check if the image exists
     if docker image inspect "$IMAGE_NAME" &> /dev/null; then
         echo "[INFO] Using existing Docker image: $IMAGE_NAME"
     else
-        echo "[WARNING] Docker image $IMAGE_NAME not found"
-        echo "[INFO] Please build it using: ./build_triton_image.sh"
-        echo "[INFO] Or pull it if available from registry"
+        echo "[INFO] Docker image $IMAGE_NAME not found, building..."
+        DOCKER_DIR="$(dirname "$(realpath "$0")")/../../docker"
+        if docker build -t "$IMAGE_NAME" "$DOCKER_DIR"; then
+            echo "[INFO] Built Docker image: $IMAGE_NAME"
+        else
+            echo "[ERROR] Docker build failed"
+            exit 1
+        fi
     fi
 fi
 

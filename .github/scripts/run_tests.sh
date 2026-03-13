@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
-# Run Iris tests in a container
+# Run Iris tests in a container with automatic GPU allocation
 # Usage: run_tests.sh <test_dir> <num_ranks> [gpu_devices] [install_method]
 #   test_dir: subdirectory under tests/ (e.g., examples, unittests, ccl)
 #   num_ranks: number of GPU ranks (1, 2, 4, or 8)
-#   gpu_devices: comma-separated GPU device IDs (optional)
+#   gpu_devices: comma-separated GPU device IDs (optional, if not provided will use allocator)
 #   install_method: pip install method - "git", "editable", or "install" (optional, default: "editable")
 #     - "git": pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
 #     - "editable": pip install -e .
@@ -16,7 +16,7 @@ set -e
 
 TEST_DIR=$1
 NUM_RANKS=$2
-GPU_DEVICES=${3:-""}
+GPU_DEVICES=${3:-${GPU_DEVICES:-""}}
 INSTALL_METHOD=${4:-"editable"}
 
 if [ -z "$TEST_DIR" ] || [ -z "$NUM_RANKS" ]; then
@@ -43,7 +43,14 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Build GPU argument if provided
+# GPU_DEVICES should be provided by workflow-level acquire_gpus.sh step
+# or via command-line argument for backward compatibility
+if [ -z "$GPU_DEVICES" ]; then
+    echo "[RUN-TESTS] WARNING: No GPUs allocated. GPU_DEVICES not set."
+    echo "[RUN-TESTS] Tests may fail if they require GPUs."
+fi
+
+# Build GPU argument
 GPU_ARG=""
 if [ -n "$GPU_DEVICES" ]; then
     GPU_ARG="--gpus $GPU_DEVICES"
@@ -63,31 +70,10 @@ elif [ "$INSTALL_METHOD" = "install" ]; then
 fi
 
 # Run tests in container
+EXIT_CODE=0
+# shellcheck disable=SC2086
 "$SCRIPT_DIR/container_exec.sh" $GPU_ARG "
     set -e
-    
-    # Install tritonBLAS if not already installed (required for iris/ops)
-    echo \"Checking for tritonBLAS...\"
-    if ! python -c 'import tritonblas' 2>/dev/null; then
-        echo \"Installing tritonBLAS...\"
-        # Use workspace directory for tritonBLAS since /opt may not be writable
-        TRITONBLAS_DIR=\"./tritonblas_install\"
-        if [ ! -d \"\$TRITONBLAS_DIR\" ]; then
-            git clone https://github.com/ROCm/tritonBLAS.git \"\$TRITONBLAS_DIR\"
-            cd \"\$TRITONBLAS_DIR\"
-            git checkout 47768c93acb7f89511d797964b84544c30ab81ad
-        else
-            cd \"\$TRITONBLAS_DIR\"
-            git fetch
-            git checkout 47768c93acb7f89511d797964b84544c30ab81ad
-        fi
-        # Install with dependencies
-        pip install -e .
-        cd ..
-        echo \"tritonBLAS installed successfully\"
-    else
-        echo \"tritonBLAS already installed\"
-    fi
     
     echo \"Installing iris using method: $INSTALL_METHOD\"
     $INSTALL_CMD
@@ -96,7 +82,10 @@ fi
     for test_file in tests/$TEST_DIR/test_*.py; do
         if [ -f \"\$test_file\" ]; then
             echo \"Testing: \$test_file with $NUM_RANKS ranks (install: $INSTALL_METHOD)\"
-            python tests/run_tests_distributed.py --num_ranks $NUM_RANKS \"\$test_file\" -v --tb=short --durations=10
+            torchrun --nproc_per_node=$NUM_RANKS --standalone tests/run_tests_distributed.py \"\$test_file\" -v --tb=short --durations=10
         fi
     done
-"
+" || { EXIT_CODE=$?; }
+
+# GPU cleanup is now handled by workflow-level release_gpus.sh step
+exit $EXIT_CODE

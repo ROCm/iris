@@ -32,14 +32,16 @@ from iris.ccl import Config
     ],
 )
 @pytest.mark.parametrize(
-    "M, N",
+    "M, N, block_size_m, block_size_n",
     [
-        (128, 64),  # Small
-        (1024, 256),  # Medium
-        (8192, 8192),  # Large
+        (128, 64, 32, 64),  # Small
+        (128, 128, 32, 32),  # BLOCK_N < N/world_size (partial-width, multi-block per rank)
+        (256, 128, 32, 16),  # Minimum BLOCK_N=16 (16-bit vectorization path)
+        (1024, 256, 32, 64),  # Medium
+        (8192, 8192, 32, 64),  # Large
     ],
 )
-def test_all_reduce(variant, dtype, M, N):
+def test_all_reduce(variant, dtype, M, N, block_size_m, block_size_n):
     """Test all-reduce functionality by comparing against PyTorch's implementation."""
     # Ensure torch.distributed is initialized (should be done by test runner)
     if not dist.is_initialized():
@@ -70,7 +72,7 @@ def test_all_reduce(variant, dtype, M, N):
 
     # Run Iris all_reduce with specified variant
     shmem.barrier()
-    config = Config(all_reduce_variant=variant)
+    config = Config(all_reduce_variant=variant, block_size_m=block_size_m, block_size_n=block_size_n)
     if variant == "two_shot":
         # Test both distribution modes for two_shot
         config.all_reduce_distribution = 0  # striding

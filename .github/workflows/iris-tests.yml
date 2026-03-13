@@ -15,8 +15,55 @@ env:
   DOCKER_IMAGE_NAME: ${{ vars.DOCKER_IMAGE_NAME || 'iris-dev-triton-aafec41' }}
 
 jobs:
-  build-container-image:
-    runs-on: [self-hosted, mi3xx]
+  test-git:
+    name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, git install)
+    runs-on: [linux-mi325-8gpu-ossci-rad]
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Test each subdirectory with each rank count using git install
+          - test_dir: examples
+            num_ranks: 1
+          - test_dir: examples
+            num_ranks: 2
+          - test_dir: examples
+            num_ranks: 4
+          - test_dir: examples
+            num_ranks: 8
+          - test_dir: unittests
+            num_ranks: 1
+          - test_dir: unittests
+            num_ranks: 2
+          - test_dir: unittests
+            num_ranks: 4
+          - test_dir: unittests
+            num_ranks: 8
+          - test_dir: ccl
+            num_ranks: 1
+          - test_dir: ccl
+            num_ranks: 2
+          - test_dir: ccl
+            num_ranks: 4
+          - test_dir: ccl
+            num_ranks: 8
+          - test_dir: x
+            num_ranks: 1
+          - test_dir: x
+            num_ranks: 2
+          - test_dir: x
+            num_ranks: 4
+          - test_dir: x
+            num_ranks: 8
+          - test_dir: ops
+            num_ranks: 1
+          - test_dir: ops
+            num_ranks: 2
+          - test_dir: ops
+            num_ranks: 4
+          - test_dir: ops
+            num_ranks: 8
 
     steps:
       - name: Checkout repository
@@ -37,83 +84,9 @@ jobs:
         run: |
           bash .github/scripts/container_build.sh
 
-  test-git:
-    name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, git install)
-    needs: build-container-image
-    runs-on: [self-hosted, mi3xx]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Test each subdirectory with each rank count using git install
-          - test_dir: examples
-            num_ranks: 1
-            gpu_devices: "0,1"
-          - test_dir: examples
-            num_ranks: 2
-            gpu_devices: "2,3"
-          - test_dir: examples
-            num_ranks: 4
-            gpu_devices: "4,5,6,7"
-          - test_dir: examples
-            num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
-          - test_dir: unittests
-            num_ranks: 1
-            gpu_devices: "0,1"
-          - test_dir: unittests
-            num_ranks: 2
-            gpu_devices: "2,3"
-          - test_dir: unittests
-            num_ranks: 4
-            gpu_devices: "4,5,6,7"
-          - test_dir: unittests
-            num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
-          - test_dir: ccl
-            num_ranks: 1
-            gpu_devices: "0,1"
-          - test_dir: ccl
-            num_ranks: 2
-            gpu_devices: "2,3"
-          - test_dir: ccl
-            num_ranks: 4
-            gpu_devices: "4,5,6,7"
-          - test_dir: ccl
-            num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
-          - test_dir: x
-            num_ranks: 1
-            gpu_devices: "0,1"
-          - test_dir: x
-            num_ranks: 2
-            gpu_devices: "2,3"
-          - test_dir: x
-            num_ranks: 4
-            gpu_devices: "4,5,6,7"
-          - test_dir: x
-            num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
-          - test_dir: ops
-            num_ranks: 1
-            gpu_devices: "0,1"
-          - test_dir: ops
-            num_ranks: 2
-            gpu_devices: "2,3"
-          - test_dir: ops
-            num_ranks: 4
-            gpu_devices: "4,5,6,7"
-          - test_dir: ops
-            num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Cleanup lingering ports before tests
+      - name: Acquire GPUs
         run: |
-          bash .github/scripts/cleanup_ports.sh
+          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
 
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (git install)
         env:
@@ -125,15 +98,21 @@ jobs:
           bash .github/scripts/run_tests.sh \
             "${{ matrix.test_dir }}" \
             "${{ matrix.num_ranks }}" \
-            "${{ matrix.gpu_devices }}" \
+            "" \
             "git"
           echo "::endgroup::"
           echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (git) passed!"
 
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
+
   test-editable:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, editable install)
-    needs: [build-container-image, test-git]
-    runs-on: [self-hosted, mi3xx]
+    needs: [test-git]
+    runs-on: [linux-mi325-8gpu-ossci-rad]
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -141,72 +120,67 @@ jobs:
           # Test each subdirectory with each rank count using editable install
           - test_dir: examples
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: examples
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: examples
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: examples
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: unittests
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: unittests
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: unittests
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: unittests
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: ccl
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: ccl
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: ccl
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: ccl
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: x
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: x
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: x
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: x
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: ops
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: ops
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: ops
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: ops
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cleanup lingering ports before tests
+      - name: Setup Apptainer (if not available)
         run: |
-          bash .github/scripts/cleanup_ports.sh
+          if ! command -v apptainer &> /dev/null && ! command -v docker &> /dev/null; then
+            echo "Neither Apptainer nor Docker found, installing Apptainer..."
+            apt-get update && apt-get install -y software-properties-common
+            add-apt-repository -y ppa:apptainer/ppa
+            apt-get update && apt-get install -y apptainer
+          else
+            echo "Container runtime already available"
+          fi
+
+      - name: Build Iris container
+        run: |
+          bash .github/scripts/container_build.sh
+
+      - name: Acquire GPUs
+        run: |
+          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
 
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (editable install)
         run: |
@@ -215,15 +189,20 @@ jobs:
           bash .github/scripts/run_tests.sh \
             "${{ matrix.test_dir }}" \
             "${{ matrix.num_ranks }}" \
-            "${{ matrix.gpu_devices }}" \
+            "" \
             "editable"
           echo "::endgroup::"
           echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (editable) passed!"
 
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
+
   test-install:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, pip install)
-    needs: [build-container-image, test-editable]
-    runs-on: [self-hosted, mi3xx]
+    needs: [test-editable]
+    runs-on: [linux-mi325-8gpu-ossci-rad]
     strategy:
       fail-fast: false
       matrix:
@@ -231,72 +210,67 @@ jobs:
           # Test each subdirectory with each rank count using pip install
           - test_dir: examples
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: examples
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: examples
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: examples
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: unittests
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: unittests
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: unittests
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: unittests
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: ccl
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: ccl
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: ccl
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: ccl
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: x
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: x
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: x
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: x
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
           - test_dir: ops
             num_ranks: 1
-            gpu_devices: "0,1"
           - test_dir: ops
             num_ranks: 2
-            gpu_devices: "2,3"
           - test_dir: ops
             num_ranks: 4
-            gpu_devices: "4,5,6,7"
           - test_dir: ops
             num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cleanup lingering ports before tests
+      - name: Setup Apptainer (if not available)
         run: |
-          bash .github/scripts/cleanup_ports.sh
+          if ! command -v apptainer &> /dev/null && ! command -v docker &> /dev/null; then
+            echo "Neither Apptainer nor Docker found, installing Apptainer..."
+            apt-get update && apt-get install -y software-properties-common
+            add-apt-repository -y ppa:apptainer/ppa
+            apt-get update && apt-get install -y apptainer
+          else
+            echo "Container runtime already available"
+          fi
+
+      - name: Build Iris container
+        run: |
+          bash .github/scripts/container_build.sh
+
+      - name: Acquire GPUs
+        run: |
+          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
 
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (pip install)
         run: |
@@ -305,8 +279,70 @@ jobs:
           bash .github/scripts/run_tests.sh \
             "${{ matrix.test_dir }}" \
             "${{ matrix.num_ranks }}" \
-            "${{ matrix.gpu_devices }}" \
+            "" \
             "install"
           echo "::endgroup::"
           echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (install) passed!"
 
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
+
+  test-new-examples:
+    name: New examples (${{ matrix.num_ranks }} ranks, ${{ matrix.install_method }})
+    runs-on: [linux-mi325-8gpu-ossci-rad]
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - num_ranks: 2
+            install_method: editable
+          - num_ranks: 4
+            install_method: editable
+          - num_ranks: 8
+            install_method: editable
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Apptainer (if not available)
+        run: |
+          if ! command -v apptainer &> /dev/null && ! command -v docker &> /dev/null; then
+            echo "Neither Apptainer nor Docker found, installing Apptainer..."
+            apt-get update && apt-get install -y software-properties-common
+            add-apt-repository -y ppa:apptainer/ppa
+            apt-get update && apt-get install -y apptainer
+          else
+            echo "Container runtime already available"
+          fi
+
+      - name: Build Iris container
+        run: |
+          bash .github/scripts/container_build.sh
+
+      - name: Acquire GPUs
+        run: |
+          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
+
+      - name: Run new examples with ${{ matrix.num_ranks }} ranks (${{ matrix.install_method }})
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -e
+          echo "::group::Running new examples with ${{ matrix.num_ranks }} ranks (install: ${{ matrix.install_method }})"
+          bash .github/scripts/run_new_examples.sh \
+            "${{ matrix.num_ranks }}" \
+            "${{ matrix.install_method }}"
+          echo "::endgroup::"
+          echo "✅ New examples with ${{ matrix.num_ranks }} ranks passed!"
+
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh

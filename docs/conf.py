@@ -95,6 +95,7 @@ autodoc_mock_imports = [
     "numpy",
     "iris._distributed_helpers",
     "iris.hip",
+    "tritonblas",
 ]
 
 # Custom mocks that preserve docstrings for Triton Gluon
@@ -104,7 +105,10 @@ autodoc_mock_imports = [
 class PreserveDocstringMock:
     """Mock decorator that preserves docstrings and function attributes."""
 
-    def __call__(self, func):
+    def __call__(self, func=None, **kwargs):
+        # Handle both @decorator and @decorator() usage patterns
+        if func is None or not callable(func):
+            return lambda f: f
         # Return the original function unchanged to preserve docstrings
         return func
 
@@ -120,6 +124,7 @@ sys.modules["triton.language.core"]._aggregate = lambda cls: cls  # Preserve cla
 class TritonMock:
     jit = PreserveDocstringMock()
     language = triton_language_mock
+    constexpr_function = PreserveDocstringMock()
 
 
 sys.modules["triton"] = TritonMock()
@@ -128,6 +133,7 @@ sys.modules["triton"] = TritonMock()
 # Mock gluon with docstring-preserving jit
 class GluonMock:
     jit = PreserveDocstringMock()
+    constexpr_function = PreserveDocstringMock()
 
 
 sys.modules["triton.experimental"] = MagicMock()

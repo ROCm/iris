@@ -23,9 +23,68 @@
 # TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+import os
 import statistics
 import math
 import torch
+
+
+def is_simulation_env() -> bool:
+    """
+    Return True if running in a simulation environment (e.g. pre-silicon).
+
+    When True, Iris will force the torch allocator regardless of allocator_type.
+    Set IRIS_SIMULATION=1 (or "true"/"yes") to enable.
+    """
+    val = os.environ.get("IRIS_SIMULATION", "").strip().lower()
+    return val in ("1", "true", "yes")
+
+
+def get_simulation_device_id(local_rank: int) -> int:
+    """
+    Get the device ID to use in simulation mode.
+
+    In simulation, multiple ranks may need to share the same physical device.
+    This function wraps the local_rank to ensure it's within available device bounds.
+
+    Args:
+        local_rank: The local rank from the environment
+
+    Returns:
+        Device ID that's guaranteed to be valid (wrapped if needed)
+    """
+    import torch
+
+    num_devices = torch.cuda.device_count()
+    if num_devices == 0:
+        return 0  # Fallback if no devices detected
+    # Wrap to available devices - in simulation, multiple ranks can share device 0
+    return local_rank % num_devices
+
+
+def get_device_id_for_rank(local_rank: int) -> int:
+    """
+    Get the device ID to use for a given local rank.
+
+    In simulation mode, this automatically wraps the rank to handle multiple ranks
+    sharing a single GPU. In normal mode, it returns the local_rank as-is.
+
+    Args:
+        local_rank: The local rank from the environment (typically from LOCAL_RANK env var)
+
+    Returns:
+        Device ID that's guaranteed to be valid
+
+    Example:
+        >>> import iris
+        >>> local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        >>> device_id = iris.get_device_id_for_rank(local_rank)
+        >>> torch.cuda.set_device(device_id)
+    """
+    if is_simulation_env():
+        return get_simulation_device_id(local_rank)
+    else:
+        return local_rank
 
 
 def get_empty_cache_for_benchmark():

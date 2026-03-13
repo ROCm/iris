@@ -9,7 +9,7 @@
     // Creates a stable agent socket at ~/.ssh/ssh-agent.sock and optionally loads ~/.ssh/id_rsa.
     "initializeCommand": "bash -lc \"bash '${localWorkspaceFolder}/.devcontainer/ensure-ssh-agent.sh'\"",
     "runArgs": [
-        "--name=${localEnv:USER}-iris-dev",
+        "--name=${localEnv:USER}-${localWorkspaceFolderBasename}-dev",
         "--network=host",
         "--device=/dev/kfd",
         "--device=/dev/dri",

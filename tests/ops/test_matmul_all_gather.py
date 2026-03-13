@@ -18,7 +18,7 @@ import iris
     "dtype, atol, rtol",
     [
         (torch.float16, 0.5, 0.01),
-        (torch.float32, 0.5, 0.01),
+        # (torch.float32, 0.5, 0.01),  # disabled: Triton AMD backend LLVM unrealized_conversion_cast
         (torch.bfloat16, 0.5, 0.01),
     ],
 )

@@ -24,7 +24,7 @@ def x_all_gather_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -51,14 +51,14 @@ def x_all_gather_kernel(
 
         # Create Tile with loaded data and views
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        dst_view = iris.x.TensorView(
+        dst_view = iris.x.make_tensor_view(
             output_ptr,
             M * world_size if gather_dim == 0 else M,
             N if gather_dim == 0 else N * world_size,
             stride_out_m,
             stride_out_n,
         )
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         iris.x.all_gather(tile, dst_view, gather_dim, ctx)
 
@@ -78,7 +78,9 @@ def x_all_gather_kernel(
 @pytest.mark.parametrize(
     "M, N, BLOCK_SIZE_M, BLOCK_SIZE_N",
     [
-        (128, 64, 64, 32),  # Small
+        (128, 64, 64, 32),  # Small – BLOCK_N < N (partial-width, was the original failing case)
+        (128, 128, 64, 32),  # Multiple N blocks per rank – BLOCK_N < N/world_size (2 tiles in N per rank)
+        (256, 128, 64, 16),  # Very small BLOCK_N to stress 16-bit vectorization with partial-width tiles
         (1024, 256, 128, 128),  # Medium
         (2048, 2048, 256, 256),  # Large
         # TODO: Fix non-aligned dimension handling in all_gather for irregular tiling
@@ -146,7 +148,7 @@ def test_all_gather(gather_dim, dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZ
         iris_input_tensor.stride(1),
         iris_output_tensor.stride(0),
         iris_output_tensor.stride(1),
-        shmem.get_heap_bases(),
+        shmem.get_device_context(),
         rank,
         world_size,
         BLOCK_SIZE_M,
@@ -210,7 +212,7 @@ def x_all_gather_ctx_api_kernel(
     stride_in_n: tl.constexpr,
     stride_out_m: tl.constexpr,
     stride_out_n: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -237,14 +239,14 @@ def x_all_gather_ctx_api_kernel(
 
         # Create Tile with loaded data and views
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        dst_view = iris.x.TensorView(
+        dst_view = iris.x.make_tensor_view(
             output_ptr,
             M * world_size if gather_dim == 0 else M,
             N if gather_dim == 0 else N * world_size,
             stride_out_m,
             stride_out_n,
         )
-        ctx = iris.x.DeviceContext(cur_rank, world_size, heap_bases)
+        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         # Call primitive directly (ctx methods don't work due to Triton import restrictions)
         iris.x.all_gather(tile, dst_view, gather_dim, ctx)
@@ -258,7 +260,9 @@ def x_all_gather_ctx_api_kernel(
         (torch.float32, 1e-5, 1e-5),
     ],
 )
-@pytest.mark.parametrize("M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(256, 128, 64, 64)])
+@pytest.mark.parametrize(
+    "M, N, BLOCK_SIZE_M, BLOCK_SIZE_N", [(256, 128, 64, 64), (128, 64, 64, 32), (128, 128, 64, 32)]
+)
 def test_all_gather_ctx_api(gather_dim, dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     """Test tile-level all-gather using direct function call (ctx methods removed)."""
     if not dist.is_initialized():
@@ -315,7 +319,7 @@ def test_all_gather_ctx_api(gather_dim, dtype, atol, rtol, M, N, BLOCK_SIZE_M, B
         iris_input_tensor.stride(1),
         iris_output_tensor.stride(0),
         iris_output_tensor.stride(1),
-        shmem.get_heap_bases(),
+        shmem.get_device_context(),
         rank,
         world_size,
         BLOCK_SIZE_M,

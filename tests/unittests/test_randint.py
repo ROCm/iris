@@ -42,7 +42,7 @@ def test_randint_basic(dtype, size):
     assert torch.all(result < 10)
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 def test_randint_default_dtype():
@@ -51,7 +51,7 @@ def test_randint_default_dtype():
     # Test with default dtype (should use torch.int64)
     result = shmem.randint(0, 10, (2, 3))
     assert result.dtype == torch.int64
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 @pytest.mark.parametrize(
@@ -69,7 +69,7 @@ def test_randint_requires_grad(requires_grad):
 
     # Verify requires_grad is set
     assert result.requires_grad == requires_grad
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
 
 def test_randint_device_handling():
@@ -78,23 +78,23 @@ def test_randint_device_handling():
     # Test default behavior (should use Iris device)
     result = shmem.randint(0, 10, (3, 3))
     assert str(result.device) == str(shmem.get_device())
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test explicit device
     result = shmem.randint(0, 10, (3, 3), device=shmem.device)
     assert str(result.device) == str(shmem.get_device())
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test that "cuda" shorthand works (should use current CUDA device)
     if shmem.device.startswith("cuda:"):
         result = shmem.randint(0, 10, (3, 3), device="cuda")
         assert str(result.device) == str(shmem.get_device())
-        assert shmem._Iris__on_symmetric_heap(result)
+        assert shmem.is_symmetric(result)
 
     # Test None device defaults to Iris device
     result = shmem.randint(0, 10, (3, 3), device=None)
     assert str(result.device) == str(shmem.get_device())
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test that different device throws error
     different_device = "cpu"  # CPU is always different from CUDA
@@ -115,7 +115,7 @@ def test_randint_layout_handling():
     # Test with strided layout (default)
     result = shmem.randint(0, 10, (2, 4), layout=torch.strided)
     assert result.layout == torch.strided
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test that unsupported layout throws error
     with pytest.raises(ValueError):
@@ -126,7 +126,7 @@ def test_randint_out_parameter():
     shmem = iris.iris(1 << 20)
 
     # Test with out parameter
-    out_tensor = shmem._Iris__allocate(6, torch.int64)
+    out_tensor = shmem.heap.allocate(6, torch.int64)
     result = shmem.randint(0, 10, (2, 3), out=out_tensor)
 
     # Should share the same underlying data (same data_ptr)
@@ -134,14 +134,14 @@ def test_randint_out_parameter():
     assert result.shape == (2, 3)
     assert torch.all(result >= 0)
     assert torch.all(result < 10)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Test with explicit dtype
-    out_tensor_int32 = shmem._Iris__allocate(6, torch.int32)
+    out_tensor_int32 = shmem.heap.allocate(6, torch.int32)
     result_int32 = shmem.randint(0, 10, (2, 3), dtype=torch.int32, out=out_tensor_int32)
     assert result_int32.data_ptr() == out_tensor_int32.data_ptr()
     assert result_int32.dtype == torch.int32
-    assert shmem._Iris__on_symmetric_heap(result_int32)
+    assert shmem.is_symmetric(result_int32)
 
 
 def test_randint_size_variations():
@@ -152,28 +152,28 @@ def test_randint_size_variations():
     assert result1.shape == (5,)
     assert torch.all(result1 >= 0)
     assert torch.all(result1 < 5)
-    assert shmem._Iris__on_symmetric_heap(result1)
+    assert shmem.is_symmetric(result1)
 
     # Test multiple dimensions
     result2 = shmem.randint(0, 10, (2, 3, 4))
     assert result2.shape == (2, 3, 4)
     assert torch.all(result2 >= 0)
     assert torch.all(result2 < 10)
-    assert shmem._Iris__on_symmetric_heap(result2)
+    assert shmem.is_symmetric(result2)
 
     # Test with tuple as single argument
     result3 = shmem.randint(0, 10, (3, 4))
     assert result3.shape == (3, 4)
     assert torch.all(result3 >= 0)
     assert torch.all(result3 < 10)
-    assert shmem._Iris__on_symmetric_heap(result3)
+    assert shmem.is_symmetric(result3)
 
     # Test with list as single argument
     result4 = shmem.randint(0, 10, [2, 5])
     assert result4.shape == (2, 5)
     assert torch.all(result4 >= 0)
     assert torch.all(result4 < 10)
-    assert shmem._Iris__on_symmetric_heap(result4)
+    assert shmem.is_symmetric(result4)
 
 
 def test_randint_edge_cases():
@@ -183,7 +183,7 @@ def test_randint_edge_cases():
     empty_result = shmem.randint(0, 5, (0,))
     assert empty_result.shape == (0,)
     assert empty_result.numel() == 0
-    assert shmem._Iris__on_symmetric_heap(empty_result)
+    assert shmem.is_symmetric(empty_result)
 
     # Single element tensor
     single_result = shmem.randint(0, 10, (1,))
@@ -191,7 +191,7 @@ def test_randint_edge_cases():
     assert single_result.numel() == 1
     assert torch.all(single_result >= 0)
     assert torch.all(single_result < 10)
-    assert shmem._Iris__on_symmetric_heap(single_result)
+    assert shmem.is_symmetric(single_result)
 
     # Large tensor
     large_result = shmem.randint(0, 100, (100, 100))
@@ -199,7 +199,7 @@ def test_randint_edge_cases():
     assert large_result.numel() == 10000
     assert torch.all(large_result >= 0)
     assert torch.all(large_result < 100)
-    assert shmem._Iris__on_symmetric_heap(large_result)
+    assert shmem.is_symmetric(large_result)
 
     # Zero-dimensional tensor (scalar)
     scalar_result = shmem.randint(0, 10, ())
@@ -207,7 +207,7 @@ def test_randint_edge_cases():
     assert scalar_result.numel() == 1
     assert torch.all(scalar_result >= 0)
     assert torch.all(scalar_result < 10)
-    assert shmem._Iris__on_symmetric_heap(scalar_result)
+    assert shmem.is_symmetric(scalar_result)
 
 
 def test_randint_pytorch_equivalence():
@@ -257,7 +257,7 @@ def test_randint_parameter_combinations(params):
     assert result.shape == (3, 3)
     assert torch.all(result >= 0)
     assert torch.all(result < 10)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)
 
     # Verify dtype if specified
     if "dtype" in params:
@@ -292,7 +292,7 @@ def test_randint_symmetric_heap_shapes_dtypes(size, dtype):
     result = shmem.randint(0, 10, size, dtype=dtype)
 
     # Verify tensor is on symmetric heap
-    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with size {size}, dtype {dtype} is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), f"Tensor with size {size}, dtype {dtype} is NOT on symmetric heap!"
 
     # Also verify basic functionality
     assert result.shape == size
@@ -307,7 +307,7 @@ def test_randint_symmetric_heap_dtype_override(dtype):
     shmem = iris.iris(1 << 20)
 
     result = shmem.randint(0, 10, (3, 3), dtype=dtype)
-    assert shmem._Iris__on_symmetric_heap(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), f"Tensor with dtype {dtype} is NOT on symmetric heap!"
     assert result.dtype == dtype
 
 
@@ -317,20 +317,20 @@ def test_randint_symmetric_heap_other_params():
 
     # Test with requires_grad
     result = shmem.randint(0, 10, (3, 3), dtype=torch.float32, requires_grad=True)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with requires_grad=True is NOT on symmetric heap!"
 
     # Test with device override
     result = shmem.randint(0, 10, (3, 3), device=shmem.device)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with device override is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with device override is NOT on symmetric heap!"
 
     # Test with layout override (only strided is supported)
     result = shmem.randint(0, 10, (3, 3), layout=torch.strided)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with layout override is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with layout override is NOT on symmetric heap!"
 
     # Test with out parameter
-    out_tensor = shmem._Iris__allocate(9, torch.int64)  # Use default dtype
+    out_tensor = shmem.heap.allocate(9, torch.int64)  # Use default dtype
     result = shmem.randint(0, 10, (3, 3), out=out_tensor)
-    assert shmem._Iris__on_symmetric_heap(result), "Tensor with out parameter is NOT on symmetric heap!"
+    assert shmem.is_symmetric(result), "Tensor with out parameter is NOT on symmetric heap!"
 
 
 def test_randint_invalid_output_tensor():
@@ -338,12 +338,12 @@ def test_randint_invalid_output_tensor():
     shmem = iris.iris(1 << 20)
 
     # Test with wrong size output tensor
-    wrong_size_tensor = shmem._Iris__allocate(4, torch.int32)  # Wrong size for (3, 3)
+    wrong_size_tensor = shmem.heap.allocate(4, torch.int32)  # Wrong size for (3, 3)
     with pytest.raises(RuntimeError):
         shmem.randint(0, 10, (3, 3), out=wrong_size_tensor)
 
     # Test with wrong dtype output tensor
-    wrong_dtype_tensor = shmem._Iris__allocate(9, torch.float32)  # Wrong dtype
+    wrong_dtype_tensor = shmem.heap.allocate(9, torch.float32)  # Wrong dtype
     with pytest.raises(RuntimeError):
         shmem.randint(0, 10, (3, 3), dtype=torch.int32, out=wrong_dtype_tensor)
 
@@ -399,14 +399,14 @@ def test_randint_generator():
     assert result1.shape == (3, 3)
     assert torch.all(result1 >= 0)
     assert torch.all(result1 < 10)
-    assert shmem._Iris__on_symmetric_heap(result1)
+    assert shmem.is_symmetric(result1)
 
     # Test without generator (should still work)
     result2 = shmem.randint(0, 10, (3, 3))
     assert result2.shape == (3, 3)
     assert torch.all(result2 >= 0)
     assert torch.all(result2 < 10)
-    assert shmem._Iris__on_symmetric_heap(result2)
+    assert shmem.is_symmetric(result2)
 
 
 def test_randint_argument_validation():
@@ -457,14 +457,14 @@ def test_randint_pytorch_signatures():
     assert result1.shape == (2, 3)
     assert torch.all(result1 >= 0)
     assert torch.all(result1 < 10)
-    assert shmem._Iris__on_symmetric_heap(result1)
+    assert shmem.is_symmetric(result1)
 
     # Test randint(low, high, size) signature
     result2 = shmem.randint(5, 15, (2, 3))
     assert result2.shape == (2, 3)
     assert torch.all(result2 >= 5)
     assert torch.all(result2 < 15)
-    assert shmem._Iris__on_symmetric_heap(result2)
+    assert shmem.is_symmetric(result2)
 
     # Both should work correctly
     assert result1.shape == result2.shape
@@ -480,4 +480,4 @@ def test_randint_deterministic_behavior():
     assert result.shape == (2, 3)
     assert torch.all(result >= 0)
     assert torch.all(result < 10)
-    assert shmem._Iris__on_symmetric_heap(result)
+    assert shmem.is_symmetric(result)

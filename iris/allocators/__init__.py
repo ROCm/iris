@@ -7,5 +7,6 @@ Allocator interfaces for Iris symmetric heap management.
 
 from .base import BaseAllocator
 from .torch_allocator import TorchAllocator
+from .vmem_allocator import VMemAllocator
 
-__all__ = ["BaseAllocator", "TorchAllocator"]
+__all__ = ["BaseAllocator", "TorchAllocator", "VMemAllocator"]

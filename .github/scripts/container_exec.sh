@@ -51,13 +51,21 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     # Find image
     if [ -n "$CUSTOM_IMAGE" ]; then
         IMAGE="$CUSTOM_IMAGE"
-    elif [ -f ~/apptainer/iris-dev.sif ]; then
-        IMAGE=~/apptainer/iris-dev.sif
-    elif [ -f apptainer/images/iris.sif ]; then
-        IMAGE="apptainer/images/iris.sif"
     else
-        echo "[ERROR] Apptainer image not found" >&2
-        exit 1
+        # Calculate checksum of def file to find the correct subdirectory
+        DEF_FILE=apptainer/iris.def
+        if [ ! -f "$DEF_FILE" ]; then
+            echo "[ERROR] Definition file $DEF_FILE not found" >&2
+            exit 1
+        fi
+        DEF_CHECKSUM=$(sha256sum "$DEF_FILE" | awk '{print $1}')
+        
+        if [ -f "${HOME}/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif" ]; then
+            IMAGE="${HOME}/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif"
+        else
+            echo "[ERROR] Apptainer image not found" >&2
+            exit 1
+        fi
     fi
     
     # Create temporary overlay in workspace with unique name based on PID and timestamp
@@ -99,24 +107,11 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     fi
     
     # Build run command with proper GPU access
-    # Get video and render group IDs from host
-    VIDEO_GID=$(getent group video | cut -d: -f3)
-    RENDER_GID=$(getent group render | cut -d: -f3)
-    
     RUN_CMD="docker run --rm --network=host --device=/dev/kfd --device=/dev/dri"
     RUN_CMD="$RUN_CMD --cap-add=SYS_PTRACE --security-opt seccomp=unconfined"
     RUN_CMD="$RUN_CMD -v ${PWD}:/iris_workspace -w /iris_workspace"
     RUN_CMD="$RUN_CMD --shm-size=16G --ulimit memlock=-1 --ulimit stack=67108864"
-    RUN_CMD="$RUN_CMD --user $(id -u):$(id -g)"
-    
-    # Add video and render groups for GPU access
-    if [ -n "$VIDEO_GID" ]; then
-        RUN_CMD="$RUN_CMD --group-add $VIDEO_GID"
-    fi
-    if [ -n "$RENDER_GID" ]; then
-        RUN_CMD="$RUN_CMD --group-add $RENDER_GID"
-    fi
-    
+
     RUN_CMD="$RUN_CMD -e HOME=/iris_workspace"
     RUN_CMD="$RUN_CMD --entrypoint bash"
     

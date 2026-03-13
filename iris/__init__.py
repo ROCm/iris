@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
 Iris: Multi-GPU Communication and Memory Management Framework
@@ -41,11 +41,11 @@ Quick Start (Gluon API - Experimental):
     >>>     ctx.load(buffer, 1)
 """
 
-# __init__.py
-
 from .iris import (
     Iris,
     iris,
+    DeviceContext,
+    TraceEvent,
     load,
     store,
     copy,
@@ -63,17 +63,19 @@ from .iris import (
 
 from .util import (
     do_bench,
+    get_device_id_for_rank,
+    is_simulation_env,
+)
+
+from .tensor_utils import (
+    CUDAArrayInterface,
+    tensor_from_ptr,
 )
 
 from . import hip
-
-# Import experimental features (optional, for users who want experimental APIs)
 from . import experimental
-
-# Import ops module (fused GEMM+CCL operations)
 from . import ops
-
-# Import logging functionality
+from . import tensor_creation
 from .logging import (
     set_logger_level,
     logger,
@@ -83,11 +85,12 @@ from .logging import (
     ERROR,
 )
 
-# Launcher functionality is now user code - see examples and documentation
-
 __all__ = [
     "Iris",
     "iris",
+    "get_device_id_for_rank",
+    "DeviceContext",
+    "TraceEvent",
     "load",
     "store",
     "copy",
@@ -102,9 +105,12 @@ __all__ = [
     "atomic_min",
     "atomic_max",
     "do_bench",
+    "CUDAArrayInterface",
+    "tensor_from_ptr",
     "hip",
-    "experimental",  # Experimental features including iris_gluon
-    "ops",  # Fused GEMM+CCL operations
+    "experimental",
+    "ops",
+    "tensor_creation",
     "set_logger_level",
     "logger",
     "DEBUG",
@@ -112,3 +118,19 @@ __all__ = [
     "WARNING",
     "ERROR",
 ]
+
+# Patch torch.cuda.set_device to automatically handle device ID wrapping in simulation mode
+# Only patch if in simulation mode
+if is_simulation_env():
+    import torch
+
+    _original_set_device = torch.cuda.set_device
+
+    def _patched_set_device(device):
+        """Patched version of torch.cuda.set_device that wraps device IDs in simulation mode."""
+        num_devices = torch.cuda.device_count()
+        if num_devices > 0 and isinstance(device, int) and device >= num_devices:
+            device = device % num_devices
+        return _original_set_device(device)
+
+    torch.cuda.set_device = _patched_set_device

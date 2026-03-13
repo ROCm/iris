@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
 Tile-level reduce-scatter primitive for Iris.
@@ -10,7 +10,8 @@ Reduces tiles from all ranks and stores the result only to the assigned rank.
 import triton
 import triton.language as tl
 import iris
-from .core import Tile, TensorView, DeviceContext
+from iris.iris import DeviceContext
+from .core import Tile, TensorView
 
 
 @triton.jit()
@@ -41,8 +42,8 @@ def reduce_scatter(
         # Rank 0 handles tiles 0, 1, 2
         # Rank 1 handles tiles 3, 4, 5
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)
-        src_view = iris.x.TensorView(temp_buffer, M, N, stride_m, stride_n)
-        dst_view = iris.x.TensorView(output_ptr, M, N, stride_m, stride_n)
+        src_view = iris.x.make_tensor_view(temp_buffer, M, N, stride_m, stride_n)
+        dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_m, stride_n)
         iris.x.reduce_scatter(tile, src_view, dst_view, locks, ctx)
     """
     num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)

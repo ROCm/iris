@@ -57,20 +57,28 @@ def distributed_allgather(data):
 
     # Fast path: tensor all_gather if dtype is NCCL-supported or backend != nccl
     data_tensor = torch.from_numpy(data)
-    use_tensor_collective = backend != "nccl" or _nccl_dtype_supported(data_tensor)
+    # Gloo doesn't support uint64, so use object collective for uint64 with gloo
+    # For int64 with gloo, we can use tensor collective (gloo supports int64)
+    use_tensor_collective = (backend != "nccl" or _nccl_dtype_supported(data_tensor)) and not (
+        backend == "gloo" and data_tensor.dtype == torch.uint64
+    )
 
     if use_tensor_collective:
         data_tensor = data_tensor.to(device)
         gathered_tensors = [torch.empty_like(data_tensor) for _ in range(world_size)]
         dist.all_gather(gathered_tensors, data_tensor)
-        return torch.stack(gathered_tensors, dim=0).to("cpu").numpy()
-
-    # Fallback for NCCL-unsupported dtypes (e.g., uint64/bool/etc.)
-    obj_list = [None for _ in range(world_size)]
-    # Use object collective (works across backends)
-    dist.all_gather_object(obj_list, data)
-    # Ensure uniform shapes and stack
-    return np.stack(obj_list, axis=0)
+        stacked = torch.stack(gathered_tensors, dim=0)
+        cpu_tensor = stacked.to("cpu")
+        result = cpu_tensor.numpy()
+        return result
+    else:
+        # Fallback for NCCL-unsupported dtypes or gloo with uint64 (e.g., uint64/bool/etc.)
+        obj_list = [None for _ in range(world_size)]
+        # Use object collective (works across backends)
+        dist.all_gather_object(obj_list, data)
+        # Ensure uniform shapes and stack
+        result = np.stack(obj_list, axis=0)
+        return result
 
 
 def distributed_allgather_multidim(data):
