@@ -139,9 +139,8 @@ def persistent_gemm_all_scatter_wg_specialization(
                 timestamp = read_realtime()
                 tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
-            tl.store(c_global + global_offset, c, mask=sub_mask, cache_modifier=".wt")
-            tl.debug_barrier()
-            tl.store(locks + tile_id, 1, cache_modifier=".wt")
+            tl.store(c_global + global_offset, c, mask=sub_mask)
+            tl.atomic_xchg(locks + tile_id, 1, sem="release", scope="gpu")
 
     else:  # pid >= GEMM_SMS
         COMM_SMS = NUM_SMS - GEMM_SMS
@@ -163,7 +162,7 @@ def persistent_gemm_all_scatter_wg_specialization(
             global_offset = rm[:, None] * stride_cm_global + (rn[None, :] + cur_rank * N) * stride_cn_global
             # End: masks/offset calculations.
 
-            while tl.load(locks + tile_id, cache_modifier=".cv", volatile=True) != 1:
+            while tl.atomic_cas(locks + tile_id, 1, 1, sem="acquire", scope="gpu") != 1:
                 pass
 
             for remote_rank in range(world_size):
