@@ -132,7 +132,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
     total_tiles = total_blocks_M * total_blocks_N
 
-    locks = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int32)
+    locks = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int8)
 
     bias = None
 
@@ -153,15 +153,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # Allocate Timestamps
     timestamps = Timestamps(num_tiles=total_tiles)
 
-    def preamble():
-        shmem.barrier()
-        locks.zero_()
-        shmem.barrier()
-
     def run_experiment():
         nonlocal local_C
         nonlocal global_C
         nonlocal kernel_timing
+
+        shmem.barrier()
 
         if args["trace_tiles"]:
             timestamps.reset()
@@ -244,7 +241,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         matmul.set_debug(False)
         shmem.info("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
-        triton_ms = iris.do_bench(run_experiment, shmem.barrier, preamble)
+        triton_ms = iris.do_bench(run_experiment, shmem.barrier)
         triton_tflops = perf(triton_ms)
         algo_string = "all_scatter"
         shmem.info(

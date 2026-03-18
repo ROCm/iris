@@ -139,7 +139,7 @@ def persistent_gemm_all_scatter_wg_specialization(
                 timestamp = read_realtime()
                 tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
-            tl.store(c_global + global_offset, c, mask=sub_mask, cache_modifier=".wt")
+            tl.store(c_global + global_offset, c, mask=sub_mask)
             tl.atomic_xchg(locks + tile_id, 1, sem="release", scope="gpu")
 
     else:  # pid >= GEMM_SMS
