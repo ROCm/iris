@@ -29,7 +29,6 @@ def parse_args():
     parser.add_argument("-m", type=int, default=512, help="Number of rows")
     parser.add_argument("-n", type=int, default=128, help="Number of columns per rank slice")
     parser.add_argument("--heap_size", type=int, default=1 << 31, help="Iris heap size")
-    # Added (same as all_gather)
     parser.add_argument("--block_size_m", type=int, default=32, help="Block size for M dimension tiling")
     parser.add_argument("--block_size_n", type=int, default=64, help="Block size for N dimension tiling")
     parser.add_argument("--comm_sms", type=int, default=64, help="Number of SMs for all-to-all kernel")
