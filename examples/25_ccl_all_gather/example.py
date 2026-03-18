@@ -31,7 +31,6 @@ def parse_args():
     parser.add_argument("--heap_size", type=int, default=1 << 31, help="Iris heap size")
     parser.add_argument("--datatype", type=str, default="fp16", choices=["fp16", "fp32", "bf16"], help="Data type")
     parser.add_argument("-v", "--validate", action="store_true", help="Validate output against reference")
-    # Added
     parser.add_argument("--block_size_m", type=int, default=32, help="Block size for M dimension tiling")
     parser.add_argument("--block_size_n", type=int, default=64, help="Block size for N dimension tiling")
     parser.add_argument("--comm_sms", type=int, default=64, help="Number of SMs for all-gather kernel")
