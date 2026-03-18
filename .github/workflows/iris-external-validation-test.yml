@@ -54,7 +54,7 @@ jobs:
             cd /iris_workspace
             pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
             wget -O test_iris_distributed.py https://gist.githubusercontent.com/mawad-amd/6375dc078e39e256828f379e03310ec7/raw/0827d023eaf8e9755b17cbe8ab06f2ce258e746a/test_iris_distributed.py
-            torchrun --nproc_per_node=2 test_iris_distributed.py
+            torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 --nnodes=1 --nproc_per_node=2 test_iris_distributed.py
           "
           echo "::endgroup::"
 
@@ -103,7 +103,7 @@ jobs:
             cd /iris_workspace
             pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
             wget -O test_iris_gluon_distributed.py https://gist.githubusercontent.com/mawad-amd/2666dde8ebe2755eb0c4f2108709fcd5/raw/c5544943e2832c75252160bd9084600bf01a6b06/test_iris_gluon_distributed.py
-            torchrun --nproc_per_node=2 test_iris_gluon_distributed.py
+            torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 --nnodes=1 --nproc_per_node=2 test_iris_gluon_distributed.py
           "
           echo "::endgroup::"
 
