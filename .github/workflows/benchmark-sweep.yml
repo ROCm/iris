@@ -7,6 +7,11 @@ on:
         description: "PR number to post results to (optional)"
         required: false
         default: ""
+  pull_request:
+    branches: [main]
+    paths:
+      - "examples/10_gemm_all_scatter_wg_specialization/**"
+      - ".github/workflows/benchmark-sweep.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -190,11 +195,11 @@ jobs:
           cat sweep_report.md
 
       - name: Post results as PR comment
-        if: ${{ github.event.inputs.pr_number != '' }}
+        if: ${{ github.event.inputs.pr_number != '' || github.event_name == 'pull_request' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR="${{ github.event.inputs.pr_number }}"
+          PR="${{ github.event.inputs.pr_number || github.event.number }}"
           BODY=$(cat sweep_report.md)
           gh pr comment "$PR" --repo "${{ github.repository }}" --body "$BODY"
           echo "✅ Posted benchmark results to PR #${PR}"
