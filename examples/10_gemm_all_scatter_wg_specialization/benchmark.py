@@ -154,8 +154,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     timestamps = Timestamps(num_tiles=total_tiles)
 
     def preamble():
+        # Barrier 1: ensure all ranks finish previous iteration before clearing locks
         shmem.barrier()
         locks.zero_()
+        # Barrier 2: ensure all ranks see zeroed locks before any rank starts the kernel
         shmem.barrier()
 
     def run_experiment():
