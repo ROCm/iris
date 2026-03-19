@@ -38,6 +38,7 @@ Example (Object-Oriented DeviceContext API):
     >>>     data = device_ctx.load(buffer, from_rank=remote_rank)
 """
 
+import os
 import triton
 import triton.language as tl
 from triton.language.core import _aggregate as aggregate
@@ -117,7 +118,8 @@ class Iris:
             import json
 
             heap_bases_list = [int(self.heap_bases[r].item()) for r in range(self.num_ranks)]
-            out_path = f"iris_rank_{self.cur_rank}_heap_bases.json"
+            prefix = os.environ.get("IRIS_HEAP_BASES_PREFIX", "iris")
+            out_path = f"{prefix}_rank_{self.cur_rank}_heap_bases.json"
             with open(out_path, "w") as f:
                 json.dump(
                     {
@@ -1919,7 +1921,15 @@ def load(pointer, to_rank, from_rank, heap_bases, mask=None, hint: tl.constexpr 
 
 
 @triton.jit
-def store(pointer, value, from_rank, to_rank, heap_bases, mask=None, hint: tl.constexpr = None):
+def store(
+    pointer,
+    value,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    hint: tl.constexpr = None,
+):
     """
     Writes data to the specified rank's memory location.
 
