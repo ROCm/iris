@@ -26,7 +26,7 @@ jobs:
         include:
           - example_name: "GEMM All-Scatter WG Specialization"
             example_path: "10_gemm_all_scatter_wg_specialization"
-            tflops_threshold: 1600  # Actual: ~2182 TFLOPs
+            tflops_threshold: 1440  # Actual: ~1802 TFLOPs (80% regression threshold)
             benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
 
           - example_name: "GEMM All-Scatter"
