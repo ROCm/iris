@@ -56,7 +56,7 @@ EXIT_CODE=0
                 fi
             fi
             echo \"Running: \$example_file with $NUM_RANKS ranks\"
-            torchrun --nproc_per_node=$NUM_RANKS --standalone \"\$example_file\"
+            torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 --nnodes=1 --nproc_per_node=$NUM_RANKS \"\$example_file\"
         fi
     done
 " || { EXIT_CODE=$?; }
