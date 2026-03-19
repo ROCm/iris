@@ -222,6 +222,16 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         kernel_timing[k]["experiments"] = 0
 
     if args["validate"]:
+        # Run a dedicated validation kernel to ensure all cross-GPU writes are fully
+        # propagated before checking results.  The warmup above may leave some
+        # iris.put stores in-flight on the xGMI interconnect; the extra
+        # preamble + run + barrier cycle guarantees all ranks have flushed their
+        # GPU caches and that rank-0 sees every scattered tile before we call
+        # validate_gemm.
+        preamble()
+        run_experiment()
+        shmem.barrier()
+
         shmem.info("Validating...")
         matmul.set_debug(True)
         # Validate global result
