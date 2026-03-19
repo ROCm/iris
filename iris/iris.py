@@ -145,6 +145,9 @@ class Iris:
         # Initialize tracing
         self.tracing = Tracing(self)
 
+        # Pre-build the device context tensor (rebuilt when tracing is enabled)
+        self._build_device_context()
+
     def __del__(self):
         """Cleanup resources on deletion."""
         try:
@@ -906,31 +909,11 @@ class Iris:
         """
         return self.heap_bases
 
-    def get_device_context(self):
+    def _build_device_context(self):
         """
-        Get the device context tensor for DeviceContext initialization.
+        Build and cache the device context tensor.
 
-        Returns a tensor encoding: [cur_rank, world_size, heap_base_0, heap_base_1, ...]
-        If tracing is enabled, also includes: [trace_enabled, max_events, trace_counter_ptr, trace_buffer_ptrs...]
-
-        This opaque format allows future extension without breaking the API.
-
-        Returns:
-            torch.Tensor: Encoded context data as int64 tensor on device
-
-        Example:
-            >>> import iris
-            >>> from iris import DeviceContext
-            >>> import triton
-            >>> import triton.language as tl
-            >>>
-            >>> ctx = iris.iris()
-            >>> context_tensor = shmem.get_device_context()
-            >>>
-            >>> @triton.jit
-            >>> def my_kernel(context_tensor, rank: tl.constexpr, world_size: tl.constexpr, ...):
-            >>>     ctx = DeviceContext.initialize(context_tensor, rank, world_size)
-            >>>     data = ctx.load(buffer, from_rank=1)
+        Called during __init__ and again after tracing.enable() to include tracing fields.
         """
         # Convert heap_bases to a list for concatenation
         heap_bases_list = self.heap_bases.tolist()
@@ -965,9 +948,35 @@ class Iris:
         else:
             context_data += [0]  # trace_enabled = 0 (false)
 
-        context_tensor = torch.tensor(context_data, dtype=torch.int64, device=self.device)
+        self._device_context = torch.tensor(context_data, dtype=torch.int64, device=self.device)
 
-        return context_tensor
+    def get_device_context(self):
+        """
+        Get the device context tensor for DeviceContext initialization.
+
+        Returns a tensor encoding: [cur_rank, world_size, heap_base_0, heap_base_1, ...]
+        If tracing is enabled, also includes: [trace_enabled, max_events, trace_counter_ptr, trace_buffer_ptrs...]
+
+        This opaque format allows future extension without breaking the API.
+
+        Returns:
+            torch.Tensor: Encoded context data as int64 tensor on device
+
+        Example:
+            >>> import iris
+            >>> from iris import DeviceContext
+            >>> import triton
+            >>> import triton.language as tl
+            >>>
+            >>> ctx = iris.iris()
+            >>> context_tensor = shmem.get_device_context()
+            >>>
+            >>> @triton.jit
+            >>> def my_kernel(context_tensor, rank: tl.constexpr, world_size: tl.constexpr, ...):
+            >>>     ctx = DeviceContext.initialize(context_tensor, rank, world_size)
+            >>>     data = ctx.load(buffer, from_rank=1)
+        """
+        return self._device_context
 
     def barrier(self, stream=None, group=None):
         """
