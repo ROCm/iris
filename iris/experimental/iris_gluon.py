@@ -512,6 +512,9 @@ class IrisGluon:
         # Initialize CCL interface
         self.ccl = self.CCL(self)
 
+        # Pre-build the device context tensor
+        self._build_device_context()
+
     class CCL:
         """
         Collective Communication Library (CCL) interface for IrisGluon.
@@ -657,6 +660,19 @@ class IrisGluon:
         """Log an error message with rank information."""
         self._log_with_rank(logging.ERROR, message)
 
+    def _build_device_context(self):
+        """
+        Build and cache the device context tensor.
+
+        Called during __init__ to pre-build the tensor once.
+        """
+        # Convert heap_bases to a list for concatenation
+        heap_bases_list = self.heap_bases.tolist()
+
+        # Create context tensor: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
+        context_data = [self.cur_rank, self.num_ranks] + heap_bases_list
+        self._device_context = torch.tensor(context_data, dtype=torch.int64, device=self.device)
+
     def get_device_context(self):
         """
         Get the device context tensor for Gluon kernels.
@@ -675,14 +691,7 @@ class IrisGluon:
             >>>     ctx = IrisDeviceCtx.initialize(context_tensor)
             >>>     data = ctx.load(buffer, 1)
         """
-        # Convert heap_bases to a list for concatenation
-        heap_bases_list = self.heap_bases.tolist()
-
-        # Create context tensor: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
-        context_data = [self.cur_rank, self.num_ranks] + heap_bases_list
-        context_tensor = torch.tensor(context_data, dtype=torch.int64, device=self.device)
-
-        return context_tensor
+        return self._device_context
 
     def get_backend(self):
         """
