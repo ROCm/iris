@@ -969,7 +969,7 @@ class Iris:
             >>> import triton.language as tl
             >>>
             >>> ctx = iris.iris()
-            >>> context_tensor = shmem.get_device_context()
+            >>> context_tensor = ctx.get_device_context()
             >>>
             >>> @triton.jit
             >>> def my_kernel(context_tensor, rank: tl.constexpr, world_size: tl.constexpr, ...):
