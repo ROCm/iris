@@ -74,10 +74,11 @@ def test_get_other_api(dtype, BLOCK_SIZE):
 
     # Verify the results
     # First half should contain loaded values accumulated from all ranks (num_ranks * 1.0)
-    # Second half should contain accumulated "other" values (num_ranks * -1.0)
+    # Second half stays at 0.0 because iris.get stores with mask, so masked-out positions
+    # in `results` are never written; tl.load(results + offsets) reads 0.0 from them.
     expected = torch.zeros(BLOCK_SIZE, dtype=dtype, device="cuda")
     expected[: BLOCK_SIZE // 2] = num_ranks * 1.0
-    expected[BLOCK_SIZE // 2 :] = num_ranks * other_value
+    expected[BLOCK_SIZE // 2 :] = 0.0
 
     try:
         torch.testing.assert_close(results, expected, rtol=0, atol=0)

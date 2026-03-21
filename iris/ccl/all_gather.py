@@ -377,6 +377,9 @@ def all_gather(
         config.comm_sms,
         config.num_xcds,
         config.chunk_size,
+        num_stages=config.num_stages,
+        num_warps=config.num_warps,
+        waves_per_eu=config.waves_per_eu,
     )
 
     if not async_op:

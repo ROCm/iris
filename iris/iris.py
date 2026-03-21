@@ -38,6 +38,7 @@ Example (Object-Oriented DeviceContext API):
     >>>     data = device_ctx.load(buffer, from_rank=remote_rank)
 """
 
+import os
 import triton
 import triton.language as tl
 from triton.language.core import _aggregate as aggregate
@@ -45,6 +46,7 @@ from triton.language.core import _aggregate as aggregate
 from iris._distributed_helpers import (
     init_distributed,
     distributed_barrier,
+    distributed_device_barrier,
     distributed_broadcast_scalar,
     distributed_broadcast_tensor,
 )
@@ -55,6 +57,7 @@ from iris.hip import (
 )
 from iris.symmetric_heap import SymmetricHeap
 import numpy as np
+from typing import Any
 import torch
 import logging
 
@@ -115,7 +118,8 @@ class Iris:
             import json
 
             heap_bases_list = [int(self.heap_bases[r].item()) for r in range(self.num_ranks)]
-            out_path = f"iris_rank_{self.cur_rank}_heap_bases.json"
+            prefix = os.environ.get("IRIS_HEAP_BASES_PREFIX", "iris")
+            out_path = f"{prefix}_rank_{self.cur_rank}_heap_bases.json"
             with open(out_path, "w") as f:
                 json.dump(
                     {
@@ -135,8 +139,14 @@ class Iris:
         # Lazy initialization for ops interface
         self._ops = None
 
+        # Device-side barrier state, keyed by process group (None = all ranks).
+        self._device_barrier_state: dict[Any, torch.Tensor] = {}
+
         # Initialize tracing
         self.tracing = Tracing(self)
+
+        # Pre-build the device context tensor (rebuilt when tracing is enabled)
+        self._build_device_context()
 
     def __del__(self):
         """Cleanup resources on deletion."""
@@ -899,31 +909,11 @@ class Iris:
         """
         return self.heap_bases
 
-    def get_device_context(self):
+    def _build_device_context(self):
         """
-        Get the device context tensor for DeviceContext initialization.
+        Build and cache the device context tensor.
 
-        Returns a tensor encoding: [cur_rank, world_size, heap_base_0, heap_base_1, ...]
-        If tracing is enabled, also includes: [trace_enabled, max_events, trace_counter_ptr, trace_buffer_ptrs...]
-
-        This opaque format allows future extension without breaking the API.
-
-        Returns:
-            torch.Tensor: Encoded context data as int64 tensor on device
-
-        Example:
-            >>> import iris
-            >>> from iris import DeviceContext
-            >>> import triton
-            >>> import triton.language as tl
-            >>>
-            >>> ctx = iris.iris()
-            >>> context_tensor = shmem.get_device_context()
-            >>>
-            >>> @triton.jit
-            >>> def my_kernel(context_tensor, rank: tl.constexpr, world_size: tl.constexpr, ...):
-            >>>     ctx = DeviceContext.initialize(context_tensor, rank, world_size)
-            >>>     data = ctx.load(buffer, from_rank=1)
+        Called during __init__ and again after tracing.enable() to include tracing fields.
         """
         # Convert heap_bases to a list for concatenation
         heap_bases_list = self.heap_bases.tolist()
@@ -958,9 +948,35 @@ class Iris:
         else:
             context_data += [0]  # trace_enabled = 0 (false)
 
-        context_tensor = torch.tensor(context_data, dtype=torch.int64, device=self.device)
+        self._device_context = torch.tensor(context_data, dtype=torch.int64, device=self.device)
 
-        return context_tensor
+    def get_device_context(self):
+        """
+        Get the device context tensor for DeviceContext initialization.
+
+        Returns a tensor encoding: [cur_rank, world_size, heap_base_0, heap_base_1, ...]
+        If tracing is enabled, also includes: [trace_enabled, max_events, trace_counter_ptr, trace_buffer_ptrs...]
+
+        This opaque format allows future extension without breaking the API.
+
+        Returns:
+            torch.Tensor: Encoded context data as int64 tensor on device
+
+        Example:
+            >>> import iris
+            >>> from iris import DeviceContext
+            >>> import triton
+            >>> import triton.language as tl
+            >>>
+            >>> ctx = iris.iris()
+            >>> context_tensor = ctx.get_device_context()
+            >>>
+            >>> @triton.jit
+            >>> def my_kernel(context_tensor, rank: tl.constexpr, world_size: tl.constexpr, ...):
+            >>>     ctx = DeviceContext.initialize(context_tensor, rank, world_size)
+            >>>     data = ctx.load(buffer, from_rank=1)
+        """
+        return self._device_context
 
     def barrier(self, stream=None, group=None):
         """
@@ -988,6 +1004,36 @@ class Iris:
 
         # Distributed barrier
         distributed_barrier(group=group)
+
+    def device_barrier(self, group=None):
+        """
+        Device-side barrier that is CUDA graph capturable.
+
+        Unlike ``barrier()`` which uses host-side ``torch.distributed.barrier()``,
+        this uses device-side atomic operations on the symmetric heap to synchronize
+        ranks. Stateless w.r.t. host-side epoch tracking: each rank's flag on
+        the heap serves as its own epoch counter, managed entirely by the GPU
+        via atomic_add. A persistent per-group flags tensor is cached in
+        ``_device_barrier_state``.
+
+        Args:
+            group (ProcessGroup, optional): The process group to synchronize.
+                If None, uses all ranks in the shmem context.
+
+        Example:
+            >>> ctx = iris.iris(1 << 20)
+            >>> ctx.device_barrier()  # Synchronize all ranks on device
+        """
+        if group not in self._device_barrier_state:
+            self._device_barrier_state[group] = self.zeros((self.num_ranks,), dtype=torch.int32)
+
+        distributed_device_barrier(
+            self._device_barrier_state[group],
+            group,
+            self.cur_rank,
+            self.num_ranks,
+            self.get_heap_bases(),
+        )
 
     def get_device(self):
         """
@@ -1865,13 +1911,14 @@ def load(
 
     This function performs a memory read operation by translating the pointer
     from the `from_rank`'s address space to the `to_rank`'s address space and loading
-    data from the target memory location. If the `from_rank` and `to_rank` are the same,
-    this function performs a local load operation.
+    data from the target memory location. The load is **local** when
+    ``to_rank == from_rank``, and **remote** (cross-GPU) otherwise.
 
-    The `cache_modifier` parameter controls instruction-level cache behavior
-    by setting the appropriate scope (`SC0`, `SC1`) and non-temporal (`NT`) bits
-    in the global load instruction. These affect cache usage across the CU,
-    L2, and last-level caches.
+    The `cache_modifier` is passed through to the underlying ``tl.load()`` call
+    unconditionally — it is the caller's responsibility to choose an appropriate
+    modifier. Cache modifiers control instruction-level cache behavior by setting
+    the appropriate scope (``SC0``, ``SC1``) and non-temporal (``NT``) bits in
+    the load instruction, following the CDNA ISA.
 
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the `from_rank`'s address space that will be translated to the `to_rank`'s address space. Must be the current rank where the pointer is local.
@@ -1880,7 +1927,7 @@ def load(
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address pointer[idx]. Defaults to None.
         other (Block, optional): Value to return for masked-out elements. If not provided, the result for masked-out elements is undefined. Defaults to None.
-        cache_modifier (str, optional): Controls cache behavior of the load.
+        cache_modifier (str, optional): Controls cache behavior of the load. It is the caller's responsibility to use modifiers appropriately.
 
             Supported values:
                 - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
@@ -1926,13 +1973,14 @@ def store(
 
     This function performs a memory write operation by translating the pointer
     from the `from_rank`'s address space to the `to_rank`'s address space and storing
-    the provided data to the target memory location. If the `from_rank` and `to_rank` are the same,
-    this function performs a local store operation.
+    the provided data to the target memory location. The store is **local** when
+    ``from_rank == to_rank``, and **remote** (cross-GPU) otherwise.
 
-    The `cache_modifier` parameter controls instruction-level cache behavior
-    by setting the appropriate scope (`SC0`, `SC1`) and non-temporal (`NT`) bits
-    in the global store instruction. These affect cache usage across the CU (L1),
-    L2, and last-level cache (LLC), following the CDNA ISA.
+    The `cache_modifier` is always passed through to the underlying ``tl.store()``
+    call unconditionally — it is the caller's responsibility to choose an appropriate
+    modifier for the operation (local vs. remote). Cache modifiers control instruction-level
+    cache behavior by setting the appropriate scope (``SC0``, ``SC1``) and non-temporal
+    (``NT``) bits in the store instruction, following the CDNA ISA.
 
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the `from_rank`'s address space that will be translated to the `to_rank`'s address space. Must be the current rank where the pointer is local.
@@ -1942,7 +1990,7 @@ def store(
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not store the data at address pointer[idx]. Defaults to None.
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
-        cache_modifier (str, optional): Controls cache behavior of the store. Ignored for remote stores (when `from_rank != to_rank`) as cache modifiers are not supported for cross-GPU memory operations. Supported values are:
+        cache_modifier (str, optional): Controls cache behavior of the store. It is the caller's responsibility to use modifiers appropriately. Supported values are:
 
             - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
             - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
@@ -1963,10 +2011,7 @@ def store(
         >>>     iris.store(ptr, value, cur_rank, remote_rank, heap_bases)
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
-    if from_rank == to_rank:
-        tl.store(translated_ptr, value, mask=mask, cache_modifier=cache_modifier)
-    else:
-        tl.store(translated_ptr, value, mask=mask)
+    tl.store(translated_ptr, value, mask=mask, cache_modifier=cache_modifier)
 
 
 @triton.jit
@@ -1988,8 +2033,12 @@ def copy(
     This function performs the transfer by translating `src_ptr` from the `from_rank`'s address
     space to the `to_rank`'s address space, performing a masked load from the translated
     source, and storing the loaded data to `dst_ptr` in the `to_rank` memory location.
-    If `from_rank` and `to_rank` are the same, this function performs a local copy operation.
     It is undefined behaviour if neither `from_rank` nor `to_rank` is the `cur_rank`.
+
+    The load is from ``from_rank`` (remote if ``from_rank != cur_rank``) and the store is to
+    ``to_rank`` (remote if ``to_rank != cur_rank``). Both ``load_cache_modifier`` and
+    ``store_cache_modifier`` are passed through unconditionally — it is the caller's
+    responsibility to choose appropriate modifiers for local vs. remote operations.
 
     Args:
         src_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the `from_rank`'s local memory from which to read data.
@@ -2000,13 +2049,13 @@ def copy(
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load from the translated src_ptr[idx] and do not store to dst_ptr[idx]. Defaults to None.
         other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
-        load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
+        load_cache_modifier (str, optional): Controls cache behavior of the load. It is the caller's responsibility to use modifiers appropriately. Supported values are:
             - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
             - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
             - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
             - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
 
-        store_cache_modifier (str, optional): Controls cache behavior of the store. Only effective for local stores (when `to_rank == cur_rank`). Supported values are:
+        store_cache_modifier (str, optional): Controls cache behavior of the store. It is the caller's responsibility to use modifiers appropriately. Supported values are:
             - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
             - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
             - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
@@ -2047,10 +2096,7 @@ def copy(
         translated_dst = tl.max_contiguous(tl.multiple_of(translated_dst, hint), hint)
 
     data = tl.load(translated_src, mask=mask, other=other, cache_modifier=load_cache_modifier)
-    if to_rank == cur_rank:
-        tl.store(translated_dst, data, mask=mask, cache_modifier=store_cache_modifier)
-    else:
-        tl.store(translated_dst, data, mask=mask)
+    tl.store(translated_dst, data, mask=mask, cache_modifier=store_cache_modifier)
 
 
 @triton.jit
@@ -2071,8 +2117,12 @@ def get(
 
     This function performs a memory read operation by translating the `from_ptr`
     from the current rank's address space to the `from_rank`'s address space, loading data
-    from the `from_rank` memory location, and storing it to the local `to_ptr`.
-    If the `from_rank` is the same as the current rank, this function performs a local copy operation.
+    from the `from_rank`'s memory location, and storing it to the local `to_ptr`.
+
+    The load is **remote** when ``from_rank != to_rank`` (reading from a peer GPU), while the
+    store is **always local** (writing to `to_ptr` in the current rank's own memory). Both
+    ``load_cache_modifier`` and ``store_cache_modifier`` are passed through unconditionally —
+    it is the caller's responsibility to choose appropriate modifiers.
 
     Args:
         from_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `from_rank`'s address space. Must be the current rank where the pointer is local.
@@ -2082,13 +2132,13 @@ def get(
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
         other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
-        load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
+        load_cache_modifier (str, optional): Controls cache behavior of the load (remote when ``from_rank != to_rank``). It is the caller's responsibility to use modifiers appropriately. Supported values are:
             - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
             - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
             - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
             - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
 
-        store_cache_modifier (str, optional): Controls cache behavior of the store. The store is always to local memory (`to_ptr`), so this is always applied. Supported values are:
+        store_cache_modifier (str, optional): Controls cache behavior of the store. The store is always to local memory (``to_ptr``). Supported values are:
             - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
             - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
             - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
@@ -2131,7 +2181,11 @@ def put(
     This function performs a memory write operation by loading data from the current
     rank's `from_ptr`, translating the `to_ptr` from the current rank's address
     space to the `to_rank`'s address space, and storing the data to the `to_rank` memory location.
-    If the `to_rank` is the same as the current rank, this function performs a local copy operation.
+
+    The load is **always local** (reading from the current rank's own ``from_ptr``), while the
+    store is **remote** when ``from_rank != to_rank`` (writing to a peer GPU). Both
+    ``load_cache_modifier`` and ``store_cache_modifier`` are passed through unconditionally —
+    it is the caller's responsibility to choose appropriate modifiers.
 
     Args:
         from_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's local memory from which to read data.
@@ -2142,13 +2196,13 @@ def put(
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
         other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
 
-        load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
+        load_cache_modifier (str, optional): Controls cache behavior of the load (always local). Supported values are:
             - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
             - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
             - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
             - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
 
-        store_cache_modifier (str, optional): Controls cache behavior of the store. Only effective for local stores (when `from_rank == to_rank`). Supported values are:
+        store_cache_modifier (str, optional): Controls cache behavior of the store (remote when ``from_rank != to_rank``). It is the caller's responsibility to use modifiers appropriately. Supported values are:
             - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
             - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
             - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
@@ -2170,10 +2224,7 @@ def put(
 
     data = tl.load(from_ptr, mask=mask, other=other, cache_modifier=load_cache_modifier)
 
-    if from_rank == to_rank:
-        tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
-    else:
-        tl.store(translated_to_ptr, data, mask=mask)
+    tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
 
 
 @triton.jit

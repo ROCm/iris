@@ -13,7 +13,8 @@ from itertools import product
 def put_kernel(
     data,
     results,
-    cur_rank: tl.constexpr,
+    from_rank: tl.constexpr,
+    to_rank: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     heap_bases: tl.tensor,
     load_cache_modifier: tl.constexpr,
@@ -23,61 +24,30 @@ def put_kernel(
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < BLOCK_SIZE
-
-    # Put data locally (same rank) with cache modifiers.
-    # store_cache_modifier only applies to local stores (from_rank == to_rank).
-    # Remote stores do not support cache modifiers.
-    if load_cache_modifier is None and store_cache_modifier is None:
-        iris.put(data + offsets, results + offsets, cur_rank, cur_rank, heap_bases, mask=mask)
-    elif load_cache_modifier is None:
-        iris.put(
-            data + offsets,
-            results + offsets,
-            cur_rank,
-            cur_rank,
-            heap_bases,
-            mask=mask,
-            store_cache_modifier=store_cache_modifier,
-        )
-    elif store_cache_modifier is None:
-        iris.put(
-            data + offsets,
-            results + offsets,
-            cur_rank,
-            cur_rank,
-            heap_bases,
-            mask=mask,
-            load_cache_modifier=load_cache_modifier,
-        )
-    else:
-        iris.put(
-            data + offsets,
-            results + offsets,
-            cur_rank,
-            cur_rank,
-            heap_bases,
-            mask=mask,
-            load_cache_modifier=load_cache_modifier,
-            store_cache_modifier=store_cache_modifier,
-        )
+    iris.put(
+        data + offsets,
+        results + offsets,
+        from_rank,
+        to_rank,
+        heap_bases,
+        mask=mask,
+        load_cache_modifier=load_cache_modifier,
+        store_cache_modifier=store_cache_modifier,
+    )
 
 
 # Define cache modifiers for load and store operations
 LOAD_CACHE_MODIFIERS = [None, "", ".ca", ".cg", ".cv"]
-# store_cache_modifier is only effective for local stores (from_rank == to_rank)
+# store_cache_modifier is passed unconditionally; it is the caller's responsibility
+# to choose appropriate modifiers for local vs. remote stores.
 STORE_CACHE_MODIFIERS = [None, "", ".wb", ".cg", ".cs", ".wt"]
 
 
 @pytest.mark.parametrize(
     "load_cache_modifier,store_cache_modifier", list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS))
 )
-def test_put_cache_modifiers(load_cache_modifier, store_cache_modifier):
-    """Test put (local copy) with various cache modifiers.
-
-    store_cache_modifier is only effective for local stores (from_rank == to_rank).
-    Remote stores do not support cache modifiers.
-    This test exercises only local puts to verify cache modifier behavior.
-    """
+def test_put_cache_modifiers_local(load_cache_modifier, store_cache_modifier):
+    """Test local put (from_rank == to_rank) with various cache modifiers."""
     shmem = iris.iris(1 << 20)
     heap_bases = shmem.get_heap_bases()
     cur_rank = shmem.get_rank()
@@ -89,19 +59,63 @@ def test_put_cache_modifiers(load_cache_modifier, store_cache_modifier):
     shmem.barrier()
 
     grid = lambda meta: (1,)
-    put_kernel[grid](data, results, cur_rank, BLOCK_SIZE, heap_bases, load_cache_modifier, store_cache_modifier)
+    put_kernel[grid](
+        data, results, cur_rank, cur_rank, BLOCK_SIZE, heap_bases, load_cache_modifier, store_cache_modifier
+    )
     shmem.barrier()
 
-    # Verify the result - should have the data that was put (local copy)
     expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda")
-
     try:
         torch.testing.assert_close(results, expected, rtol=0, atol=0)
     except AssertionError as e:
         print(
-            f"PUT test failed with load_cache_modifier={load_cache_modifier}, store_cache_modifier={store_cache_modifier}"
+            f"LOCAL PUT test failed with load_cache_modifier={load_cache_modifier}, store_cache_modifier={store_cache_modifier}"
         )
         print(e)
-        print("Expected:", expected)
-        print("Actual:", results)
         raise
+
+
+@pytest.mark.parametrize(
+    "load_cache_modifier,store_cache_modifier", list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS))
+)
+def test_put_cache_modifiers_remote(load_cache_modifier, store_cache_modifier):
+    """Test remote put (from_rank != to_rank) with various cache modifiers.
+
+    store_cache_modifier is passed unconditionally to the remote tl.store(). It is the
+    caller's responsibility to use modifiers appropriately for remote operations.
+    """
+    shmem = iris.iris(1 << 20)
+    heap_bases = shmem.get_heap_bases()
+    num_ranks = shmem.get_num_ranks()
+    cur_rank = shmem.get_rank()
+
+    if num_ranks < 2:
+        pytest.skip("Remote put test requires at least 2 ranks")
+
+    BLOCK_SIZE = 16
+    data = shmem.ones(BLOCK_SIZE, dtype=torch.float32)
+    results = shmem.zeros(BLOCK_SIZE, dtype=torch.float32)
+
+    shmem.barrier()
+
+    # rank 0 puts to rank 1
+    remote_rank = (cur_rank + 1) % num_ranks
+    grid = lambda meta: (1,)
+    if cur_rank == 0:
+        put_kernel[grid](
+            data, results, cur_rank, remote_rank, BLOCK_SIZE, heap_bases, load_cache_modifier, store_cache_modifier
+        )
+
+    shmem.barrier()
+
+    # rank 1 checks the data it received from rank 0
+    if cur_rank == 1:
+        expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda")
+        try:
+            torch.testing.assert_close(results, expected, rtol=0, atol=0)
+        except AssertionError as e:
+            print(
+                f"REMOTE PUT test failed with load_cache_modifier={load_cache_modifier}, store_cache_modifier={store_cache_modifier}"
+            )
+            print(e)
+            raise
