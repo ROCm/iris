@@ -41,6 +41,8 @@ roccap_args = [
 
 # Set simulation env so Iris uses torch allocator
 os.environ["IRIS_SIMULATION"] = "1"
+# Pass kernel name so Iris can name heap_bases output to match -k (e.g. persistent_all_gather_heap_bases.json)
+os.environ["IRIS_HEAP_BASES_PREFIX"] = parsed.kernel
 # Disable PyTorch caching allocator for simple allocations in simulation
 os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
 

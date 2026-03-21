@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
+import os
+
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -132,7 +134,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
     total_tiles = total_blocks_M * total_blocks_N
 
-    locks = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int8)
+    locks = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int32)
 
     bias = None
 
@@ -153,12 +155,17 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # Allocate Timestamps
     timestamps = Timestamps(num_tiles=total_tiles)
 
+    def preamble():
+        # Barrier 1: ensure all ranks finish previous iteration before clearing locks
+        shmem.barrier()
+        locks.zero_()
+        # Barrier 2: ensure all ranks see zeroed locks before any rank starts the kernel
+        shmem.barrier()
+
     def run_experiment():
         nonlocal local_C
         nonlocal global_C
         nonlocal kernel_timing
-
-        shmem.barrier()
 
         if args["trace_tiles"]:
             timestamps.reset()
@@ -215,6 +222,16 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         kernel_timing[k]["experiments"] = 0
 
     if args["validate"]:
+        # Run a dedicated validation kernel to ensure all cross-GPU writes are fully
+        # propagated before checking results.  The warmup above may leave some
+        # iris.put stores in-flight on the xGMI interconnect; the extra
+        # preamble + run + barrier cycle guarantees all ranks have flushed their
+        # GPU caches and that rank-0 sees every scattered tile before we call
+        # validate_gemm.
+        preamble()
+        run_experiment()
+        shmem.barrier()
+
         shmem.info("Validating...")
         matmul.set_debug(True)
         # Validate global result
@@ -241,7 +258,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         matmul.set_debug(False)
         shmem.info("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
-        triton_ms = iris.do_bench(run_experiment, shmem.barrier)
+        triton_ms = iris.do_bench(run_experiment, shmem.barrier, preamble)
         triton_tflops = perf(triton_ms)
         algo_string = "all_scatter"
         shmem.info(
@@ -275,15 +292,24 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 def main():
     args = parse_args()
 
-    num_ranks = args["num_ranks"]
-
-    init_url = "tcp://127.0.0.1:29500"
-    mp.spawn(
-        fn=_worker,
-        args=(num_ranks, init_url, args),
-        nprocs=num_ranks,
-        join=True,
-    )
+    # Check if running with torchrun (detected by environment variables)
+    if "RANK" in os.environ and "LOCAL_RANK" in os.environ:
+        # torchrun handles process spawning, so call _worker directly
+        print("Detected torchrun execution mode")
+        rank = int(os.environ.get("RANK", 0))
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        init_url = os.environ.get("MASTER_ADDR", "127.0.0.1") + ":" + os.environ.get("MASTER_PORT", "29500")
+        _worker(rank, world_size, f"tcp://{init_url}", args)
+    else:
+        # Use multiprocessing spawn for backward compatibility
+        num_ranks = args["num_ranks"]
+        init_url = "tcp://127.0.0.1:29500"
+        mp.spawn(
+            fn=_worker,
+            args=(num_ranks, init_url, args),
+            nprocs=num_ranks,
+            join=True,
+        )
 
 
 if __name__ == "__main__":

@@ -71,6 +71,9 @@ class Tracing:
 
         self.iris.info(f"Device tracing enabled with max {max_events} events")
 
+        # Rebuild the cached device context to include tracing fields
+        self.iris._build_device_context()
+
     def reset(self):
         """
         Reset trace counter to start a new trace capture.
