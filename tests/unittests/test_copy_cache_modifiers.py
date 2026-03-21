@@ -27,7 +27,7 @@ def copy_kernel_local_read_remote_write(
     mask = offsets < BLOCK_SIZE
 
     # Copy from current rank to other ranks.
-    # Both load and store cache modifiers are passed unconditionally.
+    # Both load and store cache modifiers are supported on local and remote ops.
     for target_rank in range(num_ranks):
         src_data = data + BLOCK_SIZE * cur_rank
         dest_data = results + BLOCK_SIZE * cur_rank
@@ -62,7 +62,7 @@ def copy_kernel_remote_read_local_write(
     mask = offsets < BLOCK_SIZE
 
     # Copy from other ranks to current rank.
-    # Both load and store cache modifiers are passed unconditionally.
+    # Both load and store cache modifiers are supported on local and remote ops.
     for source_rank in range(num_ranks):
         src_data = data + BLOCK_SIZE * source_rank
         dest_data = results + BLOCK_SIZE * source_rank
@@ -80,8 +80,6 @@ def copy_kernel_remote_read_local_write(
 
 
 # Define cache modifiers for load and store operations.
-# Both load and store modifiers are passed unconditionally to tl.load()/tl.store().
-# It is the caller's responsibility to use appropriate modifiers for local vs. remote ops.
 LOAD_CACHE_MODIFIERS = [None, "", ".ca", ".cg", ".cv"]
 STORE_CACHE_MODIFIERS = [None, "", ".wb", ".cg", ".cs", ".wt"]
 
@@ -95,9 +93,6 @@ def test_copy_local_read_remote_write(load_cache_modifier, store_cache_modifier)
     Direction: from_rank=cur_rank (local), to_rank=other (remote)
     - Load: from LOCAL memory
     - Store: to REMOTE memory
-
-    store_cache_modifier is passed unconditionally to the remote tl.store(). It is the
-    caller's responsibility to use modifiers appropriately.
     """
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
@@ -143,9 +138,6 @@ def test_copy_remote_read_local_write(load_cache_modifier, store_cache_modifier)
     Direction: from_rank=other (remote), to_rank=cur_rank (local)
     - Load: from REMOTE memory
     - Store: to LOCAL memory
-
-    Both cache modifiers are passed unconditionally. It is the caller's responsibility
-    to use appropriate modifiers for local vs. remote operations.
     """
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()

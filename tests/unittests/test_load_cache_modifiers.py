@@ -27,8 +27,6 @@ def load_kernel(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < BLOCK_SIZE
 
-    # cache_modifier is passed unconditionally; it is the caller's responsibility
-    # to use an appropriate modifier for local vs. remote loads.
     result = iris.load(
         data + offsets,
         source_rank,
@@ -49,11 +47,7 @@ VOLATILE_OPTIONS = [False, True]
 
 @pytest.mark.parametrize("cache_modifier,volatile", list(product(CACHE_MODIFIERS, VOLATILE_OPTIONS)))
 def test_load_cache_modifiers(cache_modifier, volatile):
-    """Test load with various cache modifiers and volatile settings.
-
-    cache_modifier is passed unconditionally to tl.load(). It is the caller's
-    responsibility to use modifiers appropriately for local vs. remote loads.
-    """
+    """Test load with various cache modifiers and volatile settings."""
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     heap_bases = shmem.get_heap_bases()

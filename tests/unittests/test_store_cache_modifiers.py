@@ -77,11 +77,7 @@ def test_store_cache_modifiers_local(cache_modifier):
 
 @pytest.mark.parametrize("cache_modifier", CACHE_MODIFIERS)
 def test_store_cache_modifiers_remote(cache_modifier):
-    """Test remote store (from_rank != to_rank) with various cache modifiers.
-
-    Cache modifiers are passed through unconditionally to tl.store(). It is the
-    caller's responsibility to use them appropriately for remote operations.
-    """
+    """Test remote store (from_rank != to_rank) with various cache modifiers."""
     shmem = iris.iris(1 << 20)
     heap_bases = shmem.get_heap_bases()
     num_ranks = shmem.get_num_ranks()

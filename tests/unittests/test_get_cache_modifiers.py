@@ -27,7 +27,7 @@ def get_kernel(
 
     acc = tl.zeros([BLOCK_SIZE], dtype=data.type.element_ty)
 
-    # Loop over all ranks and get data with cache modifiers applied unconditionally.
+    # Loop over all ranks and get data with cache modifiers.
     # The load is remote when from_rank != cur_rank; the store to results is always local.
     for target_rank in range(num_ranks):
         iris.get(
@@ -57,9 +57,8 @@ STORE_CACHE_MODIFIERS = [None, "", ".wb", ".cg", ".cs", ".wt"]
 def test_get_cache_modifiers(load_cache_modifier, store_cache_modifier):
     """Test get (copy from other rank) with various cache modifiers.
 
-    load_cache_modifier is passed unconditionally; it applies to the remote load when
-    from_rank != to_rank. store_cache_modifier applies to the always-local store to to_ptr.
-    It is the caller's responsibility to use modifiers appropriately.
+    load_cache_modifier applies to the remote load when from_rank != to_rank.
+    store_cache_modifier applies to the always-local store to to_ptr.
     """
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()

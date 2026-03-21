@@ -1914,11 +1914,10 @@ def load(
     data from the target memory location. The load is **local** when
     ``to_rank == from_rank``, and **remote** (cross-GPU) otherwise.
 
-    The `cache_modifier` is passed through to the underlying ``tl.load()`` call
-    unconditionally — it is the caller's responsibility to choose an appropriate
-    modifier. Cache modifiers control instruction-level cache behavior by setting
-    the appropriate scope (``SC0``, ``SC1``) and non-temporal (``NT``) bits in
-    the load instruction, following the CDNA ISA.
+    The ``cache_modifier`` is passed through to the underlying ``tl.load()``
+    call. Cache modifiers control instruction-level cache behavior by setting
+    the appropriate scope (``SC0``, ``SC1``) and non-temporal (``NT``) bits
+    in the load instruction, following the CDNA ISA.
 
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the `from_rank`'s address space that will be translated to the `to_rank`'s address space. Must be the current rank where the pointer is local.
@@ -1927,7 +1926,7 @@ def load(
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address pointer[idx]. Defaults to None.
         other (Block, optional): Value to return for masked-out elements. If not provided, the result for masked-out elements is undefined. Defaults to None.
-        cache_modifier (str, optional): Controls cache behavior of the load. It is the caller's responsibility to use modifiers appropriately.
+        cache_modifier (str, optional): Controls cache behavior of the load.
 
             Supported values:
                 - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
@@ -1976,11 +1975,10 @@ def store(
     the provided data to the target memory location. The store is **local** when
     ``from_rank == to_rank``, and **remote** (cross-GPU) otherwise.
 
-    The `cache_modifier` is always passed through to the underlying ``tl.store()``
-    call unconditionally — it is the caller's responsibility to choose an appropriate
-    modifier for the operation (local vs. remote). Cache modifiers control instruction-level
-    cache behavior by setting the appropriate scope (``SC0``, ``SC1``) and non-temporal
-    (``NT``) bits in the store instruction, following the CDNA ISA.
+    The ``cache_modifier`` is passed through to the underlying ``tl.store()``
+    call. Cache modifiers control instruction-level cache behavior by setting
+    the appropriate scope (``SC0``, ``SC1``) and non-temporal (``NT``) bits
+    in the store instruction, following the CDNA ISA.
 
     Args:
         pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the `from_rank`'s address space that will be translated to the `to_rank`'s address space. Must be the current rank where the pointer is local.
@@ -1990,7 +1988,7 @@ def store(
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not store the data at address pointer[idx]. Defaults to None.
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
-        cache_modifier (str, optional): Controls cache behavior of the store. It is the caller's responsibility to use modifiers appropriately. Supported values are:
+        cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
 
             - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
             - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
@@ -2036,9 +2034,7 @@ def copy(
     It is undefined behaviour if neither `from_rank` nor `to_rank` is the `cur_rank`.
 
     The load is from ``from_rank`` (remote if ``from_rank != cur_rank``) and the store is to
-    ``to_rank`` (remote if ``to_rank != cur_rank``). Both ``load_cache_modifier`` and
-    ``store_cache_modifier`` are passed through unconditionally — it is the caller's
-    responsibility to choose appropriate modifiers for local vs. remote operations.
+    ``to_rank`` (remote if ``to_rank != cur_rank``).
 
     Args:
         src_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the `from_rank`'s local memory from which to read data.
@@ -2049,13 +2045,13 @@ def copy(
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load from the translated src_ptr[idx] and do not store to dst_ptr[idx]. Defaults to None.
         other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
-        load_cache_modifier (str, optional): Controls cache behavior of the load. It is the caller's responsibility to use modifiers appropriately. Supported values are:
+        load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
             - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
             - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
             - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
             - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
 
-        store_cache_modifier (str, optional): Controls cache behavior of the store. It is the caller's responsibility to use modifiers appropriately. Supported values are:
+        store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
             - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
             - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
             - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
@@ -2120,9 +2116,7 @@ def get(
     from the `from_rank`'s memory location, and storing it to the local `to_ptr`.
 
     The load is **remote** when ``from_rank != to_rank`` (reading from a peer GPU), while the
-    store is **always local** (writing to `to_ptr` in the current rank's own memory). Both
-    ``load_cache_modifier`` and ``store_cache_modifier`` are passed through unconditionally —
-    it is the caller's responsibility to choose appropriate modifiers.
+    store is **always local** (writing to `to_ptr` in the current rank's own memory).
 
     Args:
         from_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `from_rank`'s address space. Must be the current rank where the pointer is local.
@@ -2132,7 +2126,7 @@ def get(
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
         other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
-        load_cache_modifier (str, optional): Controls cache behavior of the load (remote when ``from_rank != to_rank``). It is the caller's responsibility to use modifiers appropriately. Supported values are:
+        load_cache_modifier (str, optional): Controls cache behavior of the load (remote when ``from_rank != to_rank``). Supported values are:
             - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
             - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
             - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
@@ -2183,9 +2177,7 @@ def put(
     space to the `to_rank`'s address space, and storing the data to the `to_rank` memory location.
 
     The load is **always local** (reading from the current rank's own ``from_ptr``), while the
-    store is **remote** when ``from_rank != to_rank`` (writing to a peer GPU). Both
-    ``load_cache_modifier`` and ``store_cache_modifier`` are passed through unconditionally —
-    it is the caller's responsibility to choose appropriate modifiers.
+    store is **remote** when ``from_rank != to_rank`` (writing to a peer GPU).
 
     Args:
         from_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's local memory from which to read data.
@@ -2202,7 +2194,7 @@ def put(
             - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
             - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
 
-        store_cache_modifier (str, optional): Controls cache behavior of the store (remote when ``from_rank != to_rank``). It is the caller's responsibility to use modifiers appropriately. Supported values are:
+        store_cache_modifier (str, optional): Controls cache behavior of the store (remote when ``from_rank != to_rank``). Supported values are:
             - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
             - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
             - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.

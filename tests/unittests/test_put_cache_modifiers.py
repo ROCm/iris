@@ -38,8 +38,6 @@ def put_kernel(
 
 # Define cache modifiers for load and store operations
 LOAD_CACHE_MODIFIERS = [None, "", ".ca", ".cg", ".cv"]
-# store_cache_modifier is passed unconditionally; it is the caller's responsibility
-# to choose appropriate modifiers for local vs. remote stores.
 STORE_CACHE_MODIFIERS = [None, "", ".wb", ".cg", ".cs", ".wt"]
 
 
@@ -79,11 +77,7 @@ def test_put_cache_modifiers_local(load_cache_modifier, store_cache_modifier):
     "load_cache_modifier,store_cache_modifier", list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS))
 )
 def test_put_cache_modifiers_remote(load_cache_modifier, store_cache_modifier):
-    """Test remote put (from_rank != to_rank) with various cache modifiers.
-
-    store_cache_modifier is passed unconditionally to the remote tl.store(). It is the
-    caller's responsibility to use modifiers appropriately for remote operations.
-    """
+    """Test remote put (from_rank != to_rank) with various cache modifiers."""
     shmem = iris.iris(1 << 20)
     heap_bases = shmem.get_heap_bases()
     num_ranks = shmem.get_num_ranks()
