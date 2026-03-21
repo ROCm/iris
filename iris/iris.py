@@ -2117,7 +2117,7 @@ def get(
 
     This function performs a memory read operation by translating the `from_ptr`
     from the current rank's address space to the `from_rank`'s address space, loading data
-    from the `from_rank`` memory location, and storing it to the local `to_ptr`.
+    from the `from_rank`'s memory location, and storing it to the local `to_ptr`.
 
     The load is **remote** when ``from_rank != to_rank`` (reading from a peer GPU), while the
     store is **always local** (writing to `to_ptr` in the current rank's own memory). Both
