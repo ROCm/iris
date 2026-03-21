@@ -111,6 +111,11 @@ def test_copy_local_read_remote_write(load_cache_modifier, store_cache_modifier)
         data[i, :] = base * (i + 1)
 
     results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
+
+    # Barrier to ensure all ranks have initialized their data before any rank launches
+    # the kernel (which reads remote data in the remote-read case).
+    shmem.barrier()
+
     grid = lambda meta: (1,)
     copy_kernel_local_read_remote_write[grid](
         data, results, cur_rank, num_ranks, BLOCK_SIZE, heap_bases, load_cache_modifier, store_cache_modifier
@@ -154,6 +159,11 @@ def test_copy_remote_read_local_write(load_cache_modifier, store_cache_modifier)
         data[i, :] = base * (i + 1)
 
     results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
+
+    # Barrier to ensure all ranks have initialized their data before any rank launches
+    # the kernel (which reads remote data in the remote-read case).
+    shmem.barrier()
+
     grid = lambda meta: (1,)
     copy_kernel_remote_read_local_write[grid](
         data, results, cur_rank, num_ranks, BLOCK_SIZE, heap_bases, load_cache_modifier, store_cache_modifier
