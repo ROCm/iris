@@ -26,46 +26,22 @@ def copy_kernel_local_read_remote_write(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < BLOCK_SIZE
 
-    # Copy from current rank to other ranks
+    # Copy from current rank to other ranks.
+    # Both load and store cache modifiers are passed unconditionally.
     for target_rank in range(num_ranks):
         src_data = data + BLOCK_SIZE * cur_rank
         dest_data = results + BLOCK_SIZE * cur_rank
-        if load_cache_modifier is None and store_cache_modifier is None:
-            iris.copy(src_data + offsets, dest_data + offsets, cur_rank, target_rank, cur_rank, heap_bases, mask=mask)
-        elif load_cache_modifier is None:
-            iris.copy(
-                src_data + offsets,
-                dest_data + offsets,
-                cur_rank,
-                target_rank,
-                cur_rank,
-                heap_bases,
-                mask=mask,
-                store_cache_modifier=store_cache_modifier,
-            )
-        elif store_cache_modifier is None:
-            iris.copy(
-                src_data + offsets,
-                dest_data + offsets,
-                cur_rank,
-                target_rank,
-                cur_rank,
-                heap_bases,
-                mask=mask,
-                load_cache_modifier=load_cache_modifier,
-            )
-        else:
-            iris.copy(
-                src_data + offsets,
-                dest_data + offsets,
-                cur_rank,
-                target_rank,
-                cur_rank,
-                heap_bases,
-                mask=mask,
-                load_cache_modifier=load_cache_modifier,
-                store_cache_modifier=store_cache_modifier,
-            )
+        iris.copy(
+            src_data + offsets,
+            dest_data + offsets,
+            cur_rank,
+            target_rank,
+            cur_rank,
+            heap_bases,
+            mask=mask,
+            load_cache_modifier=load_cache_modifier,
+            store_cache_modifier=store_cache_modifier,
+        )
 
 
 @triton.jit
@@ -85,70 +61,43 @@ def copy_kernel_remote_read_local_write(
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < BLOCK_SIZE
 
-    # Copy from other ranks to current rank
+    # Copy from other ranks to current rank.
+    # Both load and store cache modifiers are passed unconditionally.
     for source_rank in range(num_ranks):
         src_data = data + BLOCK_SIZE * source_rank
         dest_data = results + BLOCK_SIZE * source_rank
-        if load_cache_modifier is None and store_cache_modifier is None:
-            iris.copy(src_data + offsets, dest_data + offsets, source_rank, cur_rank, cur_rank, heap_bases, mask=mask)
-        elif load_cache_modifier is None:
-            iris.copy(
-                src_data + offsets,
-                dest_data + offsets,
-                source_rank,
-                cur_rank,
-                cur_rank,
-                heap_bases,
-                mask=mask,
-                store_cache_modifier=store_cache_modifier,
-            )
-        elif store_cache_modifier is None:
-            iris.copy(
-                src_data + offsets,
-                dest_data + offsets,
-                source_rank,
-                cur_rank,
-                cur_rank,
-                heap_bases,
-                mask=mask,
-                load_cache_modifier=load_cache_modifier,
-            )
-        else:
-            iris.copy(
-                src_data + offsets,
-                dest_data + offsets,
-                source_rank,
-                cur_rank,
-                cur_rank,
-                heap_bases,
-                mask=mask,
-                load_cache_modifier=load_cache_modifier,
-                store_cache_modifier=store_cache_modifier,
-            )
+        iris.copy(
+            src_data + offsets,
+            dest_data + offsets,
+            source_rank,
+            cur_rank,
+            cur_rank,
+            heap_bases,
+            mask=mask,
+            load_cache_modifier=load_cache_modifier,
+            store_cache_modifier=store_cache_modifier,
+        )
 
 
-# Define cache modifiers for load and store operations
+# Define cache modifiers for load and store operations.
+# Both load and store modifiers are passed unconditionally to tl.load()/tl.store().
+# It is the caller's responsibility to use appropriate modifiers for local vs. remote ops.
 LOAD_CACHE_MODIFIERS = [None, "", ".ca", ".cg", ".cv"]
-# Remote stores (cross-GPU IPC) cannot use cache modifier bits
-# Only default (None or empty string) works - cache bits break coherency
-STORE_CACHE_MODIFIERS_REMOTE_WRITE = [None, ""]
-# For testing remote reads (which work with all load modifiers),
-# we can use all store modifiers since the store is local
-LOAD_CACHE_MODIFIERS_REMOTE_READ = [None, "", ".ca", ".cg", ".cv"]
-STORE_CACHE_MODIFIERS_LOCAL_WRITE = [None, "", ".wb", ".cg", ".cs", ".wt"]
+STORE_CACHE_MODIFIERS = [None, "", ".wb", ".cg", ".cs", ".wt"]
 
 
 @pytest.mark.parametrize(
-    "load_cache_modifier,store_cache_modifier", list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS_REMOTE_WRITE))
+    "load_cache_modifier,store_cache_modifier", list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS))
 )
 def test_copy_local_read_remote_write(load_cache_modifier, store_cache_modifier):
     """Test copy: local read → remote write
 
     Direction: from_rank=cur_rank (local), to_rank=other (remote)
-    - Load: from LOCAL memory (all cache modifiers should work)
-    - Store: to REMOTE memory (only None/"" work, cache bits break coherency)
+    - Load: from LOCAL memory
+    - Store: to REMOTE memory
 
-    This tests that load cache modifiers work for local reads.
+    store_cache_modifier is passed unconditionally to the remote tl.store(). It is the
+    caller's responsibility to use modifiers appropriately.
     """
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
@@ -181,16 +130,17 @@ def test_copy_local_read_remote_write(load_cache_modifier, store_cache_modifier)
 
 @pytest.mark.parametrize(
     "load_cache_modifier,store_cache_modifier",
-    list(product(LOAD_CACHE_MODIFIERS_REMOTE_READ, STORE_CACHE_MODIFIERS_LOCAL_WRITE)),
+    list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS)),
 )
 def test_copy_remote_read_local_write(load_cache_modifier, store_cache_modifier):
     """Test copy: remote read → local write
 
     Direction: from_rank=other (remote), to_rank=cur_rank (local)
-    - Load: from REMOTE memory (test if cache modifiers work for remote reads)
-    - Store: to LOCAL memory (all cache modifiers should work)
+    - Load: from REMOTE memory
+    - Store: to LOCAL memory
 
-    This tests whether load cache modifiers work for remote reads.
+    Both cache modifiers are passed unconditionally. It is the caller's responsibility
+    to use appropriate modifiers for local vs. remote operations.
     """
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()

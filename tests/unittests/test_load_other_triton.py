@@ -57,8 +57,9 @@ def test_load_other_api(dtype, BLOCK_SIZE):
     source_rank = shmem.get_rank()
     partner = int((source_rank + num_ranks // 2) % num_ranks)
 
-    # Fill data with partner rank value
-    data = shmem.full((BLOCK_SIZE,), partner, dtype=dtype)
+    # Fill data with source rank value so remote reads match expected values:
+    # each rank's data[i] = source_rank, so loading from partner gives partner's rank value
+    data = shmem.full((BLOCK_SIZE,), source_rank, dtype=dtype)
     results = shmem.zeros_like(data)
 
     # Use -1 as the "other" value for masked-out elements

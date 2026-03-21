@@ -10,7 +10,7 @@ from itertools import product
 
 
 @triton.jit
-def kernel(
+def load_kernel(
     data,
     results,
     source_rank: tl.constexpr,
@@ -23,25 +23,21 @@ def kernel(
     pid = tl.program_id(0)
 
     partner = int((source_rank + num_ranks // 2) % num_ranks)
-    # Compute start index of this block
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
-
-    # Guard for out-of-bounds accesses
     mask = offsets < BLOCK_SIZE
 
-    if cache_modifier is None:
-        result = iris.load(data + offsets, source_rank, partner, heap_bases, mask=mask, volatile=volatile)
-    else:
-        result = iris.load(
-            data + offsets,
-            source_rank,
-            partner,
-            heap_bases,
-            mask=mask,
-            cache_modifier=cache_modifier,
-            volatile=volatile,
-        )
+    # cache_modifier is passed unconditionally; it is the caller's responsibility
+    # to use an appropriate modifier for local vs. remote loads.
+    result = iris.load(
+        data + offsets,
+        source_rank,
+        partner,
+        heap_bases,
+        mask=mask,
+        cache_modifier=cache_modifier,
+        volatile=volatile,
+    )
 
     tl.store(results + offsets, result, mask=mask)
 
@@ -53,7 +49,11 @@ VOLATILE_OPTIONS = [False, True]
 
 @pytest.mark.parametrize("cache_modifier,volatile", list(product(CACHE_MODIFIERS, VOLATILE_OPTIONS)))
 def test_load_cache_modifiers(cache_modifier, volatile):
-    """Test load with various cache modifiers and volatile settings."""
+    """Test load with various cache modifiers and volatile settings.
+
+    cache_modifier is passed unconditionally to tl.load(). It is the caller's
+    responsibility to use modifiers appropriately for local vs. remote loads.
+    """
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     heap_bases = shmem.get_heap_bases()
@@ -67,10 +67,10 @@ def test_load_cache_modifiers(cache_modifier, volatile):
     shmem.barrier()
 
     grid = lambda meta: (1,)
-    kernel[grid](data, results, source_rank, num_ranks, BLOCK_SIZE, heap_bases, cache_modifier, volatile)
+    load_kernel[grid](data, results, source_rank, num_ranks, BLOCK_SIZE, heap_bases, cache_modifier, volatile)
     shmem.barrier()
 
-    # Verify the result
+    # Verify the result - should have loaded from partner rank
     expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda") * partner
 
     try:

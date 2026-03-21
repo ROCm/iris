@@ -27,42 +27,19 @@ def get_kernel(
 
     acc = tl.zeros([BLOCK_SIZE], dtype=data.type.element_ty)
 
-    # Loop over all ranks, get the stored data with cache modifiers
-    # We test default values set by the function when parameters are None
+    # Loop over all ranks and get data with cache modifiers applied unconditionally.
+    # The load is remote when from_rank != cur_rank; the store to results is always local.
     for target_rank in range(num_ranks):
-        if load_cache_modifier is None and store_cache_modifier is None:
-            iris.get(data + offsets, results + offsets, cur_rank, target_rank, heap_bases, mask=mask)
-        elif load_cache_modifier is None:
-            iris.get(
-                data + offsets,
-                results + offsets,
-                cur_rank,
-                target_rank,
-                heap_bases,
-                mask=mask,
-                store_cache_modifier=store_cache_modifier,
-            )
-        elif store_cache_modifier is None:
-            iris.get(
-                data + offsets,
-                results + offsets,
-                cur_rank,
-                target_rank,
-                heap_bases,
-                mask=mask,
-                load_cache_modifier=load_cache_modifier,
-            )
-        else:
-            iris.get(
-                data + offsets,
-                results + offsets,
-                cur_rank,
-                target_rank,
-                heap_bases,
-                mask=mask,
-                load_cache_modifier=load_cache_modifier,
-                store_cache_modifier=store_cache_modifier,
-            )
+        iris.get(
+            data + offsets,
+            results + offsets,
+            cur_rank,
+            target_rank,
+            heap_bases,
+            mask=mask,
+            load_cache_modifier=load_cache_modifier,
+            store_cache_modifier=store_cache_modifier,
+        )
         acc += tl.load(results + offsets, mask=mask)
 
     # Store the accumulated value back to the output
@@ -78,7 +55,12 @@ STORE_CACHE_MODIFIERS = [None, "", ".wb", ".cg", ".cs", ".wt"]
     "load_cache_modifier,store_cache_modifier", list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS))
 )
 def test_get_cache_modifiers(load_cache_modifier, store_cache_modifier):
-    """Test get (copy from other rank) with various cache modifiers."""
+    """Test get (copy from other rank) with various cache modifiers.
+
+    load_cache_modifier is passed unconditionally; it applies to the remote load when
+    from_rank != to_rank. store_cache_modifier applies to the always-local store to to_ptr.
+    It is the caller's responsibility to use modifiers appropriately.
+    """
     shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     heap_bases = shmem.get_heap_bases()

@@ -68,11 +68,12 @@ def test_put_other_api(dtype, BLOCK_SIZE):
     shmem.barrier()
 
     # Verify the results
-    # First half should contain the value 1.0 (from data)
-    # Second half should contain the "other" value (-1.0) since mask was False
+    # First half should contain the value 1.0 (from data, written via masked put)
+    # Second half stays at 0.0 because iris.put stores with mask, so masked-out positions
+    # in results are never written.
     expected = torch.zeros(BLOCK_SIZE, dtype=dtype, device="cuda")
     expected[: BLOCK_SIZE // 2] = 1.0
-    expected[BLOCK_SIZE // 2 :] = other_value
+    expected[BLOCK_SIZE // 2 :] = 0.0
 
     try:
         torch.testing.assert_close(results, expected, rtol=0, atol=0)
