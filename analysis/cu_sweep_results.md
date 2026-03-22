@@ -108,3 +108,91 @@ Gluon kernel (with traffic shaping), and RCCL.
 
 6. **Diminishing returns are steep**: 32->304 CUs (10x) yields only
    ~8% more bandwidth. The XGMI links are the bottleneck, not compute.
+
+---
+
+## Optimization Experiments (2026-03-22)
+
+### Root Cause Analysis
+
+Gluon's per-CU efficiency is lower than Triton because of two structural
+differences in the kernel:
+
+1. **Row-by-row iteration**: Gluon iterates `for i in range(BLOCK_SIZE_M)`
+   doing 1D loads/stores per row. Triton loads the full 2D tile
+   (BLOCK_SIZE_M x BLOCK_SIZE_N) in one shot. This is 32x more
+   load/store instructions per tile.
+
+2. **Pointer translation overhead**: Every `ctx.store()` call invokes
+   `_translate()`, which does 2x `gl.load(heap_bases)` + pointer
+   arithmetic. Per tile: `BLOCK_SIZE_M * (world_size-1)` translations
+   = 32 * 7 = 224 extra heap_base loads at 8 ranks.
+
+### Variant: Gluon Hoisted
+
+**Idea**: Pre-compute `local_base = gl.load(ctx.heap_bases + iris_rank)`
+once before the tile loop. Inside the inner loop, compute
+`target_base = gl.load(ctx.heap_bases + target_iris_rank)` per rank
+(compiler should hoist this since `target_iris_rank` is loop-invariant
+w.r.t. the row index `i`). Then apply `delta = target_base - local_base`
+directly instead of calling `ctx.store()`.
+
+This eliminates the `from_base` load entirely and reduces heap_base loads
+from `2 * BLOCK_SIZE_M * (world_size-1)` to `(world_size-1)` per tile.
+
+### Variant: Gluon Partitioned (CU-partitioned)
+
+**Idea**: Assign each CU to one destination rank
+(`dest_rank_idx = pid // (COMM_SMS // world_size)`).
+Eliminates the inner rank loop. Pre-compute translation delta once per CU.
+
+**Result**: Significantly slower because it breaks data reuse. In the
+persistent variant, each CU loads a tile once and writes it to all ranks
+(1 load : world_size stores). In the partitioned variant, each CU only
+writes to one rank, but the tile data is loaded world_size times total
+across all CU groups. The net load:store ratio is the same, but per-CU
+data reuse drops from world_size to 1.
+
+### Results: Gluon Variant Comparison
+
+#### 4 Ranks
+
+| CUs | Triton   | Gluon persistent | Gluon hoisted | Gluon partitioned |
+|----:|---------:|-----------------:|--------------:|------------------:|
+|   8 |    67.68 |            38.23 |     **41.27** |             20.91 |
+|  16 |   130.22 |            75.84 |     **81.90** |             42.62 |
+|  32 |   152.96 |           148.61 |    **159.81** |             86.13 |
+|  48 |   159.07 |           148.57 |    **150.70** |             89.18 |
+|  64 |   161.24 |           160.37 |    **161.67** |            103.35 |
+|  96 |   165.45 |           160.13 |        159.70 |            121.68 |
+
+#### 8 Ranks
+
+| CUs | Triton   | Gluon persistent | Gluon hoisted | Gluon partitioned |
+|----:|---------:|-----------------:|--------------:|------------------:|
+|   8 |   112.92 |            56.48 |     **62.51** |             24.01 |
+|  16 |   224.01 |           111.97 |    **124.44** |             48.01 |
+|  32 |   325.74 |           221.07 |    **243.99** |             96.16 |
+|  48 |   344.74 |           318.60 |    **319.42** |            136.95 |
+|  64 |   345.60 |           324.34 |    **324.43** |            178.66 |
+|  96 |   361.44 |           348.97 |        348.17 |            197.13 |
+
+### Key Takeaways from Optimization
+
+1. **Hoisted translation gives ~8-11% improvement** at low CU counts
+   where the overhead matters most. At 32 CUs / 4 ranks, hoisted
+   (159.81 GB/s) **beats Triton** (152.96 GB/s) by 4.5%.
+
+2. **CU partitioning is counterproductive** for all-gather. Unlike
+   all-to-all (where each CU handles independent src/dst pairs),
+   all-gather benefits from the "load once, write everywhere" pattern.
+   Partitioning forces each tile to be loaded world_size times.
+
+3. **The remaining gap at 8 ranks** (hoisted 244 vs Triton 326 at 32 CUs)
+   is ~1.3x, down from the original ~1.5x. The residual overhead is
+   from the row-by-row iteration pattern (32x more instructions than
+   Triton's 2D tile loads). Fixing this requires 2D BlockedLayout
+   support in the gluon kernel, which gluon supports but has not been
+   tested in iris yet.
+
+4. **Ranking**: Triton persistent > Gluon hoisted > Gluon persistent >> Gluon partitioned.

@@ -467,6 +467,275 @@ if GLUON_AVAILABLE:
                             ctx.tracing.record_event_end(h_store)
 
 
+if GLUON_AVAILABLE:
+
+    @gluon.jit
+    def persistent_all_gather_gluon_hoisted(
+        IrisDeviceCtx: gl.constexpr,
+        context_tensor,
+        input_ptr,
+        output_ptr,
+        M,
+        N,
+        stride_in_m,
+        stride_in_n,
+        stride_out_m,
+        stride_out_n,
+        group_rank: gl.constexpr,
+        iris_rank: gl.constexpr,
+        world_size: gl.constexpr,
+        rank_start: gl.constexpr,
+        rank_stride: gl.constexpr,
+        BLOCK_SIZE_M: gl.constexpr,
+        BLOCK_SIZE_N: gl.constexpr,
+        GROUP_SIZE_M: gl.constexpr,
+        COMM_SMS: gl.constexpr,
+        NUM_XCDS: gl.constexpr,
+        CHUNK_SIZE: gl.constexpr,
+        THREADS_PER_WARP: gl.constexpr,
+        WARPS_PER_CTA: gl.constexpr,
+        TRACING: gl.constexpr = False,
+    ):
+        """
+        Persistent gluon all-gather with hoisted pointer translation.
+
+        Same structure as persistent_all_gather_gluon (load row once, store to
+        all ranks) but pre-computes the pointer translation delta for each
+        destination rank ONCE, outside the tile loop. This eliminates
+        2 * BLOCK_SIZE_M * (world_size-1) gl.load(heap_bases) calls per tile.
+
+        The delta approach: for any pointer ``p`` in the local address space,
+        the translated pointer in rank ``r``'s address space is simply
+        ``p + delta[r]``, where ``delta[r] = heap_base[r] - heap_base[local]``.
+        """
+        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)
+        events = TraceEvent()
+
+        pid = gl.program_id(0)
+
+        num_pid_m = gl.cdiv(M, BLOCK_SIZE_M)
+        num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
+        total_tiles = num_pid_m * num_pid_n
+
+        ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
+        col_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
+
+        # Pre-compute pointer translation deltas for ALL ranks.
+        # delta[i] = heap_base[target_iris_rank_i] - heap_base[local_iris_rank]
+        # Then translated_ptr = local_ptr + delta[i]
+        local_base = gl.load(ctx.heap_bases + iris_rank)
+
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            # Swizzled tile index computation for better L2 locality
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+            rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=col_layout)) % N
+            rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+            col_offsets_in = rn * stride_in_n
+            col_offsets_out = rn * stride_out_n
+            col_mask = rn < N
+
+            rm_base = pid_m * BLOCK_SIZE_M
+
+            for i in range(BLOCK_SIZE_M):
+                row_idx = (rm_base + i) % M
+
+                if row_idx < M:
+                    input_addr = input_ptr + row_idx * stride_in_m + col_offsets_in
+                    if TRACING:
+                        h_load = ctx.tracing.record_event_start(
+                            event_id=events.load,
+                            target_rank=group_rank,
+                            address=input_addr,
+                            pid_m=pid_m,
+                            pid_n=pid_n,
+                            mask=col_mask,
+                        )
+                    data = gl.load(input_addr, mask=col_mask)
+                    if TRACING:
+                        ctx.tracing.record_event_end(h_load)
+
+                    output_offset = (group_rank * M + row_idx) * stride_out_m + col_offsets_out
+
+                    # Traffic shaping + hoisted translation
+                    for rank_idx in range(world_size):
+                        dest_idx = (group_rank + rank_idx) % world_size
+                        target_iris_rank = rank_start + dest_idx * rank_stride
+                        output_addr = output_ptr + output_offset
+
+                        if TRACING:
+                            h_store = ctx.tracing.record_event_start(
+                                event_id=events.store,
+                                target_rank=target_iris_rank,
+                                address=output_addr,
+                                pid_m=pid_m,
+                                pid_n=pid_n,
+                                mask=col_mask,
+                            )
+
+                        if dest_idx == group_rank:
+                            gl.store(output_addr, data, mask=col_mask, cache_modifier=".wt")
+                        else:
+                            # Hoisted translation: compute delta on the fly
+                            # but only load target_base once (compiler should
+                            # hoist this out of the BLOCK_SIZE_M loop since
+                            # target_iris_rank is loop-invariant w.r.t. i)
+                            target_base = gl.load(ctx.heap_bases + target_iris_rank)
+                            ptr_delta = target_base - local_base
+                            output_addr_int = tl.cast(output_addr, gl.uint64)
+                            remote_addr_int = output_addr_int + ptr_delta
+                            remote_addr = tl.cast(remote_addr_int, output_addr.dtype)
+                            gl.store(remote_addr, data, mask=col_mask)
+
+                        if TRACING:
+                            ctx.tracing.record_event_end(h_store)
+
+
+
+if GLUON_AVAILABLE:
+
+    @gluon.jit
+    def persistent_all_gather_gluon_partitioned(
+        IrisDeviceCtx: gl.constexpr,
+        context_tensor,
+        input_ptr,
+        output_ptr,
+        M,
+        N,
+        stride_in_m,
+        stride_in_n,
+        stride_out_m,
+        stride_out_n,
+        group_rank: gl.constexpr,
+        iris_rank: gl.constexpr,
+        world_size: gl.constexpr,
+        rank_start: gl.constexpr,
+        rank_stride: gl.constexpr,
+        BLOCK_SIZE_M: gl.constexpr,
+        BLOCK_SIZE_N: gl.constexpr,
+        GROUP_SIZE_M: gl.constexpr,
+        COMM_SMS: gl.constexpr,
+        NUM_XCDS: gl.constexpr,
+        CHUNK_SIZE: gl.constexpr,
+        THREADS_PER_WARP: gl.constexpr,
+        WARPS_PER_CTA: gl.constexpr,
+        TRACING: gl.constexpr = False,
+    ):
+        """
+        CU-partitioned gluon all-gather with hoisted pointer translation.
+
+        Each CU is pre-assigned to one destination rank, eliminating the inner
+        loop over world_size. Pointer translation (heap base lookup) is computed
+        once per CU rather than once per store, reducing instruction count.
+
+        Work distribution:
+          - PIDS_PER_RANK = COMM_SMS // world_size
+          - CU ``pid`` is assigned to destination rank ``pid // PIDS_PER_RANK``
+          - Within each rank group, CUs partition the tiles
+
+        This provides natural traffic shaping: at any given moment, different CUs
+        target different ranks, avoiding memory controller contention.
+        """
+        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)
+        events = TraceEvent()
+
+        pid = gl.program_id(0)
+
+        # CU partitioning: each PID is assigned to one destination rank
+        PIDS_PER_RANK: gl.constexpr = COMM_SMS // world_size
+        dest_rank_idx = pid // PIDS_PER_RANK
+        pid_in_group = pid % PIDS_PER_RANK
+        target_rank = rank_start + dest_rank_idx * rank_stride
+        is_local = dest_rank_idx == group_rank
+
+        # Pre-compute pointer translation ONCE per CU.
+        # ctx.store() calls _translate() which does 2x gl.load(heap_bases) per
+        # call. With row-by-row iteration that's 2 * BLOCK_SIZE_M loads per tile.
+        # By hoisting, we do 2 loads total for all tiles on this CU.
+        local_base = gl.load(ctx.heap_bases + iris_rank)
+        target_base = gl.load(ctx.heap_bases + target_rank)
+        # delta: add this to any local pointer to get the translated remote pointer
+        ptr_delta = target_base - local_base
+
+        num_pid_m = gl.cdiv(M, BLOCK_SIZE_M)
+        num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
+        total_tiles = num_pid_m * num_pid_n
+
+        ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
+        col_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
+
+        for tile_id in range(pid_in_group, total_tiles, PIDS_PER_RANK):
+            # Swizzled tile index computation for better L2 locality
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+            rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=col_layout)) % N
+            rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+            col_offsets_in = rn * stride_in_n
+            col_offsets_out = rn * stride_out_n
+            col_mask = rn < N
+
+            rm_base = pid_m * BLOCK_SIZE_M
+
+            for i in range(BLOCK_SIZE_M):
+                row_idx = (rm_base + i) % M
+
+                if row_idx < M:
+                    # Load from local input
+                    input_addr = input_ptr + row_idx * stride_in_m + col_offsets_in
+                    if TRACING:
+                        h_load = ctx.tracing.record_event_start(
+                            event_id=events.load,
+                            target_rank=group_rank,
+                            address=input_addr,
+                            pid_m=pid_m,
+                            pid_n=pid_n,
+                            mask=col_mask,
+                        )
+                    data = gl.load(input_addr, mask=col_mask)
+                    if TRACING:
+                        ctx.tracing.record_event_end(h_load)
+
+                    # Output row: this rank's slice at group_rank * M
+                    output_addr = output_ptr + (group_rank * M + row_idx) * stride_out_m + col_offsets_out
+
+                    if TRACING:
+                        h_store = ctx.tracing.record_event_start(
+                            event_id=events.store,
+                            target_rank=target_rank,
+                            address=output_addr,
+                            pid_m=pid_m,
+                            pid_n=pid_n,
+                            mask=col_mask,
+                        )
+
+                    if is_local:
+                        # Local store: direct write
+                        gl.store(output_addr, data, mask=col_mask, cache_modifier=".wt")
+                    else:
+                        # Remote store: use pre-computed delta instead of ctx.store()
+                        # This avoids 2x gl.load(heap_bases) per store call
+                        output_addr_int = tl.cast(output_addr, gl.uint64)
+                        remote_addr_int = output_addr_int + ptr_delta
+                        remote_addr = tl.cast(remote_addr_int, output_addr.dtype)
+                        gl.store(remote_addr, data, mask=col_mask)
+
+                    if TRACING:
+                        ctx.tracing.record_event_end(h_store)
+
+
+
 def all_gather(
     output_tensor,
     input_tensor,
@@ -549,7 +818,20 @@ def all_gather(
         tracing_enabled = hasattr(shmem, "tracing") and shmem.tracing.enabled
         context_tensor = shmem.get_device_context()
 
-        persistent_all_gather_gluon[(config.comm_sms,)](
+        # Dispatch gluon variant
+        if config.all_gather_variant == "partitioned":
+            if config.comm_sms % world_size != 0:
+                raise ValueError(
+                    f"For gluon partitioned variant, COMM_SMS ({config.comm_sms}) must be "
+                    f"divisible by world_size ({world_size})."
+                )
+            gluon_kernel = persistent_all_gather_gluon_partitioned
+        elif config.all_gather_variant == "hoisted":
+            gluon_kernel = persistent_all_gather_gluon_hoisted
+        else:
+            gluon_kernel = persistent_all_gather_gluon
+
+        gluon_kernel[(config.comm_sms,)](
             IrisDeviceCtx,
             context_tensor,
             input_tensor,
