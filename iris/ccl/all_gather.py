@@ -339,9 +339,7 @@ if GLUON_AVAILABLE:
         # With 64 threads/warp and 4 warps: spt * 256 = BLOCK_SIZE_N
         # spt=4 enables dwordx4 vectorized loads for fp16
         SPT_N: gl.constexpr = BLOCK_SIZE_N // 256
-        layout_col: gl.constexpr = gl.BlockedLayout(
-            [SPT_N], [64], [4], [0]
-        )
+        layout_col: gl.constexpr = gl.BlockedLayout([SPT_N], [64], [4], [0])
 
         for tile_id in range(pid, total_tiles, COMM_SMS):
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
