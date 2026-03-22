@@ -315,6 +315,9 @@ if GLUON_AVAILABLE:
         COMM_SMS: gl.constexpr,
         NUM_XCDS: gl.constexpr,
         CHUNK_SIZE: gl.constexpr,
+        SIZE_PER_THREAD: gl.constexpr = 1,
+        THREADS_PER_WARP: gl.constexpr = 64,
+        WARPS_PER_CTA: gl.constexpr = 4,
     ):
         """
         Persistent all-gather kernel using Gluon.
@@ -339,10 +342,12 @@ if GLUON_AVAILABLE:
             pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
             pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-            # Layout for dwordx4 vectorization
-            # For AMD: 64 threads/warp, 4 warps = 256 threads total
+            # Layout for vectorization
             # BlockedLayout: [size_per_thread], [threads_per_warp], [warps_per_cta], [order]
-            layout_col: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])
+            # Increasing size_per_thread enables wider vectorized loads (e.g. dwordx4)
+            layout_col: gl.constexpr = gl.BlockedLayout(
+                [SIZE_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0]
+            )
 
             rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=layout_col)) % N
             rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
@@ -478,6 +483,9 @@ def all_gather(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            config.gluon_size_per_thread,
+            config.gluon_threads_per_warp,
+            config.gluon_warps_per_cta,
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,
