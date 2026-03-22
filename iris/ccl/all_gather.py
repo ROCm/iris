@@ -315,16 +315,63 @@ if GLUON_AVAILABLE:
         COMM_SMS: gl.constexpr,
         NUM_XCDS: gl.constexpr,
         CHUNK_SIZE: gl.constexpr,
+        THREADS_PER_WARP: gl.constexpr,
+        WARPS_PER_CTA: gl.constexpr,
     ):
         """
-        Persistent all-gather kernel using Gluon with 2D vectorized block operations.
+        Persistent all-gather kernel using Gluon with explicit memory layout control.
 
-        Each rank sends its input tensor to all ranks, and all ranks receive
-        and concatenate all input tensors along dimension 0 (rows), matching
-        torch.distributed.all_gather_into_tensor behavior.
+        Each rank loads its local input once per row and writes it to the
+        corresponding output slice on ALL ranks (local + remote), avoiding
+        redundant loads. Column indices use an explicit BlockedLayout to
+        control vectorization width.
 
-        Uses 2D pointer construction and full-block loads/stores to match
-        Triton's vectorization and memory access patterns.
+        Memory layout (BlockedLayout):
+            The column dimension is distributed across the GPU thread hierarchy
+            using gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [order]).
+
+            - ELEMS_PER_THREAD: number of contiguous elements each thread loads/stores.
+              Controls the vector width of memory instructions. For fp16:
+                1 -> 2-byte scalar load
+                2 -> 4-byte dword load
+                4 -> 8-byte dwordx4 load (optimal on AMD GFX9+)
+            - THREADS_PER_WARP: threads per warp/wavefront (64 on AMD, 32 on NVIDIA).
+            - WARPS_PER_CTA: number of warps in the cooperative thread array (workgroup).
+
+            The product ELEMS_PER_THREAD * THREADS_PER_WARP * WARPS_PER_CTA must
+            equal BLOCK_SIZE_N. ELEMS_PER_THREAD is derived as:
+                ELEMS_PER_THREAD = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
+
+        Constraints (validated by host wrapper before launch):
+            - BLOCK_SIZE_N must be a multiple of (THREADS_PER_WARP * WARPS_PER_CTA).
+            - BLOCK_SIZE_N must be >= (THREADS_PER_WARP * WARPS_PER_CTA) so that
+              ELEMS_PER_THREAD >= 1.
+            - WARPS_PER_CTA must match the num_warps kernel launch parameter.
+            - THREADS_PER_WARP must match the hardware wavefront size (64 for AMD).
+
+        Args:
+            IrisDeviceCtx: Gluon device context class for remote memory operations.
+            context_tensor: Opaque tensor holding IrisDeviceCtx state.
+            input_ptr: Pointer to local input tensor of shape (M, N).
+            output_ptr: Pointer to output tensor of shape (world_size * M, N).
+            M: Number of rows in the input tensor (per rank).
+            N: Number of columns.
+            stride_in_m, stride_in_n: Row and column strides for input tensor.
+            stride_out_m, stride_out_n: Row and column strides for output tensor.
+            group_rank: This rank's index within the ProcessGroup (0..world_size-1).
+            iris_rank: This rank's global index in the iris context (for RMA addressing).
+            world_size: Total number of ranks in the group.
+            rank_start: First iris rank in the group (for RMA target computation).
+            rank_stride: Stride between consecutive iris ranks in the group.
+            BLOCK_SIZE_M: Number of rows per tile.
+            BLOCK_SIZE_N: Number of columns per tile. Must be a multiple of
+                          (THREADS_PER_WARP * WARPS_PER_CTA).
+            GROUP_SIZE_M: Swizzle group size for M-dimension tiling.
+            COMM_SMS: Number of SMs used for persistent scheduling.
+            NUM_XCDS: Number of XCDs (chiplet count).
+            CHUNK_SIZE: Chunk size for XCD-aware tile mapping.
+            THREADS_PER_WARP: Threads per warp/wavefront (64 for AMD, 32 for NVIDIA).
+            WARPS_PER_CTA: Number of warps per workgroup. Must match num_warps.
         """
         ctx = IrisDeviceCtx.initialize(context_tensor)
 
@@ -334,14 +381,17 @@ if GLUON_AVAILABLE:
         num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
         total_tiles = num_pid_m * num_pid_n
 
-        # 1D column layout for vectorized loads/stores
-        # spt * tpw * wpc must equal BLOCK_SIZE_N
-        # With 64 threads/warp and 4 warps: spt * 256 = BLOCK_SIZE_N
-        # spt=4 enables dwordx4 vectorized loads for fp16
-        SPT_N: gl.constexpr = BLOCK_SIZE_N // 256
-        layout_col: gl.constexpr = gl.BlockedLayout([SPT_N], [64], [4], [0])
+        # Build the 1D BlockedLayout for the column dimension.
+        # ELEMS_PER_THREAD controls how many contiguous elements each thread
+        # handles, which directly maps to the vector load/store width:
+        #   elems=1 -> scalar, elems=2 -> dword, elems=4 -> dwordx4 (optimal)
+        ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
+        col_layout: gl.constexpr = gl.BlockedLayout(
+            [ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0]
+        )
 
         for tile_id in range(pid, total_tiles, COMM_SMS):
+            # Swizzled tile index computation for better L2 locality
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
             group_id = tile_id // num_pid_in_group
             first_pid_m = group_id * GROUP_SIZE_M
@@ -349,32 +399,29 @@ if GLUON_AVAILABLE:
             pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
             pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-            # Column index array with explicit vectorized layout
-            rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=layout_col)) % N
+            # Build column index vector with explicit layout for vectorized access
+            rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=col_layout)) % N
             rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-            col_offsets_in_n = rn * stride_in_n
-            col_offsets_out_n = rn * stride_out_n
+            col_offsets_in = rn * stride_in_n
+            col_offsets_out = rn * stride_out_n
             col_mask = rn < N
 
-            # Precompute output row offset for this rank's data
             rm_base = pid_m * BLOCK_SIZE_M
 
-            # Row-by-row iteration with single load, broadcast to all ranks
+            # Iterate row-by-row: load each row once, then write to all ranks.
+            # This avoids reloading the same data for each destination rank.
             for i in range(BLOCK_SIZE_M):
                 row_idx = (rm_base + i) % M
 
                 if row_idx < M:
-                    # Load from local input once
-                    input_offset = row_idx * stride_in_m + col_offsets_in_n
-                    input_ptr_row = input_ptr + input_offset
-                    data = gl.load(input_ptr_row, mask=col_mask)
+                    # Single load from local input
+                    data = gl.load(input_ptr + row_idx * stride_in_m + col_offsets_in, mask=col_mask)
 
-                    # Compute output offset once (same for all ranks)
-                    output_row = group_rank * M + row_idx
-                    output_offset = output_row * stride_out_m + col_offsets_out_n
+                    # Output row position: this rank's slice starts at group_rank * M
+                    output_offset = (group_rank * M + row_idx) * stride_out_m + col_offsets_out
 
-                    # Write to ALL ranks (local + remote) with single data load
+                    # Broadcast to every rank (local store + remote RMA writes)
                     for rank_idx in range(world_size):
                         target_rank = rank_start + rank_idx * rank_stride
                         output_ptr_target = output_ptr + output_offset
@@ -443,10 +490,25 @@ def all_gather(
         if not hasattr(shmem, "get_device_context"):
             raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
 
-        if config.block_size_n < 256 or config.block_size_n % 256 != 0:
+        # Validate BlockedLayout constraints.
+        # The gluon kernel distributes BLOCK_SIZE_N elements across the thread
+        # hierarchy: ELEMS_PER_THREAD * THREADS_PER_WARP * WARPS_PER_CTA = BLOCK_SIZE_N.
+        # ELEMS_PER_THREAD controls vector load width (4 = dwordx4 for fp16, optimal).
+        threads_per_cta = config.threads_per_warp * config.num_warps
+        if config.block_size_n < threads_per_cta:
             raise ValueError(
-                f"Gluon all-gather requires block_size_n to be a multiple of 256, got {config.block_size_n}. "
-                f"Recommended: block_size_n=1024 for optimal dwordx4 vectorization."
+                f"Gluon all-gather requires block_size_n >= threads_per_warp * num_warps "
+                f"({config.threads_per_warp} * {config.num_warps} = {threads_per_cta}), "
+                f"got block_size_n={config.block_size_n}."
+            )
+        if config.block_size_n % threads_per_cta != 0:
+            raise ValueError(
+                f"Gluon all-gather requires block_size_n to be a multiple of "
+                f"threads_per_warp * num_warps ({threads_per_cta}), "
+                f"got block_size_n={config.block_size_n}. "
+                f"This ensures each thread handles a whole number of elements. "
+                f"Recommended: block_size_n=1024 with threads_per_warp=64, num_warps=4 "
+                f"for dwordx4 vectorization (elems_per_thread=4)."
             )
 
         context_tensor = shmem.get_device_context()
@@ -473,6 +535,8 @@ def all_gather(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            config.threads_per_warp,
+            config.num_warps,
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,
