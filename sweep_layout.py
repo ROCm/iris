@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Sweep gluon BlockedLayout parameters for all-gather and compare against Triton.
+Benchmark optimized gluon all-gather vs Triton vs RCCL.
 Run with: torchrun --nproc-per-node=4 sweep_layout.py
 """
 
+import os
 import torch
 import torch.distributed as dist
 import iris
@@ -20,58 +21,63 @@ def bench(shmem, config, label, n_warmup=10, n_repeat=50):
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
-    inp = shmem.zeros((M, N), dtype=DTYPE)
-    out = shmem.zeros((world_size * M, N), dtype=DTYPE)
-    inp.fill_(float(rank + 1))
+    try:
+        inp = shmem.zeros((M, N), dtype=DTYPE)
+        out = shmem.zeros((world_size * M, N), dtype=DTYPE)
+        inp.fill_(float(rank + 1))
 
-    # Warmup
-    for _ in range(n_warmup):
+        # Warmup
+        for _ in range(n_warmup):
+            out.zero_()
+            shmem.barrier()
+            all_gather(out, inp, shmem, config=config)
+            shmem.barrier()
+
+        # Timed runs
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+
+        shmem.barrier()
+        start.record()
+        for _ in range(n_repeat):
+            all_gather(out, inp, shmem, config=config)
+        end.record()
+        torch.cuda.synchronize()
+        shmem.barrier()
+
+        ms = start.elapsed_time(end) / n_repeat
+        element_size = torch.tensor([], dtype=DTYPE).element_size()
+        total_bytes = (world_size - 1) * M * N * element_size
+        bw = (total_bytes / 1e9) / (ms / 1e3)
+
+        # Validate
         out.zero_()
+        inp.fill_(float(rank + 1))
         shmem.barrier()
         all_gather(out, inp, shmem, config=config)
         shmem.barrier()
 
-    # Timed runs
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+        expected = torch.zeros(world_size * M, N, dtype=DTYPE, device=f"cuda:{rank}")
+        for r in range(world_size):
+            expected[r * M : (r + 1) * M, :] = float(r + 1)
+        valid = torch.allclose(out, expected, atol=1e-3)
 
-    shmem.barrier()
-    start.record()
-    for _ in range(n_repeat):
-        all_gather(out, inp, shmem, config=config)
-    end.record()
-    torch.cuda.synchronize()
-    shmem.barrier()
+        if rank == 0:
+            status = "PASS" if valid else "FAIL"
+            print(f"{label:50s}  {ms:8.3f} ms  {bw:8.2f} GB/s  [{status}]")
 
-    ms = start.elapsed_time(end) / n_repeat
-    element_size = torch.tensor([], dtype=DTYPE).element_size()
-    total_bytes = (world_size - 1) * M * N * element_size
-    bw = (total_bytes / 1e9) / (ms / 1e3)
-
-    # Validate
-    out.zero_()
-    inp.fill_(float(rank + 1))
-    shmem.barrier()
-    all_gather(out, inp, shmem, config=config)
-    shmem.barrier()
-
-    expected = torch.zeros(world_size * M, N, dtype=DTYPE, device=f"cuda:{rank}")
-    for r in range(world_size):
-        expected[r * M : (r + 1) * M, :] = float(r + 1)
-    valid = torch.allclose(out, expected, atol=1e-3)
-
-    if rank == 0:
-        status = "PASS" if valid else "FAIL"
-        print(f"{label:50s}  {ms:8.3f} ms  {bw:8.2f} GB/s  [{status}]")
-
-    return ms, bw, valid
+        return ms, bw, valid
+    except Exception as e:
+        if rank == 0:
+            err_str = str(e).split("\n")[0][:80]
+            print(f"{label:50s}  {'---':>8s}  {'---':>8s}  [ERROR: {err_str}]")
+        return None, None, False
 
 
 def main():
-    dist.init_process_group(
-        backend="nccl",
-        device_id=torch.device(f"cuda:{int(torch.distributed.get_rank())}"),
-    )
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
     rank = dist.get_rank()
 
     if rank == 0:
@@ -80,38 +86,18 @@ def main():
 
     # 1. Triton baseline
     shmem_triton = iris.iris(HEAP_SIZE)
-    bench(shmem_triton, Config(), "Triton (persistent)")
+    bench(shmem_triton, Config(), "Triton (persistent, default)")
     del shmem_triton
 
-    # 2. Gluon with different layout params
+    # 2. Optimized gluon (load once, write to all ranks)
     shmem_gluon = iris_gluon.iris(HEAP_SIZE)
 
-    # size_per_thread sweep (key variable for vectorization)
-    for spt in [1, 2, 4, 8]:
-        # BLOCK_SIZE_N must >= spt * threads_per_warp * warps_per_cta
-        # With 64 threads, 4 warps: need BLOCK_SIZE_N >= spt * 256
-        # spt=1 -> need >= 256, spt=4 -> need >= 1024
-        block_n = max(64, spt * 64 * 4)
-        cfg = Config(
-            use_gluon=True,
-            block_size_n=block_n,
-            gluon_size_per_thread=spt,
-            gluon_threads_per_warp=64,
-            gluon_warps_per_cta=4,
-        )
-        bench(shmem_gluon, cfg, f"Gluon spt={spt} tpw=64 wpc=4 bn={block_n}")
-
-    # warps_per_cta sweep with spt=4
-    for wpc in [1, 2, 4, 8]:
-        block_n = max(64, 4 * 64 * wpc)
-        cfg = Config(
-            use_gluon=True,
-            block_size_n=block_n,
-            gluon_size_per_thread=4,
-            gluon_threads_per_warp=64,
-            gluon_warps_per_cta=wpc,
-        )
-        bench(shmem_gluon, cfg, f"Gluon spt=4 tpw=64 wpc={wpc} bn={block_n}")
+    # block_size_n must be multiple of 256 (= spt * 64 * 4 warps)
+    # spt = bn / 256: bn=256 -> spt=1, bn=512 -> spt=2, bn=1024 -> spt=4
+    for bn in [256, 512, 1024, 2048]:
+        for bm in [4, 8, 16, 32]:
+            cfg = Config(use_gluon=True, block_size_m=bm, block_size_n=bn, num_warps=4)
+            bench(shmem_gluon, cfg, f"Gluon opt bm={bm} bn={bn} spt={bn//256}")
 
     del shmem_gluon
 
@@ -138,7 +124,7 @@ def main():
     dist.barrier()
 
     ms = start.elapsed_time(end) / n_repeat
-    element_size = DTYPE.itemsize if hasattr(DTYPE, 'itemsize') else torch.tensor([], dtype=DTYPE).element_size()
+    element_size = torch.tensor([], dtype=DTYPE).element_size()
     total_bytes = (dist.get_world_size() - 1) * M * N * element_size
     bw = (total_bytes / 1e9) / (ms / 1e3)
 
