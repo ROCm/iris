@@ -138,7 +138,7 @@ def main():
     dist.barrier()
 
     ms = start.elapsed_time(end) / n_repeat
-    element_size = DTYPE.itemsize if hasattr(DTYPE, 'itemsize') else torch.tensor([], dtype=DTYPE).element_size()
+    element_size = DTYPE.itemsize if hasattr(DTYPE, "itemsize") else torch.tensor([], dtype=DTYPE).element_size()
     total_bytes = (dist.get_world_size() - 1) * M * N * element_size
     bw = (total_bytes / 1e9) / (ms / 1e3)
 

@@ -345,9 +345,7 @@ if GLUON_AVAILABLE:
             # Layout for vectorization
             # BlockedLayout: [size_per_thread], [threads_per_warp], [warps_per_cta], [order]
             # Increasing size_per_thread enables wider vectorized loads (e.g. dwordx4)
-            layout_col: gl.constexpr = gl.BlockedLayout(
-                [SIZE_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0]
-            )
+            layout_col: gl.constexpr = gl.BlockedLayout([SIZE_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
 
             rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=layout_col)) % N
             rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
