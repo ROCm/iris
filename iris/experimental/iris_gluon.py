@@ -144,7 +144,7 @@ class IrisDeviceCtx:
         return translated_ptr
 
     @gluon.jit
-    def load(self, pointer, from_rank, mask=None, other=None, cache_modifier="", volatile=False):
+    def load(self, pointer, from_rank, mask=None, other=None, cache_modifier=None, volatile=False):
         """
         Loads a value from the specified rank's memory location to the current rank.
 
@@ -156,7 +156,7 @@ class IrisDeviceCtx:
             cache_modifier (str, optional): Controls cache behavior of the load.
 
                 Supported values:
-                    - "": *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                    - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
                     - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
                     - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
                     - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
@@ -177,7 +177,7 @@ class IrisDeviceCtx:
         return result
 
     @gluon.jit
-    def store(self, pointer, value, to_rank, mask=None, cache_modifier=""):
+    def store(self, pointer, value, to_rank, mask=None, cache_modifier=None):
         """
         Writes data from the current rank to the specified rank's memory location.
 
@@ -188,7 +188,7 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional storing
             cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
 
-                - "": *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
                 - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
                 - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
                 - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
@@ -202,7 +202,9 @@ class IrisDeviceCtx:
         gl.store(translated_ptr, value, mask=mask, cache_modifier=cache_modifier)
 
     @gluon.jit
-    def get(self, from_ptr, to_ptr, from_rank, mask=None, other=None, load_cache_modifier="", store_cache_modifier=""):
+    def get(
+        self, from_ptr, to_ptr, from_rank, mask=None, other=None, load_cache_modifier=None, store_cache_modifier=None
+    ):
         """
         Copies data from the specified rank's memory to the current rank's local memory.
 
@@ -213,13 +215,13 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional operations
             other: Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined.
             load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
-                - "": *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
                 - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
                 - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
                 - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
 
             store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
-                - "": *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
                 - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
                 - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
                 - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
@@ -234,7 +236,9 @@ class IrisDeviceCtx:
         gl.store(to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
 
     @gluon.jit
-    def put(self, from_ptr, to_ptr, to_rank, mask=None, other=None, load_cache_modifier="", store_cache_modifier=""):
+    def put(
+        self, from_ptr, to_ptr, to_rank, mask=None, other=None, load_cache_modifier=None, store_cache_modifier=None
+    ):
         """
         Copies data from the current rank's local memory to the specified rank's memory.
 
@@ -245,13 +249,13 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional operations
             other: Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined.
             load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
-                - "": *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
                 - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
                 - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
                 - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
 
             store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
-                - "": *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
                 - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
                 - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
                 - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
@@ -274,8 +278,8 @@ class IrisDeviceCtx:
         to_rank,
         mask=None,
         other=None,
-        load_cache_modifier="",
-        store_cache_modifier="",
+        load_cache_modifier=None,
+        store_cache_modifier=None,
     ):
         """
         Copies data from the specified rank's memory into the destination rank's memory.
@@ -294,13 +298,13 @@ class IrisDeviceCtx:
             mask: Optional mask for conditional operations
             other: Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined.
             load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
-                - "": *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
                 - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
                 - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
                 - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
 
             store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
-                - "": *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
                 - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
                 - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
                 - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
