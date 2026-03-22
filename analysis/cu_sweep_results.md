@@ -196,3 +196,84 @@ data reuse drops from world_size to 1.
    tested in iris yet.
 
 4. **Ranking**: Triton persistent > Gluon hoisted > Gluon persistent >> Gluon partitioned.
+
+---
+
+## Flat-2D Optimization (2026-03-22)
+
+### Problem
+
+Gluon's `gl.arange` doesn't support 2D `BlockedLayout` (shape/layout rank
+mismatch), and `tl.make_block_ptr` fails at MLIR lowering
+(`GluonResolveAutoEncodingsPass`). So true 2D tile loads aren't available.
+
+### Solution: Flat-2D
+
+Use a single 1D `gl.arange(0, BLOCK_M * BLOCK_N)` covering the entire tile,
+then compute row/col via integer div/mod:
+
+```python
+flat_idx = gl.arange(0, BLOCK_M * BLOCK_N, layout=flat_layout)
+row = flat_idx // BLOCK_N
+col = flat_idx % BLOCK_N
+offsets = row * stride_m + col * stride_n
+data = gl.load(ptr + offsets, mask=mask)  # single load of entire tile
+```
+
+This gives us one load + world_size stores per tile, matching Triton's
+instruction structure, while staying in gluon's 1D layout framework.
+
+### Tile Size Sensitivity
+
+The flat-2D approach is very sensitive to tile size. Total elements per tile
+= BLOCK_M * BLOCK_N, and per-thread elements = total / (64 * 4) = total / 256.
+
+| Tile     | Elements | Per-thread | 4-rank 32 CU | 8-rank 32 CU | Notes         |
+|---------:|---------:|-----------:|-------------:|-------------:|:--------------|
+| 32x1024  |    32768 |        128 |       163.42 |       248.70 | 1D baseline   |
+| 8x256    |     2048 |          8 |       172.09 |   **377.06** | Best at 8R    |
+| 4x512    |     2048 |          8 |   **176.39** |       372.88 | Best at 4R    |
+| 8x512    |     4096 |         16 |       172.33 |       368.75 | Good          |
+| 16x512   |     8192 |         32 |       112.08 |       121.55 | Register spill |
+| 32x256   |     8192 |         32 |       110.51 |       121.41 | Register spill |
+
+Sweet spot is **2048-4096 elements per tile** (8-16 per thread). Larger tiles
+cause register spilling and performance collapse.
+
+### Results: Flat-2D vs Triton vs RCCL
+
+#### 4 Ranks
+
+| CUs | Triton   | 1D hoisted | flat2D 4x512 | flat2D 8x256 |
+|----:|---------:|-----------:|-------------:|-------------:|
+|  16 |   130.22 |      83.14 |       161.63 |   **163.06** |
+|  32 |   152.96 |     163.42 |   **176.39** |       172.09 |
+|  64 |   161.24 |     168.59 |       174.33 |   **175.48** |
+|  96 |   165.45 |     165.09 |       174.60 |   **174.35** |
+
+#### 8 Ranks
+
+| CUs | Triton   | 1D hoisted | flat2D 8x512 | flat2D 8x256 |
+|----:|---------:|-----------:|-------------:|-------------:|
+|  16 |   224.01 |     125.39 |   **332.28** |       260.84 |
+|  32 |   325.74 |     248.70 |       368.75 |   **377.06** |
+|  64 |   345.60 |     358.79 |       380.60 |   **385.97** |
+|  96 |   361.44 |     376.72 |       386.11 |   **385.35** |
+
+### Key Results
+
+1. **Flat-2D Gluon now beats Triton at EVERY CU count tested.**
+   - 4 ranks, 16 CUs: flat2D 163 vs Triton 130 GB/s (**+25%**)
+   - 4 ranks, 32 CUs: flat2D 176 vs Triton 153 GB/s (**+15%**)
+   - 8 ranks, 16 CUs: flat2D 332 vs Triton 224 GB/s (**+48%**)
+   - 8 ranks, 32 CUs: flat2D 377 vs Triton 326 GB/s (**+16%**)
+
+2. **Flat-2D Gluon beats RCCL with fewer CUs.**
+   - RCCL at 8 ranks: 371.34 GB/s (unknown CU count, likely 100+)
+   - flat2D at 8 ranks, 32 CUs: **377.06 GB/s** (exceeds RCCL)
+
+3. **The per-CU efficiency gap is eliminated.** At 16 CUs / 8 ranks,
+   flat2D (332 GB/s) is 2.65x faster than 1D hoisted (125 GB/s) and
+   1.48x faster than Triton (224 GB/s).
+
+4. **Updated ranking**: Gluon flat-2D > Triton persistent > Gluon hoisted > Gluon persistent.
