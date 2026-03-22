@@ -2,7 +2,6 @@
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 import torch
-import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 import iris.experimental.iris_gluon as iris_gl
@@ -65,6 +64,17 @@ def test_device_context_gluon_tracing_1d_address():
 
     # Verify we recorded at least one event
     assert shmem.tracing.trace_counter.item() >= 1
+
+    # Verify event data fields for the first recorded event
+    bufs = shmem.tracing.trace_buffers
+    assert bufs["event_id"][0].item() == 3  # TraceEvent().put == 3
+    assert bufs["cur_rank"][0].item() == source_rank
+    assert bufs["target_rank"][0].item() == (source_rank + 1) % num_ranks
+    assert bufs["timestamp"][0].item() > 0
+    # duration_cycles holds the end timestamp; it must be >= start timestamp
+    assert bufs["duration_cycles"][0].item() >= bufs["timestamp"][0].item()
+    # payload_size: BLOCK_SIZE elements × 8 bytes each (dummy_buffer is int64)
+    assert bufs["payload_size"][0].item() == BLOCK_SIZE * 8
 
     shmem.barrier()
     del shmem

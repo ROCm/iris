@@ -175,12 +175,12 @@ class _GluonDeviceTracingCls:
             payload_size = tl.cast(0, tl.int32)
 
         if event_idx < self.max_events:
-            tl.store(self.buf_event_id + event_idx, event_id)
-            tl.store(self.buf_pid + event_idx, gl.program_id(0))
-            tl.store(self.buf_pid_m + event_idx, pid_m)
-            tl.store(self.buf_pid_n + event_idx, pid_n)
-            tl.store(self.buf_cur_rank + event_idx, self.rank)
-            tl.store(self.buf_target_rank + event_idx, target_rank)
+            tl.store(self.buf_event_id + event_idx, tl.cast(event_id, tl.int32))
+            tl.store(self.buf_pid + event_idx, tl.cast(gl.program_id(0), tl.int32))
+            tl.store(self.buf_pid_m + event_idx, tl.cast(pid_m, tl.int32))
+            tl.store(self.buf_pid_n + event_idx, tl.cast(pid_n, tl.int32))
+            tl.store(self.buf_cur_rank + event_idx, tl.cast(self.rank, tl.int32))
+            tl.store(self.buf_target_rank + event_idx, tl.cast(target_rank, tl.int32))
             tl.store(self.buf_xcc_id + event_idx, device_utils.get_xcc_id())
             tl.store(self.buf_cu_id + event_idx, device_utils.get_cu_id())
             tl.store(self.buf_timestamp + event_idx, device_utils.read_realtime())
@@ -188,7 +188,7 @@ class _GluonDeviceTracingCls:
             tl.store(self.buf_address + event_idx, tl.min(addr_i64))
             tl.store(self.buf_duration_cycles + event_idx, tl.cast(0, tl.int64))
             tl.store(self.buf_op_index + event_idx, op_index)
-            tl.store(self.buf_payload_size + event_idx, payload_size)
+            tl.store(self.buf_payload_size + event_idx, tl.cast(payload_size, tl.int32))
         return event_idx
 
     @gluon.jit
@@ -268,7 +268,7 @@ class IrisDeviceCtx:
             # Layout: [cur_rank, num_ranks, heap_base_0..N-1, trace_enabled, max_events,
             #          trace_counter_ptr, op_index_counter_ptr, buf_event_id, ...(13 buffers)]
             trace_info_base = 2 + num_ranks + 1  # skip cur_rank, num_ranks, heap_bases, trace_enabled
-            max_events = gl.load(context_tensor + trace_info_base + 0)
+            max_events = tl.cast(gl.load(context_tensor + trace_info_base + 0), tl.int32)
             trace_counter_ptr = gl.load(context_tensor + trace_info_base + 1)
             op_index_counter_ptr = gl.load(context_tensor + trace_info_base + 2)
 
