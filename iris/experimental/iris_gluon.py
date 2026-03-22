@@ -158,7 +158,7 @@ class _GluonDeviceTracingCls:
             mask: Optional mask tensor indicating valid elements.
         """
         if not self.enabled:
-            return tl.full((), 0, dtype=tl.int32)
+            return tl.cast(0, tl.int32)
 
         event_idx = tl.atomic_add(self.counter, 1)
         op_index = tl.atomic_add(self.op_index_counter, 1)
@@ -172,9 +172,9 @@ class _GluonDeviceTracingCls:
             elem_size_bytes = bitwidth // 8
             payload_size = num_elements * elem_size_bytes
         else:
-            payload_size = tl.full((), 0, dtype=tl.int32)
+            payload_size = tl.cast(0, tl.int32)
 
-        if event_idx.item() < self.max_events.item():
+        if event_idx < self.max_events:
             tl.store(self.buf_event_id + event_idx, event_id)
             tl.store(self.buf_pid + event_idx, gl.program_id(0))
             tl.store(self.buf_pid_m + event_idx, pid_m)
@@ -186,7 +186,7 @@ class _GluonDeviceTracingCls:
             tl.store(self.buf_timestamp + event_idx, device_utils.read_realtime())
             addr_i64 = tl.cast(address, tl.int64)
             tl.store(self.buf_address + event_idx, tl.min(addr_i64))
-            tl.store(self.buf_duration_cycles + event_idx, tl.full((), 0, dtype=tl.int64))
+            tl.store(self.buf_duration_cycles + event_idx, tl.cast(0, tl.int64))
             tl.store(self.buf_op_index + event_idx, op_index)
             tl.store(self.buf_payload_size + event_idx, payload_size)
         return event_idx
@@ -202,7 +202,7 @@ class _GluonDeviceTracingCls:
             return
 
         end_ts = device_utils.read_realtime()
-        if handle.item() < self.max_events.item():
+        if handle < self.max_events:
             tl.store(self.buf_duration_cycles + handle, end_ts)
 
 
@@ -316,7 +316,7 @@ class IrisDeviceCtx:
             # When tracing disabled, use dummy pointers (never dereferenced)
             dummy_ptr_i32 = tl.cast(context_tensor, tl.pointer_type(tl.int32))
             dummy_ptr_i64 = tl.cast(context_tensor, tl.pointer_type(tl.int64))
-            max_events_zero = tl.full((), 0, dtype=tl.int32)
+            max_events_zero = tl.cast(0, tl.int32)
             device_tracing = GluonDeviceTracing(
                 enabled=False,
                 rank=cur_rank,

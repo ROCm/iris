@@ -5,7 +5,6 @@ import torch
 import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import triton.language as tl
 import iris.experimental.iris_gluon as iris_gl
 from iris.tracing.events import TraceEvent
 
@@ -26,7 +25,8 @@ def device_context_tracing_1d_address_kernel(
     offsets = gl.arange(0, BLOCK_SIZE, layout=layout)
     address_1d = dummy_buffer + offsets
 
-    mask = tl.full([BLOCK_SIZE], True, dtype=tl.int1)
+    # All-true mask derived from offsets (offsets are always < BLOCK_SIZE)
+    mask = offsets < BLOCK_SIZE
     handle = ctx.tracing.record_event_start(
         event_id=TraceEvent().put,
         target_rank=(source_rank + 1) % num_ranks,
