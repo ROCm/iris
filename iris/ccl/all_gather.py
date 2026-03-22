@@ -386,9 +386,7 @@ if GLUON_AVAILABLE:
         # handles, which directly maps to the vector load/store width:
         #   elems=1 -> scalar, elems=2 -> dword, elems=4 -> dwordx4 (optimal)
         ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
-        col_layout: gl.constexpr = gl.BlockedLayout(
-            [ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0]
-        )
+        col_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
 
         for tile_id in range(pid, total_tiles, COMM_SMS):
             # Swizzled tile index computation for better L2 locality

@@ -144,8 +144,6 @@ class Config:
             raise ValueError(f"reduce_scatter_variant must be 'two_shot', got '{self.reduce_scatter_variant}'")
 
         if self.threads_per_warp not in (32, 64):
-            raise ValueError(
-                f"threads_per_warp must be 32 (NVIDIA) or 64 (AMD), got {self.threads_per_warp}"
-            )
+            raise ValueError(f"threads_per_warp must be 32 (NVIDIA) or 64 (AMD), got {self.threads_per_warp}")
         if self.num_warps <= 0:
             raise ValueError(f"num_warps must be positive, got {self.num_warps}")
