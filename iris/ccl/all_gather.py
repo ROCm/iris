@@ -12,6 +12,16 @@ import iris
 from .config import Config
 from .utils import extract_group_info
 
+# Conditional import for Gluon
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+    from iris.experimental.iris_gluon import IrisDeviceCtx
+
+    GLUON_AVAILABLE = True
+except ImportError:
+    GLUON_AVAILABLE = False
+
 
 @triton.jit()
 def persistent_all_gather(
@@ -279,6 +289,113 @@ def persistent_all_gather_partitioned(
             )
 
 
+# Gluon implementation
+if GLUON_AVAILABLE:
+
+    @gluon.jit
+    def persistent_all_gather_gluon(
+        IrisDeviceCtx: gl.constexpr,
+        context_tensor,
+        input_ptr,
+        output_ptr,
+        M,
+        N,
+        stride_in_m,
+        stride_in_n,
+        stride_out_m,
+        stride_out_n,
+        group_rank: gl.constexpr,
+        iris_rank: gl.constexpr,
+        world_size: gl.constexpr,
+        rank_start: gl.constexpr,
+        rank_stride: gl.constexpr,
+        BLOCK_SIZE_M: gl.constexpr,
+        BLOCK_SIZE_N: gl.constexpr,
+        GROUP_SIZE_M: gl.constexpr,
+        COMM_SMS: gl.constexpr,
+        NUM_XCDS: gl.constexpr,
+        CHUNK_SIZE: gl.constexpr,
+    ):
+        """
+        Persistent all-gather kernel using Gluon.
+
+        Each rank sends its input tensor to all ranks, and all ranks receive
+        and concatenate all input tensors along dimension 0 (rows), matching
+        torch.distributed.all_gather_into_tensor behavior.
+        """
+        ctx = IrisDeviceCtx.initialize(context_tensor)
+
+        pid = gl.program_id(0)
+
+        num_pid_m = gl.cdiv(M, BLOCK_SIZE_M)
+        num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
+        total_tiles = num_pid_m * num_pid_n
+
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+            # Layout for dwordx4 vectorization
+            # For AMD: 64 threads/warp, 4 warps = 256 threads total
+            # BlockedLayout: [size_per_thread], [threads_per_warp], [warps_per_cta], [order]
+            layout_col: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])
+
+            rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=layout_col)) % N
+            rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+            col_offsets_in_n = rn * stride_in_n
+            col_offsets_out_n = rn * stride_out_n
+
+            # Process local rank: write input to output[group_rank * M : (group_rank+1) * M, :]
+            for i in range(BLOCK_SIZE_M):
+                row_idx = (pid_m * BLOCK_SIZE_M + i) % M
+
+                if row_idx < M:
+                    col_mask = rn < N
+
+                    # Read from input[row_idx, :]
+                    input_offset = row_idx * stride_in_m + col_offsets_in_n
+                    input_ptr_local = input_ptr + input_offset
+                    input_ptr_local = gl.multiple_of(input_ptr_local, 4)
+
+                    # Write to output[group_rank * M + row_idx, :]
+                    output_row = group_rank * M + row_idx
+                    output_offset = output_row * stride_out_m + col_offsets_out_n
+                    output_ptr_local = output_ptr + output_offset
+                    output_ptr_local = gl.multiple_of(output_ptr_local, 4)
+
+                    data = gl.load(input_ptr_local, mask=col_mask)
+                    gl.store(output_ptr_local, data, mask=col_mask, cache_modifier=".wt")
+
+            # Process remote ranks: send input to output[group_rank * M : (group_rank+1) * M, :] on each remote rank
+            for rank_idx in range(world_size):
+                target_rank = rank_start + rank_idx * rank_stride
+                if rank_idx != group_rank:
+                    for i in range(BLOCK_SIZE_M):
+                        row_idx = (pid_m * BLOCK_SIZE_M + i) % M
+
+                        if row_idx < M:
+                            col_mask = rn < N
+
+                            # Read from local input[row_idx, :]
+                            input_offset = row_idx * stride_in_m + col_offsets_in_n
+                            input_ptr_remote = input_ptr + input_offset
+                            input_ptr_remote = gl.multiple_of(input_ptr_remote, 4)
+
+                            # Write to remote output[group_rank * M + row_idx, :]
+                            output_row = group_rank * M + row_idx
+                            output_offset = output_row * stride_out_m + col_offsets_out_n
+                            output_ptr_remote = output_ptr + output_offset
+                            output_ptr_remote = gl.multiple_of(output_ptr_remote, 4)
+
+                            remote_data = gl.load(input_ptr_remote, mask=col_mask)
+                            ctx.store(output_ptr_remote, remote_data, target_rank, mask=col_mask)
+
+
 def all_gather(
     output_tensor,
     input_tensor,
@@ -314,25 +431,10 @@ def all_gather(
     if config is None:
         config = Config(block_size_m=32, block_size_n=64)
 
-    # Check for unsupported options
-    if config.use_gluon:
-        raise ValueError(
-            "all_gather does not support use_gluon=True. "
-            "Gluon implementation is not available for all_gather. "
-            "Use default config (use_gluon=False)."
-        )
-
     # Extract group information
     # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
     # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
-
-    # Validate COMM_SMS divisibility for partitioned variant
-    if config.all_gather_variant == "partitioned" and config.comm_sms % world_size != 0:
-        raise ValueError(
-            f"For all_gather_variant='partitioned', COMM_SMS ({config.comm_sms}) must be divisible by world_size ({world_size}). "
-            f"Please adjust config.comm_sms to be a multiple of {world_size}."
-        )
 
     M, N = input_tensor.shape[:2]
     expected_output_shape = (world_size * M, N)
@@ -346,41 +448,86 @@ def all_gather(
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
-    heap_bases = shmem.get_heap_bases()
+    # Choose between Triton and Gluon implementation
+    if config.use_gluon and GLUON_AVAILABLE:
+        # Check if shmem is Iris Gluon (has get_device_context method)
+        if not hasattr(shmem, "get_device_context"):
+            raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
 
-    # Dispatch to the appropriate kernel based on variant
-    if config.all_gather_variant == "persistent":
-        kernel_fn = persistent_all_gather
-    elif config.all_gather_variant == "partitioned":
-        kernel_fn = persistent_all_gather_partitioned
+        context_tensor = shmem.get_device_context()
+
+        persistent_all_gather_gluon[(config.comm_sms,)](
+            IrisDeviceCtx,
+            context_tensor,
+            input_tensor,
+            output_tensor,
+            M,
+            N,
+            stride_in_m,
+            stride_in_n,
+            stride_out_m,
+            stride_out_n,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config.block_size_m,
+            config.block_size_n,
+            config.swizzle_size,
+            config.comm_sms,
+            config.num_xcds,
+            config.chunk_size,
+            num_stages=config.num_stages,
+            num_warps=config.num_warps,
+            waves_per_eu=config.waves_per_eu,
+        )
     else:
-        raise ValueError(f"Unknown all_gather_variant: {config.all_gather_variant}")
+        if config.use_gluon and not GLUON_AVAILABLE:
+            raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False")
 
-    kernel_fn[(config.comm_sms,)](
-        input_tensor,
-        output_tensor,
-        M,
-        N,
-        stride_in_m,
-        stride_in_n,
-        stride_out_m,
-        stride_out_n,
-        heap_bases,
-        rank_in_group,
-        rank_global,
-        world_size,
-        rank_start,
-        rank_stride,
-        config.block_size_m,
-        config.block_size_n,
-        config.swizzle_size,
-        config.comm_sms,
-        config.num_xcds,
-        config.chunk_size,
-        num_stages=config.num_stages,
-        num_warps=config.num_warps,
-        waves_per_eu=config.waves_per_eu,
-    )
+        # Validate COMM_SMS divisibility for partitioned variant
+        if config.all_gather_variant == "partitioned" and config.comm_sms % world_size != 0:
+            raise ValueError(
+                f"For all_gather_variant='partitioned', COMM_SMS ({config.comm_sms}) must be divisible by world_size ({world_size}). "
+                f"Please adjust config.comm_sms to be a multiple of {world_size}."
+            )
+
+        heap_bases = shmem.get_heap_bases()
+
+        # Dispatch to the appropriate kernel based on variant
+        if config.all_gather_variant == "persistent":
+            kernel_fn = persistent_all_gather
+        elif config.all_gather_variant == "partitioned":
+            kernel_fn = persistent_all_gather_partitioned
+        else:
+            raise ValueError(f"Unknown all_gather_variant: {config.all_gather_variant}")
+
+        kernel_fn[(config.comm_sms,)](
+            input_tensor,
+            output_tensor,
+            M,
+            N,
+            stride_in_m,
+            stride_in_n,
+            stride_out_m,
+            stride_out_n,
+            heap_bases,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config.block_size_m,
+            config.block_size_n,
+            config.swizzle_size,
+            config.comm_sms,
+            config.num_xcds,
+            config.chunk_size,
+            num_stages=config.num_stages,
+            num_warps=config.num_warps,
+            waves_per_eu=config.waves_per_eu,
+        )
 
     if not async_op:
         shmem.barrier()
