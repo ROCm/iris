@@ -2,8 +2,6 @@
 """Dump generated AMDGCN assembly for Triton and Gluon all-gather kernels."""
 
 import os
-import sys
-import glob
 import gc
 import torch
 import torch.distributed as dist
@@ -68,12 +66,12 @@ def _worker(local_rank, world_size, init_url):
             print(f"  {sz:>10}  {ext:>10}  {f}")
 
         # Now dump all .amdgcn files
-        amdgcn_files = [f for f in all_files if f.endswith('.amdgcn')]
+        amdgcn_files = [f for f in all_files if f.endswith(".amdgcn")]
         for f in sorted(amdgcn_files):
             name = os.path.basename(os.path.dirname(f)) + "/" + os.path.basename(f)
-            print(f"\n{'='*80}")
+            print(f"\n{'=' * 80}")
             print(f"=== {os.path.basename(f)} ===")
-            print(f"{'='*80}")
+            print(f"{'=' * 80}")
             with open(f) as fh:
                 print(fh.read())
 
