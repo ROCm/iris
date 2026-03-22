@@ -1523,7 +1523,16 @@ class DeviceContext:
         return __translate(ptr, from_rank, to_rank, self.heap_bases, hint)
 
     @triton.jit
-    def load(self, pointer, from_rank, mask=None, hint: tl.constexpr = None):
+    def load(
+        self,
+        pointer,
+        from_rank,
+        mask=None,
+        other=None,
+        cache_modifier=None,
+        volatile=False,
+        hint: tl.constexpr = None,
+    ):
         """
         Loads a value from the specified rank's memory location.
 
@@ -1536,6 +1545,9 @@ class DeviceContext:
             pointer (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `from_rank`'s address space.
             from_rank (int): The rank ID from which to read the data.
             mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address pointer[idx]. Defaults to None.
+            other (Block, optional): Value to return for masked-out elements. If not provided, the result for masked-out elements is undefined. Defaults to None.
+            cache_modifier (str, optional): Controls cache behavior of the load. Supported values: None (default, same as ".ca"), ".ca", ".cg", ".cv". Defaults to None.
+            volatile (bool, optional): If True, disables compiler optimizations that could reorder or eliminate the load. Defaults to False.
             hint (int or tuple, optional): Vectorization hint for the translated pointer. Defaults to None.
 
         Returns:
@@ -1545,11 +1557,11 @@ class DeviceContext:
             >>> data = ctx.load(buffer + offsets, from_rank=1, mask=mask)
         """
         translated_ptr = self._translate(pointer, self.rank, from_rank, hint)
-        result = tl.load(translated_ptr, mask=mask)
+        result = tl.load(translated_ptr, mask=mask, other=other, cache_modifier=cache_modifier, volatile=volatile)
         return result
 
     @triton.jit
-    def store(self, pointer, value, to_rank, mask=None, hint: tl.constexpr = None):
+    def store(self, pointer, value, to_rank, mask=None, cache_modifier=None, hint: tl.constexpr = None):
         """
         Writes data to the specified rank's memory location.
 
@@ -1563,6 +1575,7 @@ class DeviceContext:
             value (Block): The tensor of elements to be stored.
             to_rank (int): The rank ID to which the data will be written.
             mask (Block of triton.int1, optional): If mask[idx] is false, do not store the data at address pointer[idx]. Defaults to None.
+            cache_modifier (str, optional): Controls cache behavior of the store. Supported values: None (default, same as ".wb"), ".wb", ".cg", ".cs", ".wt". Defaults to None.
 
         Returns:
             None
@@ -1571,10 +1584,20 @@ class DeviceContext:
             >>> ctx.store(buffer + offsets, values, to_rank=1, mask=mask)
         """
         translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
-        tl.store(translated_ptr, value, mask=mask)
+        tl.store(translated_ptr, value, mask=mask, cache_modifier=cache_modifier)
 
     @triton.jit
-    def get(self, from_ptr, to_ptr, from_rank, mask=None, hint: tl.constexpr = None):
+    def get(
+        self,
+        from_ptr,
+        to_ptr,
+        from_rank,
+        mask=None,
+        other=None,
+        load_cache_modifier=None,
+        store_cache_modifier=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Copies data from the specified rank's memory into current rank's local memory.
 
@@ -1588,6 +1611,9 @@ class DeviceContext:
             to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer to local memory in current rank where the data will be written.
             from_rank (int): The rank ID from which to read the data.
             mask (Block of triton.int1, optional): If mask[idx] is false, do not load from from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
+            other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
+            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values: None (default, same as ".ca"), ".ca", ".cg", ".cv". Defaults to None.
+            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values: None (default, same as ".wb"), ".wb", ".cg", ".cs", ".wt". Defaults to None.
 
         Returns:
             None
@@ -1596,11 +1622,21 @@ class DeviceContext:
             >>> ctx.get(remote_ptr + offsets, local_ptr + offsets, from_rank=1, mask=mask)
         """
         translated_from_ptr = self._translate(from_ptr, self.rank, from_rank, hint)
-        data = tl.load(translated_from_ptr, mask=mask)
-        tl.store(to_ptr, data, mask=mask)
+        data = tl.load(translated_from_ptr, mask=mask, other=other, cache_modifier=load_cache_modifier)
+        tl.store(to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
 
     @triton.jit
-    def put(self, from_ptr, to_ptr, to_rank, mask=None, hint: tl.constexpr = None):
+    def put(
+        self,
+        from_ptr,
+        to_ptr,
+        to_rank,
+        mask=None,
+        other=None,
+        load_cache_modifier=None,
+        store_cache_modifier=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Copies data from current rank's local memory to the specified rank's memory.
 
@@ -1614,6 +1650,9 @@ class DeviceContext:
             to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that references memory in `to_rank`.
             to_rank (int): The rank ID to which the data will be written.
             mask (Block of triton.int1, optional): If mask[idx] is false, do not load from from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
+            other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
+            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values: None (default, same as ".ca"), ".ca", ".cg", ".cv". Defaults to None.
+            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values: None (default, same as ".wb"), ".wb", ".cg", ".cs", ".wt". Defaults to None.
 
         Returns:
             None
@@ -1622,11 +1661,22 @@ class DeviceContext:
             >>> ctx.put(local_ptr + offsets, remote_ptr + offsets, to_rank=1, mask=mask)
         """
         translated_to_ptr = self._translate(to_ptr, self.rank, to_rank, hint)
-        data = tl.load(from_ptr, mask=mask)
-        tl.store(translated_to_ptr, data, mask=mask)
+        data = tl.load(from_ptr, mask=mask, other=other, cache_modifier=load_cache_modifier)
+        tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
 
     @triton.jit
-    def copy(self, src_ptr, dst_ptr, from_rank, to_rank, mask=None, hint: tl.constexpr = None):
+    def copy(
+        self,
+        src_ptr,
+        dst_ptr,
+        from_rank,
+        to_rank,
+        mask=None,
+        other=None,
+        load_cache_modifier=None,
+        store_cache_modifier=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Copies data from one rank's memory to another rank's memory.
 
@@ -1643,6 +1693,9 @@ class DeviceContext:
             from_rank (int): The rank ID that owns `src_ptr` (source rank).
             to_rank (int): The rank ID that will receive the data (destination rank).
             mask (Block of triton.int1, optional): If mask[idx] is false, do not load from src_ptr[idx] and do not store to dst_ptr[idx]. Defaults to None.
+            other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
+            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values: None (default, same as ".ca"), ".ca", ".cg", ".cv". Defaults to None.
+            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values: None (default, same as ".wb"), ".wb", ".cg", ".cs", ".wt". Defaults to None.
 
         Returns:
             None
@@ -1670,8 +1723,8 @@ class DeviceContext:
             translated_src = tl.max_contiguous(tl.multiple_of(translated_src, hint), hint)
             translated_dst = tl.max_contiguous(tl.multiple_of(translated_dst, hint), hint)
 
-        data = tl.load(translated_src, mask=mask)
-        tl.store(translated_dst, data, mask=mask)
+        data = tl.load(translated_src, mask=mask, other=other, cache_modifier=load_cache_modifier)
+        tl.store(translated_dst, data, mask=mask, cache_modifier=store_cache_modifier)
 
     @triton.jit
     def atomic_add(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
