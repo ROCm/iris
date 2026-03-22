@@ -290,7 +290,17 @@ def persistent_all_gather_partitioned(
             )
 
 
-# Gluon implementation
+# Gluon implementation: flat-2D tiling approach
+#
+# Uses a single 1D arange over BLOCK_SIZE_M * BLOCK_SIZE_N elements with
+# div/mod to compute 2D row/col indices. This gives one load + world_size
+# stores per tile (matching Triton's 2D load/store structure) while staying
+# within gluon's 1D BlockedLayout framework.
+#
+# Key optimizations:
+#   - Flat-2D tiling: eliminates the inner BLOCK_SIZE_M row loop
+#   - Hoisted pointer translation: local_base loaded once outside tile loop
+#   - Traffic shaping: staggered write order avoids memory controller contention
 if GLUON_AVAILABLE:
 
     @gluon.jit
@@ -314,42 +324,35 @@ if GLUON_AVAILABLE:
         BLOCK_SIZE_N: gl.constexpr,
         GROUP_SIZE_M: gl.constexpr,
         COMM_SMS: gl.constexpr,
-        NUM_XCDS: gl.constexpr,
-        CHUNK_SIZE: gl.constexpr,
         THREADS_PER_WARP: gl.constexpr,
         WARPS_PER_CTA: gl.constexpr,
         TRACING: gl.constexpr = False,
     ):
         """
-        Persistent all-gather kernel using Gluon with explicit memory layout control.
+        Persistent all-gather kernel using Gluon with flat-2D tiling.
 
-        Each rank loads its local input once per row and writes it to the
-        corresponding output slice on ALL ranks (local + remote), avoiding
-        redundant loads. Column indices use an explicit BlockedLayout to
-        control vectorization width.
+        Uses a flat 1D index space of BLOCK_SIZE_M * BLOCK_SIZE_N elements,
+        computing 2D row/col via integer div/mod. This produces one vectorized
+        load and world_size vectorized stores per tile, matching Triton's 2D
+        load/store instruction structure while staying within gluon's 1D
+        BlockedLayout framework.
 
         Memory layout (BlockedLayout):
-            The column dimension is distributed across the GPU thread hierarchy
-            using gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [order]).
+            A 1D BlockedLayout distributes TOTAL_ELEMS = BLOCK_SIZE_M * BLOCK_SIZE_N
+            elements across the thread hierarchy:
+                ELEMS_PER_THREAD = TOTAL_ELEMS // (THREADS_PER_WARP * WARPS_PER_CTA)
 
-            - ELEMS_PER_THREAD: number of contiguous elements each thread loads/stores.
-              Controls the vector width of memory instructions. For fp16:
-                1 -> 2-byte scalar load
-                2 -> 4-byte dword load
-                4 -> 8-byte dwordx4 load (optimal on AMD GFX9+)
-            - THREADS_PER_WARP: threads per warp/wavefront (64 on AMD, 32 on NVIDIA).
-            - WARPS_PER_CTA: number of warps in the cooperative thread array (workgroup).
+            Each thread handles ELEMS_PER_THREAD contiguous elements in the
+            flattened row-major order. Row/col are recovered via:
+                row = flat_idx // BLOCK_SIZE_N
+                col = flat_idx %  BLOCK_SIZE_N
 
-            The product ELEMS_PER_THREAD * THREADS_PER_WARP * WARPS_PER_CTA must
-            equal BLOCK_SIZE_N. ELEMS_PER_THREAD is derived as:
-                ELEMS_PER_THREAD = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
-
-        Constraints (validated by host wrapper before launch):
-            - BLOCK_SIZE_N must be a multiple of (THREADS_PER_WARP * WARPS_PER_CTA).
-            - BLOCK_SIZE_N must be >= (THREADS_PER_WARP * WARPS_PER_CTA) so that
-              ELEMS_PER_THREAD >= 1.
-            - WARPS_PER_CTA must match the num_warps kernel launch parameter.
-            - THREADS_PER_WARP must match the hardware wavefront size (64 for AMD).
+        Constraints:
+            - BLOCK_SIZE_M * BLOCK_SIZE_N must be a multiple of
+              (THREADS_PER_WARP * WARPS_PER_CTA).
+            - Optimal tile: 2048-4096 total elements (8-16 per thread).
+              Larger tiles cause register spilling and performance collapse.
+            - Recommended: BLOCK_SIZE_M=8, BLOCK_SIZE_N=256 (2048 elems, 8/thread).
 
         Args:
             IrisDeviceCtx: Gluon device context class for remote memory operations.
@@ -366,12 +369,9 @@ if GLUON_AVAILABLE:
             rank_start: First iris rank in the group (for RMA target computation).
             rank_stride: Stride between consecutive iris ranks in the group.
             BLOCK_SIZE_M: Number of rows per tile.
-            BLOCK_SIZE_N: Number of columns per tile. Must be a multiple of
-                          (THREADS_PER_WARP * WARPS_PER_CTA).
+            BLOCK_SIZE_N: Number of columns per tile.
             GROUP_SIZE_M: Swizzle group size for M-dimension tiling.
-            COMM_SMS: Number of SMs used for persistent scheduling.
-            NUM_XCDS: Number of XCDs (chiplet count).
-            CHUNK_SIZE: Chunk size for XCD-aware tile mapping.
+            COMM_SMS: Number of CUs used for persistent scheduling.
             THREADS_PER_WARP: Threads per warp/wavefront (64 for AMD, 32 for NVIDIA).
             WARPS_PER_CTA: Number of warps per workgroup. Must match num_warps.
             TRACING: If True, record load/store events into trace buffers.
@@ -385,144 +385,15 @@ if GLUON_AVAILABLE:
         num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
         total_tiles = num_pid_m * num_pid_n
 
-        # Build the 1D BlockedLayout for the column dimension.
-        # ELEMS_PER_THREAD controls how many contiguous elements each thread
-        # handles, which directly maps to the vector load/store width:
-        #   elems=1 -> scalar, elems=2 -> dword, elems=4 -> dwordx4 (optimal)
-        ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
-        col_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
+        # Flat 1D layout covering BLOCK_SIZE_M * BLOCK_SIZE_N elements
+        TOTAL_ELEMS: gl.constexpr = BLOCK_SIZE_M * BLOCK_SIZE_N
+        ELEMS_PER_THREAD: gl.constexpr = TOTAL_ELEMS // (THREADS_PER_WARP * WARPS_PER_CTA)
+        flat_layout: gl.constexpr = gl.BlockedLayout(
+            [ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0]
+        )
 
-        for tile_id in range(pid, total_tiles, COMM_SMS):
-            # Swizzled tile index computation for better L2 locality
-            num_pid_in_group = GROUP_SIZE_M * num_pid_n
-            group_id = tile_id // num_pid_in_group
-            first_pid_m = group_id * GROUP_SIZE_M
-            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-            pid_n = (tile_id % num_pid_in_group) // group_size_m
-
-            # Build column index vector with explicit layout for vectorized access
-            rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=col_layout)) % N
-            rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-            col_offsets_in = rn * stride_in_n
-            col_offsets_out = rn * stride_out_n
-            col_mask = rn < N
-
-            rm_base = pid_m * BLOCK_SIZE_M
-
-            # Iterate row-by-row: load each row once, then write to all ranks.
-            # This avoids reloading the same data for each destination rank.
-            for i in range(BLOCK_SIZE_M):
-                row_idx = (rm_base + i) % M
-
-                if row_idx < M:
-                    # Single load from local input
-                    input_addr = input_ptr + row_idx * stride_in_m + col_offsets_in
-                    if TRACING:
-                        h_load = ctx.tracing.record_event_start(
-                            event_id=events.load,
-                            target_rank=group_rank,
-                            address=input_addr,
-                            pid_m=pid_m,
-                            pid_n=pid_n,
-                            mask=col_mask,
-                        )
-                    data = gl.load(input_addr, mask=col_mask)
-                    if TRACING:
-                        ctx.tracing.record_event_end(h_load)
-
-                    # Output row position: this rank's slice starts at group_rank * M
-                    output_offset = (group_rank * M + row_idx) * stride_out_m + col_offsets_out
-
-                    # Traffic shaping: stagger the write order per rank so that
-                    # at any given moment, each rank is writing to a different
-                    # target. Without this, all ranks write to rank 0 first,
-                    # then rank 1, etc., causing memory controller contention.
-                    #
-                    # With offset = group_rank:
-                    #   Rank 0: writes to 0(local), 1, 2, 3
-                    #   Rank 1: writes to 1(local), 2, 3, 0
-                    #   Rank 2: writes to 2(local), 3, 0, 1
-                    #   Rank 3: writes to 3(local), 0, 1, 2
-                    for rank_idx in range(world_size):
-                        dest_idx = (group_rank + rank_idx) % world_size
-                        target_rank = rank_start + dest_idx * rank_stride
-                        output_ptr_target = output_ptr + output_offset
-
-                        if TRACING:
-                            h_store = ctx.tracing.record_event_start(
-                                event_id=events.store,
-                                target_rank=target_rank,
-                                address=output_ptr_target,
-                                pid_m=pid_m,
-                                pid_n=pid_n,
-                                mask=col_mask,
-                            )
-                        if dest_idx == group_rank:
-                            gl.store(output_ptr_target, data, mask=col_mask, cache_modifier=".wt")
-                        else:
-                            ctx.store(output_ptr_target, data, target_rank, mask=col_mask)
-                        if TRACING:
-                            ctx.tracing.record_event_end(h_store)
-
-
-if GLUON_AVAILABLE:
-
-    @gluon.jit
-    def persistent_all_gather_gluon_hoisted(
-        IrisDeviceCtx: gl.constexpr,
-        context_tensor,
-        input_ptr,
-        output_ptr,
-        M,
-        N,
-        stride_in_m,
-        stride_in_n,
-        stride_out_m,
-        stride_out_n,
-        group_rank: gl.constexpr,
-        iris_rank: gl.constexpr,
-        world_size: gl.constexpr,
-        rank_start: gl.constexpr,
-        rank_stride: gl.constexpr,
-        BLOCK_SIZE_M: gl.constexpr,
-        BLOCK_SIZE_N: gl.constexpr,
-        GROUP_SIZE_M: gl.constexpr,
-        COMM_SMS: gl.constexpr,
-        NUM_XCDS: gl.constexpr,
-        CHUNK_SIZE: gl.constexpr,
-        THREADS_PER_WARP: gl.constexpr,
-        WARPS_PER_CTA: gl.constexpr,
-        TRACING: gl.constexpr = False,
-    ):
-        """
-        Persistent gluon all-gather with hoisted pointer translation.
-
-        Same structure as persistent_all_gather_gluon (load row once, store to
-        all ranks) but pre-computes the pointer translation delta for each
-        destination rank ONCE, outside the tile loop. This eliminates
-        2 * BLOCK_SIZE_M * (world_size-1) gl.load(heap_bases) calls per tile.
-
-        The delta approach: for any pointer ``p`` in the local address space,
-        the translated pointer in rank ``r``'s address space is simply
-        ``p + delta[r]``, where ``delta[r] = heap_base[r] - heap_base[local]``.
-        """
-        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)
-        events = TraceEvent()
-
-        pid = gl.program_id(0)
-
-        num_pid_m = gl.cdiv(M, BLOCK_SIZE_M)
-        num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
-        total_tiles = num_pid_m * num_pid_n
-
-        ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
-        col_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
-
-        # Pre-compute pointer translation deltas for ALL ranks.
-        # delta[i] = heap_base[target_iris_rank_i] - heap_base[local_iris_rank]
-        # Then translated_ptr = local_ptr + delta[i]
+        # Hoist local heap base outside the tile loop: eliminates redundant
+        # gl.load(heap_bases) calls in the inner store loop.
         local_base = gl.load(ctx.heap_bases + iris_rank)
 
         for tile_id in range(pid, total_tiles, COMM_SMS):
@@ -534,206 +405,70 @@ if GLUON_AVAILABLE:
             pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
             pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-            rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=col_layout)) % N
-            rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+            # Flat index -> 2D row/col within tile
+            flat_idx = gl.arange(0, TOTAL_ELEMS, layout=flat_layout)
+            row_local = flat_idx // BLOCK_SIZE_N
+            col_local = flat_idx % BLOCK_SIZE_N
 
-            col_offsets_in = rn * stride_in_n
-            col_offsets_out = rn * stride_out_n
-            col_mask = rn < N
+            # Global row/col
+            row = pid_m * BLOCK_SIZE_M + row_local
+            col = pid_n * BLOCK_SIZE_N + col_local
 
-            rm_base = pid_m * BLOCK_SIZE_M
+            mask = (row < M) & (col < N)
 
-            for i in range(BLOCK_SIZE_M):
-                row_idx = (rm_base + i) % M
+            # Single flat load of the entire tile
+            input_offsets = row * stride_in_m + col * stride_in_n
+            input_addr = input_ptr + input_offsets
+            if TRACING:
+                h_load = ctx.tracing.record_event_start(
+                    event_id=events.load,
+                    target_rank=group_rank,
+                    address=input_addr,
+                    pid_m=pid_m,
+                    pid_n=pid_n,
+                    mask=mask,
+                )
+            data = gl.load(input_addr, mask=mask, other=0.0)
+            if TRACING:
+                ctx.tracing.record_event_end(h_load)
 
-                if row_idx < M:
-                    input_addr = input_ptr + row_idx * stride_in_m + col_offsets_in
-                    if TRACING:
-                        h_load = ctx.tracing.record_event_start(
-                            event_id=events.load,
-                            target_rank=group_rank,
-                            address=input_addr,
-                            pid_m=pid_m,
-                            pid_n=pid_n,
-                            mask=col_mask,
-                        )
-                    data = gl.load(input_addr, mask=col_mask)
-                    if TRACING:
-                        ctx.tracing.record_event_end(h_load)
+            # Output: this rank's data goes to output[group_rank * M + row, col]
+            output_row = group_rank * M + row
+            output_offsets = output_row * stride_out_m + col * stride_out_n
 
-                    output_offset = (group_rank * M + row_idx) * stride_out_m + col_offsets_out
+            # Traffic-shaped stores to all ranks: stagger write order per rank
+            # so each rank writes to a different target at any given moment,
+            # avoiding memory controller contention on the receiver side.
+            for rank_idx in range(world_size):
+                dest_idx = (group_rank + rank_idx) % world_size
+                target_iris_rank = rank_start + dest_idx * rank_stride
+                output_ptrs = output_ptr + output_offsets
 
-                    # Traffic shaping + hoisted translation
-                    for rank_idx in range(world_size):
-                        dest_idx = (group_rank + rank_idx) % world_size
-                        target_iris_rank = rank_start + dest_idx * rank_stride
-                        output_addr = output_ptr + output_offset
+                if TRACING:
+                    h_store = ctx.tracing.record_event_start(
+                        event_id=events.store,
+                        target_rank=target_iris_rank,
+                        address=output_ptrs,
+                        pid_m=pid_m,
+                        pid_n=pid_n,
+                        mask=mask,
+                    )
 
-                        if TRACING:
-                            h_store = ctx.tracing.record_event_start(
-                                event_id=events.store,
-                                target_rank=target_iris_rank,
-                                address=output_addr,
-                                pid_m=pid_m,
-                                pid_n=pid_n,
-                                mask=col_mask,
-                            )
+                if dest_idx == group_rank:
+                    gl.store(output_ptrs, data, mask=mask, cache_modifier=".wt")
+                else:
+                    # Hoisted translation: compute ptr_delta from pre-loaded
+                    # local_base rather than calling ctx.store() which would
+                    # do 2x gl.load(heap_bases) per call.
+                    target_base = gl.load(ctx.heap_bases + target_iris_rank)
+                    ptr_delta = target_base - local_base
+                    output_ptrs_int = tl.cast(output_ptrs, gl.uint64)
+                    remote_ptrs_int = output_ptrs_int + ptr_delta
+                    remote_ptrs = tl.cast(remote_ptrs_int, output_ptrs.dtype)
+                    gl.store(remote_ptrs, data, mask=mask)
 
-                        if dest_idx == group_rank:
-                            gl.store(output_addr, data, mask=col_mask, cache_modifier=".wt")
-                        else:
-                            # Hoisted translation: compute delta on the fly
-                            # but only load target_base once (compiler should
-                            # hoist this out of the BLOCK_SIZE_M loop since
-                            # target_iris_rank is loop-invariant w.r.t. i)
-                            target_base = gl.load(ctx.heap_bases + target_iris_rank)
-                            ptr_delta = target_base - local_base
-                            output_addr_int = tl.cast(output_addr, gl.uint64)
-                            remote_addr_int = output_addr_int + ptr_delta
-                            remote_addr = tl.cast(remote_addr_int, output_addr.dtype)
-                            gl.store(remote_addr, data, mask=col_mask)
-
-                        if TRACING:
-                            ctx.tracing.record_event_end(h_store)
-
-
-
-if GLUON_AVAILABLE:
-
-    @gluon.jit
-    def persistent_all_gather_gluon_partitioned(
-        IrisDeviceCtx: gl.constexpr,
-        context_tensor,
-        input_ptr,
-        output_ptr,
-        M,
-        N,
-        stride_in_m,
-        stride_in_n,
-        stride_out_m,
-        stride_out_n,
-        group_rank: gl.constexpr,
-        iris_rank: gl.constexpr,
-        world_size: gl.constexpr,
-        rank_start: gl.constexpr,
-        rank_stride: gl.constexpr,
-        BLOCK_SIZE_M: gl.constexpr,
-        BLOCK_SIZE_N: gl.constexpr,
-        GROUP_SIZE_M: gl.constexpr,
-        COMM_SMS: gl.constexpr,
-        NUM_XCDS: gl.constexpr,
-        CHUNK_SIZE: gl.constexpr,
-        THREADS_PER_WARP: gl.constexpr,
-        WARPS_PER_CTA: gl.constexpr,
-        TRACING: gl.constexpr = False,
-    ):
-        """
-        CU-partitioned gluon all-gather with hoisted pointer translation.
-
-        Each CU is pre-assigned to one destination rank, eliminating the inner
-        loop over world_size. Pointer translation (heap base lookup) is computed
-        once per CU rather than once per store, reducing instruction count.
-
-        Work distribution:
-          - PIDS_PER_RANK = COMM_SMS // world_size
-          - CU ``pid`` is assigned to destination rank ``pid // PIDS_PER_RANK``
-          - Within each rank group, CUs partition the tiles
-
-        This provides natural traffic shaping: at any given moment, different CUs
-        target different ranks, avoiding memory controller contention.
-        """
-        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)
-        events = TraceEvent()
-
-        pid = gl.program_id(0)
-
-        # CU partitioning: each PID is assigned to one destination rank
-        PIDS_PER_RANK: gl.constexpr = COMM_SMS // world_size
-        dest_rank_idx = pid // PIDS_PER_RANK
-        pid_in_group = pid % PIDS_PER_RANK
-        target_rank = rank_start + dest_rank_idx * rank_stride
-        is_local = dest_rank_idx == group_rank
-
-        # Pre-compute pointer translation ONCE per CU.
-        # ctx.store() calls _translate() which does 2x gl.load(heap_bases) per
-        # call. With row-by-row iteration that's 2 * BLOCK_SIZE_M loads per tile.
-        # By hoisting, we do 2 loads total for all tiles on this CU.
-        local_base = gl.load(ctx.heap_bases + iris_rank)
-        target_base = gl.load(ctx.heap_bases + target_rank)
-        # delta: add this to any local pointer to get the translated remote pointer
-        ptr_delta = target_base - local_base
-
-        num_pid_m = gl.cdiv(M, BLOCK_SIZE_M)
-        num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
-        total_tiles = num_pid_m * num_pid_n
-
-        ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
-        col_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
-
-        for tile_id in range(pid_in_group, total_tiles, PIDS_PER_RANK):
-            # Swizzled tile index computation for better L2 locality
-            num_pid_in_group = GROUP_SIZE_M * num_pid_n
-            group_id = tile_id // num_pid_in_group
-            first_pid_m = group_id * GROUP_SIZE_M
-            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-            pid_n = (tile_id % num_pid_in_group) // group_size_m
-
-            rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=col_layout)) % N
-            rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-            col_offsets_in = rn * stride_in_n
-            col_offsets_out = rn * stride_out_n
-            col_mask = rn < N
-
-            rm_base = pid_m * BLOCK_SIZE_M
-
-            for i in range(BLOCK_SIZE_M):
-                row_idx = (rm_base + i) % M
-
-                if row_idx < M:
-                    # Load from local input
-                    input_addr = input_ptr + row_idx * stride_in_m + col_offsets_in
-                    if TRACING:
-                        h_load = ctx.tracing.record_event_start(
-                            event_id=events.load,
-                            target_rank=group_rank,
-                            address=input_addr,
-                            pid_m=pid_m,
-                            pid_n=pid_n,
-                            mask=col_mask,
-                        )
-                    data = gl.load(input_addr, mask=col_mask)
-                    if TRACING:
-                        ctx.tracing.record_event_end(h_load)
-
-                    # Output row: this rank's slice at group_rank * M
-                    output_addr = output_ptr + (group_rank * M + row_idx) * stride_out_m + col_offsets_out
-
-                    if TRACING:
-                        h_store = ctx.tracing.record_event_start(
-                            event_id=events.store,
-                            target_rank=target_rank,
-                            address=output_addr,
-                            pid_m=pid_m,
-                            pid_n=pid_n,
-                            mask=col_mask,
-                        )
-
-                    if is_local:
-                        # Local store: direct write
-                        gl.store(output_addr, data, mask=col_mask, cache_modifier=".wt")
-                    else:
-                        # Remote store: use pre-computed delta instead of ctx.store()
-                        # This avoids 2x gl.load(heap_bases) per store call
-                        output_addr_int = tl.cast(output_addr, gl.uint64)
-                        remote_addr_int = output_addr_int + ptr_delta
-                        remote_addr = tl.cast(remote_addr_int, output_addr.dtype)
-                        gl.store(remote_addr, data, mask=col_mask)
-
-                    if TRACING:
-                        ctx.tracing.record_event_end(h_store)
-
+                if TRACING:
+                    ctx.tracing.record_event_end(h_store)
 
 
 def all_gather(
@@ -794,44 +529,39 @@ def all_gather(
         if not hasattr(shmem, "get_device_context"):
             raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
 
-        # Validate BlockedLayout constraints.
-        # The gluon kernel distributes BLOCK_SIZE_N elements across the thread
-        # hierarchy: ELEMS_PER_THREAD * THREADS_PER_WARP * WARPS_PER_CTA = BLOCK_SIZE_N.
-        # ELEMS_PER_THREAD controls vector load width (4 = dwordx4 for fp16, optimal).
+        # Apply optimal defaults for gluon flat-2D kernel when user hasn't
+        # overridden block sizes from the Config defaults (32x64).
+        block_size_m = config.block_size_m
+        block_size_n = config.block_size_n
+        if block_size_m == 32 and block_size_n == 64:
+            # User didn't override — use optimal flat-2D tile: 8x256
+            block_size_m = 8
+            block_size_n = 256
+
+        # Validate flat-2D layout constraints.
+        # TOTAL_ELEMS = BLOCK_SIZE_M * BLOCK_SIZE_N must be a multiple of
+        # THREADS_PER_WARP * WARPS_PER_CTA so each thread gets a whole
+        # number of elements.
+        total_elems = block_size_m * block_size_n
         threads_per_cta = config.threads_per_warp * config.num_warps
-        if config.block_size_n < threads_per_cta:
+        if total_elems < threads_per_cta:
             raise ValueError(
-                f"Gluon all-gather requires block_size_n >= threads_per_warp * num_warps "
-                f"({config.threads_per_warp} * {config.num_warps} = {threads_per_cta}), "
-                f"got block_size_n={config.block_size_n}."
-            )
-        if config.block_size_n % threads_per_cta != 0:
-            raise ValueError(
-                f"Gluon all-gather requires block_size_n to be a multiple of "
+                f"Gluon all-gather requires block_size_m * block_size_n >= "
                 f"threads_per_warp * num_warps ({threads_per_cta}), "
-                f"got block_size_n={config.block_size_n}. "
-                f"This ensures each thread handles a whole number of elements. "
-                f"Recommended: block_size_n=1024 with threads_per_warp=64, num_warps=4 "
-                f"for dwordx4 vectorization (elems_per_thread=4)."
+                f"got {block_size_m} * {block_size_n} = {total_elems}."
+            )
+        if total_elems % threads_per_cta != 0:
+            raise ValueError(
+                f"Gluon all-gather requires block_size_m * block_size_n to be a "
+                f"multiple of threads_per_warp * num_warps ({threads_per_cta}), "
+                f"got {block_size_m} * {block_size_n} = {total_elems}. "
+                f"Recommended: block_size_m=8, block_size_n=256."
             )
 
         tracing_enabled = hasattr(shmem, "tracing") and shmem.tracing.enabled
         context_tensor = shmem.get_device_context()
 
-        # Dispatch gluon variant
-        if config.all_gather_variant == "partitioned":
-            if config.comm_sms % world_size != 0:
-                raise ValueError(
-                    f"For gluon partitioned variant, COMM_SMS ({config.comm_sms}) must be "
-                    f"divisible by world_size ({world_size})."
-                )
-            gluon_kernel = persistent_all_gather_gluon_partitioned
-        elif config.all_gather_variant == "hoisted":
-            gluon_kernel = persistent_all_gather_gluon_hoisted
-        else:
-            gluon_kernel = persistent_all_gather_gluon
-
-        gluon_kernel[(config.comm_sms,)](
+        persistent_all_gather_gluon[(config.comm_sms,)](
             IrisDeviceCtx,
             context_tensor,
             input_tensor,
@@ -847,12 +577,10 @@ def all_gather(
             world_size,
             rank_start,
             rank_stride,
-            config.block_size_m,
-            config.block_size_n,
+            block_size_m,
+            block_size_n,
             config.swizzle_size,
             config.comm_sms,
-            config.num_xcds,
-            config.chunk_size,
             config.threads_per_warp,
             config.num_warps,
             tracing_enabled,

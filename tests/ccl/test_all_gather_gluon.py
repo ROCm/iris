@@ -32,12 +32,14 @@ except ImportError:
 @pytest.mark.parametrize(
     "M, N, block_size_m, block_size_n",
     [
-        # block_size_n must be a multiple of (threads_per_warp * num_warps).
-        # With defaults (threads_per_warp=64, num_warps=4), minimum is 256.
-        # elems_per_thread = block_size_n / 256: higher = wider vector loads.
-        (256, 256, 32, 256),  # Small: elems_per_thread=1 (scalar loads)
-        (1024, 512, 32, 512),  # Medium: elems_per_thread=2 (dword loads)
-        (8192, 8192, 32, 1024),  # Large: elems_per_thread=4 (dwordx4, optimal)
+        # Flat-2D kernel: BLOCK_SIZE_M * BLOCK_SIZE_N must be a multiple of
+        # (threads_per_warp * num_warps) = 256. Optimal: 2048-4096 total elems.
+        (8192, 8192, 8, 256),   # Optimal flat-2D tile (2048 elems, 8/thread)
+        (8192, 8192, 4, 512),   # Alternative optimal (2048 elems, 8/thread)
+        (8192, 8192, 8, 512),   # Larger tile (4096 elems, 16/thread)
+        (256, 256, 8, 256),     # Small tensor with optimal tile
+        (1024, 512, 4, 256),    # Medium tensor
+        (8192, 8192, 32, 1024), # Legacy-sized tile (32768 elems)
     ],
 )
 def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n):
@@ -88,12 +90,7 @@ def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n):
         )
     finally:
         # Final barrier to ensure all ranks complete before test cleanup
-        # This helps with test isolation when running multiple tests
-        # Note: shmem.barrier() already does cuda.synchronize()
         shmem.barrier()
-        # Explicitly delete the shmem instance to trigger cleanup
         del shmem
-        # Force garbage collection to ensure IPC handles are cleaned up
         import gc
-
         gc.collect()
