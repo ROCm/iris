@@ -209,17 +209,17 @@ VOLATILE_OPTIONS = [False, True]
 @pytest.mark.parametrize("cache_modifier,volatile", list(product(LOAD_CACHE_MODIFIERS, VOLATILE_OPTIONS)))
 def test_gluon_load_cache_modifiers(cache_modifier, volatile):
     """Test IrisDeviceCtx.load() with various cache modifiers and volatile settings."""
-    shmem = iris_gl.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    context_tensor = shmem.get_device_context()
-    source_rank = shmem.get_rank()
+    ctx = iris_gl.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    context_tensor = ctx.get_device_context()
+    source_rank = ctx.get_rank()
     partner = int((source_rank + num_ranks // 2) % num_ranks)
 
     BLOCK_SIZE = 16
-    data = shmem.full((BLOCK_SIZE,), source_rank, dtype=torch.float32)
-    results = shmem.zeros_like(data)
+    data = ctx.full((BLOCK_SIZE,), source_rank, dtype=torch.float32)
+    results = ctx.zeros_like(data)
 
-    shmem.barrier()
+    ctx.barrier()
 
     grid = (1,)
     load_cache_modifier_kernel[grid](
@@ -234,7 +234,7 @@ def test_gluon_load_cache_modifiers(cache_modifier, volatile):
         volatile,
         num_warps=1,
     )
-    shmem.barrier()
+    ctx.barrier()
 
     expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda") * partner
 
@@ -247,8 +247,8 @@ def test_gluon_load_cache_modifiers(cache_modifier, volatile):
         print("Actual:", results)
         raise
     finally:
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         import gc
 
         gc.collect()
@@ -257,16 +257,16 @@ def test_gluon_load_cache_modifiers(cache_modifier, volatile):
 @pytest.mark.parametrize("cache_modifier", STORE_CACHE_MODIFIERS)
 def test_gluon_store_cache_modifiers(cache_modifier):
     """Test IrisDeviceCtx.store() with various cache modifiers."""
-    shmem = iris_gl.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    context_tensor = shmem.get_device_context()
-    destination_rank = shmem.get_rank()
+    ctx = iris_gl.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    context_tensor = ctx.get_device_context()
+    destination_rank = ctx.get_rank()
 
     BLOCK_SIZE = 16
-    src = shmem.ones(BLOCK_SIZE, dtype=torch.float32)
-    results = shmem.zeros_like(src)
+    src = ctx.ones(BLOCK_SIZE, dtype=torch.float32)
+    results = ctx.zeros_like(src)
 
-    shmem.barrier()
+    ctx.barrier()
 
     grid = (1,)
     store_cache_modifier_kernel[grid](
@@ -280,7 +280,7 @@ def test_gluon_store_cache_modifiers(cache_modifier):
         cache_modifier,
         num_warps=1,
     )
-    shmem.barrier()
+    ctx.barrier()
 
     expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda")
 
@@ -293,8 +293,8 @@ def test_gluon_store_cache_modifiers(cache_modifier):
         print("Actual:", results)
         raise
     finally:
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         import gc
 
         gc.collect()
@@ -305,16 +305,16 @@ def test_gluon_store_cache_modifiers(cache_modifier):
 )
 def test_gluon_get_cache_modifiers(load_cache_modifier, store_cache_modifier):
     """Test IrisDeviceCtx.get() with various cache modifiers."""
-    shmem = iris_gl.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    context_tensor = shmem.get_device_context()
-    cur_rank = shmem.get_rank()
+    ctx = iris_gl.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    context_tensor = ctx.get_device_context()
+    cur_rank = ctx.get_rank()
 
     BLOCK_SIZE = 16
-    data = shmem.ones(BLOCK_SIZE, dtype=torch.float32)
-    results = shmem.zeros_like(data)
+    data = ctx.ones(BLOCK_SIZE, dtype=torch.float32)
+    results = ctx.zeros_like(data)
 
-    shmem.barrier()
+    ctx.barrier()
 
     grid = (1,)
     get_cache_modifier_kernel[grid](
@@ -329,7 +329,7 @@ def test_gluon_get_cache_modifiers(load_cache_modifier, store_cache_modifier):
         store_cache_modifier,
         num_warps=1,
     )
-    shmem.barrier()
+    ctx.barrier()
 
     expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda") * num_ranks
 
@@ -344,8 +344,8 @@ def test_gluon_get_cache_modifiers(load_cache_modifier, store_cache_modifier):
         print("Actual:", results)
         raise
     finally:
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         import gc
 
         gc.collect()
@@ -356,15 +356,15 @@ def test_gluon_get_cache_modifiers(load_cache_modifier, store_cache_modifier):
 )
 def test_gluon_put_cache_modifiers_local(load_cache_modifier, store_cache_modifier):
     """Test IrisDeviceCtx.put() local (to_rank == cur_rank) with various cache modifiers."""
-    shmem = iris_gl.iris(1 << 20)
-    cur_rank = shmem.get_rank()
-    context_tensor = shmem.get_device_context()
+    ctx = iris_gl.iris(1 << 20)
+    cur_rank = ctx.get_rank()
+    context_tensor = ctx.get_device_context()
 
     BLOCK_SIZE = 16
-    data = shmem.ones(BLOCK_SIZE, dtype=torch.float32)
-    results = shmem.zeros_like(data)
+    data = ctx.ones(BLOCK_SIZE, dtype=torch.float32)
+    results = ctx.zeros_like(data)
 
-    shmem.barrier()
+    ctx.barrier()
 
     grid = (1,)
     put_cache_modifier_kernel[grid](
@@ -379,7 +379,7 @@ def test_gluon_put_cache_modifiers_local(load_cache_modifier, store_cache_modifi
         store_cache_modifier,
         num_warps=1,
     )
-    shmem.barrier()
+    ctx.barrier()
 
     expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda")
     try:
@@ -391,8 +391,8 @@ def test_gluon_put_cache_modifiers_local(load_cache_modifier, store_cache_modifi
         print(e)
         raise
     finally:
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         import gc
 
         gc.collect()
@@ -403,19 +403,19 @@ def test_gluon_put_cache_modifiers_local(load_cache_modifier, store_cache_modifi
 )
 def test_gluon_put_cache_modifiers_remote(load_cache_modifier, store_cache_modifier):
     """Test IrisDeviceCtx.put() remote (to_rank != cur_rank) with various cache modifiers."""
-    shmem = iris_gl.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    cur_rank = shmem.get_rank()
-    context_tensor = shmem.get_device_context()
+    ctx = iris_gl.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    cur_rank = ctx.get_rank()
+    context_tensor = ctx.get_device_context()
 
     if num_ranks < 2:
         pytest.skip("Remote put test requires at least 2 ranks")
 
     BLOCK_SIZE = 16
-    data = shmem.ones(BLOCK_SIZE, dtype=torch.float32)
-    results = shmem.zeros(BLOCK_SIZE, dtype=torch.float32)
+    data = ctx.ones(BLOCK_SIZE, dtype=torch.float32)
+    results = ctx.zeros(BLOCK_SIZE, dtype=torch.float32)
 
-    shmem.barrier()
+    ctx.barrier()
 
     remote_rank = (cur_rank + 1) % num_ranks
     grid = (1,)
@@ -433,7 +433,7 @@ def test_gluon_put_cache_modifiers_remote(load_cache_modifier, store_cache_modif
             num_warps=1,
         )
 
-    shmem.barrier()
+    ctx.barrier()
 
     if cur_rank == 1:
         expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda")
@@ -446,8 +446,8 @@ def test_gluon_put_cache_modifiers_remote(load_cache_modifier, store_cache_modif
             print(e)
             raise
 
-    shmem.barrier()
-    del shmem
+    ctx.barrier()
+    del ctx
     import gc
 
     gc.collect()
@@ -458,20 +458,20 @@ def test_gluon_put_cache_modifiers_remote(load_cache_modifier, store_cache_modif
 )
 def test_gluon_copy_local_read_remote_write(load_cache_modifier, store_cache_modifier):
     """Test IrisDeviceCtx.copy() local read → remote write with various cache modifiers."""
-    shmem = iris_gl.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    context_tensor = shmem.get_device_context()
-    cur_rank = shmem.get_rank()
+    ctx = iris_gl.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    context_tensor = ctx.get_device_context()
+    cur_rank = ctx.get_rank()
 
     BLOCK_SIZE = 16
-    data = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
+    data = ctx.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
     base = cur_rank + num_ranks
     for i in range(num_ranks):
         data[i, :] = base * (i + 1)
 
-    results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
+    results = ctx.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
 
-    shmem.barrier()
+    ctx.barrier()
 
     grid = (1,)
     copy_local_read_remote_write_cache_modifier_kernel[grid](
@@ -487,7 +487,7 @@ def test_gluon_copy_local_read_remote_write(load_cache_modifier, store_cache_mod
         num_warps=1,
     )
 
-    shmem.barrier()
+    ctx.barrier()
 
     for rank_id in range(num_ranks):
         expected_value = (rank_id + num_ranks) * (rank_id + 1)
@@ -498,8 +498,8 @@ def test_gluon_copy_local_read_remote_write(load_cache_modifier, store_cache_mod
             f"Mismatch at rank {cur_rank}, slot {rank_id} with load_cache_modifier={load_cache_modifier}, store_cache_modifier={store_cache_modifier}"
         )
 
-    shmem.barrier()
-    del shmem
+    ctx.barrier()
+    del ctx
     import gc
 
     gc.collect()
@@ -511,20 +511,20 @@ def test_gluon_copy_local_read_remote_write(load_cache_modifier, store_cache_mod
 )
 def test_gluon_copy_remote_read_local_write(load_cache_modifier, store_cache_modifier):
     """Test IrisDeviceCtx.copy() remote read → local write with various cache modifiers."""
-    shmem = iris_gl.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    context_tensor = shmem.get_device_context()
-    cur_rank = shmem.get_rank()
+    ctx = iris_gl.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    context_tensor = ctx.get_device_context()
+    cur_rank = ctx.get_rank()
 
     BLOCK_SIZE = 16
-    data = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
+    data = ctx.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
     base = cur_rank + num_ranks
     for i in range(num_ranks):
         data[i, :] = base * (i + 1)
 
-    results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
+    results = ctx.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
 
-    shmem.barrier()
+    ctx.barrier()
 
     grid = (1,)
     copy_remote_read_local_write_cache_modifier_kernel[grid](
@@ -540,7 +540,7 @@ def test_gluon_copy_remote_read_local_write(load_cache_modifier, store_cache_mod
         num_warps=1,
     )
 
-    shmem.barrier()
+    ctx.barrier()
 
     for rank_id in range(num_ranks):
         expected_value = (rank_id + num_ranks) * (rank_id + 1)
@@ -551,8 +551,8 @@ def test_gluon_copy_remote_read_local_write(load_cache_modifier, store_cache_mod
             f"Mismatch at rank {cur_rank}, slot {rank_id} with load_cache_modifier={load_cache_modifier}, store_cache_modifier={store_cache_modifier}"
         )
 
-    shmem.barrier()
-    del shmem
+    ctx.barrier()
+    del ctx
     import gc
 
     gc.collect()

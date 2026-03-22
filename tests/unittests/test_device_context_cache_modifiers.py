@@ -212,24 +212,24 @@ VOLATILE_OPTIONS = [False, True]
 @pytest.mark.parametrize("cache_modifier,volatile", list(product(LOAD_CACHE_MODIFIERS, VOLATILE_OPTIONS)))
 def test_device_context_load_cache_modifiers(cache_modifier, volatile):
     """Test DeviceContext.load() with various cache modifiers and volatile settings."""
-    shmem = iris.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    cur_rank = shmem.get_rank()
+    ctx = iris.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    cur_rank = ctx.get_rank()
     partner = int((cur_rank + num_ranks // 2) % num_ranks)
 
-    context_tensor = shmem.get_device_context()
+    context_tensor = ctx.get_device_context()
 
     BLOCK_SIZE = 16
-    data = shmem.full((BLOCK_SIZE,), cur_rank, dtype=torch.float32)
-    results = shmem.zeros_like(data)
+    data = ctx.full((BLOCK_SIZE,), cur_rank, dtype=torch.float32)
+    results = ctx.zeros_like(data)
 
-    shmem.barrier()
+    ctx.barrier()
 
     grid = lambda meta: (1,)
     device_context_load_cache_modifier_kernel[grid](
         context_tensor, data, results, cur_rank, num_ranks, BLOCK_SIZE, cache_modifier, volatile
     )
-    shmem.barrier()
+    ctx.barrier()
 
     expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda") * partner
 
@@ -246,19 +246,19 @@ def test_device_context_load_cache_modifiers(cache_modifier, volatile):
 @pytest.mark.parametrize("cache_modifier", STORE_CACHE_MODIFIERS)
 def test_device_context_store_cache_modifiers_local(cache_modifier):
     """Test DeviceContext.store() local (from_rank == to_rank) with various cache modifiers."""
-    shmem = iris.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    cur_rank = shmem.get_rank()
+    ctx = iris.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    cur_rank = ctx.get_rank()
 
     # For local store, we need partner == cur_rank; use a different kernel approach.
     # We'll test with partner = cur_rank by calling the kernel but verifying store to self.
-    context_tensor = shmem.get_device_context()
+    context_tensor = ctx.get_device_context()
 
     BLOCK_SIZE = 16
-    source = shmem.ones(BLOCK_SIZE, dtype=torch.float32)
-    target = shmem.zeros(BLOCK_SIZE, dtype=torch.float32)
+    source = ctx.ones(BLOCK_SIZE, dtype=torch.float32)
+    target = ctx.zeros(BLOCK_SIZE, dtype=torch.float32)
 
-    shmem.barrier()
+    ctx.barrier()
 
     # We override the kernel to store to itself (to_rank == cur_rank).
     @triton.jit
@@ -280,7 +280,7 @@ def test_device_context_store_cache_modifiers_local(cache_modifier):
 
     grid = lambda meta: (1,)
     local_store_kernel[grid](context_tensor, source, target, cur_rank, num_ranks, BLOCK_SIZE, cache_modifier)
-    shmem.barrier()
+    ctx.barrier()
 
     expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda")
     try:
@@ -294,20 +294,20 @@ def test_device_context_store_cache_modifiers_local(cache_modifier):
 @pytest.mark.parametrize("cache_modifier", STORE_CACHE_MODIFIERS)
 def test_device_context_store_cache_modifiers_remote(cache_modifier):
     """Test DeviceContext.store() remote (from_rank != to_rank) with various cache modifiers."""
-    shmem = iris.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    cur_rank = shmem.get_rank()
+    ctx = iris.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    cur_rank = ctx.get_rank()
 
     if num_ranks < 2:
         pytest.skip("Remote store test requires at least 2 ranks")
 
-    context_tensor = shmem.get_device_context()
+    context_tensor = ctx.get_device_context()
 
     BLOCK_SIZE = 16
-    source = shmem.ones(BLOCK_SIZE, dtype=torch.float32)
-    target = shmem.zeros(BLOCK_SIZE, dtype=torch.float32)
+    source = ctx.ones(BLOCK_SIZE, dtype=torch.float32)
+    target = ctx.zeros(BLOCK_SIZE, dtype=torch.float32)
 
-    shmem.barrier()
+    ctx.barrier()
 
     remote_rank = (cur_rank + 1) % num_ranks
     grid = lambda meta: (1,)
@@ -316,7 +316,7 @@ def test_device_context_store_cache_modifiers_remote(cache_modifier):
             context_tensor, source, target, cur_rank, num_ranks, BLOCK_SIZE, cache_modifier
         )
 
-    shmem.barrier()
+    ctx.barrier()
 
     if cur_rank == 1:
         expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda")
@@ -333,23 +333,23 @@ def test_device_context_store_cache_modifiers_remote(cache_modifier):
 )
 def test_device_context_get_cache_modifiers(load_cache_modifier, store_cache_modifier):
     """Test DeviceContext.get() with various cache modifiers."""
-    shmem = iris.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    cur_rank = shmem.get_rank()
+    ctx = iris.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    cur_rank = ctx.get_rank()
 
-    context_tensor = shmem.get_device_context()
+    context_tensor = ctx.get_device_context()
 
     BLOCK_SIZE = 16
-    data = shmem.ones(BLOCK_SIZE, dtype=torch.float32)
-    results = shmem.zeros_like(data)
+    data = ctx.ones(BLOCK_SIZE, dtype=torch.float32)
+    results = ctx.zeros_like(data)
 
-    shmem.barrier()
+    ctx.barrier()
 
     grid = lambda meta: (1,)
     device_context_get_cache_modifier_kernel[grid](
         context_tensor, data, results, cur_rank, num_ranks, BLOCK_SIZE, load_cache_modifier, store_cache_modifier
     )
-    shmem.barrier()
+    ctx.barrier()
 
     expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda") * num_ranks
 
@@ -370,17 +370,17 @@ def test_device_context_get_cache_modifiers(load_cache_modifier, store_cache_mod
 )
 def test_device_context_put_cache_modifiers_local(load_cache_modifier, store_cache_modifier):
     """Test DeviceContext.put() local (from_rank == to_rank) with various cache modifiers."""
-    shmem = iris.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    cur_rank = shmem.get_rank()
+    ctx = iris.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    cur_rank = ctx.get_rank()
 
-    context_tensor = shmem.get_device_context()
+    context_tensor = ctx.get_device_context()
 
     BLOCK_SIZE = 16
-    data = shmem.ones(BLOCK_SIZE, dtype=torch.float32)
-    results = shmem.zeros_like(data)
+    data = ctx.ones(BLOCK_SIZE, dtype=torch.float32)
+    results = ctx.zeros_like(data)
 
-    shmem.barrier()
+    ctx.barrier()
 
     grid = lambda meta: (1,)
     device_context_put_cache_modifier_kernel[grid](
@@ -394,7 +394,7 @@ def test_device_context_put_cache_modifiers_local(load_cache_modifier, store_cac
         load_cache_modifier,
         store_cache_modifier,
     )
-    shmem.barrier()
+    ctx.barrier()
 
     expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda")
     try:
@@ -412,20 +412,20 @@ def test_device_context_put_cache_modifiers_local(load_cache_modifier, store_cac
 )
 def test_device_context_put_cache_modifiers_remote(load_cache_modifier, store_cache_modifier):
     """Test DeviceContext.put() remote (from_rank != to_rank) with various cache modifiers."""
-    shmem = iris.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    cur_rank = shmem.get_rank()
+    ctx = iris.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    cur_rank = ctx.get_rank()
 
     if num_ranks < 2:
         pytest.skip("Remote put test requires at least 2 ranks")
 
-    context_tensor = shmem.get_device_context()
+    context_tensor = ctx.get_device_context()
 
     BLOCK_SIZE = 16
-    data = shmem.ones(BLOCK_SIZE, dtype=torch.float32)
-    results = shmem.zeros(BLOCK_SIZE, dtype=torch.float32)
+    data = ctx.ones(BLOCK_SIZE, dtype=torch.float32)
+    results = ctx.zeros(BLOCK_SIZE, dtype=torch.float32)
 
-    shmem.barrier()
+    ctx.barrier()
 
     remote_rank = (cur_rank + 1) % num_ranks
     grid = lambda meta: (1,)
@@ -442,7 +442,7 @@ def test_device_context_put_cache_modifiers_remote(load_cache_modifier, store_ca
             store_cache_modifier,
         )
 
-    shmem.barrier()
+    ctx.barrier()
 
     if cur_rank == 1:
         expected = torch.ones(BLOCK_SIZE, dtype=torch.float32, device="cuda")
@@ -461,28 +461,28 @@ def test_device_context_put_cache_modifiers_remote(load_cache_modifier, store_ca
 )
 def test_device_context_copy_local_read_remote_write(load_cache_modifier, store_cache_modifier):
     """Test DeviceContext.copy() local read → remote write with various cache modifiers."""
-    shmem = iris.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    cur_rank = shmem.get_rank()
+    ctx = iris.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    cur_rank = ctx.get_rank()
 
-    context_tensor = shmem.get_device_context()
+    context_tensor = ctx.get_device_context()
 
     BLOCK_SIZE = 16
-    data = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
+    data = ctx.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
     base = cur_rank + num_ranks
     for i in range(num_ranks):
         data[i, :] = base * (i + 1)
 
-    results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
+    results = ctx.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
 
-    shmem.barrier()
+    ctx.barrier()
 
     grid = lambda meta: (1,)
     device_context_copy_local_read_remote_write_kernel[grid](
         context_tensor, data, results, cur_rank, num_ranks, BLOCK_SIZE, load_cache_modifier, store_cache_modifier
     )
 
-    shmem.barrier()
+    ctx.barrier()
 
     for rank_id in range(num_ranks):
         expected_value = (rank_id + num_ranks) * (rank_id + 1)
@@ -500,28 +500,28 @@ def test_device_context_copy_local_read_remote_write(load_cache_modifier, store_
 )
 def test_device_context_copy_remote_read_local_write(load_cache_modifier, store_cache_modifier):
     """Test DeviceContext.copy() remote read → local write with various cache modifiers."""
-    shmem = iris.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    cur_rank = shmem.get_rank()
+    ctx = iris.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    cur_rank = ctx.get_rank()
 
-    context_tensor = shmem.get_device_context()
+    context_tensor = ctx.get_device_context()
 
     BLOCK_SIZE = 16
-    data = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
+    data = ctx.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
     base = cur_rank + num_ranks
     for i in range(num_ranks):
         data[i, :] = base * (i + 1)
 
-    results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
+    results = ctx.zeros((num_ranks, BLOCK_SIZE), dtype=torch.float32)
 
-    shmem.barrier()
+    ctx.barrier()
 
     grid = lambda meta: (1,)
     device_context_copy_remote_read_local_write_kernel[grid](
         context_tensor, data, results, cur_rank, num_ranks, BLOCK_SIZE, load_cache_modifier, store_cache_modifier
     )
 
-    shmem.barrier()
+    ctx.barrier()
 
     for rank_id in range(num_ranks):
         expected_value = (rank_id + num_ranks) * (rank_id + 1)
