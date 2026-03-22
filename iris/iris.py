@@ -1546,8 +1546,17 @@ class DeviceContext:
             from_rank (int): The rank ID from which to read the data.
             mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address pointer[idx]. Defaults to None.
             other (Block, optional): Value to return for masked-out elements. If not provided, the result for masked-out elements is undefined. Defaults to None.
-            cache_modifier (str, optional): Controls cache behavior of the load. Supported values: None (default, same as ".ca"), ".ca", ".cg", ".cv". Defaults to None.
-            volatile (bool, optional): If True, disables compiler optimizations that could reorder or eliminate the load. Defaults to False.
+            cache_modifier (str, optional): Controls cache behavior of the load.
+
+                Supported values:
+                    - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                    - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy
+                    - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
+                    - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
+                            Ensures global coherence by invalidating stale GPU cache lines.
+
+            volatile (bool, optional): If True, disables compiler optimizations that
+                could reorder or eliminate the load. Defaults to False.
             hint (int or tuple, optional): Vectorization hint for the translated pointer. Defaults to None.
 
         Returns:
@@ -1575,7 +1584,13 @@ class DeviceContext:
             value (Block): The tensor of elements to be stored.
             to_rank (int): The rank ID to which the data will be written.
             mask (Block of triton.int1, optional): If mask[idx] is false, do not store the data at address pointer[idx]. Defaults to None.
-            cache_modifier (str, optional): Controls cache behavior of the store. Supported values: None (default, same as ".wb"), ".wb", ".cg", ".cs", ".wt". Defaults to None.
+            cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
+
+                - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
+                - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
+                - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
+                - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
 
         Returns:
             None
@@ -1612,8 +1627,18 @@ class DeviceContext:
             from_rank (int): The rank ID from which to read the data.
             mask (Block of triton.int1, optional): If mask[idx] is false, do not load from from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
             other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
-            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values: None (default, same as ".ca"), ".ca", ".cg", ".cv". Defaults to None.
-            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values: None (default, same as ".wb"), ".wb", ".cg", ".cs", ".wt". Defaults to None.
+            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
+                - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
+                - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
+
+            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
+                - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
+                - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
+                - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
+                - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
 
         Returns:
             None
@@ -1651,8 +1676,18 @@ class DeviceContext:
             to_rank (int): The rank ID to which the data will be written.
             mask (Block of triton.int1, optional): If mask[idx] is false, do not load from from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
             other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
-            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values: None (default, same as ".ca"), ".ca", ".cg", ".cv". Defaults to None.
-            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values: None (default, same as ".wb"), ".wb", ".cg", ".cs", ".wt". Defaults to None.
+            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
+                - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
+                - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
+
+            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
+                - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
+                - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
+                - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
+                - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
 
         Returns:
             None
@@ -1694,8 +1729,18 @@ class DeviceContext:
             to_rank (int): The rank ID that will receive the data (destination rank).
             mask (Block of triton.int1, optional): If mask[idx] is false, do not load from src_ptr[idx] and do not store to dst_ptr[idx]. Defaults to None.
             other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
-            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values: None (default, same as ".ca"), ".ca", ".cg", ".cv". Defaults to None.
-            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values: None (default, same as ".wb"), ".wb", ".cg", ".cs", ".wt". Defaults to None.
+            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
+                - None: *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
+                - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
+
+            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
+                - None: *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
+                - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
+                - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
+                - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
 
         Returns:
             None

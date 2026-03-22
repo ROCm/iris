@@ -153,8 +153,17 @@ class IrisDeviceCtx:
             from_rank: The rank ID from which to read the data
             mask: Optional mask for conditional loading
             other: Value to return for masked-out elements. If not provided, the result for masked-out elements is undefined.
-            cache_modifier: Controls cache behavior of the load. Supported values: "" (default), ".ca", ".cg", ".cv".
-            volatile: If True, disables compiler optimizations that could reorder or eliminate the load. Defaults to False.
+            cache_modifier (str, optional): Controls cache behavior of the load.
+
+                Supported values:
+                    - "": *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                    - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
+                    - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
+                    - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
+                            Ensures global coherence by invalidating stale GPU cache lines.
+
+            volatile (bool, optional): If True, disables compiler optimizations that
+                could reorder or eliminate the load. Defaults to False.
 
         Returns:
             The loaded value from the target memory location
@@ -177,7 +186,13 @@ class IrisDeviceCtx:
             value: The value to store
             to_rank: The rank ID to which the data will be written
             mask: Optional mask for conditional storing
-            cache_modifier: Controls cache behavior of the store. Supported values: "" (default), ".wb", ".cg", ".cs", ".wt".
+            cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
+
+                - "": *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
+                - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
+                - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
+                - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
 
         Example:
             >>> # Store from current rank to rank 1
@@ -197,8 +212,18 @@ class IrisDeviceCtx:
             from_rank: The rank ID from which to read the data
             mask: Optional mask for conditional operations
             other: Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined.
-            load_cache_modifier: Controls cache behavior of the load. Supported values: "" (default), ".ca", ".cg", ".cv".
-            store_cache_modifier: Controls cache behavior of the store. Supported values: "" (default), ".wb", ".cg", ".cs", ".wt".
+            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
+                - "": *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
+                - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
+
+            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
+                - "": *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
+                - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
+                - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
+                - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
 
         Example:
             >>> # Copy from rank 1 to current rank's local memory
@@ -219,8 +244,18 @@ class IrisDeviceCtx:
             to_rank: The rank ID to which the data will be written
             mask: Optional mask for conditional operations
             other: Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined.
-            load_cache_modifier: Controls cache behavior of the load. Supported values: "" (default), ".ca", ".cg", ".cv".
-            store_cache_modifier: Controls cache behavior of the store. Supported values: "" (default), ".wb", ".cg", ".cs", ".wt".
+            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
+                - "": *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
+                - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
+
+            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
+                - "": *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
+                - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
+                - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
+                - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
 
         Example:
             >>> # Copy from current rank's local memory to rank 1
@@ -258,8 +293,18 @@ class IrisDeviceCtx:
             to_rank: The rank ID that will receive the data (destination rank)
             mask: Optional mask for conditional operations
             other: Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined.
-            load_cache_modifier: Controls cache behavior of the load. Supported values: "" (default), ".ca", ".cg", ".cv".
-            store_cache_modifier: Controls cache behavior of the store. Supported values: "" (default), ".wb", ".cg", ".cs", ".wt".
+            load_cache_modifier (str, optional): Controls cache behavior of the load. Supported values are:
+                - "": *(default)* — Same as ".ca". Uses cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".ca": Cache at all levels (CU, L2, LLC) with LRU policy.
+                - ".cg": Bypasses the CU (L1) cache, streams through L2, and may hit in LLC but the line is not retained or inserted.
+                - ".cv": Bypasses all GPU caches (CU and L2) and fetches directly from system memory. If data exists in the LLC, it may hit, but is not retained or inserted.
+
+            store_cache_modifier (str, optional): Controls cache behavior of the store. Supported values are:
+                - "": *(default)* — Same as ".wb". Uses write-back caching at all levels (CU, L2, LLC) with LRU policy.
+                - ".wb": Write-back. Write-allocate on L1 miss, inserted into caches and written back later.
+                - ".cg": Cache Global. Equivalent to ".wb" — stored through L1 → L2 → LLC under LRU.
+                - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
+                - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
 
         Example:
             >>> # Copy from rank 1 to rank 0 (current rank must be either 1 or 0)
