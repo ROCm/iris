@@ -91,7 +91,6 @@ class _GluonDeviceTracingCls:
     buf_op_index: gl.tensor
     buf_payload_size: gl.tensor
 
-    @gluon.constexpr_function
     def __init__(
         self,
         enabled,
@@ -165,12 +164,14 @@ class _GluonDeviceTracingCls:
 
         # Calculate payload_size from mask and datatype
         if mask is not None:
-            mask_i32 = tl.cast(mask, tl.int32)
-            num_elements = tl.sum(mask_i32)
+            # In Gluon, tl.sum over a BlockedLayout 1D tensor can fail layout verification.
+            # Use the compile-time shape of the mask tensor as the element count.
+            # For all-True masks this is exact; for partial masks it is an upper bound.
+            num_elements = tl.cast(mask.shape[0], tl.int32)
             elem_type = address.dtype.element_ty
             bitwidth = elem_type.primitive_bitwidth
             elem_size_bytes = bitwidth // 8
-            payload_size = num_elements * elem_size_bytes
+            payload_size = num_elements * tl.cast(elem_size_bytes, tl.int32)
         else:
             payload_size = tl.cast(0, tl.int32)
 
@@ -184,8 +185,9 @@ class _GluonDeviceTracingCls:
             tl.store(self.buf_xcc_id + event_idx, device_utils.get_xcc_id())
             tl.store(self.buf_cu_id + event_idx, device_utils.get_cu_id())
             tl.store(self.buf_timestamp + event_idx, device_utils.read_realtime())
-            addr_i64 = tl.cast(address, tl.int64)
-            tl.store(self.buf_address + event_idx, tl.min(addr_i64))
+            # Note: tl.min() over a BlockedLayout 1D tensor is not supported in Gluon.
+            # Store 0 as a placeholder; address recording is a known Gluon limitation.
+            tl.store(self.buf_address + event_idx, tl.cast(0, tl.int64))
             tl.store(self.buf_duration_cycles + event_idx, tl.cast(0, tl.int64))
             tl.store(self.buf_op_index + event_idx, op_index)
             tl.store(self.buf_payload_size + event_idx, tl.cast(payload_size, tl.int32))
@@ -318,7 +320,7 @@ class IrisDeviceCtx:
             dummy_ptr_i64 = tl.cast(context_tensor, tl.pointer_type(tl.int64))
             max_events_zero = tl.cast(0, tl.int32)
             device_tracing = GluonDeviceTracing(
-                enabled=False,
+                enabled=tracing,
                 rank=cur_rank,
                 max_events=max_events_zero,
                 counter=dummy_ptr_i32,

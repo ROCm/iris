@@ -45,7 +45,7 @@ def test_device_context_gluon_tracing_1d_address():
     source_rank = shmem.get_rank()
     num_ranks = shmem.get_num_ranks()
 
-    BLOCK_SIZE = 4
+    BLOCK_SIZE = 64  # AMD wavefront size (64 threads per warp)
     # Dummy buffer only to form 1D pointer block; never read/write
     dummy_buffer = shmem.zeros((BLOCK_SIZE,), dtype=torch.int64)
 
