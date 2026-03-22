@@ -315,16 +315,16 @@ if GLUON_AVAILABLE:
         COMM_SMS: gl.constexpr,
         NUM_XCDS: gl.constexpr,
         CHUNK_SIZE: gl.constexpr,
-        SIZE_PER_THREAD: gl.constexpr = 1,
-        THREADS_PER_WARP: gl.constexpr = 64,
-        WARPS_PER_CTA: gl.constexpr = 4,
     ):
         """
-        Persistent all-gather kernel using Gluon.
+        Persistent all-gather kernel using Gluon with 2D vectorized block operations.
 
         Each rank sends its input tensor to all ranks, and all ranks receive
         and concatenate all input tensors along dimension 0 (rows), matching
         torch.distributed.all_gather_into_tensor behavior.
+
+        Uses 2D pointer construction and full-block loads/stores to match
+        Triton's vectorization and memory access patterns.
         """
         ctx = IrisDeviceCtx.initialize(context_tensor)
 
@@ -334,6 +334,15 @@ if GLUON_AVAILABLE:
         num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
         total_tiles = num_pid_m * num_pid_n
 
+        # 1D column layout for vectorized loads/stores
+        # spt * tpw * wpc must equal BLOCK_SIZE_N
+        # With 64 threads/warp and 4 warps: spt * 256 = BLOCK_SIZE_N
+        # spt=4 enables dwordx4 vectorized loads for fp16
+        SPT_N: gl.constexpr = BLOCK_SIZE_N // 256
+        layout_col: gl.constexpr = gl.BlockedLayout(
+            [SPT_N], [64], [4], [0]
+        )
+
         for tile_id in range(pid, total_tiles, COMM_SMS):
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
             group_id = tile_id // num_pid_in_group
@@ -342,61 +351,40 @@ if GLUON_AVAILABLE:
             pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
             pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-            # Layout for vectorization
-            # BlockedLayout: [size_per_thread], [threads_per_warp], [warps_per_cta], [order]
-            # Increasing size_per_thread enables wider vectorized loads (e.g. dwordx4)
-            layout_col: gl.constexpr = gl.BlockedLayout([SIZE_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
-
+            # Column index array with explicit vectorized layout
             rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=layout_col)) % N
             rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
             col_offsets_in_n = rn * stride_in_n
             col_offsets_out_n = rn * stride_out_n
+            col_mask = rn < N
 
-            # Process local rank: write input to output[group_rank * M : (group_rank+1) * M, :]
+            # Precompute output row offset for this rank's data
+            rm_base = pid_m * BLOCK_SIZE_M
+
+            # Row-by-row iteration with single load, broadcast to all ranks
             for i in range(BLOCK_SIZE_M):
-                row_idx = (pid_m * BLOCK_SIZE_M + i) % M
+                row_idx = (rm_base + i) % M
 
                 if row_idx < M:
-                    col_mask = rn < N
-
-                    # Read from input[row_idx, :]
+                    # Load from local input once
                     input_offset = row_idx * stride_in_m + col_offsets_in_n
-                    input_ptr_local = input_ptr + input_offset
-                    input_ptr_local = gl.multiple_of(input_ptr_local, 4)
+                    input_ptr_row = input_ptr + input_offset
+                    data = gl.load(input_ptr_row, mask=col_mask)
 
-                    # Write to output[group_rank * M + row_idx, :]
+                    # Compute output offset once (same for all ranks)
                     output_row = group_rank * M + row_idx
                     output_offset = output_row * stride_out_m + col_offsets_out_n
-                    output_ptr_local = output_ptr + output_offset
-                    output_ptr_local = gl.multiple_of(output_ptr_local, 4)
 
-                    data = gl.load(input_ptr_local, mask=col_mask)
-                    gl.store(output_ptr_local, data, mask=col_mask, cache_modifier=".wt")
+                    # Write to ALL ranks (local + remote) with single data load
+                    for rank_idx in range(world_size):
+                        target_rank = rank_start + rank_idx * rank_stride
+                        output_ptr_target = output_ptr + output_offset
 
-            # Process remote ranks: send input to output[group_rank * M : (group_rank+1) * M, :] on each remote rank
-            for rank_idx in range(world_size):
-                target_rank = rank_start + rank_idx * rank_stride
-                if rank_idx != group_rank:
-                    for i in range(BLOCK_SIZE_M):
-                        row_idx = (pid_m * BLOCK_SIZE_M + i) % M
-
-                        if row_idx < M:
-                            col_mask = rn < N
-
-                            # Read from local input[row_idx, :]
-                            input_offset = row_idx * stride_in_m + col_offsets_in_n
-                            input_ptr_remote = input_ptr + input_offset
-                            input_ptr_remote = gl.multiple_of(input_ptr_remote, 4)
-
-                            # Write to remote output[group_rank * M + row_idx, :]
-                            output_row = group_rank * M + row_idx
-                            output_offset = output_row * stride_out_m + col_offsets_out_n
-                            output_ptr_remote = output_ptr + output_offset
-                            output_ptr_remote = gl.multiple_of(output_ptr_remote, 4)
-
-                            remote_data = gl.load(input_ptr_remote, mask=col_mask)
-                            ctx.store(output_ptr_remote, remote_data, target_rank, mask=col_mask)
+                        if rank_idx == group_rank:
+                            gl.store(output_ptr_target, data, mask=col_mask, cache_modifier=".wt")
+                        else:
+                            ctx.store(output_ptr_target, data, target_rank, mask=col_mask)
 
 
 def all_gather(
@@ -457,6 +445,12 @@ def all_gather(
         if not hasattr(shmem, "get_device_context"):
             raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
 
+        if config.block_size_n < 256 or config.block_size_n % 256 != 0:
+            raise ValueError(
+                f"Gluon all-gather requires block_size_n to be a multiple of 256, got {config.block_size_n}. "
+                f"Recommended: block_size_n=1024 for optimal dwordx4 vectorization."
+            )
+
         context_tensor = shmem.get_device_context()
 
         persistent_all_gather_gluon[(config.comm_sms,)](
@@ -481,9 +475,6 @@ def all_gather(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
-            config.gluon_size_per_thread,
-            config.gluon_threads_per_warp,
-            config.gluon_warps_per_cta,
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,

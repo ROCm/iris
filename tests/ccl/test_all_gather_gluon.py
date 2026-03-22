@@ -30,14 +30,14 @@ except ImportError:
     ],
 )
 @pytest.mark.parametrize(
-    "M, N",
+    "M, N, block_size_m, block_size_n",
     [
-        (128, 64),  # Small
-        (1024, 256),  # Medium
-        (8192, 8192),  # Large
+        (256, 256, 32, 256),  # Small (minimum block_size_n for gluon)
+        (1024, 512, 32, 512),  # Medium
+        (8192, 8192, 32, 1024),  # Large (optimal dwordx4 vectorization)
     ],
 )
-def test_all_gather_gluon(dtype, M, N):
+def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n):
     """Test all-gather functionality using Gluon by comparing against PyTorch's implementation."""
     # Ensure torch.distributed is initialized (should be done by test runner)
     if not dist.is_initialized():
@@ -69,8 +69,9 @@ def test_all_gather_gluon(dtype, M, N):
     iris_output_tensor = shmem.zeros((world_size * M, N), dtype=dtype)
 
     # Run Iris Gluon all_gather
+    # Gluon requires block_size_n to be a multiple of 256 for BlockedLayout vectorization
     shmem.barrier()
-    config = Config(use_gluon=True)
+    config = Config(use_gluon=True, block_size_m=block_size_m, block_size_n=block_size_n)
     all_gather(iris_output_tensor, iris_input_tensor, shmem, config=config)
     torch.cuda.synchronize()
 

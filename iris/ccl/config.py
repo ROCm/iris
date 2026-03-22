@@ -83,9 +83,6 @@ class Config:
     num_stages: int = 1
     num_warps: int = 4
     waves_per_eu: int = 0
-    gluon_size_per_thread: int = 1
-    gluon_threads_per_warp: int = 64
-    gluon_warps_per_cta: int = 4
 
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""

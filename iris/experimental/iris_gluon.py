@@ -135,12 +135,6 @@ class IrisDeviceCtx:
         # Cast to_base back to pointer type
         translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
 
-        # Optimization to vectorize the load/store - similar to iris.py
-        # This enables the compiler to generate dwordx4 or wider loads
-        # Note: Gluon uses scalar multiples, not 2D tuples like Triton
-        # ptr = gl.max_contiguous(gl.multiple_of(ptr, 64), 64)
-        # translated_ptr = gl.max_contiguous(gl.multiple_of(translated_ptr, 64), 64)
-
         return translated_ptr
 
     @gluon.jit
