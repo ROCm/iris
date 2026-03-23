@@ -123,9 +123,40 @@ def _ring_attn_fwd_kernel(
     q_idx = q_off + tl.arange(0, BLOCK_Q)
     q_mask = q_idx < seq_q
 
-    # Load Q block: [BLOCK_Q, HEAD_DIM]
+    # --- Causal early exit: skip attention if entire KV chunk is masked ---
+    if CAUSAL:
+        q_global_max = q_rank_start + q_off + BLOCK_Q - 1
+        if kv_rank_start > q_global_max:
+            # All KV positions are in the future — no useful attention.
+            # Just do the fused KV rotation and return.
+            if DO_PUT:
+                num_q_blks = tl.cdiv(seq_q, BLOCK_Q)
+                pid_flat = h * num_q_blks + q_blk
+                put_offs = pid_flat * PUT_BLOCK + tl.arange(0, PUT_BLOCK)
+                put_mask = put_offs < n_put_elem
+                iris.put(
+                    k_put_src + put_offs,
+                    k_put_dst + put_offs,
+                    put_rank,
+                    put_next_rank,
+                    heap_bases,
+                    mask=put_mask,
+                )
+                iris.put(
+                    v_put_src + put_offs,
+                    v_put_dst + put_offs,
+                    put_rank,
+                    put_next_rank,
+                    heap_bases,
+                    mask=put_mask,
+                )
+            return
+
+    # Load Q block in native dtype (fp16/bf16) for efficient MFMA matrix multiply.
+    # Keeping inputs in fp16 uses the FP16 MFMA path (1307 TFLOPS on MI300X)
+    # instead of the FP32 path (~163 TFLOPS).
     q_ptrs = Q + h * stride_qh + q_idx[:, None] * stride_qs + tl.arange(0, HEAD_DIM)[None, :] * stride_qd
-    q = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0).to(tl.float32)
+    q = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0)
 
     # Load running statistics for this head and Q block
     m_ptrs = M + h * stride_mh + q_idx * stride_ms
@@ -141,49 +172,49 @@ def _ring_attn_fwd_kernel(
     # The maximum value is world_size * seq_q which fits comfortably in int32.
     q_global = q_rank_start + q_idx
 
-    # Iterate over all KV blocks
+    # Iterate over KV blocks
     d_idx = tl.arange(0, HEAD_DIM)
     for kv_off in range(0, seq_kv, BLOCK_KV):
-        kv_idx = kv_off + tl.arange(0, BLOCK_KV)
-        kv_mask = kv_idx < seq_kv
-
-        # Load K in transposed layout [HEAD_DIM, BLOCK_KV] for efficient dot product
-        k_ptrs = K + h * stride_kh + d_idx[:, None] * stride_kd + kv_idx[None, :] * stride_ks
-        v_ptrs = V + h * stride_vh + kv_idx[:, None] * stride_vs + d_idx[None, :] * stride_vd
-
-        k = tl.load(k_ptrs, mask=kv_mask[None, :], other=0.0).to(tl.float32)
-        v = tl.load(v_ptrs, mask=kv_mask[:, None], other=0.0).to(tl.float32)
-
-        # Attention scores: [BLOCK_Q, BLOCK_KV] = Q [BLOCK_Q, HEAD_DIM] @ K^T [HEAD_DIM, BLOCK_KV]
-        qk = tl.dot(q, k) * scale
-
-        # Apply padding mask (validity) and optional causal mask
+        # Causal inner-loop skip: avoid loading K/V for fully-masked blocks.
+        # Once kv_rank_start + kv_off > q_global_max, all subsequent blocks
+        # are also masked (KV positions are monotonically increasing).
         if CAUSAL:
-            kv_global = kv_rank_start + kv_idx
-            # Causal: token at kv_pos can only be attended to if kv_pos <= q_pos
-            causal_mask = kv_global[None, :] <= q_global[:, None]
-            qk = tl.where(causal_mask & kv_mask[None, :], qk, -float("inf"))
+            do_kv_block = kv_rank_start + kv_off <= q_global_max
         else:
-            qk = tl.where(kv_mask[None, :], qk, -float("inf"))
+            do_kv_block = True
 
-        # Online softmax accumulation
-        # m_new = max(m, row_max(qk))
-        m_new = tl.maximum(m, tl.max(qk, axis=1))
+        if do_kv_block:
+            kv_idx = kv_off + tl.arange(0, BLOCK_KV)
+            kv_mask = kv_idx < seq_kv
 
-        # Scale factor for previous running values
-        alpha = libdevice.fast_expf(m - m_new)
+            # Load K transposed [HEAD_DIM, BLOCK_KV] and V [BLOCK_KV, HEAD_DIM]
+            # in native dtype (fp16/bf16) for efficient MFMA matrix multiply
+            k_ptrs = K + h * stride_kh + d_idx[:, None] * stride_kd + kv_idx[None, :] * stride_ks
+            v_ptrs = V + h * stride_vh + kv_idx[:, None] * stride_vs + d_idx[None, :] * stride_vd
 
-        # Unnormalized attention probabilities
-        p = libdevice.fast_expf(qk - m_new[:, None])
+            k = tl.load(k_ptrs, mask=kv_mask[None, :], other=0.0)
+            v = tl.load(v_ptrs, mask=kv_mask[:, None], other=0.0)
 
-        # Update running sum
-        l = alpha * l + tl.sum(p, axis=1)
+            # QK^T: fp16/bf16 matmul with fp32 accumulation via MFMA
+            qk = tl.dot(q, k) * scale
 
-        # Update running output (unnormalized weighted value sum)
-        o = alpha[:, None] * o + tl.dot(p, v)
+            # Apply padding mask and optional causal mask
+            if CAUSAL:
+                kv_global = kv_rank_start + kv_idx
+                causal_mask = kv_global[None, :] <= q_global[:, None]
+                qk = tl.where(causal_mask & kv_mask[None, :], qk, -float("inf"))
+            else:
+                qk = tl.where(kv_mask[None, :], qk, -float("inf"))
 
-        # Update running max
-        m = m_new
+            # Online softmax accumulation (fp32)
+            m_new = tl.maximum(m, tl.max(qk, axis=1))
+            alpha = libdevice.fast_expf(m - m_new)
+            p = libdevice.fast_expf(qk - m_new[:, None])
+            l = alpha * l + tl.sum(p, axis=1)
+
+            # AV: cast softmax probs to native dtype for efficient MFMA
+            o = alpha[:, None] * o + tl.dot(p.to(v.dtype), v)
+            m = m_new
 
     # Write back updated statistics and output
     tl.store(m_ptrs, m, mask=q_mask)
@@ -298,18 +329,12 @@ def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None)
         kv_rank = (rank - step) % world_size
         do_put = step < world_size - 1
 
-        # Never skip compute even when all KV positions will be causally
-        # masked: running the attention kernel on fully-masked blocks is
-        # cheap (all-inf qk → zero contribution via online softmax) and
-        # keeps all ranks busy at every step, eliminating the barrier-wait
-        # imbalance where low-ranked GPUs idle while high-ranked GPUs
-        # compute.  We always pass the outer `causal` flag so the kernel
-        # applies the correct global causal mask at every step.
-
-        # Fused attention + KV rotation: the attention kernel's thread
-        # blocks each transfer a slice of K/V to the next rank after
-        # computing their attention tile, achieving SM-level overlap
-        # with zero extra kernel launches.
+        # The kernel handles causal masking internally with two optimizations:
+        # 1. Program-level early exit: when all KV positions are beyond the
+        #    Q block's range, skip attention entirely (just do the put).
+        # 2. Inner-loop skip: stop iterating KV blocks once positions exceed
+        #    the Q range, avoiding useless loads and masked matmuls.
+        # All ranks still launch the kernel at every step (no barrier imbalance).
         q_rank_start = rank * seq_q
         kv_rank_start = kv_rank * seq_kv
         grid = (num_heads, triton.cdiv(seq_q, BLOCK_Q))
