@@ -67,7 +67,7 @@ def test_device_context_gluon_tracing_1d_address():
 
     # Verify event data fields for the first recorded event
     bufs = shmem.tracing.trace_buffers
-    assert bufs["event_id"][0].item() == 3  # TraceEvent().put == 3
+    assert bufs["event_id"][0].item() == int(TraceEvent().put)
     assert bufs["cur_rank"][0].item() == source_rank
     assert bufs["target_rank"][0].item() == (source_rank + 1) % num_ranks
     assert bufs["timestamp"][0].item() > 0
@@ -104,26 +104,65 @@ def test_device_context_gluon_initialize():
     gc.collect()
 
 
+def test_device_context_gluon_tracing_compiled_but_disabled():
+    """Test kernel compiled with tracing=True against a context tensor with tracing disabled.
+
+    The context tensor is zero-padded so the kernel can safely decode the tracing
+    layout. max_events=0 ensures record_event_start never writes to the null buffers.
+    """
+    shmem = iris_gl.iris(1 << 20)
+    # Do NOT enable tracing on host — context tensor has trace_enabled=0
+    context_tensor = shmem.get_device_context()
+    source_rank = shmem.get_rank()
+    num_ranks = shmem.get_num_ranks()
+
+    BLOCK_SIZE = 64
+    dummy_buffer = shmem.zeros((BLOCK_SIZE,), dtype=torch.int64)
+
+    shmem.barrier()
+
+    # Launch kernel compiled with tracing=True against non-tracing context
+    device_context_tracing_1d_address_kernel[(1,)](
+        iris_gl.IrisDeviceCtx,
+        context_tensor,
+        dummy_buffer,
+        source_rank,
+        num_ranks,
+        BLOCK_SIZE,
+        num_warps=1,
+    )
+    shmem.barrier()
+
+    # No events should have been recorded (max_events=0 from zero-padded tensor)
+    # tracing was never enabled on host, so trace_counter doesn't exist —
+    # just verify the kernel ran without crashing
+
+    shmem.barrier()
+    del shmem
+    import gc
+
+    gc.collect()
+
+
 def test_device_context_gluon_tracing_enable():
     """Test that shmem.tracing.enable() rebuilds context tensor with tracing fields."""
     shmem = iris_gl.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
 
-    # Without tracing: [cur_rank, num_ranks, heap_base_0..N-1, trace_enabled=0]
+    # Without tracing: tensor is padded to same size as tracing-enabled layout
+    # (zeros for max_events, counter ptrs, buffer ptrs) so kernels compiled with
+    # tracing=True can safely decode the tensor without reading out of bounds.
     ctx_no_trace = shmem.get_device_context()
-    size_no_trace = ctx_no_trace.shape[0]
+    trace_enabled_idx = 2 + num_ranks
+    assert ctx_no_trace[trace_enabled_idx].item() == 0
 
     # Enable tracing and rebuild
     shmem.tracing.enable(max_events=1000)
     ctx_with_trace = shmem.get_device_context()
-    size_with_trace = ctx_with_trace.shape[0]
 
-    # With tracing the context tensor is larger:
-    # [cur_rank, num_ranks, heap_base_0..N-1, trace_enabled=1, max_events,
-    #  trace_counter_ptr, op_index_counter_ptr, 13 buffer ptrs]
-    assert size_with_trace > size_no_trace
+    # Both tensors should be the same size (no-trace is zero-padded)
+    assert ctx_with_trace.shape[0] == ctx_no_trace.shape[0]
     # trace_enabled flag should be 1
-    trace_enabled_idx = 2 + num_ranks
     assert ctx_with_trace[trace_enabled_idx].item() == 1
 
     shmem.barrier()

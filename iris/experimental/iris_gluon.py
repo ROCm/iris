@@ -151,12 +151,18 @@ class _GluonDeviceTracingCls:
         Args:
             event_id: Event type ID (constexpr)
             target_rank: Target rank for the operation
-            address: Memory address(es) - can be 1D or 2D block of pointers.
+            address: Memory address(es) - 1D or 2D block of pointers.
             pid_m: Program ID in M dimension
             pid_n: Program ID in N dimension
-            mask: Optional mask tensor indicating valid elements.
+            mask: Optional mask tensor indicating valid elements (1D or 2D).
         """
         if not self.enabled:
+            return tl.cast(0, tl.int32)
+
+        # Guard against runtime-disabled tracing: when the kernel is compiled
+        # with tracing=True but the host context has tracing disabled, the
+        # counter pointers are null and max_events is 0. Skip all work.
+        if self.max_events <= 0:
             return tl.cast(0, tl.int32)
 
         event_idx = tl.atomic_add(self.counter, 1)
@@ -165,7 +171,7 @@ class _GluonDeviceTracingCls:
         # Calculate payload_size from mask and datatype
         if mask is not None:
             mask_i32 = tl.cast(mask, tl.int32)
-            num_elements = gl.sum(mask_i32, axis=0)
+            num_elements = gl.sum(mask_i32)
             elem_type = address.dtype.element_ty
             bitwidth = elem_type.primitive_bitwidth
             elem_size_bytes = bitwidth // 8
@@ -184,7 +190,7 @@ class _GluonDeviceTracingCls:
             tl.store(self.buf_cu_id + event_idx, device_utils.get_cu_id())
             tl.store(self.buf_timestamp + event_idx, device_utils.read_realtime())
             addr_i64 = tl.cast(address, tl.int64)
-            tl.store(self.buf_address + event_idx, gl.min(addr_i64, axis=0))
+            tl.store(self.buf_address + event_idx, gl.min(addr_i64))
             tl.store(self.buf_duration_cycles + event_idx, tl.cast(0, tl.int64))
             tl.store(self.buf_op_index + event_idx, op_index)
             tl.store(self.buf_payload_size + event_idx, tl.cast(payload_size, tl.int32))
@@ -263,9 +269,14 @@ class IrisDeviceCtx:
         heap_bases = context_tensor + 2  # Offset pointer to start at heap bases
 
         if tracing:
-            # Extract tracing info: starts after heap_bases, then skip trace_enabled flag
+            # Extract tracing info: starts after heap_bases, then skip trace_enabled flag.
             # Layout: [cur_rank, num_ranks, heap_base_0..N-1, trace_enabled, max_events,
             #          trace_counter_ptr, op_index_counter_ptr, buf_event_id, ...(13 buffers)]
+            #
+            # When tracing is disabled at the host, the context tensor is padded with
+            # zeros in the same positions (max_events=0, null pointers). The bounds
+            # check (event_idx < max_events) in record_event_start prevents any
+            # writes, so decoding null pointers here is safe.
             trace_info_base = 2 + num_ranks + 1  # skip cur_rank, num_ranks, heap_bases, trace_enabled
             max_events = tl.cast(gl.load(context_tensor + trace_info_base + 0), tl.int32)
             trace_counter_ptr = gl.load(context_tensor + trace_info_base + 1)
@@ -933,7 +944,13 @@ class IrisGluon:
                 self.tracing.op_index_counter.data_ptr(),
             ] + trace_buffer_ptrs
         else:
-            context_data += [0]  # trace_enabled = 0 (false)
+            # trace_enabled = 0, then pad with zeros so a kernel compiled with
+            # tracing=True can safely decode the same layout without reading
+            # out of bounds. The zeros produce max_events=0 and null pointers,
+            # so the bounds check (event_idx < max_events) in record_event_start
+            # prevents any actual writes.
+            # Padding: 1 (trace_enabled) + 1 (max_events) + 2 (counters) + 13 (buffers) = 17
+            context_data += [0] * 17
 
         self._device_context = torch.tensor(context_data, dtype=torch.int64, device=self.device)
 
