@@ -194,8 +194,10 @@ def _ring_attn_persistent_kernel(
             iris.put(V_cur_flat + put_offs, V_dst_flat + put_offs, rank, next_rank, heap_bases, mask=put_mask)
             tl.debug_barrier()
 
-            # Count completed CTAs; last one signals next rank
-            old = tl.atomic_add(put_done_counters + step, 1, sem="release", scope="gpu")
+            # Count completed CTAs; last one signals next rank.
+            # scope="sys" on the counter ensures each CTA's remote puts are
+            # visible system-wide before the counter increment is observed.
+            old = tl.atomic_add(put_done_counters + step, 1, sem="release", scope="sys")
             if old == total_blocks - 1:
                 iris.atomic_xchg(
                     signal_flags + step + 1, step + 1, rank, next_rank, heap_bases, sem="release", scope="sys"
