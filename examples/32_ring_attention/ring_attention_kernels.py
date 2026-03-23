@@ -134,14 +134,8 @@ def _ring_attn_persistent_kernel(
                 pass
 
         # COMPUTE: flash attention on this KV chunk
-        # Uses the same structure as the original kernel: iterate over KV blocks
-        # with causal skip logic inside the loop body.
         for kv_off in range(0, seq_kv, BLOCK_KV):
-            if CAUSAL:
-                do_kv_block = kv_rank_start + kv_off <= q_global_max
-            else:
-                do_kv_block = True
-
+            do_kv_block = True
             if do_kv_block:
                 kv_idx = kv_off + tl.arange(0, BLOCK_KV)
                 kv_mask = kv_idx < seq_kv
