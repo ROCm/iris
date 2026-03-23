@@ -58,6 +58,8 @@ def _ring_attn_persistent_kernel(
     signal_flags,
     put_done_counters,
     heap_bases,
+    # pre-computed kv_rank_start values for each step, shape [world_size]
+    kv_rank_starts,
     scale,
     rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -107,8 +109,7 @@ def _ring_attn_persistent_kernel(
     d_idx = tl.arange(0, HEAD_DIM)
 
     for step in range(world_size):
-        kv_rank = (rank - step) % world_size
-        kv_rank_start = kv_rank * seq_kv
+        kv_rank_start = tl.load(kv_rank_starts + step)
         do_put = step < world_size - 1
 
         # Select ping/pong buffer based on step parity
@@ -273,6 +274,12 @@ def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None,
     FUSED_PUT_BLOCK = BLOCK_Q * HEAD_DIM
     heap_bases = shmem.get_heap_bases()
 
+    # Pre-compute kv_rank_start for each step (avoids in-kernel constexpr * runtime)
+    kv_rank_starts = torch.tensor(
+        [(rank - step) % world_size * seq_kv for step in range(world_size)],
+        dtype=torch.int32, device=q.device,
+    )
+
     # Single kernel launch for ALL ring steps
     grid = (num_heads, triton.cdiv(seq_q, BLOCK_Q))
     _ring_attn_persistent_kernel[grid](
@@ -318,6 +325,8 @@ def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None,
         signal_flags,
         put_done_counters,
         heap_bases,
+        # pre-computed kv_rank_start values
+        kv_rank_starts,
         scale,
         rank=rank,
         world_size=world_size,
