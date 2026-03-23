@@ -14,8 +14,54 @@ permissions:
   contents: read
 
 jobs:
-  build-container-image:
-    runs-on: [self-hosted, mi3xx]
+  test-nightly:
+    name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, nightly Triton)
+    runs-on: [linux-mi325-8gpu-ossci-rad]
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - test_dir: examples
+            num_ranks: 1
+          - test_dir: examples
+            num_ranks: 2
+          - test_dir: examples
+            num_ranks: 4
+          - test_dir: examples
+            num_ranks: 8
+          - test_dir: unittests
+            num_ranks: 1
+          - test_dir: unittests
+            num_ranks: 2
+          - test_dir: unittests
+            num_ranks: 4
+          - test_dir: unittests
+            num_ranks: 8
+          - test_dir: ccl
+            num_ranks: 1
+          - test_dir: ccl
+            num_ranks: 2
+          - test_dir: ccl
+            num_ranks: 4
+          - test_dir: ccl
+            num_ranks: 8
+          - test_dir: x
+            num_ranks: 1
+          - test_dir: x
+            num_ranks: 2
+          - test_dir: x
+            num_ranks: 4
+          - test_dir: x
+            num_ranks: 8
+          - test_dir: ops
+            num_ranks: 1
+          - test_dir: ops
+            num_ranks: 2
+          - test_dir: ops
+            num_ranks: 4
+          - test_dir: ops
+            num_ranks: 8
 
     steps:
       - name: Checkout repository
@@ -36,93 +82,19 @@ jobs:
         run: |
           bash .github/scripts/container_build.sh
 
-  test-nightly:
-    name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, nightly Triton)
-    needs: build-container-image
-    runs-on: [self-hosted, mi3xx]
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - test_dir: examples
-            num_ranks: 1
-            gpu_devices: "0,1"
-          - test_dir: examples
-            num_ranks: 2
-            gpu_devices: "2,3"
-          - test_dir: examples
-            num_ranks: 4
-            gpu_devices: "4,5,6,7"
-          - test_dir: examples
-            num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
-          - test_dir: unittests
-            num_ranks: 1
-            gpu_devices: "0,1"
-          - test_dir: unittests
-            num_ranks: 2
-            gpu_devices: "2,3"
-          - test_dir: unittests
-            num_ranks: 4
-            gpu_devices: "4,5,6,7"
-          - test_dir: unittests
-            num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
-          - test_dir: ccl
-            num_ranks: 1
-            gpu_devices: "0,1"
-          - test_dir: ccl
-            num_ranks: 2
-            gpu_devices: "2,3"
-          - test_dir: ccl
-            num_ranks: 4
-            gpu_devices: "4,5,6,7"
-          - test_dir: ccl
-            num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
-          - test_dir: x
-            num_ranks: 1
-            gpu_devices: "0,1"
-          - test_dir: x
-            num_ranks: 2
-            gpu_devices: "2,3"
-          - test_dir: x
-            num_ranks: 4
-            gpu_devices: "4,5,6,7"
-          - test_dir: x
-            num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
-          - test_dir: ops
-            num_ranks: 1
-            gpu_devices: "0,1"
-          - test_dir: ops
-            num_ranks: 2
-            gpu_devices: "2,3"
-          - test_dir: ops
-            num_ranks: 4
-            gpu_devices: "4,5,6,7"
-          - test_dir: ops
-            num_ranks: 8
-            gpu_devices: "0,1,2,3,4,5,6,7"
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Cleanup lingering ports before tests
+      - name: Acquire GPUs
         run: |
-          bash .github/scripts/cleanup_ports.sh
+          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
 
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (nightly Triton)
         run: |
           set -e
           echo "::group::Running ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (nightly Triton)"
 
-          # Build GPU argument
+          # Build GPU argument (GPU_DEVICES set by acquire_gpus.sh)
           GPU_ARG=""
-          if [ -n "${{ matrix.gpu_devices }}" ]; then
-              GPU_ARG="--gpus ${{ matrix.gpu_devices }}"
+          if [ -n "$GPU_DEVICES" ]; then
+              GPU_ARG="--gpus $GPU_DEVICES"
           fi
 
           # Run tests in container, reinstalling Triton from main first
@@ -135,27 +107,6 @@ jobs:
                   git+https://github.com/triton-lang/triton@main
               echo \"Triton version: \$(pip show triton 2>/dev/null | grep Version || echo unknown)\"
 
-              # Install tritonBLAS if not already installed
-              echo \"Checking for tritonBLAS...\"
-              if ! python -c 'import tritonblas' 2>/dev/null; then
-                  echo \"Installing tritonBLAS...\"
-                  TRITONBLAS_DIR=\"./tritonblas_install\"
-                  if [ ! -d \"\$TRITONBLAS_DIR\" ]; then
-                      git clone https://github.com/ROCm/tritonBLAS.git \"\$TRITONBLAS_DIR\"
-                      cd \"\$TRITONBLAS_DIR\"
-                      git checkout 47768c93acb7f89511d797964b84544c30ab81ad
-                  else
-                      cd \"\$TRITONBLAS_DIR\"
-                      git fetch
-                      git checkout 47768c93acb7f89511d797964b84544c30ab81ad
-                  fi
-                  pip install -e .
-                  cd ..
-                  echo \"tritonBLAS installed successfully\"
-              else
-                  echo \"tritonBLAS already installed\"
-              fi
-
               # Install iris in editable mode
               echo \"Installing iris in editable mode\"
               pip install -e .
@@ -164,10 +115,16 @@ jobs:
               for test_file in tests/${{ matrix.test_dir }}/test_*.py; do
                   if [ -f \"\$test_file\" ]; then
                       echo \"Testing: \$test_file with ${{ matrix.num_ranks }} ranks (nightly Triton)\"
-                      python tests/run_tests_distributed.py \
-                          --num_ranks ${{ matrix.num_ranks }} \"\$test_file\" -v --tb=short --durations=10
+                      torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 \
+                          --nnodes=1 --nproc_per_node=${{ matrix.num_ranks }} \
+                          tests/run_tests_distributed.py \"\$test_file\" -v --tb=short --durations=10
                   fi
               done
           "
           echo "::endgroup::"
           echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (nightly Triton) passed!"
+
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
