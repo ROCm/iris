@@ -58,6 +58,9 @@ class RingAttention(nn.Module):
         self._buf_cache: dict[
             tuple[torch.Size, torch.dtype], tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         ] = {}
+        # Signal flags on the symmetric heap for device-side synchronization.
+        # Allocated lazily on first forward call (needs world_size from shmem).
+        self._signal_flags: torch.Tensor | None = None
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """
@@ -86,4 +89,13 @@ class RingAttention(nn.Module):
             )
         ping_pong = self._buf_cache[buf_key]
 
-        return ring_attn_fwd(q, k, v, self.shmem, causal=self.causal, scale=self.scale, _ping_pong_bufs=ping_pong)
+        # Lazily allocate signal flags on the symmetric heap.
+        if self._signal_flags is None:
+            world_size = self.shmem.get_num_ranks()
+            self._signal_flags = self.shmem.zeros((world_size,), dtype=torch.int32)
+
+        return ring_attn_fwd(
+            q, k, v, self.shmem,
+            causal=self.causal, scale=self.scale,
+            _ping_pong_bufs=ping_pong, _signal_flags=self._signal_flags,
+        )

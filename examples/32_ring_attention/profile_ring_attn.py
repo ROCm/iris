@@ -3,12 +3,10 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Ring Attention profiler: per-step timing breakdown.
+Ring Attention profiler: end-to-end timing for the persistent kernel.
 
-Instruments the ring attention loop to measure where time is spent:
-  - Kernel launch + compute time
-  - torch.cuda.synchronize() time
-  - shmem.barrier() time
+Measures total kernel time and wall time for the persistent ring attention
+kernel with device-side signal-flag synchronization.
 
 Usage::
 
@@ -28,166 +26,49 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import triton
 
 import iris
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ring_attention_kernels import _ring_attn_fwd_kernel  # noqa: E402
+from ring_attention_kernels import ring_attn_fwd  # noqa: E402
 
 
-def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None):
+def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None,
+                             _ping_pong_bufs=None, _signal_flags=None):
     """
-    Instrumented ring_attn_fwd that collects per-step timing.
+    Instrumented ring_attn_fwd that measures end-to-end kernel time.
+
+    With the persistent kernel, the entire ring loop runs in a single kernel
+    launch with device-side synchronization, so per-step host timing is not
+    applicable.  This measures total wall time and kernel time instead.
 
     Returns (output, timing_data).
     """
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+    # Time the entire persistent kernel launch
+    kernel_start = torch.cuda.Event(enable_timing=True)
+    kernel_end = torch.cuda.Event(enable_timing=True)
 
-    seq_q, num_heads, head_dim = q.shape
-    seq_kv = k.shape[0]
+    wall_start = time.perf_counter()
+    kernel_start.record()
 
-    if scale is None:
-        scale = head_dim**-0.5
+    output = ring_attn_fwd(
+        q, k, v, shmem,
+        causal=causal, scale=scale,
+        _ping_pong_bufs=_ping_pong_bufs, _signal_flags=_signal_flags,
+    )
 
-    input_dtype = q.dtype
+    kernel_end.record()
+    torch.cuda.synchronize()
+    wall_end = time.perf_counter()
 
-    O = torch.zeros(seq_q, num_heads, head_dim, dtype=torch.float32, device=q.device)
-    M = torch.full((num_heads, seq_q), fill_value=-float("inf"), dtype=torch.float32, device=q.device)
-    L = torch.zeros(num_heads, seq_q, dtype=torch.float32, device=q.device)
+    kernel_ms = kernel_start.elapsed_time(kernel_end)
+    wall_ms = (wall_end - wall_start) * 1000.0
 
-    BLOCK_Q = 64
-    BLOCK_KV = 64
-    HEAD_DIM = head_dim
-
-    if _ping_pong_bufs is not None:
-        k_ping, k_pong, v_ping, v_pong = _ping_pong_bufs
-    else:
-        k_ping = shmem.empty(k.shape, dtype=k.dtype)
-        k_pong = shmem.empty(k.shape, dtype=k.dtype)
-        v_ping = shmem.empty(v.shape, dtype=v.dtype)
-        v_pong = shmem.empty(v.shape, dtype=v.dtype)
-
-    k_ping.copy_(k.contiguous())
-    v_ping.copy_(v.contiguous())
-    shmem.barrier()
-
-    k_cur, k_recv = k_ping, k_pong
-    v_cur, v_recv = v_ping, v_pong
-
-    next_rank = (rank + 1) % world_size
-
-    FUSED_PUT_BLOCK = BLOCK_Q * HEAD_DIM
-    n_k = k_cur.numel()
-    heap_bases = shmem.get_heap_bases()
-
-    step_timings = []
-
-    for step in range(world_size):
-        kv_rank = (rank - step) % world_size
-        do_put = step < world_size - 1
-
-        # --- Time the kernel launch + execution ---
-        kernel_start = torch.cuda.Event(enable_timing=True)
-        kernel_end = torch.cuda.Event(enable_timing=True)
-
-        kernel_start.record()
-
-        q_rank_start = rank * seq_q
-        kv_rank_start = kv_rank * seq_kv
-        grid = (num_heads, triton.cdiv(seq_q, BLOCK_Q))
-        _ring_attn_fwd_kernel[grid](
-            q,
-            k_cur,
-            v_cur,
-            O,
-            M,
-            L,
-            q.stride(0),
-            q.stride(1),
-            q.stride(2),
-            k_cur.stride(0),
-            k_cur.stride(1),
-            k_cur.stride(2),
-            v_cur.stride(0),
-            v_cur.stride(1),
-            v_cur.stride(2),
-            O.stride(0),
-            O.stride(1),
-            O.stride(2),
-            M.stride(0),
-            M.stride(1),
-            L.stride(0),
-            L.stride(1),
-            seq_q,
-            seq_kv,
-            q_rank_start,
-            kv_rank_start,
-            scale,
-            # fused put params
-            k_cur.view(-1),
-            k_recv.view(-1),
-            v_cur.view(-1),
-            v_recv.view(-1),
-            n_k,
-            put_rank=rank,
-            put_next_rank=next_rank,
-            heap_bases=heap_bases,
-            CAUSAL=causal,
-            BLOCK_Q=BLOCK_Q,
-            BLOCK_KV=BLOCK_KV,
-            HEAD_DIM=HEAD_DIM,
-            DO_PUT=do_put,
-            PUT_BLOCK=FUSED_PUT_BLOCK,
-            num_warps=4,
-            num_stages=2,
-        )
-
-        kernel_end.record()
-
-        # --- Time sync + barrier ---
-        if do_put:
-            sync_start = torch.cuda.Event(enable_timing=True)
-            sync_end = torch.cuda.Event(enable_timing=True)
-
-            sync_start.record()
-            torch.cuda.synchronize()
-            sync_end.record()
-            torch.cuda.synchronize()  # need to sync to read sync timing
-
-            sync_ms = sync_start.elapsed_time(sync_end)
-
-            barrier_wall_start = time.perf_counter()
-            shmem.barrier()
-            barrier_wall_end = time.perf_counter()
-            barrier_ms = (barrier_wall_end - barrier_wall_start) * 1000.0
-
-            k_cur, k_recv = k_recv, k_cur
-            v_cur, v_recv = v_recv, v_cur
-        else:
-            torch.cuda.synchronize()
-            sync_ms = 0.0
-            barrier_ms = 0.0
-
-        kernel_ms = kernel_start.elapsed_time(kernel_end)
-
-        step_timings.append(
-            {
-                "step": step,
-                "kv_rank": kv_rank,
-                "do_put": do_put,
-                "kernel_ms": kernel_ms,
-                "sync_ms": sync_ms,
-                "barrier_ms": barrier_ms,
-                "total_ms": kernel_ms + sync_ms + barrier_ms,
-            }
-        )
-
-    L_expanded = L.permute(1, 0).unsqueeze(-1)
-    output = O / L_expanded
-
-    return output.to(input_dtype), step_timings
+    timing_data = {
+        "kernel_ms": kernel_ms,
+        "wall_ms": wall_ms,
+    }
+    return output, timing_data
 
 
 def _profile_worker(rank, world_size, init_url, cfg, results_file):
@@ -220,48 +101,39 @@ def _profile_worker(rank, world_size, init_url, cfg, results_file):
     k = torch.randn(seq_local, num_heads, head_dim, dtype=dtype)
     v = torch.randn(seq_local, num_heads, head_dim, dtype=dtype)
 
-    # Pre-allocate ping-pong buffers
+    # Pre-allocate ping-pong buffers and signal flags
     k_ping = shmem.empty(k.shape, dtype=k.dtype)
     k_pong = shmem.empty(k.shape, dtype=k.dtype)
     v_ping = shmem.empty(v.shape, dtype=v.dtype)
     v_pong = shmem.empty(v.shape, dtype=v.dtype)
     bufs = (k_ping, k_pong, v_ping, v_pong)
+    signal_flags = shmem.zeros((world_size,), dtype=torch.int32)
 
     shmem.barrier()
 
     # Warmup
     for _ in range(num_warmup):
-        out, _ = _profiled_ring_attn_fwd(q, k, v, shmem, causal=causal, scale=scale, _ping_pong_bufs=bufs)
+        out, _ = _profiled_ring_attn_fwd(
+            q, k, v, shmem, causal=causal, scale=scale,
+            _ping_pong_bufs=bufs, _signal_flags=signal_flags,
+        )
     torch.cuda.synchronize()
     shmem.barrier()
 
-    # Timed iterations — collect per-step timings
+    # Timed iterations
     all_iter_timings = []
     for it in range(num_iters):
-        out, step_timings = _profiled_ring_attn_fwd(q, k, v, shmem, causal=causal, scale=scale, _ping_pong_bufs=bufs)
-        all_iter_timings.append(step_timings)
+        out, timing = _profiled_ring_attn_fwd(
+            q, k, v, shmem, causal=causal, scale=scale,
+            _ping_pong_bufs=bufs, _signal_flags=signal_flags,
+        )
+        all_iter_timings.append(timing)
     torch.cuda.synchronize()
     shmem.barrier()
 
-    # Aggregate: average each step's timings across iterations
-    num_steps = world_size
-    avg_timings = []
-    for s in range(num_steps):
-        kernel_vals = [all_iter_timings[it][s]["kernel_ms"] for it in range(num_iters)]
-        sync_vals = [all_iter_timings[it][s]["sync_ms"] for it in range(num_iters)]
-        barrier_vals = [all_iter_timings[it][s]["barrier_ms"] for it in range(num_iters)]
-        total_vals = [all_iter_timings[it][s]["total_ms"] for it in range(num_iters)]
-        avg_timings.append(
-            {
-                "step": s,
-                "kv_rank": all_iter_timings[0][s]["kv_rank"],
-                "do_put": all_iter_timings[0][s]["do_put"],
-                "kernel_ms": sum(kernel_vals) / len(kernel_vals),
-                "sync_ms": sum(sync_vals) / len(sync_vals),
-                "barrier_ms": sum(barrier_vals) / len(barrier_vals),
-                "total_ms": sum(total_vals) / len(total_vals),
-            }
-        )
+    # Aggregate: average timings across iterations
+    avg_kernel_ms = sum(t["kernel_ms"] for t in all_iter_timings) / num_iters
+    avg_wall_ms = sum(t["wall_ms"] for t in all_iter_timings) / num_iters
 
     del shmem
     dist.destroy_process_group()
@@ -271,12 +143,9 @@ def _profile_worker(rank, world_size, init_url, cfg, results_file):
             "config": cfg,
             "world_size": world_size,
             "rank": rank,
-            "per_step": avg_timings,
             "totals": {
-                "kernel_ms": sum(s["kernel_ms"] for s in avg_timings),
-                "sync_ms": sum(s["sync_ms"] for s in avg_timings),
-                "barrier_ms": sum(s["barrier_ms"] for s in avg_timings),
-                "total_ms": sum(s["total_ms"] for s in avg_timings),
+                "kernel_ms": avg_kernel_ms,
+                "wall_ms": avg_wall_ms,
             },
         }
         with open(results_file, "w") as f:
@@ -331,37 +200,22 @@ def main():
         totals = result["totals"]
         print(f"\n{'=' * 80}")
         print(
-            f"Ring Attention Profiling — {world_size} GPUs, seq={cfg['total_seq']}, "
-            f"H={cfg['num_heads']}, D={cfg['head_dim']}, causal={cfg['causal']}"
+            f"Ring Attention Profiling (persistent kernel) — {world_size} GPUs, "
+            f"seq={cfg['total_seq']}, H={cfg['num_heads']}, D={cfg['head_dim']}, "
+            f"causal={cfg['causal']}"
         )
         print(f"{'=' * 80}")
 
-        print(f"\n{'step':>4} {'kv_rank':>7} {'put':>4} {'kernel':>9} {'sync':>9} {'barrier':>9} {'total':>9}")
-        print("-" * 65)
-        for s in result["per_step"]:
-            print(
-                f"{s['step']:>4} {s['kv_rank']:>7} {str(s['do_put']):>4} "
-                f"{s['kernel_ms']:>8.3f}ms {s['sync_ms']:>8.3f}ms {s['barrier_ms']:>8.3f}ms {s['total_ms']:>8.3f}ms"
-            )
-
-        print("\n--- Totals (rank 0) ---")
-        print(
-            f"  Kernel compute : {totals['kernel_ms']:>8.3f} ms ({100 * totals['kernel_ms'] / totals['total_ms']:>5.1f}%)"
-        )
-        print(
-            f"  CUDA sync      : {totals['sync_ms']:>8.3f} ms ({100 * totals['sync_ms'] / totals['total_ms']:>5.1f}%)"
-        )
-        print(
-            f"  Barrier        : {totals['barrier_ms']:>8.3f} ms ({100 * totals['barrier_ms'] / totals['total_ms']:>5.1f}%)"
-        )
-        print(f"  TOTAL          : {totals['total_ms']:>8.3f} ms")
+        print("\n--- Timings (rank 0, averaged) ---")
+        print(f"  Kernel (GPU)   : {totals['kernel_ms']:>8.3f} ms")
+        print(f"  Wall (end2end) : {totals['wall_ms']:>8.3f} ms")
 
         # Compute efficiency
         seq_local = cfg["total_seq"] // world_size
         flops = 4 * seq_local * cfg["total_seq"] * cfg["head_dim"] * cfg["num_heads"]
         if cfg["causal"]:
             flops //= 2
-        tflops = flops / (totals["total_ms"] * 1e-3) / 1e12
+        tflops = flops / (totals["kernel_ms"] * 1e-3) / 1e12
         print(f"  TFLOPS         : {tflops:>8.2f}")
         print(f"  MFU (vs 1307)  : {100 * tflops / 1307.4:>7.1f}%")
         print()
