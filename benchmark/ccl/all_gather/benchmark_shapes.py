@@ -83,13 +83,9 @@ def bench_rccl(M, N, rank, world_size, n_warmup, n_repeat):
     return ms
 
 
-def bench_iris(M, N, shmem, config, n_warmup, n_repeat):
-    """Benchmark Iris all-gather (Triton or Gluon depending on config)."""
-    world_size = shmem.get_num_ranks()
+def bench_iris(inp, out, shmem, config, n_warmup, n_repeat):
+    """Benchmark Iris all-gather with pre-allocated heap tensors."""
     rank = shmem.get_rank()
-
-    inp = shmem.zeros((M, N), dtype=DTYPE)
-    out = shmem.zeros((world_size * M, N), dtype=DTYPE)
 
     inp.fill_(float(rank + 1))
     shmem.barrier()
@@ -98,22 +94,15 @@ def bench_iris(M, N, shmem, config, n_warmup, n_repeat):
         shmem.ccl.all_gather(out, inp, config=config, async_op=False)
 
     ms = iris.do_bench(fn, shmem.barrier, n_warmup=n_warmup, n_repeat=n_repeat)
-
-    # Free symmetric heap memory for next iteration
-    del inp, out
-    torch.cuda.empty_cache()
     shmem.barrier()
-
     return ms
 
 
-def validate_iris(M, N, shmem, config):
-    """Quick correctness check for an Iris config. Returns True if correct."""
+def validate_iris(inp, out, shmem, config):
+    """Quick correctness check with pre-allocated heap tensors."""
     world_size = shmem.get_num_ranks()
     rank = shmem.get_rank()
-
-    inp = shmem.zeros((M, N), dtype=DTYPE)
-    out = shmem.zeros((world_size * M, N), dtype=DTYPE)
+    M = inp.shape[0]
 
     inp.fill_(float(rank + 1))
     out.zero_()
@@ -131,8 +120,6 @@ def validate_iris(M, N, shmem, config):
             ok = False
             break
 
-    del inp, out
-    torch.cuda.empty_cache()
     shmem.barrier()
     return ok
 
@@ -167,10 +154,29 @@ def main():
     is_root = rank == 0
 
     # Initialize both Triton and Gluon shmem contexts.
-    # They share the same underlying symmetric heap / distributed state,
-    # but dispatch to different kernel backends.
     shmem_triton = iris.iris(args.heap_size)
     shmem_gluon = iris_gluon.iris(args.heap_size)
+
+    # Pre-allocate all input/output tensor pairs on each heap upfront.
+    # The symmetric heap uses a bump allocator (no free), so we must
+    # allocate everything before the benchmark loop.
+    triton_bufs = {}  # (M, N) -> (inp, out)
+    gluon_bufs = {}
+    for M, N in SHAPES:
+        triton_bufs[(M, N)] = (
+            shmem_triton.zeros((M, N), dtype=DTYPE),
+            shmem_triton.zeros((world_size * M, N), dtype=DTYPE),
+        )
+        gluon_bufs[(M, N)] = (
+            shmem_gluon.zeros((M, N), dtype=DTYPE),
+            shmem_gluon.zeros((world_size * M, N), dtype=DTYPE),
+        )
+
+    if is_root:
+        total_heap_per_ctx = sum(
+            (M * N + world_size * M * N) * ELEMENT_SIZE for M, N in SHAPES
+        )
+        print(f"Heap usage per context: {total_heap_per_ctx / (1024**3):.2f} GB")
 
     # Collect results: list of dicts
     results = []
@@ -189,14 +195,17 @@ def main():
         data_mb = M * N * ELEMENT_SIZE / (1024**2)
         shape_str = f"{M}x{N}"
 
+        t_inp, t_out = triton_bufs[(M, N)]
+        g_inp, g_out = gluon_bufs[(M, N)]
+
         # --- Optional validation ---
         if args.validate:
             for cu in [CU_COUNTS[-1]]:  # validate at highest CU count only
                 triton_cfg = Config(comm_sms=cu)
                 gluon_cfg = Config(comm_sms=cu, use_gluon=True)
 
-                ok_t = validate_iris(M, N, shmem_triton, triton_cfg)
-                ok_g = validate_iris(M, N, shmem_gluon, gluon_cfg)
+                ok_t = validate_iris(t_inp, t_out, shmem_triton, triton_cfg)
+                ok_g = validate_iris(g_inp, g_out, shmem_gluon, gluon_cfg)
 
                 if is_root:
                     if not ok_t:
@@ -223,12 +232,12 @@ def main():
 
         # --- Iris Triton + Gluon at each CU count ---
         for cu in CU_COUNTS:
-            for backend_name, shmem, use_gluon in [
-                ("Triton", shmem_triton, False),
-                ("Gluon", shmem_gluon, True),
+            for backend_name, shmem, inp, out, use_gluon in [
+                ("Triton", shmem_triton, t_inp, t_out, False),
+                ("Gluon", shmem_gluon, g_inp, g_out, True),
             ]:
                 cfg = Config(comm_sms=cu, use_gluon=use_gluon)
-                ms = bench_iris(M, N, shmem, cfg, n_warmup, n_repeat)
+                ms = bench_iris(inp, out, shmem, cfg, n_warmup, n_repeat)
                 bw = calc_bandwidth_gbps(M, N, world_size, ms)
                 vs_rccl = (bw / rccl_bw * 100) if rccl_bw > 0 else 0.0
 
