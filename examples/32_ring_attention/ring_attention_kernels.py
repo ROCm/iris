@@ -134,38 +134,15 @@ def _ring_attn_persistent_kernel(
                 pass
 
         # COMPUTE: flash attention on this KV chunk
-        # The causal early exit and inner-loop skip logic matches the original
-        # kernel — just nested differently to avoid mutable flags in Triton.
-        if CAUSAL:
-            # Program-level early exit: when all KV positions are beyond Q range,
-            # skip attention entirely (just do the put below).
-            if kv_rank_start <= q_global_max:
-                for kv_off in range(0, seq_kv, BLOCK_KV):
-                    # Inner-loop skip: stop once KV positions exceed Q range
-                    if kv_rank_start + kv_off <= q_global_max:
-                        kv_idx = kv_off + tl.arange(0, BLOCK_KV)
-                        kv_mask = kv_idx < seq_kv
+        # Uses the same structure as the original kernel: iterate over KV blocks
+        # with causal skip logic inside the loop body.
+        for kv_off in range(0, seq_kv, BLOCK_KV):
+            if CAUSAL:
+                do_kv_block = kv_rank_start + kv_off <= q_global_max
+            else:
+                do_kv_block = True
 
-                        k_ptrs = K_cur + h * stride_kh + d_idx[:, None] * stride_kd + kv_idx[None, :] * stride_ks
-                        v_ptrs = V_cur + h * stride_vh + kv_idx[:, None] * stride_vs + d_idx[None, :] * stride_vd
-
-                        k = tl.load(k_ptrs, mask=kv_mask[None, :], other=0.0)
-                        v = tl.load(v_ptrs, mask=kv_mask[:, None], other=0.0)
-
-                        qk = tl.dot(q, k) * scale
-
-                        kv_global = kv_rank_start + kv_idx
-                        causal_mask = kv_global[None, :] <= q_global[:, None]
-                        qk = tl.where(causal_mask & kv_mask[None, :], qk, -float("inf"))
-
-                        m_new = tl.maximum(m, tl.max(qk, axis=1))
-                        alpha = libdevice.fast_expf(m - m_new)
-                        p = libdevice.fast_expf(qk - m_new[:, None])
-                        l = alpha * l + tl.sum(p, axis=1)
-                        o = alpha[:, None] * o + tl.dot(p.to(v.dtype), v)
-                        m = m_new
-        else:
-            for kv_off in range(0, seq_kv, BLOCK_KV):
+            if do_kv_block:
                 kv_idx = kv_off + tl.arange(0, BLOCK_KV)
                 kv_mask = kv_idx < seq_kv
 
@@ -176,7 +153,13 @@ def _ring_attn_persistent_kernel(
                 v = tl.load(v_ptrs, mask=kv_mask[:, None], other=0.0)
 
                 qk = tl.dot(q, k) * scale
-                qk = tl.where(kv_mask[None, :], qk, -float("inf"))
+
+                if CAUSAL:
+                    kv_global = kv_rank_start + kv_idx
+                    causal_mask = kv_global[None, :] <= q_global[:, None]
+                    qk = tl.where(causal_mask & kv_mask[None, :], qk, -float("inf"))
+                else:
+                    qk = tl.where(kv_mask[None, :], qk, -float("inf"))
 
                 m_new = tl.maximum(m, tl.max(qk, axis=1))
                 alpha = libdevice.fast_expf(m - m_new)
