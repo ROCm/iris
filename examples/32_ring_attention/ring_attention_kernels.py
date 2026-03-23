@@ -277,7 +277,8 @@ def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None,
     # Pre-compute kv_rank_start for each step (avoids in-kernel constexpr * runtime)
     kv_rank_starts = torch.tensor(
         [(rank - step) % world_size * seq_kv for step in range(world_size)],
-        dtype=torch.int32, device=q.device,
+        dtype=torch.int32,
+        device=q.device,
     )
 
     # Single kernel launch for ALL ring steps
