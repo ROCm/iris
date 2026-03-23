@@ -267,25 +267,47 @@ def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None)
 
     next_rank = (rank + 1) % world_size
 
-    # Block size for the put kernel (elements per workgroup). 1024 is a good
-    # default that balances kernel launch overhead vs. occupancy across a wide
-    # range of tensor sizes and GPU architectures.
     PUT_BLOCK = 1024
     n_k = k_cur.numel()
     heap_bases = shmem.get_heap_bases()
 
+    # Dedicated CUDA stream for KV rotation so the ``iris.put`` transfer
+    # runs concurrently with the attention kernel on the default stream.
+    comm_stream = torch.cuda.Stream(device=q.device)
+
     for step in range(world_size):
-        # The KV chunk we currently hold comes from rank kv_rank
         kv_rank = (rank - step) % world_size
 
-        # Determine whether attention is needed and what kind of causal mask to use
         if causal:
-            skip_compute = kv_rank > rank  # KV is entirely in the future; skip step
-            apply_causal = kv_rank == rank  # diagonal block → per-element causal mask
+            skip_compute = kv_rank > rank
+            apply_causal = kv_rank == rank
         else:
             skip_compute = False
             apply_causal = False
 
+        # --- Overlap: launch KV rotation and attention concurrently ---
+        #
+        # Both the put kernel and the attention kernel only READ k_cur / v_cur
+        # (the put writes to the *remote* rank's k_recv buffer), so there is
+        # no data-race and they can safely execute on separate streams.
+
+        # 1. Start async KV rotation on comm_stream.
+        if step < world_size - 1:
+            comm_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(comm_stream):
+                _put_kv_kernel[(triton.cdiv(n_k, PUT_BLOCK),)](
+                    k_cur.view(-1),
+                    k_recv.view(-1),
+                    v_cur.view(-1),
+                    v_recv.view(-1),
+                    n_k,
+                    cur_rank=rank,
+                    next_rank=next_rank,
+                    heap_bases=heap_bases,
+                    BLOCK=PUT_BLOCK,
+                )
+
+        # 2. Compute attention on the default stream (overlaps with put).
         if not skip_compute:
             q_rank_start = rank * seq_q
             kv_rank_start = kv_rank * seq_kv
@@ -326,30 +348,10 @@ def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None)
                 num_stages=2,
             )
 
-        # Rotate K and V to the next rank using a single fused Iris put kernel.
-        # Fusing K and V into one kernel launch halves launch overhead and lets
-        # the GPU overlap their transfers.  All ranks MUST participate in this
-        # step so the barrier is well-defined.  The ping-pong buffers guarantee
-        # that the source being read and the destination being written are always
-        # different allocations.
+        # 3. Drain both streams, then global barrier, then swap buffers.
         if step < world_size - 1:
-            _put_kv_kernel[(triton.cdiv(n_k, PUT_BLOCK),)](
-                k_cur.view(-1),
-                k_recv.view(-1),
-                v_cur.view(-1),
-                v_recv.view(-1),
-                n_k,
-                cur_rank=rank,
-                next_rank=next_rank,
-                heap_bases=heap_bases,
-                BLOCK=PUT_BLOCK,
-            )
-            # Wait until all ranks have completed their puts before any rank
-            # proceeds to the next step (where k_recv becomes k_cur).
+            torch.cuda.synchronize()
             shmem.barrier()
-
-            # Swap: the buffer we just received into becomes the source for the
-            # next step; the old source becomes the receive buffer.
             k_cur, k_recv = k_recv, k_cur
             v_cur, v_recv = v_recv, v_cur
 

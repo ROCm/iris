@@ -209,20 +209,27 @@ def _benchmark_worker(
         # ---- Reference SDPA on rank 0 (full sequence, single GPU) ----
         ref_ms = None
         if rank == 0:
-            q_full = torch.randn(total_seq, num_heads, head_dim, dtype=dtype)
-            k_full = torch.randn_like(q_full)
-            v_full = torch.randn_like(q_full)
+            try:
+                q_full = torch.randn(total_seq, num_heads, head_dim, dtype=dtype)
+                k_full = torch.randn_like(q_full)
+                v_full = torch.randn_like(q_full)
 
-            # [S, H, D] → [H, S, D] for SDPA
-            q_f = q_full.permute(1, 0, 2)
-            k_f = k_full.permute(1, 0, 2)
-            v_f = v_full.permute(1, 0, 2)
+                # [S, H, D] → [H, S, D] for SDPA
+                q_f = q_full.permute(1, 0, 2)
+                k_f = k_full.permute(1, 0, 2)
+                v_f = v_full.permute(1, 0, 2)
 
-            ref_ms = _time_ms(
-                lambda: torch.nn.functional.scaled_dot_product_attention(q_f, k_f, v_f, scale=scale, is_causal=causal),
-                warmup=num_warmup,
-                iters=num_iters,
-            )
+                ref_ms = _time_ms(
+                    lambda: torch.nn.functional.scaled_dot_product_attention(
+                        q_f, k_f, v_f, scale=scale, is_causal=causal
+                    ),
+                    warmup=num_warmup,
+                    iters=num_iters,
+                )
+            except torch.OutOfMemoryError:
+                print(f"[WARN] SDPA reference OOM at total_seq={total_seq}, skipping")
+                ref_ms = float("nan")
+                torch.cuda.empty_cache()
 
             # ---- FLOPs (per rank) ----
             # Ring attention: seq_q × total_seq attention per rank
@@ -481,7 +488,12 @@ def main():
         results_file = f.name
 
     try:
-        init_url = "tcp://127.0.0.1:29501"
+        import socket
+
+        _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _sock.bind(("", 0))
+        init_url = f"tcp://127.0.0.1:{_sock.getsockname()[1]}"
+        _sock.close()
         mp.spawn(
             fn=_benchmark_worker,
             args=(world_size, init_url, configs, results_file, args.causal, args.warmup, args.iters),

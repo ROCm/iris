@@ -167,15 +167,22 @@ def _scaling_worker(
     def _run_sdpa(total_seq: int) -> float | None:
         if rank != 0:
             return None
-        q_f = torch.randn(num_heads, total_seq, head_dim, dtype=dtype)
-        k_f = torch.randn_like(q_f)
-        v_f = torch.randn_like(q_f)
-        ms = _time_ms(
-            lambda: torch.nn.functional.scaled_dot_product_attention(q_f, k_f, v_f, scale=scale, is_causal=causal),
-            warmup=num_warmup,
-            iters=num_iters,
-        )
-        return ms
+        try:
+            q_f = torch.randn(num_heads, total_seq, head_dim, dtype=dtype)
+            k_f = torch.randn_like(q_f)
+            v_f = torch.randn_like(q_f)
+            ms = _time_ms(
+                lambda: torch.nn.functional.scaled_dot_product_attention(
+                    q_f, k_f, v_f, scale=scale, is_causal=causal
+                ),
+                warmup=num_warmup,
+                iters=num_iters,
+            )
+            return ms
+        except torch.OutOfMemoryError:
+            print(f"[WARN] SDPA reference OOM at total_seq={total_seq}, skipping")
+            torch.cuda.empty_cache()
+            return float("nan")
 
     # ------------------------------------------------------------------
     # STRONG SCALING: fixed total_seq, world_size GPUs

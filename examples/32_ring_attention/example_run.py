@@ -114,9 +114,17 @@ def run(rank: int, world_size: int, init_url: str, args):
     dist.destroy_process_group()
 
 
+def _find_free_port() -> int:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
 def main():
     args = parse_args()
-    init_url = "tcp://127.0.0.1:29500"
+    init_url = f"tcp://127.0.0.1:{_find_free_port()}"
     mp.spawn(
         fn=run,
         args=(args.num_ranks, init_url, args),
