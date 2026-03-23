@@ -136,7 +136,12 @@ def _ring_attn_persistent_kernel(
 
         # COMPUTE: flash attention on this KV chunk
         for kv_off in range(0, seq_kv, BLOCK_KV):
-            do_kv_block = True
+            # Causal early-exit: skip KV blocks entirely after Q's range
+            if CAUSAL:
+                kv_block_start = kv_rank_start + kv_off
+                do_kv_block = kv_block_start <= q_global_max
+            else:
+                do_kv_block = True
             if do_kv_block:
                 kv_idx = kv_off + tl.arange(0, BLOCK_KV)
                 kv_mask = kv_idx < seq_kv
