@@ -321,10 +321,10 @@ if GLUON_AVAILABLE:
         """
         Persistent all-gather kernel using Gluon with explicit memory layout control.
 
-        Each rank loads its local input once per row and writes it to the
-        corresponding output slice on ALL ranks (local + remote), avoiding
-        redundant loads. Column indices use an explicit BlockedLayout to
-        control vectorization width.
+        Uses hoisted pointer translation: heap_bases are loaded once before the
+        tile loops, and pointer deltas (target_base - local_base) are precomputed.
+        Remote stores use gl.store() directly with contiguity hints preserved,
+        enabling vectorized global_store_dwordx4 instead of scalar stores.
 
         Memory layout (BlockedLayout):
             The column dimension is distributed across the GPU thread hierarchy
@@ -388,6 +388,12 @@ if GLUON_AVAILABLE:
         ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
         col_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
 
+        # Hoist heap_bases loads: load local_base once, then compute a signed
+        # byte-delta for each remote rank.  The delta is added to the local
+        # output pointer at store time so that gl.store() sees a pointer with
+        # the same contiguity attributes as the original — enabling dwordx4.
+        local_base = gl.load(ctx.heap_bases + iris_rank)
+
         for tile_id in range(pid, total_tiles, COMM_SMS):
             # Swizzled tile index computation for better L2 locality
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -427,7 +433,19 @@ if GLUON_AVAILABLE:
                         if rank_idx == group_rank:
                             gl.store(output_ptr_target, data, mask=col_mask, cache_modifier=".wt")
                         else:
-                            ctx.store(output_ptr_target, data, target_rank, mask=col_mask)
+                            # Hoisted pointer translation: compute target address
+                            # by adding the byte delta between target and local
+                            # heap bases to the local pointer.  This avoids
+                            # reloading heap_bases every iteration and preserves
+                            # the contiguity hints for vectorized stores.
+                            target_base = gl.load(ctx.heap_bases + target_rank)
+                            ptr_int = tl.cast(output_ptr_target, gl.uint64)
+                            offset = ptr_int - local_base
+                            target_base_byte = tl.cast(target_base, gl.pointer_type(gl.int8))
+                            translated_byte = target_base_byte + offset
+                            translated_ptr = tl.cast(translated_byte, output_ptr_target.dtype)
+                            translated_ptr = gl.max_contiguous(gl.multiple_of(translated_ptr, BLOCK_SIZE_N), BLOCK_SIZE_N)
+                            gl.store(translated_ptr, data, mask=col_mask)
 
 
 def all_gather(
