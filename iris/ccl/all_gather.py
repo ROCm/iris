@@ -444,7 +444,9 @@ if GLUON_AVAILABLE:
                             target_base_byte = tl.cast(target_base, gl.pointer_type(gl.int8))
                             translated_byte = target_base_byte + offset
                             translated_ptr = tl.cast(translated_byte, output_ptr_target.dtype)
-                            translated_ptr = gl.max_contiguous(gl.multiple_of(translated_ptr, BLOCK_SIZE_N), BLOCK_SIZE_N)
+                            translated_ptr = gl.max_contiguous(
+                                gl.multiple_of(translated_ptr, BLOCK_SIZE_N), BLOCK_SIZE_N
+                            )
                             gl.store(translated_ptr, data, mask=col_mask)
 
 
