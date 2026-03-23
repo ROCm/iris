@@ -33,7 +33,7 @@ import triton
 import iris
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ring_attention_kernels import _ring_attn_fwd_kernel, _put_kv_kernel  # noqa: E402
+from ring_attention_kernels import _ring_attn_fwd_kernel  # noqa: E402
 
 
 def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None):
@@ -78,7 +78,6 @@ def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_
 
     next_rank = (rank + 1) % world_size
 
-    STANDALONE_PUT_BLOCK = 1024
     FUSED_PUT_BLOCK = BLOCK_Q * HEAD_DIM
     n_k = k_cur.numel()
     heap_bases = shmem.get_heap_bases()
@@ -89,81 +88,61 @@ def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_
         kv_rank = (rank - step) % world_size
         do_put = step < world_size - 1
 
-        if causal:
-            skip_compute = kv_rank > rank
-            apply_causal = kv_rank == rank
-        else:
-            skip_compute = False
-            apply_causal = False
-
         # --- Time the kernel launch + execution ---
         kernel_start = torch.cuda.Event(enable_timing=True)
         kernel_end = torch.cuda.Event(enable_timing=True)
 
         kernel_start.record()
 
-        if not skip_compute:
-            q_rank_start = rank * seq_q
-            kv_rank_start = kv_rank * seq_kv
-            grid = (num_heads, triton.cdiv(seq_q, BLOCK_Q))
-            _ring_attn_fwd_kernel[grid](
-                q,
-                k_cur,
-                v_cur,
-                O,
-                M,
-                L,
-                q.stride(0),
-                q.stride(1),
-                q.stride(2),
-                k_cur.stride(0),
-                k_cur.stride(1),
-                k_cur.stride(2),
-                v_cur.stride(0),
-                v_cur.stride(1),
-                v_cur.stride(2),
-                O.stride(0),
-                O.stride(1),
-                O.stride(2),
-                M.stride(0),
-                M.stride(1),
-                L.stride(0),
-                L.stride(1),
-                seq_q,
-                seq_kv,
-                q_rank_start,
-                kv_rank_start,
-                scale,
-                # fused put params
-                k_cur.view(-1),
-                k_recv.view(-1),
-                v_cur.view(-1),
-                v_recv.view(-1),
-                n_k,
-                put_rank=rank,
-                put_next_rank=next_rank,
-                heap_bases=heap_bases,
-                CAUSAL=apply_causal,
-                BLOCK_Q=BLOCK_Q,
-                BLOCK_KV=BLOCK_KV,
-                HEAD_DIM=HEAD_DIM,
-                DO_PUT=do_put,
-                PUT_BLOCK=FUSED_PUT_BLOCK,
-                num_warps=4,
-                num_stages=2,
-            )
-        elif do_put:
-            _put_kv_kernel[(triton.cdiv(n_k, STANDALONE_PUT_BLOCK),)](
-                k_cur.view(-1),
-                k_recv.view(-1),
-                v_cur.view(-1),
-                v_recv.view(-1),
-                n_k,
-                cur_rank=rank,
-                next_rank=next_rank,
-                heap_bases=heap_bases,
-                BLOCK=STANDALONE_PUT_BLOCK,
-            )
+        q_rank_start = rank * seq_q
+        kv_rank_start = kv_rank * seq_kv
+        grid = (num_heads, triton.cdiv(seq_q, BLOCK_Q))
+        _ring_attn_fwd_kernel[grid](
+            q,
+            k_cur,
+            v_cur,
+            O,
+            M,
+            L,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k_cur.stride(0),
+            k_cur.stride(1),
+            k_cur.stride(2),
+            v_cur.stride(0),
+            v_cur.stride(1),
+            v_cur.stride(2),
+            O.stride(0),
+            O.stride(1),
+            O.stride(2),
+            M.stride(0),
+            M.stride(1),
+            L.stride(0),
+            L.stride(1),
+            seq_q,
+            seq_kv,
+            q_rank_start,
+            kv_rank_start,
+            scale,
+            # fused put params
+            k_cur.view(-1),
+            k_recv.view(-1),
+            v_cur.view(-1),
+            v_recv.view(-1),
+            n_k,
+            put_rank=rank,
+            put_next_rank=next_rank,
+            heap_bases=heap_bases,
+            CAUSAL=causal,
+            BLOCK_Q=BLOCK_Q,
+            BLOCK_KV=BLOCK_KV,
+            HEAD_DIM=HEAD_DIM,
+            DO_PUT=do_put,
+            PUT_BLOCK=FUSED_PUT_BLOCK,
+            num_warps=4,
+            num_stages=2,
+        )
 
         kernel_end.record()
 
@@ -197,7 +176,6 @@ def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_
             {
                 "step": step,
                 "kv_rank": kv_rank,
-                "skip_compute": skip_compute,
                 "do_put": do_put,
                 "kernel_ms": kernel_ms,
                 "sync_ms": sync_ms,
@@ -277,7 +255,6 @@ def _profile_worker(rank, world_size, init_url, cfg, results_file):
             {
                 "step": s,
                 "kv_rank": all_iter_timings[0][s]["kv_rank"],
-                "skip_compute": all_iter_timings[0][s]["skip_compute"],
                 "do_put": all_iter_timings[0][s]["do_put"],
                 "kernel_ms": sum(kernel_vals) / len(kernel_vals),
                 "sync_ms": sum(sync_vals) / len(sync_vals),
@@ -360,12 +337,12 @@ def main():
         print(f"{'=' * 80}")
 
         print(
-            f"\n{'step':>4} {'kv_rank':>7} {'skip':>5} {'put':>4} {'kernel':>9} {'sync':>9} {'barrier':>9} {'total':>9}"
+            f"\n{'step':>4} {'kv_rank':>7} {'put':>4} {'kernel':>9} {'sync':>9} {'barrier':>9} {'total':>9}"
         )
-        print("-" * 70)
+        print("-" * 65)
         for s in result["per_step"]:
             print(
-                f"{s['step']:>4} {s['kv_rank']:>7} {str(s['skip_compute']):>5} {str(s['do_put']):>4} "
+                f"{s['step']:>4} {s['kv_rank']:>7} {str(s['do_put']):>4} "
                 f"{s['kernel_ms']:>8.3f}ms {s['sync_ms']:>8.3f}ms {s['barrier_ms']:>8.3f}ms {s['total_ms']:>8.3f}ms"
             )
 

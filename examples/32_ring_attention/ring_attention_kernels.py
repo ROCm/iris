@@ -290,7 +290,6 @@ def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None)
 
     next_rank = (rank + 1) % world_size
 
-    STANDALONE_PUT_BLOCK = 1024
     FUSED_PUT_BLOCK = BLOCK_Q * HEAD_DIM
     n_k = k_cur.numel()
     heap_bases = shmem.get_heap_bases()
@@ -299,80 +298,67 @@ def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None)
         kv_rank = (rank - step) % world_size
         do_put = step < world_size - 1
 
-        if causal:
-            skip_compute = kv_rank > rank
-            apply_causal = kv_rank == rank
-        else:
-            skip_compute = False
-            apply_causal = False
+        # Never skip compute even when all KV positions will be causally
+        # masked: running the attention kernel on fully-masked blocks is
+        # cheap (all-inf qk → zero contribution via online softmax) and
+        # keeps all ranks busy at every step, eliminating the barrier-wait
+        # imbalance where low-ranked GPUs idle while high-ranked GPUs
+        # compute.  We always pass the outer `causal` flag so the kernel
+        # applies the correct global causal mask at every step.
 
-        if not skip_compute:
-            # Fused attention + KV rotation: the attention kernel's thread
-            # blocks each transfer a slice of K/V to the next rank after
-            # computing their attention tile, achieving SM-level overlap
-            # with zero extra kernel launches.
-            q_rank_start = rank * seq_q
-            kv_rank_start = kv_rank * seq_kv
-            grid = (num_heads, triton.cdiv(seq_q, BLOCK_Q))
-            _ring_attn_fwd_kernel[grid](
-                q,
-                k_cur,
-                v_cur,
-                O,
-                M,
-                L,
-                q.stride(0),
-                q.stride(1),
-                q.stride(2),
-                k_cur.stride(0),
-                k_cur.stride(1),
-                k_cur.stride(2),
-                v_cur.stride(0),
-                v_cur.stride(1),
-                v_cur.stride(2),
-                O.stride(0),
-                O.stride(1),
-                O.stride(2),
-                M.stride(0),
-                M.stride(1),
-                L.stride(0),
-                L.stride(1),
-                seq_q,
-                seq_kv,
-                q_rank_start,
-                kv_rank_start,
-                scale,
-                # fused put params
-                k_cur.view(-1),
-                k_recv.view(-1),
-                v_cur.view(-1),
-                v_recv.view(-1),
-                n_k,
-                put_rank=rank,
-                put_next_rank=next_rank,
-                heap_bases=heap_bases,
-                CAUSAL=apply_causal,
-                BLOCK_Q=BLOCK_Q,
-                BLOCK_KV=BLOCK_KV,
-                HEAD_DIM=HEAD_DIM,
-                DO_PUT=do_put,
-                PUT_BLOCK=FUSED_PUT_BLOCK,
-                num_warps=4,
-                num_stages=2,
-            )
-        elif do_put:
-            # skip_compute but still need to rotate KV — use standalone put
-            _put_kv_kernel[(triton.cdiv(n_k, STANDALONE_PUT_BLOCK),)](
-                k_cur.view(-1),
-                k_recv.view(-1),
-                v_cur.view(-1),
-                v_recv.view(-1),
-                n_k,
-                cur_rank=rank,
-                next_rank=next_rank,
-                heap_bases=heap_bases,
-                BLOCK=STANDALONE_PUT_BLOCK,
-            )
+        # Fused attention + KV rotation: the attention kernel's thread
+        # blocks each transfer a slice of K/V to the next rank after
+        # computing their attention tile, achieving SM-level overlap
+        # with zero extra kernel launches.
+        q_rank_start = rank * seq_q
+        kv_rank_start = kv_rank * seq_kv
+        grid = (num_heads, triton.cdiv(seq_q, BLOCK_Q))
+        _ring_attn_fwd_kernel[grid](
+            q,
+            k_cur,
+            v_cur,
+            O,
+            M,
+            L,
+            q.stride(0),
+            q.stride(1),
+            q.stride(2),
+            k_cur.stride(0),
+            k_cur.stride(1),
+            k_cur.stride(2),
+            v_cur.stride(0),
+            v_cur.stride(1),
+            v_cur.stride(2),
+            O.stride(0),
+            O.stride(1),
+            O.stride(2),
+            M.stride(0),
+            M.stride(1),
+            L.stride(0),
+            L.stride(1),
+            seq_q,
+            seq_kv,
+            q_rank_start,
+            kv_rank_start,
+            scale,
+            # fused put params
+            k_cur.view(-1),
+            k_recv.view(-1),
+            v_cur.view(-1),
+            v_recv.view(-1),
+            n_k,
+            put_rank=rank,
+            put_next_rank=next_rank,
+            heap_bases=heap_bases,
+            CAUSAL=causal,
+            BLOCK_Q=BLOCK_Q,
+            BLOCK_KV=BLOCK_KV,
+            HEAD_DIM=HEAD_DIM,
+            DO_PUT=do_put,
+            PUT_BLOCK=FUSED_PUT_BLOCK,
+            num_warps=4,
+            num_stages=2,
+        )
 
         # Global barrier ensures all ranks have received data, then swap.
         if do_put:
