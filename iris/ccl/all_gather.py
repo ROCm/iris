@@ -12,6 +12,16 @@ import iris
 from .config import Config
 from .utils import extract_group_info
 
+# Conditional import for Gluon
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+    from iris.experimental.iris_gluon import IrisDeviceCtx
+
+    GLUON_AVAILABLE = True
+except ImportError:
+    GLUON_AVAILABLE = False
+
 
 @triton.jit()
 def persistent_all_gather(
@@ -279,6 +289,147 @@ def persistent_all_gather_partitioned(
             )
 
 
+# Gluon implementation
+if GLUON_AVAILABLE:
+
+    @gluon.jit
+    def persistent_all_gather_gluon(
+        IrisDeviceCtx: gl.constexpr,
+        context_tensor,
+        input_ptr,
+        output_ptr,
+        M,
+        N,
+        stride_in_m,
+        stride_in_n,
+        stride_out_m,
+        stride_out_n,
+        group_rank: gl.constexpr,
+        iris_rank: gl.constexpr,
+        world_size: gl.constexpr,
+        rank_start: gl.constexpr,
+        rank_stride: gl.constexpr,
+        BLOCK_SIZE_M: gl.constexpr,
+        BLOCK_SIZE_N: gl.constexpr,
+        GROUP_SIZE_M: gl.constexpr,
+        COMM_SMS: gl.constexpr,
+        NUM_XCDS: gl.constexpr,
+        CHUNK_SIZE: gl.constexpr,
+        THREADS_PER_WARP: gl.constexpr,
+        WARPS_PER_CTA: gl.constexpr,
+    ):
+        """
+        Persistent all-gather kernel using Gluon with explicit memory layout control.
+
+        Each rank loads its local input once per row and writes it to the
+        corresponding output slice on ALL ranks (local + remote), avoiding
+        redundant loads. Column indices use an explicit BlockedLayout to
+        control vectorization width.
+
+        Memory layout (BlockedLayout):
+            The column dimension is distributed across the GPU thread hierarchy
+            using gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [order]).
+
+            - ELEMS_PER_THREAD: number of contiguous elements each thread loads/stores.
+              Controls the vector width of memory instructions. For fp16:
+                1 -> 2-byte scalar load
+                2 -> 4-byte dword load
+                4 -> 8-byte dwordx4 load (optimal on AMD GFX9+)
+            - THREADS_PER_WARP: threads per warp/wavefront (64 on AMD, 32 on NVIDIA).
+            - WARPS_PER_CTA: number of warps in the cooperative thread array (workgroup).
+
+            The product ELEMS_PER_THREAD * THREADS_PER_WARP * WARPS_PER_CTA must
+            equal BLOCK_SIZE_N. ELEMS_PER_THREAD is derived as:
+                ELEMS_PER_THREAD = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
+
+        Constraints (validated by host wrapper before launch):
+            - BLOCK_SIZE_N must be a multiple of (THREADS_PER_WARP * WARPS_PER_CTA).
+            - BLOCK_SIZE_N must be >= (THREADS_PER_WARP * WARPS_PER_CTA) so that
+              ELEMS_PER_THREAD >= 1.
+            - WARPS_PER_CTA must match the num_warps kernel launch parameter.
+            - THREADS_PER_WARP must match the hardware wavefront size (64 for AMD).
+
+        Args:
+            IrisDeviceCtx: Gluon device context class for remote memory operations.
+            context_tensor: Opaque tensor holding IrisDeviceCtx state.
+            input_ptr: Pointer to local input tensor of shape (M, N).
+            output_ptr: Pointer to output tensor of shape (world_size * M, N).
+            M: Number of rows in the input tensor (per rank).
+            N: Number of columns.
+            stride_in_m, stride_in_n: Row and column strides for input tensor.
+            stride_out_m, stride_out_n: Row and column strides for output tensor.
+            group_rank: This rank's index within the ProcessGroup (0..world_size-1).
+            iris_rank: This rank's global index in the iris context (for RMA addressing).
+            world_size: Total number of ranks in the group.
+            rank_start: First iris rank in the group (for RMA target computation).
+            rank_stride: Stride between consecutive iris ranks in the group.
+            BLOCK_SIZE_M: Number of rows per tile.
+            BLOCK_SIZE_N: Number of columns per tile. Must be a multiple of
+                          (THREADS_PER_WARP * WARPS_PER_CTA).
+            GROUP_SIZE_M: Swizzle group size for M-dimension tiling.
+            COMM_SMS: Number of SMs used for persistent scheduling.
+            NUM_XCDS: Number of XCDs (chiplet count).
+            CHUNK_SIZE: Chunk size for XCD-aware tile mapping.
+            THREADS_PER_WARP: Threads per warp/wavefront (64 for AMD, 32 for NVIDIA).
+            WARPS_PER_CTA: Number of warps per workgroup. Must match num_warps.
+        """
+        ctx = IrisDeviceCtx.initialize(context_tensor)
+
+        pid = gl.program_id(0)
+
+        num_pid_m = gl.cdiv(M, BLOCK_SIZE_M)
+        num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
+        total_tiles = num_pid_m * num_pid_n
+
+        # Build the 1D BlockedLayout for the column dimension.
+        # ELEMS_PER_THREAD controls how many contiguous elements each thread
+        # handles, which directly maps to the vector load/store width:
+        #   elems=1 -> scalar, elems=2 -> dword, elems=4 -> dwordx4 (optimal)
+        ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE_N // (THREADS_PER_WARP * WARPS_PER_CTA)
+        col_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
+
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            # Swizzled tile index computation for better L2 locality
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+            # Build column index vector with explicit layout for vectorized access
+            rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=col_layout)) % N
+            rn = gl.max_contiguous(gl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+            col_offsets_in = rn * stride_in_n
+            col_offsets_out = rn * stride_out_n
+            col_mask = rn < N
+
+            rm_base = pid_m * BLOCK_SIZE_M
+
+            # Iterate row-by-row: load each row once, then write to all ranks.
+            # This avoids reloading the same data for each destination rank.
+            for i in range(BLOCK_SIZE_M):
+                row_idx = (rm_base + i) % M
+
+                if row_idx < M:
+                    # Single load from local input
+                    data = gl.load(input_ptr + row_idx * stride_in_m + col_offsets_in, mask=col_mask)
+
+                    # Output row position: this rank's slice starts at group_rank * M
+                    output_offset = (group_rank * M + row_idx) * stride_out_m + col_offsets_out
+
+                    # Broadcast to every rank (local store + remote RMA writes)
+                    for rank_idx in range(world_size):
+                        target_rank = rank_start + rank_idx * rank_stride
+                        output_ptr_target = output_ptr + output_offset
+
+                        if rank_idx == group_rank:
+                            gl.store(output_ptr_target, data, mask=col_mask, cache_modifier=".wt")
+                        else:
+                            ctx.store(output_ptr_target, data, target_rank, mask=col_mask)
+
+
 def all_gather(
     output_tensor,
     input_tensor,
@@ -314,25 +465,10 @@ def all_gather(
     if config is None:
         config = Config(block_size_m=32, block_size_n=64)
 
-    # Check for unsupported options
-    if config.use_gluon:
-        raise ValueError(
-            "all_gather does not support use_gluon=True. "
-            "Gluon implementation is not available for all_gather. "
-            "Use default config (use_gluon=False)."
-        )
-
     # Extract group information
     # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
     # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
-
-    # Validate COMM_SMS divisibility for partitioned variant
-    if config.all_gather_variant == "partitioned" and config.comm_sms % world_size != 0:
-        raise ValueError(
-            f"For all_gather_variant='partitioned', COMM_SMS ({config.comm_sms}) must be divisible by world_size ({world_size}). "
-            f"Please adjust config.comm_sms to be a multiple of {world_size}."
-        )
 
     M, N = input_tensor.shape[:2]
     expected_output_shape = (world_size * M, N)
@@ -346,41 +482,109 @@ def all_gather(
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
-    heap_bases = shmem.get_heap_bases()
+    # Choose between Triton and Gluon implementation
+    if config.use_gluon and GLUON_AVAILABLE:
+        # Check if shmem is Iris Gluon (has get_device_context method)
+        if not hasattr(shmem, "get_device_context"):
+            raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
 
-    # Dispatch to the appropriate kernel based on variant
-    if config.all_gather_variant == "persistent":
-        kernel_fn = persistent_all_gather
-    elif config.all_gather_variant == "partitioned":
-        kernel_fn = persistent_all_gather_partitioned
+        # Validate BlockedLayout constraints.
+        # The gluon kernel distributes BLOCK_SIZE_N elements across the thread
+        # hierarchy: ELEMS_PER_THREAD * THREADS_PER_WARP * WARPS_PER_CTA = BLOCK_SIZE_N.
+        # ELEMS_PER_THREAD controls vector load width (4 = dwordx4 for fp16, optimal).
+        threads_per_cta = config.threads_per_warp * config.num_warps
+        if config.block_size_n < threads_per_cta:
+            raise ValueError(
+                f"Gluon all-gather requires block_size_n >= threads_per_warp * num_warps "
+                f"({config.threads_per_warp} * {config.num_warps} = {threads_per_cta}), "
+                f"got block_size_n={config.block_size_n}."
+            )
+        if config.block_size_n % threads_per_cta != 0:
+            raise ValueError(
+                f"Gluon all-gather requires block_size_n to be a multiple of "
+                f"threads_per_warp * num_warps ({threads_per_cta}), "
+                f"got block_size_n={config.block_size_n}. "
+                f"This ensures each thread handles a whole number of elements. "
+                f"Recommended: block_size_n=1024 with threads_per_warp=64, num_warps=4 "
+                f"for dwordx4 vectorization (elems_per_thread=4)."
+            )
+
+        context_tensor = shmem.get_device_context()
+
+        persistent_all_gather_gluon[(config.comm_sms,)](
+            IrisDeviceCtx,
+            context_tensor,
+            input_tensor,
+            output_tensor,
+            M,
+            N,
+            stride_in_m,
+            stride_in_n,
+            stride_out_m,
+            stride_out_n,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config.block_size_m,
+            config.block_size_n,
+            config.swizzle_size,
+            config.comm_sms,
+            config.num_xcds,
+            config.chunk_size,
+            config.threads_per_warp,
+            config.num_warps,
+            num_stages=config.num_stages,
+            num_warps=config.num_warps,
+            waves_per_eu=config.waves_per_eu,
+        )
     else:
-        raise ValueError(f"Unknown all_gather_variant: {config.all_gather_variant}")
+        if config.use_gluon and not GLUON_AVAILABLE:
+            raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False")
 
-    kernel_fn[(config.comm_sms,)](
-        input_tensor,
-        output_tensor,
-        M,
-        N,
-        stride_in_m,
-        stride_in_n,
-        stride_out_m,
-        stride_out_n,
-        heap_bases,
-        rank_in_group,
-        rank_global,
-        world_size,
-        rank_start,
-        rank_stride,
-        config.block_size_m,
-        config.block_size_n,
-        config.swizzle_size,
-        config.comm_sms,
-        config.num_xcds,
-        config.chunk_size,
-        num_stages=config.num_stages,
-        num_warps=config.num_warps,
-        waves_per_eu=config.waves_per_eu,
-    )
+        # Validate COMM_SMS divisibility for partitioned variant
+        if config.all_gather_variant == "partitioned" and config.comm_sms % world_size != 0:
+            raise ValueError(
+                f"For all_gather_variant='partitioned', COMM_SMS ({config.comm_sms}) must be divisible by world_size ({world_size}). "
+                f"Please adjust config.comm_sms to be a multiple of {world_size}."
+            )
+
+        heap_bases = shmem.get_heap_bases()
+
+        # Dispatch to the appropriate kernel based on variant
+        if config.all_gather_variant == "persistent":
+            kernel_fn = persistent_all_gather
+        elif config.all_gather_variant == "partitioned":
+            kernel_fn = persistent_all_gather_partitioned
+        else:
+            raise ValueError(f"Unknown all_gather_variant: {config.all_gather_variant}")
+
+        kernel_fn[(config.comm_sms,)](
+            input_tensor,
+            output_tensor,
+            M,
+            N,
+            stride_in_m,
+            stride_in_n,
+            stride_out_m,
+            stride_out_n,
+            heap_bases,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config.block_size_m,
+            config.block_size_n,
+            config.swizzle_size,
+            config.comm_sms,
+            config.num_xcds,
+            config.chunk_size,
+            num_stages=config.num_stages,
+            num_warps=config.num_warps,
+            waves_per_eu=config.waves_per_eu,
+        )
 
     if not async_op:
         shmem.barrier()
