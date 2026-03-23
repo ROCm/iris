@@ -30,11 +30,11 @@ import iris.experimental.iris_gluon as iris_gluon
 # ---------------------------------------------------------------------------
 
 SHAPES = [
-    (1024, 1024),    # 2 MB   - small activations
-    (2048, 4096),    # 16 MB  - medium MLP
-    (4096, 4096),    # 32 MB  - GPT-scale hidden
-    (8192, 8192),    # 128 MB - large MLP / standard bench
-    (16384, 8192),   # 256 MB - long sequences
+    (1024, 1024),  # 2 MB   - small activations
+    (2048, 4096),  # 16 MB  - medium MLP
+    (4096, 4096),  # 32 MB  - GPT-scale hidden
+    (8192, 8192),  # 128 MB - large MLP / standard bench
+    (16384, 8192),  # 256 MB - long sequences
     (16384, 16384),  # 512 MB - large model partitions
 ]
 
@@ -52,6 +52,7 @@ DEFAULT_N_REPEAT = 100
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def calc_bandwidth_gbps(M, N, world_size, ms):
     """Calculate all-gather bandwidth in GB/s."""
@@ -128,6 +129,7 @@ def validate_iris(inp, out, shmem, config):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="All-gather shape + CU sweep benchmark")
     parser.add_argument("--csv", type=str, default=None, help="Output CSV file path")
@@ -173,9 +175,7 @@ def main():
         )
 
     if is_root:
-        total_heap_per_ctx = sum(
-            (M * N + world_size * M * N) * ELEMENT_SIZE for M, N in SHAPES
-        )
+        total_heap_per_ctx = sum((M * N + world_size * M * N) * ELEMENT_SIZE for M, N in SHAPES)
         print(f"Heap usage per context: {total_heap_per_ctx / (1024**3):.2f} GB")
 
     # Collect results: list of dicts
@@ -218,9 +218,15 @@ def main():
         rccl_bw = calc_bandwidth_gbps(M, N, world_size, rccl_ms)
 
         row = {
-            "shape": shape_str, "M": M, "N": N, "data_mb": data_mb,
-            "backend": "RCCL", "cus": "-", "time_ms": rccl_ms,
-            "bw_gbps": rccl_bw, "vs_rccl_pct": 100.0,
+            "shape": shape_str,
+            "M": M,
+            "N": N,
+            "data_mb": data_mb,
+            "backend": "RCCL",
+            "cus": "-",
+            "time_ms": rccl_ms,
+            "bw_gbps": rccl_bw,
+            "vs_rccl_pct": 100.0,
         }
         results.append(row)
 
@@ -242,9 +248,15 @@ def main():
                 vs_rccl = (bw / rccl_bw * 100) if rccl_bw > 0 else 0.0
 
                 row = {
-                    "shape": shape_str, "M": M, "N": N, "data_mb": data_mb,
-                    "backend": backend_name, "cus": cu, "time_ms": ms,
-                    "bw_gbps": bw, "vs_rccl_pct": vs_rccl,
+                    "shape": shape_str,
+                    "M": M,
+                    "N": N,
+                    "data_mb": data_mb,
+                    "backend": backend_name,
+                    "cus": cu,
+                    "time_ms": ms,
+                    "bw_gbps": bw,
+                    "vs_rccl_pct": vs_rccl,
                 }
                 results.append(row)
 
