@@ -51,6 +51,7 @@ def device_context_store_cache_modifier_kernel(
     target,
     cur_rank: tl.constexpr,
     num_ranks: tl.constexpr,
+    to_rank: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     cache_modifier: tl.constexpr,
 ):
@@ -58,14 +59,13 @@ def device_context_store_cache_modifier_kernel(
     ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
-    partner = int((cur_rank + num_ranks // 2) % num_ranks)
 
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)
     mask = offsets < BLOCK_SIZE
 
     data = tl.load(source + offsets, mask=mask)
-    ctx.store(target + offsets, data, to_rank=partner, mask=mask, cache_modifier=cache_modifier)
+    ctx.store(target + offsets, data, to_rank=to_rank, mask=mask, cache_modifier=cache_modifier)
 
 
 @triton.jit
@@ -313,7 +313,7 @@ def test_device_context_store_cache_modifiers_remote(cache_modifier):
     grid = lambda meta: (1,)
     if cur_rank == 0:
         device_context_store_cache_modifier_kernel[grid](
-            context_tensor, source, target, cur_rank, num_ranks, BLOCK_SIZE, cache_modifier
+            context_tensor, source, target, cur_rank, num_ranks, remote_rank, BLOCK_SIZE, cache_modifier
         )
 
     ctx.barrier()
