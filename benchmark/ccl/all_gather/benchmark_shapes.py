@@ -44,9 +44,9 @@ DTYPE = torch.float16
 DTYPE_STR = "fp16"
 ELEMENT_SIZE = 2  # bytes per fp16 element
 
-# Benchmark parameters
-N_WARMUP = 25
-N_REPEAT = 100
+# Default benchmark parameters
+DEFAULT_N_WARMUP = 25
+DEFAULT_N_REPEAT = 100
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ def calc_bandwidth_gbps(M, N, world_size, ms):
     return total_gb / (ms * 1e-3) if ms > 0 else 0.0
 
 
-def bench_rccl(M, N, rank, world_size):
+def bench_rccl(M, N, rank, world_size, n_warmup, n_repeat):
     """Benchmark RCCL all_gather_into_tensor at default channel config."""
     inp = torch.zeros(M, N, dtype=DTYPE, device=f"cuda:{rank}")
     inp.fill_(float(rank + 1))
@@ -79,11 +79,11 @@ def bench_rccl(M, N, rank, world_size):
     def fn():
         dist.all_gather_into_tensor(out, inp)
 
-    ms = iris.do_bench(fn, dist.barrier, n_warmup=N_WARMUP, n_repeat=N_REPEAT)
+    ms = iris.do_bench(fn, dist.barrier, n_warmup=n_warmup, n_repeat=n_repeat)
     return ms
 
 
-def bench_iris(M, N, shmem, config):
+def bench_iris(M, N, shmem, config, n_warmup, n_repeat):
     """Benchmark Iris all-gather (Triton or Gluon depending on config)."""
     world_size = shmem.get_num_ranks()
     rank = shmem.get_rank()
@@ -97,7 +97,7 @@ def bench_iris(M, N, shmem, config):
     def fn():
         shmem.ccl.all_gather(out, inp, config=config, async_op=False)
 
-    ms = iris.do_bench(fn, shmem.barrier, n_warmup=N_WARMUP, n_repeat=N_REPEAT)
+    ms = iris.do_bench(fn, shmem.barrier, n_warmup=n_warmup, n_repeat=n_repeat)
 
     # Free symmetric heap memory for next iteration
     del inp, out
@@ -146,13 +146,12 @@ def main():
     parser.add_argument("--csv", type=str, default=None, help="Output CSV file path")
     parser.add_argument("--heap_size", type=int, default=1 << 34, help="Iris heap size (default 16 GB)")
     parser.add_argument("--validate", action="store_true", help="Validate correctness before benchmarking")
-    parser.add_argument("--n_warmup", type=int, default=N_WARMUP, help="Warmup iterations")
-    parser.add_argument("--n_repeat", type=int, default=N_REPEAT, help="Benchmark iterations")
+    parser.add_argument("--n_warmup", type=int, default=DEFAULT_N_WARMUP, help="Warmup iterations")
+    parser.add_argument("--n_repeat", type=int, default=DEFAULT_N_REPEAT, help="Benchmark iterations")
     args = parser.parse_args()
 
-    global N_WARMUP, N_REPEAT
-    N_WARMUP = args.n_warmup
-    N_REPEAT = args.n_repeat
+    n_warmup = args.n_warmup
+    n_repeat = args.n_repeat
 
     # torchrun sets these env vars
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -206,7 +205,7 @@ def main():
                         print(f"WARNING: Gluon  validation FAILED for {shape_str} cu={cu}")
 
         # --- RCCL baseline ---
-        rccl_ms = bench_rccl(M, N, rank, world_size)
+        rccl_ms = bench_rccl(M, N, rank, world_size, n_warmup, n_repeat)
         rccl_bw = calc_bandwidth_gbps(M, N, world_size, rccl_ms)
 
         row = {
@@ -229,7 +228,7 @@ def main():
                 ("Gluon", shmem_gluon, True),
             ]:
                 cfg = Config(comm_sms=cu, use_gluon=use_gluon)
-                ms = bench_iris(M, N, shmem, cfg)
+                ms = bench_iris(M, N, shmem, cfg, n_warmup, n_repeat)
                 bw = calc_bandwidth_gbps(M, N, world_size, ms)
                 vs_rccl = (bw / rccl_bw * 100) if rccl_bw > 0 else 0.0
 
