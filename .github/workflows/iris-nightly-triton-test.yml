@@ -2,8 +2,8 @@ name: Iris Nightly Triton Test
 
 on:
   schedule:
-    # Run nightly at 2 AM UTC
-    - cron: '0 2 * * *'
+    # Run nightly at midnight Pacific (7 AM UTC / PDT)
+    - cron: '0 7 * * *'
   workflow_dispatch:  # Allow manual triggering
 
 concurrency:
