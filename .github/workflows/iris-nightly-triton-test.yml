@@ -7,16 +7,15 @@ on:
   workflow_dispatch:  # Allow manual triggering
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  build-container-with-latest-triton:
+  build-container-image:
     runs-on: [self-hosted, mi3xx]
-    timeout-minutes: 120  # Building with latest Triton may take longer
 
     steps:
       - name: Checkout repository
@@ -33,48 +32,19 @@ jobs:
             echo "Container runtime already available"
           fi
 
-      - name: Modify Apptainer def file to use latest Triton
+      - name: Build Iris container
         run: |
-          echo "Modifying apptainer/iris.def to use latest Triton from main branch"
-          # Replace any 40-character hex commit checkout with main branch
-          sed -i 's/git checkout [0-9a-f]\{40\}/git checkout main/' apptainer/iris.def
-          echo "Modified iris.def:"
-          grep -A2 -B2 "git checkout" apptainer/iris.def
+          bash .github/scripts/container_build.sh
 
-      - name: Build Iris container with latest Triton
-        run: |
-          set -e
-          
-          # Check /dev/shm size
-          shm_size_gb=$(df -k /dev/shm | tail -1 | awk '{print int($2/1024/1024)}')
-          if [ "${shm_size_gb:-0}" -lt 64 ]; then
-              echo "❌ ERROR: /dev/shm is too small (${shm_size_gb}GB < 64GB)"
-              echo "Fix: mount -o remount,size=64G /dev/shm"
-              exit 1
-          fi
-          echo "✅ /dev/shm size OK (${shm_size_gb}GB)"
-          
-          # Build with Apptainer, forcing rebuild
-          DEF_FILE=apptainer/iris.def
-          IMAGE_PATH="${HOME}/iris-apptainer-nightly/iris-dev-nightly.sif"
-          
-          mkdir -p "${HOME}/iris-apptainer-nightly"
-          
-          echo "Building Apptainer image with latest Triton..."
-          apptainer build --force "$IMAGE_PATH" "$DEF_FILE"
-          
-          echo "Built image: $IMAGE_PATH"
-
-  test-nightly-triton:
-    name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks)
-    needs: build-container-with-latest-triton
+  test-nightly:
+    name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, nightly Triton)
+    needs: build-container-image
     runs-on: [self-hosted, mi3xx]
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Test each subdirectory with different rank counts
           - test_dir: examples
             num_ranks: 1
             gpu_devices: "0,1"
@@ -144,27 +114,27 @@ jobs:
         run: |
           bash .github/scripts/cleanup_ports.sh
 
-      - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks
+      - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (nightly Triton)
         run: |
           set -e
           echo "::group::Running ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (nightly Triton)"
-          
-          # Use nightly image path
-          NIGHTLY_IMAGE="${HOME}/iris-apptainer-nightly/iris-dev-nightly.sif"
-          
+
           # Build GPU argument
           GPU_ARG=""
           if [ -n "${{ matrix.gpu_devices }}" ]; then
               GPU_ARG="--gpus ${{ matrix.gpu_devices }}"
           fi
-          
-          # Run tests in container using the nightly image
-          .github/scripts/container_exec.sh $GPU_ARG --image "$NIGHTLY_IMAGE" "
+
+          # Run tests in container, reinstalling Triton from main first
+          bash .github/scripts/container_exec.sh $GPU_ARG "
               set -e
-              
-              # tritonBLAS version to use
-              TRITONBLAS_COMMIT=\"47768c93acb7f89511d797964b84544c30ab81ad\"
-              
+
+              # Reinstall Triton from main branch
+              echo \"Reinstalling Triton from main branch...\"
+              pip install --force-reinstall --no-deps \
+                  git+https://github.com/triton-lang/triton@main
+              echo \"Triton version: \$(pip show triton 2>/dev/null | grep Version || echo unknown)\"
+
               # Install tritonBLAS if not already installed
               echo \"Checking for tritonBLAS...\"
               if ! python -c 'import tritonblas' 2>/dev/null; then
@@ -173,11 +143,11 @@ jobs:
                   if [ ! -d \"\$TRITONBLAS_DIR\" ]; then
                       git clone https://github.com/ROCm/tritonBLAS.git \"\$TRITONBLAS_DIR\"
                       cd \"\$TRITONBLAS_DIR\"
-                      git checkout \"\$TRITONBLAS_COMMIT\"
+                      git checkout 47768c93acb7f89511d797964b84544c30ab81ad
                   else
                       cd \"\$TRITONBLAS_DIR\"
                       git fetch
-                      git checkout \"\$TRITONBLAS_COMMIT\"
+                      git checkout 47768c93acb7f89511d797964b84544c30ab81ad
                   fi
                   pip install -e .
                   cd ..
@@ -185,15 +155,17 @@ jobs:
               else
                   echo \"tritonBLAS already installed\"
               fi
-              
+
+              # Install iris in editable mode
               echo \"Installing iris in editable mode\"
               pip install -e .
-              
+
               # Run tests in the specified directory
               for test_file in tests/${{ matrix.test_dir }}/test_*.py; do
                   if [ -f \"\$test_file\" ]; then
                       echo \"Testing: \$test_file with ${{ matrix.num_ranks }} ranks (nightly Triton)\"
-                      python tests/run_tests_distributed.py --num_ranks ${{ matrix.num_ranks }} \"\$test_file\" -v --tb=short --durations=10
+                      python tests/run_tests_distributed.py \
+                          --num_ranks ${{ matrix.num_ranks }} \"\$test_file\" -v --tb=short --durations=10
                   fi
               done
           "
