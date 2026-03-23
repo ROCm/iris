@@ -336,9 +336,7 @@ def main():
         )
         print(f"{'=' * 80}")
 
-        print(
-            f"\n{'step':>4} {'kv_rank':>7} {'put':>4} {'kernel':>9} {'sync':>9} {'barrier':>9} {'total':>9}"
-        )
+        print(f"\n{'step':>4} {'kv_rank':>7} {'put':>4} {'kernel':>9} {'sync':>9} {'barrier':>9} {'total':>9}")
         print("-" * 65)
         for s in result["per_step"]:
             print(
