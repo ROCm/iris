@@ -133,9 +133,11 @@ def test_device_context_gluon_tracing_compiled_but_disabled():
     )
     shmem.barrier()
 
-    # No events should have been recorded (max_events=0 from zero-padded tensor)
-    # tracing was never enabled on host, so trace_counter doesn't exist —
-    # just verify the kernel ran without crashing
+    # Verify the padded layout still reports tracing disabled and that the
+    # dummy buffer remains untouched (no writes to null pointers).
+    trace_enabled_idx = 2 + num_ranks
+    assert context_tensor[trace_enabled_idx].item() == 0
+    assert torch.all(dummy_buffer == 0)
 
     shmem.barrier()
     del shmem

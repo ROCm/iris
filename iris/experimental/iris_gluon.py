@@ -274,9 +274,11 @@ class IrisDeviceCtx:
             #          trace_counter_ptr, op_index_counter_ptr, buf_event_id, ...(13 buffers)]
             #
             # When tracing is disabled at the host, the context tensor is padded with
-            # zeros in the same positions (max_events=0, null pointers). The bounds
-            # check (event_idx < max_events) in record_event_start prevents any
-            # writes, so decoding null pointers here is safe.
+            # zeros in the same positions (max_events=0, null pointers). On device,
+            # the tracing helpers (e.g., record_event_start) first early-return when
+            # max_events <= 0 and then guard all writes with a bounds check
+            # (event_idx < max_events), so decoding potentially null pointers here is
+            # safe as long as those invariants are preserved.
             trace_info_base = 2 + num_ranks + 1  # skip cur_rank, num_ranks, heap_bases, trace_enabled
             max_events = tl.cast(gl.load(context_tensor + trace_info_base + 0), tl.int32)
             trace_counter_ptr = gl.load(context_tensor + trace_info_base + 1)
