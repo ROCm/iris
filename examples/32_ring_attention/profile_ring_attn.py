@@ -107,32 +107,60 @@ def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_
             kv_rank_start = kv_rank * seq_kv
             grid = (num_heads, triton.cdiv(seq_q, BLOCK_Q))
             _ring_attn_fwd_kernel[grid](
-                q, k_cur, v_cur, O, M, L,
-                q.stride(0), q.stride(1), q.stride(2),
-                k_cur.stride(0), k_cur.stride(1), k_cur.stride(2),
-                v_cur.stride(0), v_cur.stride(1), v_cur.stride(2),
-                O.stride(0), O.stride(1), O.stride(2),
-                M.stride(0), M.stride(1),
-                L.stride(0), L.stride(1),
-                seq_q, seq_kv,
-                q_rank_start, kv_rank_start, scale,
+                q,
+                k_cur,
+                v_cur,
+                O,
+                M,
+                L,
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                k_cur.stride(0),
+                k_cur.stride(1),
+                k_cur.stride(2),
+                v_cur.stride(0),
+                v_cur.stride(1),
+                v_cur.stride(2),
+                O.stride(0),
+                O.stride(1),
+                O.stride(2),
+                M.stride(0),
+                M.stride(1),
+                L.stride(0),
+                L.stride(1),
+                seq_q,
+                seq_kv,
+                q_rank_start,
+                kv_rank_start,
+                scale,
                 # fused put params
-                k_cur.view(-1), k_recv.view(-1),
-                v_cur.view(-1), v_recv.view(-1),
+                k_cur.view(-1),
+                k_recv.view(-1),
+                v_cur.view(-1),
+                v_recv.view(-1),
                 n_k,
-                put_rank=rank, put_next_rank=next_rank,
+                put_rank=rank,
+                put_next_rank=next_rank,
                 heap_bases=heap_bases,
                 CAUSAL=apply_causal,
-                BLOCK_Q=BLOCK_Q, BLOCK_KV=BLOCK_KV, HEAD_DIM=HEAD_DIM,
-                DO_PUT=do_put, PUT_BLOCK=FUSED_PUT_BLOCK,
-                num_warps=4, num_stages=2,
+                BLOCK_Q=BLOCK_Q,
+                BLOCK_KV=BLOCK_KV,
+                HEAD_DIM=HEAD_DIM,
+                DO_PUT=do_put,
+                PUT_BLOCK=FUSED_PUT_BLOCK,
+                num_warps=4,
+                num_stages=2,
             )
         elif do_put:
             _put_kv_kernel[(triton.cdiv(n_k, STANDALONE_PUT_BLOCK),)](
-                k_cur.view(-1), k_recv.view(-1),
-                v_cur.view(-1), v_recv.view(-1),
+                k_cur.view(-1),
+                k_recv.view(-1),
+                v_cur.view(-1),
+                v_recv.view(-1),
                 n_k,
-                cur_rank=rank, next_rank=next_rank,
+                cur_rank=rank,
+                next_rank=next_rank,
                 heap_bases=heap_bases,
                 BLOCK=STANDALONE_PUT_BLOCK,
             )
@@ -165,16 +193,18 @@ def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_
 
         kernel_ms = kernel_start.elapsed_time(kernel_end)
 
-        step_timings.append({
-            "step": step,
-            "kv_rank": kv_rank,
-            "skip_compute": skip_compute,
-            "do_put": do_put,
-            "kernel_ms": kernel_ms,
-            "sync_ms": sync_ms,
-            "barrier_ms": barrier_ms,
-            "total_ms": kernel_ms + sync_ms + barrier_ms,
-        })
+        step_timings.append(
+            {
+                "step": step,
+                "kv_rank": kv_rank,
+                "skip_compute": skip_compute,
+                "do_put": do_put,
+                "kernel_ms": kernel_ms,
+                "sync_ms": sync_ms,
+                "barrier_ms": barrier_ms,
+                "total_ms": kernel_ms + sync_ms + barrier_ms,
+            }
+        )
 
     L_expanded = L.permute(1, 0).unsqueeze(-1)
     output = O / L_expanded
@@ -185,8 +215,10 @@ def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_
 def _profile_worker(rank, world_size, init_url, cfg, results_file):
     backend = "nccl" if torch.cuda.is_available() else "gloo"
     dist.init_process_group(
-        backend=backend, init_method=init_url,
-        world_size=world_size, rank=rank,
+        backend=backend,
+        init_method=init_url,
+        world_size=world_size,
+        rank=rank,
         device_id=torch.device(f"cuda:{rank}"),
     )
     torch.cuda.set_device(rank)
@@ -241,16 +273,18 @@ def _profile_worker(rank, world_size, init_url, cfg, results_file):
         sync_vals = [all_iter_timings[it][s]["sync_ms"] for it in range(num_iters)]
         barrier_vals = [all_iter_timings[it][s]["barrier_ms"] for it in range(num_iters)]
         total_vals = [all_iter_timings[it][s]["total_ms"] for it in range(num_iters)]
-        avg_timings.append({
-            "step": s,
-            "kv_rank": all_iter_timings[0][s]["kv_rank"],
-            "skip_compute": all_iter_timings[0][s]["skip_compute"],
-            "do_put": all_iter_timings[0][s]["do_put"],
-            "kernel_ms": sum(kernel_vals) / len(kernel_vals),
-            "sync_ms": sum(sync_vals) / len(sync_vals),
-            "barrier_ms": sum(barrier_vals) / len(barrier_vals),
-            "total_ms": sum(total_vals) / len(total_vals),
-        })
+        avg_timings.append(
+            {
+                "step": s,
+                "kv_rank": all_iter_timings[0][s]["kv_rank"],
+                "skip_compute": all_iter_timings[0][s]["skip_compute"],
+                "do_put": all_iter_timings[0][s]["do_put"],
+                "kernel_ms": sum(kernel_vals) / len(kernel_vals),
+                "sync_ms": sum(sync_vals) / len(sync_vals),
+                "barrier_ms": sum(barrier_vals) / len(barrier_vals),
+                "total_ms": sum(total_vals) / len(total_vals),
+            }
+        )
 
     del shmem
     dist.destroy_process_group()
@@ -299,6 +333,7 @@ def main():
 
     try:
         import socket
+
         _sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         _sock.bind(("", 0))
         init_url = f"tcp://127.0.0.1:{_sock.getsockname()[1]}"
@@ -317,22 +352,33 @@ def main():
         # Print results
         world_size = result["world_size"]
         totals = result["totals"]
-        print(f"\n{'='*80}")
-        print(f"Ring Attention Profiling — {world_size} GPUs, seq={cfg['total_seq']}, "
-              f"H={cfg['num_heads']}, D={cfg['head_dim']}, causal={cfg['causal']}")
-        print(f"{'='*80}")
+        print(f"\n{'=' * 80}")
+        print(
+            f"Ring Attention Profiling — {world_size} GPUs, seq={cfg['total_seq']}, "
+            f"H={cfg['num_heads']}, D={cfg['head_dim']}, causal={cfg['causal']}"
+        )
+        print(f"{'=' * 80}")
 
-        print(f"\n{'step':>4} {'kv_rank':>7} {'skip':>5} {'put':>4} "
-              f"{'kernel':>9} {'sync':>9} {'barrier':>9} {'total':>9}")
+        print(
+            f"\n{'step':>4} {'kv_rank':>7} {'skip':>5} {'put':>4} {'kernel':>9} {'sync':>9} {'barrier':>9} {'total':>9}"
+        )
         print("-" * 70)
         for s in result["per_step"]:
-            print(f"{s['step']:>4} {s['kv_rank']:>7} {str(s['skip_compute']):>5} {str(s['do_put']):>4} "
-                  f"{s['kernel_ms']:>8.3f}ms {s['sync_ms']:>8.3f}ms {s['barrier_ms']:>8.3f}ms {s['total_ms']:>8.3f}ms")
+            print(
+                f"{s['step']:>4} {s['kv_rank']:>7} {str(s['skip_compute']):>5} {str(s['do_put']):>4} "
+                f"{s['kernel_ms']:>8.3f}ms {s['sync_ms']:>8.3f}ms {s['barrier_ms']:>8.3f}ms {s['total_ms']:>8.3f}ms"
+            )
 
-        print(f"\n--- Totals (rank 0) ---")
-        print(f"  Kernel compute : {totals['kernel_ms']:>8.3f} ms ({100*totals['kernel_ms']/totals['total_ms']:>5.1f}%)")
-        print(f"  CUDA sync      : {totals['sync_ms']:>8.3f} ms ({100*totals['sync_ms']/totals['total_ms']:>5.1f}%)")
-        print(f"  Barrier        : {totals['barrier_ms']:>8.3f} ms ({100*totals['barrier_ms']/totals['total_ms']:>5.1f}%)")
+        print("\n--- Totals (rank 0) ---")
+        print(
+            f"  Kernel compute : {totals['kernel_ms']:>8.3f} ms ({100 * totals['kernel_ms'] / totals['total_ms']:>5.1f}%)"
+        )
+        print(
+            f"  CUDA sync      : {totals['sync_ms']:>8.3f} ms ({100 * totals['sync_ms'] / totals['total_ms']:>5.1f}%)"
+        )
+        print(
+            f"  Barrier        : {totals['barrier_ms']:>8.3f} ms ({100 * totals['barrier_ms'] / totals['total_ms']:>5.1f}%)"
+        )
         print(f"  TOTAL          : {totals['total_ms']:>8.3f} ms")
 
         # Compute efficiency
@@ -342,7 +388,7 @@ def main():
             flops //= 2
         tflops = flops / (totals["total_ms"] * 1e-3) / 1e12
         print(f"  TFLOPS         : {tflops:>8.2f}")
-        print(f"  MFU (vs 1307)  : {100*tflops/1307.4:>7.1f}%")
+        print(f"  MFU (vs 1307)  : {100 * tflops / 1307.4:>7.1f}%")
         print()
 
     finally:
