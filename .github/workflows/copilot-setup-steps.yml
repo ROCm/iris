@@ -52,8 +52,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           mkdir -p .github/agents/skills
           curl -sSL https://raw.githubusercontent.com/AMDResearch/intellikit/main/install/skills/install.sh | \
-            bash -s -- --target agents --base-url https://raw.githubusercontent.com/AMDResearch/intellikit/main
-          cp -r .agents/skills/* .github/agents/skills/ 2>/dev/null || true
+            bash -s -- --target github --base-url https://raw.githubusercontent.com/AMDResearch/intellikit/main
 
       - name: Make venv default for subsequent steps
         run: |
