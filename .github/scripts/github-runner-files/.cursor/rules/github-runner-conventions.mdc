@@ -1,0 +1,25 @@
+---
+description: Workflow and conventions for the GitHub Actions runner (from AGENTS.md)
+alwaysApply: true
+---
+
+# GitHub Runner – Workflow and Conventions
+
+## Workflow
+
+Flow: run-github-coding-agent-runner.sh → container → start.sh → Actions listener. Two run modes: (1) Standalone: `./run-github-coding-agent-runner.sh` with required flags (--github-token, --github-repository, --script-dir, --runner-base). (2) SLURM: set GITHUB_TOKEN and GITHUB_REPOSITORY, then `sbatch run-github-coding-agent-runner.sh`; when under SLURM with no args, the script uses env and SLURM defaults. start.sh installs/configures the runner in RUNNER_HOME and starts the Actions listener.
+
+## Conventions
+
+1. **No sensitive data** – Do not hardcode tokens, passwords, or API keys. Use environment variables (e.g. export GITHUB_TOKEN before running).
+2. **No host-specific paths** – Do not add paths like /work1/amd/josantos/... Prefer SCRIPT_DIR with dirname BASH_SOURCE, or GITHUB_WORKSPACE, RUNNER_WORKDIR, RUNNER_BASE, WORK, or relative paths.
+3. **Do not edit iris.def unless the user explicitly asks.** Prefer changing start.sh or run-github-coding-agent-runner.sh for runtime behavior.
+4. **Use known writable directories** – Prefer GITHUB_WORKSPACE, RUNNER_WORKDIR, RUNNER_BASE for installs and cache. Avoid $HOME, ~, /tmp.
+
+## Directory layout (when running in runner)
+
+| Variable | Use for |
+|----------|---------|
+| GITHUB_WORKSPACE | Repo checkout; installs, cache, venv |
+| RUNNER_WORKDIR | Parent of owner/repo; job work |
+| RUNNER_BASE | Runner data root; overlay, .github-runner |

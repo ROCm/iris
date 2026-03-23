@@ -1,0 +1,19 @@
+---
+description: Build and run instructions (from skills.md)
+globs: **/build-github-coding-agent-runner.sh,**/run-github-coding-agent-runner.sh,**/start.sh,**/iris.def
+alwaysApply: false
+---
+
+# Build & Run
+
+## Build (SLURM)
+
+From the `github-runner` directory: `sbatch build-github-coding-agent-runner.sh`.
+
+- Partition: `mi3001x`, time limit: 2 hours.
+- Input: `--def=FILE` (default `iris.def`). Output: `--output=FILE` (default `github-copilot-coding-agent-runner.sif`). Same directory.
+- Submit from repo dir so `SLURM_SUBMIT_DIR` is correct. Temp/cache under build dir (`.apptainer-tmp`, `.apptainer-cache`); temp removed after success, cache kept for rebuilds.
+
+## Run
+
+After build: (1) Standalone: `./run-github-coding-agent-runner.sh --github-token=... --github-repository=... --script-dir="$(pwd)" --runner-base="$(pwd)/runner-data"`. (2) SLURM: set `GITHUB_TOKEN` and `GITHUB_REPOSITORY`, then `sbatch run-github-coding-agent-runner.sh` (script uses env and SLURM defaults). See README.md for full setup.
