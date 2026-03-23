@@ -37,6 +37,8 @@ jobs:
           pip install --no-cache-dir "git+https://github.com/AMDResearch/intellikit.git#subdirectory=linex"
           pip install --no-cache-dir "git+https://github.com/AMDResearch/intellikit.git#subdirectory=metrix"
           pip install --no-cache-dir "git+https://github.com/AMDResearch/intellikit.git#subdirectory=nexus"
+          pip install --no-cache-dir "git+https://github.com/AMDResearch/intellikit.git#subdirectory=rocm_mcp"
+          
 
       - name: Install uv for MCP servers
         run: |
