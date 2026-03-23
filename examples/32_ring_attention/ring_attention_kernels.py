@@ -190,18 +190,16 @@ def _ring_attn_persistent_kernel(
             pid_flat = h * num_q_blks + q_blk
             put_offs = pid_flat * PUT_BLOCK + tl.arange(0, PUT_BLOCK)
             put_mask = put_offs < n_put_elem
-            iris.put(K_cur_flat + put_offs, K_dst_flat + put_offs,
-                     rank, next_rank, heap_bases, mask=put_mask)
-            iris.put(V_cur_flat + put_offs, V_dst_flat + put_offs,
-                     rank, next_rank, heap_bases, mask=put_mask)
+            iris.put(K_cur_flat + put_offs, K_dst_flat + put_offs, rank, next_rank, heap_bases, mask=put_mask)
+            iris.put(V_cur_flat + put_offs, V_dst_flat + put_offs, rank, next_rank, heap_bases, mask=put_mask)
             tl.debug_barrier()
 
             # Count completed CTAs; last one signals next rank
             old = tl.atomic_add(put_done_counters + step, 1, sem="release", scope="gpu")
             if old == total_blocks - 1:
-                iris.atomic_xchg(signal_flags + step + 1, step + 1,
-                                 rank, next_rank, heap_bases,
-                                 sem="release", scope="sys")
+                iris.atomic_xchg(
+                    signal_flags + step + 1, step + 1, rank, next_rank, heap_bases, sem="release", scope="sys"
+                )
 
     # Store final O, M, L to HBM (once, not per-step)
     o_ptrs = O + h * stride_oh + q_idx[:, None] * stride_os + tl.arange(0, HEAD_DIM)[None, :] * stride_od
@@ -300,27 +298,46 @@ def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None,
     grid = (num_heads, triton.cdiv(seq_q, BLOCK_Q))
     _ring_attn_persistent_kernel[grid](
         q,
-        k_ping, k_pong,
-        v_ping, v_pong,
-        O, M, L,
+        k_ping,
+        k_pong,
+        v_ping,
+        v_pong,
+        O,
+        M,
+        L,
         # flat pointers for iris.put
-        k_ping.view(-1), k_pong.view(-1),
-        v_ping.view(-1), v_pong.view(-1),
+        k_ping.view(-1),
+        k_pong.view(-1),
+        v_ping.view(-1),
+        v_pong.view(-1),
         # Q strides
-        q.stride(0), q.stride(1), q.stride(2),
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
         # O strides
-        O.stride(0), O.stride(1), O.stride(2),
+        O.stride(0),
+        O.stride(1),
+        O.stride(2),
         # K strides (ping and pong have same strides)
-        k_ping.stride(0), k_ping.stride(1), k_ping.stride(2),
+        k_ping.stride(0),
+        k_ping.stride(1),
+        k_ping.stride(2),
         # V strides
-        v_ping.stride(0), v_ping.stride(1), v_ping.stride(2),
+        v_ping.stride(0),
+        v_ping.stride(1),
+        v_ping.stride(2),
         # M, L strides
-        M.stride(0), M.stride(1),
-        L.stride(0), L.stride(1),
+        M.stride(0),
+        M.stride(1),
+        L.stride(0),
+        L.stride(1),
         # sizes
-        seq_q, seq_kv, num_heads,
+        seq_q,
+        seq_kv,
+        num_heads,
         # signal infrastructure
-        signal_flags, put_done_counters,
+        signal_flags,
+        put_done_counters,
         heap_bases,
         scale,
         rank=rank,

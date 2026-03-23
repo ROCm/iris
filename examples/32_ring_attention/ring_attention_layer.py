@@ -95,7 +95,12 @@ class RingAttention(nn.Module):
             self._signal_flags = self.shmem.zeros((world_size,), dtype=torch.int32)
 
         return ring_attn_fwd(
-            q, k, v, self.shmem,
-            causal=self.causal, scale=self.scale,
-            _ping_pong_bufs=ping_pong, _signal_flags=self._signal_flags,
+            q,
+            k,
+            v,
+            self.shmem,
+            causal=self.causal,
+            scale=self.scale,
+            _ping_pong_bufs=ping_pong,
+            _signal_flags=self._signal_flags,
         )

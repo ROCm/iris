@@ -33,8 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ring_attention_kernels import ring_attn_fwd  # noqa: E402
 
 
-def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None,
-                             _ping_pong_bufs=None, _signal_flags=None):
+def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None, _signal_flags=None):
     """
     Instrumented ring_attn_fwd that measures end-to-end kernel time.
 
@@ -52,9 +51,14 @@ def _profiled_ring_attn_fwd(q, k, v, shmem, causal=True, scale=None,
     kernel_start.record()
 
     output = ring_attn_fwd(
-        q, k, v, shmem,
-        causal=causal, scale=scale,
-        _ping_pong_bufs=_ping_pong_bufs, _signal_flags=_signal_flags,
+        q,
+        k,
+        v,
+        shmem,
+        causal=causal,
+        scale=scale,
+        _ping_pong_bufs=_ping_pong_bufs,
+        _signal_flags=_signal_flags,
     )
 
     kernel_end.record()
@@ -114,8 +118,14 @@ def _profile_worker(rank, world_size, init_url, cfg, results_file):
     # Warmup
     for _ in range(num_warmup):
         out, _ = _profiled_ring_attn_fwd(
-            q, k, v, shmem, causal=causal, scale=scale,
-            _ping_pong_bufs=bufs, _signal_flags=signal_flags,
+            q,
+            k,
+            v,
+            shmem,
+            causal=causal,
+            scale=scale,
+            _ping_pong_bufs=bufs,
+            _signal_flags=signal_flags,
         )
     torch.cuda.synchronize()
     shmem.barrier()
@@ -124,8 +134,14 @@ def _profile_worker(rank, world_size, init_url, cfg, results_file):
     all_iter_timings = []
     for it in range(num_iters):
         out, timing = _profiled_ring_attn_fwd(
-            q, k, v, shmem, causal=causal, scale=scale,
-            _ping_pong_bufs=bufs, _signal_flags=signal_flags,
+            q,
+            k,
+            v,
+            shmem,
+            causal=causal,
+            scale=scale,
+            _ping_pong_bufs=bufs,
+            _signal_flags=signal_flags,
         )
         all_iter_timings.append(timing)
     torch.cuda.synchronize()
