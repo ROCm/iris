@@ -388,9 +388,7 @@ if GLUON_AVAILABLE:
         # Flat 1D layout covering BLOCK_SIZE_M * BLOCK_SIZE_N elements
         TOTAL_ELEMS: gl.constexpr = BLOCK_SIZE_M * BLOCK_SIZE_N
         ELEMS_PER_THREAD: gl.constexpr = TOTAL_ELEMS // (THREADS_PER_WARP * WARPS_PER_CTA)
-        flat_layout: gl.constexpr = gl.BlockedLayout(
-            [ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0]
-        )
+        flat_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
 
         # Hoist local heap base outside the tile loop: eliminates redundant
         # gl.load(heap_bases) calls in the inner store loop.
