@@ -172,9 +172,7 @@ def _scaling_worker(
             k_f = torch.randn_like(q_f)
             v_f = torch.randn_like(q_f)
             ms = _time_ms(
-                lambda: torch.nn.functional.scaled_dot_product_attention(
-                    q_f, k_f, v_f, scale=scale, is_causal=causal
-                ),
+                lambda: torch.nn.functional.scaled_dot_product_attention(q_f, k_f, v_f, scale=scale, is_causal=causal),
                 warmup=num_warmup,
                 iters=num_iters,
             )
