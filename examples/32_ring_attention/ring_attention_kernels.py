@@ -199,10 +199,8 @@ def _ring_attn_fwd_kernel(
         pid_flat = h * num_q_blks + q_blk
         put_offs = pid_flat * PUT_BLOCK + tl.arange(0, PUT_BLOCK)
         put_mask = put_offs < n_put_elem
-        iris.put(k_put_src + put_offs, k_put_dst + put_offs,
-                 put_rank, put_next_rank, heap_bases, mask=put_mask)
-        iris.put(v_put_src + put_offs, v_put_dst + put_offs,
-                 put_rank, put_next_rank, heap_bases, mask=put_mask)
+        iris.put(k_put_src + put_offs, k_put_dst + put_offs, put_rank, put_next_rank, heap_bases, mask=put_mask)
+        iris.put(v_put_src + put_offs, v_put_dst + put_offs, put_rank, put_next_rank, heap_bases, mask=put_mask)
 
 
 def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None):
