@@ -302,7 +302,6 @@ def ring_attn_fwd(
         signal_flags = _signal_flags
     else:
         signal_flags = shmem.zeros((world_size,), dtype=torch.int32)
-    signal_flags.zero_()
 
     # Allocate backward signal counters on symmetric heap (one per step).
     # After attention, each CTA signals the previous rank that it has
@@ -312,13 +311,17 @@ def ring_attn_fwd(
         back_signal_flags = _back_signal_flags
     else:
         back_signal_flags = shmem.zeros((world_size,), dtype=torch.int32)
-    back_signal_flags.zero_()
 
     # Copy initial K/V into ping buffers, then sync so every rank has its
     # own initial chunk ready before the persistent kernel launches.
     k_ping.copy_(k.contiguous())
     v_ping.copy_(v.contiguous())
-    shmem.barrier()  # only host barrier — ensures all ranks have initial data
+    shmem.barrier()  # ensures all ranks' prior kernels are done
+
+    # Reset signal counters AFTER barrier so that a remote rank's stale
+    # backward signals from the previous call cannot arrive after the zero.
+    signal_flags.zero_()
+    back_signal_flags.zero_()
 
     FUSED_PUT_BLOCK = BLOCK_Q * HEAD_DIM
     heap_bases = shmem.get_heap_bases()
