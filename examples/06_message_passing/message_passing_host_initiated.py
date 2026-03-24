@@ -161,6 +161,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         elem_size = source_buffer.element_size()
 
         import time
+
         start_time = time.time()
 
         for block_id in range(num_blocks):
@@ -179,10 +180,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
             # Transfer data block using SDMA
             anvil_lib.host_put(
-                producer_rank, consumer_rank, 0,
-                source_buffer.data_ptr() + src_offset,
-                dst_remote_addr,
-                size_bytes
+                producer_rank, consumer_rank, 0, source_buffer.data_ptr() + src_offset, dst_remote_addr, size_bytes
             )
 
             # Signal completion with atomic add - translate flag address
@@ -193,7 +191,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
         end_time = time.time()
         elapsed_ms = (end_time - start_time) * 1000
-        shmem.info(f"Host SDMA loop took {elapsed_ms:.2f} ms for {num_blocks} blocks ({elapsed_ms/num_blocks:.2f} ms/block)")
+        shmem.info(
+            f"Host SDMA loop took {elapsed_ms:.2f} ms for {num_blocks} blocks ({elapsed_ms / num_blocks:.2f} ms/block)"
+        )
 
         # Synchronize to ensure all transfers complete
         # TODO use quiet()
