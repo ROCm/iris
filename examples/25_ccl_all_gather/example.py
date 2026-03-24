@@ -8,7 +8,7 @@ Example: iris.ccl.all_gather
 Each rank contributes an (M, N) tensor; every rank receives the concatenated (world_size*M, N) result.
 
 Run with:
-    torchrun --nproc_per_node=<num_gpus> --standalone example.py [--validate]
+    torchrun --nproc_per_node=<num_gpus> --standalone example.py [--validate] [--use_gluon]
 """
 
 import argparse
@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--num_stages", type=int, default=1, help="Number of stages")
     parser.add_argument("--num_warps", type=int, default=4, help="Number of warps")
     parser.add_argument("--waves_per_eu", type=int, default=0, help="Number of waves per EU")
+    parser.add_argument("--use_gluon", action="store_true", help="Use Gluon kernel backend")
     return vars(parser.parse_args())
 
 
@@ -47,7 +48,11 @@ def main():
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="gloo")
 
-    ctx = iris.iris(heap_size=args["heap_size"])
+    if args["use_gluon"]:
+        import iris.experimental.iris_gluon as iris_gluon
+        ctx = iris_gluon.iris(heap_size=args["heap_size"])
+    else:
+        ctx = iris.iris(heap_size=args["heap_size"])
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
 
@@ -67,6 +72,7 @@ def main():
         "num_stages": args["num_stages"],
         "num_warps": args["num_warps"],
         "waves_per_eu": args["waves_per_eu"],
+        "use_gluon": args["use_gluon"],
     }
     config = Config(**config_kwargs)
 
