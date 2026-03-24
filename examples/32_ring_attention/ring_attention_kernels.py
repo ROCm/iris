@@ -224,7 +224,9 @@ def _ring_attn_persistent_kernel(
     tl.store(l_ptrs, l, mask=q_mask)
 
 
-def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None, _signal_flags=None, _back_signal_flags=None):
+def ring_attn_fwd(
+    q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None, _signal_flags=None, _back_signal_flags=None
+):
     """
     Ring Attention forward pass.
 
