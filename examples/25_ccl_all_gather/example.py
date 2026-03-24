@@ -50,6 +50,7 @@ def main():
 
     if args["use_gluon"]:
         import iris.experimental.iris_gluon as iris_gluon
+
         ctx = iris_gluon.iris(heap_size=args["heap_size"])
     else:
         ctx = iris.iris(heap_size=args["heap_size"])
