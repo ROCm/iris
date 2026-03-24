@@ -131,8 +131,9 @@ def _run_ring_attn_test(total_seq_len, num_heads, head_dim, causal, dtype):
 
         shmem.barrier()
 
-        # Compare with relatively tight tolerances
-        atol, rtol = (2e-2, 2e-2) if dtype == torch.float16 else (1e-2, 1e-2)
+        # Tolerances: FP16 MFMA accumulation + online softmax across multiple
+        # ring steps introduces rounding that grows with world_size.
+        atol, rtol = (3e-2, 3e-2) if dtype == torch.float16 else (1e-2, 1e-2)
         error = None
         try:
             torch.testing.assert_close(output_local.float(), ref_local.float(), atol=atol, rtol=rtol)

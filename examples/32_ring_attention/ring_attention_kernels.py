@@ -178,9 +178,10 @@ def _ring_attn_persistent_kernel(
             tl.debug_barrier()
 
             # Count completed CTAs; last one signals next rank.
-            # scope="sys" on the counter ensures each CTA's remote puts are
-            # visible system-wide before the counter increment is observed.
-            old = tl.atomic_add(put_done_counters + step, 1, sem="release", scope="sys")
+            # acq_rel: release orders this CTA's preceding iris.put stores
+            # before the counter increment; acquire ensures the last CTA
+            # observes all other CTAs' put stores (via release-acquire chain).
+            old = tl.atomic_add(put_done_counters + step, 1, sem="acq_rel", scope="sys")
             if old == total_blocks - 1:
                 iris.atomic_xchg(
                     signal_flags + step + 1, step + 1, rank, next_rank, heap_bases, sem="release", scope="sys"
