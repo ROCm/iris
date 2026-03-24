@@ -117,47 +117,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Test each subdirectory with each rank count using editable install
-          - test_dir: examples
-            num_ranks: 1
+          # Smoke test: 2 ranks per dir verifies editable install + basic distributed paths
           - test_dir: examples
             num_ranks: 2
-          - test_dir: examples
-            num_ranks: 4
-          - test_dir: examples
-            num_ranks: 8
-          - test_dir: unittests
-            num_ranks: 1
           - test_dir: unittests
             num_ranks: 2
-          - test_dir: unittests
-            num_ranks: 4
-          - test_dir: unittests
-            num_ranks: 8
-          - test_dir: ccl
-            num_ranks: 1
           - test_dir: ccl
             num_ranks: 2
-          - test_dir: ccl
-            num_ranks: 4
-          - test_dir: ccl
-            num_ranks: 8
-          - test_dir: x
-            num_ranks: 1
           - test_dir: x
             num_ranks: 2
-          - test_dir: x
-            num_ranks: 4
-          - test_dir: x
-            num_ranks: 8
-          - test_dir: ops
-            num_ranks: 1
           - test_dir: ops
             num_ranks: 2
-          - test_dir: ops
-            num_ranks: 4
-          - test_dir: ops
-            num_ranks: 8
 
     steps:
       - name: Checkout repository
@@ -201,53 +171,24 @@ jobs:
 
   test-install:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, pip install)
-    needs: [test-editable]
+    needs: [test-git]
     runs-on: [linux-mi325-8gpu-ossci-rad]
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Test each subdirectory with each rank count using pip install
-          - test_dir: examples
-            num_ranks: 1
+          # Smoke test: 2 ranks per dir verifies pip install + basic distributed paths
           - test_dir: examples
             num_ranks: 2
-          - test_dir: examples
-            num_ranks: 4
-          - test_dir: examples
-            num_ranks: 8
-          - test_dir: unittests
-            num_ranks: 1
           - test_dir: unittests
             num_ranks: 2
-          - test_dir: unittests
-            num_ranks: 4
-          - test_dir: unittests
-            num_ranks: 8
-          - test_dir: ccl
-            num_ranks: 1
           - test_dir: ccl
             num_ranks: 2
-          - test_dir: ccl
-            num_ranks: 4
-          - test_dir: ccl
-            num_ranks: 8
-          - test_dir: x
-            num_ranks: 1
           - test_dir: x
             num_ranks: 2
-          - test_dir: x
-            num_ranks: 4
-          - test_dir: x
-            num_ranks: 8
-          - test_dir: ops
-            num_ranks: 1
           - test_dir: ops
             num_ranks: 2
-          - test_dir: ops
-            num_ranks: 4
-          - test_dir: ops
-            num_ranks: 8
 
     steps:
       - name: Checkout repository
