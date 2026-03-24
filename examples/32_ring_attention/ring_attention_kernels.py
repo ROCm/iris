@@ -185,9 +185,7 @@ def _ring_attn_persistent_kernel(
             # remote signal counter with release semantics, which fences this
             # CTA's preceding iris.put stores before the increment is visible.
             # The consumer waits until the counter reaches total_blocks.
-            iris.atomic_add(
-                signal_flags + step + 1, 1, rank, next_rank, heap_bases, sem="release", scope="sys"
-            )
+            iris.atomic_add(signal_flags + step + 1, 1, rank, next_rank, heap_bases, sem="release", scope="sys")
 
     # Store final O, M, L to HBM (once, not per-step)
     o_ptrs = O + h * stride_oh + q_idx[:, None] * stride_os + tl.arange(0, HEAD_DIM)[None, :] * stride_od
