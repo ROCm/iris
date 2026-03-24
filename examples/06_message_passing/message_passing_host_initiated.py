@@ -1,0 +1,296 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+"""
+Host-Initiated Message Passing Example
+
+This example demonstrates message passing where the producer (GPU 0) is
+controlled by the HOST (Python/CPU) instead of a device kernel, while
+the consumer (GPU 1) remains a device kernel.
+
+Key difference from message_passing_put.py:
+- Producer: Host uses anvil to initiate SDMA transfers from Python
+- Consumer: Same device kernel waiting for data
+
+This shows how to orchestrate GPU-to-GPU transfers from Python without
+requiring kernel launches on the source GPU.
+"""
+
+import argparse
+
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+import triton
+import triton.language as tl
+import random
+
+import iris
+
+
+@triton.jit
+def consumer_kernel(
+    buffer,  # tl.tensor: pointer to shared buffer (read from target_rank)
+    flag,  # tl.tensor: sync flag per block
+    buffer_size,  # int32: total number of elements
+    consumer_rank: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    heap_bases_ptr: tl.tensor,  # tl.tensor: pointer to heap bases pointers
+):
+    pid = tl.program_id(0)
+
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < buffer_size
+
+    # Spin-wait until writer sets flag[pid] = 1
+    done = 0
+    while done == 0:
+        done = iris.atomic_cas(
+            flag + pid, 1, 0, consumer_rank, consumer_rank, heap_bases_ptr, sem="acquire", scope="sys"
+        )
+
+    # Read from the target buffer (written by producer)
+    values = tl.load(buffer + offsets, mask=mask)
+
+    # Do something with values...
+    values = values * 2
+
+    # Store chunk to target buffer
+    tl.store(
+        buffer + offsets,
+        values,
+        mask=mask,
+    )
+
+    # Optionally reset the flag for next iteration
+    tl.store(flag + pid, 0)
+
+
+torch.manual_seed(123)
+random.seed(123)
+
+
+def torch_dtype_from_str(datatype: str) -> torch.dtype:
+    dtype_map = {
+        "fp16": torch.float16,
+        "fp32": torch.float32,
+        "int8": torch.int8,
+        "bf16": torch.bfloat16,
+    }
+    try:
+        return dtype_map[datatype]
+    except KeyError:
+        print(f"Unknown datatype: {datatype}")
+        exit(1)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Host-Initiated Message Passing Example",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "-t",
+        "--datatype",
+        type=str,
+        default="fp32",
+        choices=["fp16", "fp32", "int8", "bf16"],
+        help="Datatype of computation",
+    )
+    parser.add_argument("-s", "--buffer_size", type=int, default=4096, help="Buffer Size")
+    parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
+    parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
+    parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
+
+    return vars(parser.parse_args())
+
+
+def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
+    """Worker function for PyTorch distributed execution."""
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(
+        backend=backend,
+        init_method=init_url,
+        world_size=world_size,
+        rank=local_rank,
+        device_id=torch.device(f"cuda:{local_rank}"),
+    )
+
+    # Main benchmark logic
+    shmem = iris.iris(args["heap_size"])
+    dtype = torch_dtype_from_str(args["datatype"])
+    cur_rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+
+    # Allocate source and destination buffers on the symmetric heap
+    destination_buffer = shmem.zeros(args["buffer_size"], device="cuda", dtype=dtype)
+    if dtype.is_floating_point:
+        source_buffer = shmem.randn(args["buffer_size"], device="cuda", dtype=dtype)
+    else:
+        ii = torch.iinfo(dtype)
+        source_buffer = shmem.randint(ii.min, ii.max, (args["buffer_size"],), device="cuda", dtype=dtype)
+
+    if world_size != 2:
+        raise ValueError("This example requires exactly two processes.")
+
+    producer_rank = 0
+    consumer_rank = 1
+
+    n_elements = source_buffer.numel()
+    # Use fixed block size for both producer and consumer
+    BLOCK_SIZE = args["block_size"]
+    num_blocks = triton.cdiv(n_elements, BLOCK_SIZE)
+    grid = (num_blocks,)
+
+    # Allocate flags on the symmetric heap
+    flags = shmem.zeros((num_blocks,), device="cuda", dtype=torch.int32)
+
+    if cur_rank == producer_rank:
+        shmem.info(f"Rank {cur_rank} (HOST) is sending data to rank {consumer_rank}.")
+        # Initialize CUDA context even though we're doing host-side operations
+        # This is needed for the barrier to work
+        torch.cuda.current_device()
+
+        # Create host-initiated SDMA connection separate from iris's device connection
+        # This allows the host to orchestrate transfers without kernel launches
+        anvil_lib = shmem.copy_engines  # Reuse iris's anvil instance
+        anvil_lib.connect(producer_rank, consumer_rank, num_channels=1, allocate_on_host=True)
+
+        # Host-initiated transfer: send data block by block
+        elem_size = source_buffer.element_size()
+
+        # Get heap bases for address translation
+        heap_bases = shmem.get_heap_bases().cpu()
+        producer_base = int(heap_bases[producer_rank])
+        consumer_base = int(heap_bases[consumer_rank])
+        shmem.info(f"Heap bases: producer={producer_rank}:0x{producer_base:x} consumer={consumer_rank}:0x{consumer_base:x}")
+
+        import time
+        start_time = time.time()
+
+        for block_id in range(num_blocks):
+            block_start = block_id * BLOCK_SIZE
+            block_end = min(block_start + BLOCK_SIZE, n_elements)
+            block_len = block_end - block_start
+
+            # Calculate byte offsets
+            src_offset = block_start * elem_size
+            dst_offset = block_start * elem_size
+            size_bytes = block_len * elem_size
+
+            # Translate destination buffer address (same as flags)
+            dst_local_addr = destination_buffer.data_ptr() + dst_offset
+            dst_offset_in_heap = dst_local_addr - producer_base
+            dst_remote_addr = consumer_base + dst_offset_in_heap
+
+            # Transfer data block using SDMA
+            anvil_lib.host_put(
+                producer_rank, consumer_rank, 0,
+                source_buffer.data_ptr() + src_offset,
+                dst_remote_addr,
+                size_bytes
+            )
+
+            # Signal completion with atomic add (32-bit atomic)
+            # Translate address: flags is on consumer GPU, translate to address visible from producer
+            flag_local_addr = flags.data_ptr() + block_id * 4  # 4 bytes for int32
+            offset = flag_local_addr - producer_base
+            flag_remote_addr = consumer_base + offset
+
+            if block_id == 0:
+                shmem.info(f"Address translation for flag[0]:")
+                shmem.info(f"  local=0x{flag_local_addr:x} offset=0x{offset:x} remote=0x{flag_remote_addr:x}")
+
+            anvil_lib.host_atomic_add_32(producer_rank, consumer_rank, 0, flag_remote_addr, 1)
+
+        end_time = time.time()
+        elapsed_ms = (end_time - start_time) * 1000
+        shmem.info(f"Host SDMA loop took {elapsed_ms:.2f} ms for {num_blocks} blocks ({elapsed_ms/num_blocks:.2f} ms/block)")
+
+        # Synchronize to ensure all transfers complete
+        # torch.cuda.synchronize()
+        # TODO use quiet()
+
+        # Check if SDMA consumed the packets
+        # import time
+        # time.sleep(1)
+
+        # # Read flags from host to verify atomic_add worked
+        # flags_cpu = flags.cpu()
+        # shmem.info(f"Rank {cur_rank} (HOST) finished sending data.")
+        # shmem.info(f"Flags after atomic_add (read from host): {flags_cpu.tolist()}")
+
+        # # Also check destination buffer
+        # dst_sample = destination_buffer[:10].cpu()
+        # shmem.info(f"Destination buffer sample: {dst_sample.tolist()}")
+
+    else:
+        shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank}, gid: {grid}.")
+        kk = consumer_kernel[grid](
+            destination_buffer, flags, n_elements, consumer_rank, BLOCK_SIZE, shmem.get_heap_bases()
+        )
+        shmem.info("CONSUMER kernel launched, waiting for completion...")
+        torch.cuda.synchronize()
+        shmem.info("CONSUMER DONE - kernel actually finished")
+
+    shmem.info(f"Rank {cur_rank} about to hit barrier")
+
+    # Debug: manual barrier to see where it hangs
+    shmem.info(f"Rank {cur_rank} calling torch.cuda.synchronize()")
+    torch.cuda.synchronize()
+    shmem.info(f"Rank {cur_rank} passed torch.cuda.synchronize()")
+
+    # import torch.distributed as dist
+    shmem.info(f"Rank {cur_rank} calling dist.barrier()")
+    dist.barrier()
+    shmem.info(f"Rank {cur_rank} passed dist.barrier()")
+
+    # shmem.barrier()
+    shmem.info(f"Rank {cur_rank} passed barrier")
+    shmem.info(f"Rank {cur_rank} has finished sending/receiving data.")
+    shmem.info("Validating output...")
+
+    success = True
+    if cur_rank == consumer_rank:
+        expected = source_buffer * 2
+        diff_mask = ~torch.isclose(destination_buffer, expected, atol=1)
+        breaking_indices = torch.nonzero(diff_mask, as_tuple=False)
+
+        if not torch.allclose(destination_buffer, expected, atol=1):
+            max_diff = (destination_buffer - expected).abs().max().item()
+            shmem.info(f"Max absolute difference: {max_diff}")
+            for idx in breaking_indices:
+                idx = tuple(idx.tolist())
+                computed_val = destination_buffer[idx]
+                expected_val = expected[idx]
+                shmem.info(f"Mismatch at index {idx}: C={computed_val}, expected={expected_val}")
+                success = False
+                break
+
+        if success:
+            shmem.info("Validation successful.")
+        else:
+            shmem.info(f"Validation failed with {len(breaking_indices)} errors / {destination_buffer.numel()}")
+
+    shmem.barrier()
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+def main():
+    args = parse_args()
+
+    num_ranks = args["num_ranks"]
+
+    init_url = "tcp://127.0.0.1:29500"
+    mp.spawn(
+        fn=_worker,
+        args=(num_ranks, init_url, args),
+        nprocs=num_ranks,
+        join=True,
+    )
+
+
+if __name__ == "__main__":
+    main()
