@@ -56,7 +56,6 @@ def _ring_attn_persistent_kernel(
     num_heads,
     # signal infrastructure
     signal_flags,
-    put_done_counters,
     heap_bases,
     # pre-computed kv_rank_start values for each step, shape [world_size]
     kv_rank_starts,
@@ -76,9 +75,11 @@ def _ring_attn_persistent_kernel(
     registers across all steps. M, L, O accumulators stay in registers —
     no HBM round-trip between steps.
 
-    Synchronization uses point-to-point signal flags on the symmetric heap
-    instead of host-side barriers. Each CTA atomically increments a completion
-    counter after its put; the last CTA fires a remote signal to the next rank.
+    Synchronization uses point-to-point signal counters on the symmetric heap
+    instead of host-side barriers. After each CTA completes its iris.put, it
+    atomically increments the next rank's signal counter with release semantics,
+    fencing its remote stores. The consumer spins until the counter reaches
+    total_blocks (all CTAs done).
     """
     h = tl.program_id(0)
     q_blk = tl.program_id(1)
@@ -129,9 +130,12 @@ def _ring_attn_persistent_kernel(
             K_dst_flat = K_ping_flat
             V_dst_flat = V_ping_flat
 
-        # WAIT: if step > 0, spin on signal from previous rank
+        # WAIT: if step > 0, spin on signal from previous rank.
+        # Each CTA on the previous rank incremented our signal_flags[step]
+        # after completing its iris.put, so we wait until the counter
+        # reaches total_blocks (all CTAs done).
         if step > 0:
-            while tl.atomic_cas(signal_flags + step, 0, 0, sem="acquire", scope="sys") != step:
+            while tl.atomic_add(signal_flags + step, 0, sem="acquire", scope="sys") < total_blocks:
                 pass
 
         # COMPUTE: flash attention on this KV chunk
@@ -177,15 +181,13 @@ def _ring_attn_persistent_kernel(
             iris.put(V_cur_flat + put_offs, V_dst_flat + put_offs, rank, next_rank, heap_bases, mask=put_mask)
             tl.debug_barrier()
 
-            # Count completed CTAs; last one signals next rank.
-            # acq_rel: release orders this CTA's preceding iris.put stores
-            # before the counter increment; acquire ensures the last CTA
-            # observes all other CTAs' put stores (via release-acquire chain).
-            old = tl.atomic_add(put_done_counters + step, 1, sem="acq_rel", scope="sys")
-            if old == total_blocks - 1:
-                iris.atomic_xchg(
-                    signal_flags + step + 1, step + 1, rank, next_rank, heap_bases, sem="release", scope="sys"
-                )
+            # Signal next rank directly: each CTA atomically increments the
+            # remote signal counter with release semantics, which fences this
+            # CTA's preceding iris.put stores before the increment is visible.
+            # The consumer waits until the counter reaches total_blocks.
+            iris.atomic_add(
+                signal_flags + step + 1, 1, rank, next_rank, heap_bases, sem="release", scope="sys"
+            )
 
     # Store final O, M, L to HBM (once, not per-step)
     o_ptrs = O + h * stride_oh + q_idx[:, None] * stride_os + tl.arange(0, HEAD_DIM)[None, :] * stride_od
@@ -261,15 +263,15 @@ def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None,
         v_ping = shmem.empty(v.shape, dtype=v.dtype)
         v_pong = shmem.empty(v.shape, dtype=v.dtype)
 
-    # Allocate signal flags on symmetric heap (one per step, indexed 1..world_size-1)
-    # and local completion counters (one per step)
+    # Allocate signal counters on symmetric heap (one per step, indexed 1..world_size-1).
+    # Each CTA atomically increments the next rank's counter after its put;
+    # the consumer waits until the counter reaches total_blocks.
     if _signal_flags is not None:
         signal_flags = _signal_flags
     else:
         signal_flags = shmem.zeros((world_size,), dtype=torch.int32)
-    # Reset signal flags to 0 for this call
+    # Reset signal counters to 0 for this call
     signal_flags.zero_()
-    put_done_counters = torch.zeros(world_size, dtype=torch.int32, device=q.device)
 
     # Copy initial K/V into ping buffers, then sync so every rank has its
     # own initial chunk ready before the persistent kernel launches.
@@ -330,7 +332,6 @@ def ring_attn_fwd(q, k, v, shmem, causal=True, scale=None, _ping_pong_bufs=None,
         num_heads,
         # signal infrastructure
         signal_flags,
-        put_done_counters,
         heap_bases,
         # pre-computed kv_rank_start values
         kv_rank_starts,
