@@ -110,6 +110,7 @@ jobs:
 
   test-editable:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, editable install)
+    needs: [test-git]
     runs-on: [linux-mi325-8gpu-ossci-rad]
     timeout-minutes: 180
     strategy:
@@ -170,6 +171,7 @@ jobs:
 
   test-install:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, pip install)
+    needs: [test-git]
     runs-on: [linux-mi325-8gpu-ossci-rad]
     timeout-minutes: 180
     strategy:
