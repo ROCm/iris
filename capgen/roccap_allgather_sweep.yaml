@@ -1,0 +1,59 @@
+# Example config for roccap_ccl_sweep.py
+#
+# Shape knobs: use EITHER paired lists (tensor_mn + block_mn) OR legacy args.m/n/block_size_*.
+#
+# Paired mode (recommended): Cartesian product of tensor_mn × block_mn × other args lists.
+
+# /workspaces/pre_silicon_sw_dev/roccap_ccl_sweep.py  --config /workspaces/pre_silicon_sw_dev/roccap_allgather_sweep.yaml
+tensor_mn:
+  #- {m: 2048, n: 2048}
+  - {m: 2048, n: 2048}
+  #- {m: 1024, n: 512}
+block_mn:
+  - {block_size_m: 64, block_size_n: 64}
+  - {block_size_m: 128, block_size_n: 64}
+  - {block_size_m: 128, block_size_n: 128}
+  - {block_size_m: 256, block_size_n: 128}
+  - {block_size_m: 256, block_size_n: 256}
+
+# Legacy mode: if you omit tensor_mn and block_mn, define scalars/lists under args for all of:
+#   m, n, block_size_m, block_size_n, comm_sms, cache_modifier, num_warps, datatype
+# (full Cartesian product across those eight — use paired mode to avoid odd m×n × block crosses.)
+
+workdir: "" # e.g. "examples/25_ccl_all_gather" if you run from iris repo root
+
+torchrun:
+  # Scalar or list (sweeps each value × all other combos). Tag includes …4nproc / …8nproc.
+  nproc_per_node: [8] # e.g. [4, 8]
+  standalone: true
+
+paths:
+  wrapper: /workspaces/pre_silicon_sw_dev/iris-jonathou-hints/scripts/roccap_wrapper.py
+  example: /workspaces/pre_silicon_sw_dev/iris-jonathou-hints/examples/25_ccl_all_gather/example.py
+
+kernel: persistent_all_gather
+
+# Required in paired mode: comm_sms, cache_modifier, num_warps, datatype (no m, n, block_size_* here).
+# Optional: all_gather_variant for examples/25_ccl_all_gather (omit = example default).
+# Use a list to sweep, e.g. [persistent, partitioned] (partitioned needs comm_sms % world_size == 0).
+# .wt cache modifier is for write-through mode but adds a wait storecnt after
+args:
+  comm_sms: [48, 64, 96]
+  cache_modifier: [".cs"]
+  num_warps: [32]
+  datatype: [fp32]
+  all_gather_variant: [persistent, partitioned]
+
+extra:
+  num_stages: [1]
+  waves_per_eu: []
+  heap_size: []
+
+rename:
+  enabled: true
+
+# Optional: capture all stdout/stderr from each torchrun (roccap + example) into one file per combo.
+# Files: <workdir>/<dir>/<same tag as rename>.log
+logging:
+  dir: sweep_logs # set to "" or omit to disable
+  tee: false # true = also print child output on the terminal while logging
