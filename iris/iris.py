@@ -2117,7 +2117,7 @@ def put(
         command_in_bytes = command_in_bytes_u32.to(tl.uint64)
 
         # Acquire space in the queue
-        base, offset = anvil.acquire(
+        base, offset = anvil.acquire_fadd(
             queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
         )
 
@@ -2348,7 +2348,7 @@ def atomic_add(
 
         command_in_bytes = 32
         # Acquire space (returns base index and wraparound offset)
-        base, offset = anvil.acquire(
+        base, offset = anvil.acquire_fadd(
             # base = anvil.acquire(
             queue_ptr_u32,
             read_ptr,
