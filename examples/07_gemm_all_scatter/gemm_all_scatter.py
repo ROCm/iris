@@ -141,7 +141,6 @@ def persistent_gemm_all_scatter(
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
-
         if USE_COPY_ENGINE:
             # Store locally first
             tl.store(c_global + global_offset, c, mask=sub_mask, cache_modifier=".wt")
