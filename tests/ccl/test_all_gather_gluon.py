@@ -13,9 +13,7 @@ import torch.distributed as dist
 try:
     import iris.experimental.iris_gluon as iris_gluon
     from iris.ccl import Config
-    from iris.ccl.all_gather import all_gather
-
-    GLUON_AVAILABLE = True
+    from iris.ccl.all_gather import all_gather, GLUON_AVAILABLE
 except ImportError:
     GLUON_AVAILABLE = False
 
@@ -46,7 +44,7 @@ def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n):
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33  # 8GB
+    heap_size = 2**30  # 1GB
     shmem = iris_gluon.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()

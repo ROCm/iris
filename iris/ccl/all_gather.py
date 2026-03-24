@@ -499,6 +499,13 @@ def all_gather(
         if not hasattr(shmem, "get_device_context"):
             raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
 
+        # Gluon only supports the persistent variant
+        if config.all_gather_variant != "persistent":
+            raise ValueError(
+                f"Gluon all_gather only supports all_gather_variant='persistent', "
+                f"got '{config.all_gather_variant}'."
+            )
+
         # Apply optimal defaults for gluon flat-2D kernel when user hasn't
         # overridden block sizes from the Config defaults (32x64).
         block_size_m = config.block_size_m

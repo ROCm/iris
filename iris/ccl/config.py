@@ -47,7 +47,8 @@ class Config:
         num_stages: Number of pipeline stages for the kernel (default: 1)
         num_warps: Number of warps per workgroup (default: 4). For gluon kernels,
                    this also sets WARPS_PER_CTA in the BlockedLayout. The product
-                   threads_per_warp * num_warps determines the minimum block_size_n.
+                   threads_per_warp * num_warps determines the minimum tile size
+                   (block_size_m * block_size_n for flat-2D, or block_size_n for 1D).
         threads_per_warp: Threads per warp/wavefront (default: 64). Must match the
                           hardware wavefront size: 64 for AMD GPUs, 32 for NVIDIA.
                           Used by gluon kernels to construct BlockedLayout for
