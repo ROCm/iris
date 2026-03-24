@@ -916,6 +916,34 @@ class Iris:
     def get_copy_engine_ctx(self):
         return self.copy_engines_device_ctx
 
+    def translate(self, ptr: int, from_rank: int, to_rank: int) -> int:
+        """
+        Translate a pointer address from one rank's address space to another.
+
+        This is useful for host-side SDMA operations where you need to convert
+        peer-mapped addresses to the target GPU's local address space.
+
+        Args:
+            ptr (int): The pointer address in from_rank's address space
+            from_rank (int): Source rank (address space of ptr)
+            to_rank (int): Target rank (desired address space)
+
+        Returns:
+            int: Translated pointer address in to_rank's address space
+
+        Example:
+            >>> ctx = iris.iris()
+            >>> buffer = ctx.zeros(1024, dtype=torch.float32)
+            >>> # Translate buffer address from rank 0 to rank 1's address space
+            >>> remote_addr = ctx.translate(buffer.data_ptr(), 0, 1)
+            >>> ctx.copy_engines.host_put(0, 1, 0, src_ptr, remote_addr, size)
+        """
+        heap_bases = self.heap_bases.cpu()
+        from_base = int(heap_bases[from_rank])
+        to_base = int(heap_bases[to_rank])
+        offset = ptr - from_base
+        return to_base + offset
+
     def get_device_context(self):
         """
         Get the device context tensor for DeviceContext initialization.

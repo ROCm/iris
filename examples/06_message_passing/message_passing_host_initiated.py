@@ -53,6 +53,7 @@ def consumer_kernel(
     values = tl.load(buffer + offsets, mask=mask)
 
     # Do something with values...
+    # (Here you might write to output, do computation, etc.)
     values = values * 2
 
     # Store chunk to target buffer
@@ -86,7 +87,7 @@ def torch_dtype_from_str(datatype: str) -> torch.dtype:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Host-Initiated Message Passing Example",
+        description="Host-Initiated SDMA Message Passing Example",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -159,12 +160,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         # Host-initiated transfer: send data block by block
         elem_size = source_buffer.element_size()
 
-        # Get heap bases for address translation
-        heap_bases = shmem.get_heap_bases().cpu()
-        producer_base = int(heap_bases[producer_rank])
-        consumer_base = int(heap_bases[consumer_rank])
-        shmem.info(f"Heap bases: producer={producer_rank}:0x{producer_base:x} consumer={consumer_rank}:0x{consumer_base:x}")
-
         import time
         start_time = time.time()
 
@@ -178,10 +173,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             dst_offset = block_start * elem_size
             size_bytes = block_len * elem_size
 
-            # Translate destination buffer address (same as flags)
+            # Translate destination buffer address from producer to consumer address space
             dst_local_addr = destination_buffer.data_ptr() + dst_offset
-            dst_offset_in_heap = dst_local_addr - producer_base
-            dst_remote_addr = consumer_base + dst_offset_in_heap
+            dst_remote_addr = shmem.translate(dst_local_addr, producer_rank, consumer_rank)
 
             # Transfer data block using SDMA
             anvil_lib.host_put(
@@ -191,15 +185,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                 size_bytes
             )
 
-            # Signal completion with atomic add (32-bit atomic)
-            # Translate address: flags is on consumer GPU, translate to address visible from producer
+            # Signal completion with atomic add - translate flag address
             flag_local_addr = flags.data_ptr() + block_id * 4  # 4 bytes for int32
-            offset = flag_local_addr - producer_base
-            flag_remote_addr = consumer_base + offset
-
-            if block_id == 0:
-                shmem.info(f"Address translation for flag[0]:")
-                shmem.info(f"  local=0x{flag_local_addr:x} offset=0x{offset:x} remote=0x{flag_remote_addr:x}")
+            flag_remote_addr = shmem.translate(flag_local_addr, producer_rank, consumer_rank)
 
             anvil_lib.host_atomic_add_32(producer_rank, consumer_rank, 0, flag_remote_addr, 1)
 
@@ -208,45 +196,14 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         shmem.info(f"Host SDMA loop took {elapsed_ms:.2f} ms for {num_blocks} blocks ({elapsed_ms/num_blocks:.2f} ms/block)")
 
         # Synchronize to ensure all transfers complete
-        # torch.cuda.synchronize()
         # TODO use quiet()
 
-        # Check if SDMA consumed the packets
-        # import time
-        # time.sleep(1)
-
-        # # Read flags from host to verify atomic_add worked
-        # flags_cpu = flags.cpu()
-        # shmem.info(f"Rank {cur_rank} (HOST) finished sending data.")
-        # shmem.info(f"Flags after atomic_add (read from host): {flags_cpu.tolist()}")
-
-        # # Also check destination buffer
-        # dst_sample = destination_buffer[:10].cpu()
-        # shmem.info(f"Destination buffer sample: {dst_sample.tolist()}")
-
     else:
-        shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank}, gid: {grid}.")
+        shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank}.")
         kk = consumer_kernel[grid](
             destination_buffer, flags, n_elements, consumer_rank, BLOCK_SIZE, shmem.get_heap_bases()
         )
-        shmem.info("CONSUMER kernel launched, waiting for completion...")
-        torch.cuda.synchronize()
-        shmem.info("CONSUMER DONE - kernel actually finished")
-
-    shmem.info(f"Rank {cur_rank} about to hit barrier")
-
-    # Debug: manual barrier to see where it hangs
-    shmem.info(f"Rank {cur_rank} calling torch.cuda.synchronize()")
-    torch.cuda.synchronize()
-    shmem.info(f"Rank {cur_rank} passed torch.cuda.synchronize()")
-
-    # import torch.distributed as dist
-    shmem.info(f"Rank {cur_rank} calling dist.barrier()")
-    dist.barrier()
-    shmem.info(f"Rank {cur_rank} passed dist.barrier()")
-
-    # shmem.barrier()
-    shmem.info(f"Rank {cur_rank} passed barrier")
+    shmem.barrier()
     shmem.info(f"Rank {cur_rank} has finished sending/receiving data.")
     shmem.info("Validating output...")
 
