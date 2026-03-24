@@ -138,11 +138,7 @@ def run_torchrun_logged(
     Run cmd; if log_file is set, append stdout+stderr to that file.
     If tee, also copy streams to the terminal (line-buffered where possible).
     """
-    header = (
-        f"# roccap_ccl_sweep {datetime.datetime.now().isoformat()}\n"
-        f"# cwd: {cwd}\n"
-        f"# {shlex.join(cmd)}\n\n"
-    )
+    header = f"# roccap_ccl_sweep {datetime.datetime.now().isoformat()}\n# cwd: {cwd}\n# {shlex.join(cmd)}\n\n"
 
     if log_file is None:
         return subprocess.run(cmd, cwd=cwd)
@@ -388,14 +384,16 @@ def main() -> None:
         sys.exit(1)
 
     arg_flags_order = (
-        (LEGACY_ARG_FLAGS if paired_bases is None else [
+        LEGACY_ARG_FLAGS
+        if paired_bases is None
+        else [
             ("m", "-m"),
             ("n", "-n"),
             ("block_size_m", "--block_size_m"),
             ("block_size_n", "--block_size_n"),
-        ] + OTHER_ARG_KEYS)
-        + OPTIONAL_SCRIPT_ARGS
-    )
+        ]
+        + OTHER_ARG_KEYS
+    ) + OPTIONAL_SCRIPT_ARGS
 
     for nproc in nproc_list:
         for kernel in kernels:
@@ -454,8 +452,7 @@ def main() -> None:
                     else:
                         detail = describe_cap_problem(cwd, str(kernel), nproc)
                         print(
-                            f"ERROR: Command failed (exit {proc.returncode}); {detail}.\n"
-                            f"  {cmd_str}",
+                            f"ERROR: Command failed (exit {proc.returncode}); {detail}.\n  {cmd_str}",
                             file=sys.stderr,
                             flush=True,
                         )
