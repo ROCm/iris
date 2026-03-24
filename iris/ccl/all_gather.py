@@ -11,7 +11,6 @@ import triton.language as tl
 import iris
 from .config import Config
 from .utils import extract_group_info
-from iris.tracing.events import TraceEvent
 
 # Conditional import for Gluon
 try:
@@ -326,7 +325,6 @@ if GLUON_AVAILABLE:
         COMM_SMS: gl.constexpr,
         THREADS_PER_WARP: gl.constexpr,
         WARPS_PER_CTA: gl.constexpr,
-        TRACING: gl.constexpr = False,
     ):
         """
         Persistent all-gather kernel using Gluon with flat-2D tiling.
@@ -374,10 +372,8 @@ if GLUON_AVAILABLE:
             COMM_SMS: Number of CUs used for persistent scheduling.
             THREADS_PER_WARP: Threads per warp/wavefront (64 for AMD, 32 for NVIDIA).
             WARPS_PER_CTA: Number of warps per workgroup. Must match num_warps.
-            TRACING: If True, record load/store events into trace buffers.
         """
-        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)
-        events = TraceEvent()
+        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=False)
 
         pid = gl.program_id(0)
 
@@ -417,18 +413,7 @@ if GLUON_AVAILABLE:
             # Single flat load of the entire tile
             input_offsets = row * stride_in_m + col * stride_in_n
             input_addr = input_ptr + input_offsets
-            if TRACING:
-                h_load = ctx.tracing.record_event_start(
-                    event_id=events.load,
-                    target_rank=group_rank,
-                    address=input_addr,
-                    pid_m=pid_m,
-                    pid_n=pid_n,
-                    mask=mask,
-                )
             data = gl.load(input_addr, mask=mask, other=0.0)
-            if TRACING:
-                ctx.tracing.record_event_end(h_load)
 
             # Output: this rank's data goes to output[group_rank * M + row, col]
             output_row = group_rank * M + row
@@ -442,16 +427,6 @@ if GLUON_AVAILABLE:
                 target_iris_rank = rank_start + dest_idx * rank_stride
                 output_ptrs = output_ptr + output_offsets
 
-                if TRACING:
-                    h_store = ctx.tracing.record_event_start(
-                        event_id=events.store,
-                        target_rank=target_iris_rank,
-                        address=output_ptrs,
-                        pid_m=pid_m,
-                        pid_n=pid_n,
-                        mask=mask,
-                    )
-
                 if dest_idx == group_rank:
                     gl.store(output_ptrs, data, mask=mask, cache_modifier=".wt")
                 else:
@@ -464,9 +439,6 @@ if GLUON_AVAILABLE:
                     remote_ptrs_int = output_ptrs_int + ptr_delta
                     remote_ptrs = tl.cast(remote_ptrs_int, output_ptrs.dtype)
                     gl.store(remote_ptrs, data, mask=mask)
-
-                if TRACING:
-                    ctx.tracing.record_event_end(h_store)
 
 
 def all_gather(
@@ -556,7 +528,6 @@ def all_gather(
                 f"Recommended: block_size_m=8, block_size_n=256."
             )
 
-        tracing_enabled = hasattr(shmem, "tracing") and shmem.tracing.enabled
         context_tensor = shmem.get_device_context()
 
         persistent_all_gather_gluon[(config.comm_sms,)](
@@ -581,7 +552,6 @@ def all_gather(
             config.comm_sms,
             config.threads_per_warp,
             config.num_warps,
-            tracing_enabled,
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,

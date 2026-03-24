@@ -72,7 +72,7 @@ class _GluonDeviceTracingCls:
     / record_event_end to bracket operations; events are exported via Tracing.export().
     """
 
-    enabled: gl.tensor
+    enabled: tl.constexpr
     rank: gl.tensor
     max_events: gl.tensor
     counter: gl.tensor
@@ -91,7 +91,6 @@ class _GluonDeviceTracingCls:
     buf_op_index: gl.tensor
     buf_payload_size: gl.tensor
 
-    @gluon.constexpr_function
     def __init__(
         self,
         enabled,
@@ -157,8 +156,8 @@ class _GluonDeviceTracingCls:
             pid_n: Program ID in N dimension
             mask: Optional mask tensor indicating valid elements.
         """
-        if self.enabled == 0:
-            return tl.cast(self.enabled, tl.int32)
+        if not self.enabled:
+            return tl.cast(0, tl.int32)
 
         event_idx = tl.atomic_add(self.counter, 1)
         op_index = tl.atomic_add(self.op_index_counter, 1)
@@ -166,29 +165,29 @@ class _GluonDeviceTracingCls:
         # Calculate payload_size from mask and datatype
         if mask is not None:
             mask_i32 = tl.cast(mask, tl.int32)
-            num_elements = tl.sum(mask_i32)
+            num_elements = gl.sum(mask_i32, axis=0)
             elem_type = address.dtype.element_ty
             bitwidth = elem_type.primitive_bitwidth
             elem_size_bytes = bitwidth // 8
-            payload_size = num_elements * elem_size_bytes
+            payload_size = num_elements * tl.cast(elem_size_bytes, tl.int32)
         else:
-            payload_size = self.enabled * 0  # scalar 0 without tl.full
+            payload_size = tl.cast(0, tl.int32)
 
         if event_idx < self.max_events:
-            tl.store(self.buf_event_id + event_idx, event_id)
-            tl.store(self.buf_pid + event_idx, gl.program_id(0))
-            tl.store(self.buf_pid_m + event_idx, pid_m)
-            tl.store(self.buf_pid_n + event_idx, pid_n)
-            tl.store(self.buf_cur_rank + event_idx, self.rank)
-            tl.store(self.buf_target_rank + event_idx, target_rank)
+            tl.store(self.buf_event_id + event_idx, tl.cast(event_id, tl.int32))
+            tl.store(self.buf_pid + event_idx, tl.cast(gl.program_id(0), tl.int32))
+            tl.store(self.buf_pid_m + event_idx, tl.cast(pid_m, tl.int32))
+            tl.store(self.buf_pid_n + event_idx, tl.cast(pid_n, tl.int32))
+            tl.store(self.buf_cur_rank + event_idx, tl.cast(self.rank, tl.int32))
+            tl.store(self.buf_target_rank + event_idx, tl.cast(target_rank, tl.int32))
             tl.store(self.buf_xcc_id + event_idx, device_utils.get_xcc_id())
             tl.store(self.buf_cu_id + event_idx, device_utils.get_cu_id())
             tl.store(self.buf_timestamp + event_idx, device_utils.read_realtime())
             addr_i64 = tl.cast(address, tl.int64)
-            tl.store(self.buf_address + event_idx, tl.min(addr_i64))
-            tl.store(self.buf_duration_cycles + event_idx, tl.cast(self.enabled * 0, tl.int64))
+            tl.store(self.buf_address + event_idx, gl.min(addr_i64, axis=0))
+            tl.store(self.buf_duration_cycles + event_idx, tl.cast(0, tl.int64))
             tl.store(self.buf_op_index + event_idx, op_index)
-            tl.store(self.buf_payload_size + event_idx, payload_size)
+            tl.store(self.buf_payload_size + event_idx, tl.cast(payload_size, tl.int32))
         return event_idx
 
     @gluon.jit
@@ -198,7 +197,7 @@ class _GluonDeviceTracingCls:
 
         Only stores when handle < max_events (bounds check).
         """
-        if self.enabled == 0:
+        if not self.enabled:
             return
 
         end_ts = device_utils.read_realtime()
@@ -268,7 +267,7 @@ class IrisDeviceCtx:
             # Layout: [cur_rank, num_ranks, heap_base_0..N-1, trace_enabled, max_events,
             #          trace_counter_ptr, op_index_counter_ptr, buf_event_id, ...(13 buffers)]
             trace_info_base = 2 + num_ranks + 1  # skip cur_rank, num_ranks, heap_bases, trace_enabled
-            max_events = gl.load(context_tensor + trace_info_base + 0)
+            max_events = tl.cast(gl.load(context_tensor + trace_info_base + 0), tl.int32)
             trace_counter_ptr = gl.load(context_tensor + trace_info_base + 1)
             op_index_counter_ptr = gl.load(context_tensor + trace_info_base + 2)
 
@@ -292,10 +291,8 @@ class IrisDeviceCtx:
             buf_op_index = tl.cast(gl.load(context_tensor + buf_base + 11), tl.pointer_type(tl.int32))
             buf_payload_size = tl.cast(gl.load(context_tensor + buf_base + 12), tl.pointer_type(tl.int32))
 
-            # Read trace_enabled flag from context tensor (at index 2 + num_ranks)
-            trace_enabled_val = gl.load(context_tensor + 2 + num_ranks)
             device_tracing = GluonDeviceTracing(
-                enabled=trace_enabled_val,
+                enabled=tracing,
                 rank=cur_rank,
                 max_events=max_events,
                 counter=trace_counter,
@@ -318,11 +315,9 @@ class IrisDeviceCtx:
             # When tracing disabled, use dummy pointers (never dereferenced)
             dummy_ptr_i32 = tl.cast(context_tensor, tl.pointer_type(tl.int32))
             dummy_ptr_i64 = tl.cast(context_tensor, tl.pointer_type(tl.int64))
-            # Read trace_enabled flag from context tensor (0 = disabled)
-            trace_enabled_val = gl.load(context_tensor + 2 + num_ranks)
-            max_events_zero = trace_enabled_val  # 0 when tracing disabled
+            max_events_zero = tl.cast(0, tl.int32)
             device_tracing = GluonDeviceTracing(
-                enabled=trace_enabled_val,
+                enabled=tracing,
                 rank=cur_rank,
                 max_events=max_events_zero,
                 counter=dummy_ptr_i32,
@@ -369,6 +364,12 @@ class IrisDeviceCtx:
         translated_ptr_byte = to_base_byte + offset
         # Cast to_base back to pointer type
         translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
+
+        # Optimization to vectorize the load/store - similar to iris.py
+        # This enables the compiler to generate dwordx4 or wider loads
+        # Note: Gluon uses scalar multiples, not 2D tuples like Triton
+        # ptr = gl.max_contiguous(gl.multiple_of(ptr, 64), 64)
+        # translated_ptr = gl.max_contiguous(gl.multiple_of(translated_ptr, 64), 64)
 
         return translated_ptr
 
