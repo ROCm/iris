@@ -61,6 +61,7 @@ class RingAttention(nn.Module):
         # Signal flags on the symmetric heap for device-side synchronization.
         # Allocated lazily on first forward call (needs world_size from shmem).
         self._signal_flags: torch.Tensor | None = None
+        self._back_signal_flags: torch.Tensor | None = None
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """
@@ -93,6 +94,7 @@ class RingAttention(nn.Module):
         if self._signal_flags is None:
             world_size = self.shmem.get_num_ranks()
             self._signal_flags = self.shmem.zeros((world_size,), dtype=torch.int32)
+            self._back_signal_flags = self.shmem.zeros((world_size,), dtype=torch.int32)
 
         return ring_attn_fwd(
             q,
@@ -103,4 +105,5 @@ class RingAttention(nn.Module):
             scale=self.scale,
             _ping_pong_bufs=ping_pong,
             _signal_flags=self._signal_flags,
+            _back_signal_flags=self._back_signal_flags,
         )
