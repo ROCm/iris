@@ -1,5 +1,19 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+"""
+Host-Initiated Message Passing Example
+
+This example demonstrates message passing where the producer (GPU 0) is
+controlled by the HOST (Python/CPU) instead of a device kernel, while
+the consumer (GPU 1) remains a device kernel.
+
+Key difference from message_passing_put.py:
+- Producer: Host uses anvil to initiate SDMA transfers from Python
+- Consumer: Same device kernel waiting for data
+
+This shows how to orchestrate GPU-to-GPU transfers from Python without
+requiring kernel launches on the source GPU.
+"""
 
 import argparse
 
@@ -11,55 +25,6 @@ import triton.language as tl
 import random
 
 import iris
-
-
-@triton.jit
-def producer_kernel(
-    source_buffer,  # tl.tensor: pointer to source data
-    target_buffer,  # tl.tensor: pointer to target data
-    flag,  # tl.tensor: pointer to flags
-    buffer_size,  # int32: total number of elements
-    producer_rank: tl.constexpr,
-    consumer_rank: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    heap_bases_ptr: tl.tensor,  # tl.tensor: pointer to heap bases pointers
-    copy_engine_handle_ptr,
-    USE_COPY_ENGINE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    # Compute start index of this block
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-
-    # Guard for out-of-bounds accesses
-    mask = offsets < buffer_size
-
-    # Put chunk into remote buffer
-    iris.put(
-        source_buffer + offsets,
-        target_buffer + offsets,
-        producer_rank,
-        consumer_rank,
-        heap_bases_ptr,
-        copy_engine_handle_ptr,
-        mask=mask,
-        USE_COPY_ENGINE=USE_COPY_ENGINE,
-    )
-
-    # Set flag to signal completion
-    # iris.atomic_cas(flag + pid, 0, 1, producer_rank, consumer_rank, heap_bases_ptr, copy_engine_handle_ptr, sem="release", scope="sys")
-    iris.atomic_add(
-        flag + pid,
-        1,
-        producer_rank,
-        consumer_rank,
-        heap_bases_ptr,
-        sem="release",
-        scope="sys",
-        copy_engine_ctx=copy_engine_handle_ptr,
-        USE_COPY_ENGINE=USE_COPY_ENGINE,
-    )
 
 
 @triton.jit
@@ -122,7 +87,7 @@ def torch_dtype_from_str(datatype: str) -> torch.dtype:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Parse Message Passing configuration.",
+        description="Host-Initiated SDMA Message Passing Example",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -137,9 +102,6 @@ def parse_args():
     parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
-    parser.add_argument(
-        "-c", "--use_copy_engine", action="store_true", help="Use copy engine for device-to-device copies"
-    )
 
     return vars(parser.parse_args())
 
@@ -176,34 +138,70 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     consumer_rank = 1
 
     n_elements = source_buffer.numel()
-    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-    num_blocks = triton.cdiv(n_elements, args["block_size"])
+    # Use fixed block size for both producer and consumer
+    BLOCK_SIZE = args["block_size"]
+    num_blocks = triton.cdiv(n_elements, BLOCK_SIZE)
+    grid = (num_blocks,)
 
     # Allocate flags on the symmetric heap
     flags = shmem.zeros((num_blocks,), device="cuda", dtype=torch.int32)
 
-    # Get copy engine context
-    # copy_engine_ctx = shmem.get_copy_engine_handle(consumer_rank) if args["use_copy_engine"] and cur_rank == producer_rank else None
-    copy_engine_ctx = shmem.get_copy_engine_ctx()
-
     if cur_rank == producer_rank:
-        shmem.info(f"Rank {cur_rank} is sending data to rank {consumer_rank}.")
-        kk = producer_kernel[grid](
-            source_buffer,
-            destination_buffer,
-            flags,
-            n_elements,
-            producer_rank,
-            consumer_rank,
-            args["block_size"],
-            shmem.get_heap_bases(),
-            copy_engine_ctx,
-            USE_COPY_ENGINE=args["use_copy_engine"],
+        shmem.info(f"Rank {cur_rank} (HOST) is sending data to rank {consumer_rank}.")
+        # Initialize CUDA context even though we're doing host-side operations
+        # This is needed for the barrier to work
+        torch.cuda.current_device()
+
+        # Create host-initiated SDMA connection separate from iris's device connection
+        # This allows the host to orchestrate transfers without kernel launches
+        anvil_lib = shmem.copy_engines  # Reuse iris's anvil instance
+        anvil_lib.connect(producer_rank, consumer_rank, num_channels=1, allocate_on_host=True)
+
+        # Host-initiated transfer: send data block by block
+        elem_size = source_buffer.element_size()
+
+        import time
+
+        start_time = time.time()
+
+        for block_id in range(num_blocks):
+            block_start = block_id * BLOCK_SIZE
+            block_end = min(block_start + BLOCK_SIZE, n_elements)
+            block_len = block_end - block_start
+
+            # Calculate byte offsets
+            src_offset = block_start * elem_size
+            dst_offset = block_start * elem_size
+            size_bytes = block_len * elem_size
+
+            # Translate destination buffer address from producer to consumer address space
+            dst_local_addr = destination_buffer.data_ptr() + dst_offset
+            dst_remote_addr = shmem.translate(dst_local_addr, producer_rank, consumer_rank)
+
+            # Transfer data block using SDMA
+            anvil_lib.host_put(
+                producer_rank, consumer_rank, 0, source_buffer.data_ptr() + src_offset, dst_remote_addr, size_bytes
+            )
+
+            # Signal completion with atomic add - translate flag address
+            flag_local_addr = flags.data_ptr() + block_id * 4  # 4 bytes for int32
+            flag_remote_addr = shmem.translate(flag_local_addr, producer_rank, consumer_rank)
+
+            anvil_lib.host_atomic_add_32(producer_rank, consumer_rank, 0, flag_remote_addr, 1)
+
+        end_time = time.time()
+        elapsed_ms = (end_time - start_time) * 1000
+        shmem.info(
+            f"Host SDMA loop took {elapsed_ms:.2f} ms for {num_blocks} blocks ({elapsed_ms / num_blocks:.2f} ms/block)"
         )
+
+        # Synchronize to ensure all transfers complete
+        # TODO use quiet()
+
     else:
         shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank}.")
         kk = consumer_kernel[grid](
-            destination_buffer, flags, n_elements, consumer_rank, args["block_size"], shmem.get_heap_bases()
+            destination_buffer, flags, n_elements, consumer_rank, BLOCK_SIZE, shmem.get_heap_bases()
         )
     shmem.barrier()
     shmem.info(f"Rank {cur_rank} has finished sending/receiving data.")

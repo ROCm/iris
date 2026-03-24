@@ -9,6 +9,11 @@ from iris.device_utils import read_realtime
 import iris
 
 
+@triton.jit
+def wait_cnt():
+    tl.inline_asm_elementwise("s_waitcnt vmcnt(0)", "=r", [], dtype=tl.int32, is_pure=False, pack=1)
+
+
 @triton.jit()
 def persistent_gemm_all_scatter_wg_specialization(
     A,
@@ -17,6 +22,7 @@ def persistent_gemm_all_scatter_wg_specialization(
     c_global,
     bias_ptr,
     locks,
+    flags,
     M,
     N,
     K,
@@ -24,8 +30,8 @@ def persistent_gemm_all_scatter_wg_specialization(
     stride_ak,
     stride_bk,
     stride_bn,
-    stride_cm,
-    stride_cn,
+    stride_cm,  # unused
+    stride_cn,  # unused
     stride_cm_global,
     stride_cn_global,
     stride_bias,
@@ -42,6 +48,8 @@ def persistent_gemm_all_scatter_wg_specialization(
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     COLLECT_TIMESTAMPS: tl.constexpr = False,
+    USE_COPY_ENGINE: tl.constexpr = False,
+    copy_engine_ctx: tl.tensor = None,
     mm_begin_timestamp_ptr: tl.tensor = None,
     mm_end_timestamp_ptr: tl.tensor = None,
 ):
@@ -67,6 +75,9 @@ def persistent_gemm_all_scatter_wg_specialization(
     # and another that performs the communication. Uses persistent-
     # kernel.
     if pid < GEMM_SMS:
+        # tl.device_print("GEMM_SMS: ", GEMM_SMS)
+        # tl.device_print("GEMM pid: ", pid)
+
         for tile_id in range(pid, total_tiles, GEMM_SMS):
             if COLLECT_TIMESTAMPS:
                 timestamp = read_realtime()
@@ -140,12 +151,15 @@ def persistent_gemm_all_scatter_wg_specialization(
                 tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
             tl.store(c_global + global_offset, c, mask=sub_mask, cache_modifier=".wt")
+            wait_cnt()
             tl.debug_barrier()
             tl.store(locks + tile_id, 1, cache_modifier=".wt")
 
     else:  # pid >= GEMM_SMS
         COMM_SMS = NUM_SMS - GEMM_SMS
         pid = pid - GEMM_SMS
+        # tl.device_print("COMM_SMS: ", COMM_SMS)
+        # tl.device_print("COMM pid: ", pid)
         for tile_id in range(pid, total_tiles, COMM_SMS):
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
             group_id = tile_id // num_pid_in_group
@@ -174,5 +188,37 @@ def persistent_gemm_all_scatter_wg_specialization(
                         cur_rank,
                         remote_rank,
                         heap_bases,
+                        copy_engine_ctx,
+                        stride_tm=stride_cm_global,
+                        stride_tn=stride_cn_global,
+                        stride_fm=stride_cm_global,
+                        stride_fn=stride_cn_global,
                         mask=sub_mask,
+                        USE_COPY_ENGINE=USE_COPY_ENGINE,
+                        IS_2D_COPY=True,
+                        from_base_ptr=c_global,
+                        to_base_ptr=c_global,
                     )
+        tl.debug_barrier()
+        # Signal other ranks
+        for remote_rank in range(world_size):
+            if remote_rank != cur_rank:
+                # print("Issue atomic_add")
+                iris.atomic_add(
+                    flags + (pid * world_size) + cur_rank,
+                    1,
+                    cur_rank,
+                    remote_rank,
+                    heap_bases,
+                    sem="release",
+                    scope="sys",
+                    copy_engine_ctx=copy_engine_ctx,
+                    USE_COPY_ENGINE=USE_COPY_ENGINE,
+                )
+        # print("Start waiting")
+        # Wait for other ranks to signal us
+        for remote_rank in range(world_size):
+            if remote_rank != cur_rank:
+                while tl.load(flags + (pid * world_size) + remote_rank, cache_modifier=".cv", volatile=True) != 1:
+                    pass
+                # print("done waiting")

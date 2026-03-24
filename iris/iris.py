@@ -53,6 +53,8 @@ from iris.hip import (
     get_cu_count,
     count_devices,
 )
+
+import anvil
 from iris.symmetric_heap import SymmetricHeap
 import numpy as np
 import torch
@@ -129,6 +131,35 @@ class Iris:
 
         distributed_barrier()
 
+        # initialize copy engines
+        self.copy_engines = anvil.AnvilLib.get_instance()
+        self.copy_engines.init()
+
+        # connect to all peers
+        # TODO only connect local ranks
+        # TODO get size
+        context_size = 6
+        self.copy_engines_device_ctx = torch.zeros((num_ranks, context_size), dtype=torch.uint64, device=self.device)
+
+        for rank in range(num_ranks):
+            if rank != cur_rank:
+                self.copy_engines.connect(cur_rank, rank, 1)
+                queue = self.copy_engines.get_sdma_queue(cur_rank, rank, 0)
+                handle = queue.device_ctx()
+                self.info(f"---- Queue {rank} ------------")
+                self.info(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
+                self.info(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
+                self.info(f"wptr {handle.wptr:#x} at {id(handle.wptr):#x}")
+                self.info(f"doorbell {handle.doorbell:#x} at {id(handle.doorbell):#x}")
+                self.info(f"cached_write_ptr {handle.cached_wptr:#x} at {id(handle.cached_wptr):#x}")
+                self.info(f"committed_write_ptr {handle.committed_wptr:#x} at {id(handle.committed_wptr):#x}")
+
+                self.copy_engines_device_ctx[rank][0] = handle.queue_buf
+                self.copy_engines_device_ctx[rank][1] = handle.rptr
+                self.copy_engines_device_ctx[rank][2] = handle.wptr
+                self.copy_engines_device_ctx[rank][3] = handle.doorbell
+                self.copy_engines_device_ctx[rank][4] = handle.cached_wptr
+                self.copy_engines_device_ctx[rank][5] = handle.committed_wptr
         # Initialize CCL interface
         self.ccl = self.CCL(self)
 
@@ -898,6 +929,37 @@ class Iris:
             >>> print(heap_bases.shape)  # torch.Size([num_ranks])
         """
         return self.heap_bases
+
+    def get_copy_engine_ctx(self):
+        return self.copy_engines_device_ctx
+
+    def translate(self, ptr: int, from_rank: int, to_rank: int) -> int:
+        """
+        Translate a pointer address from one rank's address space to another.
+
+        This is useful for host-side SDMA operations where you need to convert
+        peer-mapped addresses to the target GPU's local address space.
+
+        Args:
+            ptr (int): The pointer address in from_rank's address space
+            from_rank (int): Source rank (address space of ptr)
+            to_rank (int): Target rank (desired address space)
+
+        Returns:
+            int: Translated pointer address in to_rank's address space
+
+        Example:
+            >>> ctx = iris.iris()
+            >>> buffer = ctx.zeros(1024, dtype=torch.float32)
+            >>> # Translate buffer address from rank 0 to rank 1's address space
+            >>> remote_addr = ctx.translate(buffer.data_ptr(), 0, 1)
+            >>> ctx.copy_engines.host_put(0, 1, 0, src_ptr, remote_addr, size)
+        """
+        heap_bases = self.heap_bases.cpu()
+        from_base = int(heap_bases[from_rank])
+        to_base = int(heap_bases[to_rank])
+        offset = ptr - from_base
+        return to_base + offset
 
     def get_device_context(self):
         """
@@ -2014,43 +2076,310 @@ def get(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None, hint: tl.co
 
 
 @triton.jit
-def put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, mask=None, hint: tl.constexpr = None):
+def put(
+    from_ptr,
+    to_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    stride_tm: tl.constexpr = 0,
+    stride_tn: tl.constexpr = 0,
+    stride_fm: tl.constexpr = 0,
+    stride_fn: tl.constexpr = 0,
+    mask=None,
+    hint: tl.constexpr = None,
+    USE_COPY_ENGINE: tl.constexpr = False,
+    IS_2D_COPY: tl.constexpr = False,
+    from_base_ptr=None,
+    to_base_ptr=None,
+):
     """
     Copies data from the current rank's local memory to the specified rank's memory.
     This function performs a memory write operation by loading data from the current
     rank's `from_ptr`, translating the `to_ptr` from the current rank's address
     space to the `to_rank`'s address space, and storing the data to the `to_rank` memory location.
-    If the `to_rank` is the same as the current rank, this function performs a local copy operation.
+
+    Supports both 1D (flat/linear) and 2D (tiled) copies:
+    - 1D copies: Used when stride_tm == 0 and stride_fm == 0 (default), uses linear SDMA packets
+    - 2D copies: Used when strides are non-zero, uses sub-window SDMA packets for better performance
 
     Args:
         from_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's local memory from which to read data.
-        to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `to_rank`'s address space. Must be the current rank where the pointer is local.
+        to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `to_rank`'s address space.
         from_rank (int): The current rank ID from which to read the data.
-        to_rank (int): The `to_rank` ID to which the data will be written.
+        to_rank (int): The rank ID to which the data will be written.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
-        mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
-        hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
+        copy_engine_ctx (tl.tensor): Copy engine context for SDMA operations.
+        stride_tm (int, optional): Stride in M dimension for destination buffer (in elements). Default: 0 (flat copy).
+        stride_tn (int, optional): Stride in N dimension for destination buffer (in elements). Default: 0.
+        stride_fm (int, optional): Stride in M dimension for source buffer (in elements). Default: 0 (flat copy).
+        stride_fn (int, optional): Stride in N dimension for source buffer (in elements). Default: 0.
+        mask (Block of triton.int1, optional): If mask[idx] is false, do not load/copy data at that index. Defaults to None.
+        USE_COPY_ENGINE (tl.constexpr, optional): Whether to use SDMA copy engine. Defaults to False (uses regular load/store).
+        from_base_ptr (triton.PointerType, optional): Base pointer of the source buffer. Required for 2D copies when USE_COPY_ENGINE is True.
+        to_base_ptr (triton.PointerType, optional): Base pointer of the destination buffer. Required for 2D copies when USE_COPY_ENGINE is True.
 
     Returns:
         None
 
-    Example:
+    Examples:
+        1D (flat) copy:
         >>> @triton.jit
-        >>> def kernel(local_ptr, remote_ptr, heap_bases):
+        >>> def kernel(local_ptr, remote_ptr, heap_bases, copy_engine_ctx):
         >>>     from_rank = 0
         >>>     to_rank = 1
-        >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases)
+        >>>     offsets = tl.arange(0, 256)
+        >>>     iris.put(local_ptr + offsets, remote_ptr + offsets,
+        >>>              from_rank, to_rank, heap_bases, copy_engine_ctx,
+        >>>              mask=offsets < 256, USE_COPY_ENGINE=True)
+
+        2D (tiled) copy:
+        >>> @triton.jit
+        >>> def kernel(local_ptr, remote_ptr, heap_bases, copy_engine_ctx, base_ptr):
+        >>>     from_rank = 0
+        >>>     to_rank = 1
+        >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases, copy_engine_ctx,
+        >>>              stride_tm=1024, stride_fm=1024,
+        >>>              mask=mask, USE_COPY_ENGINE=True,
+        >>>              from_base_ptr=base_ptr, to_base_ptr=base_ptr)
     """
     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
 
-    data = tl.load(from_ptr, mask=mask)
+    if not USE_COPY_ENGINE:
+        data = tl.load(from_ptr, mask=mask)
 
-    tl.store(translated_to_ptr, data, mask=mask)
+        tl.store(translated_to_ptr, data, mask=mask)
+    else:
+        ctx = copy_engine_ctx + (6 * to_rank)
+        queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+        read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+        write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+        doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+        cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+        committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+        # dst_ptr_val = tl.min(translated_to_ptr.to(tl.uint64), axis=-1)
+        dst_ptr_val0 = tl.min(translated_to_ptr.to(tl.uint64))
+        # Extract source address (min of pointer block where data is stored)
+        src_ptr_u64 = from_ptr.to(tl.uint64)
+        # src_ptr_val = tl.min(src_ptr_u64, axis=-1)
+        src_ptr_val0 = tl.min(src_ptr_u64)
+        # max_src_ptr = tl.max(src_ptr_u64, axis=0)
+
+        # Infer element size from pointer type
+        # src_ptr is a block of pointers with a specific element type (e.g., pointer<float32>)
+        # The pointer dtype tells us the element type, which has a known size
+        # Map Triton dtypes to their byte sizes
+        ptr_dtype = from_ptr.dtype.element_ty  # Get the element type that the pointer points to
+
+        # Get element size in bytes from the dtype
+        # tl.float16 -> 2, tl.float32 -> 4, tl.float64 -> 8, etc.
+        if ptr_dtype == tl.float16 or ptr_dtype == tl.bfloat16:
+            element_size_bytes = 2
+        elif ptr_dtype == tl.float32 or ptr_dtype == tl.int32 or ptr_dtype == tl.uint32:
+            element_size_bytes = 4
+        elif ptr_dtype == tl.float64 or ptr_dtype == tl.int64 or ptr_dtype == tl.uint64:
+            element_size_bytes = 8
+        elif ptr_dtype == tl.int8 or ptr_dtype == tl.uint8:
+            element_size_bytes = 1
+        elif ptr_dtype == tl.int16 or ptr_dtype == tl.uint16:
+            element_size_bytes = 2
+        else:
+            # Default to 4 bytes for unknown types
+            element_size_bytes = 4
+
+        # Determine packet size based on copy type
+        # Linear copy packet: 32 bytes for 1D, Sub-window copy packet: 80 bytes for 2D
+        # IS_2D_COPY is a compile-time constant for proper branch elimination
+        mask_int = mask.to(tl.int32)
+        command_in_bytes_u32 = 80 if IS_2D_COPY else 32
+        command_in_bytes = command_in_bytes_u32.to(tl.uint64)
+
+        # Acquire space in the queue
+        base, offset = anvil.acquire_fadd(
+            queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+        )
+
+        # Write padding NOPs if we wrapped around
+        anvil.place_nop_packet(queue_ptr_u32, base, offset)
+
+        # Place the appropriate packet type
+        packet_offset_bytes = base + offset
+
+        if not IS_2D_COPY:
+            # For 1D copies, mask is 1D, so just sum all elements
+            num_elements = tl.sum(mask_int, axis=0)
+            size_bytes = (num_elements * element_size_bytes).to(tl.uint32)
+
+            # Place linear copy packet for 1D/flat copies
+            anvil.place_copy_packet(
+                queue_ptr_u32,
+                packet_offset_bytes,
+                size_bytes,
+                src_ptr_val0,
+                dst_ptr_val0,
+            )
+        else:
+            # For 2D copies, mask is 2D [M, N], use axis operations
+            num_elements_per_stride = tl.max(tl.sum(mask_int, axis=-1))
+            num_strides = tl.max(tl.sum(mask_int, axis=0))
+            size_bytes = (num_elements_per_stride * element_size_bytes).to(tl.uint32)
+            src_stride = (stride_fm * element_size_bytes).to(tl.uint32)
+            dst_stride = (stride_tm * element_size_bytes).to(tl.uint32)
+
+            # Place sub-window copy packet for 2D tiled copies
+            # Calculate base addresses and offsets for sub-window copy
+            src_base = from_base_ptr.to(tl.uint64)
+            dst_base = __translate(to_base_ptr, from_rank, to_rank, heap_bases).to(tl.uint64)
+
+            # Calculate tile offset from base
+            tile_offset_bytes = src_ptr_val0 - src_base
+            src_y_val = (tile_offset_bytes // src_stride).to(tl.uint32)
+            src_x_val = (tile_offset_bytes % src_stride).to(tl.uint32)
+
+            tile_offset_bytes_dst = dst_ptr_val0 - dst_base
+            dst_y_val = (tile_offset_bytes_dst // dst_stride).to(tl.uint32)
+            dst_x_val = (tile_offset_bytes_dst % dst_stride).to(tl.uint32)
+
+            anvil.place_sub_window_copy_packet(
+                queue_ptr_u32,
+                packet_offset_bytes,
+                src_base,
+                dst_base,
+                tile_width=size_bytes,
+                tile_height=num_strides,
+                src_buffer_pitch=src_stride,
+                dst_buffer_pitch=dst_stride,
+                src_x=src_x_val,
+                src_y=src_y_val,
+                dst_x=dst_x_val,
+                dst_y=dst_y_val,
+            )
+
+        # Submit the command to the queue
+        pending_wptr = base + offset + command_in_bytes
+        anvil.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def nontemporal_store(addr, value):
+    tl.inline_asm_elementwise(
+        asm="""flat_store_dwordx2 $1 $2 sc0 nt; s_waitcnt vmcnt(0)""",
+        constraints=("=r,v,v"),  # =r used for dummy return to satisfy compiler requirement
+        args=[addr, value],
+        dtype=tl.int32,  # return not used
+        is_pure=False,
+        pack=1,
+    )
+
+
+# TODO rename or add nt
+@triton.jit
+def nontemporal_load(addr):
+    val = tl.inline_asm_elementwise(
+        asm="""flat_load_dwordx2 $0 $1 sc0 sc1; s_waitcnt vmcnt(0)""",
+        constraints=("=v,v"),
+        args=[addr],
+        dtype=tl.uint64,
+        is_pure=False,
+        pack=1,
+    )
+    return val
+
+
+@triton.jit
+def nontemporal_atomic_add(addr, value):
+    old = tl.inline_asm_elementwise(
+        asm="""flat_atomic_add_x2 $0 $1 sc0 sc1; s_waitcnt vmcnt(0)""",
+        constraints=("=v,v,v"),
+        args=[addr, value],
+        dtype=tl.uint64,
+        is_pure=False,
+        pack=1,
+    )
+    return old
+
+
+# @triton.jit
+# def nontemporal_compare_exchange(addr, cmp_low, cmp_high, val_low, val_high):
+#     # data_128bit = tl.cat([cmp_low, cmp_high, val_low, val_high])
+#     data_128bit = tl.make_vector([cmp_low, cmp_high, val_low, val_high], type=tl.uint32)
+#     old = tl.inline_asm_elementwise(
+#         asm="""flat_atomic_cmpswap_x2 $0 $1 $2 sc0 nt; s_waitcnt vmcnt(0)""",
+#         constraints=("=v,v,v"),
+#         args=[addr, data_128bit],
+#         dtype=tl.uint64,
+#         is_pure=False,
+#         pack=1,
+#     )
+#     return True # TODO if old == cmp else False
+
+
+# @triton.jit
+# def signal_ce(to_ptr, from_rank, to_rank, heap_bases, ce_handle, mask=None):
+#     """
+#     Copies data from the current rank's local memory to the specified rank's memory.
+#     This function performs a memory write operation by loading data from the current
+#     rank's `from_ptr`, translating the `to_ptr` from the current rank's address
+#     space to the `to_rank`'s address space, and storing the data to the `to_rank` memory location.
+#     If the `to_rank` is the same as the current rank, this function performs a local copy operation.
+
+#     Args:
+#         from_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's local memory from which to read data.
+#         to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `to_rank`'s address space. Must be the current rank where the pointer is local.
+#         from_rank (int): The current rank ID from which to read the data.
+#         to_rank (int): The `to_rank` ID to which the data will be written.
+#         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
+#         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
+
+#     Returns:
+#         None
+
+#     Example:
+#         >>> @triton.jit
+#         >>> def kernel(local_ptr, remote_ptr, heap_bases):
+#         >>>     from_rank = 0
+#         >>>     to_rank = 1
+#         >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases)
+#     """
+
+#     handle = ce_handle  # iris.get_copy_engine_handle(to_rank)
+#     queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
+#     read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
+#     write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
+#     doorbell_ptr = tl.load(handle + 3).to(tl.pointer_type(tl.uint64))
+#     cached_write_ptr = tl.load(handle + 4).to(tl.pointer_type(tl.uint64))
+#     committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
+
+#     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases)
+#     dst_ptr_val = translated_to_ptr.to(tl.uint64)
+
+#     command_in_bytes = 32
+#     # Acquire space
+#     base = anvil.acquire(queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes)
+
+#     # Place command packet
+#     slot_ptr_u32  = queue_ptr_u32 + (base // 4)
+#     anvil.place_atomic_packet(slot_ptr_u32, dst_ptr_val)
+
+#     # Submit command
+#     anvil.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, command_in_bytes)
 
 
 @triton.jit
 def atomic_add(
-    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+    pointer,
+    val,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    sem=None,
+    scope=None,
+    hint: tl.constexpr = None,
+    copy_engine_ctx=None,
+    USE_COPY_ENGINE: tl.constexpr = False,
 ):
     """
     Performs an atomic add at the specified rank's memory location.
@@ -2084,7 +2413,45 @@ def atomic_add(
         >>>     old_val = iris.atomic_add(ptr, increment, cur_rank, remote_rank, heap_bases)
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
-    return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+    if not USE_COPY_ENGINE:
+        return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+    else:
+        handle = copy_engine_ctx + (6 * to_rank)
+        queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
+        read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
+        write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
+        doorbell_ptr = tl.load(handle + 3).to(tl.pointer_type(tl.uint64))
+        cached_write_ptr = tl.load(handle + 4).to(tl.pointer_type(tl.uint64))
+        committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
+
+        dst_ptr_val = translated_ptr.to(tl.uint64)
+
+        command_in_bytes = 32
+        # Acquire space (returns base index and wraparound offset)
+        base, offset = anvil.acquire_fadd(
+            # base = anvil.acquire(
+            queue_ptr_u32,
+            read_ptr,
+            write_ptr,
+            doorbell_ptr,
+            cached_write_ptr,
+            committed_write_ptr,
+            command_in_bytes,
+        )
+        # tl.device_print("offset ", offset)
+
+        # Write padding NOPs if we wrapped around
+        anvil.place_nop_packet(queue_ptr_u32, base, offset)
+
+        # Calculate packet position (base + offset for wraparound)
+        packet_offset_bytes = base + offset
+
+        # Place command packet
+        anvil.place_atomic_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val)
+
+        # Submit command
+        pending_wptr = base + offset + command_in_bytes
+        anvil.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
 
 @triton.jit

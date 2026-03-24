@@ -5,10 +5,11 @@ import argparse
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import triton
 import triton.language as tl
 import random
+
+from mpi4py import MPI
 
 import iris
 
@@ -24,7 +25,6 @@ def producer_kernel(
     BLOCK_SIZE: tl.constexpr,
     heap_bases_ptr: tl.tensor,  # tl.tensor: pointer to heap bases pointers
     copy_engine_handle_ptr,
-    USE_COPY_ENGINE: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
@@ -44,22 +44,11 @@ def producer_kernel(
         heap_bases_ptr,
         copy_engine_handle_ptr,
         mask=mask,
-        USE_COPY_ENGINE=USE_COPY_ENGINE,
+        USE_COPY_ENGINE=True,
     )
 
     # Set flag to signal completion
-    # iris.atomic_cas(flag + pid, 0, 1, producer_rank, consumer_rank, heap_bases_ptr, copy_engine_handle_ptr, sem="release", scope="sys")
-    iris.atomic_add(
-        flag + pid,
-        1,
-        producer_rank,
-        consumer_rank,
-        heap_bases_ptr,
-        sem="release",
-        scope="sys",
-        copy_engine_ctx=copy_engine_handle_ptr,
-        USE_COPY_ENGINE=USE_COPY_ENGINE,
-    )
+    iris.signal_ce(flag + pid, producer_rank, consumer_rank, heap_bases_ptr, copy_engine_handle_ptr)
 
 
 @triton.jit
@@ -78,7 +67,9 @@ def consumer_kernel(
     mask = offsets < buffer_size
 
     # Spin-wait until writer sets flag[pid] = 1
-    done = 0
+    # zero_u64 = tl.zeros((1,), tl.uint64)
+    # one_u64 = tl.full((1,), 1, tl.uint64)
+    done = 0  # zero_u64
     while done == 0:
         done = iris.atomic_cas(
             flag + pid, 1, 0, consumer_rank, consumer_rank, heap_bases_ptr, sem="acquire", scope="sys"
@@ -135,11 +126,8 @@ def parse_args():
     )
     parser.add_argument("-s", "--buffer_size", type=int, default=4096, help="Buffer Size")
     parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
+
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
-    parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
-    parser.add_argument(
-        "-c", "--use_copy_engine", action="store_true", help="Use copy engine for device-to-device copies"
-    )
 
     return vars(parser.parse_args())
 
@@ -182,10 +170,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # Allocate flags on the symmetric heap
     flags = shmem.zeros((num_blocks,), device="cuda", dtype=torch.int32)
 
-    # Get copy engine context
-    # copy_engine_ctx = shmem.get_copy_engine_handle(consumer_rank) if args["use_copy_engine"] and cur_rank == producer_rank else None
-    copy_engine_ctx = shmem.get_copy_engine_ctx()
-
     if cur_rank == producer_rank:
         shmem.info(f"Rank {cur_rank} is sending data to rank {consumer_rank}.")
         kk = producer_kernel[grid](
@@ -197,8 +181,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             consumer_rank,
             args["block_size"],
             shmem.get_heap_bases(),
-            copy_engine_ctx,
-            USE_COPY_ENGINE=args["use_copy_engine"],
+            shmem.get_copy_engine_handle(consumer_rank),
         )
     else:
         shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank}.")
@@ -240,15 +223,18 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 def main():
     args = parse_args()
 
-    num_ranks = args["num_ranks"]
+    comm = MPI.COMM_WORLD  # Communicator for all processes
+    rank = comm.Get_rank()  # Get the rank of the current process
+    num_ranks = comm.Get_size()  # Total number of processes
+    # TODO local_rank
+    torch.cuda.set_device(rank)
+
+    # Synchronize all processes
+    comm.barrier()
 
     init_url = "tcp://127.0.0.1:29500"
-    mp.spawn(
-        fn=_worker,
-        args=(num_ranks, init_url, args),
-        nprocs=num_ranks,
-        join=True,
-    )
+
+    _worker(rank, num_ranks, init_url, args)
 
 
 if __name__ == "__main__":
