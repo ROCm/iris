@@ -502,8 +502,7 @@ def all_gather(
         # Gluon only supports the persistent variant
         if config.all_gather_variant != "persistent":
             raise ValueError(
-                f"Gluon all_gather only supports all_gather_variant='persistent', "
-                f"got '{config.all_gather_variant}'."
+                f"Gluon all_gather only supports all_gather_variant='persistent', got '{config.all_gather_variant}'."
             )
 
         # Apply optimal defaults for gluon flat-2D kernel when user hasn't
