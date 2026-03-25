@@ -466,6 +466,17 @@ class SymmetricHeap:
 
     def close(self):
         """Release resources held by the symmetric heap."""
+        # Synchronize GPU to ensure all in-flight kernels complete before
+        # unmapping memory.  Without this, async operations (NCCL collectives,
+        # .zero_(), .fill_()) may still reference mapped addresses, causing
+        # hipErrorUnknown when the VA ranges are freed.
+        try:
+            import torch
+            if hasattr(self, "device_id"):
+                torch.cuda.synchronize(self.device_id)
+        except Exception:
+            pass
+
         # Free peer VA ranges to avoid VA space leaks
         if hasattr(self, "_peer_va_ranges"):
             try:
