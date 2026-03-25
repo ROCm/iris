@@ -11,16 +11,14 @@ import io
 import itertools
 import json
 import os
-import pickle
 import re
 import statistics
 import sys
-import tempfile
 from typing import Any, Callable
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
+from torch.distributed.launcher.api import LaunchConfig, elastic_launch
 
 from ._core import (
     AxisDef,
@@ -295,9 +293,6 @@ def _format_csv(results: list[Result]) -> str:
 
 
 def _run_benchmarks_worker(
-    local_rank: int,
-    world_size: int,
-    init_url: str,
     benchmarks: list[BenchmarkDef],
     axis_overrides: dict[str, list[Any]],
     skip_overrides: dict[str, list[Any]],
@@ -306,19 +301,19 @@ def _run_benchmarks_worker(
     n_warmup: int,
     n_repeat: int,
     benchmark_filter: str | None,
-    results_file: str,
-):
-    """Worker that runs inside each rank via mp.spawn."""
+) -> list[Result]:
+    """Worker that runs inside each rank via ``elastic_launch``.
+
+    Returns results on rank 0; empty list on other ranks.
+    """
     import iris as _iris
 
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+
+    torch.cuda.set_device(local_rank)
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(
-        backend=backend,
-        init_method=init_url,
-        world_size=world_size,
-        rank=local_rank,
-        device_id=torch.device(f"cuda:{local_rank}"),
-    )
+    dist.init_process_group(backend=backend)
 
     # Create iris context
     if use_gluon:
@@ -435,13 +430,10 @@ def _run_benchmarks_worker(
                     )
                 )
 
-    # Rank 0 writes results to temp file for the main process to collect
-    if rank == 0:
-        with open(results_file, "wb") as f:
-            pickle.dump(all_results, f)
-
     ctx.barrier()
     dist.destroy_process_group()
+
+    return all_results if rank == 0 else []
 
 
 # ---------------------------------------------------------------------------
@@ -503,9 +495,10 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entry point.  Call from ``if __name__ == '__main__': bench.main()``.
 
     Collects all ``@bench.register``-ed benchmarks in the current module,
-    resolves ``num_ranks`` values, and spawns one process group per unique
-    ``num_ranks`` via ``mp.spawn``.  Results are merged and formatted to
-    stdout (and optionally a file).
+    resolves ``num_ranks`` values, and launches one process group per unique
+    ``num_ranks`` via ``elastic_launch`` (the programmatic ``torchrun``
+    API).  Results are merged and formatted to stdout (and optionally a
+    file).
 
     In addition to the flags shown by ``--help``, two families of dynamic
     flags are supported:
@@ -551,41 +544,30 @@ def main(argv: list[str] | None = None) -> None:
         print("No benchmark configurations to run after applying filters/skips.", file=sys.stderr)
         sys.exit(1)
 
-    # Run once per unique num_ranks, collecting results across spawns
+    # Launch once per unique num_ranks, collecting results across runs
     all_results: list[Result] = []
 
     for num_ranks in sorted(all_num_ranks):
-        fd, results_file = tempfile.mkstemp(suffix=".pkl")
-        os.close(fd)
-        # file:// rendezvous — no port needed, avoids conflicts
-        rdzv_file = tempfile.mktemp()
-        init_url = f"file://{rdzv_file}"
-        try:
-            mp.spawn(
-                fn=_run_benchmarks_worker,
-                args=(
-                    num_ranks,
-                    init_url,
-                    benchmarks,
-                    axis_overrides,
-                    skip_overrides,
-                    args.heap_size,
-                    args.use_gluon,
-                    args.n_warmup,
-                    args.n_repeat,
-                    args.benchmark_filter,
-                    results_file,
-                ),
-                nprocs=num_ranks,
-                join=True,
-            )
-            with open(results_file, "rb") as f:
-                all_results.extend(pickle.load(f))
-        finally:
-            if os.path.exists(results_file):
-                os.unlink(results_file)
-            if os.path.exists(rdzv_file):
-                os.unlink(rdzv_file)
+        config = LaunchConfig(
+            min_nodes=1,
+            max_nodes=1,
+            nproc_per_node=num_ranks,
+            rdzv_backend="c10d",
+            rdzv_endpoint="localhost:0",
+            max_restarts=0,
+        )
+        results_by_rank = elastic_launch(config, _run_benchmarks_worker)(
+            benchmarks,
+            axis_overrides,
+            skip_overrides,
+            args.heap_size,
+            args.use_gluon,
+            args.n_warmup,
+            args.n_repeat,
+            args.benchmark_filter,
+        )
+        # Rank 0 returns the results; other ranks return []
+        all_results.extend(results_by_rank[0])
 
     # Format and output (runs in the main process)
     if args.benchmark_format == "json":
