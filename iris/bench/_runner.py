@@ -13,7 +13,6 @@ import json
 import os
 import pickle
 import re
-import socket
 import statistics
 import sys
 import tempfile
@@ -556,14 +555,11 @@ def main(argv: list[str] | None = None) -> None:
     all_results: list[Result] = []
 
     for num_ranks in sorted(all_num_ranks):
-        # Find a free port for each spawn to avoid conflicts
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            port = s.getsockname()[1]
-        init_url = f"tcp://127.0.0.1:{port}"
-
         fd, results_file = tempfile.mkstemp(suffix=".pkl")
         os.close(fd)
+        # file:// rendezvous — no port needed, avoids conflicts
+        rdzv_file = tempfile.mktemp()
+        init_url = f"file://{rdzv_file}"
         try:
             mp.spawn(
                 fn=_run_benchmarks_worker,
@@ -588,6 +584,8 @@ def main(argv: list[str] | None = None) -> None:
         finally:
             if os.path.exists(results_file):
                 os.unlink(results_file)
+            if os.path.exists(rdzv_file):
+                os.unlink(rdzv_file)
 
     # Format and output (runs in the main process)
     if args.benchmark_format == "json":
