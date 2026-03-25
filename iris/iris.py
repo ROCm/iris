@@ -41,7 +41,6 @@ Example (TritonContext API):
 import os
 import triton
 import triton.language as tl
-from triton.language.core import _aggregate as aggregate
 
 from iris._distributed_helpers import (
     init_distributed,
@@ -1319,7 +1318,6 @@ class Iris:
             _reduce_scatter(
                 output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
             )
-
 
 
 @triton.jit
