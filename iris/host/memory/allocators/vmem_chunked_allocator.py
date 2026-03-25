@@ -118,16 +118,17 @@ class VMemChunkedAllocator(BaseAllocator):
         self.lock = Lock()
         self.granularity = get_allocation_granularity(device_id)
 
-        # Chunk configuration
-        self.chunk_size = max(chunk_size, self.granularity)
+        # Chunk configuration -- cap at heap_size to avoid overshooting VA
+        effective_chunk = min(chunk_size, max(heap_size, self.granularity))
+        self.chunk_size = max(effective_chunk, self.granularity)
         # Align chunk_size to granularity
         self.chunk_size = (self.chunk_size + self.granularity - 1) & ~(self.granularity - 1)
 
-        # VA reservation -- larger than heap_size for growth headroom
-        # Default: 8x heap_size (min 256 MiB) to allow chunk growth + imports
+        # VA reservation -- larger than heap_size for growth + imports headroom
+        # Default: 16x heap_size (min 32 MiB) for tests with small heaps
         if va_size == 0:
-            va_size = max(256 * 1024 * 1024, heap_size * 8)
-        self.va_size = max(va_size, heap_size * 2)
+            va_size = max(32 * 1024 * 1024, heap_size * 16)
+        self.va_size = max(va_size, heap_size * 4)
         # Align VA size to chunk_size
         self.va_size = (self.va_size + self.chunk_size - 1) & ~(self.chunk_size - 1)
         self.base_va = mem_address_reserve(self.va_size, self.granularity, 0)
