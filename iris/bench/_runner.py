@@ -50,6 +50,22 @@ _DTYPE_MAP = {
 }
 
 
+def _dtype_str(v: Any) -> str:
+    """Short string for a torch dtype, passthrough for anything else."""
+    if isinstance(v, torch.dtype):
+        return {
+            torch.float16: "float16",
+            torch.float32: "float32",
+            torch.bfloat16: "bfloat16",
+            torch.float64: "float64",
+            torch.int8: "int8",
+            torch.int16: "int16",
+            torch.int32: "int32",
+            torch.int64: "int64",
+        }.get(v, str(v))
+    return str(v)
+
+
 def _parse_axis_values(raw: str, axis_name: str) -> list[Any]:
     """Parse a CLI ``--axis_<name>=<value>`` or ``--skip_<name>=<value>`` string.
 
@@ -134,22 +150,6 @@ def _get_benchmark_num_ranks(
 # ---------------------------------------------------------------------------
 # Output formatters
 # ---------------------------------------------------------------------------
-
-
-def _dtype_str(v: Any) -> str:
-    """Short string for a torch dtype, passthrough for anything else."""
-    if isinstance(v, torch.dtype):
-        return {
-            torch.float16: "float16",
-            torch.float32: "float32",
-            torch.bfloat16: "bfloat16",
-            torch.float64: "float64",
-            torch.int8: "int8",
-            torch.int16: "int16",
-            torch.int32: "int32",
-            torch.int64: "int64",
-        }.get(v, str(v))
-    return str(v)
 
 
 def _format_console(results: list[Result]) -> str:
