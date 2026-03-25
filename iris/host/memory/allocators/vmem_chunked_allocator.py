@@ -353,7 +353,14 @@ class VMemChunkedAllocator(BaseAllocator):
             # Map at import offset in our VA range
             target_va = self.base_va + import_offset
             mem_map(target_va, aligned_export_size, 0, imported_handle)
-            mem_set_access(target_va, aligned_export_size, self.local_access_desc)
+            # Imported DMA-BUF handles from PyTorch's allocator may already
+            # have device access set.  hipMemSetAccess can fail with
+            # "invalid argument" on such handles, so treat the error as
+            # non-fatal — the mapping itself is sufficient.
+            try:
+                mem_set_access(target_va, aligned_export_size, self.local_access_desc)
+            except RuntimeError:
+                pass
 
             # Track as a pseudo-chunk for cleanup and peer sharing
             self.chunks.append((imported_handle, target_va, aligned_export_size))
