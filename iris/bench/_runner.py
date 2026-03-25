@@ -37,7 +37,6 @@ _DEFAULT_NUM_RANKS = 8
 
 
 # Axis override / skip parsing
-
 _DTYPE_MAP = {
     "fp16": torch.float16,
     "float16": torch.float16,
@@ -146,8 +145,6 @@ def _get_benchmark_num_ranks(
 
 
 # Output formatters
-
-
 def _format_console(results: list[Result]) -> str:
     """Render results as an aligned console table."""
     if not results:
@@ -284,8 +281,6 @@ def _format_csv(results: list[Result]) -> str:
 
 
 # Distributed worker
-
-
 def _run_benchmarks_worker(
     benchmarks: list[BenchmarkDef],
     axis_overrides: dict[str, list[Any]],
@@ -431,8 +426,6 @@ def _run_benchmarks_worker(
 
 
 # CLI entry point
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="iris.bench — GPU benchmarking framework",

@@ -10,8 +10,6 @@ from typing import Any, Callable
 
 
 # Dataclasses
-
-
 @dataclass
 class AxisDef:
     """A single sweep axis (name + list of values)."""
@@ -46,13 +44,10 @@ class Result:
 
 
 # Registry
-
 _registry: list[BenchmarkDef] = []
 
 
 # Skip sentinel
-
-
 class _SkipCombination(Exception):
     """Raised by :meth:`State.skip` to skip the current parameter combo."""
 
@@ -61,8 +56,6 @@ class _SkipCombination(Exception):
 
 
 # State — passed into every benchmark function
-
-
 class State:
     """Per-combination state object passed as the first argument to every
     benchmark function.
@@ -183,8 +176,6 @@ class State:
 
 
 # Range helpers
-
-
 def power_of_two(start_exp: int, end_exp: int) -> list[int]:
     """Return ``[2**start_exp, ..., 2**end_exp]`` inclusive."""
     return [1 << e for e in range(start_exp, end_exp + 1)]
@@ -196,8 +187,6 @@ def linear_range(start: int, end: int, step: int) -> list[int]:
 
 
 # Decorators
-
-
 def axis(name: str, values: list[Any]):
     """Define a sweep axis for a benchmark.
 
