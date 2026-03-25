@@ -137,6 +137,9 @@ class VMemChunkedAllocator(BaseAllocator):
 
         # Chunk tracking: list of (handle, va, size)
         self.chunks = []
+        # Import chunks are tracked separately -- they cannot be re-exported
+        # for peer sharing (they were imported from DMA-BUF, not VMem-created).
+        self._import_chunks = []
         self.mapped_extent = 0  # total bytes of physical mapped into VA
 
         # Pre-allocate initial chunks to cover heap_size
@@ -362,8 +365,8 @@ class VMemChunkedAllocator(BaseAllocator):
             except RuntimeError:
                 pass
 
-            # Track as a pseudo-chunk for cleanup and peer sharing
-            self.chunks.append((imported_handle, target_va, aligned_export_size))
+            # Track as an import chunk (cleanup only, NOT peer-shared)
+            self._import_chunks.append((imported_handle, target_va, aligned_export_size))
             # Advance mapped_extent past the import
             self.mapped_extent = import_offset + aligned_export_size
             # Also advance bump past the import so future allocs don't collide
@@ -407,8 +410,8 @@ class VMemChunkedAllocator(BaseAllocator):
             self.free_lists.clear()
             self.alloc_sizes.clear()
 
-            # Unmap and release all chunks
-            for handle, va, size in self.chunks:
+            # Unmap and release all chunks (regular + imported)
+            for handle, va, size in self.chunks + self._import_chunks:
                 try:
                     mem_unmap(va, size)
                 except Exception:
@@ -418,6 +421,7 @@ class VMemChunkedAllocator(BaseAllocator):
                 except Exception:
                     pass
             self.chunks.clear()
+            self._import_chunks.clear()
 
             # Free VA range
             if self.base_va:
