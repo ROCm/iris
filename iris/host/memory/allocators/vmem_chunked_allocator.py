@@ -414,6 +414,14 @@ class VMemChunkedAllocator(BaseAllocator):
             self.free_lists.clear()
             self.alloc_sizes.clear()
 
+            # Synchronize GPU before unmapping -- async kernels (.zero_(), .fill_())
+            # may still be accessing mapped memory. Unmapping while kernels are
+            # in-flight causes hipErrorUnknown on subsequent GPU operations.
+            try:
+                torch.cuda.synchronize(self.device)
+            except Exception:
+                pass
+
             # Unmap and release all chunks (regular + imported)
             for handle, va, size in self.chunks + self._import_chunks:
                 try:
