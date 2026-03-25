@@ -382,15 +382,17 @@ def _run_benchmarks_worker(
                     skip_reason = exc.reason
 
                 if skipped:
-                    all_results.append(Result(
-                        benchmark_name=bdef.name,
-                        params=params,
-                        gpu_time_ms=0.0,
-                        all_times_ms=[],
-                        skipped=True,
-                        skip_reason=skip_reason,
-                        world_size=world_size,
-                    ))
+                    all_results.append(
+                        Result(
+                            benchmark_name=bdef.name,
+                            params=params,
+                            gpu_time_ms=0.0,
+                            all_times_ms=[],
+                            skipped=True,
+                            skip_reason=skip_reason,
+                            world_size=world_size,
+                        )
+                    )
                     continue
 
                 if state._exec_fn is None:
@@ -420,16 +422,18 @@ def _run_benchmarks_worker(
                 if state._flops is not None and mean_ms > 0:
                     tflops = (state._flops / 1e12) / (mean_ms * 1e-3)
 
-                all_results.append(Result(
-                    benchmark_name=bdef.name,
-                    params=params,
-                    gpu_time_ms=mean_ms,
-                    all_times_ms=times,
-                    bandwidth_gbps=bw,
-                    tflops=tflops,
-                    counters=dict(state._counters),
-                    world_size=world_size,
-                ))
+                all_results.append(
+                    Result(
+                        benchmark_name=bdef.name,
+                        params=params,
+                        gpu_time_ms=mean_ms,
+                        all_times_ms=times,
+                        bandwidth_gbps=bw,
+                        tflops=tflops,
+                        counters=dict(state._counters),
+                        world_size=world_size,
+                    )
+                )
 
     # Rank 0 writes results to temp file for the main process to collect
     if rank == 0:
