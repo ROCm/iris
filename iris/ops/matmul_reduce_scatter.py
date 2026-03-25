@@ -164,6 +164,12 @@ def matmul_reduce_scatter_preamble(
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
     total_tiles = num_pid_m * num_pid_n
 
+    if workspace.locks is not None and workspace.locks.numel() < total_tiles:
+        raise ValueError(
+            f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
+            f"Pre-allocate workspace with the smallest block sizes you intend to use."
+        )
+
     if workspace.locks is None or workspace.locks.numel() != total_tiles:
         workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
     else:
@@ -224,7 +230,15 @@ def matmul_reduce_scatter(
 
     num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    grid = (num_pid_m * num_pid_n,)
+    total_tiles = num_pid_m * num_pid_n
+
+    if workspace.locks is not None and workspace.locks.numel() < total_tiles:
+        raise ValueError(
+            f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
+            f"Pre-allocate workspace with the smallest block sizes you intend to use."
+        )
+
+    grid = (total_tiles,)
 
     even_k = K % config.block_size_k == 0
 

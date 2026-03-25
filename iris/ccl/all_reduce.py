@@ -840,6 +840,15 @@ def all_reduce(
                 "Spinlock variant requires workspace preparation. Call all_reduce_preamble before all_reduce."
             )
 
+        num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
+        num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
+        total_tiles = num_pid_m * num_pid_n
+        if workspace.locks.numel() < total_tiles:
+            raise ValueError(
+                f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
+                f"Pre-allocate workspace with the smallest block sizes you intend to use."
+            )
+
         persistent_all_reduce_spinlock[(config.comm_sms,)](
             input_tensor,
             output_tensor,
@@ -868,6 +877,16 @@ def all_reduce(
         if workspace is None or workspace.ring_buffer is None or workspace.flags is None:
             raise RuntimeError(
                 "Ring variant requires workspace preparation. Call all_reduce_preamble before all_reduce."
+            )
+
+        num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
+        num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
+        total_tiles = num_pid_m * num_pid_n
+        total_flags = total_tiles * workspace.flags_per_tile
+        if workspace.flags.numel() < total_flags:
+            raise ValueError(
+                f"Flags array too small: have {workspace.flags.numel()} but need {total_flags}. "
+                f"Pre-allocate workspace with the smallest block sizes you intend to use."
             )
 
         # Calculate next rank in the ring for group support
