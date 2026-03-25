@@ -36,9 +36,7 @@ _NUM_RANKS_AXIS = "num_ranks"
 _DEFAULT_NUM_RANKS = 8
 
 
-# ---------------------------------------------------------------------------
 # Axis override / skip parsing
-# ---------------------------------------------------------------------------
 
 _DTYPE_MAP = {
     "fp16": torch.float16,
@@ -147,9 +145,7 @@ def _get_benchmark_num_ranks(
     return [_DEFAULT_NUM_RANKS]
 
 
-# ---------------------------------------------------------------------------
 # Output formatters
-# ---------------------------------------------------------------------------
 
 
 def _format_console(results: list[Result]) -> str:
@@ -287,9 +283,7 @@ def _format_csv(results: list[Result]) -> str:
     return buf.getvalue()
 
 
-# ---------------------------------------------------------------------------
 # Distributed worker
-# ---------------------------------------------------------------------------
 
 
 def _run_benchmarks_worker(
@@ -436,9 +430,7 @@ def _run_benchmarks_worker(
     return all_results if rank == 0 else []
 
 
-# ---------------------------------------------------------------------------
 # CLI entry point
-# ---------------------------------------------------------------------------
 
 
 def _build_parser() -> argparse.ArgumentParser:

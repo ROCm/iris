@@ -9,9 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
-# ---------------------------------------------------------------------------
 # Dataclasses
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -47,16 +45,12 @@ class Result:
     world_size: int = 1
 
 
-# ---------------------------------------------------------------------------
 # Registry
-# ---------------------------------------------------------------------------
 
 _registry: list[BenchmarkDef] = []
 
 
-# ---------------------------------------------------------------------------
 # Skip sentinel
-# ---------------------------------------------------------------------------
 
 
 class _SkipCombination(Exception):
@@ -66,9 +60,7 @@ class _SkipCombination(Exception):
         self.reason = reason
 
 
-# ---------------------------------------------------------------------------
 # State — passed into every benchmark function
-# ---------------------------------------------------------------------------
 
 
 class State:
@@ -190,9 +182,7 @@ class State:
         raise _SkipCombination(reason)
 
 
-# ---------------------------------------------------------------------------
 # Range helpers
-# ---------------------------------------------------------------------------
 
 
 def power_of_two(start_exp: int, end_exp: int) -> list[int]:
@@ -205,9 +195,7 @@ def linear_range(start: int, end: int, step: int) -> list[int]:
     return list(range(start, end + 1, step))
 
 
-# ---------------------------------------------------------------------------
 # Decorators
-# ---------------------------------------------------------------------------
 
 
 def axis(name: str, values: list[Any]):
