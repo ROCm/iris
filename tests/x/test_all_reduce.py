@@ -223,6 +223,8 @@ def x_all_reduce_spinlock_kernel(
     "M, N, BLOCK_SIZE_M, BLOCK_SIZE_N",
     [
         (128, 64, 64, 32),  # Small
+        (128, 128, 64, 32),  # BLOCK_N < N/world_size (partial-width, multi-block per rank)
+        (256, 128, 64, 16),  # Minimum BLOCK_N=16 (16-bit vectorization path)
         (1024, 256, 128, 128),  # Medium
         (2048, 2048, 256, 256),  # Large
         # (100, 100, 64, 64),  # Non-aligned dimensions - DISABLED: other=0.0 not supported

@@ -63,7 +63,19 @@ class SymmetricHeap:
 
         self.fd_conns = setup_fd_infrastructure(cur_rank, num_ranks)
         device = self.allocator.get_device()
-        self.heap_bases = torch.zeros(num_ranks, dtype=torch.uint64, device=device)
+
+        # Use int64 instead of uint64 for gloo backend compatibility
+        # Create from numpy array to avoid kernel issue (torch.zeros on small tensors triggers problematic kernel)
+        heap_bases_array = np.zeros(self.num_ranks, dtype=np.int64)
+        # Create on CPU first, then move to device to avoid FFM ioctl issue
+        from iris.util import is_simulation_env
+
+        if is_simulation_env():
+            self.heap_bases = torch.tensor(heap_bases_array, device="cpu", dtype=torch.int64)
+            self.heap_bases = self.heap_bases.to(device)
+        else:
+            self.heap_bases = torch.tensor(heap_bases_array, device=device, dtype=torch.int64)
+
         self.refresh_peer_access()
 
     def allocate(self, num_elements: int, dtype: torch.dtype, alignment: int = 1024) -> torch.Tensor:
@@ -159,8 +171,9 @@ class SymmetricHeap:
             dist.barrier()
 
         my_base = self.allocator.get_base_address()
-        local_base_arr = np.array([my_base], dtype=np.uint64)
-        all_bases_arr = distributed_allgather(local_base_arr).reshape(self.num_ranks).astype(np.uint64)
+        # Use int64 instead of uint64 to avoid gloo issues with all_gather_object
+        local_base_arr = np.array([my_base], dtype=np.int64)
+        all_bases_arr = distributed_allgather(local_base_arr).reshape(self.num_ranks).astype(np.int64)
         self.heap_bases[self.cur_rank] = int(all_bases_arr[self.cur_rank])
 
         if self.num_ranks == 1 or self.fd_conns is None:
@@ -168,10 +181,18 @@ class SymmetricHeap:
 
         if not hasattr(self.allocator, "get_allocation_segments"):
             if hasattr(self.allocator, "establish_peer_access"):
-                all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
-                self.allocator.establish_peer_access(all_bases, self.fd_conns)
-                for r in range(self.num_ranks):
-                    self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
+                # In simulation, all ranks share the same device, so skip peer access setup
+                from iris.util import is_simulation_env
+
+                if is_simulation_env():
+                    # Just set heap_bases directly from all_bases_arr
+                    for r in range(self.num_ranks):
+                        self.heap_bases[r] = int(all_bases_arr[r])
+                else:
+                    all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
+                    self.allocator.establish_peer_access(all_bases, self.fd_conns)
+                    for r in range(self.num_ranks):
+                        self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
             return
 
         my_segments = self.allocator.get_allocation_segments()
