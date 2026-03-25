@@ -23,7 +23,6 @@ import threading
 
 import pytest
 import torch
-import torch.distributed as dist
 
 import iris
 
@@ -125,7 +124,7 @@ def test_chunked_free_list_size_classes():
     ctx = iris.iris(8 << 20, allocator_type=ALLOC_TYPE)
 
     # Allocate different sizes
-    small = ctx.zeros(10, dtype=torch.float32)   # 40 bytes -> rounds up
+    small = ctx.zeros(10, dtype=torch.float32)  # 40 bytes -> rounds up
     medium = ctx.zeros(1024, dtype=torch.float32)  # 4096 bytes
     large = ctx.zeros(65536, dtype=torch.float32)  # 262144 bytes
 

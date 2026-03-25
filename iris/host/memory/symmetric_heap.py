@@ -77,10 +77,7 @@ class SymmetricHeap:
         elif allocator_type == "vmem_chunked":
             self.allocator = VMemChunkedAllocator(heap_size, device_id, cur_rank, num_ranks)
         else:
-            raise ValueError(
-                f"Unknown allocator type: {allocator_type}. "
-                "Supported: 'torch', 'vmem', 'vmem_chunked'"
-            )
+            raise ValueError(f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem', 'vmem_chunked'")
 
         self.fd_conns = setup_fd_infrastructure(cur_rank, num_ranks)
         device = self.allocator.get_device()
@@ -212,17 +209,6 @@ class SymmetricHeap:
         Collective: all ranks must call together. Do not cache heap_bases.
         """
         import torch.distributed as dist
-        from iris.host.distributed.fd_passing import send_fd, recv_fd
-        from iris.host.platform.hip import (
-            export_dmabuf_handle,
-            mem_import_from_shareable_handle,
-            mem_map,
-            mem_set_access,
-            mem_address_reserve,
-            hipMemAccessDesc,
-            hipMemLocationTypeDevice,
-            hipMemAccessFlagsProtReadWrite,
-        )
 
         _log_rank(
             logging.DEBUG,
@@ -297,7 +283,7 @@ class SymmetricHeap:
         if not hasattr(self, "_shared_chunk_count"):
             self._shared_chunk_count = 0
 
-        new_chunks = chunks[self._shared_chunk_count:]
+        new_chunks = chunks[self._shared_chunk_count :]
         if not new_chunks and self._shared_chunk_count > 0:
             # Nothing new to share, but ensure heap_bases are set
             return
@@ -322,9 +308,7 @@ class SymmetricHeap:
 
             if peer not in self._peer_va_ranges:
                 # Reserve VA for this peer's chunks -- same size as our VA
-                peer_va_base = mem_address_reserve(
-                    self.allocator.va_size, self.allocator.granularity, 0
-                )
+                peer_va_base = mem_address_reserve(self.allocator.va_size, self.allocator.granularity, 0)
                 self._peer_va_ranges[peer] = peer_va_base
             peer_va_base = self._peer_va_ranges[peer]
 

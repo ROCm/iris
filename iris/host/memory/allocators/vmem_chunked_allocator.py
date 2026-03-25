@@ -40,7 +40,6 @@ from ..hip import (
     mem_address_free,
     mem_release,
     mem_set_access,
-    mem_export_to_shareable_handle,
     mem_import_from_shareable_handle,
     hipMemAccessDesc,
     hipMemLocationTypeDevice,
@@ -303,10 +302,7 @@ class VMemChunkedAllocator(BaseAllocator):
             if not external_tensor.is_cuda:
                 raise RuntimeError("Can only import CUDA tensors")
             if not external_tensor.is_contiguous():
-                raise RuntimeError(
-                    "Only contiguous tensors can be imported; "
-                    "call .contiguous() before as_symmetric()"
-                )
+                raise RuntimeError("Only contiguous tensors can be imported; call .contiguous() before as_symmetric()")
 
             external_ptr = external_tensor.data_ptr()
             alloc_base, alloc_size = get_address_range(external_ptr)
@@ -378,10 +374,7 @@ class VMemChunkedAllocator(BaseAllocator):
     def get_stats(self):
         """Return allocator statistics."""
         total_free = sum(len(v) for v in self.free_lists.values())
-        free_bytes = sum(
-            size_class * len(offsets)
-            for size_class, offsets in self.free_lists.items()
-        )
+        free_bytes = sum(size_class * len(offsets) for size_class, offsets in self.free_lists.items())
         return {
             "num_chunks": len(self.chunks),
             "mapped_bytes": self.mapped_extent,
