@@ -472,6 +472,7 @@ class SymmetricHeap:
         # hipErrorUnknown when the VA ranges are freed.
         try:
             import torch
+
             if hasattr(self, "device_id"):
                 torch.cuda.synchronize(self.device_id)
         except Exception:
