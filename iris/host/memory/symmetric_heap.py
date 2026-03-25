@@ -15,7 +15,7 @@ import torch
 import os
 
 from iris.host.logging.logging import _log_rank, logger
-from iris.host.memory.allocators import TorchAllocator, VMemAllocator
+from iris.host.memory.allocators import TorchAllocator, VMemAllocator, VMemChunkedAllocator
 from iris.host.distributed.fd_passing import setup_fd_infrastructure
 from iris.host.distributed.helpers import distributed_allgather
 from iris.host.platform.utils import is_simulation_env
@@ -74,8 +74,13 @@ class SymmetricHeap:
             self.allocator = TorchAllocator(heap_size, device_id, cur_rank, num_ranks)
         elif allocator_type == "vmem":
             self.allocator = VMemAllocator(heap_size, device_id, cur_rank, num_ranks)
+        elif allocator_type == "vmem_chunked":
+            self.allocator = VMemChunkedAllocator(heap_size, device_id, cur_rank, num_ranks)
         else:
-            raise ValueError(f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem'")
+            raise ValueError(
+                f"Unknown allocator type: {allocator_type}. "
+                "Supported: 'torch', 'vmem', 'vmem_chunked'"
+            )
 
         self.fd_conns = setup_fd_infrastructure(cur_rank, num_ranks)
         device = self.allocator.get_device()
@@ -141,9 +146,22 @@ class SymmetricHeap:
         element_size = torch.tensor([], dtype=dtype).element_size()
         min_elements = max(1, (min_bytes + element_size - 1) // element_size)
         actual_elements = max(num_elements, min_elements)
+
+        # For chunked allocator, track chunk count to detect growth
+        is_chunked = isinstance(self.allocator, VMemChunkedAllocator)
+        chunks_before = self.allocator.get_num_chunks() if is_chunked else 0
+
         tensor = self.allocator.allocate(actual_elements, dtype, alignment)
         tensor = tensor[:num_elements]
-        self.refresh_peer_access()
+
+        if is_chunked:
+            # Only refresh peer access if new chunks were grown
+            chunks_after = self.allocator.get_num_chunks()
+            if chunks_after > chunks_before:
+                self.refresh_peer_access()
+        else:
+            self.refresh_peer_access()
+
         return tensor
 
     def get_device(self) -> torch.device:
@@ -227,21 +245,127 @@ class SymmetricHeap:
         if self.num_ranks == 1 or self.fd_conns is None:
             return
 
-        if not hasattr(self.allocator, "get_allocation_segments"):
-            if hasattr(self.allocator, "establish_peer_access"):
-                # In simulation, all ranks share the same device, so skip peer access setup
-                from iris.host.platform.utils import is_simulation_env
-
-                if is_simulation_env():
-                    # Just set heap_bases directly from all_bases_arr
-                    for r in range(self.num_ranks):
-                        self.heap_bases[r] = int(all_bases_arr[r])
-                else:
-                    all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
-                    self.allocator.establish_peer_access(all_bases, self.fd_conns)
-                    for r in range(self.num_ranks):
-                        self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
+        # Dispatch to allocator-specific peer access path
+        if isinstance(self.allocator, VMemChunkedAllocator):
+            self._refresh_peer_access_chunked(dist)
+        elif hasattr(self.allocator, "get_allocation_segments"):
+            self._refresh_peer_access_segmented(dist)
+        elif hasattr(self.allocator, "establish_peer_access"):
+            self._refresh_peer_access_torch(dist, all_bases_arr)
+        else:
             return
+
+        if dist.is_initialized():
+            dist.barrier()
+
+    def _refresh_peer_access_torch(self, dist, all_bases_arr):
+        """Peer access for TorchAllocator (IPC-based)."""
+        from iris.util import is_simulation_env
+
+        if is_simulation_env():
+            for r in range(self.num_ranks):
+                self.heap_bases[r] = int(all_bases_arr[r])
+        else:
+            all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
+            self.allocator.establish_peer_access(all_bases, self.fd_conns)
+            for r in range(self.num_ranks):
+                self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
+
+    def _refresh_peer_access_chunked(self, dist):
+        """
+        Peer access for VMemChunkedAllocator (chunk-based).
+
+        Only exchanges NEW chunks that haven't been shared yet.
+        Each chunk is exported via hipMemExportToShareableHandle (VMem handle export),
+        not hipMemGetHandleForAddressRange (address range export).
+        """
+        from iris.fd_passing import send_fd, recv_fd
+        from iris.hip import (
+            mem_export_to_shareable_handle,
+            mem_import_from_shareable_handle,
+            mem_map,
+            mem_set_access,
+            mem_address_reserve,
+            hipMemAccessDesc,
+            hipMemLocationTypeDevice,
+            hipMemAccessFlagsProtReadWrite,
+        )
+
+        chunks = self.allocator.get_allocation_chunks()
+
+        # Track which chunks have been shared already
+        if not hasattr(self, "_shared_chunk_count"):
+            self._shared_chunk_count = 0
+
+        new_chunks = chunks[self._shared_chunk_count:]
+        if not new_chunks and self._shared_chunk_count > 0:
+            # Nothing new to share, but ensure heap_bases are set
+            return
+
+        # Export new chunk handles as DMA-BUF fds
+        new_fds = []
+        for chunk_idx, offset, size, handle in new_chunks:
+            fd = mem_export_to_shareable_handle(handle)
+            new_fds.append((fd, offset, size))
+
+        access_desc = hipMemAccessDesc()
+        access_desc.location.type = hipMemLocationTypeDevice
+        access_desc.location.id = self.device_id
+        access_desc.flags = hipMemAccessFlagsProtReadWrite
+
+        for peer, sock in self.fd_conns.items():
+            if peer == self.cur_rank:
+                continue
+
+            if not hasattr(self, "_peer_va_ranges"):
+                self._peer_va_ranges = {}
+
+            if peer not in self._peer_va_ranges:
+                # Reserve VA for this peer's chunks -- same size as our VA
+                peer_va_base = mem_address_reserve(
+                    self.allocator.va_size, self.allocator.granularity, 0
+                )
+                self._peer_va_ranges[peer] = peer_va_base
+            peer_va_base = self._peer_va_ranges[peer]
+
+            # Exchange new chunk fds
+            for my_fd, my_offset, my_size in new_fds:
+                if self.cur_rank > peer:
+                    send_fd(sock, my_fd)
+                    peer_fd, _ = recv_fd(sock)
+                else:
+                    peer_fd, _ = recv_fd(sock)
+                    send_fd(sock, my_fd)
+
+                # Import and map peer's chunk
+                imported_handle = mem_import_from_shareable_handle(peer_fd)
+                os.close(peer_fd)
+
+                peer_va = peer_va_base + my_offset
+                mem_map(peer_va, my_size, 0, imported_handle)
+                mem_set_access(peer_va, my_size, access_desc)
+
+            self.heap_bases[peer] = peer_va_base
+
+        # Close our exported fds
+        for fd, _, _ in new_fds:
+            os.close(fd)
+
+        self._shared_chunk_count = len(chunks)
+
+    def _refresh_peer_access_segmented(self, dist):
+        """Peer access for VMemAllocator (segment-based, legacy)."""
+        from iris.fd_passing import send_fd, recv_fd
+        from iris.hip import (
+            export_dmabuf_handle,
+            mem_import_from_shareable_handle,
+            mem_map,
+            mem_set_access,
+            mem_address_reserve,
+            hipMemAccessDesc,
+            hipMemLocationTypeDevice,
+            hipMemAccessFlagsProtReadWrite,
+        )
 
         my_segments = self.allocator.get_allocation_segments()
         my_exported_fds = []
@@ -277,7 +401,6 @@ class SymmetricHeap:
 
             peer_fds = []
             for seg_idx, (my_fd, my_size, my_offset) in enumerate(my_exported_fds):
-                # Exchange FDs (higher rank sends first to avoid deadlock)
                 if self.cur_rank > peer:
                     send_fd(sock, my_fd)
                     peer_fd, _ = recv_fd(sock)
@@ -299,14 +422,10 @@ class SymmetricHeap:
             for peer_fd, segment_size, offset in peer_fds:
                 segment_key = (offset, segment_size)
                 if segment_key in self._peer_imported_segments[peer]:
-                    import os
-
                     os.close(peer_fd)
                     continue
 
                 imported_handle = mem_import_from_shareable_handle(peer_fd)
-                import os
-
                 os.close(peer_fd)
 
                 peer_va = peer_va_base + offset
@@ -322,8 +441,6 @@ class SymmetricHeap:
             self.heap_bases[peer] = peer_va_base
 
         for fd, _, _ in my_exported_fds:
-            import os
-
             os.close(fd)
 
         if logger.isEnabledFor(logging.DEBUG):
@@ -337,6 +454,7 @@ class SymmetricHeap:
 
         if dist.is_initialized():
             dist.barrier()
+
 
     def as_symmetric(self, external_tensor: torch.Tensor) -> torch.Tensor:
         """
