@@ -113,6 +113,10 @@ class Iris:
         self.device = f"cuda:{gpu_id}"
         self.heap_bases = self.heap.get_heap_bases()
 
+        # Pre-fetch heap_bases to CPU for host-side address translation
+        # This avoids needing to copy from GPU during SDMA operations
+        self.heap_bases_cpu = self.heap_bases.cpu().numpy()
+
         if is_simulation_env():
             import json
 
@@ -955,9 +959,9 @@ class Iris:
             >>> remote_addr = ctx.translate(buffer.data_ptr(), 0, 1)
             >>> ctx.copy_engines.host_put(0, 1, 0, src_ptr, remote_addr, size)
         """
-        heap_bases = self.heap_bases.cpu()
-        from_base = int(heap_bases[from_rank])
-        to_base = int(heap_bases[to_rank])
+        # Use pre-cached CPU copy to avoid GPU->CPU transfer on every call
+        from_base = int(self.heap_bases_cpu[from_rank])
+        to_base = int(self.heap_bases_cpu[to_rank])
         offset = ptr - from_base
         return to_base + offset
 
