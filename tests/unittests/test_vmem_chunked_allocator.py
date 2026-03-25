@@ -120,13 +120,30 @@ def test_chunked_gc_multiple_reuse():
 
 
 def test_chunked_free_list_size_classes():
-    """Test that different sizes use different free list buckets."""
-    ctx = iris.iris(8 << 20, allocator_type=ALLOC_TYPE)
+    """Test that different sizes use different free list buckets.
 
-    # Allocate different sizes
-    small = ctx.zeros(10, dtype=torch.float32)  # 40 bytes -> rounds up
-    medium = ctx.zeros(1024, dtype=torch.float32)  # 4096 bytes
-    large = ctx.zeros(65536, dtype=torch.float32)  # 262144 bytes
+    SymmetricHeap.allocate() bumps element counts to at least
+    granularity / element_size, so we must pick sizes that remain in
+    distinct power-of-two buckets after that rounding.
+    """
+    ctx = iris.iris(256 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    elem_size = 4  # float32
+
+    # Compute the minimum element count (the floor imposed by SymmetricHeap)
+    min_elems = max(1, (alloc.granularity + elem_size - 1) // elem_size)
+
+    # Pick three sizes that land in clearly different power-of-two buckets:
+    #   small  = 1x granularity  (min_elems elements)
+    #   medium = 4x granularity  (min_elems * 4 elements)
+    #   large  = 16x granularity (min_elems * 16 elements)
+    size_small = min_elems
+    size_medium = min_elems * 4
+    size_large = min_elems * 16
+
+    small = ctx.zeros(size_small, dtype=torch.float32)
+    medium = ctx.zeros(size_medium, dtype=torch.float32)
+    large = ctx.zeros(size_large, dtype=torch.float32)
 
     small_ptr = small.data_ptr()
     medium_ptr = medium.data_ptr()
@@ -138,9 +155,9 @@ def test_chunked_free_list_size_classes():
     torch.cuda.synchronize()
 
     # Re-allocate -- each should reuse from its size class
-    small2 = ctx.zeros(10, dtype=torch.float32)
-    medium2 = ctx.zeros(1024, dtype=torch.float32)
-    large2 = ctx.zeros(65536, dtype=torch.float32)
+    small2 = ctx.zeros(size_small, dtype=torch.float32)
+    medium2 = ctx.zeros(size_medium, dtype=torch.float32)
+    large2 = ctx.zeros(size_large, dtype=torch.float32)
 
     assert small2.data_ptr() == small_ptr
     assert medium2.data_ptr() == medium_ptr
