@@ -132,7 +132,7 @@ def _fused_matmul_all_reduce_kernel(
         # Use atomic_xchg with release semantics to ensure memory ordering
         tile_id = pid_m * num_tiles_n + pid_n
         lock_ptr = locks + tile_id
-        tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
+        tl.atomic_xchg(lock_ptr, 1, sem="release", scope="sys")  # Release ensures prior stores visible to remote GPUs
 
         # Create source view only when needed (aux_buffer is not None)
         src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
