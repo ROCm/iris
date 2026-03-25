@@ -946,7 +946,10 @@ class Iris:
                 self.tracing.op_index_counter.data_ptr(),
             ] + trace_buffer_ptrs
         else:
-            context_data += [0]  # trace_enabled = 0 (false)
+            # Zero-pad to same length as tracing-enabled layout so kernels compiled
+            # with tracing=True can safely decode without reading out of bounds.
+            # Layout: [trace_enabled=0, max_events=0, counter_ptr=0, op_index_counter_ptr=0, 13 buffer_ptrs=0]
+            context_data += [0] * (1 + 1 + 2 + 13)  # 17 zeros
 
         self._device_context = torch.tensor(context_data, dtype=torch.int64, device=self.device)
 
