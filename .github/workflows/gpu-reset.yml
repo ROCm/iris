@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# Manual GPU bitmap reset for self-hosted runners.
+# Trigger from: Actions → "Reset GPU Allocator" → Run workflow
+#
+# Use when GPU allocations leak (e.g., a runner crashed without releasing).
+# This resets the shared bitmap so all 8 GPUs appear free.
+
+name: Reset GPU Allocator
+
+on:
+  workflow_dispatch:
+
+jobs:
+  reset:
+    runs-on: [self-hosted, amdgpu]
+    steps:
+      - name: Reset GPU bitmap
+        run: |
+          STATE_FILE="${GPU_STATE_FILE:-/tmp/iris_gpu_state}"
+          echo "=== Before reset ==="
+          echo "Bitmap: $(cat "$STATE_FILE" 2>/dev/null || echo 'file not found')"
+          echo "0" > "$STATE_FILE"
+          echo "=== After reset ==="
+          echo "Bitmap: $(cat "$STATE_FILE")"
+          echo "GPU allocator reset complete. All GPUs are now free."
