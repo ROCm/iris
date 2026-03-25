@@ -148,3 +148,50 @@ def test_matmul_all_reduce_via_shmem_ops():
     import gc
 
     gc.collect()
+
+
+def test_matmul_all_reduce_lock_too_small():
+    """Test that ValueError is raised when the lock array is too small for current tile count.
+
+    Scenario: workspace is prepared with larger block sizes (fewer tiles), then reused
+    with smaller block sizes (more tiles). The workspace.matches() call skips the preamble,
+    leaving the undersized lock array in place.
+    """
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33
+    shmem = iris.iris(heap_size)
+    world_size = shmem.get_num_ranks()
+
+    from iris.ops.config import FusedConfig
+
+    M, N, K = 512, 512, 64
+    dtype = torch.float16
+    variant = "one_shot"
+
+    iris_A = shmem.zeros((M, K), dtype=dtype)
+    iris_B = shmem.zeros((K, N), dtype=dtype)
+    iris_C = shmem.zeros((M, N), dtype=dtype)
+
+    shmem.barrier()
+
+    # Step 1: run preamble with larger block sizes → allocates a smaller lock array
+    config_large = FusedConfig(block_size_m=128, block_size_n=128, block_size_k=32, all_reduce_variant=variant)
+    workspace = ops.matmul_all_reduce_preamble(shmem, iris_C, iris_A, iris_B, config=config_large)
+
+    # Step 2: manually mark workspace as prepared so matmul_all_reduce skips the preamble
+    workspace.prepared = True
+
+    # Step 3: call matmul_all_reduce with smaller block sizes that need more tiles —
+    # workspace.matches() returns True (same shape/dtype/variant), preamble is skipped,
+    # and the undersized lock array is detected.
+    config_small = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant=variant)
+    with pytest.raises(ValueError, match="Lock array too small"):
+        ops.matmul_all_reduce(shmem, iris_C, iris_A, iris_B, config=config_small, workspace=workspace)
+
+    shmem.barrier()
+    del shmem
+    import gc
+
+    gc.collect()

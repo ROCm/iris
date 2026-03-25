@@ -300,7 +300,17 @@ def matmul_all_reduce(
     # Launch kernel
     num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    grid = (num_pid_m * num_pid_n,)
+    total_tiles = num_pid_m * num_pid_n
+    grid = (total_tiles,)
+
+    # Validate that the pre-allocated lock array is large enough for the current tile count.
+    # This can occur when the workspace was prepared with larger block sizes (fewer tiles)
+    # and is then reused with smaller block sizes (more tiles).
+    if workspace.locks is not None and workspace.locks.numel() < total_tiles:
+        raise ValueError(
+            f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
+            f"Pre-allocate workspace with the smallest block sizes you intend to use."
+        )
 
     even_k = K % config.block_size_k == 0
 
