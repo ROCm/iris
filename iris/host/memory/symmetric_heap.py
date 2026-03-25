@@ -469,6 +469,7 @@ class SymmetricHeap:
         # Free peer VA ranges to avoid VA space leaks
         if hasattr(self, "_peer_va_ranges"):
             from iris.hip import mem_address_free
+
             for peer, va_base in self._peer_va_ranges.items():
                 try:
                     va_size = getattr(self.allocator, "va_size", self.heap_size)
@@ -483,7 +484,6 @@ class SymmetricHeap:
 
         # Close FD sockets
         if self.fd_conns:
-            import socket
             for peer, sock in self.fd_conns.items():
                 try:
                     sock.close()
