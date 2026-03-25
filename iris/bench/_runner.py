@@ -13,6 +13,7 @@ import json
 import os
 import pickle
 import re
+import socket
 import statistics
 import sys
 import tempfile
@@ -553,9 +554,14 @@ def main(argv: list[str] | None = None) -> None:
 
     # Run once per unique num_ranks, collecting results across spawns
     all_results: list[Result] = []
-    init_url = "tcp://127.0.0.1:29500"
 
     for num_ranks in sorted(all_num_ranks):
+        # Find a free port for each spawn to avoid conflicts
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+        init_url = f"tcp://127.0.0.1:{port}"
+
         fd, results_file = tempfile.mkstemp(suffix=".pkl")
         os.close(fd)
         try:
