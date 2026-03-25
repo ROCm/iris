@@ -5,6 +5,8 @@
 Test suite for all-gather collective operation using Gluon.
 """
 
+import os
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -44,7 +46,11 @@ def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n):
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**30  # 1GB
+    # Size heap to fit input (M*N) + output (max_ranks*M*N) with headroom
+    max_ranks = int(os.environ.get("WORLD_SIZE", 8))
+    elem_size = torch.tensor([], dtype=dtype).element_size()
+    needed = (1 + max_ranks) * M * N * elem_size
+    heap_size = max(2**30, int(needed * 2))  # 2x headroom, minimum 1GB
     shmem = iris_gluon.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
