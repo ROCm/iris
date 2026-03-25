@@ -500,7 +500,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point.  Call from ``if __name__ == '__main__': bench.main()``."""
+    """CLI entry point.  Call from ``if __name__ == '__main__': bench.main()``.
+
+    Collects all ``@bench.register``-ed benchmarks in the current module,
+    resolves ``num_ranks`` values, and spawns one process group per unique
+    ``num_ranks`` via ``mp.spawn``.  Results are merged and formatted to
+    stdout (and optionally a file).
+
+    In addition to the flags shown by ``--help``, two families of dynamic
+    flags are supported:
+
+    - ``--axis_<name>=<values>`` — override an axis (replaces declared values).
+    - ``--skip_<name>=<values>`` — exclude specific values from an axis.
+
+    Value formats: ``1024,2048`` (explicit), ``pow2:8:13`` (power-of-two
+    range), ``lin:64:256:64`` (linear range), ``fp16``/``fp32``/``bf16``
+    (dtype shorthand).
+    """
     parser = _build_parser()
     args, remaining = parser.parse_known_args(argv)
 
