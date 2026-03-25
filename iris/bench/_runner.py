@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """Distributed runner, output formatters, and CLI entry point for iris.bench."""
 
@@ -11,9 +11,11 @@ import io
 import itertools
 import json
 import os
+import pickle
 import re
 import statistics
 import sys
+import tempfile
 from typing import Any, Callable
 
 import torch
@@ -31,9 +33,13 @@ from ._core import (
     linear_range,
 )
 
+# Reserved axis name that controls process spawning.
+_NUM_RANKS_AXIS = "num_ranks"
+_DEFAULT_NUM_RANKS = 8
+
 
 # ---------------------------------------------------------------------------
-# Axis override parsing
+# Axis override / skip parsing
 # ---------------------------------------------------------------------------
 
 _DTYPE_MAP = {
@@ -46,8 +52,8 @@ _DTYPE_MAP = {
 }
 
 
-def _parse_axis_override(raw: str, axis_name: str) -> list[Any]:
-    """Parse a CLI ``--axis_<name>=<value>`` string.
+def _parse_axis_values(raw: str, axis_name: str) -> list[Any]:
+    """Parse a CLI ``--axis_<name>=<value>`` or ``--skip_<name>=<value>`` string.
 
     Formats:
     - ``1024,2048`` — explicit list
@@ -87,6 +93,46 @@ def _parse_axis_override(raw: str, axis_name: str) -> list[Any]:
     return tokens
 
 
+def _effective_values(
+    ax: AxisDef,
+    axis_overrides: dict[str, list[Any]],
+    skip_overrides: dict[str, list[Any]],
+) -> list[Any]:
+    """Resolve effective values for an axis after overrides and skips."""
+    if ax.name in axis_overrides:
+        values = list(axis_overrides[ax.name])
+    else:
+        values = list(ax.values)
+
+    if ax.name in skip_overrides:
+        skip_set = set(skip_overrides[ax.name])
+        values = [v for v in values if v not in skip_set]
+
+    return values
+
+
+def _get_benchmark_num_ranks(
+    bdef: BenchmarkDef,
+    axis_overrides: dict[str, list[Any]],
+    skip_overrides: dict[str, list[Any]],
+) -> list[int]:
+    """Return the effective num_ranks values for a benchmark."""
+    # Check if benchmark declares a num_ranks axis
+    for ax in bdef.axes:
+        if ax.name == _NUM_RANKS_AXIS:
+            return _effective_values(ax, axis_overrides, skip_overrides)
+
+    # No declared axis — check if there's a global override
+    if _NUM_RANKS_AXIS in axis_overrides:
+        values = list(axis_overrides[_NUM_RANKS_AXIS])
+        if _NUM_RANKS_AXIS in skip_overrides:
+            skip_set = set(skip_overrides[_NUM_RANKS_AXIS])
+            values = [v for v in values if v not in skip_set]
+        return values
+
+    return [_DEFAULT_NUM_RANKS]
+
+
 # ---------------------------------------------------------------------------
 # Output formatters
 # ---------------------------------------------------------------------------
@@ -120,8 +166,7 @@ def _format_console(results: list[Result]) -> str:
 
     lines: list[str] = []
     for bench_name, bench_results in by_bench.items():
-        ws = bench_results[0].world_size
-        lines.append(f"\n{bench_name} ({ws} ranks)")
+        lines.append(f"\n{bench_name}")
 
         # Build column specs
         param_names = list(bench_results[0].params.keys())
@@ -245,7 +290,7 @@ def _format_csv(results: list[Result]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Distributed runner
+# Distributed worker
 # ---------------------------------------------------------------------------
 
 
@@ -255,149 +300,144 @@ def _run_benchmarks_worker(
     init_url: str,
     benchmarks: list[BenchmarkDef],
     axis_overrides: dict[str, list[Any]],
+    skip_overrides: dict[str, list[Any]],
     heap_size: int,
     use_gluon: bool,
     n_warmup: int,
     n_repeat: int,
     benchmark_filter: str | None,
-    benchmark_format: str,
-    benchmark_out: str | None,
-    _already_initialized: bool = False,
+    results_file: str,
 ):
-    """Worker that runs inside each rank (via mp.spawn or torchrun)."""
+    """Worker that runs inside each rank via mp.spawn."""
     import iris as _iris
 
-    if not _already_initialized:
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        dist.init_process_group(
-            backend=backend,
-            init_method=init_url,
-            world_size=world_size,
-            rank=local_rank,
-            device_id=torch.device(f"cuda:{local_rank}"),
-        )
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(
+        backend=backend,
+        init_method=init_url,
+        world_size=world_size,
+        rank=local_rank,
+        device_id=torch.device(f"cuda:{local_rank}"),
+    )
 
     # Create iris context
     if use_gluon:
         import iris.experimental.iris_gluon as iris_gluon
 
-        shmem = iris_gluon.iris(heap_size)
+        ctx = iris_gluon.iris(heap_size)
     else:
-        shmem = _iris.iris(heap_size)
+        ctx = _iris.iris(heap_size)
 
-    rank = shmem.get_rank()
-    actual_world_size = shmem.get_num_ranks()
+    rank = ctx.get_rank()
 
     all_results: list[Result] = []
 
     for bdef in benchmarks:
-        # Filter
+        # Filter by name
         if benchmark_filter and not re.search(benchmark_filter, bdef.name):
             continue
 
-        # Apply axis overrides
-        axes = []
-        for ax in bdef.axes:
-            if ax.name in axis_overrides:
-                axes.append(AxisDef(ax.name, axis_overrides[ax.name]))
-            else:
-                axes.append(ax)
-
-        # Generate Cartesian product
-        if axes:
-            axis_names = [a.name for a in axes]
-            axis_values = [a.values for a in axes]
-            combos = list(itertools.product(*axis_values))
-        else:
-            axis_names = []
-            combos = [()]
-
-        for combo in combos:
-            params = dict(zip(axis_names, combo))
-            state = State(params, n_warmup=n_warmup, n_repeat=n_repeat)
-
-            skipped = False
-            skip_reason = ""
-            try:
-                bdef.fn(state, shmem)
-            except _SkipCombination as exc:
-                skipped = True
-                skip_reason = exc.reason
-
-            if skipped:
-                result = Result(
-                    benchmark_name=bdef.name,
-                    params=params,
-                    gpu_time_ms=0.0,
-                    all_times_ms=[],
-                    skipped=True,
-                    skip_reason=skip_reason,
-                    world_size=actual_world_size,
-                )
-                all_results.append(result)
+        # Check if this benchmark should run at this world_size
+        has_nr_axis = any(ax.name == _NUM_RANKS_AXIS for ax in bdef.axes)
+        if not has_nr_axis and _NUM_RANKS_AXIS not in axis_overrides:
+            # No num_ranks axis declared and no global override —
+            # only run at the default
+            if world_size != _DEFAULT_NUM_RANKS:
                 continue
 
-            if state._exec_fn is None:
-                raise RuntimeError(
-                    f"Benchmark '{bdef.name}' with params {params} "
-                    f"did not call state.exec(fn). Every benchmark must "
-                    f"register a callable to time."
+        # Build non-num_ranks axes with overrides/skips applied
+        axes: list[AxisDef] = []
+        for ax in bdef.axes:
+            if ax.name == _NUM_RANKS_AXIS:
+                continue  # handled externally by the spawning loop
+            values = _effective_values(ax, axis_overrides, skip_overrides)
+            if not values:
+                break  # entire benchmark skipped if an axis is empty
+            axes.append(AxisDef(ax.name, values))
+        else:
+            # Generate Cartesian product of non-num_ranks axes
+            if axes:
+                axis_names = [a.name for a in axes]
+                axis_values = [a.values for a in axes]
+                combos = list(itertools.product(*axis_values))
+            else:
+                axis_names = []
+                combos = [()]
+
+            for combo in combos:
+                params: dict[str, Any] = {}
+                # Include num_ranks in params so it appears in output
+                if has_nr_axis or _NUM_RANKS_AXIS in axis_overrides:
+                    params[_NUM_RANKS_AXIS] = world_size
+                params.update(zip(axis_names, combo))
+
+                state = State(params, n_warmup=n_warmup, n_repeat=n_repeat)
+
+                skipped = False
+                skip_reason = ""
+                try:
+                    bdef.fn(state, ctx)
+                except _SkipCombination as exc:
+                    skipped = True
+                    skip_reason = exc.reason
+
+                if skipped:
+                    all_results.append(Result(
+                        benchmark_name=bdef.name,
+                        params=params,
+                        gpu_time_ms=0.0,
+                        all_times_ms=[],
+                        skipped=True,
+                        skip_reason=skip_reason,
+                        world_size=world_size,
+                    ))
+                    continue
+
+                if state._exec_fn is None:
+                    raise RuntimeError(
+                        f"Benchmark '{bdef.name}' with params {params} "
+                        f"did not call state.exec(fn). Every benchmark must "
+                        f"register a callable to time."
+                    )
+
+                # Time with do_bench
+                times = _iris.do_bench(
+                    state._exec_fn,
+                    barrier_fn=ctx.barrier,
+                    preamble_fn=state._preamble_fn,
+                    n_warmup=state._n_warmup,
+                    n_repeat=state._n_repeat,
+                    return_mode="all",
                 )
 
-            # Time with do_bench
-            times = _iris.do_bench(
-                state._exec_fn,
-                barrier_fn=shmem.barrier,
-                preamble_fn=state._preamble_fn,
-                n_warmup=state._n_warmup,
-                n_repeat=state._n_repeat,
-                return_mode="all",
-            )
+                mean_ms = statistics.mean(times)
 
-            mean_ms = statistics.mean(times)
+                bw = None
+                if state._bytes is not None and mean_ms > 0:
+                    bw = (state._bytes / 1e9) / (mean_ms * 1e-3)
 
-            # Compute derived metrics
-            bw = None
-            if state._bytes is not None and mean_ms > 0:
-                bw = (state._bytes / 1e9) / (mean_ms * 1e-3)
+                tflops = None
+                if state._flops is not None and mean_ms > 0:
+                    tflops = (state._flops / 1e12) / (mean_ms * 1e-3)
 
-            tflops = None
-            if state._flops is not None and mean_ms > 0:
-                tflops = (state._flops / 1e12) / (mean_ms * 1e-3)
+                all_results.append(Result(
+                    benchmark_name=bdef.name,
+                    params=params,
+                    gpu_time_ms=mean_ms,
+                    all_times_ms=times,
+                    bandwidth_gbps=bw,
+                    tflops=tflops,
+                    counters=dict(state._counters),
+                    world_size=world_size,
+                ))
 
-            result = Result(
-                benchmark_name=bdef.name,
-                params=params,
-                gpu_time_ms=mean_ms,
-                all_times_ms=times,
-                bandwidth_gbps=bw,
-                tflops=tflops,
-                counters=dict(state._counters),
-                world_size=actual_world_size,
-            )
-            all_results.append(result)
-
-    # Only rank 0 prints / writes output
+    # Rank 0 writes results to temp file for the main process to collect
     if rank == 0:
-        if benchmark_format == "json":
-            output = _format_json(all_results)
-        elif benchmark_format == "csv":
-            output = _format_csv(all_results)
-        else:
-            output = _format_console(all_results)
+        with open(results_file, "wb") as f:
+            pickle.dump(all_results, f)
 
-        print(output, end="")
-
-        if benchmark_out:
-            with open(benchmark_out, "w") as f:
-                f.write(output)
-
-    shmem.barrier()
-
-    if not _already_initialized:
-        dist.destroy_process_group()
-
-    return all_results
+    ctx.barrier()
+    dist.destroy_process_group()
 
 
 # ---------------------------------------------------------------------------
@@ -430,13 +470,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write results to this file",
     )
     parser.add_argument(
-        "-r",
-        "--num_ranks",
-        type=int,
-        default=8,
-        help="Number of GPUs (ignored under torchrun)",
-    )
-    parser.add_argument(
         "--heap_size",
         type=int,
         default=1 << 34,
@@ -467,75 +500,79 @@ def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args, remaining = parser.parse_known_args(argv)
 
-    # Parse --axis_<name>=<value> from remaining args
+    # Parse --axis_<name>=<value> and --skip_<name>=<value> from remaining args
     axis_overrides: dict[str, list[Any]] = {}
+    skip_overrides: dict[str, list[Any]] = {}
     for token in remaining:
         m = re.match(r"^--axis_(\w+)=(.+)$", token)
         if m:
-            axis_overrides[m.group(1)] = _parse_axis_override(m.group(2), m.group(1))
-        else:
-            parser.error(f"Unrecognized argument: {token}")
+            axis_overrides[m.group(1)] = _parse_axis_values(m.group(2), m.group(1))
+            continue
+        m = re.match(r"^--skip_(\w+)=(.+)$", token)
+        if m:
+            skip_overrides[m.group(1)] = _parse_axis_values(m.group(2), m.group(1))
+            continue
+        parser.error(f"Unrecognized argument: {token}")
 
     benchmarks = list(_registry)
     if not benchmarks:
         print("No benchmarks registered.", file=sys.stderr)
         sys.exit(1)
 
-    # Detect torchrun: if dist is already initialized, we're inside torchrun
-    if dist.is_initialized():
-        _run_benchmarks_worker(
-            local_rank=int(os.environ.get("LOCAL_RANK", 0)),
-            world_size=dist.get_world_size(),
-            init_url="",
-            benchmarks=benchmarks,
-            axis_overrides=axis_overrides,
-            heap_size=args.heap_size,
-            use_gluon=args.use_gluon,
-            n_warmup=args.n_warmup,
-            n_repeat=args.n_repeat,
-            benchmark_filter=args.benchmark_filter,
-            benchmark_format=args.benchmark_format,
-            benchmark_out=args.benchmark_out,
-            _already_initialized=True,
-        )
-    elif "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        # torchrun sets these env vars but dist may not be initialized yet
-        local_rank = int(os.environ["LOCAL_RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        torch.cuda.set_device(local_rank)
-        _run_benchmarks_worker(
-            local_rank=local_rank,
-            world_size=world_size,
-            init_url="env://",
-            benchmarks=benchmarks,
-            axis_overrides=axis_overrides,
-            heap_size=args.heap_size,
-            use_gluon=args.use_gluon,
-            n_warmup=args.n_warmup,
-            n_repeat=args.n_repeat,
-            benchmark_filter=args.benchmark_filter,
-            benchmark_format=args.benchmark_format,
-            benchmark_out=args.benchmark_out,
-        )
+    # Collect the union of all num_ranks values across registered benchmarks
+    all_num_ranks: set[int] = set()
+    for bdef in benchmarks:
+        # Skip benchmarks that don't match the filter before collecting num_ranks
+        if args.benchmark_filter and not re.search(args.benchmark_filter, bdef.name):
+            continue
+        all_num_ranks.update(_get_benchmark_num_ranks(bdef, axis_overrides, skip_overrides))
+
+    if not all_num_ranks:
+        print("No benchmark configurations to run after applying filters/skips.", file=sys.stderr)
+        sys.exit(1)
+
+    # Run once per unique num_ranks, collecting results across spawns
+    all_results: list[Result] = []
+    init_url = "tcp://127.0.0.1:29500"
+
+    for num_ranks in sorted(all_num_ranks):
+        fd, results_file = tempfile.mkstemp(suffix=".pkl")
+        os.close(fd)
+        try:
+            mp.spawn(
+                fn=_run_benchmarks_worker,
+                args=(
+                    num_ranks,
+                    init_url,
+                    benchmarks,
+                    axis_overrides,
+                    skip_overrides,
+                    args.heap_size,
+                    args.use_gluon,
+                    args.n_warmup,
+                    args.n_repeat,
+                    args.benchmark_filter,
+                    results_file,
+                ),
+                nprocs=num_ranks,
+                join=True,
+            )
+            with open(results_file, "rb") as f:
+                all_results.extend(pickle.load(f))
+        finally:
+            if os.path.exists(results_file):
+                os.unlink(results_file)
+
+    # Format and output (runs in the main process)
+    if args.benchmark_format == "json":
+        output = _format_json(all_results)
+    elif args.benchmark_format == "csv":
+        output = _format_csv(all_results)
     else:
-        # Standalone: use mp.spawn
-        num_ranks = args.num_ranks
-        init_url = "tcp://127.0.0.1:29500"
-        mp.spawn(
-            fn=_run_benchmarks_worker,
-            args=(
-                num_ranks,
-                init_url,
-                benchmarks,
-                axis_overrides,
-                args.heap_size,
-                args.use_gluon,
-                args.n_warmup,
-                args.n_repeat,
-                args.benchmark_filter,
-                args.benchmark_format,
-                args.benchmark_out,
-            ),
-            nprocs=num_ranks,
-            join=True,
-        )
+        output = _format_console(all_results)
+
+    print(output, end="")
+
+    if args.benchmark_out:
+        with open(args.benchmark_out, "w") as f:
+            f.write(output)
