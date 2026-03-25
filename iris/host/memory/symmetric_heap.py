@@ -463,3 +463,33 @@ class SymmetricHeap:
         imported = self.allocator.import_external_tensor(external_tensor)
         self.refresh_peer_access()
         return imported
+
+    def close(self):
+        """Release resources held by the symmetric heap."""
+        # Free peer VA ranges to avoid VA space leaks
+        if hasattr(self, "_peer_va_ranges"):
+            from iris.hip import mem_address_free
+            for peer, va_base in self._peer_va_ranges.items():
+                try:
+                    va_size = getattr(self.allocator, "va_size", self.heap_size)
+                    mem_address_free(va_base, va_size)
+                except Exception:
+                    pass
+            self._peer_va_ranges.clear()
+
+        # Close the allocator
+        if hasattr(self.allocator, "close"):
+            self.allocator.close()
+
+        # Close FD sockets
+        if self.fd_conns:
+            import socket
+            for peer, sock in self.fd_conns.items():
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            self.fd_conns = None
+
+    def __del__(self):
+        self.close()

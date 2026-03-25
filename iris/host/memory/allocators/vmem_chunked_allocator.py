@@ -101,8 +101,8 @@ class VMemChunkedAllocator(BaseAllocator):
 
     # Default chunk size: 256 MiB
     DEFAULT_CHUNK_SIZE = 256 * 1024 * 1024
-    # Default VA size: 64 GiB
-    DEFAULT_VA_SIZE = 64 * 1024 * 1024 * 1024
+    # Default VA size: 0 means auto-size (8x heap_size, min 256 MiB)
+    DEFAULT_VA_SIZE = 0
 
     def __init__(
         self,
@@ -123,7 +123,10 @@ class VMemChunkedAllocator(BaseAllocator):
         # Align chunk_size to granularity
         self.chunk_size = (self.chunk_size + self.granularity - 1) & ~(self.granularity - 1)
 
-        # VA reservation -- much larger than heap_size for growth headroom
+        # VA reservation -- larger than heap_size for growth headroom
+        # Default: 8x heap_size (min 256 MiB) to allow chunk growth + imports
+        if va_size == 0:
+            va_size = max(256 * 1024 * 1024, heap_size * 8)
         self.va_size = max(va_size, heap_size * 2)
         # Align VA size to chunk_size
         self.va_size = (self.va_size + self.chunk_size - 1) & ~(self.chunk_size - 1)
