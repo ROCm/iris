@@ -16,7 +16,7 @@ from .utils import extract_group_info
 try:
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
-    from iris.experimental.iris_gluon import IrisDeviceCtx
+    from iris.context import GluonContext
 
     GLUON_AVAILABLE = True
 except ImportError:
@@ -304,7 +304,7 @@ if GLUON_AVAILABLE:
 
     @gluon.jit
     def persistent_all_gather_gluon(
-        IrisDeviceCtx: gl.constexpr,
+        GluonContext: gl.constexpr,
         context_tensor,
         input_ptr,
         output_ptr,
@@ -353,8 +353,8 @@ if GLUON_AVAILABLE:
             - Recommended: BLOCK_SIZE_M=8, BLOCK_SIZE_N=256 (2048 elems, 8/thread).
 
         Args:
-            IrisDeviceCtx: Gluon device context class for remote memory operations.
-            context_tensor: Opaque tensor holding IrisDeviceCtx state.
+            GluonContext: Gluon device context class for remote memory operations.
+            context_tensor: Opaque tensor holding GluonContext state.
             input_ptr: Pointer to local input tensor of shape (M, N).
             output_ptr: Pointer to output tensor of shape (world_size * M, N).
             M: Number of rows in the input tensor (per rank).
@@ -373,7 +373,7 @@ if GLUON_AVAILABLE:
             THREADS_PER_WARP: Threads per warp/wavefront (64 for AMD, 32 for NVIDIA).
             WARPS_PER_CTA: Number of warps per workgroup. Must match num_warps.
         """
-        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=False)
+        ctx = GluonContext.initialize(context_tensor, tracing=False)
 
         pid = gl.program_id(0)
 
@@ -495,10 +495,6 @@ def all_gather(
 
     # Choose between Triton and Gluon implementation
     if config.use_gluon and GLUON_AVAILABLE:
-        # Check if shmem is Iris Gluon (has get_device_context method)
-        if not hasattr(shmem, "get_device_context"):
-            raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
-
         # Gluon only supports the persistent variant
         if config.all_gather_variant != "persistent":
             raise ValueError(
@@ -537,7 +533,7 @@ def all_gather(
         context_tensor = shmem.get_device_context()
 
         persistent_all_gather_gluon[(config.comm_sms,)](
-            IrisDeviceCtx,
+            GluonContext,
             context_tensor,
             input_tensor,
             output_tensor,

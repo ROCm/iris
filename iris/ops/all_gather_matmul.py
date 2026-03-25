@@ -80,8 +80,8 @@ def _fused_all_gather_matmul_kernel(
         # Initialize accumulator using GemmContext
         acc = gemm_ctx.init_accumulator()
 
-        # Create DeviceContext and TensorView for gather operations
-        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+        # Create TritonContext and TensorView for gather operations
+        ctx = iris.TritonContext.initialize(context_tensor, cur_rank, world_size)
         src_view = iris.x.make_tensor_view(A_sharded, M, K_local, stride_am, stride_ak)
 
         # Precompute B column offsets for this output tile (constant across K iterations)

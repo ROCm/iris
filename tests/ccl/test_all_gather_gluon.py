@@ -13,7 +13,7 @@ import torch.distributed as dist
 
 # Try to import Gluon, skip tests if not available
 try:
-    import iris.experimental.iris_gluon as iris_gluon
+    import iris
     from iris.ccl import Config
     from iris.ccl.all_gather import all_gather, GLUON_AVAILABLE
 except ImportError:
@@ -51,7 +51,7 @@ def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n):
     elem_size = torch.tensor([], dtype=dtype).element_size()
     needed = (1 + max_ranks) * M * N * elem_size
     heap_size = max(2**30, int(needed * 2))  # 2x headroom, minimum 1GB
-    shmem = iris_gluon.iris(heap_size)
+    shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 

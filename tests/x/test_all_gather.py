@@ -58,7 +58,7 @@ def x_all_gather_kernel(
             stride_out_m,
             stride_out_n,
         )
-        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+        ctx = iris.TritonContext.initialize(context_tensor, cur_rank, world_size)
 
         iris.x.all_gather(tile, dst_view, gather_dim, ctx)
 
@@ -246,7 +246,7 @@ def x_all_gather_ctx_api_kernel(
             stride_out_m,
             stride_out_n,
         )
-        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+        ctx = iris.TritonContext.initialize(context_tensor, cur_rank, world_size)
 
         # Call primitive directly (ctx methods don't work due to Triton import restrictions)
         iris.x.all_gather(tile, dst_view, gather_dim, ctx)

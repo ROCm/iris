@@ -6,7 +6,7 @@
 Gluon All-Gather Tracing Example
 =================================
 
-Demonstrates IrisDeviceCtx tracing support inside a ``@gluon.jit`` kernel.
+Demonstrates GluonContext tracing support inside a ``@gluon.jit`` kernel.
 The kernel performs a one-hop ring put (all-gather step) and can be compiled
 in two modes via a constexpr flag:
 
@@ -42,7 +42,8 @@ import triton.language as tl
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.context import GluonContext
 from iris.tracing.events import TraceEvent
 
 
@@ -53,7 +54,7 @@ from iris.tracing.events import TraceEvent
 
 @gluon.jit
 def all_gather_put_kernel(
-    IrisDeviceCtx: gl.constexpr,
+    GluonContext: gl.constexpr,
     context_tensor,
     local_buf,
     global_buf,
@@ -74,7 +75,7 @@ def all_gather_put_kernel(
     because ``GluonDeviceTracing.enabled`` is a ``tl.constexpr``.
 
     Args:
-        IrisDeviceCtx: aggregate class passed as constexpr from the host.
+        GluonContext: aggregate class passed as constexpr from the host.
         context_tensor: encoded context tensor (from ``shmem.get_device_context()``).
         local_buf: source buffer (``num_elements`` elements on this rank).
         global_buf: output buffer (``num_ranks * num_elements`` elements).
@@ -83,7 +84,7 @@ def all_gather_put_kernel(
         NUM_WARPS: number of warps per CTA (constexpr).
         TRACING: enable/disable tracing at compile time (constexpr).
     """
-    ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)
+    ctx = GluonContext.initialize(context_tensor, tracing=TRACING)
 
     cur_rank = ctx.cur_rank
     num_ranks = ctx.num_ranks
@@ -136,7 +137,7 @@ def _launch(shmem, local_buf, global_buf, context_tensor, enable_tracing: bool):
     BLOCK_SIZE = 64 * NUM_WARPS  # 256 elements per tile (1 el/thread, 64 threads/warp, 4 warps)
     grid = ((num_elements + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     all_gather_put_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        GluonContext,
         context_tensor,
         local_buf,
         global_buf,
@@ -194,7 +195,7 @@ def main():
     if not dist.is_initialized():
         dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
 
-    shmem = iris_gl.iris(args.heap_size)
+    shmem = iris.iris(args.heap_size)
     rank = shmem.get_rank()
     num_ranks = shmem.get_num_ranks()
 

@@ -108,7 +108,7 @@ def _fused_matmul_reduce_scatter_kernel(
 
     # Create tile object and context
     tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+    ctx = iris.TritonContext.initialize(context_tensor, cur_rank, world_size)
 
     # Create tensor views for source and destination
     src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)

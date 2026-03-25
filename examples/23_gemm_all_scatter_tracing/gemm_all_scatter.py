@@ -4,7 +4,7 @@
 import triton
 import triton.language as tl
 
-from iris import DeviceContext, TraceEvent
+from iris.context import TritonContext, TraceEvent
 from iris.device_utils import read_realtime
 
 
@@ -43,8 +43,8 @@ def persistent_gemm_all_scatter(
     mm_begin_timestamp_ptr: tl.tensor = None,
     mm_end_timestamp_ptr: tl.tensor = None,
 ):
-    # Initialize DeviceContext with tracing
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, world_size, tracing=TRACING)
+    # Initialize TritonContext with tracing
+    ctx = TritonContext.initialize(context_tensor, cur_rank, world_size, tracing=TRACING)
 
     pid = tl.program_id(0)
 
@@ -139,7 +139,7 @@ def persistent_gemm_all_scatter(
         C_ptr = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
         tl.store(C_ptr, c, mask=sub_mask)
 
-        # Store data to the global result using DeviceContext
+        # Store data to the global result using TritonContext
         for remote_rank in range(world_size):
             if remote_rank == cur_rank:
                 # For the current rank, we can use store
@@ -158,7 +158,7 @@ def persistent_gemm_all_scatter(
                     mask=sub_mask,
                 )
 
-                # Use DeviceContext.put for remote stores
+                # Use TritonContext.put for remote stores
                 # Put from local C to remote c_global
                 ctx.put(C_ptr, c_global + global_offset, to_rank=remote_rank, mask=sub_mask)
 

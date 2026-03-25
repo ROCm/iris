@@ -11,7 +11,7 @@ Users manage tile iteration themselves and call these functions from their own k
 import triton
 import triton.language as tl
 import iris
-from iris.iris import DeviceContext
+from iris.context import TritonContext
 from .core import Tile, TensorView
 
 
@@ -19,7 +19,7 @@ from .core import Tile, TensorView
 def all_reduce_atomic(
     tile: Tile,
     dst_view: TensorView,
-    ctx: DeviceContext,
+    ctx: TritonContext,
 ):
     """
     Tile-level all-reduce using atomic operations.
@@ -30,7 +30,7 @@ def all_reduce_atomic(
     Args:
         tile: Tile object with position, dimensions, and data to reduce (tile.data).
         dst_view: TensorView for output tensor where reduced result will be written.
-        ctx: DeviceContext with rank, world_size, and heap_bases.
+        ctx: TritonContext with rank, world_size, and heap_bases.
 
     Example:
         # After computing a local tile result
@@ -58,7 +58,7 @@ def all_reduce_spinlock(
     tile: Tile,
     dst_view: TensorView,
     locks,
-    ctx: DeviceContext,
+    ctx: TritonContext,
 ):
     """
     Tile-level all-reduce using spinlock synchronization.
@@ -71,7 +71,7 @@ def all_reduce_spinlock(
         tile: Tile object with position, dimensions, and local data (tile.data).
         dst_view: TensorView for output tensor where reduced result will be written.
         locks: Pointer to locks array (one lock per tile).
-        ctx: DeviceContext with rank, world_size, and heap_bases.
+        ctx: TritonContext with rank, world_size, and heap_bases.
 
     Example:
         # After computing a local tile result
@@ -119,7 +119,7 @@ def all_reduce_one_shot(
     src_view: TensorView,
     dst_view: TensorView,
     locks,
-    ctx: DeviceContext,
+    ctx: TritonContext,
 ):
     """
     Tile-level all-reduce using one-shot algorithm (all ranks gather and reduce locally).
@@ -135,7 +135,7 @@ def all_reduce_one_shot(
         src_view: TensorView for source tensor (to load remote data).
         dst_view: TensorView for output tensor where reduced result will be written locally.
         locks: Pointer to lock array (one per tile) used as ready flags.
-        ctx: DeviceContext with rank, world_size, and heap_bases.
+        ctx: TritonContext with rank, world_size, and heap_bases.
 
     Example:
         # After computing and storing a local tile result and signaling ready
@@ -182,7 +182,7 @@ def all_reduce_ring(
     tile: Tile,
     src_view: TensorView,
     dst_view: TensorView,
-    ctx: DeviceContext,
+    ctx: TritonContext,
 ):
     """
     Tile-level all-reduce using ring algorithm.
@@ -191,7 +191,7 @@ def all_reduce_ring(
         tile: Tile object with position and dimensions.
         src_view: TensorView for input tensor.
         dst_view: TensorView for output tensor.
-        ctx: DeviceContext with rank, world_size, and heap_bases.
+        ctx: TritonContext with rank, world_size, and heap_bases.
     """
     # Get tile pointer and mask
     src_tile_ptr, mask = src_view.tile_ptr(tile)
@@ -237,7 +237,7 @@ def all_reduce_two_shot(
     src_view: TensorView,
     dst_view: TensorView,
     locks,
-    ctx: DeviceContext,
+    ctx: TritonContext,
 ):
     """
     Tile-level all-reduce using two-shot algorithm with work distribution.
@@ -256,7 +256,7 @@ def all_reduce_two_shot(
         src_view: TensorView for source tensor (to load remote data).
         dst_view: TensorView for output tensor where reduced result will be written.
         locks: Pointer to lock array (one per tile) used as ready flags.
-        ctx: DeviceContext with rank, world_size, and heap_bases.
+        ctx: TritonContext with rank, world_size, and heap_bases.
 
     Example:
         tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_result)

@@ -7,6 +7,5 @@ for debugging and performance analysis.
 
 from .events import EVENT_NAMES, TraceEvent
 from .core import Tracing
-from .device import DeviceTracing
 
-__all__ = ["EVENT_NAMES", "TraceEvent", "Tracing", "DeviceTracing"]
+__all__ = ["EVENT_NAMES", "TraceEvent", "Tracing"]

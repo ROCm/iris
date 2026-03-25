@@ -10,7 +10,7 @@ Reduces tiles from all ranks and stores the result only to the assigned rank.
 import triton
 import triton.language as tl
 import iris
-from iris.iris import DeviceContext
+from iris.context import TritonContext
 from .core import Tile, TensorView
 
 
@@ -20,7 +20,7 @@ def reduce_scatter(
     src_view: TensorView,
     dst_view: TensorView,
     locks,
-    ctx: DeviceContext,
+    ctx: TritonContext,
 ):
     """
     Tile-level reduce-scatter using two-shot algorithm with contiguous work distribution.
@@ -35,7 +35,7 @@ def reduce_scatter(
         src_view: TensorView for source tensor (to load remote data).
         dst_view: TensorView for output tensor where reduced result will be written.
         locks: Pointer to lock array (one per tile) used as ready flags.
-        ctx: DeviceContext with rank, world_size, and heap_bases.
+        ctx: TritonContext with rank, world_size, and heap_bases.
 
     Example:
         # With 4 ranks and 12 tiles:

@@ -16,7 +16,7 @@ from .utils import chiplet_transform_chunked, extract_group_info
 try:
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
-    from iris.experimental.iris_gluon import IrisDeviceCtx
+    from iris.context import GluonContext
 
     GLUON_AVAILABLE = True
 except ImportError:
@@ -208,7 +208,7 @@ if GLUON_AVAILABLE:
 
     @gluon.jit
     def persistent_all_to_all_gluon(
-        IrisDeviceCtx: gl.constexpr,
+        GluonContext: gl.constexpr,
         context_tensor,
         input_ptr,
         output_ptr,
@@ -236,7 +236,7 @@ if GLUON_AVAILABLE:
         Each rank sends input data to all ranks and receives data from all ranks.
         Simplified version that mirrors the Triton implementation.
         """
-        ctx = IrisDeviceCtx.initialize(context_tensor)
+        ctx = GluonContext.initialize(context_tensor)
 
         pid = gl.program_id(0)
 
@@ -373,14 +373,10 @@ def all_to_all(
 
     # Choose between Triton and Gluon implementation
     if config.use_gluon and GLUON_AVAILABLE:
-        # Check if shmem is Iris Gluon (has get_device_context method)
-        if not hasattr(shmem, "get_device_context"):
-            raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
-
         context_tensor = shmem.get_device_context()
 
         persistent_all_to_all_gluon[(config.comm_sms,)](
-            IrisDeviceCtx,
+            GluonContext,
             context_tensor,
             input_tensor,
             output_tensor,

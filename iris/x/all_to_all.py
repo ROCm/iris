@@ -10,7 +10,7 @@ Performs all-to-all communication where each rank sends and receives data to/fro
 import triton
 import triton.language as tl
 import iris
-from iris.iris import DeviceContext
+from iris.context import TritonContext
 from .core import Tile, TensorView
 
 
@@ -20,7 +20,7 @@ def all_to_all(
     src_view: TensorView,
     dst_view: TensorView,
     N_per_rank: tl.constexpr,
-    ctx: DeviceContext,
+    ctx: TritonContext,
 ):
     """
     Tile-level all-to-all for iris.x.
@@ -33,7 +33,7 @@ def all_to_all(
         src_view: TensorView for input tensor.
         dst_view: TensorView for output tensor.
         N_per_rank: Number of columns each rank sends/receives per rank.
-        ctx: DeviceContext with rank, world_size, and heap_bases.
+        ctx: TritonContext with rank, world_size, and heap_bases.
 
     Semantics:
         Input: Each rank has (M, world_size * N_per_rank)

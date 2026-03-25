@@ -3,9 +3,9 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Message Passing with DeviceContext API
+Message Passing with TritonContext API
 
-This example demonstrates the DeviceContext API - an object-oriented interface
+This example demonstrates the TritonContext API - an object-oriented interface
 for Iris operations that follows the gluon pattern.
 
 """
@@ -18,7 +18,7 @@ import triton
 import triton.language as tl
 
 import iris
-from iris import DeviceContext
+from iris.context import TritonContext
 
 
 @triton.jit
@@ -34,12 +34,12 @@ def device_context_producer_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     """
-    Producer kernel using DeviceContext API.
+    Producer kernel using TritonContext API.
 
-    Note how we don't need to pass heap_bases - it's encapsulated in DeviceContext.
+    Note how we don't need to pass heap_bases - it's encapsulated in TritonContext.
     """
     # Initialize device context from encoded tensor
-    ctx = DeviceContext.initialize(context_tensor, rank, world_size)
+    ctx = TritonContext.initialize(context_tensor, rank, world_size)
 
     pid = tl.program_id(0)
 
@@ -53,7 +53,7 @@ def device_context_producer_kernel(
     # Load from local buffer (no translation needed, so we just use tl.load)
     values = tl.load(source_buffer + offsets, mask=mask)
 
-    # Store to remote buffer using DeviceContext (much cleaner API!)
+    # Store to remote buffer using TritonContext (much cleaner API!)
     ctx.store(target_buffer + offsets, values, to_rank=consumer_rank, mask=mask)
 
     # Signal completion with atomic CAS
@@ -70,9 +70,9 @@ def device_context_consumer_kernel(
     world_size: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Consumer kernel using DeviceContext API."""
+    """Consumer kernel using TritonContext API."""
     # Initialize device context from encoded tensor
-    ctx = DeviceContext.initialize(context_tensor, rank, world_size)
+    ctx = TritonContext.initialize(context_tensor, rank, world_size)
 
     pid = tl.program_id(0)
 
@@ -128,7 +128,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     if rank == producer_rank:
         ctx.info(f"Producer: Sending {buffer_size} elements to rank {consumer_rank}")
 
-        # Launch producer kernel with DeviceContext
+        # Launch producer kernel with TritonContext
         device_context_producer_kernel[(num_blocks,)](
             context_tensor,
             source_buffer,
@@ -141,12 +141,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             block_size,
         )
 
-        ctx.info("Producer: Data sent successfully using DeviceContext API")
+        ctx.info("Producer: Data sent successfully using TritonContext API")
 
     if rank == consumer_rank:
         ctx.info(f"Consumer: Waiting for data from rank {producer_rank}")
 
-        # Launch consumer kernel with DeviceContext
+        # Launch consumer kernel with TritonContext
         device_context_consumer_kernel[(num_blocks,)](
             context_tensor,
             target_buffer,
@@ -160,7 +160,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         # Verify the data
         expected = torch.arange(buffer_size, dtype=torch.float32, device=target_buffer.device)
         if torch.allclose(target_buffer, expected):
-            ctx.info("Consumer: Data received and verified successfully using DeviceContext API!")
+            ctx.info("Consumer: Data received and verified successfully using TritonContext API!")
         else:
             ctx.error("Consumer: Data verification failed!")
 
@@ -169,7 +169,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DeviceContext Message Passing Example")
+    parser = argparse.ArgumentParser(description="TritonContext Message Passing Example")
     parser.add_argument("--buffer_size", type=int, default=1024, help="Buffer size")
     parser.add_argument("--block_size", type=int, default=256, help="Block size")
     parser.add_argument("--heap_size", type=int, default=1 << 30, help="Iris heap size (default: 1GB)")
@@ -179,9 +179,9 @@ def main():
     world_size = args["num_ranks"]
     init_url = "tcp://127.0.0.1:23456"
 
-    print(f"Spawning {world_size} processes for DeviceContext example...")
+    print(f"Spawning {world_size} processes for TritonContext example...")
     mp.spawn(_worker, args=(world_size, init_url, args), nprocs=world_size, join=True)
-    print("DeviceContext example completed!")
+    print("TritonContext example completed!")
 
 
 if __name__ == "__main__":

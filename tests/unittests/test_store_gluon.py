@@ -5,12 +5,13 @@ import torch
 import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.context import GluonContext
 
 
 @gluon.jit
 def store_kernel(
-    IrisDeviceCtx: gl.constexpr,
+    GluonContext: gl.constexpr,
     context_tensor,
     data,
     results,
@@ -18,7 +19,7 @@ def store_kernel(
     num_ranks: gl.constexpr,
     BLOCK_SIZE: gl.constexpr,
 ):
-    ctx = IrisDeviceCtx.initialize(context_tensor)
+    ctx = GluonContext.initialize(context_tensor)
     pid = gl.program_id(0)
 
     block_start = pid * BLOCK_SIZE
@@ -56,7 +57,7 @@ def store_kernel(
 )
 def test_store_api(dtype, BLOCK_SIZE):
     # TODO: Adjust heap size.
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     context_tensor = shmem.get_device_context()
     destination_rank = shmem.get_rank()
@@ -68,7 +69,7 @@ def test_store_api(dtype, BLOCK_SIZE):
 
     grid = (1,)
     store_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        GluonContext,
         context_tensor,
         src,
         results,

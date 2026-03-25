@@ -37,7 +37,7 @@ class Tracing:
         """
         Enable device-side event tracing.
 
-        Allocates trace buffers to store events recorded by DeviceContext.
+        Allocates trace buffers to store events recorded by TritonContext/GluonContext.
 
         Args:
             max_events (int): Maximum number of events to record. Default: 1,000,000

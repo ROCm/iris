@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 import pytest
 import iris
-from iris import DeviceContext, TraceEvent
+from iris import TritonContext, TraceEvent
 
 
 @triton.jit
@@ -19,7 +19,7 @@ def device_context_tracing_1d_address_kernel(
     BLOCK_SIZE: tl.constexpr = 4,
 ):
     """Test ctx.tracing.record_event_start/end with a 1D address (block of pointers)."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks, tracing=TRACING)
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks, tracing=TRACING)
     if not TRACING:
         return
     # 1D block of pointers: dummy_buffer + offsets
@@ -47,8 +47,8 @@ def device_context_load_kernel(
     num_ranks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Test DeviceContext.load() method."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.load() method."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
     partner = int((cur_rank + num_ranks // 2) % num_ranks)
@@ -70,8 +70,8 @@ def device_context_store_kernel(
     num_ranks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Test DeviceContext.store() method."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.store() method."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
     partner = int((cur_rank + num_ranks // 2) % num_ranks)
@@ -92,8 +92,8 @@ def device_context_atomic_add_kernel(
     num_ranks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Test DeviceContext.atomic_add() method."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.atomic_add() method."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
     block_start = pid * BLOCK_SIZE
@@ -120,8 +120,8 @@ def device_context_atomic_cas_kernel(
     cur_rank: tl.constexpr,
     num_ranks: tl.constexpr,
 ):
-    """Test DeviceContext.atomic_cas() method."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.atomic_cas() method."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
     partner = int((cur_rank + num_ranks // 2) % num_ranks)
@@ -138,8 +138,8 @@ def device_context_get_kernel(
     num_ranks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Test DeviceContext.get() method."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.get() method."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
     partner = int((cur_rank + num_ranks // 2) % num_ranks)
@@ -160,8 +160,8 @@ def device_context_put_kernel(
     num_ranks: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Test DeviceContext.put() method."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.put() method."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
     partner = int((cur_rank + num_ranks // 2) % num_ranks)
@@ -195,7 +195,7 @@ def device_context_put_kernel(
     ],
 )
 def test_device_context_load(dtype, BLOCK_SIZE):
-    """Test DeviceContext.load() works correctly."""
+    """Test TritonContext.load() works correctly."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     rank = ctx.get_rank()
@@ -249,7 +249,7 @@ def test_device_context_load(dtype, BLOCK_SIZE):
     ],
 )
 def test_device_context_store(dtype, BLOCK_SIZE):
-    """Test DeviceContext.store() works correctly."""
+    """Test TritonContext.store() works correctly."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -299,7 +299,7 @@ def test_device_context_store(dtype, BLOCK_SIZE):
     ],
 )
 def test_device_context_atomic_add(dtype, BLOCK_SIZE):
-    """Test DeviceContext.atomic_add() works correctly."""
+    """Test TritonContext.atomic_add() works correctly."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -331,7 +331,7 @@ def test_device_context_atomic_add(dtype, BLOCK_SIZE):
 
 
 def test_device_context_atomic_cas():
-    """Test DeviceContext.atomic_cas() works correctly."""
+    """Test TritonContext.atomic_cas() works correctly."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -370,7 +370,7 @@ def test_device_context_atomic_cas():
     ],
 )
 def test_device_context_get(BLOCK_SIZE):
-    """Test DeviceContext.get() works correctly."""
+    """Test TritonContext.get() works correctly."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -411,7 +411,7 @@ def test_device_context_get(BLOCK_SIZE):
     ],
 )
 def test_device_context_put(BLOCK_SIZE):
-    """Test DeviceContext.put() works correctly."""
+    """Test TritonContext.put() works correctly."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -476,7 +476,7 @@ def test_device_context_tracing_1d_address():
 
 
 def test_device_context_initialize():
-    """Test DeviceContext.initialize() creates valid context."""
+    """Test TritonContext.initialize() creates valid context."""
     ctx = iris.iris(1 << 20)
     cur_rank = ctx.get_rank()
     num_ranks = ctx.get_num_ranks()
@@ -499,8 +499,8 @@ def test_device_context_initialize():
 
 
 def test_device_context_imports():
-    """Test that DeviceContext is available from correct import paths."""
-    from iris import DeviceContext as DC1
-    from iris.iris import DeviceContext as DC2
+    """Test that TritonContext is available from correct import paths."""
+    from iris import TritonContext as DC1
+    from iris.context import TritonContext as DC2
 
     assert DC1 is DC2

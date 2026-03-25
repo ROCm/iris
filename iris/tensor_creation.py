@@ -8,9 +8,8 @@ Provides shared helpers (parse_size, device validation, allocation wiring,
 output-tensor validation, layout and memory-format handling) and the core
 creation logic for ``zeros``, ``ones``, ``full``, and ``zeros_like``.
 
-Both the Triton :class:`~iris.iris.Iris` backend and the Gluon
-:class:`~iris.experimental.iris_gluon.IrisGluon` backend delegate to these
-functions so that the logic lives in exactly one place.
+The unified :class:`~iris.iris.Iris` class delegates to these functions
+so that tensor-creation logic lives in exactly one place.
 """
 
 import math

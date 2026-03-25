@@ -18,7 +18,6 @@ from examples.common.utils import JSONWriter
 
 import iris
 from iris.ccl import Config
-import iris.experimental.iris_gluon as iris_gluon
 
 torch.manual_seed(123)
 random.seed(123)
@@ -82,11 +81,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         device_id=torch.device(f"cuda:{local_rank}"),
     )
 
-    # Use Gluon if requested
-    if args["use_gluon"]:
-        shmem = iris_gluon.iris(args["heap_size"])
-    else:
-        shmem = iris.iris(args["heap_size"])
+    shmem = iris.iris(args["heap_size"])
 
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()

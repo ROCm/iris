@@ -110,7 +110,7 @@ def _fused_matmul_all_reduce_kernel(
     c = acc.to(C.type.element_ty)
 
     # Create views and context
-    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+    ctx = iris.TritonContext.initialize(context_tensor, cur_rank, world_size)
     dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
     # Create tile object once for all variants

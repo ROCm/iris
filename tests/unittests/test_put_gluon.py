@@ -5,7 +5,8 @@ import torch
 import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.context import GluonContext
 
 
 # TODO: Separate this kernel out in the following categories:
@@ -14,7 +15,7 @@ import iris.experimental.iris_gluon as iris_gl
 # 3. for remote put with more than one rank (if num_ranks > 2).
 @gluon.jit
 def put_kernel(
-    IrisDeviceCtx: gl.constexpr,
+    GluonContext: gl.constexpr,
     context_tensor,
     data,
     results,
@@ -22,7 +23,7 @@ def put_kernel(
     num_ranks: gl.constexpr,
     BLOCK_SIZE: gl.constexpr,
 ):
-    ctx = IrisDeviceCtx.initialize(context_tensor)
+    ctx = GluonContext.initialize(context_tensor)
     pid = gl.program_id(0)
     block_start = pid * BLOCK_SIZE
     layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
@@ -55,7 +56,7 @@ def put_kernel(
 )
 def test_put_api(dtype, BLOCK_SIZE):
     # TODO: Adjust heap size.
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
@@ -67,7 +68,7 @@ def test_put_api(dtype, BLOCK_SIZE):
 
     grid = (1,)
     put_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        GluonContext,
         context_tensor,
         data,
         results,

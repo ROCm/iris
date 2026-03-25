@@ -2,26 +2,29 @@
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Iris Gluon: Gluon-based Multi-GPU Communication Framework
+Gluon device-side context and tracing for Iris.
 
-This module provides a Gluon-based implementation of Iris that uses the
-`@aggregate` decorator with Gluon's `@gluon.jit` to encapsulate the Iris backend
-struct, eliminating the need to pass `heap_bases` around manually.
+Provides ``GluonContext`` — a device-side aggregate that decodes the context
+tensor from ``Iris.get_device_context()`` and exposes RMA operations (load,
+store, copy, get, put, atomics) inside ``@gluon.jit`` kernels.
 
-Key Features:
-- Uses Gluon's `@gluon.jit` decorator for device-side methods
-- Encapsulates `heap_bases` and rank info in `IrisDeviceCtx` aggregate
-- Provides same functionality as original Iris with improved ergonomics
+Also provides ``GluonDeviceTracing`` — a device-side aggregate for recording
+trace events into SoA buffers from inside Gluon kernels.
 
-Example:
-    >>> import iris.iris_gluon as iris_gl
-    >>> ctx = iris_gl.iris(heap_size=2**30)  # 1GB heap
-    >>> context_tensor = ctx.get_device_context()  # Get context tensor
-    >>>
-    >>> @gluon.jit
-    >>> def kernel(IrisDeviceCtx: gl.constexpr, context_tensor):
-    >>>     ctx = IrisDeviceCtx.initialize(context_tensor)
-    >>>     data = ctx.load(buffer, 1)
+Example::
+
+    import iris
+    from iris.context import GluonContext
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+
+    ctx = iris.iris(heap_size=2**30)
+    context_tensor = ctx.get_device_context()
+
+    @gluon.jit
+    def kernel(GluonContext: gl.constexpr, context_tensor):
+        ctx = GluonContext.initialize(context_tensor)
+        data = ctx.load(buffer, 1)
 """
 
 from triton.language.core import _aggregate as aggregate
@@ -33,42 +36,20 @@ try:
 except ImportError as e:
     raise ImportError(
         "Gluon is not available in your Triton installation. "
-        "Please update Triton to a version with Gluon support to use iris.experimental.iris_gluon. "
+        "Please update Triton to a version with Gluon support to use iris.context.gluon. "
         "You can install the latest Triton with: pip install --upgrade triton"
     ) from e
 
 import triton.language as tl
 
-from iris._distributed_helpers import (
-    init_distributed,
-    distributed_barrier,
-    distributed_broadcast_scalar,
-    distributed_broadcast_tensor,
-)
-from iris.hip import (
-    set_device,
-    get_cu_count,
-    count_devices,
-)
-from iris.symmetric_heap import SymmetricHeap
 from iris import device_utils
-from iris.tracing.core import Tracing
-import numpy as np
-import torch
-import logging
-
-# Import logging functionality from the separate logging module
-from ..logging import logger
-
-# Import shared tensor-creation helpers
-from .. import tensor_creation
 
 
 class _GluonDeviceTracingCls:
     """
     Gluon-native device-side tracing: records events into SoA buffers from inside Gluon kernels.
 
-    Created by IrisDeviceCtx.initialize() when tracing=True. Use record_event_start
+    Created by GluonContext.initialize() when tracing=True. Use record_event_start
     / record_event_end to bracket operations; events are exported via Tracing.export().
     """
 
@@ -112,7 +93,7 @@ class _GluonDeviceTracingCls:
         buf_op_index,
         buf_payload_size,
     ):
-        """Construct GluonDeviceTracing (called from IrisDeviceCtx.initialize)."""
+        """Construct GluonDeviceTracing (called from GluonContext.initialize)."""
         self.enabled = enabled
         self.rank = rank
         self.max_events = max_events
@@ -216,7 +197,7 @@ GluonDeviceTracing = aggregate(_GluonDeviceTracingCls)
 
 
 @aggregate
-class IrisDeviceCtx:
+class GluonContext:
     """
     Gluon device-side context that decodes the tensor from Iris.get_device_context().
 
@@ -246,7 +227,7 @@ class IrisDeviceCtx:
     @gluon.jit
     def initialize(context_tensor, tracing: gl.constexpr = False):
         """
-        Initialize `IrisDeviceCtx` from the encoded tensor.
+        Initialize `GluonContext` from the encoded tensor.
 
         The context tensor has the format:
         ``[cur_rank, num_ranks, heap_base_0, heap_base_1, ..., trace_info...]``
@@ -259,7 +240,7 @@ class IrisDeviceCtx:
             tracing: Enable event tracing (constexpr, default: False)
 
         Returns:
-            `IrisDeviceCtx`: Initialized device context
+            `GluonContext`: Initialized device context
         """
         # Decode the tensor: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
         cur_rank = gl.load(context_tensor + 0)
@@ -350,7 +331,7 @@ class IrisDeviceCtx:
                 buf_payload_size=dummy_ptr_i32,
             )
 
-        return IrisDeviceCtx(cur_rank, num_ranks, heap_bases, device_tracing)
+        return GluonContext(cur_rank, num_ranks, heap_bases, device_tracing)
 
     @gluon.jit
     def _translate(self, ptr, from_rank, to_rank):
@@ -377,12 +358,6 @@ class IrisDeviceCtx:
         translated_ptr_byte = to_base_byte + offset
         # Cast to_base back to pointer type
         translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
-
-        # Optimization to vectorize the load/store - similar to iris.py
-        # This enables the compiler to generate dwordx4 or wider loads
-        # Note: Gluon uses scalar multiples, not 2D tuples like Triton
-        # ptr = gl.max_contiguous(gl.multiple_of(ptr, 64), 64)
-        # translated_ptr = gl.max_contiguous(gl.multiple_of(translated_ptr, 64), 64)
 
         return translated_ptr
 
@@ -782,594 +757,3 @@ class IrisDeviceCtx:
         """
         translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         return gl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
-class IrisGluon:
-    """
-    Gluon-based Iris class for multi-GPU communication and memory management.
-
-    This class provides the same functionality as the original Iris class but
-    uses Gluon's `@aggregate` decorator to encapsulate the backend state.
-
-    Args:
-        heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
-
-    Example:
-        >>> ctx = iris_gluon.iris(heap_size=2**31)  # 2GB heap
-        >>> backend = ctx.get_backend()  # Get Gluon aggregate
-        >>> tensor = ctx.zeros(1000, 1000, dtype=torch.float32)
-    """
-
-    def __init__(self, heap_size=1 << 30):
-        # Initialize distributed environment
-        comm, cur_rank, num_ranks = init_distributed()
-        num_gpus = count_devices()
-
-        gpu_id = cur_rank % num_gpus
-        set_device(gpu_id)
-
-        self.comm = comm
-        self.num_ranks = num_ranks
-        self.cur_rank = cur_rank
-        self.gpu_id = gpu_id
-        self.heap_size = heap_size
-        self.device = f"cuda:{gpu_id}"
-
-        # Initialize symmetric heap
-        self.heap = SymmetricHeap(heap_size, gpu_id, cur_rank, num_ranks)
-        self.heap_bases = self.heap.get_heap_bases()
-
-        for i in range(num_ranks):
-            self.debug(f"GPU {i}: Heap base {hex(int(self.heap_bases[i].item()))}")
-
-        distributed_barrier()
-
-        # Initialize tracing manager (disabled by default)
-        self.tracing = Tracing(self)
-
-        # Initialize CCL interface
-        self.ccl = self.CCL(self)
-
-        # Pre-build the device context tensor
-        self._build_device_context()
-
-    class CCL:
-        """
-        Collective Communication Library (CCL) interface for IrisGluon.
-
-        Provides collective operations that can be called as methods on the IrisGluon instance.
-        Example usage:
-            >>> shmem = iris_gluon.iris()
-            >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
-        """
-
-        def __init__(self, iris_instance):
-            """
-            Initialize CCL with a reference to the parent IrisGluon instance.
-
-            Args:
-                iris_instance: The parent IrisGluon instance
-            """
-            self._iris = iris_instance
-
-        def all_to_all(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
-            """
-            All-to-all collective operation.
-
-            Each rank sends a tensor chunk to each other rank and receives
-            a tensor chunk from each other rank. Input/output tensors should have
-            shape (M, N * world_size) where each chunk of N columns corresponds to one rank.
-
-            Args:
-                output_tensor: Output tensor of shape (M, N * world_size)
-                input_tensor: Input tensor of shape (M, N * world_size)
-                group: ProcessGroup or None. If None, uses all ranks in shmem context.
-                       Default: None.
-                async_op: If False, performs a barrier at the end. If True, returns immediately.
-                          Default: False.
-                config: Config instance with kernel parameters (default: None).
-                        If None, uses default Config values.
-                        Set config.use_gluon=True to use Gluon implementation with traffic shaping.
-
-            Example:
-                >>> shmem = iris_gluon.iris()
-                >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
-
-                >>> # Custom configuration with Gluon traffic shaping
-                >>> from iris.ccl import Config
-                >>> config = Config(use_gluon=True, block_size_m=128, block_size_n=32)
-                >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
-            """
-            from iris.ccl.all_to_all import all_to_all as _all_to_all
-
-            _all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
-
-        def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
-            """
-            All-gather collective operation.
-
-            Each rank sends its input tensor to all ranks, and all ranks receive
-            and concatenate all input tensors along dimension 0 (rows), matching
-            torch.distributed.all_gather_into_tensor behavior.
-
-            Args:
-                output_tensor: Output tensor of shape (world_size * M, N) - will contain concatenated inputs
-                input_tensor: Input tensor of shape (M, N) - local rank's data to send
-                group: ProcessGroup or None. If None, uses all ranks in shmem context.
-                       Default: None.
-                async_op: If False, performs a barrier at the end. If True, returns immediately.
-                          Default: False.
-                config: Config instance with kernel parameters (default: None).
-                        If None, uses default Config values.
-
-            Example:
-                >>> shmem = iris_gluon.iris()
-                >>> # Input: (M, N), Output: (world_size * M, N)
-                >>> shmem.ccl.all_gather(output_tensor, input_tensor)
-
-                >>> # Custom configuration
-                >>> from iris.ccl import Config
-                >>> config = Config(block_size_m=128, block_size_n=32)
-                >>> shmem.ccl.all_gather(output_tensor, input_tensor, config=config)
-            """
-            from iris.ccl.all_gather import all_gather as _all_gather
-
-            _all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
-
-        def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
-            """
-            Reduce-scatter collective operation.
-
-            Each rank reduces its assigned tiles from all ranks' inputs and stores
-            the result only to its own output tensor. This is similar to all-reduce
-            but without broadcasting the result to all ranks.
-
-            Args:
-                output_tensor: Output tensor of shape (M, N) - will contain reduced tiles for this rank
-                input_tensor: Input tensor of shape (M, N) - local rank's partial data
-                op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
-                    Default: ReduceOp.SUM.
-                group: ProcessGroup or None. If None, uses all ranks in shmem context.
-                       Default: None.
-                async_op: If False, performs a barrier at the end. If True, returns immediately.
-                          Default: False.
-                config: Config instance with kernel parameters (default: None).
-                        If None, uses default Config values.
-                        Only supports reduce_scatter_variant="two_shot".
-
-            Example:
-                >>> shmem = iris_gluon.iris()
-                >>> shmem.ccl.reduce_scatter(output_tensor, input_tensor)
-
-                >>> # Custom configuration
-                >>> from iris.ccl import Config
-                >>> config = Config(reduce_scatter_variant="two_shot", all_reduce_distribution=1)
-                >>> shmem.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
-            """
-            from iris.ccl.reduce_scatter import reduce_scatter as _reduce_scatter
-            from iris.ccl import ReduceOp
-
-            # Default to SUM if not specified
-            if op is None:
-                op = ReduceOp.SUM
-
-            _reduce_scatter(
-                output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
-            )
-
-    def _log_with_rank(self, level, message):
-        """Helper method to log with rank information injected into the record."""
-        extra = {"iris_rank": self.cur_rank, "iris_num_ranks": self.num_ranks}
-        logger.log(level, message, extra=extra)
-
-    def debug(self, message):
-        """Log a debug message with rank information."""
-        self._log_with_rank(logging.DEBUG, message)
-
-    def info(self, message):
-        """Log an info message with rank information."""
-        self._log_with_rank(logging.INFO, message)
-
-    def warning(self, message):
-        """Log a warning message with rank information."""
-        self._log_with_rank(logging.WARNING, message)
-
-    def error(self, message):
-        """Log an error message with rank information."""
-        self._log_with_rank(logging.ERROR, message)
-
-    def _build_device_context(self):
-        """
-        Build and cache the device context tensor.
-
-        Called during __init__ and again after tracing.enable() to include tracing fields.
-        """
-        # Convert heap_bases to a list for concatenation
-        heap_bases_list = self.heap_bases.tolist()
-
-        # Create context tensor: [cur_rank, num_ranks, heap_base_0, heap_base_1, ...]
-        context_data = [self.cur_rank, self.num_ranks] + heap_bases_list
-
-        # Add tracing info if enabled (same layout as Iris._build_device_context)
-        if self.tracing.enabled:
-            trace_buffer_ptrs = [
-                self.tracing.trace_buffers["event_id"].data_ptr(),
-                self.tracing.trace_buffers["pid"].data_ptr(),
-                self.tracing.trace_buffers["pid_m"].data_ptr(),
-                self.tracing.trace_buffers["pid_n"].data_ptr(),
-                self.tracing.trace_buffers["cur_rank"].data_ptr(),
-                self.tracing.trace_buffers["target_rank"].data_ptr(),
-                self.tracing.trace_buffers["xcc_id"].data_ptr(),
-                self.tracing.trace_buffers["cu_id"].data_ptr(),
-                self.tracing.trace_buffers["timestamp"].data_ptr(),
-                self.tracing.trace_buffers["address"].data_ptr(),
-                self.tracing.trace_buffers["duration_cycles"].data_ptr(),
-                self.tracing.trace_buffers["op_index"].data_ptr(),
-                self.tracing.trace_buffers["payload_size"].data_ptr(),
-            ]
-            context_data += [
-                1,  # trace_enabled = 1 (true)
-                self.tracing.max_events,
-                self.tracing.trace_counter.data_ptr(),
-                self.tracing.op_index_counter.data_ptr(),
-            ] + trace_buffer_ptrs
-        else:
-            # trace_enabled = 0, then pad with zeros so a kernel compiled with
-            # tracing=True can safely decode the same layout without reading
-            # out of bounds. The zeros produce max_events=0 and null pointers,
-            # so the bounds check (event_idx < max_events) in record_event_start
-            # prevents any actual writes.
-            # Padding: 1 (trace_enabled) + 1 (max_events) + 2 (counters) + 13 (buffers) = 17
-            context_data += [0] * 17
-
-        self._device_context = torch.tensor(context_data, dtype=torch.int64, device=self.device)
-
-    def get_device_context(self):
-        """
-        Get the device context tensor for Gluon kernels.
-
-        Returns a tensor encoding: ``[cur_rank, num_ranks, heap_base_0, heap_base_1, ...]``
-        If tracing is enabled, also includes: ``[trace_enabled, max_events, trace_counter_ptr, trace_buffer_ptrs...]``
-
-        Returns:
-            torch.Tensor: Encoded context data as int64 tensor on device
-
-        Example:
-            >>> ctx = iris_gluon.iris()
-            >>> context_tensor = ctx.get_device_context()
-            >>>
-            >>> @gluon.jit
-            >>> def kernel(IrisDeviceCtx: gl.constexpr, context_tensor):
-            >>>     ctx = IrisDeviceCtx.initialize(context_tensor)
-            >>>     data = ctx.load(buffer, 1)
-        """
-        return self._device_context
-
-    def get_backend(self):
-        """
-        Legacy method for backward compatibility.
-        Use get_device_context() for Gluon kernels.
-
-        Returns:
-            torch.Tensor: Device context tensor
-        """
-        return self.get_device_context()
-
-    def get_heap_bases(self):
-        """
-        Return the tensor of symmetric heap base addresses for all ranks.
-
-        Returns:
-            torch.Tensor: A 1D tensor of uint64 heap base addresses
-        """
-        return self.heap_bases
-
-    def barrier(self, group=None):
-        """
-        Synchronize ranks within the specified group using a distributed barrier.
-
-        Args:
-            group (ProcessGroup, optional): The process group to synchronize.
-                If None, uses the default process group (all ranks).
-        """
-        distributed_barrier(group=group)
-
-    def get_device(self):
-        """
-        Get the underlying device where the Iris symmetric heap resides.
-
-        Returns:
-            torch.device: The CUDA device of Iris-managed memory
-        """
-        return self.heap.get_device()
-
-    def get_cu_count(self):
-        """
-        Get the number of compute units (CUs) for the current GPU.
-
-        Returns:
-            int: Number of compute units on this rank's GPU
-        """
-        return get_cu_count(self.gpu_id)
-
-    def get_rank(self):
-        """
-        Get the current rank ID.
-
-        Returns:
-            int: The current rank ID
-        """
-        return self.cur_rank
-
-    def get_num_ranks(self):
-        """
-        Get the total number of ranks.
-
-        Returns:
-            int: The total number of ranks in the distributed system
-        """
-        return self.num_ranks
-
-    def broadcast(self, data, src_rank=0):
-        """
-        Broadcast data from source rank to all ranks.
-
-        Args:
-            data: Data to broadcast (scalar or tensor)
-            src_rank: Source rank for broadcast (default: 0)
-
-        Returns:
-            The broadcasted data
-        """
-        # Check if the value on src_rank is a tensor or array-like
-        if self.cur_rank == src_rank and data is not None:
-            # Explicitly exclude strings and non-numeric types
-            if isinstance(data, (str, dict, bool)):
-                is_tensor = False
-            elif isinstance(data, torch.Tensor):
-                is_tensor = True
-            elif isinstance(data, np.ndarray):
-                is_tensor = True
-            elif isinstance(data, (list, tuple)):
-                # Try to convert list/tuple to tensor to check if it's numeric
-                try:
-                    torch.as_tensor(data)
-                    is_tensor = True
-                except (TypeError, ValueError):
-                    is_tensor = False
-            else:
-                # For other types, try to convert and check
-                try:
-                    test_array = np.asarray(data)
-                    # Check if it's a numeric dtype that torch can handle
-                    if np.issubdtype(test_array.dtype, np.number):
-                        torch.as_tensor(test_array)
-                        is_tensor = True
-                    else:
-                        is_tensor = False
-                except (TypeError, ValueError):
-                    is_tensor = False
-        else:
-            is_tensor = False
-
-        # Broadcast the type decision to all ranks
-        is_tensor = distributed_broadcast_scalar(is_tensor, src_rank)
-
-        if is_tensor:
-            return distributed_broadcast_tensor(data, root=src_rank)
-        else:
-            return distributed_broadcast_scalar(data, src_rank)
-
-    def zeros(
-        self,
-        *size,
-        out=None,
-        dtype=None,
-        layout=torch.strided,
-        device=None,
-        requires_grad=False,
-    ):
-        """
-        Create a tensor filled with zeros on the symmetric heap.
-
-        Args:
-            size: Shape of the tensor
-            dtype: Data type (default: torch.float32)
-            device: Device (must match Iris device)
-            layout: Layout (default: torch.strided)
-            requires_grad: Whether to track gradients
-
-        Returns:
-            torch.Tensor: Zero-initialized tensor on the symmetric heap
-        """
-        return tensor_creation.zeros(
-            self.heap,
-            self.get_device(),
-            size,
-            out=out,
-            dtype=dtype,
-            layout=layout,
-            device=device,
-            requires_grad=requires_grad,
-        )
-
-    def ones(
-        self,
-        *size,
-        out=None,
-        dtype=None,
-        layout=torch.strided,
-        device=None,
-        requires_grad=False,
-    ):
-        """
-        Returns a tensor filled with the scalar value 1, with the shape defined by the variable argument size.
-        The tensor is allocated on the Iris symmetric heap.
-
-        Args:
-            *size (int...): a sequence of integers defining the shape of the output tensor.
-                Can be a variable number of arguments or a collection like a list or tuple.
-
-        Keyword Arguments:
-            out (Tensor, optional): the output tensor.
-            dtype (torch.dtype, optional): the desired data type of returned tensor.
-                Default: if None, uses a global default (see torch.set_default_dtype()).
-            layout (torch.layout, optional): the desired layout of returned Tensor.
-                Default: torch.strided. Note: Iris tensors always use `torch.strided` regardless of this parameter.
-            device (torch.device, optional): the desired device of returned tensor.
-                Default: if None, uses the current device for the default tensor type.
-            requires_grad (bool, optional): If autograd should record operations on the returned tensor.
-                Default: False.
-
-        Example:
-            >>> ctx = iris_gluon.iris(1 << 20)
-            >>> tensor = ctx.ones(2, 3)
-            >>> print(tensor.shape)  # torch.Size([2, 3])
-            >>> print(tensor[0])  # tensor([1., 1., 1.], device='cuda:0')
-        """
-        return tensor_creation.ones(
-            self.heap,
-            self.get_device(),
-            size,
-            out=out,
-            dtype=dtype,
-            layout=layout,
-            device=device,
-            requires_grad=requires_grad,
-        )
-
-    def full(
-        self,
-        size,
-        fill_value,
-        *,
-        out=None,
-        dtype=None,
-        layout=torch.strided,
-        device=None,
-        requires_grad=False,
-    ):
-        """
-        Creates a tensor of size size filled with fill_value. The tensor's dtype is inferred from fill_value.
-        The tensor is allocated on the Iris symmetric heap.
-
-        Args:
-            size (int...): a list, tuple, or torch.Size of integers defining the shape of the output tensor.
-            fill_value (Scalar): the value to fill the output tensor with.
-
-        Keyword Arguments:
-            out (Tensor, optional): the output tensor.
-            dtype (torch.dtype, optional): the desired data type of returned tensor.
-                Default: if None, uses a global default (see torch.set_default_dtype()).
-            layout (torch.layout, optional): the desired layout of returned Tensor.
-                Default: torch.strided. Note: Iris tensors always use `torch.strided` regardless of this parameter.
-            device (torch.device, optional): the desired device of returned tensor.
-                Default: if None, uses the current device for the default tensor type.
-            requires_grad (bool, optional): If autograd should record operations on the returned tensor.
-                Default: False.
-
-        Example:
-            >>> ctx = iris_gluon.iris(1 << 20)
-            >>> tensor = ctx.full((2, 3), 3.14)
-            >>> print(tensor.shape)  # torch.Size([2, 3])
-            >>> print(tensor[0])  # tensor([3.1400, 3.1400, 3.1400], device='cuda:0')
-        """
-        return tensor_creation.full(
-            self.heap,
-            self.get_device(),
-            size,
-            fill_value,
-            out=out,
-            dtype=dtype,
-            layout=layout,
-            device=device,
-            requires_grad=requires_grad,
-        )
-
-    def zeros_like(
-        self,
-        input,
-        *,
-        dtype=None,
-        layout=None,
-        device=None,
-        requires_grad=False,
-        memory_format=torch.preserve_format,
-    ):
-        """
-        Returns a tensor filled with the scalar value 0, with the same size as input, allocated on the Iris symmetric heap.
-
-        Args:
-            input (Tensor): the size of input will determine size of the output tensor.
-
-        Keyword Arguments:
-            dtype (torch.dtype, optional): the desired data type of returned Tensor.
-                Default: if None, defaults to the dtype of input.
-            layout (torch.layout, optional): the desired layout of returned tensor.
-                Default: if None, defaults to the layout of input. Note: Iris tensors are always contiguous (strided).
-            device (torch.device, optional): the desired device of returned tensor.
-                Default: if None, defaults to the device of input. Must be compatible with this Iris instance.
-            requires_grad (bool, optional): If autograd should record operations on the returned tensor.
-                Default: False.
-            memory_format (torch.memory_format, optional): the desired memory format of returned Tensor.
-                Default: torch.preserve_format.
-
-        Example:
-            >>> ctx = iris_gluon.iris(1 << 20)
-            >>> input_tensor = ctx.ones(2, 3)
-            >>> zeros_tensor = ctx.zeros_like(input_tensor)
-            >>> print(zeros_tensor.shape)  # torch.Size([2, 3])
-        """
-        return tensor_creation.zeros_like(
-            self.heap,
-            self.get_device(),
-            input,
-            dtype=dtype,
-            layout=layout,
-            device=device,
-            requires_grad=requires_grad,
-            memory_format=memory_format,
-        )
-
-    def is_symmetric(self, tensor: torch.Tensor) -> bool:
-        """
-        Check if a tensor is allocated on the symmetric heap.
-
-        This method checks whether a tensor resides in the symmetric heap, making it
-        accessible for RMA operations across ranks. Use this to validate tensors before
-        performing distributed operations.
-
-        Args:
-            tensor (torch.Tensor): PyTorch tensor to check
-
-        Returns:
-            bool: True if tensor is on the symmetric heap, False otherwise
-
-        Example:
-            >>> import iris.experimental.iris_gluon as iris_gl
-            >>> ctx = iris_gl.iris(heap_size=2**30)
-            >>> # Create a symmetric tensor
-            >>> symmetric_tensor = ctx.zeros(1000, dtype=torch.float32)
-            >>> ctx.is_symmetric(symmetric_tensor)  # True
-            >>>
-            >>> # Create an external tensor (not on symmetric heap)
-            >>> external_tensor = torch.zeros(1000, dtype=torch.float32, device='cuda')
-            >>> ctx.is_symmetric(external_tensor)   # False
-        """
-        return self.heap.is_symmetric(tensor)
-
-
-def iris(heap_size=1 << 30):
-    """
-    Create and return a Gluon-based Iris instance with the specified heap size.
-    Args:
-        heap_size (int): Size of the heap in bytes. Defaults to 1GB.
-    Returns:
-        IrisGluon: An initialized Gluon-based Iris instance
-    Example:
-        >>> import iris.iris_gluon as iris_gl
-        >>> ctx = iris_gl.iris(2**30)  # 1GB heap
-        >>> backend = ctx.get_backend()
-        >>> tensor = ctx.zeros(1024, 1024)
-    """
-    return IrisGluon(heap_size)

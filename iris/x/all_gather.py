@@ -10,7 +10,7 @@ Gathers tiles from all ranks and concatenates them along the output dimension.
 import triton
 import triton.language as tl
 import iris
-from iris.iris import DeviceContext
+from iris.context import TritonContext
 from .core import Tile, TensorView
 
 
@@ -19,7 +19,7 @@ def all_gather(
     tile: Tile,
     dst_view: TensorView,
     dim: tl.constexpr,
-    ctx: DeviceContext,
+    ctx: TritonContext,
 ):
     """
     Tile-level all-gather operation (scatter pre-computed data mode).
@@ -31,7 +31,7 @@ def all_gather(
         tile: Tile object with position, dimensions, and computed data in tile.data.
         dst_view: TensorView for destination tensor after gather (full gathered size).
         dim: Dimension to gather along (0 for rows, 1 for columns).
-        ctx: DeviceContext with rank, world_size, and heap_bases.
+        ctx: TritonContext with rank, world_size, and heap_bases.
 
     Layout:
         - dim=0: Current rank's rows go to output[ctx.rank * M_local : (ctx.rank+1) * M_local, :]

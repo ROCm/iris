@@ -5,12 +5,13 @@ import torch
 import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.context import GluonContext
 
 
 @gluon.jit
 def copy_get_kernel(
-    IrisDeviceCtx: gl.constexpr,
+    GluonContext: gl.constexpr,
     context_tensor,
     data,
     results,
@@ -19,7 +20,7 @@ def copy_get_kernel(
     BLOCK_SIZE: gl.constexpr,
 ):
     """GET: cur_rank == to_rank (pull from remote)"""
-    ctx = IrisDeviceCtx.initialize(context_tensor)
+    ctx = GluonContext.initialize(context_tensor)
     pid = gl.program_id(0)
     block_start = pid * BLOCK_SIZE
     layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
@@ -34,7 +35,7 @@ def copy_get_kernel(
 
 @gluon.jit
 def copy_put_kernel(
-    IrisDeviceCtx: gl.constexpr,
+    GluonContext: gl.constexpr,
     context_tensor,
     data,
     results,
@@ -43,7 +44,7 @@ def copy_put_kernel(
     BLOCK_SIZE: gl.constexpr,
 ):
     """PUT: cur_rank == from_rank (push to remote)"""
-    ctx = IrisDeviceCtx.initialize(context_tensor)
+    ctx = GluonContext.initialize(context_tensor)
     pid = gl.program_id(0)
     block_start = pid * BLOCK_SIZE
     layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
@@ -58,7 +59,7 @@ def copy_put_kernel(
 
 @gluon.jit
 def copy_local_kernel(
-    IrisDeviceCtx: gl.constexpr,
+    GluonContext: gl.constexpr,
     context_tensor,
     data,
     results,
@@ -67,7 +68,7 @@ def copy_local_kernel(
     BLOCK_SIZE: gl.constexpr,
 ):
     """LOCAL: from_rank == to_rank == cur_rank"""
-    ctx = IrisDeviceCtx.initialize(context_tensor)
+    ctx = GluonContext.initialize(context_tensor)
     pid = gl.program_id(0)
     block_start = pid * BLOCK_SIZE
     layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
@@ -100,7 +101,7 @@ def copy_local_kernel(
 )
 def test_copy_get(dtype, BLOCK_SIZE):
     """Test GET operation: cur_rank == to_rank"""
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
@@ -113,7 +114,7 @@ def test_copy_get(dtype, BLOCK_SIZE):
     results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=dtype)
     grid = (1,)
     copy_get_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        GluonContext,
         context_tensor,
         data,
         results,
@@ -168,7 +169,7 @@ def test_copy_get(dtype, BLOCK_SIZE):
 )
 def test_copy_put(dtype, BLOCK_SIZE):
     """Test PUT operation: cur_rank == from_rank"""
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
@@ -181,7 +182,7 @@ def test_copy_put(dtype, BLOCK_SIZE):
     results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=dtype)
     grid = (1,)
     copy_put_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        GluonContext,
         context_tensor,
         data,
         results,
@@ -238,7 +239,7 @@ def test_copy_put(dtype, BLOCK_SIZE):
 )
 def test_copy_local(dtype, BLOCK_SIZE):
     """Test LOCAL operation: from_rank == to_rank == cur_rank"""
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
@@ -251,7 +252,7 @@ def test_copy_local(dtype, BLOCK_SIZE):
     results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=dtype)
     grid = (1,)
     copy_local_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        GluonContext,
         context_tensor,
         data,
         results,

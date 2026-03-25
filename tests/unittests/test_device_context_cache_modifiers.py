@@ -6,7 +6,7 @@ import triton
 import triton.language as tl
 import pytest
 import iris
-from iris import DeviceContext
+from iris.context import TritonContext
 from itertools import product
 
 
@@ -24,8 +24,8 @@ def device_context_load_cache_modifier_kernel(
     cache_modifier: tl.constexpr,
     volatile: tl.constexpr,
 ):
-    """Test DeviceContext.load() with cache_modifier and volatile."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.load() with cache_modifier and volatile."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
     partner = int((cur_rank + num_ranks // 2) % num_ranks)
@@ -55,8 +55,8 @@ def device_context_store_cache_modifier_kernel(
     BLOCK_SIZE: tl.constexpr,
     cache_modifier: tl.constexpr,
 ):
-    """Test DeviceContext.store() with cache_modifier."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.store() with cache_modifier."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
 
@@ -79,8 +79,8 @@ def device_context_get_cache_modifier_kernel(
     load_cache_modifier: tl.constexpr,
     store_cache_modifier: tl.constexpr,
 ):
-    """Test DeviceContext.get() with load_cache_modifier and store_cache_modifier."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.get() with load_cache_modifier and store_cache_modifier."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
     block_start = pid * BLOCK_SIZE
@@ -115,8 +115,8 @@ def device_context_put_cache_modifier_kernel(
     load_cache_modifier: tl.constexpr,
     store_cache_modifier: tl.constexpr,
 ):
-    """Test DeviceContext.put() with load_cache_modifier and store_cache_modifier."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.put() with load_cache_modifier and store_cache_modifier."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
     block_start = pid * BLOCK_SIZE
@@ -144,8 +144,8 @@ def device_context_copy_local_read_remote_write_kernel(
     load_cache_modifier: tl.constexpr,
     store_cache_modifier: tl.constexpr,
 ):
-    """Test DeviceContext.copy() with cache modifiers (local read, remote write)."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.copy() with cache modifiers (local read, remote write)."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
     block_start = pid * BLOCK_SIZE
@@ -177,8 +177,8 @@ def device_context_copy_remote_read_local_write_kernel(
     load_cache_modifier: tl.constexpr,
     store_cache_modifier: tl.constexpr,
 ):
-    """Test DeviceContext.copy() with cache modifiers (remote read, local write)."""
-    ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+    """Test TritonContext.copy() with cache modifiers (remote read, local write)."""
+    ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
 
     pid = tl.program_id(0)
     block_start = pid * BLOCK_SIZE
@@ -211,7 +211,7 @@ VOLATILE_OPTIONS = [False, True]
 
 @pytest.mark.parametrize("cache_modifier,volatile", list(product(LOAD_CACHE_MODIFIERS, VOLATILE_OPTIONS)))
 def test_device_context_load_cache_modifiers(cache_modifier, volatile):
-    """Test DeviceContext.load() with various cache modifiers and volatile settings."""
+    """Test TritonContext.load() with various cache modifiers and volatile settings."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -245,7 +245,7 @@ def test_device_context_load_cache_modifiers(cache_modifier, volatile):
 
 @pytest.mark.parametrize("cache_modifier", STORE_CACHE_MODIFIERS)
 def test_device_context_store_cache_modifiers_local(cache_modifier):
-    """Test DeviceContext.store() local (from_rank == to_rank) with various cache modifiers."""
+    """Test TritonContext.store() local (from_rank == to_rank) with various cache modifiers."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -271,7 +271,7 @@ def test_device_context_store_cache_modifiers_local(cache_modifier):
         BLOCK_SIZE: tl.constexpr,
         cache_modifier: tl.constexpr,
     ):
-        ctx = DeviceContext.initialize(context_tensor, cur_rank, num_ranks)
+        ctx = TritonContext.initialize(context_tensor, cur_rank, num_ranks)
         pid = tl.program_id(0)
         offsets = tl.arange(0, BLOCK_SIZE)
         mask = offsets < BLOCK_SIZE
@@ -293,7 +293,7 @@ def test_device_context_store_cache_modifiers_local(cache_modifier):
 
 @pytest.mark.parametrize("cache_modifier", STORE_CACHE_MODIFIERS)
 def test_device_context_store_cache_modifiers_remote(cache_modifier):
-    """Test DeviceContext.store() remote (from_rank != to_rank) with various cache modifiers."""
+    """Test TritonContext.store() remote (from_rank != to_rank) with various cache modifiers."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -332,7 +332,7 @@ def test_device_context_store_cache_modifiers_remote(cache_modifier):
     "load_cache_modifier,store_cache_modifier", list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS))
 )
 def test_device_context_get_cache_modifiers(load_cache_modifier, store_cache_modifier):
-    """Test DeviceContext.get() with various cache modifiers."""
+    """Test TritonContext.get() with various cache modifiers."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -369,7 +369,7 @@ def test_device_context_get_cache_modifiers(load_cache_modifier, store_cache_mod
     "load_cache_modifier,store_cache_modifier", list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS))
 )
 def test_device_context_put_cache_modifiers_local(load_cache_modifier, store_cache_modifier):
-    """Test DeviceContext.put() local (from_rank == to_rank) with various cache modifiers."""
+    """Test TritonContext.put() local (from_rank == to_rank) with various cache modifiers."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -411,7 +411,7 @@ def test_device_context_put_cache_modifiers_local(load_cache_modifier, store_cac
     "load_cache_modifier,store_cache_modifier", list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS))
 )
 def test_device_context_put_cache_modifiers_remote(load_cache_modifier, store_cache_modifier):
-    """Test DeviceContext.put() remote (from_rank != to_rank) with various cache modifiers."""
+    """Test TritonContext.put() remote (from_rank != to_rank) with various cache modifiers."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -460,7 +460,7 @@ def test_device_context_put_cache_modifiers_remote(load_cache_modifier, store_ca
     "load_cache_modifier,store_cache_modifier", list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS))
 )
 def test_device_context_copy_local_read_remote_write(load_cache_modifier, store_cache_modifier):
-    """Test DeviceContext.copy() local read → remote write with various cache modifiers."""
+    """Test TritonContext.copy() local read → remote write with various cache modifiers."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
@@ -499,7 +499,7 @@ def test_device_context_copy_local_read_remote_write(load_cache_modifier, store_
     list(product(LOAD_CACHE_MODIFIERS, STORE_CACHE_MODIFIERS)),
 )
 def test_device_context_copy_remote_read_local_write(load_cache_modifier, store_cache_modifier):
-    """Test DeviceContext.copy() remote read → local write with various cache modifiers."""
+    """Test TritonContext.copy() remote read → local write with various cache modifiers."""
     ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()

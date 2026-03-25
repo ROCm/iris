@@ -5,12 +5,13 @@ import torch
 import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.context import GluonContext
 
 
 @gluon.jit
 def atomic_add_kernel(
-    IrisDeviceCtx: gl.constexpr,
+    GluonContext: gl.constexpr,
     context_tensor,
     results,
     sem: gl.constexpr,
@@ -19,7 +20,7 @@ def atomic_add_kernel(
     num_ranks: gl.constexpr,
     BLOCK_SIZE: gl.constexpr,
 ):
-    ctx = IrisDeviceCtx.initialize(context_tensor)
+    ctx = GluonContext.initialize(context_tensor)
     pid = gl.program_id(0)
     block_start = pid * BLOCK_SIZE
     layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
@@ -77,7 +78,7 @@ def atomic_add_kernel(
 )
 def test_atomic_add_api(dtype, sem, scope, BLOCK_SIZE):
     # TODO: Adjust heap size.
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
@@ -88,7 +89,7 @@ def test_atomic_add_api(dtype, sem, scope, BLOCK_SIZE):
 
     grid = (1,)
     atomic_add_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        GluonContext,
         context_tensor,
         results,
         sem,

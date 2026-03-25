@@ -19,12 +19,13 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 import triton
 
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.context import GluonContext
 
 
 @gluon.jit
 def producer_kernel(
-    IrisDeviceCtx: gl.constexpr,  # The aggregate class
+    GluonContext: gl.constexpr,  # The aggregate class
     context_tensor,  # Encoded context
     source_buffer,  # gl.tensor: pointer to source data
     target_buffer,  # gl.tensor: pointer to target data
@@ -35,7 +36,7 @@ def producer_kernel(
     BLOCK_SIZE: gl.constexpr,
 ):
     # Initialize device context from tensor
-    ctx = IrisDeviceCtx.initialize(context_tensor)
+    ctx = GluonContext.initialize(context_tensor)
 
     pid = gl.program_id(0)
 
@@ -65,7 +66,7 @@ def producer_kernel(
 
 @gluon.jit
 def consumer_kernel(
-    IrisDeviceCtx: gl.constexpr,  # The aggregate class
+    GluonContext: gl.constexpr,  # The aggregate class
     context_tensor,  # Encoded context
     buffer,  # gl.tensor: pointer to shared buffer (read from target_rank)
     flag,  # gl.tensor: sync flag per block
@@ -74,7 +75,7 @@ def consumer_kernel(
     BLOCK_SIZE: gl.constexpr,
 ):
     # Initialize device context from tensor
-    ctx = IrisDeviceCtx.initialize(context_tensor)
+    ctx = GluonContext.initialize(context_tensor)
 
     pid = gl.program_id(0)
 
@@ -153,7 +154,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     dist.init_process_group(backend=backend, init_method=init_url, world_size=world_size, rank=local_rank)
 
     # Main benchmark logic using Gluon-based Iris
-    shmem = iris_gl.iris(args["heap_size"])
+    shmem = iris.iris(args["heap_size"])
     dtype = torch_dtype_from_str(args["datatype"])
     cur_rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
@@ -190,7 +191,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     if cur_rank == producer_rank:
         shmem.info(f"Rank {cur_rank} is sending data to rank {consumer_rank} (Gluon version).")
         producer_kernel[grid](
-            iris_gl.IrisDeviceCtx,  # Pass the aggregate class
+            GluonContext,  # Pass the aggregate class
             context_tensor,  # Pass the encoded context
             source_buffer,
             destination_buffer,
@@ -204,7 +205,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     else:
         shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank} (Gluon version).")
         consumer_kernel[grid](
-            iris_gl.IrisDeviceCtx,  # Pass the aggregate class
+            GluonContext,  # Pass the aggregate class
             context_tensor,  # Pass the encoded context
             destination_buffer,
             flags,

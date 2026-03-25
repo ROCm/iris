@@ -14,7 +14,7 @@ Use `gather` when you want to consume the tile immediately without materializing
 import triton
 import triton.language as tl
 import iris
-from iris.iris import DeviceContext
+from iris.context import TritonContext
 from .core import Tile, TensorView
 
 
@@ -23,7 +23,7 @@ def gather(
     tile: Tile,
     src_view: TensorView,
     source_rank: tl.constexpr,
-    ctx: DeviceContext,
+    ctx: TritonContext,
 ):
     """
     Tile-level gather from a specific rank.
@@ -36,7 +36,7 @@ def gather(
         tile: Tile object with position and dimensions.
         src_view: TensorView for source tensor on source_rank.
         source_rank: Specific rank to load from (constexpr).
-        ctx: DeviceContext with rank, world_size, and heap_bases.
+        ctx: TritonContext with rank, world_size, and heap_bases.
 
     Returns:
         Loaded tile data as a tensor.
