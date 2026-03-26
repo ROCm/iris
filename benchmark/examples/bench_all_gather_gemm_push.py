@@ -29,17 +29,21 @@ def all_gather_gemm_push(state, ctx):
     dtype = state["dtype"]
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
+    if K % world_size != 0:
+        state.skip(f"K={K} not divisible by world_size={world_size}")
+        return
     K_local = K // world_size
+    device = torch.device(f"cuda:{rank}")
 
     BLK_M, BLK_N, BLK_K, gsize_m = 256, 64, 64, 6
-    num_sms = torch.cuda.get_device_properties(rank).multi_processor_count
+    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
 
     # Allocate tensors
     A_local = ctx.empty((M, K_local), dtype=dtype)
     A_local.fill_(1.0)
     A_inbox = ctx.empty((world_size, M, K_local), dtype=dtype)
-    B = torch.randn((K, N), device="cuda", dtype=dtype)
-    C = torch.empty((M, N), device="cuda", dtype=dtype)
+    B = torch.randn((K, N), device=device, dtype=dtype)
+    C = torch.empty((M, N), device=device, dtype=dtype)
 
     num_m_tiles = (M + BLK_M - 1) // BLK_M
     num_k_tiles = (K_local + BLK_K - 1) // BLK_K

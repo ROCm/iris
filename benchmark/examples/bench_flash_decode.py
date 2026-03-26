@@ -60,14 +60,16 @@ def flash_decode(state, ctx):
         max_allowed_batch=num_seqs,
     )
 
+    device = torch.device(f"cuda:{rank}")
+
     num_blocks = (kv_len + block_size - 1) // block_size
-    query = torch.randn(num_seqs, num_heads, head_dim, dtype=dtype).cuda()
-    key_cache = torch.randn(num_blocks, block_size, num_kv_heads, head_dim, dtype=dtype).cuda()
-    value_cache = torch.randn(num_blocks, block_size, num_kv_heads, head_dim, dtype=dtype).cuda()
-    block_tables = torch.arange(num_blocks, dtype=torch.int32).repeat(num_seqs, 1).cuda()
+    query = torch.randn(num_seqs, num_heads, head_dim, dtype=dtype, device=device)
+    key_cache = torch.randn(num_blocks, block_size, num_kv_heads, head_dim, dtype=dtype, device=device)
+    value_cache = torch.randn(num_blocks, block_size, num_kv_heads, head_dim, dtype=dtype, device=device)
+    block_tables = torch.arange(num_blocks, dtype=torch.int32, device=device).repeat(num_seqs, 1)
 
     kv_lens_per_rank = [kv_len] * num_seqs
-    kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32).cuda()
+    kv_lens_tensor = torch.tensor(kv_lens_per_rank, dtype=torch.int32, device=device)
     global_kv_lens = kv_lens_tensor.unsqueeze(0).repeat(world_size, 1)
 
     state.add_counter("global_kv_len", float(kv_len * world_size))

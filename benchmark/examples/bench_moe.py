@@ -44,6 +44,7 @@ def moe(state, ctx):
     n_tokens = bpe * n_expts_tot // n_expts_act
     if n_tokens % world_size != 0:
         state.skip(f"n_tokens={n_tokens} not divisible by world_size={world_size}")
+        return
 
     n_tokens_local = n_tokens // world_size
     device = torch.device(f"cuda:{rank}")
@@ -95,8 +96,10 @@ def moe(state, ctx):
 
     # Disable refresh_peer_access during bench iterations.
     ctx.heap.refresh_peer_access = lambda: None
-
-    state.exec(run_dist, preamble_fn=_preamble)
+    try:
+        state.exec(run_dist, preamble_fn=_preamble)
+    finally:
+        ctx.heap.refresh_peer_access = saved_refresh
 
 
 if __name__ == "__main__":
