@@ -120,6 +120,7 @@ class TuneState:
 
 # Decorators
 
+
 def search_space(name: str, values: list[Any]):
     """Declare a Config field to sweep during tuning.
 

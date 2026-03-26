@@ -129,18 +129,14 @@ def _format_console(results: list[TuneResult], top_k: int) -> str:
         skipped_count = sum(1 for r in tune_results if r.skipped)
 
         lines.append(f"\n{tune_name}")
-        lines.append(
-            f"  {len(valid)} configs benchmarked, {skipped_count} pruned/skipped"
-        )
+        lines.append(f"  {len(valid)} configs benchmarked, {skipped_count} pruned/skipped")
 
         if not valid:
             lines.append("  No valid configs found.")
             continue
 
         # Show fixed params
-        param_strs = [
-            f"{k}={_dtype_str(v)}" for k, v in valid[0].params.items()
-        ]
+        param_strs = [f"{k}={_dtype_str(v)}" for k, v in valid[0].params.items()]
         if param_strs:
             lines.append(f"  params: {', '.join(param_strs)}")
         lines.append(f"  world_size: {valid[0].world_size}")
@@ -152,17 +148,13 @@ def _format_console(results: list[TuneResult], top_k: int) -> str:
             ("rank", lambda r, _i=[0]: str((_i.__setitem__(0, _i[0] + 1), _i[0])[1])),
         ]
         for ck in config_keys:
-            cols.append(
-                (ck, lambda r, _ck=ck: str(r.config_kwargs.get(_ck, "")))
-            )
+            cols.append((ck, lambda r, _ck=ck: str(r.config_kwargs.get(_ck, ""))))
         cols.append(("GPU Time (ms)", lambda r: f"{r.gpu_time_ms:.3f}"))
         if any(r.bandwidth_gbps is not None for r in valid):
             cols.append(
                 (
                     "BW (GB/s)",
-                    lambda r: f"{r.bandwidth_gbps:.1f}"
-                    if r.bandwidth_gbps is not None
-                    else "",
+                    lambda r: f"{r.bandwidth_gbps:.1f}" if r.bandwidth_gbps is not None else "",
                 )
             )
         if any(r.tflops is not None for r in valid):
@@ -276,8 +268,7 @@ def _run_tune_worker(
             for ax in tdef.search_axes:
                 total *= len(ax.values)
             print(
-                f"[tune] {tdef.name}: {len(configs)} configs "
-                f"(pruned {total - len(configs)} of {total})",
+                f"[tune] {tdef.name}: {len(configs)} configs (pruned {total - len(configs)} of {total})",
                 file=sys.stderr,
             )
 
@@ -323,10 +314,7 @@ def _run_tune_worker(
                 continue
 
             if state._exec_fn is None:
-                raise RuntimeError(
-                    f"Tunable '{tdef.name}' with config {config_kwargs} "
-                    f"did not call state.exec(fn)."
-                )
+                raise RuntimeError(f"Tunable '{tdef.name}' with config {config_kwargs} did not call state.exec(fn).")
 
             try:
                 times = _iris.do_bench(
@@ -473,8 +461,7 @@ def main(argv: list[str] | None = None) -> None:
         num_ranks = torch.cuda.device_count() if torch.cuda.is_available() else 1
 
     print(
-        f"[tune] Starting with {num_ranks} ranks, "
-        f"{len(tunables)} tunable(s) registered",
+        f"[tune] Starting with {num_ranks} ranks, {len(tunables)} tunable(s) registered",
         file=sys.stderr,
     )
 
@@ -518,9 +505,7 @@ def main(argv: list[str] | None = None) -> None:
                 continue
 
             world_size = tune_results[0].world_size
-            cache_key = _build_cache_key(
-                tdef.name, tdef.fixed_params, tdef.search_axes, world_size, gpu_arch
-            )
+            cache_key = _build_cache_key(tdef.name, tdef.fixed_params, tdef.search_axes, world_size, gpu_arch)
             cache_data = []
             for r in tune_results:
                 cache_data.append(
