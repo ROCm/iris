@@ -21,7 +21,6 @@ Cost model:
 """
 
 import math
-import os
 import weakref
 from collections import defaultdict, deque
 from threading import Lock
@@ -42,7 +41,6 @@ from ..hip import (
     mem_address_free,
     mem_release,
     mem_set_access,
-    mem_import_from_shareable_handle,
     hipMemAccessDesc,
     hipMemLocationTypeDevice,
     hipMemAccessFlagsProtReadWrite,
@@ -332,8 +330,10 @@ class VMemChunkedAllocator(BaseAllocator):
             # hipImportExternalMemory takes ownership of the fd, so do NOT
             # close it after this call.
             mapped_ptr, ext_mem_handle = import_dmabuf_handle(
-                dmabuf_fd, export_size,
-                original_ptr=external_ptr, base_ptr=alloc_base,
+                dmabuf_fd,
+                export_size,
+                original_ptr=external_ptr,
+                base_ptr=alloc_base,
             )
 
             # Track for cleanup and ownership detection
