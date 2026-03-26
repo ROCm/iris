@@ -25,7 +25,6 @@ import itertools
 import json
 import random
 import statistics
-import sys
 from pathlib import Path
 
 import torch
@@ -68,6 +67,7 @@ TUNE_GRIDS: dict[str, dict] = {
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
+
 
 def parse_int_list(value: str) -> list[int]:
     return [int(x.strip()) for x in value.split(",") if x.strip()]
@@ -129,13 +129,9 @@ def _config_from_grid_params(variant: str, params: dict, args: dict) -> Config |
     if args["num_xcds"] is not None:
         config_kwargs["num_xcds"] = args["num_xcds"]
     if variant == "two_shot":
-        config_kwargs["all_reduce_distribution"] = params.get(
-            "all_reduce_distribution", args["distribution"]
-        )
+        config_kwargs["all_reduce_distribution"] = params.get("all_reduce_distribution", args["distribution"])
     if variant == "ring":
-        config_kwargs["all_reduce_num_rings"] = params.get(
-            "all_reduce_num_rings", args["num_rings"]
-        )
+        config_kwargs["all_reduce_num_rings"] = params.get("all_reduce_num_rings", args["num_rings"])
     try:
         return Config(**config_kwargs)
     except (ValueError, Exception):
@@ -158,6 +154,7 @@ def _build_grid_configs(variant: str, args: dict) -> list[tuple[dict, Config]]:
 
 
 # ── Measurement ──────────────────────────────────────────────────────────
+
 
 def measure_case(
     *,
@@ -276,9 +273,16 @@ def measure_case(
 
 # ── Validation ───────────────────────────────────────────────────────────
 
+
 def validate_all_reduce(
-    M: int, N: int, dtype: torch.dtype, variant: str,
-    rank: int, world_size: int, shmem, args: dict,
+    M: int,
+    N: int,
+    dtype: torch.dtype,
+    variant: str,
+    rank: int,
+    world_size: int,
+    shmem,
+    args: dict,
 ):
     config = make_config(args, variant)
     input_tensor = shmem.zeros((M, N), dtype=dtype)
@@ -289,14 +293,19 @@ def validate_all_reduce(
     expected_tensor.fill_(expected_sum)
 
     workspace = shmem.ccl.all_reduce_preamble(
-        output_tensor, input_tensor, config=config,
+        output_tensor,
+        input_tensor,
+        config=config,
     )
     shmem.barrier()
 
     torch.cuda.nvtx.range_push("All-Reduce-Validate")
     shmem.ccl.all_reduce(
-        output_tensor, input_tensor,
-        config=config, async_op=False, workspace=workspace,
+        output_tensor,
+        input_tensor,
+        config=config,
+        async_op=False,
+        workspace=workspace,
     )
     torch.cuda.nvtx.range_pop()
     torch.cuda.synchronize()
@@ -315,9 +324,18 @@ def validate_all_reduce(
 
 # ── Tuning ───────────────────────────────────────────────────────────────
 
+
 def tune_variant_for_m(
-    *, variant: str, phase: str, M: int, N: int, dtype: torch.dtype,
-    rank: int, world_size: int, shmem, args: dict,
+    *,
+    variant: str,
+    phase: str,
+    M: int,
+    N: int,
+    dtype: torch.dtype,
+    rank: int,
+    world_size: int,
+    shmem,
+    args: dict,
 ) -> Config:
     fallback = make_config(args, variant)
     grid_configs = _build_grid_configs(variant, args)
@@ -331,8 +349,15 @@ def tune_variant_for_m(
     for idx, (params, cfg) in enumerate(grid_configs):
         try:
             result = measure_case(
-                phase=phase, M=M, N=N, dtype=dtype, variant=variant,
-                rank=rank, world_size=world_size, shmem=shmem, args=args,
+                phase=phase,
+                M=M,
+                N=N,
+                dtype=dtype,
+                variant=variant,
+                rank=rank,
+                world_size=world_size,
+                shmem=shmem,
+                args=args,
                 config=cfg,
                 warmup=args["tune_warmup"],
                 iters=args["tune_iters"],
@@ -362,8 +387,11 @@ def tune_variant_for_m(
 
 # ── Markdown rendering ───────────────────────────────────────────────────
 
+
 def render_markdown(
-    results: list[dict], world_size: int, dtype_name: str,
+    results: list[dict],
+    world_size: int,
+    dtype_name: str,
     best_configs: dict[tuple, Config] | None = None,
 ) -> str:
     lines: list[str] = []
@@ -408,9 +436,7 @@ def render_markdown(
     if best_configs:
         lines.append("## Tuned Configs")
         lines.append("")
-        lines.append(
-            "| M | Variant | comm_sms | block_size_m | block_size_n | swizzle_size | extra |"
-        )
+        lines.append("| M | Variant | comm_sms | block_size_m | block_size_n | swizzle_size | extra |")
         lines.append("|---:|---|---:|---:|---:|---:|---|")
         for (M, variant), cfg in sorted(best_configs.items()):
             extra_parts = []
@@ -430,6 +456,7 @@ def render_markdown(
 
 # ── Argument parsing ─────────────────────────────────────────────────────
 
+
 def parse_args() -> dict:
     parser = argparse.ArgumentParser(
         description="Benchmark iris-ccl all-reduce (single-point or sweep mode).",
@@ -438,7 +465,9 @@ def parse_args() -> dict:
 
     # YAML config — overrides defaults, CLI flags override YAML
     parser.add_argument(
-        "--config", type=str, default=None,
+        "--config",
+        type=str,
+        default=None,
         help="Path to YAML config file (see configs/ for examples)",
     )
 
@@ -446,24 +475,32 @@ def parse_args() -> dict:
     parser.add_argument("-m", type=int, default=16384, help="Number of rows (single-point mode)")
     parser.add_argument("-n", type=int, default=16384, help="Number of columns")
     parser.add_argument(
-        "--sweep-ms", type=str, default=None,
+        "--sweep-ms",
+        type=str,
+        default=None,
         help="Comma-separated M values to sweep (enables sweep mode, ignores -m)",
     )
 
     # Variant
     parser.add_argument(
-        "--variant", type=str, default="two_shot",
+        "--variant",
+        type=str,
+        default="two_shot",
         choices=["atomic", "ring", "two_shot", "one_shot", "spinlock"],
         help="All-reduce variant (single-point mode)",
     )
     parser.add_argument(
-        "--variants", type=str, default=None,
+        "--variants",
+        type=str,
+        default=None,
         help="Comma-separated variants for sweep mode (e.g. rccl,two_shot,ring,one_shot)",
     )
 
     # Dtype
     parser.add_argument(
-        "--datatype", type=str, default="fp16",
+        "--datatype",
+        type=str,
+        default="fp16",
         choices=["fp16", "fp32", "bf16"],
         help="Datatype of tensors",
     )
@@ -484,7 +521,9 @@ def parse_args() -> dict:
     parser.add_argument("--iters", type=int, default=200, help="Measured iterations")
     parser.add_argument("-r", "--num-ranks", type=int, default=8, help="Number of ranks")
     parser.add_argument(
-        "--init-url", type=str, default="tcp://127.0.0.1:29527",
+        "--init-url",
+        type=str,
+        default="tcp://127.0.0.1:29527",
         help="Initialization URL for distributed setup",
     )
 
@@ -510,6 +549,7 @@ def parse_args() -> dict:
     # ── Apply YAML config as base, CLI overrides on top ──
     if args["config"] is not None:
         import yaml
+
         with open(args["config"]) as f:
             yaml_cfg = yaml.safe_load(f)
         if yaml_cfg is None:
@@ -562,11 +602,15 @@ def _is_sweep_mode(args: dict) -> bool:
 
 # ── Single-point worker (original benchmark.py logic) ────────────────────
 
+
 def _single_point_worker(local_rank: int, world_size: int, init_url: str, args: dict):
     backend = "nccl" if torch.cuda.is_available() else "gloo"
     dist.init_process_group(
-        backend=backend, init_method=init_url, world_size=world_size,
-        rank=local_rank, device_id=torch.device(f"cuda:{local_rank}"),
+        backend=backend,
+        init_method=init_url,
+        world_size=world_size,
+        rank=local_rank,
+        device_id=torch.device(f"cuda:{local_rank}"),
     )
 
     shmem = iris.iris(args["heap_size"])
@@ -613,23 +657,27 @@ def _single_point_worker(local_rank: int, world_size: int, init_url: str, args: 
     def run_experiment():
         nonlocal kernel_timing, workspace
         workspace = shmem.ccl.all_reduce_preamble(
-            output_tensor, input_tensor, config=config, workspace=workspace,
+            output_tensor,
+            input_tensor,
+            config=config,
+            workspace=workspace,
         )
         shmem.barrier()
         torch.cuda.nvtx.range_push("All-Reduce")
         with torch.cuda.stream(comm_stream):
             kernel_timing["all_reduce"]["start_event"].record()
             shmem.ccl.all_reduce(
-                output_tensor, input_tensor,
-                config=config, async_op=False, workspace=workspace,
+                output_tensor,
+                input_tensor,
+                config=config,
+                async_op=False,
+                workspace=workspace,
             )
             kernel_timing["all_reduce"]["end_event"].record()
             kernel_timing["all_reduce"]["experiments"] += 1
         torch.cuda.nvtx.range_pop()
         shmem.barrier()
-        ms = kernel_timing["all_reduce"]["start_event"].elapsed_time(
-            kernel_timing["all_reduce"]["end_event"]
-        )
+        ms = kernel_timing["all_reduce"]["start_event"].elapsed_time(kernel_timing["all_reduce"]["end_event"])
         kernel_timing["all_reduce"]["ms"] += ms
 
     shmem.barrier()
@@ -748,11 +796,15 @@ def _single_point_worker(local_rank: int, world_size: int, init_url: str, args: 
 
 # ── Sweep worker ─────────────────────────────────────────────────────────
 
+
 def _sweep_worker(local_rank: int, world_size: int, init_url: str, args: dict):
     backend = "nccl" if torch.cuda.is_available() else "gloo"
     dist.init_process_group(
-        backend=backend, init_method=init_url, world_size=world_size,
-        rank=local_rank, device_id=torch.device(f"cuda:{local_rank}"),
+        backend=backend,
+        init_method=init_url,
+        world_size=world_size,
+        rank=local_rank,
+        device_id=torch.device(f"cuda:{local_rank}"),
     )
     torch.cuda.set_device(local_rank)
 
@@ -782,13 +834,21 @@ def _sweep_worker(local_rank: int, world_size: int, init_url: str, args: dict):
             print(
                 f"\n=== Tuning pass: {total} trials "
                 f"({args['tune_warmup']} warmup + {args['tune_iters']} iters each) ===\n"
-                + "  " + "  ".join(f"{v}: {n_grid[v]} configs" for v in iris_variants)
+                + "  "
+                + "  ".join(f"{v}: {n_grid[v]} configs" for v in iris_variants)
             )
         for phase, m in cases:
             for variant in iris_variants:
                 cfg = tune_variant_for_m(
-                    variant=variant, phase=phase, M=m, N=args["n"], dtype=dtype,
-                    rank=local_rank, world_size=world_size, shmem=shmem, args=args,
+                    variant=variant,
+                    phase=phase,
+                    M=m,
+                    N=args["n"],
+                    dtype=dtype,
+                    rank=local_rank,
+                    world_size=world_size,
+                    shmem=shmem,
+                    args=args,
                 )
                 best_configs[(m, variant)] = cfg
         if local_rank == 0:
@@ -801,8 +861,14 @@ def _sweep_worker(local_rank: int, world_size: int, init_url: str, args: dict):
             config = best_configs.get((cases[0][1], variant)) if best_configs else None
             M_val = cases[0][1]
             validate_all_reduce(
-                M_val, args["n"], dtype, variant,
-                local_rank, world_size, shmem, args,
+                M_val,
+                args["n"],
+                dtype,
+                variant,
+                local_rank,
+                world_size,
+                shmem,
+                args,
             )
 
     # Full measurement
@@ -811,8 +877,15 @@ def _sweep_worker(local_rank: int, world_size: int, init_url: str, args: dict):
         for variant in variants:
             cfg = best_configs.get((m, variant))
             row = measure_case(
-                phase=phase, M=m, N=args["n"], dtype=dtype, variant=variant,
-                rank=local_rank, world_size=world_size, shmem=shmem, args=args,
+                phase=phase,
+                M=m,
+                N=args["n"],
+                dtype=dtype,
+                variant=variant,
+                rank=local_rank,
+                world_size=world_size,
+                shmem=shmem,
+                args=args,
                 config=cfg,
             )
             if local_rank == 0 and row is not None:
@@ -836,7 +909,9 @@ def _sweep_worker(local_rank: int, world_size: int, init_url: str, args: dict):
         json_path.write_text(json.dumps(results, indent=2) + "\n")
 
         md_content = render_markdown(
-            results, world_size, args["datatype"],
+            results,
+            world_size,
+            args["datatype"],
             best_configs=best_configs if args["tune"] else None,
         )
         md_path = args.get("markdown_output")
@@ -850,6 +925,7 @@ def _sweep_worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
 
 # ── Entry point ──────────────────────────────────────────────────────────
+
 
 def main():
     args = parse_args()
