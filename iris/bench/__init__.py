@@ -51,7 +51,8 @@ The ``num_ranks`` Axis
 
 ``num_ranks`` is a special axis. It controls how many GPU processes are
 spawned.  The framework collects all unique ``num_ranks`` values across
-registered benchmarks, then does a separate ``mp.spawn()`` for each value.
+registered benchmarks, then launches a separate worker group via
+``torch.distributed.launcher.api.elastic_launch`` for each value.
 Other axes are iterated inside the worker processes.
 
 If no ``num_ranks`` axis is declared, the benchmark runs with 8 ranks.

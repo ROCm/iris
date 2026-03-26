@@ -76,16 +76,36 @@ def _parse_axis_values(raw: str, axis_name: str) -> list[Any]:
 
     if raw.startswith("pow2:"):
         parts = raw.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                f"Invalid pow2 specification {raw!r} for axis {axis_name!r}; "
+                "expected format 'pow2:start:stop'."
+            )
         return power_of_two(int(parts[1]), int(parts[2]))
 
     if raw.startswith("lin:"):
         parts = raw.split(":")
+        if len(parts) != 4:
+            raise ValueError(
+                f"Invalid linear specification {raw!r} for axis {axis_name!r}; "
+                "expected format 'lin:start:stop:step'."
+            )
         return linear_range(int(parts[1]), int(parts[2]), int(parts[3]))
 
     tokens = [t.strip() for t in raw.split(",")]
 
     # Check if they look like dtype names
-    if axis_name == "dtype" or all(t.lower() in _DTYPE_MAP for t in tokens):
+    if axis_name == "dtype":
+        lower_tokens = [t.lower() for t in tokens]
+        unknown = [t for t in lower_tokens if t not in _DTYPE_MAP]
+        if unknown:
+            allowed = ", ".join(sorted(_DTYPE_MAP.keys()))
+            raise ValueError(
+                f"Unknown dtype(s) for axis {axis_name!r}: {', '.join(unknown)}. "
+                f"Allowed: {allowed}"
+            )
+        return [_DTYPE_MAP[t] for t in lower_tokens]
+    if all(t.lower() in _DTYPE_MAP for t in tokens):
         return [_DTYPE_MAP[t.lower()] for t in tokens]
 
     # Try integers
@@ -186,8 +206,12 @@ def _format_console(results: list[Result]) -> str:
         row_strs: list[list[str]] = []
         for r in bench_results:
             if r.skipped:
-                row = [cols[0][1](r)] + ["(skipped)" + (f" {r.skip_reason}" if r.skip_reason else "")]
-                row += [""] * (len(cols) - 2)
+                status = "(skipped)" + (f" {r.skip_reason}" if r.skip_reason else "")
+                if param_names:
+                    row = [cols[0][1](r)] + [status]
+                    row += [""] * (len(cols) - 2)
+                else:
+                    row = [status] + [""] * (len(cols) - 1)
                 row_strs.append(row)
             else:
                 row_strs.append([c[1](r) for c in cols])
@@ -300,8 +324,9 @@ def _run_benchmarks_worker(
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
 
-    torch.cuda.set_device(local_rank)
     backend = "nccl" if torch.cuda.is_available() else "gloo"
+    if backend == "nccl":
+        torch.cuda.set_device(local_rank)
     dist.init_process_group(backend=backend)
 
     # Create iris context
@@ -343,7 +368,7 @@ def _run_benchmarks_worker(
             if axes:
                 axis_names = [a.name for a in axes]
                 axis_values = [a.values for a in axes]
-                combos = list(itertools.product(*axis_values))
+                combos = itertools.product(*axis_values)
             else:
                 axis_names = []
                 combos = [()]
