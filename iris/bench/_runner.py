@@ -300,8 +300,9 @@ def _run_benchmarks_worker(
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
 
-    torch.cuda.set_device(local_rank)
     backend = "nccl" if torch.cuda.is_available() else "gloo"
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
     dist.init_process_group(backend=backend)
 
     # Create iris context
