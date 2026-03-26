@@ -41,11 +41,15 @@ def flash_decode(state, ctx):
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
     num_kv_heads = num_heads // 8 if num_heads >= 8 else 1
-    scale = head_dim ** -0.5
+    scale = head_dim**-0.5
     block_size = 1
 
     fd_layer = flash_decode_fused_layer(
-        ctx, rank, rank, world_size, world_size,
+        ctx,
+        rank,
+        rank,
+        world_size,
+        world_size,
         num_q_heads=num_heads,
         num_kv_heads=num_kv_heads,
         q_head_dim=head_dim,

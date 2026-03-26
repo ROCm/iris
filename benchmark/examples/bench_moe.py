@@ -77,8 +77,13 @@ def moe(state, ctx):
 
     run_dist = functools.partial(
         mixture_of_expt_epsharded,
-        x_dp, l_dp, w_ep, b_ep,
-        expt_assignment, n_expts_act, ctx,
+        x_dp,
+        l_dp,
+        w_ep,
+        b_ep,
+        expt_assignment,
+        n_expts_act,
+        ctx,
         fusion_config=fusion_config,
     )
 

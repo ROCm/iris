@@ -42,17 +42,32 @@ def all_gather_gemm_pull(state, ctx):
 
     state.set_flops(2 * M * N * K)
 
-    state.exec(lambda: persistent_ag_gemm[(num_sms,)](
-        A_local, B, C,
-        M, N, K,
-        A_local.stride(0), A_local.stride(1),
-        B.stride(0), B.stride(1),
-        C.stride(0), C.stride(1),
-        BLK_M, BLK_N, BLK_K, gsize_m, num_sms,
-        1,  # NUM_XCDs
-        (K % BLK_K == 0),
-        heap_bases, rank, world_size,
-    ))
+    state.exec(
+        lambda: persistent_ag_gemm[(num_sms,)](
+            A_local,
+            B,
+            C,
+            M,
+            N,
+            K,
+            A_local.stride(0),
+            A_local.stride(1),
+            B.stride(0),
+            B.stride(1),
+            C.stride(0),
+            C.stride(1),
+            BLK_M,
+            BLK_N,
+            BLK_K,
+            gsize_m,
+            num_sms,
+            1,  # NUM_XCDs
+            (K % BLK_K == 0),
+            heap_bases,
+            rank,
+            world_size,
+        )
+    )
 
 
 if __name__ == "__main__":
