@@ -29,6 +29,7 @@ from .workspace import FusedWorkspace
 # Import Tile class from anvil module
 try:
     import anvil
+
     Tile = anvil.Tile
 except (ImportError, AttributeError):
     Tile = None  # Will raise error later if needed
@@ -298,23 +299,23 @@ def all_gather_matmul_copy_engine_preamble(
 
     # Share pointers across ranks for SDMA addressing
     # Need: A_sharded (source), staged_a (destination), flags (signaling)
-    A_sharded_ptr_tensor = torch.tensor([A_sharded.data_ptr()], dtype=torch.int64, device='cuda')
-    A_sharded_ptrs = [torch.zeros(1, dtype=torch.int64, device='cuda') for _ in range(world_size)]
+    A_sharded_ptr_tensor = torch.tensor([A_sharded.data_ptr()], dtype=torch.int64, device="cuda")
+    A_sharded_ptrs = [torch.zeros(1, dtype=torch.int64, device="cuda") for _ in range(world_size)]
     dist.all_gather(A_sharded_ptrs, A_sharded_ptr_tensor)
 
-    staged_a_ptr_tensor = torch.tensor([ws.aux_buffer.data_ptr()], dtype=torch.int64, device='cuda')
-    staged_a_ptrs = [torch.zeros(1, dtype=torch.int64, device='cuda') for _ in range(world_size)]
+    staged_a_ptr_tensor = torch.tensor([ws.aux_buffer.data_ptr()], dtype=torch.int64, device="cuda")
+    staged_a_ptrs = [torch.zeros(1, dtype=torch.int64, device="cuda") for _ in range(world_size)]
     dist.all_gather(staged_a_ptrs, staged_a_ptr_tensor)
 
-    flags_ptr_tensor = torch.tensor([ws.locks.data_ptr()], dtype=torch.int64, device='cuda')
-    flags_ptrs = [torch.zeros(1, dtype=torch.int64, device='cuda') for _ in range(world_size)]
+    flags_ptr_tensor = torch.tensor([ws.locks.data_ptr()], dtype=torch.int64, device="cuda")
+    flags_ptrs = [torch.zeros(1, dtype=torch.int64, device="cuda") for _ in range(world_size)]
     dist.all_gather(flags_ptrs, flags_ptr_tensor)
 
     # Store all remote pointers in workspace
     ws.remote_pointers = {
-        'A_sharded': [ptr.item() for ptr in A_sharded_ptrs],
-        'staged_a': [ptr.item() for ptr in staged_a_ptrs],
-        'flags': [ptr.item() for ptr in flags_ptrs],
+        "A_sharded": [ptr.item() for ptr in A_sharded_ptrs],
+        "staged_a": [ptr.item() for ptr in staged_a_ptrs],
+        "flags": [ptr.item() for ptr in flags_ptrs],
     }
 
     # Note: heap_bases are already cached in shmem.heap_bases_cpu (done in iris.py __init__)
@@ -540,6 +541,7 @@ def all_gather_matmul_copy_engine(
     # ======================================================================
 
     import time
+
     sdma_start_time = time.perf_counter()
 
     # Analyze wave schedule to understand M-tile access patterns
