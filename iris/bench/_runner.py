@@ -78,8 +78,7 @@ def _parse_axis_values(raw: str, axis_name: str) -> list[Any]:
         parts = raw.split(":")
         if len(parts) != 3:
             raise ValueError(
-                f"Invalid pow2 specification {raw!r} for axis {axis_name!r}; "
-                "expected format 'pow2:start:stop'."
+                f"Invalid pow2 specification {raw!r} for axis {axis_name!r}; expected format 'pow2:start:stop'."
             )
         return power_of_two(int(parts[1]), int(parts[2]))
 
@@ -87,8 +86,7 @@ def _parse_axis_values(raw: str, axis_name: str) -> list[Any]:
         parts = raw.split(":")
         if len(parts) != 4:
             raise ValueError(
-                f"Invalid linear specification {raw!r} for axis {axis_name!r}; "
-                "expected format 'lin:start:stop:step'."
+                f"Invalid linear specification {raw!r} for axis {axis_name!r}; expected format 'lin:start:stop:step'."
             )
         return linear_range(int(parts[1]), int(parts[2]), int(parts[3]))
 
@@ -100,10 +98,7 @@ def _parse_axis_values(raw: str, axis_name: str) -> list[Any]:
         unknown = [t for t in lower_tokens if t not in _DTYPE_MAP]
         if unknown:
             allowed = ", ".join(sorted(_DTYPE_MAP.keys()))
-            raise ValueError(
-                f"Unknown dtype(s) for axis {axis_name!r}: {', '.join(unknown)}. "
-                f"Allowed: {allowed}"
-            )
+            raise ValueError(f"Unknown dtype(s) for axis {axis_name!r}: {', '.join(unknown)}. Allowed: {allowed}")
         return [_DTYPE_MAP[t] for t in lower_tokens]
     if all(t.lower() in _DTYPE_MAP for t in tokens):
         return [_DTYPE_MAP[t.lower()] for t in tokens]
