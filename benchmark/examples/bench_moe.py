@@ -74,7 +74,6 @@ def moe(state, ctx):
 
     # Record heap offset for reset between iterations.
     heap_offset = ctx.heap.allocator.heap_offset
-    saved_refresh = ctx.heap.refresh_peer_access
 
     run_dist = functools.partial(
         mixture_of_expt_epsharded,
@@ -94,12 +93,7 @@ def moe(state, ctx):
     def _preamble():
         ctx.heap.allocator.heap_offset = heap_offset
 
-    # Disable refresh_peer_access during bench iterations.
-    ctx.heap.refresh_peer_access = lambda: None
-    try:
-        state.exec(run_dist, preamble_fn=_preamble)
-    finally:
-        ctx.heap.refresh_peer_access = saved_refresh
+    state.exec(run_dist, preamble_fn=_preamble)
 
 
 if __name__ == "__main__":
