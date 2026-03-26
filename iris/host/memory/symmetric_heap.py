@@ -305,11 +305,15 @@ class SymmetricHeap:
 
             if not hasattr(self, "_peer_va_ranges"):
                 self._peer_va_ranges = {}
+            if not hasattr(self, "_peer_imported_mappings"):
+                self._peer_imported_mappings = {}
 
             if peer not in self._peer_va_ranges:
                 # Reserve VA for this peer's chunks -- same size as our VA
                 peer_va_base = mem_address_reserve(self.allocator.va_size, self.allocator.granularity, 0)
                 self._peer_va_ranges[peer] = peer_va_base
+            if peer not in self._peer_imported_mappings:
+                self._peer_imported_mappings[peer] = []
             peer_va_base = self._peer_va_ranges[peer]
 
             # Exchange new chunk fds
@@ -328,6 +332,9 @@ class SymmetricHeap:
                 peer_va = peer_va_base + my_offset
                 mem_map(peer_va, my_size, 0, imported_handle)
                 mem_set_access(peer_va, my_size, access_desc)
+
+                # Track for cleanup: must unmap + release before freeing VA
+                self._peer_imported_mappings[peer].append((imported_handle, peer_va, my_size))
 
             self.heap_bases[peer] = peer_va_base
 
@@ -402,6 +409,10 @@ class SymmetricHeap:
                 self._peer_imported_segments = {}
             if peer not in self._peer_imported_segments:
                 self._peer_imported_segments[peer] = set()
+            if not hasattr(self, "_peer_imported_mappings"):
+                self._peer_imported_mappings = {}
+            if peer not in self._peer_imported_mappings:
+                self._peer_imported_mappings[peer] = []
 
             for peer_fd, segment_size, offset in peer_fds:
                 segment_key = (offset, segment_size)
@@ -415,6 +426,9 @@ class SymmetricHeap:
                 peer_va = peer_va_base + offset
                 mem_map(peer_va, segment_size, 0, imported_handle)
                 self._peer_imported_segments[peer].add(segment_key)
+
+                # Track for cleanup
+                self._peer_imported_mappings[peer].append((imported_handle, peer_va, segment_size))
 
                 new_cumulative = offset + segment_size
                 if new_cumulative > cumulative_size:
@@ -478,7 +492,28 @@ class SymmetricHeap:
         except Exception:
             pass
 
-        # Free peer VA ranges to avoid VA space leaks
+        # Unmap and release peer-imported chunks BEFORE freeing VA ranges.
+        # mem_address_free on a VA range with active mappings corrupts the
+        # HIP runtime, causing hipErrorUnknown on subsequent GPU operations.
+        if hasattr(self, "_peer_imported_mappings"):
+            try:
+                from iris.hip import mem_unmap, mem_release
+
+                for peer, mappings in self._peer_imported_mappings.items():
+                    for handle, va, size in mappings:
+                        try:
+                            mem_unmap(va, size)
+                        except Exception:
+                            pass
+                        try:
+                            mem_release(handle)
+                        except Exception:
+                            pass
+                self._peer_imported_mappings.clear()
+            except ImportError:
+                pass
+
+        # Free peer VA ranges (now safe -- all mappings have been removed)
         if hasattr(self, "_peer_va_ranges"):
             try:
                 from iris.hip import mem_address_free
