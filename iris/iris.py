@@ -147,7 +147,11 @@ class Iris:
 
         for rank in range(num_ranks):
             if rank != cur_rank:
-                self.copy_engines.connect(cur_rank, rank, 1)
+                # Device-initiated queues
+                self.copy_engines.connect(cur_rank, rank, 1, allocate_on_host=False)
+                # Host-initiated queues
+                self.copy_engines.connect(cur_rank, rank, 1, allocate_on_host=True)
+
                 queue = self.copy_engines.get_sdma_queue(cur_rank, rank, 0)
                 handle = queue.device_ctx()
                 self.info(f"---- Queue {rank} ------------")
