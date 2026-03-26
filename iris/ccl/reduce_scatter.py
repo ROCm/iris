@@ -189,8 +189,12 @@ def reduce_scatter(
             f"Only ReduceOp.SUM is currently supported, got {op}. "
             "Support for other operations (PRODUCT, MAX, MIN, etc.) will be added in a future release."
         )
-    if config is None:
-        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+    # Resolve autotuning: fills in any AUTOTUNE fields via cache or benchmarking
+    from .autotune import resolve_config
+
+    config = resolve_config(
+        "reduce_scatter", config, reduce_scatter, output_tensor, input_tensor, shmem, op=op, group=group
+    )
 
     # Check for unsupported options
     if config.use_gluon:

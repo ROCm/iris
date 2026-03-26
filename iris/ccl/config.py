@@ -5,8 +5,33 @@
 Configuration structures for iris-ccl collective operations.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 import iris
+
+
+class _AutoTuneSentinel:
+    """Sentinel value indicating a Config field should be auto-tuned.
+
+    Usage:
+        >>> from iris.ccl import AUTOTUNE
+        >>> config = Config(block_size_m=AUTOTUNE, comm_sms=64)
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return "AUTOTUNE"
+
+    def __bool__(self):
+        raise TypeError("AUTOTUNE sentinel cannot be used as a boolean")
+
+
+AUTOTUNE = _AutoTuneSentinel()
 
 
 @dataclass
@@ -17,6 +42,8 @@ class Config:
     This configuration struct encapsulates common kernel parameters that can be
     set once and reused across multiple collective calls, similar to the
     origami config pattern from ROCm libraries.
+
+    Fields set to AUTOTUNE will be automatically tuned on first call and cached.
 
     Args:
         block_size_m: Block size for the M dimension tiling (default: 128)
@@ -75,6 +102,14 @@ class Config:
         >>> # All-gather with partitioned variant
         >>> config = Config(all_gather_variant="partitioned")
         >>> shmem.ccl.all_gather(output_tensor, input_tensor, config=config)
+
+        >>> # Auto-tune all fields
+        >>> from iris.ccl import AUTOTUNE
+        >>> shmem.ccl.all_gather(output_tensor, input_tensor)  # all fields auto-tuned
+
+        >>> # Partial auto-tune: fix comm_sms, tune everything else
+        >>> config = Config(comm_sms=64, block_size_m=AUTOTUNE)
+        >>> shmem.ccl.all_gather(output_tensor, input_tensor, config=config)
     """
 
     block_size_m: int = 32
@@ -97,6 +132,11 @@ class Config:
 
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
+        # If any field is AUTOTUNE, skip validation — it will be resolved
+        # and validated after autotuning fills in concrete values.
+        if self.get_autotune_fields():
+            return
+
         if self.num_xcds is None:
             self.num_xcds = iris.hip.get_num_xcc()
 
@@ -148,3 +188,47 @@ class Config:
             raise ValueError(f"threads_per_warp must be 32 (NVIDIA) or 64 (AMD), got {self.threads_per_warp}")
         if self.num_warps <= 0:
             raise ValueError(f"num_warps must be positive, got {self.num_warps}")
+
+    def get_autotune_fields(self) -> list[str]:
+        """Return names of fields set to AUTOTUNE."""
+        return [f.name for f in fields(self) if getattr(self, f.name) is AUTOTUNE]
+
+    def with_resolved(self, **kwargs) -> "Config":
+        """Return a copy with specified fields overridden.
+
+        This creates a new Config with the given fields replaced. The new
+        Config goes through normal __post_init__ validation, so all
+        resolved values must be concrete.
+        """
+        return replace(self, **kwargs)
+
+    @classmethod
+    def autotune(cls, **fixed_fields) -> "Config":
+        """Create a Config that auto-tunes all fields except those specified.
+
+        Fields passed as keyword arguments are pinned to the given values.
+        All other fields are marked as AUTOTUNE and will be searched during
+        the first collective call.
+
+        Args:
+            **fixed_fields: Fields to pin (e.g., comm_sms=64).
+
+        Returns:
+            Config with unspecified fields set to AUTOTUNE.
+
+        Example:
+            >>> Config.autotune(comm_sms=64)        # fix comm_sms, tune the rest
+            >>> Config.autotune()                    # tune everything
+            >>> Config.autotune(block_size_m=32, comm_sms=64)  # fix two, tune the rest
+        """
+        all_field_names = {f.name for f in fields(cls)}
+        invalid = set(fixed_fields) - all_field_names
+        if invalid:
+            raise TypeError(f"Unknown Config fields: {invalid}")
+
+        kwargs = {f.name: AUTOTUNE for f in fields(cls) if f.name not in fixed_fields}
+        kwargs.update(fixed_fields)
+        # num_xcds and chunk_size are always auto-derived, never tuned
+        kwargs["num_xcds"] = None
+        kwargs["chunk_size"] = None
+        return cls(**kwargs)

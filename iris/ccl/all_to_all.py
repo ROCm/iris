@@ -356,9 +356,10 @@ def all_to_all(
                 If None, uses default Config values.
                 Set config.use_gluon=True to use Gluon implementation with traffic shaping.
     """
-    # Use provided config or create default one
-    if config is None:
-        config = Config(block_size_m=32, block_size_n=128)
+    # Resolve autotuning: fills in any AUTOTUNE fields via cache or benchmarking
+    from .autotune import resolve_config
+
+    config = resolve_config("all_to_all", config, all_to_all, output_tensor, input_tensor, shmem, group=group)
 
     # Extract group information
     # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
