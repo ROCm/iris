@@ -33,6 +33,8 @@ from ..hip import (
     get_allocation_granularity,
     get_address_range,
     export_dmabuf_handle,
+    import_dmabuf_handle,
+    destroy_external_memory,
     mem_create,
     mem_address_reserve,
     mem_map,
@@ -277,7 +279,14 @@ class VMemChunkedAllocator(BaseAllocator):
         if tensor.numel() == 0:
             return True
         ptr = tensor.data_ptr()
-        return self.base_va <= ptr < self.base_va + self.va_size
+        if self.base_va <= ptr < self.base_va + self.va_size:
+            return True
+        # Check imported external memory ranges
+        if hasattr(self, "_imported_ranges"):
+            for base, size in self._imported_ranges:
+                if base <= ptr < base + size:
+                    return True
+        return False
 
     def get_allocation_chunks(self):
         """
@@ -303,7 +312,9 @@ class VMemChunkedAllocator(BaseAllocator):
         The imported tensor shares physical memory with the original --
         writes to one are visible in the other (zero-copy).
 
-        The import is placed beyond the current bump pointer in the VA range.
+        Uses the External Memory API (hipImportExternalMemory) rather than
+        the VMem API (hipMemImportFromShareableHandle) because hipMalloc-backed
+        allocations cannot have hipMemSetAccess applied after VMem import.
         """
         with self.lock:
             if not external_tensor.is_cuda:
@@ -313,73 +324,29 @@ class VMemChunkedAllocator(BaseAllocator):
 
             external_ptr = external_tensor.data_ptr()
             alloc_base, alloc_size = get_address_range(external_ptr)
-            offset_in_alloc = external_ptr - alloc_base
-            aligned_alloc_size = (alloc_size + self.granularity - 1) & ~(self.granularity - 1)
 
-            # Place import beyond current bump, aligned to granularity
-            import_offset = (self.bump + self.granularity - 1) & ~(self.granularity - 1)
-
-            # Grow chunks if needed to cover the import region
-            while import_offset + aligned_alloc_size > self.mapped_extent:
-                self._grow_chunk()
-
-            # We need to unmap the existing chunk region at import_offset
-            # and remap with the imported DMA-BUF handle instead.
-            # Actually, the import region overlaps with a pre-mapped chunk.
-            # We need to unmap that portion and remap with the imported handle.
-            #
-            # Simpler approach: use a separate VA range for imports that
-            # doesn't overlap with the chunk region. But that breaks the
-            # single-VA-range requirement.
-            #
-            # Correct approach: reserve import space in the VA range BEYOND
-            # the chunk region. The import region uses unmapped VA (no chunk
-            # was mapped there). We just map the imported handle directly.
-
-            # Recalculate: place import at the END of mapped_extent
-            # (or beyond, in unmapped VA space)
-            import_offset = self.mapped_extent
-            # Grow VA if needed (but not physical chunks)
-            if import_offset + aligned_alloc_size > self.va_size:
-                raise RuntimeError(
-                    f"VMemChunkedAllocator: VA space exhausted for import. "
-                    f"import_offset={import_offset}, size={aligned_alloc_size}, "
-                    f"va_size={self.va_size}"
-                )
-
-            # Export external tensor as DMA-BUF
+            # Export as DMA-BUF fd
             dmabuf_fd, export_base, export_size = export_dmabuf_handle(alloc_base, alloc_size)
-            try:
-                aligned_export_size = (export_size + self.granularity - 1) & ~(self.granularity - 1)
 
-                # Import the DMA-BUF as a VMem handle
-                imported_handle = mem_import_from_shareable_handle(dmabuf_fd)
-            finally:
-                os.close(dmabuf_fd)
+            # Import via External Memory API (works with hipMalloc-backed memory).
+            # hipImportExternalMemory takes ownership of the fd, so do NOT
+            # close it after this call.
+            mapped_ptr, ext_mem_handle = import_dmabuf_handle(
+                dmabuf_fd, export_size,
+                original_ptr=external_ptr, base_ptr=alloc_base,
+            )
 
-            # Map at import offset in our VA range
-            target_va = self.base_va + import_offset
-            mem_map(target_va, aligned_export_size, 0, imported_handle)
-            # Imported DMA-BUF handles from PyTorch's allocator may already
-            # have device access set.  hipMemSetAccess can fail with
-            # "invalid argument" on such handles, so treat the error as
-            # non-fatal — the mapping itself is sufficient.
-            try:
-                mem_set_access(target_va, aligned_export_size, self.local_access_desc)
-            except RuntimeError:
-                pass
+            # Track for cleanup and ownership detection
+            if not hasattr(self, "_ext_mem_handles"):
+                self._ext_mem_handles = []
+            if not hasattr(self, "_imported_ranges"):
+                self._imported_ranges = []
+            self._ext_mem_handles.append(ext_mem_handle)
+            self._imported_ranges.append((mapped_ptr, export_size))
 
-            # Track as an import chunk (cleanup only, NOT peer-shared)
-            self._import_chunks.append((imported_handle, target_va, aligned_export_size))
-            # Advance mapped_extent past the import
-            self.mapped_extent = import_offset + aligned_export_size
-            # Also advance bump past the import so future allocs don't collide
-            self.bump = self.mapped_extent
-
-            # Create tensor view at the correct offset within the import
-            tensor_va = target_va + offset_in_alloc
+            # Create tensor view at the mapped pointer
             tensor_size = external_tensor.numel() * external_tensor.element_size()
-            iface = _CUDAArrayInterface(tensor_va, tensor_size)
+            iface = _CUDAArrayInterface(mapped_ptr, tensor_size)
             tensor_bytes = torch.as_tensor(iface, device=self.device)
             imported_tensor = tensor_bytes.view(external_tensor.dtype).reshape(external_tensor.shape)
 
@@ -421,6 +388,15 @@ class VMemChunkedAllocator(BaseAllocator):
                 torch.cuda.synchronize(self.device)
             except Exception:
                 pass
+
+            # Destroy external memory handles (from import_external_tensor)
+            if hasattr(self, "_ext_mem_handles"):
+                for ext_mem in self._ext_mem_handles:
+                    try:
+                        destroy_external_memory(ext_mem)
+                    except Exception:
+                        pass
+                self._ext_mem_handles.clear()
 
             # Unmap and release all chunks (regular + imported)
             for handle, va, size in self.chunks + self._import_chunks:
