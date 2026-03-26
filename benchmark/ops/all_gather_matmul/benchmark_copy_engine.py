@@ -33,6 +33,47 @@ from iris.ops.all_gather_matmul_copy_engine import (
 )
 from iris.ops import FusedConfig
 
+_DERIVE_AVAILABLE = False
+try:
+    import sys as _sys
+
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    if _script_dir not in _sys.path:
+        _sys.path.insert(0, _script_dir)
+    from derive_params import (
+        derive as _derive_params,
+        DEFAULT_NUM_CUS,
+        DEFAULT_PEAK_TFLOPS_FP16,
+        DEFAULT_HBM_BW_GBPS,
+        DEFAULT_L2_SIZE_BYTES,
+        DEFAULT_SCHEDULING_FACTOR,
+    )
+
+    _DERIVE_AVAILABLE = True
+except Exception:
+    pass
+
+_MODEL_PARAMS = (
+    "block_size_m",
+    "block_size_n",
+    "block_size_k",
+    "group_size_m",
+    "num_fetch_sms",
+    "k_per_flag",
+    "num_warps",
+    "num_fetch_stages",
+    "first_stage_fetch_sms",
+)
+
+_FALLBACK_DEFAULTS = {
+    "block_size_m": 256,
+    "block_size_n": 64,
+    "block_size_k": 64,
+    "group_size_m": 1,
+    "k_per_flag": 1,
+    "num_fetch_stages": 1,
+}
+
 torch.manual_seed(123)
 random.seed(123)
 
@@ -171,15 +212,15 @@ def parse_args():
         action="store_true",
         help="Also benchmark PyTorch (all_gather_into_tensor + matmul)",
     )
-    parser.add_argument("--block_size_m", type=int, default=256, help="Block size M")
-    parser.add_argument("--block_size_n", type=int, default=64, help="Block size N")
-    parser.add_argument("--block_size_k", type=int, default=64, help="Block size K")
-    parser.add_argument("--group_size_m", type=int, default=1, help="Group size M")
+    parser.add_argument("--block_size_m", type=int, default=None, help="Block size M (model-derived if omitted)")
+    parser.add_argument("--block_size_n", type=int, default=None, help="Block size N (model-derived if omitted)")
+    parser.add_argument("--block_size_k", type=int, default=None, help="Block size K (model-derived if omitted)")
+    parser.add_argument("--group_size_m", type=int, default=None, help="Group size M (model-derived if omitted)")
     parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto if None)")
     parser.add_argument("--b_col_major", action="store_true", help="B col-major (K-contiguous)")
     parser.add_argument("--a_col_major", action="store_true", help="A col-major (M-contiguous)")
     parser.add_argument("--single-run", action="store_true", help="1 iteration (for profiling)")
-    parser.add_argument("--k_per_flag", type=int, default=1, help="K-blocks per ready flag")
+    parser.add_argument("--m_tiles_per_flag", type=int, default=1, help="M-tiles per ready flag")
     parser.add_argument("--num_warps", type=int, default=None, help="Triton num_warps (auto if None)")
     parser.add_argument("--num_stages", type=int, default=None, help="Triton num_stages (auto if None)")
     parser.add_argument(
@@ -190,6 +231,41 @@ def parse_args():
     )
     parser.add_argument("--trace_output", type=str, default="trace_copy_engine.png", help="Output path for trace plot")
     return vars(parser.parse_args())
+
+
+def _apply_model_defaults(args, world_size, dtype_bytes=2):
+    """Fill None-valued kernel parameters with model-derived predictions.
+
+    Returns a list of parameter names that were set by the model.
+    """
+    applied = []
+    if _DERIVE_AVAILABLE:
+        try:
+            p = _derive_params(
+                args["m"],
+                args["n"],
+                args["k"],
+                world_size,
+                link_bw=50.0,
+                num_cus=DEFAULT_NUM_CUS,
+                peak_tflops=DEFAULT_PEAK_TFLOPS_FP16,
+                hbm_bw_gbps=DEFAULT_HBM_BW_GBPS,
+                l2_size=DEFAULT_L2_SIZE_BYTES,
+                scheduling_factor=DEFAULT_SCHEDULING_FACTOR,
+                dtype_bytes=dtype_bytes,
+            )
+            for name in _MODEL_PARAMS:
+                if args.get(name) is None and name in p:
+                    args[name] = p[name]
+                    applied.append(name)
+        except Exception:
+            pass
+
+    for name, fallback in _FALLBACK_DEFAULTS.items():
+        if args.get(name) is None:
+            args[name] = fallback
+
+    return applied
 
 
 def _worker(args):
@@ -227,6 +303,14 @@ def _worker(args):
 
     datatype_map = {"fp16": torch.float16, "fp32": torch.float32, "bf16": torch.bfloat16}
     datatype = datatype_map.get(args["datatype"], torch.float16)
+    dtype_bytes = torch.tensor([], dtype=datatype).element_size()
+
+    model_applied = _apply_model_defaults(args, world_size, dtype_bytes)
+    if rank == 0 and model_applied:
+        shmem.info(f"Model-derived defaults: {', '.join(model_applied)}")
+    if rank == 0:
+        param_summary = " ".join(f"{k}={args[k]}" for k in _MODEL_PARAMS)
+        shmem.info(f"Kernel params: {param_summary}")
 
     M = args["m"]
     N = args["n"]
@@ -244,10 +328,14 @@ def _worker(args):
     config = FusedConfig(**config_kwargs)
 
     buffer_mb = M * K * torch.tensor([], dtype=datatype).element_size() / (1024**2)
+    num_m_tiles = M // config.block_size_m
+    num_k_blocks = K // config.block_size_k
+    m_tiles_per_flag = args["m_tiles_per_flag"]
+    num_m_tile_groups = (num_m_tiles + m_tiles_per_flag - 1) // m_tiles_per_flag
     shmem.info(
         f"Copy Engine variant: M={M} N={N} K={K} K_local={K_local} "
         f"block=({config.block_size_m},{config.block_size_n},{config.block_size_k}) "
-        f"buffer={buffer_mb:.0f}MB"
+        f"buffer={buffer_mb:.0f}MB flags={num_m_tile_groups} (m_tiles_per_flag={m_tiles_per_flag})"
     )
 
     # ── Allocate tensors ─────────────────────────────────────────────────
@@ -286,8 +374,7 @@ def _worker(args):
         expected_tensor.copy_(torch.matmul(A_gathered, B_data))
 
     # Pre-allocate workspace
-    k_per_flag = args["k_per_flag"]
-    workspace = all_gather_matmul_copy_engine_preamble(shmem, A_sharded, B, config, k_per_flag=k_per_flag)
+    workspace = all_gather_matmul_copy_engine_preamble(shmem, A_sharded, B, config, m_tiles_per_flag=m_tiles_per_flag)
 
     # ── Timing ───────────────────────────────────────────────────────────
     comm_stream = torch.cuda.Stream()
@@ -312,7 +399,7 @@ def _worker(args):
                 config=config,
                 async_op=False,
                 workspace=workspace,
-                k_per_flag=k_per_flag,
+                m_tiles_per_flag=m_tiles_per_flag,
                 num_warps=num_warps,
                 num_stages=num_stages,
             )
@@ -393,7 +480,7 @@ def _worker(args):
             config=config,
             async_op=False,
             workspace=workspace,
-            k_per_flag=k_per_flag,
+            m_tiles_per_flag=m_tiles_per_flag,
             num_warps=num_warps,
             num_stages=num_stages,
         )
@@ -437,7 +524,7 @@ def _worker(args):
             config=config,
             async_op=False,
             workspace=workspace,
-            k_per_flag=k_per_flag,
+            m_tiles_per_flag=m_tiles_per_flag,
             num_warps=num_warps,
             num_stages=num_stages,
             trace=True,
@@ -459,7 +546,7 @@ def _worker(args):
             config=config,
             async_op=False,
             workspace=workspace,
-            k_per_flag=k_per_flag,
+            m_tiles_per_flag=m_tiles_per_flag,
             num_warps=num_warps,
             num_stages=num_stages,
             trace=True,
