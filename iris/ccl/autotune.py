@@ -140,6 +140,7 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
 # Cache key
 # ---------------------------------------------------------------------------
 
+
 class AutotuneKey(NamedTuple):
     collective: str
     M: int
@@ -215,6 +216,7 @@ def _is_tuning() -> bool:
 # Candidate pruning
 # ---------------------------------------------------------------------------
 
+
 def _is_valid_candidate(collective: str, values: dict[str, Any], world_size: int) -> bool:
     """Return False for configurations known to be invalid."""
     comm_sms = values.get("comm_sms")
@@ -236,6 +238,7 @@ def _is_valid_candidate(collective: str, values: dict[str, Any], world_size: int
 # ---------------------------------------------------------------------------
 # Core autotuning
 # ---------------------------------------------------------------------------
+
 
 def _generate_candidates(
     collective: str,
@@ -297,9 +300,7 @@ def _autotune(
         if val is not AUTOTUNE:
             fixed_values[f.name] = val
 
-    candidates = _generate_candidates(
-        collective, autotune_field_names, fixed_values, world_size, budget
-    )
+    candidates = _generate_candidates(collective, autotune_field_names, fixed_values, world_size, budget)
 
     if verbose and rank == 0:
         print(
@@ -325,6 +326,7 @@ def _autotune(
 
         # Benchmark this config
         try:
+
             def _run():
                 collective_fn(
                     output_tensor,
@@ -347,8 +349,7 @@ def _autotune(
 
         if verbose and rank == 0:
             print(
-                f"[iris autotune]   [{i + 1}/{len(candidates)}] "
-                f"{candidate_values} -> {time_ms:.3f} ms",
+                f"[iris autotune]   [{i + 1}/{len(candidates)}] {candidate_values} -> {time_ms:.3f} ms",
                 file=sys.stderr,
             )
 
@@ -370,8 +371,7 @@ def _autotune(
 
     if verbose and rank == 0:
         print(
-            f"[iris autotune] {collective}: best config "
-            f"({best_time:.3f} ms): {best_values}",
+            f"[iris autotune] {collective}: best config ({best_time:.3f} ms): {best_values}",
             file=sys.stderr,
         )
 
@@ -387,6 +387,7 @@ def _autotune(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def resolve_config(
     collective: str,

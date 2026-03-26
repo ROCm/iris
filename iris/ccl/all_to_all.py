@@ -9,7 +9,6 @@ Supports both Triton and Gluon implementations based on config.
 import triton
 import triton.language as tl
 import iris
-from .config import Config
 from .utils import chiplet_transform_chunked, extract_group_info
 
 # Conditional import for Gluon
