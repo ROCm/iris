@@ -22,7 +22,6 @@ Cost model:
 Requires ROCm 7.1+. hipMemImportFromShareableHandle segfaults on ROCm 7.0
 due to inverted MemObjMap logic in ROCm/clr hip_vm.cpp (removes instead of
 adds imported memory objects, leading to null dereference in hipMemSetAccess).
-Fixed in ROCm 7.1: https://github.com/ROCm/clr/blob/rocm-7.1.0/hipamd/src/hip_vm.cpp
 """
 
 import math
