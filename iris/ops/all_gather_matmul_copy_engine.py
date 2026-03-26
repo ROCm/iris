@@ -19,7 +19,6 @@ import triton.language as tl
 import iris
 import iris.x
 
-from tritonblas.kernels.stages import GemmContext, ScheduleContext
 
 from iris.device_utils import read_realtime
 from iris.tracing.events import TraceEvent
@@ -138,7 +137,7 @@ def _copy_engine_all_gather_matmul_kernel(
         pass
 
     if TRACE:
-        _tile_wt = (read_realtime() - _ws)
+        _tile_wt = read_realtime() - _ws
 
     # Process ALL K-blocks in global order (all from staged_a - no branch)
     for k_block_global in range(NUM_K_BLOCKS):
@@ -427,7 +426,9 @@ def all_gather_matmul_copy_engine(
     # assert num_remote_k_blocks % k_per_flag == 0
 
     if workspace is None:
-        workspace = all_gather_matmul_copy_engine_preamble(shmem, A_sharded, B, config, m_tiles_per_flag, staged_a_layout)
+        workspace = all_gather_matmul_copy_engine_preamble(
+            shmem, A_sharded, B, config, m_tiles_per_flag, staged_a_layout
+        )
 
     workspace.locks.zero_()
 
@@ -556,7 +557,9 @@ def all_gather_matmul_copy_engine(
         )
         shmem.info(f"[Rank {rank}] Wave schedule: {len(wave_schedule)} waves")
         for wave_num, m_tiles in wave_schedule[:3]:  # Show first 3 waves
-            shmem.info(f"  Wave {wave_num}: needs {len(m_tiles)} new M-tiles: {m_tiles[:10]}{'...' if len(m_tiles) > 10 else ''}")
+            shmem.info(
+                f"  Wave {wave_num}: needs {len(m_tiles)} new M-tiles: {m_tiles[:10]}{'...' if len(m_tiles) > 10 else ''}"
+            )
 
     elem_size = A_sharded.element_size()
     staged_a_base_addr = workspace.aux_buffer.data_ptr()
@@ -588,7 +591,10 @@ def all_gather_matmul_copy_engine(
             tile.data = A_sharded.data_ptr()
 
             # Destination offset: m_tile_start * M + k_block_global_start * K
-            dst_offset_bytes = (m_tile_start * config.block_size_m * stride_sa_m + k_block_start_global * config.block_size_k * stride_sa_k) * elem_size
+            dst_offset_bytes = (
+                m_tile_start * config.block_size_m * stride_sa_m
+                + k_block_start_global * config.block_size_k * stride_sa_k
+            ) * elem_size
             dst_ptr_local = staged_a_base_addr + dst_offset_bytes
             dst_ptr_remote = shmem.translate(dst_ptr_local, rank, dst_rank)
 
@@ -598,12 +604,14 @@ def all_gather_matmul_copy_engine(
             flag_addr_remote = shmem.translate(flag_addr_local, rank, dst_rank)
 
             # Batched transfer + signal in one SDMA command
-            anvil_lib.host_put_tile_signal(rank, dst_rank, 0, tile, dst_ptr_remote, stride_sa_m * elem_size, flag_addr_remote, 1)
+            anvil_lib.host_put_tile_signal(
+                rank, dst_rank, 0, tile, dst_ptr_remote, stride_sa_m * elem_size, flag_addr_remote, 1
+            )
             tile_transfer_count += 1
 
             if debug and m_tile_group_id < 2:
                 shmem.info(
-                    f"[Rank {rank}] Transferred M-tile-group={m_tile_group_id} (M-tiles {m_tile_start}-{m_tile_end-1}) "
+                    f"[Rank {rank}] Transferred M-tile-group={m_tile_group_id} (M-tiles {m_tile_start}-{m_tile_end - 1}) "
                     f"to dst_rank={dst_rank}, flag_idx={flag_idx}, size={tile.block_m}×{tile.block_n}"
                 )
 
