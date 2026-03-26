@@ -80,7 +80,13 @@ def _parse_axis_values(raw: str, axis_name: str) -> list[Any]:
             raise ValueError(
                 f"Invalid pow2 specification {raw!r} for axis {axis_name!r}; expected format 'pow2:start:stop'."
             )
-        return power_of_two(int(parts[1]), int(parts[2]))
+        try:
+            return power_of_two(int(parts[1]), int(parts[2]))
+        except ValueError:
+            raise ValueError(
+                f"Non-integer values in {raw!r} for axis {axis_name!r}; "
+                "expected format 'pow2:<int>:<int>'."
+            )
 
     if raw.startswith("lin:"):
         parts = raw.split(":")
@@ -88,18 +94,26 @@ def _parse_axis_values(raw: str, axis_name: str) -> list[Any]:
             raise ValueError(
                 f"Invalid linear specification {raw!r} for axis {axis_name!r}; expected format 'lin:start:stop:step'."
             )
-        return linear_range(int(parts[1]), int(parts[2]), int(parts[3]))
+        try:
+            return linear_range(int(parts[1]), int(parts[2]), int(parts[3]))
+        except ValueError:
+            raise ValueError(
+                f"Non-integer values in {raw!r} for axis {axis_name!r}; "
+                "expected format 'lin:<int>:<int>:<int>'."
+            )
 
     tokens = [t.strip() for t in raw.split(",")]
 
     # Check if they look like dtype names
     if axis_name == "dtype":
-        lower_tokens = [t.lower() for t in tokens]
-        unknown = [t for t in lower_tokens if t not in _DTYPE_MAP]
+        unknown = [t for t in tokens if t.lower() not in _DTYPE_MAP]
         if unknown:
             allowed = ", ".join(sorted(_DTYPE_MAP.keys()))
-            raise ValueError(f"Unknown dtype(s) for axis {axis_name!r}: {', '.join(unknown)}. Allowed: {allowed}")
-        return [_DTYPE_MAP[t] for t in lower_tokens]
+            raise ValueError(
+                f"Unknown dtype(s) for axis {axis_name!r}: {', '.join(unknown)}. "
+                f"Allowed: {allowed}"
+            )
+        return [_DTYPE_MAP[t.lower()] for t in tokens]
     if all(t.lower() in _DTYPE_MAP for t in tokens):
         return [_DTYPE_MAP[t.lower()] for t in tokens]
 
@@ -203,10 +217,12 @@ def _format_console(results: list[Result]) -> str:
             if r.skipped:
                 status = "(skipped)" + (f" {r.skip_reason}" if r.skip_reason else "")
                 if param_names:
-                    row = [cols[0][1](r)] + [status]
+                    row = [cols[0][1](r), status]
                     row += [""] * (len(cols) - 2)
-                else:
+                elif len(cols) > 1:
                     row = [status] + [""] * (len(cols) - 1)
+                else:
+                    row = [status]
                 row_strs.append(row)
             else:
                 row_strs.append([c[1](r) for c in cols])
