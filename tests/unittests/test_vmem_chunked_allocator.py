@@ -286,13 +286,16 @@ def test_chunked_stats():
     assert stats["num_active_allocs"] >= 2
     assert stats["bump"] > 0
 
-    # Free and check
+    # Free and check -- synchronize first to ensure no async ops hold
+    # references to the storage, then del + gc to trigger the weakref finalizer.
+    torch.cuda.synchronize()
     del t1
     gc.collect()
+    gc.collect()  # Second pass catches ref cycles from first pass
     # Force processing pending frees
     t3 = ctx.zeros(1, dtype=torch.float32)
     stats = alloc.get_stats()
-    assert stats["num_free_blocks"] >= 1
+    assert stats["num_free_blocks"] >= 1, f"Expected free blocks after GC, got stats: {stats}"
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires at least 2 GPUs")
