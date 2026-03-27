@@ -102,15 +102,19 @@ class MLPLayer:
 
 # ── Main ───────────────────────────────────────────────────────────────────
 heap_size = 2**33
-ctx = iris.iris(heap_size)
+# Use vmem allocator to enable as_symmetric (zero-copy import)
+try:
+    ctx = iris.iris(heap_size, allocator_type="vmem")
+    has_as_symmetric = hasattr(ctx, "as_symmetric")
+except Exception:
+    ctx = iris.iris(heap_size)
+    has_as_symmetric = False
 
 
 def run_model(model_name, cfg):
     hidden = cfg["hidden"]
     intermediate = cfg["intermediate"]
     mlp = MLPLayer(hidden, intermediate, world_size)
-
-    has_as_symmetric = hasattr(ctx.allocator, "import_external_tensor")
 
     if rank == 0:
         inter_per_rank = intermediate // world_size
@@ -257,7 +261,7 @@ for cfg in MODELS.values():
         ctx.ccl.all_reduce(out, inp, config=config, workspace=ws)
 
         # Also warm up with as_symmetric path if available
-        if hasattr(ctx.allocator, "import_external_tensor"):
+        if has_as_symmetric:
             ext = torch.zeros(M, cfg["hidden"], dtype=dtype, device="cuda")
             sym = ctx.as_symmetric(ext)
             ws2 = ctx.ccl.all_reduce_preamble(out, sym, config=config)
