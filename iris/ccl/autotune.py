@@ -357,6 +357,13 @@ def _autotune(
             best_time = time_ms
             best_values = candidate_values
 
+    # Fence all remote writes from benchmarking before proceeding.
+    # do_bench does not add a trailing barrier after the last iteration,
+    # so XGMI stores from other ranks' last benchmark kernel may still be
+    # in-flight.  Without this barrier the "real" kernel run (by the caller)
+    # can race with stale benchmark writes arriving on the interconnect.
+    shmem.barrier()
+
     # Rank 0 broadcasts the winner
     if dist.is_initialized() and world_size > 1:
         result = [best_values] if rank == 0 else [None]
