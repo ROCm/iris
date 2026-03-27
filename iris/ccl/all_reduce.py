@@ -53,7 +53,7 @@ class AllReduceWorkspace:
 def all_reduce_preamble(
     output_tensor,
     input_tensor,
-    shmem,
+    ctx,
     config: Optional[Config] = None,
     workspace: Optional[AllReduceWorkspace] = None,
 ):
@@ -86,7 +86,7 @@ def all_reduce_preamble(
 
     if variant in (VARIANT_ATOMIC, VARIANT_SPINLOCK, VARIANT_ONE_SHOT):
         output_tensor.zero_()
-        shmem.barrier()
+        ctx.barrier()
 
     elif variant == VARIANT_RING:
         num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
@@ -99,17 +99,17 @@ def all_reduce_preamble(
             or workspace.ring_buffer.shape != (M, N)
             or workspace.ring_buffer.dtype != dtype
         ):
-            workspace.ring_buffer = shmem.zeros((M, N), dtype=dtype)
+            workspace.ring_buffer = ctx.zeros((M, N), dtype=dtype)
         else:
             workspace.ring_buffer.zero_()
 
         if workspace.flags is None or workspace.flags.numel() != total_flags:
-            workspace.flags = shmem.zeros((total_flags,), dtype=torch.int32)
+            workspace.flags = ctx.zeros((total_flags,), dtype=torch.int32)
         else:
             workspace.flags.zero_()
 
         output_tensor.zero_()
-        shmem.barrier()
+        ctx.barrier()
 
     elif variant == VARIANT_TWO_SHOT:
         pass
@@ -119,7 +119,7 @@ def all_reduce_preamble(
         num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
         total_tiles = num_pid_m * num_pid_n
         if workspace.locks is None or workspace.locks.numel() != total_tiles:
-            workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
+            workspace.locks = ctx.zeros((total_tiles,), dtype=torch.int32)
         else:
             workspace.locks.zero_()
 
@@ -707,7 +707,7 @@ def persistent_all_reduce_two_shot(
 def all_reduce(
     output_tensor,
     input_tensor,
-    shmem,
+    ctx,
     op=ReduceOp.SUM,
     group=None,
     async_op=False,
@@ -717,9 +717,9 @@ def all_reduce(
     """
     Internal all-reduce collective operation implementation.
 
-    This function is called internally by shmem.ccl.all_reduce().
+    This function is called internally by ctx.ccl.all_reduce().
     Users should use the Iris instance method instead:
-        >>> shmem.ccl.all_reduce(output_tensor, input_tensor)
+        >>> ctx.ccl.all_reduce(output_tensor, input_tensor)
 
     Each rank has a local input tensor, and all ranks compute the sum of all
     input tensors. The result is written to output_tensor on all ranks.
@@ -727,10 +727,10 @@ def all_reduce(
     Args:
         output_tensor: Output tensor of shape (M, N) - will contain sum of all inputs
         input_tensor: Input tensor of shape (M, N) - local rank's partial data
-        shmem: Iris shmem context
+        ctx: Iris ctx context
         op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
             Default: ReduceOp.SUM.
-        group: ProcessGroup or None. If None, uses all ranks in shmem context.
+        group: ProcessGroup or None. If None, uses all ranks in ctx context.
                Default: None.
         async_op: If False, performs a barrier at the end. If True, returns immediately.
                   Default: False.
@@ -748,7 +748,7 @@ def all_reduce(
     # Resolve autotuning: fills in any AUTOTUNE fields via cache or benchmarking
     from .autotune import resolve_config
 
-    config = resolve_config("all_reduce", config, all_reduce, output_tensor, input_tensor, shmem, op=op, group=group)
+    config = resolve_config("all_reduce", config, all_reduce, output_tensor, input_tensor, ctx, op=op, group=group)
 
     # Check for unsupported options
     if config.use_gluon:
@@ -761,7 +761,7 @@ def all_reduce(
     # Extract group information
     # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
     # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
     M, N = input_tensor.shape[:2]
 
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
@@ -805,12 +805,12 @@ def all_reduce(
         workspace = all_reduce_preamble(
             output_tensor,
             input_tensor,
-            shmem,
+            ctx,
             config=config,
             workspace=workspace,
         )
 
-    heap_bases = shmem.get_heap_bases()
+    heap_bases = ctx.get_heap_bases()
 
     if variant == VARIANT_ATOMIC:
         persistent_all_reduce_atomic[(config.comm_sms,)](
@@ -988,6 +988,6 @@ def all_reduce(
         workspace.prepared = False
 
     if not async_op:
-        shmem.barrier()
+        ctx.barrier()
 
     return workspace

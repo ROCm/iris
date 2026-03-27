@@ -142,7 +142,7 @@ def persistent_reduce_scatter_two_shot(
 def reduce_scatter(
     output_tensor,
     input_tensor,
-    shmem,
+    ctx,
     op=ReduceOp.SUM,
     group=None,
     async_op=False,
@@ -151,9 +151,9 @@ def reduce_scatter(
     """
     Internal reduce-scatter collective operation implementation.
 
-    This function is called internally by shmem.ccl.reduce_scatter().
+    This function is called internally by ctx.ccl.reduce_scatter().
     Users should use the Iris instance method instead:
-        >>> shmem.ccl.reduce_scatter(output_tensor, input_tensor)
+        >>> ctx.ccl.reduce_scatter(output_tensor, input_tensor)
 
     Each rank reduces its assigned tiles from all ranks' inputs and stores
     the result only to its own output tensor. This is similar to all-reduce
@@ -162,10 +162,10 @@ def reduce_scatter(
     Args:
         output_tensor: Output tensor of shape (M, N) - will contain reduced tiles for this rank
         input_tensor: Input tensor of shape (M, N) - local rank's partial data
-        shmem: Iris shmem context
+        ctx: Iris ctx context
         op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
             Default: ReduceOp.SUM.
-        group: ProcessGroup or None. If None, uses all ranks in shmem context.
+        group: ProcessGroup or None. If None, uses all ranks in ctx context.
                Default: None.
         async_op: If False, performs a barrier at the end. If True, returns immediately.
                   Default: False.
@@ -174,13 +174,13 @@ def reduce_scatter(
                 Only supports reduce_scatter_variant="two_shot".
 
     Example:
-        >>> shmem = iris.iris()
-        >>> shmem.ccl.reduce_scatter(output_tensor, input_tensor)
+        >>> ctx = iris.iris()
+        >>> ctx.ccl.reduce_scatter(output_tensor, input_tensor)
 
         >>> # Custom configuration
         >>> from iris.ccl import Config
         >>> config = Config(reduce_scatter_variant="two_shot", all_reduce_distribution=1)
-        >>> shmem.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
+        >>> ctx.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
     """
     # Validate op parameter
     if op != ReduceOp.SUM:
@@ -192,7 +192,7 @@ def reduce_scatter(
     from .autotune import resolve_config
 
     config = resolve_config(
-        "reduce_scatter", config, reduce_scatter, output_tensor, input_tensor, shmem, op=op, group=group
+        "reduce_scatter", config, reduce_scatter, output_tensor, input_tensor, ctx, op=op, group=group
     )
 
     # Check for unsupported options
@@ -214,7 +214,7 @@ def reduce_scatter(
     # Extract group information
     # rank_in_group: position within the group (0, 1, 2, ...) - used for tile assignment
     # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
     M, N = input_tensor.shape[:2]
 
     # Validate output shape matches input shape
@@ -227,7 +227,7 @@ def reduce_scatter(
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
-    heap_bases = shmem.get_heap_bases()
+    heap_bases = ctx.get_heap_bases()
 
     # Use all_reduce_distribution for tile distribution
     distribution = config.all_reduce_distribution
@@ -260,4 +260,4 @@ def reduce_scatter(
     )
 
     if not async_op:
-        shmem.barrier()
+        ctx.barrier()

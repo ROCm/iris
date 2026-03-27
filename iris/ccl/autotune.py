@@ -283,14 +283,14 @@ def _autotune(
     collective_fn: Callable,
     output_tensor: torch.Tensor,
     input_tensor: torch.Tensor,
-    shmem,
+    ctx,
     extra_kwargs: dict,
 ) -> Config:
     """Run the autotuning benchmark loop and return the best Config."""
     budget = int(os.environ.get("IRIS_AUTOTUNE_BUDGET", "50"))
     verbose = os.environ.get("IRIS_AUTOTUNE_VERBOSE", "0") == "1"
 
-    rank = shmem.get_rank()
+    rank = ctx.get_rank()
     world_size = key.world_size
 
     # Build fixed values dict (non-AUTOTUNE fields from base_config)
@@ -331,7 +331,7 @@ def _autotune(
                 collective_fn(
                     output_tensor,
                     input_tensor,
-                    shmem,
+                    ctx,
                     config=trial_config,
                     async_op=True,
                     **extra_kwargs,
@@ -339,7 +339,7 @@ def _autotune(
 
             time_ms = iris.do_bench(
                 _run,
-                barrier_fn=shmem.barrier,
+                barrier_fn=ctx.barrier,
                 n_warmup=3,
                 n_repeat=10,
                 return_mode="median",
@@ -362,7 +362,7 @@ def _autotune(
     # so XGMI stores from other ranks' last benchmark kernel may still be
     # in-flight.  Without this barrier the "real" kernel run (by the caller)
     # can race with stale benchmark writes arriving on the interconnect.
-    shmem.barrier()
+    ctx.barrier()
 
     # Rank 0 broadcasts the winner
     if dist.is_initialized() and world_size > 1:
@@ -402,7 +402,7 @@ def resolve_config(
     collective_fn: Callable,
     output_tensor: torch.Tensor,
     input_tensor: torch.Tensor,
-    shmem,
+    ctx,
     **extra_kwargs,
 ) -> Config:
     """Resolve AUTOTUNE fields in a Config, using cache or benchmarking.
@@ -420,7 +420,7 @@ def resolve_config(
         collective_fn: The collective's dispatch function (e.g., all_gather).
         output_tensor: Output tensor for benchmarking.
         input_tensor: Input tensor for benchmarking.
-        shmem: Iris context.
+        ctx: Iris context.
         **extra_kwargs: Extra keyword args forwarded to collective_fn during
             benchmarking (e.g., op=ReduceOp.SUM, group=group).
 
@@ -468,7 +468,7 @@ def resolve_config(
     # Case 3: has AUTOTUNE fields -> cache lookup or autotune
     M, N = input_tensor.shape[:2]
     dtype_str = str(input_tensor.dtype)
-    world_size = shmem.get_num_ranks()
+    world_size = ctx.get_num_ranks()
     gpu_arch = iris.hip.get_arch_string()
 
     # Build fixed_fields for cache key (non-AUTOTUNE fields that differ from defaults)
@@ -513,7 +513,7 @@ def resolve_config(
             collective_fn,
             output_tensor,
             input_tensor,
-            shmem,
+            ctx,
             extra_kwargs,
         )
     finally:
