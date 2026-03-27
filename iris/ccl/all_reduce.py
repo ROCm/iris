@@ -1203,16 +1203,18 @@ def all_reduce(
         workspace.prepared = False
 
     if not async_op:
-        if variant == VARIANT_FLAT and use_one_shot:
-            # Flat one_shot only does iris.load (remote reads) + tl.store
-            # (local writes).  No remote stores → no inter-rank sync needed.
-            # Just ensure the kernel has finished on *this* GPU.
+        # Use the minimum synchronization each variant actually needs:
+        #   - Read-only variants (iris.load + tl.store, no remote writes):
+        #     just cuda.synchronize() to ensure local kernel finished.
+        #   - Remote-write variants (iris.store or atomic RMW):
+        #     device_barrier to ensure all remote stores have landed.
+        reads_only = (
+            variant == VARIANT_ONE_SHOT
+            or (variant == VARIANT_FLAT and use_one_shot)
+        )
+        if reads_only:
             torch.cuda.synchronize()
-        elif variant == VARIANT_FLAT:
-            # Flat two_shot uses iris.store (remote writes) so we need a
-            # device-side barrier to ensure all ranks see the broadcast.
-            shmem.device_barrier(group=group)
         else:
-            shmem.barrier()
+            shmem.device_barrier(group=group)
 
     return workspace
