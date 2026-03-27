@@ -80,7 +80,7 @@ for M in ALL_MS:
     tensor_rccl = torch.full((M, N), float(rank + 1), dtype=dtype, device="cuda")
     dist.all_reduce(tensor_rccl, op=dist.ReduceOp.SUM)
 
-    for variant in ["two_shot", "one_shot"]:
+    for variant in ["two_shot", "one_shot", "flat"]:
         inp = ctx.zeros((M, N), dtype=dtype)
         out = ctx.zeros((M, N), dtype=dtype)
         inp.fill_(float(rank + 1))
@@ -93,8 +93,8 @@ dist.barrier()
 
 if rank == 0:
     print("Compilation done. Starting benchmarks...\n", flush=True)
-    print(f"{'M':>6} {'N':>6} | {'RCCL (ms)':>10} {'RCCL BW':>10} | {'two_shot':>10} {'BW':>10} {'ratio':>7} | {'one_shot':>10} {'BW':>10} {'ratio':>7} |", flush=True)
-    print("-" * 110, flush=True)
+    print(f"{'M':>6} {'N':>6} | {'RCCL (ms)':>10} {'RCCL BW':>10} | {'two_shot':>10} {'BW':>10} {'ratio':>7} | {'one_shot':>10} {'BW':>10} {'ratio':>7} | {'flat':>10} {'BW':>10} {'ratio':>7} |", flush=True)
+    print("-" * 140, flush=True)
 
 results = []
 
@@ -109,7 +109,7 @@ for M in ALL_MS:
     row = {"M": M, "rccl_ms": rccl_ms, "rccl_bw": rccl_bw}
 
     # Iris variants
-    for variant in ["two_shot", "one_shot"]:
+    for variant in ["two_shot", "one_shot", "flat"]:
         inp = ctx.zeros((M, N), dtype=dtype)
         out = ctx.zeros((M, N), dtype=dtype)
         inp.fill_(float(rank + 1))
@@ -129,14 +129,16 @@ for M in ALL_MS:
     if rank == 0:
         print(f"{M:>6} {N:>6} | {row['rccl_ms']:>10.3f} {row['rccl_bw']:>9.2f}G | "
               f"{row['two_shot_ms']:>10.3f} {row['two_shot_bw']:>9.2f}G {row['two_shot_ratio']:>6.2f}x | "
-              f"{row['one_shot_ms']:>10.3f} {row['one_shot_bw']:>9.2f}G {row['one_shot_ratio']:>6.2f}x |", flush=True)
+              f"{row['one_shot_ms']:>10.3f} {row['one_shot_bw']:>9.2f}G {row['one_shot_ratio']:>6.2f}x | "
+              f"{row['flat_ms']:>10.3f} {row['flat_bw']:>9.2f}G {row['flat_ratio']:>6.2f}x |", flush=True)
 
 if rank == 0:
     print("\n--- CSV ---", flush=True)
-    print("M,N,rccl_ms,rccl_bw_gbps,two_shot_ms,two_shot_bw_gbps,two_shot_ratio,one_shot_ms,one_shot_bw_gbps,one_shot_ratio", flush=True)
+    print("M,N,rccl_ms,rccl_bw_gbps,two_shot_ms,two_shot_bw_gbps,two_shot_ratio,one_shot_ms,one_shot_bw_gbps,one_shot_ratio,flat_ms,flat_bw_gbps,flat_ratio", flush=True)
     for r in results:
         print(f"{r['M']},{N},{r['rccl_ms']:.4f},{r['rccl_bw']:.2f},"
               f"{r['two_shot_ms']:.4f},{r['two_shot_bw']:.2f},{r['two_shot_ratio']:.3f},"
-              f"{r['one_shot_ms']:.4f},{r['one_shot_bw']:.2f},{r['one_shot_ratio']:.3f}", flush=True)
+              f"{r['one_shot_ms']:.4f},{r['one_shot_bw']:.2f},{r['one_shot_ratio']:.3f},"
+              f"{r['flat_ms']:.4f},{r['flat_bw']:.2f},{r['flat_ratio']:.3f}", flush=True)
 
 dist.destroy_process_group()

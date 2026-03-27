@@ -89,6 +89,8 @@ class Config:
     all_reduce_distribution: int = 1
     all_reduce_num_rings: int = 1
     all_reduce_ring_slice_n: int | None = None
+    flat_block_size: int = 4096
+    flat_one_shot_threshold: int = 0
     reduce_scatter_variant: str = "two_shot"
     num_stages: int = 1
     num_warps: int = 4
@@ -118,10 +120,14 @@ class Config:
             raise ValueError(
                 f"all_gather_variant must be one of: 'persistent', 'partitioned', got {self.all_gather_variant}"
             )
-        if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock"]:
+        if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock", "flat"]:
             raise ValueError(
-                f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'spinlock', got {self.all_reduce_variant}"
+                f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'spinlock', 'flat', got {self.all_reduce_variant}"
             )
+        if self.flat_block_size <= 0 or (self.flat_block_size & (self.flat_block_size - 1)):
+            raise ValueError(f"flat_block_size must be a positive power of two, got {self.flat_block_size}")
+        if self.flat_one_shot_threshold < 0:
+            raise ValueError(f"flat_one_shot_threshold must be non-negative, got {self.flat_one_shot_threshold}")
         if self.all_reduce_distribution not in [0, 1]:
             raise ValueError(
                 f"all_reduce_distribution must be 0 (striding) or 1 (block), got {self.all_reduce_distribution}"

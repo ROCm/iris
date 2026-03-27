@@ -22,6 +22,7 @@ VARIANT_RING = "ring"
 VARIANT_TWO_SHOT = "two_shot"
 VARIANT_ONE_SHOT = "one_shot"
 VARIANT_SPINLOCK = "spinlock"
+VARIANT_FLAT = "flat"
 
 
 @dataclass
@@ -67,9 +68,9 @@ def all_reduce_preamble(
         config = Config()
 
     variant = config.all_reduce_variant.lower()
-    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK]:
+    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK, VARIANT_FLAT]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}, {VARIANT_FLAT}"
         )
 
     M, N = input_tensor.shape[:2]
@@ -111,7 +112,7 @@ def all_reduce_preamble(
         output_tensor.zero_()
         shmem.barrier()
 
-    elif variant == VARIANT_TWO_SHOT:
+    elif variant in (VARIANT_TWO_SHOT, VARIANT_FLAT):
         pass
 
     if variant == VARIANT_SPINLOCK:
@@ -652,15 +653,13 @@ def persistent_all_reduce_two_shot(
         # (one with masks and one without). Separate unmasked paths allow the compiler to generate
         # more efficient vectorized instructions.
         if is_full:
-            mask = (rm[:, None] < M) & (rn[None, :] < N)
-
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
@@ -679,11 +678,11 @@ def persistent_all_reduce_two_shot(
 
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask).to(acc_dtype)
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
@@ -702,6 +701,178 @@ def persistent_all_reduce_two_shot(
                         mask=mask,
                         hint=(1, BLOCK_SIZE_N),
                     )
+
+
+@triton.jit
+def flat_all_reduce_one_shot(
+    input_ptr,
+    output_ptr,
+    total_elements,
+    heap_bases: tl.tensor,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+):
+    """Flat 1D one-shot all-reduce for small/latency-bound buffers.
+
+    Every GPU reads from all inputs via iris.load, reduces locally, stores
+    locally.  No remote stores, no 2D tiling, no swizzle.
+    """
+    pid = tl.program_id(0)
+
+    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
+
+    offset = pid * BLOCK_SIZE
+    while offset < total_elements:
+        idx = offset + tl.arange(0, BLOCK_SIZE)
+        is_full = (offset + BLOCK_SIZE) <= total_elements
+
+        if is_full:
+            # Fast path: no mask needed
+            first_rank = rank_start
+            acc = iris.load(input_ptr + idx, iris_rank, first_rank, heap_bases, hint=BLOCK_SIZE).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = rank_start + i * rank_stride
+                acc += iris.load(input_ptr + idx, iris_rank, remote_rank, heap_bases, hint=BLOCK_SIZE).to(acc_dtype)
+
+            tl.store(output_ptr + idx, acc.to(output_ptr.type.element_ty))
+        else:
+            # Slow path: masked for boundary elements
+            mask = idx < total_elements
+            first_rank = rank_start
+            acc = iris.load(input_ptr + idx, iris_rank, first_rank, heap_bases, mask=mask, hint=BLOCK_SIZE).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = rank_start + i * rank_stride
+                acc += iris.load(input_ptr + idx, iris_rank, remote_rank, heap_bases, mask=mask, hint=BLOCK_SIZE).to(acc_dtype)
+
+            tl.store(output_ptr + idx, acc.to(output_ptr.type.element_ty), mask=mask)
+
+        offset += COMM_SMS * BLOCK_SIZE
+
+
+@triton.jit
+def flat_all_reduce_two_shot(
+    input_ptr,
+    output_ptr,
+    total_elements,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    DISTRIBUTION: tl.constexpr,
+):
+    """Flat 1D two-shot all-reduce for large/bandwidth-bound buffers.
+
+    Phase 1 (reduce-scatter): each rank reduces its assigned 1/W slice by
+    reading that slice from all peers.
+    Phase 2 (all-gather): broadcast the reduced slice to all peers via
+    iris.store.
+
+    Flat 1D indexing — no 2D tile coordinates, no swizzle, no chiplet
+    transform.
+    """
+    pid = tl.program_id(0)
+
+    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
+
+    elements_per_rank = tl.cdiv(total_elements, world_size)
+
+    if DISTRIBUTION == 1:
+        # Block distribution: rank owns a contiguous slice
+        my_start = group_rank * elements_per_rank
+        my_end = tl.minimum(my_start + elements_per_rank, total_elements)
+        my_count = tl.maximum(my_end - my_start, 0)
+    else:
+        # Striding distribution: rank owns every Wth block
+        my_start = 0  # placeholder — we compute per-block below
+        my_count = 0
+
+    if DISTRIBUTION == 1:
+        # Block distribution: iterate over this rank's contiguous slice
+        offset = pid * BLOCK_SIZE
+        while offset < my_count:
+            global_offset = my_start + offset
+            idx = global_offset + tl.arange(0, BLOCK_SIZE)
+            is_full = (global_offset + BLOCK_SIZE) <= my_end
+
+            if is_full:
+                first_rank = rank_start
+                acc = iris.load(input_ptr + idx, iris_rank, first_rank, heap_bases, hint=BLOCK_SIZE).to(acc_dtype)
+                for i in tl.static_range(1, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    acc += iris.load(input_ptr + idx, iris_rank, remote_rank, heap_bases, hint=BLOCK_SIZE).to(acc_dtype)
+
+                reduced = acc.to(output_ptr.type.element_ty)
+                tl.store(output_ptr + idx, reduced, cache_modifier=".wt")
+
+                for i in tl.static_range(0, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    if i != group_rank:
+                        iris.store(output_ptr + idx, reduced, iris_rank, remote_rank, heap_bases, hint=BLOCK_SIZE)
+            else:
+                mask = idx < total_elements
+                first_rank = rank_start
+                acc = iris.load(input_ptr + idx, iris_rank, first_rank, heap_bases, mask=mask, hint=BLOCK_SIZE).to(acc_dtype)
+                for i in tl.static_range(1, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    acc += iris.load(input_ptr + idx, iris_rank, remote_rank, heap_bases, mask=mask, hint=BLOCK_SIZE).to(acc_dtype)
+
+                reduced = acc.to(output_ptr.type.element_ty)
+                tl.store(output_ptr + idx, reduced, mask=mask, cache_modifier=".wt")
+
+                for i in tl.static_range(0, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    if i != group_rank:
+                        iris.store(output_ptr + idx, reduced, iris_rank, remote_rank, heap_bases, mask=mask, hint=BLOCK_SIZE)
+
+            offset += COMM_SMS * BLOCK_SIZE
+    else:
+        # Striding distribution: rank handles every Wth block
+        total_blocks = tl.cdiv(total_elements, BLOCK_SIZE)
+        block_id = group_rank + pid * world_size
+        while block_id < total_blocks:
+            global_offset = block_id * BLOCK_SIZE
+            idx = global_offset + tl.arange(0, BLOCK_SIZE)
+            is_full = (global_offset + BLOCK_SIZE) <= total_elements
+
+            if is_full:
+                first_rank = rank_start
+                acc = iris.load(input_ptr + idx, iris_rank, first_rank, heap_bases, hint=BLOCK_SIZE).to(acc_dtype)
+                for i in tl.static_range(1, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    acc += iris.load(input_ptr + idx, iris_rank, remote_rank, heap_bases, hint=BLOCK_SIZE).to(acc_dtype)
+
+                reduced = acc.to(output_ptr.type.element_ty)
+                tl.store(output_ptr + idx, reduced, cache_modifier=".wt")
+
+                for i in tl.static_range(0, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    if i != group_rank:
+                        iris.store(output_ptr + idx, reduced, iris_rank, remote_rank, heap_bases, hint=BLOCK_SIZE)
+            else:
+                mask = idx < total_elements
+                first_rank = rank_start
+                acc = iris.load(input_ptr + idx, iris_rank, first_rank, heap_bases, mask=mask, hint=BLOCK_SIZE).to(acc_dtype)
+                for i in tl.static_range(1, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    acc += iris.load(input_ptr + idx, iris_rank, remote_rank, heap_bases, mask=mask, hint=BLOCK_SIZE).to(acc_dtype)
+
+                reduced = acc.to(output_ptr.type.element_ty)
+                tl.store(output_ptr + idx, reduced, mask=mask, cache_modifier=".wt")
+
+                for i in tl.static_range(0, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    if i != group_rank:
+                        iris.store(output_ptr + idx, reduced, iris_rank, remote_rank, heap_bases, mask=mask, hint=BLOCK_SIZE)
+
+            block_id += COMM_SMS * world_size
 
 
 def all_reduce(
@@ -772,9 +943,10 @@ def all_reduce(
         VARIANT_RING,
         VARIANT_TWO_SHOT,
         VARIANT_ONE_SHOT,
+        VARIANT_FLAT,
     ]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_SPINLOCK}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_SPINLOCK}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_FLAT}"
         )
 
     slice_n = config.all_reduce_ring_slice_n
@@ -981,6 +1153,48 @@ def all_reduce(
             config.num_xcds,
             config.chunk_size,
         )
+
+    elif variant == VARIANT_FLAT:
+        total_elements = M * N
+        block_size = config.flat_block_size
+        threshold = config.flat_one_shot_threshold
+        if threshold == 0:
+            threshold = 64 * N  # auto: use one_shot for M <= 64
+
+        if total_elements <= threshold:
+            flat_all_reduce_one_shot[(config.comm_sms,)](
+                input_tensor,
+                output_tensor,
+                total_elements,
+                heap_bases,
+                rank_global,
+                world_size,
+                rank_start,
+                rank_stride,
+                block_size,
+                config.comm_sms,
+                num_warps=8,
+                num_stages=1,
+                waves_per_eu=0,
+            )
+        else:
+            flat_all_reduce_two_shot[(config.comm_sms,)](
+                input_tensor,
+                output_tensor,
+                total_elements,
+                heap_bases,
+                rank_in_group,
+                rank_global,
+                world_size,
+                rank_start,
+                rank_stride,
+                block_size,
+                config.comm_sms,
+                config.all_reduce_distribution,
+                num_warps=8,
+                num_stages=1,
+                waves_per_eu=0,
+            )
 
     if workspace is not None:
         workspace.prepared = False
