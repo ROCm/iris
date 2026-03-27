@@ -981,6 +981,7 @@ def all_reduce(
         )
 
     heap_bases = shmem.get_heap_bases()
+    use_one_shot = False  # Only set to True for VARIANT_FLAT one_shot path
 
     if variant == VARIANT_ATOMIC:
         persistent_all_reduce_atomic[(config.comm_sms,)](
@@ -1159,7 +1160,7 @@ def all_reduce(
         block_size = config.flat_block_size
         threshold = config.flat_one_shot_threshold
         if threshold == 0:
-            threshold = 64 * N  # auto: use one_shot for M <= 64
+            threshold = 512 * N  # auto: use one_shot for M <= 512
 
         use_one_shot = total_elements <= threshold
 
@@ -1202,10 +1203,14 @@ def all_reduce(
         workspace.prepared = False
 
     if not async_op:
-        if variant == VARIANT_FLAT:
-            # Flat kernels use device-side barrier (GPU atomics on symmetric
-            # heap) instead of the host barrier to avoid the ~0.1ms cost of
-            # torch.cuda.synchronize() + torch.distributed.barrier().
+        if variant == VARIANT_FLAT and use_one_shot:
+            # Flat one_shot only does iris.load (remote reads) + tl.store
+            # (local writes).  No remote stores → no inter-rank sync needed.
+            # Just ensure the kernel has finished on *this* GPU.
+            torch.cuda.synchronize()
+        elif variant == VARIANT_FLAT:
+            # Flat two_shot uses iris.store (remote writes) so we need a
+            # device-side barrier to ensure all ranks see the broadcast.
             shmem.device_barrier(group=group)
         else:
             shmem.barrier()
