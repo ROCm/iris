@@ -1160,7 +1160,7 @@ def all_reduce(
         block_size = config.flat_block_size
         threshold = config.flat_one_shot_threshold
         if threshold == 0:
-            threshold = 512 * N  # auto: use one_shot for M <= 512
+            threshold = 128 * N  # auto: use one_shot for M <= 128
 
         use_one_shot = total_elements <= threshold
 
