@@ -1161,7 +1161,9 @@ def all_reduce(
         if threshold == 0:
             threshold = 64 * N  # auto: use one_shot for M <= 64
 
-        if total_elements <= threshold:
+        use_one_shot = total_elements <= threshold
+
+        if use_one_shot:
             flat_all_reduce_one_shot[(config.comm_sms,)](
                 input_tensor,
                 output_tensor,
@@ -1200,6 +1202,12 @@ def all_reduce(
         workspace.prepared = False
 
     if not async_op:
-        shmem.barrier()
+        if variant == VARIANT_FLAT:
+            # Flat kernels use device-side barrier (GPU atomics on symmetric
+            # heap) instead of the host barrier to avoid the ~0.1ms cost of
+            # torch.cuda.synchronize() + torch.distributed.barrier().
+            shmem.device_barrier(group=group)
+        else:
+            shmem.barrier()
 
     return workspace
