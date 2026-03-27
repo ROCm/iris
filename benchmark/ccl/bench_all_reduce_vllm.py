@@ -36,8 +36,15 @@ def rccl_all_reduce(state, ctx):
     element_size = torch.tensor([], dtype=dtype).element_size()
     state.set_bytes(int(M * N * element_size * 2 * (world_size - 1) / world_size))
 
-    tensor = torch.full((M, N), float(rank + 1), dtype=dtype, device=f"cuda:{rank}")
-    state.exec(lambda: dist.all_reduce(tensor, op=dist.ReduceOp.SUM))
+    tensor = torch.full((M, N), float(rank + 1), dtype=dtype, device=torch.device("cuda"))
+
+    def preamble():
+        tensor.fill_(float(rank + 1))
+
+    state.exec(
+        lambda: dist.all_reduce(tensor, op=dist.ReduceOp.SUM),
+        preamble_fn=preamble,
+    )
 
 
 # ── Iris variants ────────────────────────────────────────────────────────
