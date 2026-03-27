@@ -110,16 +110,25 @@ def run_model(model_name, cfg):
     intermediate = cfg["intermediate"]
     mlp = MLPLayer(hidden, intermediate, world_size)
 
+    has_as_symmetric = hasattr(ctx.allocator, "import_external_tensor")
+
     if rank == 0:
         inter_per_rank = intermediate // world_size
         print(f"\n{'='*90}")
         print(f"  {model_name}  (hidden={hidden}, intermediate={intermediate}, TP={world_size})")
         print(f"  Per-rank matmul shapes: ({hidden}→{inter_per_rank}) and ({inter_per_rank}→{hidden})")
         print(f"  All-reduce shape: (M, {hidden}), dtype={dtype}")
+        if has_as_symmetric:
+            print(f"  as_symmetric: AVAILABLE (zero-copy import)")
+        else:
+            print(f"  as_symmetric: not available (will use copy)")
         print(f"{'='*90}")
-        print(f"{'M':>6} | {'Compute':>10} {'Comm(RCCL)':>11} {'Full(RCCL)':>11} {'Comm%':>6} | "
-              f"{'Comm(iris)':>11} {'Full(iris)':>11} {'Comm%':>6} {'iris/RCCL':>10} |")
-        print("-" * 100)
+        hdr = (f"{'M':>6} | {'Compute':>10} {'Comm(RCCL)':>11} {'Full(RCCL)':>11} {'Comm%':>6} | "
+               f"{'iris+copy':>11} {'Full+copy':>11} {'Comm%':>6} {'vs RCCL':>8} |")
+        if has_as_symmetric:
+            hdr += (f" {'iris(0cp)':>11} {'Full(0cp)':>11} {'Comm%':>6} {'vs RCCL':>8} |")
+        print(hdr)
+        print("-" * (len(hdr)))
 
     for M in TOKEN_COUNTS:
         # Input tensor
@@ -146,7 +155,7 @@ def run_model(model_name, cfg):
 
         rccl_full_ms = bench_cuda_events(rccl_full, warmup=10, rep=50)
 
-        # ── iris comm only ──
+        # ── iris with copy (baseline) ──
         iris_inp = ctx.zeros((M, hidden), dtype=dtype)
         iris_out = ctx.zeros((M, hidden), dtype=dtype)
         iris_inp.copy_(partial)
@@ -154,38 +163,84 @@ def run_model(model_name, cfg):
         workspace = ctx.ccl.all_reduce_preamble(iris_out, iris_inp, config=config)
         ctx.barrier()
 
-        def iris_comm():
+        def iris_comm_copy():
             iris_inp.copy_(partial)
             ctx.ccl.all_reduce(iris_out, iris_inp, config=config, workspace=workspace)
 
-        iris_comm_ms = bench_cuda_events(iris_comm, warmup=10, rep=50)
+        iris_copy_comm_ms = bench_cuda_events(iris_comm_copy, warmup=10, rep=50)
 
-        # ── iris full layer ──
-        def iris_full():
+        def iris_full_copy():
             out = mlp.compute(x)
             iris_inp.copy_(out)
             ctx.ccl.all_reduce(iris_out, iris_inp, config=config, workspace=workspace)
 
-        iris_full_ms = bench_cuda_events(iris_full, warmup=10, rep=50)
+        iris_copy_full_ms = bench_cuda_events(iris_full_copy, warmup=10, rep=50)
+
+        # ── iris with as_symmetric (zero-copy) ──
+        iris_zc_comm_ms = None
+        iris_zc_full_ms = None
+
+        if has_as_symmetric:
+            # as_symmetric maps the matmul output into the heap — no copy needed.
+            # We need to set up workspace with a symmetric tensor of the right shape.
+            sym_partial = ctx.as_symmetric(partial)
+            iris_zc_out = ctx.zeros((M, hidden), dtype=dtype)
+            config_zc = Config(all_reduce_variant="flat")
+            workspace_zc = ctx.ccl.all_reduce_preamble(
+                iris_zc_out, sym_partial, config=config_zc
+            )
+            ctx.barrier()
+
+            def iris_comm_zc():
+                # partial is already in heap via as_symmetric — just all_reduce
+                ctx.ccl.all_reduce(
+                    iris_zc_out, sym_partial, config=config_zc, workspace=workspace_zc
+                )
+
+            iris_zc_comm_ms = bench_cuda_events(iris_comm_zc, warmup=10, rep=50)
+
+            def iris_full_zc():
+                # Compute directly into the pre-registered buffer
+                out = mlp.compute(x)
+                # as_symmetric was called once during setup — `partial` and
+                # `sym_partial` share storage. We just need to get the matmul
+                # output into that same buffer.
+                partial.copy_(out)
+                ctx.ccl.all_reduce(
+                    iris_zc_out, sym_partial, config=config_zc, workspace=workspace_zc
+                )
+
+            iris_zc_full_ms = bench_cuda_events(iris_full_zc, warmup=10, rep=50)
 
         # ── Print ──
         rccl_comm_pct = rccl_comm_ms / rccl_full_ms * 100 if rccl_full_ms > 0 else 0
-        iris_comm_pct = iris_comm_ms / iris_full_ms * 100 if iris_full_ms > 0 else 0
-        speedup = rccl_full_ms / iris_full_ms if iris_full_ms > 0 else 0
+        iris_copy_comm_pct = iris_copy_comm_ms / iris_copy_full_ms * 100 if iris_copy_full_ms > 0 else 0
+        copy_speedup = rccl_full_ms / iris_copy_full_ms if iris_copy_full_ms > 0 else 0
+
+        line = (
+            f"{M:>6} | "
+            f"{compute_ms:>9.3f}ms "
+            f"{rccl_comm_ms:>9.3f}ms "
+            f"{rccl_full_ms:>9.3f}ms "
+            f"{rccl_comm_pct:>5.1f}% | "
+            f"{iris_copy_comm_ms:>9.3f}ms "
+            f"{iris_copy_full_ms:>9.3f}ms "
+            f"{iris_copy_comm_pct:>5.1f}% "
+            f"{copy_speedup:>7.2f}x |"
+        )
+
+        if has_as_symmetric and iris_zc_full_ms is not None:
+            iris_zc_comm_pct = iris_zc_comm_ms / iris_zc_full_ms * 100 if iris_zc_full_ms > 0 else 0
+            zc_speedup = rccl_full_ms / iris_zc_full_ms if iris_zc_full_ms > 0 else 0
+            line += (
+                f" {iris_zc_comm_ms:>9.3f}ms "
+                f"{iris_zc_full_ms:>9.3f}ms "
+                f"{iris_zc_comm_pct:>5.1f}% "
+                f"{zc_speedup:>7.2f}x |"
+            )
 
         if rank == 0:
-            print(
-                f"{M:>6} | "
-                f"{compute_ms:>9.3f}ms "
-                f"{rccl_comm_ms:>9.3f}ms "
-                f"{rccl_full_ms:>9.3f}ms "
-                f"{rccl_comm_pct:>5.1f}% | "
-                f"{iris_comm_ms:>9.3f}ms "
-                f"{iris_full_ms:>9.3f}ms "
-                f"{iris_comm_pct:>5.1f}% "
-                f"{speedup:>9.2f}x |",
-                flush=True,
-            )
+            print(line, flush=True)
 
 
 # ── Pre-compile ────────────────────────────────────────────────────────────
@@ -200,6 +255,13 @@ for cfg in MODELS.values():
         config = Config(all_reduce_variant="flat")
         ws = ctx.ccl.all_reduce_preamble(out, inp, config=config)
         ctx.ccl.all_reduce(out, inp, config=config, workspace=ws)
+
+        # Also warm up with as_symmetric path if available
+        if hasattr(ctx.allocator, "import_external_tensor"):
+            ext = torch.zeros(M, cfg["hidden"], dtype=dtype, device="cuda")
+            sym = ctx.as_symmetric(ext)
+            ws2 = ctx.ccl.all_reduce_preamble(out, sym, config=config)
+            ctx.ccl.all_reduce(out, sym, config=config, workspace=ws2)
 
 torch.cuda.synchronize()
 dist.barrier()
