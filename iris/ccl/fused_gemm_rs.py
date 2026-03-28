@@ -257,7 +257,16 @@ def gemm_reduce_scatter(
     heap_bases = shmem.get_heap_bases()
 
     BLOCK_M = config.block_size_m
-    BLOCK_N = config.block_size_n
+    # Cap BLOCK_N at shard_size so each output tile maps to exactly one destination rank.
+    # Must be a power of 2 for tl.dot. Find the largest power of 2 <= shard_size.
+    max_block_n = shard_size
+    # Round down to power of 2
+    max_block_n_pow2 = 1
+    while max_block_n_pow2 * 2 <= max_block_n:
+        max_block_n_pow2 *= 2
+    BLOCK_N = min(config.block_size_n, max_block_n_pow2)
+    # Ensure BLOCK_N is at least 16 for Triton tl.dot
+    BLOCK_N = max(BLOCK_N, 16)
     BLOCK_K = 32  # Inner-dim tile size for GEMM k-loop
 
     num_pid_m = triton.cdiv(tokens, BLOCK_M)
