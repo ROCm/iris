@@ -56,8 +56,9 @@ GROUPED_MATMUL_MOD = _load_module("gm", EXAMPLE_DIR / "grouped_matmul.py")
 grouped_matmul = GROUPED_MATMUL_MOD.grouped_matmul
 
 
-def naive_a2a_dispatch(tokens, topk_idx, topk_weight, w_local, b_local,
-                       expt_assignment, n_expts_tot, n_expts_act, rank, world_size):
+def naive_a2a_dispatch(
+    tokens, topk_idx, topk_weight, w_local, b_local, expt_assignment, n_expts_tot, n_expts_act, rank, world_size
+):
     """Naive dispatch using torch.distributed.all_to_all.
 
     This is the baseline: gather all tokens, sort by expert, send via all_to_all,
@@ -117,8 +118,7 @@ def naive_a2a_dispatch(tokens, topk_idx, topk_weight, w_local, b_local,
     return z_local
 
 
-def iris_dispatch_combine(tokens, topk_idx, topk_weight, w_local, b_local,
-                          dispatcher, local_meta_out):
+def iris_dispatch_combine(tokens, topk_idx, topk_weight, w_local, b_local, dispatcher, local_meta_out):
     """Iris MoEDispatcher dispatch + expert matmul + combine."""
     dispatch_buf, local_meta, handle = dispatcher.dispatch(tokens, topk_idx, topk_weight)
     expert_out = grouped_matmul(dispatch_buf, w_local, b_local, local_meta)
@@ -166,14 +166,14 @@ def main():
     # Test configurations
     configs = [
         # (n_tokens_local, d_model, n_expts_tot, n_expts_act)
-        (32, 4096, world_size * 8, 2),     # Small decode batch, LLM hidden dim
-        (64, 4096, world_size * 8, 2),     # Medium decode
-        (128, 4096, world_size * 8, 2),    # Large decode
-        (256, 4096, world_size * 8, 2),    # Prefill-like
-        (512, 4096, world_size * 8, 2),    # Large prefill
-        (128, 2048, world_size * 4, 2),    # Smaller model
-        (128, 4096, world_size * 8, 1),    # topk=1
-        (128, 4096, world_size * 8, 4),    # topk=4
+        (32, 4096, world_size * 8, 2),  # Small decode batch, LLM hidden dim
+        (64, 4096, world_size * 8, 2),  # Medium decode
+        (128, 4096, world_size * 8, 2),  # Large decode
+        (256, 4096, world_size * 8, 2),  # Prefill-like
+        (512, 4096, world_size * 8, 2),  # Large prefill
+        (128, 2048, world_size * 4, 2),  # Smaller model
+        (128, 4096, world_size * 8, 1),  # topk=1
+        (128, 4096, world_size * 8, 4),  # topk=4
     ]
 
     if rank == 0:
@@ -213,14 +213,18 @@ def main():
 
         # Create dispatcher
         dispatcher = MoEDispatcher(
-            ctx, d_model, n_expts_tot, n_expts_act, n_tokens_local,
-            dtype=dtype, expt_assignment=expt_assignment,
+            ctx,
+            d_model,
+            n_expts_tot,
+            n_expts_act,
+            n_tokens_local,
+            dtype=dtype,
+            expt_assignment=expt_assignment,
         )
         ctx.barrier()
 
         # Benchmark iris
-        def _iris_fn(x=x_local, idx=topk_result.indx, vals=topk_result.vals,
-                     w=w_local, b=b_local, d=dispatcher):
+        def _iris_fn(x=x_local, idx=topk_result.indx, vals=topk_result.vals, w=w_local, b=b_local, d=dispatcher):
             return iris_dispatch_combine(x, idx, vals, w, b, d, None)
 
         iris_time, _, _ = benchmark(_iris_fn, warmup=20, measured=100)
@@ -228,17 +232,27 @@ def main():
         # Benchmark naive
         naive_time, _, _ = benchmark(
             lambda: naive_a2a_dispatch(
-                x_local, topk_result.indx, topk_result.vals,
-                w_local, b_local, expt_assignment, n_expts_tot,
-                n_expts_act, rank, world_size
+                x_local,
+                topk_result.indx,
+                topk_result.vals,
+                w_local,
+                b_local,
+                expt_assignment,
+                n_expts_tot,
+                n_expts_act,
+                rank,
+                world_size,
             ),
-            warmup=20, measured=100,
+            warmup=20,
+            measured=100,
         )
 
         speedup = naive_time / iris_time if iris_time > 0 else float("inf")
 
         if rank == 0:
-            print(f"| {n_tokens_local:>7} | {d_model:>4} | {n_expts_tot:>5} | {n_expts_act} | {iris_time:>9.0f} | {naive_time:>10.0f} | {speedup:>6.2f}x |")
+            print(
+                f"| {n_tokens_local:>7} | {d_model:>4} | {n_expts_tot:>5} | {n_expts_act} | {iris_time:>9.0f} | {naive_time:>10.0f} | {speedup:>6.2f}x |"
+            )
 
         # Cleanup
         del dispatcher
