@@ -4,22 +4,18 @@
 """
 Fused AllReduce + Residual Add + RMSNorm collective operation for Iris.
 
-Eliminates two global memory round-trips by fusing three ops into one kernel:
+Composes three ops that appear together in every LLM transformer layer:
   1. AllReduce (sum partials across all ranks)
   2. Residual add (residual += reduced)
   3. RMSNorm (normalize with learnable weight)
 
-This is the critical fusion in every LLM transformer layer, appearing after both
-the attention projection and MLP down-projection.
+Uses a two-phase approach:
+  Phase 1: AllReduce via the existing fast two-shot kernel (proven, optimized).
+  Phase 2: Fused residual add + RMSNorm + broadcast to all peers.
 
-The kernel uses a tiled two-pass approach per row:
-  Pass 1: For each tile of the hidden dimension, allreduce + residual add + broadcast
-           residual, while accumulating the sum-of-squares for RMSNorm.
-  Pass 2: Compute rms, then for each tile, reload residual from L2, apply normalization,
-           store and broadcast norm_out.
-
-This avoids loading the entire hidden dimension into registers at once, which would
-cause register spilling for typical LLM hidden sizes (4096-8192).
+Phase 2 fuses the residual add with RMSNorm to avoid an extra HBM round-trip.
+The broadcast propagates both the updated residual and norm output to all ranks
+via iris.store, eliminating the need for a separate allgather.
 """
 
 from typing import Optional
@@ -29,19 +25,20 @@ import triton.language as tl
 import torch
 import iris
 from .config import Config
+from .all_reduce import all_reduce, all_reduce_preamble
 from .utils import extract_group_info
 
 
 @triton.jit
-def _fused_ar_rmsnorm_two_shot_kernel(
-    partial_ptr,
+def _residual_rmsnorm_broadcast_kernel(
+    reduced_ptr,
     residual_ptr,
     weight_ptr,
     norm_out_ptr,
     tokens,
     hidden,
-    stride_partial_t,
-    stride_partial_h,
+    stride_red_t,
+    stride_red_h,
     stride_res_t,
     stride_res_h,
     stride_out_t,
@@ -53,22 +50,22 @@ def _fused_ar_rmsnorm_two_shot_kernel(
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
-    NUM_TILES: tl.constexpr,
-    BLOCK_H: tl.constexpr,
+    BLOCK_HIDDEN: tl.constexpr,
     COMM_SMS: tl.constexpr,
     DISTRIBUTION: tl.constexpr,
 ):
     """
-    Two-shot fused AllReduce + Residual + RMSNorm with tiled hidden dimension.
+    Fused residual add + RMSNorm + broadcast for assigned rows.
+
+    After allreduce completes, each rank already has the full reduced tensor.
+    This kernel:
+    1. Adds the reduced value to the residual (in-place).
+    2. Computes RMSNorm of the updated residual.
+    3. Broadcasts both residual and norm_out to all peers.
 
     Grid: (COMM_SMS,)
-    Each CTA processes one row at a time, iterating persistently across assigned rows.
-    The hidden dimension is tiled into NUM_TILES tiles of BLOCK_H elements each.
-
-    For each row:
-      Pass 1 (tile loop): allreduce partial, residual += reduced, broadcast residual,
-                           accumulate sum-of-squares for variance.
-      Pass 2 (tile loop): compute rms, apply normalization, broadcast norm_out.
+    BLOCK_HIDDEN covers the entire hidden dimension (padded to power of 2).
+    Each CTA persistently processes its assigned rows.
     """
     pid = tl.program_id(0)
 
@@ -88,41 +85,77 @@ def _fused_ar_rmsnorm_two_shot_kernel(
         remaining = tl.maximum(remaining, 0)
         max_row_offset = tl.minimum(rows_per_rank, remaining)
 
-    # Rotate starting rank to distribute load across XGMI links
-    start_rank_idx = pid % world_size
+    col_offsets = tl.arange(0, BLOCK_HIDDEN)
+    col_offsets = tl.max_contiguous(tl.multiple_of(col_offsets, BLOCK_HIDDEN), BLOCK_HIDDEN)
+    col_mask = col_offsets < hidden
 
-    # Persistent loop: each CTA handles multiple rows
+    is_full = BLOCK_HIDDEN <= hidden
+
     for row_offset in range(pid, max_row_offset, COMM_SMS):
         row = start_row + row_offset * row_stride_val
 
         if row < total_rows:
-            row_var: tl.float32 = 0.0
+            start_rank_idx = pid % world_size
 
-            # === Pass 1: AllReduce + Residual + Broadcast + Variance ===
-            for tile in tl.static_range(0, NUM_TILES):
-                col_base = tile * BLOCK_H
-                col_offsets = col_base + tl.arange(0, BLOCK_H)
-                col_mask = col_offsets < hidden
+            if is_full:
+                # ---- Fast path: no masks ----
+                # Load reduced and residual
+                red_offset = row * stride_red_t + col_offsets * stride_red_h
+                red = tl.load(reduced_ptr + red_offset).to(tl.float32)
 
-                partial_offset = row * stride_partial_t + col_offsets * stride_partial_h
-                partial_ptrs = partial_ptr + partial_offset
+                res_offset = row * stride_res_t + col_offsets * stride_res_h
+                res_ptrs = residual_ptr + res_offset
+                res = tl.load(res_ptrs).to(tl.float32)
+                res = res + red
 
-                # Reduce partials from all ranks
-                start_rank_global = rank_start + start_rank_idx * rank_stride
-                acc = iris.load(partial_ptrs, iris_rank, start_rank_global, heap_bases, mask=col_mask).to(tl.float32)
-
-                for i in tl.static_range(1, world_size):
+                # Store updated residual + broadcast
+                tl.store(res_ptrs, res.to(residual_ptr.type.element_ty), cache_modifier=".wt")
+                for i in tl.static_range(0, world_size):
                     remote_rank_idx = (start_rank_idx + i) % world_size
                     remote_rank = rank_start + remote_rank_idx * rank_stride
-                    acc += iris.load(partial_ptrs, iris_rank, remote_rank, heap_bases, mask=col_mask).to(tl.float32)
+                    if remote_rank_idx != group_rank:
+                        iris.store(
+                            res_ptrs,
+                            res.to(residual_ptr.type.element_ty),
+                            iris_rank,
+                            remote_rank,
+                            heap_bases,
+                            hint=BLOCK_HIDDEN,
+                        )
 
-                # Residual add
+                # RMSNorm
+                row_var = tl.sum(res * res, axis=0)
+                rms = tl.rsqrt(row_var / hidden + eps)
+                w = tl.load(weight_ptr + col_offsets).to(tl.float32)
+                norm = res * rms * w
+
+                # Store norm output + broadcast
+                out_offset = row * stride_out_t + col_offsets * stride_out_h
+                out_ptrs = norm_out_ptr + out_offset
+                tl.store(out_ptrs, norm.to(norm_out_ptr.type.element_ty), cache_modifier=".wt")
+                for i in tl.static_range(0, world_size):
+                    remote_rank_idx = (start_rank_idx + i) % world_size
+                    remote_rank = rank_start + remote_rank_idx * rank_stride
+                    if remote_rank_idx != group_rank:
+                        iris.store(
+                            out_ptrs,
+                            norm.to(norm_out_ptr.type.element_ty),
+                            iris_rank,
+                            remote_rank,
+                            heap_bases,
+                            hint=BLOCK_HIDDEN,
+                        )
+
+            else:
+                # ---- Slow path: masked ----
+                red_offset = row * stride_red_t + col_offsets * stride_red_h
+                red = tl.load(reduced_ptr + red_offset, mask=col_mask, other=0.0).to(tl.float32)
+
                 res_offset = row * stride_res_t + col_offsets * stride_res_h
                 res_ptrs = residual_ptr + res_offset
                 res = tl.load(res_ptrs, mask=col_mask, other=0.0).to(tl.float32)
-                res = res + acc
+                res = res + red
 
-                # Store updated residual locally + broadcast
                 tl.store(
                     res_ptrs,
                     res.to(residual_ptr.type.element_ty),
@@ -140,32 +173,15 @@ def _fused_ar_rmsnorm_two_shot_kernel(
                             remote_rank,
                             heap_bases,
                             mask=col_mask,
-                            hint=BLOCK_H,
+                            hint=BLOCK_HIDDEN,
                         )
 
-                # Accumulate sum-of-squares for RMSNorm variance
                 sq = tl.where(col_mask, res * res, 0.0)
-                row_var += tl.sum(sq, axis=0)
-
-            # Compute RMS normalization factor
-            rms = tl.rsqrt(row_var / hidden + eps)
-
-            # === Pass 2: Apply normalization + Broadcast ===
-            for tile in tl.static_range(0, NUM_TILES):
-                col_base = tile * BLOCK_H
-                col_offsets = col_base + tl.arange(0, BLOCK_H)
-                col_mask = col_offsets < hidden
-
-                # Reload residual (should be in L2 from pass 1)
-                res_offset = row * stride_res_t + col_offsets * stride_res_h
-                res_ptrs = residual_ptr + res_offset
-                res = tl.load(res_ptrs, mask=col_mask, other=0.0).to(tl.float32)
-
-                # Apply normalization
+                row_var = tl.sum(sq, axis=0)
+                rms = tl.rsqrt(row_var / hidden + eps)
                 w = tl.load(weight_ptr + col_offsets, mask=col_mask, other=0.0).to(tl.float32)
                 norm = res * rms * w
 
-                # Store norm output locally + broadcast
                 out_offset = row * stride_out_t + col_offsets * stride_out_h
                 out_ptrs = norm_out_ptr + out_offset
                 tl.store(
@@ -185,7 +201,7 @@ def _fused_ar_rmsnorm_two_shot_kernel(
                             remote_rank,
                             heap_bases,
                             mask=col_mask,
-                            hint=BLOCK_H,
+                            hint=BLOCK_HIDDEN,
                         )
 
 
@@ -220,10 +236,14 @@ def all_reduce_rmsnorm(
       2. Adds the reduced result to the residual (in-place)
       3. Applies RMSNorm with the given weight
 
+    Uses two phases:
+      Phase 1: AllReduce via existing optimized two-shot kernel.
+      Phase 2: Fused residual add + RMSNorm + broadcast.
+
     Args:
-        partial: [tokens, hidden] — each rank's partial GEMM output (on symmetric heap).
-        residual: [tokens, hidden] — residual connection, updated IN-PLACE (on symmetric heap).
-        weight: [hidden] — RMSNorm gamma (replicated across ranks).
+        partial: [tokens, hidden] -- each rank's partial GEMM output (on symmetric heap).
+        residual: [tokens, hidden] -- residual connection, updated IN-PLACE (on symmetric heap).
+        weight: [hidden] -- RMSNorm gamma (replicated across ranks).
         ctx: Iris ctx context.
         eps: RMSNorm epsilon. Default: 1e-6.
         group: ProcessGroup or None. Default: None.
@@ -231,7 +251,7 @@ def all_reduce_rmsnorm(
         config: Optional Config instance. Default: None (uses defaults).
 
     Returns:
-        norm_out: [tokens, hidden] — normalized output (on symmetric heap).
+        norm_out: [tokens, hidden] -- normalized output (on symmetric heap).
     """
     if config is None:
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
@@ -257,25 +277,32 @@ def all_reduce_rmsnorm(
 
     heap_bases = ctx.get_heap_bases()
 
-    # Allocate output on symmetric heap
+    # Phase 1: AllReduce via existing fast two-shot kernel
+    reduced = ctx.zeros((tokens, hidden), dtype=partial.dtype)
+    ar_config = Config(
+        all_reduce_variant="two_shot",
+        all_reduce_distribution=config.all_reduce_distribution,
+        comm_sms=config.comm_sms,
+        block_size_m=config.block_size_m,
+        block_size_n=config.block_size_n,
+    )
+    workspace = all_reduce_preamble(reduced, partial, ctx, config=ar_config)
+    all_reduce(reduced, partial, ctx, group=group, async_op=False, config=ar_config, workspace=workspace)
+
+    # Phase 2: Fused residual add + RMSNorm + broadcast
     norm_out = ctx.zeros((tokens, hidden), dtype=partial.dtype)
 
-    # Tile size for hidden dimension — balance register pressure vs tile count.
-    # Too small (64) = too many tiles = massive loop unrolling = slow compilation.
-    # Too large (4096+) = register spilling = slow execution.
-    # Sweet spot: 512 elements per tile → 8 tiles for hidden=4096.
-    BLOCK_H = min(_next_power_of_2(hidden), 512)
-    NUM_TILES = (hidden + BLOCK_H - 1) // BLOCK_H
+    BLOCK_HIDDEN = _next_power_of_2(hidden)
 
-    _fused_ar_rmsnorm_two_shot_kernel[(config.comm_sms,)](
-        partial,
+    _residual_rmsnorm_broadcast_kernel[(config.comm_sms,)](
+        reduced,
         residual,
         weight,
         norm_out,
         tokens,
         hidden,
-        partial.stride(0),
-        partial.stride(1),
+        reduced.stride(0),
+        reduced.stride(1),
         residual.stride(0),
         residual.stride(1),
         norm_out.stride(0),
@@ -287,8 +314,7 @@ def all_reduce_rmsnorm(
         world_size,
         rank_start,
         rank_stride,
-        NUM_TILES,
-        BLOCK_H,
+        BLOCK_HIDDEN,
         config.comm_sms,
         config.all_reduce_distribution,
         num_warps=8,
