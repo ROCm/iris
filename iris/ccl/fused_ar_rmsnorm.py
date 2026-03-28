@@ -261,7 +261,7 @@ def all_reduce_rmsnorm(
     norm_out = ctx.zeros((tokens, hidden), dtype=partial.dtype)
 
     # Tile size for hidden dimension — balance between register pressure and tile count
-    BLOCK_H = min(_next_power_of_2(hidden), config.block_size_n if hasattr(config, 'block_size_n') else 256)
+    BLOCK_H = min(_next_power_of_2(hidden), config.block_size_n if hasattr(config, "block_size_n") else 256)
     # Ensure BLOCK_H is reasonable (not too small, not too large)
     BLOCK_H = max(BLOCK_H, 64)
     BLOCK_H = min(BLOCK_H, 1024)
