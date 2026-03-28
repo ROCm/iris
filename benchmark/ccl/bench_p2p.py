@@ -53,6 +53,7 @@ def _make_pingpong_fn(ctx, t, p2p, rank):
         elif rank == 1:
             ctx.ccl.recv(t, src=0, p2p_state=p2p)
             ctx.ccl.send(t, dst=0, p2p_state=p2p)
+
     return fn
 
 
@@ -64,6 +65,7 @@ def _make_rccl_pingpong_fn(buf, rank):
         elif rank == 1:
             dist.recv(buf, src=0)
             dist.send(buf, dst=0)
+
     return fn
 
 
@@ -73,6 +75,7 @@ def _make_uni_fn(ctx, t, p2p, rank):
             ctx.ccl.send(t, dst=1, p2p_state=p2p)
         elif rank == 1:
             ctx.ccl.recv(t, src=0, p2p_state=p2p)
+
     return fn
 
 
@@ -82,6 +85,7 @@ def _make_rccl_uni_fn(buf, rank):
             dist.send(buf, dst=1)
         elif rank == 1:
             dist.recv(buf, src=0)
+
     return fn
 
 
@@ -94,6 +98,7 @@ def _make_ring_fn(ctx, send_buf, recv_buf, p2p, dst, src):
         works = ctx.ccl.batch_isend_irecv(ops, p2p)
         for w in works:
             w.wait()
+
     return fn
 
 
@@ -106,6 +111,7 @@ def _make_rccl_ring_fn(send_buf, recv_buf, dst, src):
         reqs = dist.batch_isend_irecv(ops_rccl)
         for r in reqs:
             r.wait()
+
     return fn
 
 

@@ -204,9 +204,7 @@ def isend(ctx, tensor: torch.Tensor, dst: int, p2p_state: P2PState, group=None, 
     tensor = tensor.contiguous()
     numel = tensor.numel()
     if numel > p2p_state._max_numel:
-        raise ValueError(
-            f"Tensor has {numel} elements but P2PState max_numel={p2p_state._max_numel}"
-        )
+        raise ValueError(f"Tensor has {numel} elements but P2PState max_numel={p2p_state._max_numel}")
 
     heap_bases = ctx.get_heap_bases()
     cfg = p2p_state._config

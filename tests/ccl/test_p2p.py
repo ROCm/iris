@@ -100,7 +100,11 @@ def test_isend_irecv():
     device = f"cuda:{rank}"
     N = 2048
 
-    ref = torch.randn(N, dtype=torch.float32, device=device) if rank == 0 else torch.empty(N, dtype=torch.float32, device=device)
+    ref = (
+        torch.randn(N, dtype=torch.float32, device=device)
+        if rank == 0
+        else torch.empty(N, dtype=torch.float32, device=device)
+    )
     dist.broadcast(ref, src=0)
 
     if rank == 0:
@@ -216,7 +220,11 @@ def test_vs_torch_distributed():
     device = f"cuda:{rank}"
     N = 8192
 
-    ref = torch.randn(N, dtype=torch.float32, device=device) if rank == 0 else torch.empty(N, dtype=torch.float32, device=device)
+    ref = (
+        torch.randn(N, dtype=torch.float32, device=device)
+        if rank == 0
+        else torch.empty(N, dtype=torch.float32, device=device)
+    )
     dist.broadcast(ref, src=0)
 
     if rank == 0:
@@ -278,7 +286,11 @@ def test_pingpong():
     device = f"cuda:{rank}"
     N = 512
 
-    data = torch.randn(N, dtype=torch.float32, device=device) if rank == 0 else torch.empty(N, dtype=torch.float32, device=device)
+    data = (
+        torch.randn(N, dtype=torch.float32, device=device)
+        if rank == 0
+        else torch.empty(N, dtype=torch.float32, device=device)
+    )
     dist.broadcast(data, src=0)
 
     if rank == 0:
