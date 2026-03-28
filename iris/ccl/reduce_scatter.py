@@ -9,12 +9,20 @@ Supports two variants:
 - ring_chunked: Ring-based Rabenseifner-style reduce-scatter with flag-based synchronization.
 """
 
+import functools
+
 import torch
 import triton
 import triton.language as tl
 import iris
 from .config import Config
 from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
+
+
+@functools.lru_cache(maxsize=8)
+def _default_config(block_size_m, block_size_n, comm_sms=64, distribution=1):
+    """Cache default Config objects to avoid repeated HIP queries (subprocess overhead)."""
+    return Config(block_size_m=block_size_m, block_size_n=block_size_n, comm_sms=comm_sms, all_reduce_distribution=distribution)
 
 
 @triton.jit()
@@ -393,14 +401,15 @@ def reduce_scatter(
         # Key insight: for very large tensors, fewer SMs (comm_sms=48) reduces
         # XGMI link contention and improves bandwidth. Smaller block_size_m=16
         # creates more tiles for better SM utilization.
+        # Uses _default_config() cache to avoid repeated HIP subprocess queries.
         M_in, N_in = input_tensor.shape[:2]
         total_elems = M_in * N_in
         if total_elems >= 64 * 1024 * 1024:  # >= 64M elements
-            config = Config(block_size_m=16, block_size_n=64, comm_sms=48, all_reduce_distribution=1)
+            config = _default_config(16, 64, comm_sms=48)
         elif total_elems >= 16 * 1024 * 1024:  # >= 16M elements
-            config = Config(block_size_m=16, block_size_n=64, all_reduce_distribution=1)
+            config = _default_config(16, 64)
         else:
-            config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+            config = _default_config(32, 64)
 
     # Check for unsupported options
     if config.use_gluon:
