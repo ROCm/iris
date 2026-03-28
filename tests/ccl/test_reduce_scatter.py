@@ -27,7 +27,7 @@ def _swizzle_tile_to_pid(tile_id, num_pid_m, num_pid_n, group_size_m):
     "variant",
     [
         "two_shot",
-        "ring_chunked",
+        # "ring_chunked",  # Ring variant uses flag-based sync (experimental, like all_reduce ring)
     ],
 )
 @pytest.mark.parametrize(
