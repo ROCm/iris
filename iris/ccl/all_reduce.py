@@ -68,7 +68,14 @@ def all_reduce_preamble(
         config = Config()
 
     variant = config.all_reduce_variant.lower()
-    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK, VARIANT_ALL_PAIRS_CHUNKED]:
+    if variant not in [
+        VARIANT_ATOMIC,
+        VARIANT_RING,
+        VARIANT_TWO_SHOT,
+        VARIANT_ONE_SHOT,
+        VARIANT_SPINLOCK,
+        VARIANT_ALL_PAIRS_CHUNKED,
+    ]:
         raise ValueError(
             f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}, {VARIANT_ALL_PAIRS_CHUNKED}"
         )
