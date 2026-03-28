@@ -129,7 +129,7 @@ def _fused_ar_rmsnorm_two_shot_kernel(
                             iris_rank,
                             remote_rank,
                             heap_bases,
-                            hint=(1, BLOCK_HIDDEN),
+                            hint=BLOCK_HIDDEN,
                         )
 
                 # RMS normalization
@@ -152,7 +152,7 @@ def _fused_ar_rmsnorm_two_shot_kernel(
                             iris_rank,
                             remote_rank,
                             heap_bases,
-                            hint=(1, BLOCK_HIDDEN),
+                            hint=BLOCK_HIDDEN,
                         )
 
             else:
@@ -188,7 +188,7 @@ def _fused_ar_rmsnorm_two_shot_kernel(
                             remote_rank,
                             heap_bases,
                             mask=col_mask,
-                            hint=(1, BLOCK_HIDDEN),
+                            hint=BLOCK_HIDDEN,
                         )
 
                 # RMS normalization (zero out padding before sum)
@@ -218,7 +218,7 @@ def _fused_ar_rmsnorm_two_shot_kernel(
                             remote_rank,
                             heap_bases,
                             mask=col_mask,
-                            hint=(1, BLOCK_HIDDEN),
+                            hint=BLOCK_HIDDEN,
                         )
 
 
