@@ -29,6 +29,7 @@ class AllGatherWorkspace:
     shape: Tuple[int, int] = ()
     dtype: Optional[torch.dtype] = None
     ring_buffer: Optional[torch.Tensor] = None
+    ring_buffer_1: Optional[torch.Tensor] = None  # Second buffer for double-buffering
     flags: Optional[torch.Tensor] = None
     flags_per_tile: int = 0
     prepared: bool = False
@@ -467,7 +468,8 @@ if GLUON_AVAILABLE:
 def persistent_all_gather_ring(
     input_ptr,
     output_ptr,
-    ring_buffer,
+    ring_buffer_0,
+    ring_buffer_1,
     flags,
     M,
     N,
@@ -499,15 +501,17 @@ def persistent_all_gather_ring(
     the shard received in step k-1 to rank (r+1). After world_size-1
     steps, every rank has all shards in its output buffer.
 
-    Synchronization: uses a global per-step barrier instead of per-tile
-    flags. All CUs write tiles for a step in parallel, then synchronize
-    once per step. This reduces remote atomic traffic from O(tiles * steps)
-    to O(steps).
+    Synchronization: uses a global per-step barrier with monotonic counters
+    instead of per-tile flags. All CUs write tiles for a step in parallel,
+    then synchronize once per step via a local done-counter + single remote
+    signal. This reduces remote atomic traffic from O(tiles * steps) to
+    O(steps).
 
-    Flags layout (3 int32 values on symmetric heap):
-      flags[0]: send_done counter — local CUs atomic_add after finishing tiles
-      flags[1]: recv_ready — set by predecessor after all its tiles are sent
-      flags[2]: next rank's recv_ready target (written via iris.atomic_xchg)
+    Flags layout (2 int32 values on symmetric heap):
+      flags[0]: send_done — local CUs atomic_add after finishing tiles
+      flags[1]: recv_ready — monotonic counter set by predecessor via
+                iris.atomic_xchg to step number (1, 2, 3, ...).
+                Each CU waits for recv_ready >= current step.
     """
     pid = tl.program_id(0)
 
@@ -518,18 +522,14 @@ def persistent_all_gather_ring(
 
     # Barrier flag pointers
     send_done_ptr = flags + 0  # CUs count here when done sending tiles
-    recv_ready_ptr = flags + 1  # Predecessor sets this when its data is ready
+    recv_ready_ptr = flags + 1  # Predecessor writes step number here
 
     for _step in range(0, world_size - 1):
-        # Which shard are we forwarding?
-        # Step 0: our own shard (group_rank). Step k: shard (group_rank - k).
-        # Add world_size before modulo to avoid negative values
-        # (Triton uses C truncated-division semantics, not Python floored).
-        source_rank_idx = (group_rank + world_size - _step) % world_size
-
         if _step > 0:
             # Wait for predecessor to deliver data into our ring_buffer
-            while tl.atomic_cas(recv_ready_ptr, 1, 1, sem="acquire", scope="sys") != 1:
+            # Predecessor sets recv_ready to _step when step _step's data is ready.
+            # Use atomic_cas as a load: compare with 0, swap with 0 — returns current value.
+            while tl.atomic_cas(recv_ready_ptr, 0, 0, sem="acquire", scope="sys") < _step:
                 pass
 
         # --- All CUs process tiles in parallel ---
@@ -566,8 +566,9 @@ def persistent_all_gather_ring(
                 out_offset = rm_out[:, None] * stride_out_m + rn[None, :] * stride_out_n
                 tl.store(output_ptr + out_offset, send_data, mask=mask, cache_modifier=".wt")
             else:
-                # Load from ring_buffer (data from predecessor)
-                send_data = tl.load(ring_buffer + tile_offset, mask=mask, other=0)
+                # Load from ring_buffer (predecessor wrote to buf[_step % 2])
+                read_buf = ring_buffer_0 if _step % 2 == 0 else ring_buffer_1
+                send_data = tl.load(read_buf + tile_offset, mask=mask, other=0)
                 # Write to output at the received shard's slot
                 recv_rank_idx = (group_rank + world_size - _step) % world_size
                 rm_recv = rm + recv_rank_idx * M
@@ -575,8 +576,10 @@ def persistent_all_gather_ring(
                 tl.store(output_ptr + out_offset_recv, send_data, mask=mask, cache_modifier=".wt")
 
             # Forward tile to next rank's ring_buffer
+            # Write to buf[(_step + 1) % 2] so next rank can read while we use the other
+            write_buf = ring_buffer_0 if (_step + 1) % 2 == 0 else ring_buffer_1
             iris.store(
-                ring_buffer + tile_offset,
+                write_buf + tile_offset,
                 send_data,
                 iris_rank,
                 next_rank,
@@ -589,12 +592,10 @@ def persistent_all_gather_ring(
         tl.debug_barrier()
         done_count = tl.atomic_add(send_done_ptr, 1, sem="release", scope="gpu")
         if done_count == (_step + 1) * COMM_SMS - 1:
-            # Last CU: reset recv_ready for next step, signal next rank
-            if _step > 0:
-                tl.atomic_xchg(recv_ready_ptr, 0, sem="release", scope="sys")
+            # Last CU: signal next rank that step (_step+1) data is ready
             iris.atomic_xchg(
                 recv_ready_ptr,
-                1,
+                _step + 1,
                 iris_rank,
                 next_rank,
                 heap_bases,
@@ -603,7 +604,8 @@ def persistent_all_gather_ring(
             )
 
     # === Final receive: last shard from predecessor, no forwarding ===
-    while tl.atomic_cas(recv_ready_ptr, 1, 1, sem="acquire", scope="sys") != 1:
+    _last_step = world_size - 1
+    while tl.atomic_cas(recv_ready_ptr, 0, 0, sem="acquire", scope="sys") < _last_step:
         pass
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
@@ -627,9 +629,11 @@ def persistent_all_gather_ring(
         mask = (rm[:, None] < M) & (rn[None, :] < N)
         tile_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
 
-        recv_data = tl.load(ring_buffer + tile_offset, mask=mask, other=0)
+        # Final step reads from buf[(world_size - 1) % 2]
+        final_buf = ring_buffer_0 if (world_size - 1) % 2 == 0 else ring_buffer_1
+        recv_data = tl.load(final_buf + tile_offset, mask=mask, other=0)
 
-        # Final shard: goes to slot (group_rank - (world_size-1)) mod world_size
+        # Final shard: goes to slot (group_rank + 1) mod world_size
         recv_rank_idx = (group_rank + 1) % world_size
         rm_recv = rm + recv_rank_idx * M
         out_offset_recv = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
@@ -675,17 +679,16 @@ def all_gather_preamble(
     if config.all_gather_variant == "ring":
         workspace.flags_per_tile = 1  # Unused, kept for API compat
 
-        if (
-            workspace.ring_buffer is None
-            or workspace.ring_buffer.shape != (M, N)
-            or workspace.ring_buffer.dtype != dtype
-        ):
-            workspace.ring_buffer = ctx.zeros((M, N), dtype=dtype)
-        else:
-            workspace.ring_buffer.zero_()
+        # Double-buffered ring buffers (alternate per step to avoid WAR hazard)
+        for attr in ("ring_buffer", "ring_buffer_1"):
+            buf = getattr(workspace, attr)
+            if buf is None or buf.shape != (M, N) or buf.dtype != dtype:
+                setattr(workspace, attr, ctx.zeros((M, N), dtype=dtype))
+            else:
+                buf.zero_()
 
         # Global barrier uses 2 flags:
-        # [0] = send_done counter, [1] = recv_ready signal
+        # [0] = send_done counter, [1] = recv_ready signal (monotonic)
         total_flags = 2
         if workspace.flags is None or workspace.flags.numel() != total_flags:
             workspace.flags = ctx.zeros((total_flags,), dtype=torch.int32)
@@ -837,12 +840,14 @@ def all_gather(
         if config.all_gather_variant == "ring":
             # Ring variant: use workspace if provided, otherwise allocate
             if workspace is not None and workspace.prepared:
-                ring_buffer = workspace.ring_buffer
+                ring_buffer_0 = workspace.ring_buffer
+                ring_buffer_1 = workspace.ring_buffer_1
                 flags = workspace.flags
                 flags_per_tile = workspace.flags_per_tile
                 workspace.prepared = False
             else:
-                ring_buffer = ctx.zeros((M, N), dtype=input_tensor.dtype)
+                ring_buffer_0 = ctx.zeros((M, N), dtype=input_tensor.dtype)
+                ring_buffer_1 = ctx.zeros((M, N), dtype=input_tensor.dtype)
                 flags_per_tile = 1
                 # Global barrier: 2 flags (send_done counter + recv_ready)
                 flags = ctx.zeros((2,), dtype=torch.int32)
@@ -864,7 +869,8 @@ def all_gather(
             persistent_all_gather_ring[(config.comm_sms,)](
                 input_tensor,
                 output_tensor,
-                ring_buffer,
+                ring_buffer_0,
+                ring_buffer_1,
                 flags,
                 M,
                 N,
