@@ -571,27 +571,20 @@ def all_to_all_v(
     # the remote rank expects for data from us. We collect this info via
     # an all-to-all exchange of displacements.
 
-    # Gather remote recv_displs: remote_recv_displs[i] = rank i's recv_displ for data from us
-    remote_recv_displs = torch.zeros(world_size, dtype=torch.int64, device=device)
-    # Use torch.distributed to exchange displacements
+    # For remote stores, we need each remote rank's recv_displ for data from us.
+    # We gather all recv_displs via all_gather, then index into them.
     import torch.distributed as dist
 
-    # What we send to rank i: our recv_displ for data from rank i
-    # After exchange, recv_displs_exchange[j] = rank j's recv_displ for data from us
-    send_displs_exchange = [torch.tensor([recv_displs[i]], dtype=torch.int64, device=device) for i in range(world_size)]
-    recv_displs_exchange = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)]
+    # All-gather recv_displs from all ranks into a [world_size, world_size] matrix.
+    # all_recv_displs[j][i] = rank j's recv_displs[i] = where rank j stores data from rank i.
+    local_recv_displs_t = torch.tensor(recv_displs, dtype=torch.int64, device=device)
+    all_recv_displs_list = [torch.zeros(world_size, dtype=torch.int64, device=device) for _ in range(world_size)]
+    dist.all_gather(all_recv_displs_list, local_recv_displs_t, group=group)
 
-    dist.all_to_all(recv_displs_exchange, send_displs_exchange, group=group)
+    # kernel_recv_displs[i] = rank i's recv_displs[group_rank] = where rank i stores data from us.
+    kernel_recv_displs = torch.zeros(world_size, dtype=torch.int64, device=device)
     for i in range(world_size):
-        remote_recv_displs[i] = recv_displs_exchange[i].item()
-
-    # Now remote_recv_displs[i] = rank i's recv_displ for data from group_rank
-    # When we write to rank i, we write to their output at remote_recv_displs[i]
-
-    # For the kernel, recv_displs should be the REMOTE recv_displs for our data
-    # For local copy (i == group_rank), recv_displs[group_rank] is correct as-is
-    kernel_recv_displs = remote_recv_displs.clone()
-    kernel_recv_displs[rank_in_group] = recv_displs[rank_in_group]
+        kernel_recv_displs[i] = all_recv_displs_list[i][rank_in_group].item()
     kernel_recv_displs_t = kernel_recv_displs.to(device)
 
     block_size = config.block_size_n  # Use block_size_n as the 1D tile size
