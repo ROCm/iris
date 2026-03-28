@@ -389,11 +389,15 @@ def reduce_scatter(
             "Support for other operations (PRODUCT, MAX, MIN, etc.) will be added in a future release."
         )
     if config is None:
-        # Adaptive default: smaller block_size_m improves bandwidth for large tensors
-        # by creating more tiles and distributing work across SMs.
+        # Adaptive defaults tuned on MI308X×4 vs RCCL.
+        # Key insight: for very large tensors, fewer SMs (comm_sms=48) reduces
+        # XGMI link contention and improves bandwidth. Smaller block_size_m=16
+        # creates more tiles for better SM utilization.
         M_in, N_in = input_tensor.shape[:2]
         total_elems = M_in * N_in
-        if total_elems >= 16 * 1024 * 1024:  # >= 16M elements
+        if total_elems >= 64 * 1024 * 1024:  # >= 64M elements
+            config = Config(block_size_m=16, block_size_n=64, comm_sms=48, all_reduce_distribution=1)
+        elif total_elems >= 16 * 1024 * 1024:  # >= 16M elements
             config = Config(block_size_m=16, block_size_n=64, all_reduce_distribution=1)
         else:
             config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
