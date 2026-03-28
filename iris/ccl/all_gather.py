@@ -528,7 +528,9 @@ def persistent_all_gather_ring(
         for _step in range(0, world_size - 1):
             # Which shard are we forwarding? At step 0, it's our own shard
             # (group_rank). At step k, it's shard (group_rank - k) % world_size.
-            source_rank_idx = (group_rank - _step) % world_size
+            # Note: add world_size before modulo to avoid negative values
+            # (Triton uses C truncated-division semantics, not Python floored).
+            source_rank_idx = (group_rank + world_size - _step) % world_size
 
             # Wait for next rank's flag to be 0 (ready to receive)
             while (
@@ -577,7 +579,9 @@ def persistent_all_gather_ring(
             recv_tile = tl.load(ring_buffer + tile_offset, mask=mask, other=0)
 
             # Write received shard to the correct slot in our output buffer
-            recv_rank_idx = (group_rank - _step - 1) % world_size
+            # Note: add world_size before modulo to avoid negative values
+            # (Triton uses C truncated-division semantics, not Python floored).
+            recv_rank_idx = (group_rank + world_size - _step - 1) % world_size
             rm_recv = rm + recv_rank_idx * M
             out_offset_recv = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
             tl.store(output_ptr + out_offset_recv, recv_tile, mask=mask, cache_modifier=".wt")
