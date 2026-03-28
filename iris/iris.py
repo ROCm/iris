@@ -1316,6 +1316,36 @@ class Iris:
                 output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
             )
 
+        def all_gather_gemm(self, output_tensor, local_shard, weight, group=None, async_op=False, config=None, block_size_k=64):
+            """
+            Fused all-gather + GEMM collective operation.
+
+            Computes: output = all_gather(local_shard, dim=1) @ weight
+
+            Each rank holds a column shard of the activation matrix (M, K_local).
+            This operation gathers all shards via XGMI reads and fuses the
+            communication with GEMM computation.
+
+            Args:
+                output_tensor: Output tensor of shape (M, N).
+                local_shard: Local rank's column shard of shape (M, K_local).
+                weight: Replicated weight matrix of shape (K, N) where K = world_size * K_local.
+                group: ProcessGroup or None. If None, uses all ranks. Default: None.
+                async_op: If False, performs barrier at end. Default: False.
+                config: Config instance with kernel parameters. Default: None.
+                block_size_k: GEMM K-dimension block size. Default: 64.
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> ctx.ccl.all_gather_gemm(output, local_shard, weight)
+            """
+            from iris.ccl.fused_ag_gemm import all_gather_gemm as _all_gather_gemm
+
+            _all_gather_gemm(
+                output_tensor, local_shard, weight, self._iris,
+                group=group, async_op=async_op, config=config, block_size_k=block_size_k,
+            )
+
 
 @triton.jit
 def __translate(ptr, from_rank, to_rank, heap_bases, hint: tl.constexpr = None):

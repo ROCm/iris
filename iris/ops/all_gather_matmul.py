@@ -7,6 +7,8 @@ Fused All-Gather + GEMM operation using pull pattern.
 Each rank has a column-sharded input A_sharded (M x K_local).
 This operation computes C = all_gather(A_sharded) @ B by pulling
 tiles from remote ranks on-demand during GEMM computation.
+
+Uses raw Triton + iris.load for XGMI remote reads.
 """
 
 from typing import Optional
@@ -14,9 +16,6 @@ import torch
 import triton
 import triton.language as tl
 import iris
-import iris.x
-
-from tritonblas.kernels.stages import GemmContext, ScheduleContext
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
@@ -39,7 +38,7 @@ def _fused_all_gather_matmul_kernel(
     stride_cm,
     stride_cn,
     stride_bias,
-    context_tensor: tl.tensor,
+    heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -53,109 +52,113 @@ def _fused_all_gather_matmul_kernel(
     EVEN_K: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
 ):
-    """Fused all-gather + GEMM kernel using pull pattern."""
-    # ═══════════════════════════════════════════════════════════════════════
-    # Create tritonblas context and scheduler for GEMM configuration
-    # ═══════════════════════════════════════════════════════════════════════
-    gemm_ctx = GemmContext(
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        BLOCK_SIZE_K,
-        num_sms=NUM_SMS,
-        num_xcds=NUM_XCDS,
-        group_size_m=GROUP_SIZE_M,
-        even_k=EVEN_K,
-        allow_tf32=ALLOW_TF32,
-    )
-    sched = ScheduleContext(M, N, K, gemm_ctx)
+    """Fused all-gather + GEMM kernel using pull pattern with raw Triton."""
+    pid = tl.program_id(0)
 
-    # Persistent loop over output tiles using scheduler
-    start, total, stride = sched.persistent_tile_range()
-    for tile_id in range(start, total, stride):
-        # Get tile coordinates with swizzling from scheduler
-        out_tile = sched.get_tile_from_idx(tile_id)
-        pid_m = out_tile.pid_m
-        pid_n = out_tile.pid_n
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
 
-        # Initialize accumulator using GemmContext
-        acc = gemm_ctx.init_accumulator()
+    for tile_id in range(pid, total_tiles, NUM_SMS):
+        # Swizzled tile indexing for better L2 locality
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        # Create DeviceContext and TensorView for gather operations
-        ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
-        src_view = iris.x.make_tensor_view(A_sharded, M, K_local, stride_am, stride_ak)
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
 
-        # Precompute B column offsets for this output tile (constant across K iterations)
+        # Initialize fp32 accumulator
+        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+        # Precompute row indices for this output tile
+        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        # Precompute column indices for B / output
         rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-        rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-        # Loop over all ranks to pull and accumulate
-        # Note: K = world_size * K_local, so we iterate over each rank's K_local contribution
-        for source_rank_id in range(world_size):
-            # Use pre-computed loop bound (constexpr for static unrolling)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        is_full_m = (pid_m * BLOCK_SIZE_M + BLOCK_SIZE_M) <= M
+        is_full_n = (pid_n * BLOCK_SIZE_N + BLOCK_SIZE_N) <= N
+
+        # Loop over all ranks to pull their K_local shard and accumulate
+        for source_rank_id in tl.static_range(world_size):
             loop_k_local = NUM_K_BLOCKS_LOCAL if EVEN_K else NUM_K_BLOCKS_LOCAL - 1
 
-            # Loop over K dimension for this rank's shard
             for k_block_idx in range(0, loop_k_local):
                 k_offset = k_block_idx * BLOCK_SIZE_K
+                rk_local = k_offset + tl.arange(0, BLOCK_SIZE_K)
+                rk_local = tl.max_contiguous(tl.multiple_of(rk_local, BLOCK_SIZE_K), BLOCK_SIZE_K)
 
-                # Create tile view for this K block
-                # Promote tile_k to tensor (TileView expects tl.tensor for pid_n)
-                tile_k = pid_m * 0 + k_offset // BLOCK_SIZE_K
-                k_tile = iris.x.TileView(pid_m, tile_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
-
-                # Pull A tile from source_rank_id using gather primitive
-                a = iris.x.gather(k_tile, src_view, source_rank_id, ctx)
-
-                # Load B tile using direct pointer arithmetic
-                # Compute global K row index for B matrix
-                global_k_offset = source_rank_id * K_local + k_block_idx * BLOCK_SIZE_K
-                rk = global_k_offset + tl.arange(0, BLOCK_SIZE_K)
-                rk = tl.max_contiguous(tl.multiple_of(rk % K, BLOCK_SIZE_K), BLOCK_SIZE_K)
-                B_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-                b = tl.load(B_ptrs)
-
-                # Accumulate
-                if ALLOW_TF32:
-                    acc = tl.dot(a, b, acc, allow_tf32=True)
+                # Load A tile: A_sharded[rm, rk_local] from source_rank_id
+                a_ptrs = A_sharded + rm[:, None] * stride_am + rk_local[None, :] * stride_ak
+                if source_rank_id == cur_rank:
+                    # Local rank: direct HBM read (fast path)
+                    if is_full_m:
+                        a = tl.load(a_ptrs)
+                    else:
+                        a_mask = rm[:, None] < M
+                        a = tl.load(a_ptrs, mask=a_mask, other=0.0)
                 else:
-                    acc += tl.dot(a, b, allow_tf32=False)
+                    # Remote rank: XGMI read via iris.load
+                    if is_full_m:
+                        a = iris.load(a_ptrs, cur_rank, source_rank_id, heap_bases, hint=(1, BLOCK_SIZE_K))
+                    else:
+                        a_mask = rm[:, None] < M
+                        a = iris.load(a_ptrs, cur_rank, source_rank_id, heap_bases, mask=a_mask, hint=(1, BLOCK_SIZE_K))
+
+                # Load B tile: B[global_k, rn]
+                global_k_offset = source_rank_id * K_local + k_block_idx * BLOCK_SIZE_K
+                rk_global = global_k_offset + tl.arange(0, BLOCK_SIZE_K)
+                rk_global = tl.max_contiguous(tl.multiple_of(rk_global, BLOCK_SIZE_K), BLOCK_SIZE_K)
+                b_ptrs = B + rk_global[:, None] * stride_bk + rn[None, :] * stride_bn
+                if is_full_n:
+                    b = tl.load(b_ptrs)
+                else:
+                    b_mask = rn[None, :] < N
+                    b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+
+                acc = tl.dot(a, b, acc, allow_tf32=ALLOW_TF32)
 
             # Handle remaining K elements if not evenly divisible
             if not EVEN_K:
                 k_offset = loop_k_local * BLOCK_SIZE_K
-                # Promote tile_k to tensor (TileView expects tl.tensor for pid_n)
-                tile_k = pid_m * 0 + k_offset // BLOCK_SIZE_K
-                k_tile = iris.x.TileView(pid_m, tile_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
+                rk_local = k_offset + tl.arange(0, BLOCK_SIZE_K)
 
-                # Pull A tile from source_rank_id using gather primitive
-                a = iris.x.gather(k_tile, src_view, source_rank_id, ctx)
-
-                # Load B tile with boundary handling
-                global_k_offset = source_rank_id * K_local + loop_k_local * BLOCK_SIZE_K
-                rk = global_k_offset + tl.arange(0, BLOCK_SIZE_K)
-                B_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-                b_mask = (rk[:, None] < K) & (rn[None, :] < N)
-                b = tl.load(B_ptrs, mask=b_mask, other=0.0)
-
-                if ALLOW_TF32:
-                    acc = tl.dot(a, b, acc, allow_tf32=True)
+                # A tile with K boundary mask
+                a_ptrs = A_sharded + rm[:, None] * stride_am + rk_local[None, :] * stride_ak
+                a_mask = (rm[:, None] < M) & (rk_local[None, :] < K_local)
+                if source_rank_id == cur_rank:
+                    a = tl.load(a_ptrs, mask=a_mask, other=0.0)
                 else:
-                    acc += tl.dot(a, b, allow_tf32=False)
+                    a = iris.load(a_ptrs, cur_rank, source_rank_id, heap_bases, mask=a_mask, hint=(1, BLOCK_SIZE_K))
+
+                # B tile with K boundary mask
+                global_k_offset = source_rank_id * K_local + loop_k_local * BLOCK_SIZE_K
+                rk_global = global_k_offset + tl.arange(0, BLOCK_SIZE_K)
+                b_ptrs = B + rk_global[:, None] * stride_bk + rn[None, :] * stride_bn
+                b_mask = (rk_global[:, None] < K) & (rn[None, :] < N)
+                b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+
+                acc = tl.dot(a, b, acc, allow_tf32=ALLOW_TF32)
 
         # Add bias if provided
         if BIAS:
-            rm, _ = out_tile.indices()
             bias_vector = tl.load(bias_ptr + rm * stride_bias, mask=rm < M, other=0.0)
             acc = acc + bias_vector[:, None]
 
-        # Convert to output dtype
+        # Store output
         c = acc.to(C.type.element_ty)
-
-        # Store result using tritonblas Tile
-        rm, rn = out_tile.indices()
-        C_ptr = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
-        tl.store(C_ptr, c, mask=mask)
+        c_ptrs = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+        if is_full_m and is_full_n:
+            tl.store(c_ptrs, c)
+        else:
+            c_mask = (rm[:, None] < M) & (rn[None, :] < N)
+            tl.store(c_ptrs, c, mask=c_mask)
 
 
 def all_gather_matmul_preamble(
@@ -245,6 +248,8 @@ def all_gather_matmul(
     even_k = K_local % config.block_size_k == 0
     num_k_blocks_local = (K_local + config.block_size_k - 1) // config.block_size_k
 
+    heap_bases = shmem.get_heap_bases()
+
     # Launch single fused kernel
     grid = (num_sms,)
     _fused_all_gather_matmul_kernel[grid](
@@ -263,7 +268,7 @@ def all_gather_matmul(
         stride_cm,
         stride_cn,
         stride_bias,
-        shmem.get_device_context(),
+        heap_bases,
         rank,
         world_size,
         config.block_size_m,
