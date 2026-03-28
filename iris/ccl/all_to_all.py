@@ -573,9 +573,7 @@ def all_to_all_v(
         import torch.distributed as dist
 
         local_recv_displs_t = torch.tensor(recv_displs, dtype=torch.int64, device=device)
-        all_recv_displs_list = [
-            torch.zeros(world_size, dtype=torch.int64, device=device) for _ in range(world_size)
-        ]
+        all_recv_displs_list = [torch.zeros(world_size, dtype=torch.int64, device=device) for _ in range(world_size)]
         dist.all_gather(all_recv_displs_list, local_recv_displs_t, group=group)
 
         # kernel_recv_displs[i] = rank i's recv_displs[group_rank]
