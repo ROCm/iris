@@ -124,8 +124,8 @@ def main():
     dtype = torch.bfloat16
     elem_bytes = 2  # bf16
 
-    # Message sizes: 1K to 16M elements
-    sizes = [1024, 4096, 16384, 65536, 262144, 1 << 20, 4 << 20, 16 << 20]
+    # Message sizes: 1K to 64M elements (128MB at bf16)
+    sizes = [1024, 4096, 16384, 65536, 262144, 1 << 20, 4 << 20, 16 << 20, 32 << 20, 64 << 20]
 
     ctx = iris.iris(2**33)
 
