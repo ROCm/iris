@@ -174,16 +174,17 @@ def persistent_reduce_scatter_ring(
     """
     Ring-based reduce-scatter (Rabenseifner-style).
 
-    Each rank processes its assigned tiles by forwarding partial reductions
-    around the ring. For each tile, a rank:
-      1. Loads its local data
+    All ranks participate in reducing ALL tiles through the ring. Each rank:
+      1. Loads its local data for the tile
       2. Stores to ring_buffer on the next rank and signals
       3. Waits for data from the previous rank
       4. Accumulates the received data with its local partial sum
-      5. Forwards the accumulated result to the next rank
-      6. After N-1 steps, writes the fully reduced tile to output
+      5. Forwards the received data to the next rank
+      6. After world_size-1 steps, the tile is fully reduced
+      7. Only the owning rank writes the result to output
 
-    This achieves O(1) remote reads/writes per step instead of O(N) in two_shot.
+    This achieves O(1) remote reads/writes per step instead of O(N) in two_shot,
+    while each rank only stores results for its assigned tiles.
     """
     pid_raw = tl.program_id(0)
 
@@ -197,23 +198,11 @@ def persistent_reduce_scatter_ring(
 
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
 
-    # Tile assignment: each rank gets a subset of tiles (same as two_shot)
+    # Tile ownership: determine which tiles this rank will store results for
     tiles_per_rank = tl.cdiv(total_tiles, world_size)
-    if DISTRIBUTION == 0:
-        start_tile = group_rank
-        stride = world_size
-        remaining = total_tiles - start_tile
-        remaining = tl.maximum(remaining, 0)
-        max_tile_offset = tl.cdiv(remaining, stride)
-    else:
-        start_tile = group_rank * tiles_per_rank
-        stride = 1
-        remaining = total_tiles - start_tile
-        remaining = tl.maximum(remaining, 0)
-        max_tile_offset = tl.minimum(tiles_per_rank, remaining)
 
-    for tile_offset in range(pid, max_tile_offset, COMM_SMS):
-        tile_id = start_tile + tile_offset * stride
+    # ALL ranks process ALL tiles through the ring
+    for tile_id in range(pid, total_tiles, COMM_SMS):
 
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
@@ -242,13 +231,12 @@ def persistent_reduce_scatter_ring(
         send_data = local_tile
 
         flag_offset = tile_id
+        remote_flag_ptr = flags + flag_offset
+        local_flag_ptr = flags + flag_offset
 
         # Ring reduce: world_size - 1 steps
         for _step in range(0, world_size - 1):
             # 1. Wait for next rank's ring_buffer to be free (flag == 0)
-            remote_flag_ptr = flags + flag_offset
-            local_flag_ptr = flags + flag_offset
-
             while (
                 iris.atomic_cas(
                     remote_flag_ptr,
@@ -298,19 +286,27 @@ def persistent_reduce_scatter_ring(
             acc += recv_tile.to(acc_dtype)
 
             # Forward the received data (not the accumulated result)
-            # to keep the ring pipeline moving with each rank's contribution
             send_data = recv_tile
 
             # 7. Reset our flag for next step
             tl.debug_barrier()
             tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
 
-        # Write fully reduced tile to output
-        tl.store(
-            output_ptr + tile_offset_out,
-            acc.to(output_ptr.type.element_ty),
-            mask=mask,
-        )
+        # Only the owning rank stores the result (reduce-scatter vs all-reduce)
+        if DISTRIBUTION == 0:
+            # Striding: rank owns tiles rank, rank+world_size, rank+2*world_size, ...
+            is_owner = (tile_id % world_size) == group_rank
+        else:
+            # Block: rank owns tiles [rank*tiles_per_rank, (rank+1)*tiles_per_rank)
+            owner_start = group_rank * tiles_per_rank
+            is_owner = (tile_id >= owner_start) & (tile_id < owner_start + tiles_per_rank)
+
+        if is_owner:
+            tl.store(
+                output_ptr + tile_offset_out,
+                acc.to(output_ptr.type.element_ty),
+                mask=mask,
+            )
 
 
 class ReduceScatterWorkspace:
