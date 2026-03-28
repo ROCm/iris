@@ -47,7 +47,7 @@ def fused_gemm_rs(state, ctx):
 @bench.axis("K", [4096, 8192])
 @bench.axis("dtype", [torch.bfloat16])
 def unfused_gemm_rs_rccl(state, ctx):
-    """Baseline: torch.matmul + RCCL reduce_scatter_tensor."""
+    """Baseline: torch.matmul + RCCL all_reduce + column slice."""
     import torch.distributed as dist
 
     tokens = state["tokens"]
@@ -61,13 +61,14 @@ def unfused_gemm_rs_rccl(state, ctx):
     inp = torch.randn(tokens, H_shard, dtype=dtype, device=f"cuda:{rank}")
     weight = torch.randn(H_shard, K, dtype=dtype, device=f"cuda:{rank}")
     partial = torch.empty(tokens, K, dtype=dtype, device=f"cuda:{rank}")
-    out = torch.empty(tokens, shard_size, dtype=dtype, device=f"cuda:{rank}")
 
     state.set_bytes(int(tokens * shard_size * inp.element_size()))
 
     def run():
         torch.matmul(inp, weight, out=partial)
-        dist.reduce_scatter_tensor(out, partial, op=dist.ReduceOp.SUM)
+        dist.all_reduce(partial, op=dist.ReduceOp.SUM)
+        # Column slice: rank gets columns rank*shard_size : (rank+1)*shard_size
+        _ = partial[:, rank * shard_size : (rank + 1) * shard_size].contiguous()
 
     state.exec(run)
 

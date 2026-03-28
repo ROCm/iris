@@ -92,12 +92,14 @@ def _fused_gemm_rs_kernel(
     if pid >= total_tiles:
         return
 
-    # Decode pid -> (pid_m, pid_n) with simple row-major
+    # Decode pid -> (pid_m, pid_n) with rank-based swizzle
     pid_m = pid // num_pid_n
     pid_n_raw = pid % num_pid_n
 
-    # No swizzle for now — simple direct mapping
-    pid_n = pid_n_raw
+    # Swizzle: offset n-coordinate by rank to spread atomic destinations across ranks.
+    # Each rank starts at a different column offset, reducing contention.
+    tiles_per_shard = tl.cdiv(shard_size, BLOCK_N)
+    pid_n = (pid_n_raw + group_rank * tiles_per_shard) % num_pid_n
 
     # --- GEMM k-loop ---
     # A = input[:, rank*H_shard : (rank+1)*H_shard], shape [tokens, H_shard]

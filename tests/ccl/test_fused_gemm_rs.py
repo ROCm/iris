@@ -12,10 +12,12 @@ Reference computation:
     The full matmul is: full_result = full_input @ full_weight   (shape [tokens, K])
     where full_weight is the vertical stack of all ranks' weight_shards.
 
-    After reduce-scatter, rank j should hold:
+    After reduce-scatter along columns, rank j should hold:
         full_result[:, j*shard_size : (j+1)*shard_size]
 
-    We compute the reference using torch.matmul + dist.reduce_scatter_tensor.
+    We compute the reference using torch.matmul + dist.all_reduce + column slicing,
+    because dist.reduce_scatter_tensor scatters along dim=0 (rows) by default,
+    but the kernel scatters along dim=1 (columns).
 """
 
 import gc
@@ -61,16 +63,19 @@ def test_fused_gemm_rs_correctness(dtype, tokens, H, K):
     full_input = torch.randn(tokens, H, dtype=dtype, device=f"cuda:{rank}")
     full_weight = torch.randn(H, K, dtype=dtype, device=f"cuda:{rank}")
 
-    # Reference: each rank does partial matmul, then reduce-scatter
+    # Reference: each rank does partial matmul, then all-reduce + column slice.
+    # The kernel scatters along dim=1 (columns), so rank j gets columns
+    # j*shard_size : (j+1)*shard_size of the full reduced result.
     input_shard = full_input[:, rank * H_shard : (rank + 1) * H_shard].contiguous()
     weight_shard = full_weight[rank * H_shard : (rank + 1) * H_shard, :].contiguous()
 
     # Each rank's partial result
     partial = torch.matmul(input_shard, weight_shard)  # [tokens, K]
 
-    # reduce_scatter_tensor: reduces and scatters along dim=1
-    ref_output = torch.empty(tokens, shard_size, dtype=dtype, device=f"cuda:{rank}")
-    dist.reduce_scatter_tensor(ref_output, partial, op=dist.ReduceOp.SUM)
+    # All-reduce to get full result, then slice columns for this rank
+    full_result = partial.clone()
+    dist.all_reduce(full_result, op=dist.ReduceOp.SUM)
+    ref_output = full_result[:, rank * shard_size : (rank + 1) * shard_size].contiguous()
     torch.cuda.synchronize()
 
     # Iris fused path: input_shard and weight_shard must be on the symmetric heap
@@ -131,8 +136,9 @@ def test_fused_gemm_rs_workspace_reuse(dtype):
     weight_shard = full_weight[rank * H_shard : (rank + 1) * H_shard, :].contiguous()
 
     partial = torch.matmul(input_shard, weight_shard)
-    ref_output = torch.empty(tokens, shard_size, dtype=dtype, device=f"cuda:{rank}")
-    dist.reduce_scatter_tensor(ref_output, partial, op=dist.ReduceOp.SUM)
+    full_result = partial.clone()
+    dist.all_reduce(full_result, op=dist.ReduceOp.SUM)
+    ref_output = full_result[:, rank * shard_size : (rank + 1) * shard_size].contiguous()
     torch.cuda.synchronize()
 
     iris_input = shmem.zeros((tokens, H_shard), dtype=dtype)
@@ -230,10 +236,11 @@ def test_fused_gemm_rs_deterministic():
     input_shard = torch.full((tokens, H_shard), 1.0, dtype=dtype, device=f"cuda:{rank}")
     weight_shard = torch.full((H_shard, K), 1.0 / H_shard, dtype=dtype, device=f"cuda:{rank}")
 
-    # Reference
+    # Reference: all-reduce + column slice (kernel scatters along columns)
     partial = torch.matmul(input_shard, weight_shard)
-    ref_output = torch.empty(tokens, shard_size, dtype=dtype, device=f"cuda:{rank}")
-    dist.reduce_scatter_tensor(ref_output, partial, op=dist.ReduceOp.SUM)
+    full_result = partial.clone()
+    dist.all_reduce(full_result, op=dist.ReduceOp.SUM)
+    ref_output = full_result[:, rank * shard_size : (rank + 1) * shard_size].contiguous()
     torch.cuda.synchronize()
 
     # Iris
@@ -321,8 +328,9 @@ def test_fused_gemm_rs_non_pow2_tokens(tokens):
     weight_shard = full_weight[rank * H_shard : (rank + 1) * H_shard, :].contiguous()
 
     partial = torch.matmul(input_shard, weight_shard)
-    ref_output = torch.empty(tokens, shard_size, dtype=dtype, device=f"cuda:{rank}")
-    dist.reduce_scatter_tensor(ref_output, partial, op=dist.ReduceOp.SUM)
+    full_result = partial.clone()
+    dist.all_reduce(full_result, op=dist.ReduceOp.SUM)
+    ref_output = full_result[:, rank * shard_size : (rank + 1) * shard_size].contiguous()
     torch.cuda.synchronize()
 
     iris_input = shmem.zeros((tokens, H_shard), dtype=dtype)
