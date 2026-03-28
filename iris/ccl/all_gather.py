@@ -494,30 +494,118 @@ def persistent_all_gather_ring(
     TRACING: tl.constexpr = False,
 ):
     """
-    Ring-based all-gather kernel using a single-buffer, producer/consumer
-    handshake (same pattern as the ring all-reduce).
+    Ring-based all-gather with global per-step barrier.
 
-    Each rank starts with its local shard.  In step k (0-indexed), rank r
-    forwards the shard it received in the previous step to rank (r+1) via
-    iris.store into (r+1)'s ring_buffer.  After world_size-1 steps every
-    rank has all shards written into its output buffer.
+    Each rank starts with its local shard. In step k, rank r forwards
+    the shard received in step k-1 to rank (r+1). After world_size-1
+    steps, every rank has all shards in its output buffer.
 
-    The ring_buffer is an M x N scratch space on the symmetric heap used
-    for receiving data from the predecessor.
+    Synchronization: uses a global per-step barrier instead of per-tile
+    flags. All CUs write tiles for a step in parallel, then synchronize
+    once per step. This reduces remote atomic traffic from O(tiles * steps)
+    to O(steps).
 
-    When TRACING=True, records iris tracing events for remote operations
-    (iris.atomic_cas, iris.store, iris.atomic_xchg). Zero overhead when
-    TRACING=False due to constexpr dead-code elimination.
+    Flags layout (3 int32 values on symmetric heap):
+      flags[0]: send_done counter — local CUs atomic_add after finishing tiles
+      flags[1]: recv_ready — set by predecessor after all its tiles are sent
+      flags[2]: next rank's recv_ready target (written via iris.atomic_xchg)
     """
-    # Initialize DeviceContext for tracing (zero-overhead when TRACING=False)
-    trace_ctx = DeviceContext.initialize(context_tensor, iris_rank, world_size, tracing=TRACING)
-
     pid = tl.program_id(0)
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
     tl.assume(total_tiles > 0)
+
+    # Barrier flag pointers
+    send_done_ptr = flags + 0  # CUs count here when done sending tiles
+    recv_ready_ptr = flags + 1  # Predecessor sets this when its data is ready
+
+    for _step in range(0, world_size - 1):
+        # Which shard are we forwarding?
+        # Step 0: our own shard (group_rank). Step k: shard (group_rank - k).
+        # Add world_size before modulo to avoid negative values
+        # (Triton uses C truncated-division semantics, not Python floored).
+        source_rank_idx = (group_rank + world_size - _step) % world_size
+
+        if _step > 0:
+            # Wait for predecessor to deliver data into our ring_buffer
+            while tl.atomic_cas(recv_ready_ptr, 1, 1, sem="acquire", scope="sys") != 1:
+                pass
+
+        # --- All CUs process tiles in parallel ---
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+            tl.assume(pid_m >= 0)
+            tl.assume(pid_n >= 0)
+            tl.assume(stride_in_m >= 0)
+            tl.assume(stride_in_n >= 0)
+            tl.assume(stride_out_m >= 0)
+            tl.assume(stride_out_n >= 0)
+
+            rm_base = pid_m * BLOCK_SIZE_M
+            rn_base = pid_n * BLOCK_SIZE_N
+            rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+            rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+            rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            tile_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+
+            if _step == 0:
+                # Load from local input
+                send_data = tl.load(input_ptr + tile_offset, mask=mask, other=0)
+                # Write local shard to own output slot
+                rm_out = rm + group_rank * M
+                out_offset = rm_out[:, None] * stride_out_m + rn[None, :] * stride_out_n
+                tl.store(output_ptr + out_offset, send_data, mask=mask, cache_modifier=".wt")
+            else:
+                # Load from ring_buffer (data from predecessor)
+                send_data = tl.load(ring_buffer + tile_offset, mask=mask, other=0)
+                # Write to output at the received shard's slot
+                recv_rank_idx = (group_rank + world_size - _step) % world_size
+                rm_recv = rm + recv_rank_idx * M
+                out_offset_recv = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
+                tl.store(output_ptr + out_offset_recv, send_data, mask=mask, cache_modifier=".wt")
+
+            # Forward tile to next rank's ring_buffer
+            iris.store(
+                ring_buffer + tile_offset,
+                send_data,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                mask=mask,
+                hint=(1, BLOCK_SIZE_N),
+            )
+
+        # --- Global barrier: all CUs done sending this step ---
+        tl.debug_barrier()
+        done_count = tl.atomic_add(send_done_ptr, 1, sem="release", scope="gpu")
+        if done_count == (_step + 1) * COMM_SMS - 1:
+            # Last CU: reset recv_ready for next step, signal next rank
+            if _step > 0:
+                tl.atomic_xchg(recv_ready_ptr, 0, sem="release", scope="sys")
+            iris.atomic_xchg(
+                recv_ready_ptr,
+                1,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                sem="release",
+                scope="sys",
+            )
+
+    # === Final receive: last shard from predecessor, no forwarding ===
+    while tl.atomic_cas(recv_ready_ptr, 1, 1, sem="acquire", scope="sys") != 1:
+        pass
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -529,10 +617,6 @@ def persistent_all_gather_ring(
 
         tl.assume(pid_m >= 0)
         tl.assume(pid_n >= 0)
-        tl.assume(stride_in_m >= 0)
-        tl.assume(stride_in_n >= 0)
-        tl.assume(stride_out_m >= 0)
-        tl.assume(stride_out_n >= 0)
 
         rm_base = pid_m * BLOCK_SIZE_M
         rn_base = pid_n * BLOCK_SIZE_N
@@ -544,98 +628,13 @@ def persistent_all_gather_ring(
         mask = (rm[:, None] < M) & (rn[None, :] < N)
         tile_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
 
-        # Load local input tile — this is the first thing we send
-        send_data = tl.load(input_ptr + tile_offset, mask=mask, other=0)
+        recv_data = tl.load(ring_buffer + tile_offset, mask=mask, other=0)
 
-        # Write local shard to local output at group_rank's slot
-        rm_out = rm + group_rank * M
-        out_offset_local = rm_out[:, None] * stride_out_m + rn[None, :] * stride_out_n
-        tl.store(output_ptr + out_offset_local, send_data, mask=mask, cache_modifier=".wt")
-
-        flag_offset = tile_id * FLAGS_PER_TILE
-        remote_flag_ptr = flags + flag_offset
-        local_flag_ptr = flags + flag_offset
-
-        for _step in range(0, world_size - 1):
-            # Which shard are we forwarding? At step 0, it's our own shard
-            # (group_rank). At step k, it's shard (group_rank - k) % world_size.
-            # Note: add world_size before modulo to avoid negative values
-            # (Triton uses C truncated-division semantics, not Python floored).
-            source_rank_idx = (group_rank + world_size - _step) % world_size
-
-            # Trace: record full ring step (poll + store + signal + wait + read + write)
-            # Uses the ring_buffer tile address (2D block) as representative address.
-            h_step = trace_ctx.tracing.record_event_start(
-                event_id=TraceEvent().store,
-                target_rank=next_rank,
-                address=ring_buffer + tile_offset,
-                pid_m=pid_m,
-                pid_n=pid_n,
-                mask=mask,
-            )
-
-            # Wait for next rank's flag to be 0 (ready to receive)
-            while (
-                iris.atomic_cas(
-                    remote_flag_ptr,
-                    0,
-                    0,
-                    iris_rank,
-                    next_rank,
-                    heap_bases,
-                    sem="acquire",
-                    scope="sys",
-                )
-                != 0
-            ):
-                pass
-
-            # Write shard into next rank's ring_buffer via iris.store
-            iris.store(
-                ring_buffer + tile_offset,
-                send_data,
-                iris_rank,
-                next_rank,
-                heap_bases,
-                mask=mask,
-                hint=(1, BLOCK_SIZE_N),
-            )
-            tl.debug_barrier()
-
-            # Signal next rank that data is ready
-            iris.atomic_xchg(
-                remote_flag_ptr,
-                1,
-                iris_rank,
-                next_rank,
-                heap_bases,
-                sem="release",
-                scope="sys",
-            )
-
-            # Wait for our predecessor to deliver data into our ring_buffer
-            while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
-                pass
-
-            # Read received shard from ring_buffer
-            recv_tile = tl.load(ring_buffer + tile_offset, mask=mask, other=0)
-
-            # Write received shard to the correct slot in our output buffer
-            # Note: add world_size before modulo to avoid negative values
-            # (Triton uses C truncated-division semantics, not Python floored).
-            recv_rank_idx = (group_rank + world_size - _step - 1) % world_size
-            rm_recv = rm + recv_rank_idx * M
-            out_offset_recv = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
-            tl.store(output_ptr + out_offset_recv, recv_tile, mask=mask, cache_modifier=".wt")
-
-            trace_ctx.tracing.record_event_end(h_step)
-
-            # Prepare to forward what we just received
-            send_data = recv_tile
-
-            # Reset flag for next iteration
-            tl.debug_barrier()
-            tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+        # Final shard: goes to slot (group_rank - (world_size-1)) mod world_size
+        recv_rank_idx = (group_rank + 1) % world_size
+        rm_recv = rm + recv_rank_idx * M
+        out_offset_recv = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
+        tl.store(output_ptr + out_offset_recv, recv_data, mask=mask, cache_modifier=".wt")
 
 
 def all_gather_preamble(
@@ -675,11 +674,7 @@ def all_gather_preamble(
     workspace.prepared = False
 
     if config.all_gather_variant == "ring":
-        num_pid_m = triton.cdiv(M, config.block_size_m)
-        num_pid_n = triton.cdiv(N, config.block_size_n)
-        total_tiles = num_pid_m * num_pid_n
-        workspace.flags_per_tile = 1
-        total_flags = total_tiles * workspace.flags_per_tile
+        workspace.flags_per_tile = 1  # Unused, kept for API compat
 
         if (
             workspace.ring_buffer is None
@@ -690,6 +685,9 @@ def all_gather_preamble(
         else:
             workspace.ring_buffer.zero_()
 
+        # Global barrier uses 2 flags:
+        # [0] = send_done counter, [1] = recv_ready signal
+        total_flags = 2
         if workspace.flags is None or workspace.flags.numel() != total_flags:
             workspace.flags = ctx.zeros((total_flags,), dtype=torch.int32)
         else:
@@ -846,12 +844,9 @@ def all_gather(
                 workspace.prepared = False
             else:
                 ring_buffer = ctx.zeros((M, N), dtype=input_tensor.dtype)
-                num_pid_m = triton.cdiv(M, config.block_size_m)
-                num_pid_n = triton.cdiv(N, config.block_size_n)
-                total_tiles = num_pid_m * num_pid_n
                 flags_per_tile = 1
-                total_flags = total_tiles * flags_per_tile
-                flags = ctx.zeros((total_flags,), dtype=torch.int32)
+                # Global barrier: 2 flags (send_done counter + recv_ready)
+                flags = ctx.zeros((2,), dtype=torch.int32)
                 ctx.barrier()
 
             # Calculate next rank in the ring
