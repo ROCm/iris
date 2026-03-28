@@ -242,17 +242,13 @@ def gemm_reduce_scatter(
             f"input_tensor.shape[1] ({H_shard}): inner dimension mismatch."
         )
     if K % world_size != 0:
-        raise ValueError(
-            f"weight output dim K ({K}) must be divisible by world_size ({world_size})."
-        )
+        raise ValueError(f"weight output dim K ({K}) must be divisible by world_size ({world_size}).")
 
     shard_size = K // world_size
 
     # Allocate workspace if not provided
     if workspace is None or workspace.output_f32 is None or workspace.output_f32.shape != (tokens, shard_size):
-        workspace = gemm_reduce_scatter_preamble(
-            input_tensor, weight_shard, shmem, config=config, workspace=workspace
-        )
+        workspace = gemm_reduce_scatter_preamble(input_tensor, weight_shard, shmem, config=config, workspace=workspace)
 
     # Zero the fp32 accumulation buffer — all ranks will atomically add into it
     workspace.output_f32.zero_()

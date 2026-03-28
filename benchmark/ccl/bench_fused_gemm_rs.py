@@ -6,7 +6,6 @@
 
 import torch
 import iris.bench as bench
-from iris.ccl import Config
 
 
 @bench.register

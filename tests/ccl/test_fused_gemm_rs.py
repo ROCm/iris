@@ -24,7 +24,6 @@ import pytest
 import torch
 import torch.distributed as dist
 import iris
-from iris.ccl import Config
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
@@ -99,8 +98,8 @@ def test_fused_gemm_rs_correctness(dtype, tokens, H, K):
     try:
         assert torch.allclose(iris_output, ref_output, atol=atol, rtol=rtol), (
             f"Rank {rank}: max diff = {max_diff}, atol={atol}\n"
-            f"iris_output[:2,:4] = {iris_output[:2,:4]}\n"
-            f"ref_output[:2,:4]  = {ref_output[:2,:4]}"
+            f"iris_output[:2,:4] = {iris_output[:2, :4]}\n"
+            f"ref_output[:2,:4]  = {ref_output[:2, :4]}"
         )
     finally:
         shmem.barrier()

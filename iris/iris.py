@@ -1333,7 +1333,9 @@ class Iris:
 
             return _fn(input_tensor, weight_shard, self._iris, config=config, workspace=workspace)
 
-        def gemm_reduce_scatter(self, input_tensor, weight_shard, group=None, async_op=False, config=None, workspace=None):
+        def gemm_reduce_scatter(
+            self, input_tensor, weight_shard, group=None, async_op=False, config=None, workspace=None
+        ):
             """
             Fused GEMM + reduce-scatter collective.
 
@@ -1354,8 +1356,13 @@ class Iris:
             from iris.ccl.fused_gemm_rs import gemm_reduce_scatter as _fn
 
             return _fn(
-                input_tensor, weight_shard, self._iris,
-                group=group, async_op=async_op, config=config, workspace=workspace,
+                input_tensor,
+                weight_shard,
+                self._iris,
+                group=group,
+                async_op=async_op,
+                config=config,
+                workspace=workspace,
             )
 
 
