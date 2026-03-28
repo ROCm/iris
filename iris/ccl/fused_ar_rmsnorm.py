@@ -239,7 +239,7 @@ def all_reduce_rmsnorm(
     partial: torch.Tensor,
     residual: torch.Tensor,
     weight: torch.Tensor,
-    shmem,
+    ctx,
     eps: float = 1e-6,
     group=None,
     async_op: bool = False,
@@ -257,7 +257,7 @@ def all_reduce_rmsnorm(
         partial: [tokens, hidden] — each rank's partial GEMM output (on symmetric heap).
         residual: [tokens, hidden] — residual connection, updated IN-PLACE (on symmetric heap).
         weight: [hidden] — RMSNorm gamma (replicated across ranks).
-        shmem: Iris shmem context.
+        ctx: Iris ctx context.
         eps: RMSNorm epsilon. Default: 1e-6.
         group: ProcessGroup or None. Default: None.
         async_op: If False, barrier at end. Default: False.
@@ -286,12 +286,12 @@ def all_reduce_rmsnorm(
     if weight.shape[0] != hidden:
         raise ValueError(f"weight size {weight.shape[0]} doesn't match hidden dimension {hidden}")
 
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
-    heap_bases = shmem.get_heap_bases()
+    heap_bases = ctx.get_heap_bases()
 
     # Allocate output on symmetric heap
-    norm_out = shmem.zeros((tokens, hidden), dtype=partial.dtype)
+    norm_out = ctx.zeros((tokens, hidden), dtype=partial.dtype)
 
     # BLOCK_HIDDEN must cover the entire hidden dimension for RMSNorm row reduction
     BLOCK_HIDDEN = _next_power_of_2(hidden)
@@ -325,6 +325,6 @@ def all_reduce_rmsnorm(
     )
 
     if not async_op:
-        shmem.barrier()
+        ctx.barrier()
 
     return norm_out

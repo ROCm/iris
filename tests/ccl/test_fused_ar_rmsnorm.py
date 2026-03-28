@@ -50,9 +50,9 @@ def test_fused_ar_rmsnorm(dtype, tokens, hidden):
         pytest.skip("torch.distributed not initialized")
 
     heap_size = 2**33  # 8GB
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
     eps = 1e-6
 
     # Create deterministic inputs per rank
@@ -79,19 +79,19 @@ def test_fused_ar_rmsnorm(dtype, tokens, hidden):
     ref_norm_out = _rmsnorm_reference(ref_residual, weight_data, eps)
 
     # === Iris fused implementation ===
-    iris_partial = shmem.zeros((tokens, hidden), dtype=dtype)
+    iris_partial = ctx.zeros((tokens, hidden), dtype=dtype)
     iris_partial.copy_(partial_data)
 
-    iris_residual = shmem.zeros((tokens, hidden), dtype=dtype)
+    iris_residual = ctx.zeros((tokens, hidden), dtype=dtype)
     iris_residual.copy_(residual_data)
 
-    shmem.barrier()
+    ctx.barrier()
 
     config = Config(
         all_reduce_variant="two_shot",
         all_reduce_distribution=1,
     )
-    iris_norm_out = shmem.ccl.all_reduce_rmsnorm(iris_partial, iris_residual, weight_data, eps=eps, config=config)
+    iris_norm_out = ctx.ccl.all_reduce_rmsnorm(iris_partial, iris_residual, weight_data, eps=eps, config=config)
     torch.cuda.synchronize()
 
     # === Compare ===
@@ -132,8 +132,8 @@ def test_fused_ar_rmsnorm(dtype, tokens, hidden):
         raise
 
     # Cleanup
-    shmem.barrier()
-    del shmem
+    ctx.barrier()
+    del ctx
     import gc
 
     gc.collect()
@@ -156,8 +156,8 @@ def test_fused_ar_rmsnorm_distribution(distribution):
     eps = 1e-6
 
     heap_size = 2**33
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
 
     torch.manual_seed(42 + rank)
     partial_data = torch.randn(tokens, hidden, dtype=dtype, device=f"cuda:{rank}")
@@ -174,17 +174,17 @@ def test_fused_ar_rmsnorm_distribution(distribution):
     ref_norm_out = _rmsnorm_reference(ref_residual, weight_data, eps)
 
     # Iris
-    iris_partial = shmem.zeros((tokens, hidden), dtype=dtype)
+    iris_partial = ctx.zeros((tokens, hidden), dtype=dtype)
     iris_partial.copy_(partial_data)
-    iris_residual = shmem.zeros((tokens, hidden), dtype=dtype)
+    iris_residual = ctx.zeros((tokens, hidden), dtype=dtype)
     iris_residual.copy_(residual_data)
-    shmem.barrier()
+    ctx.barrier()
 
     config = Config(
         all_reduce_variant="two_shot",
         all_reduce_distribution=distribution,
     )
-    iris_norm_out = shmem.ccl.all_reduce_rmsnorm(iris_partial, iris_residual, weight_data, eps=eps, config=config)
+    iris_norm_out = ctx.ccl.all_reduce_rmsnorm(iris_partial, iris_residual, weight_data, eps=eps, config=config)
     torch.cuda.synchronize()
 
     atol = 1e-4
@@ -198,8 +198,8 @@ def test_fused_ar_rmsnorm_distribution(distribution):
         print(f"Rank {rank}: distribution={distribution}, max_diff={max_diff}")
         raise
 
-    shmem.barrier()
-    del shmem
+    ctx.barrier()
+    del ctx
     import gc
 
     gc.collect()
@@ -215,8 +215,8 @@ def test_fused_ar_rmsnorm_deterministic():
     eps = 1e-6
 
     heap_size = 2**33
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
 
     torch.manual_seed(42 + rank)
     partial_data = torch.randn(tokens, hidden, dtype=dtype, device=f"cuda:{rank}")
@@ -227,14 +227,14 @@ def test_fused_ar_rmsnorm_deterministic():
     # Run twice with fresh inputs
     results = []
     for _ in range(2):
-        iris_partial = shmem.zeros((tokens, hidden), dtype=dtype)
+        iris_partial = ctx.zeros((tokens, hidden), dtype=dtype)
         iris_partial.copy_(partial_data)
-        iris_residual = shmem.zeros((tokens, hidden), dtype=dtype)
+        iris_residual = ctx.zeros((tokens, hidden), dtype=dtype)
         iris_residual.copy_(residual_data)
-        shmem.barrier()
+        ctx.barrier()
 
         config = Config(all_reduce_variant="two_shot", all_reduce_distribution=1)
-        norm_out = shmem.ccl.all_reduce_rmsnorm(iris_partial, iris_residual, weight_data, eps=eps, config=config)
+        norm_out = ctx.ccl.all_reduce_rmsnorm(iris_partial, iris_residual, weight_data, eps=eps, config=config)
         torch.cuda.synchronize()
         results.append((norm_out.clone(), iris_residual.clone()))
 
@@ -242,8 +242,8 @@ def test_fused_ar_rmsnorm_deterministic():
         assert torch.equal(results[0][0], results[1][0]), "norm_out not deterministic"
         assert torch.equal(results[0][1], results[1][1]), "residual not deterministic"
     finally:
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         import gc
 
         gc.collect()
@@ -255,31 +255,31 @@ def test_fused_ar_rmsnorm_shape_validation():
         pytest.skip("torch.distributed not initialized")
 
     heap_size = 2**33
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
 
     # 1D partial should fail
-    partial_1d = shmem.zeros((128,), dtype=torch.float32)
-    residual = shmem.zeros((4, 128), dtype=torch.float32)
+    partial_1d = ctx.zeros((128,), dtype=torch.float32)
+    residual = ctx.zeros((4, 128), dtype=torch.float32)
     weight = torch.randn(128, dtype=torch.float32, device=f"cuda:{rank}")
 
     with pytest.raises(ValueError, match="partial must be 2D"):
-        shmem.ccl.all_reduce_rmsnorm(partial_1d, residual, weight)
+        ctx.ccl.all_reduce_rmsnorm(partial_1d, residual, weight)
 
     # Mismatched shapes
-    partial = shmem.zeros((4, 128), dtype=torch.float32)
-    residual_wrong = shmem.zeros((4, 256), dtype=torch.float32)
+    partial = ctx.zeros((4, 128), dtype=torch.float32)
+    residual_wrong = ctx.zeros((4, 256), dtype=torch.float32)
 
     with pytest.raises(ValueError, match="doesn't match"):
-        shmem.ccl.all_reduce_rmsnorm(partial, residual_wrong, weight)
+        ctx.ccl.all_reduce_rmsnorm(partial, residual_wrong, weight)
 
     # Wrong weight size
     weight_wrong = torch.randn(256, dtype=torch.float32, device=f"cuda:{rank}")
     with pytest.raises(ValueError, match="doesn't match hidden"):
-        shmem.ccl.all_reduce_rmsnorm(partial, residual, weight_wrong)
+        ctx.ccl.all_reduce_rmsnorm(partial, residual, weight_wrong)
 
-    shmem.barrier()
-    del shmem
+    ctx.barrier()
+    del ctx
     import gc
 
     gc.collect()
