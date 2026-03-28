@@ -56,13 +56,14 @@ def test_fused_ar_rmsnorm(dtype, tokens, hidden):
     eps = 1e-6
 
     # Create deterministic inputs per rank
+    # Partial is different per rank (each rank has its own GEMM shard)
     torch.manual_seed(42 + rank)
     partial_data = torch.randn(tokens, hidden, dtype=dtype, device=f"cuda:{rank}")
+
+    # Residual and weight are replicated across ranks (tensor parallelism invariant)
+    torch.manual_seed(42)
     residual_data = torch.randn(tokens, hidden, dtype=dtype, device=f"cuda:{rank}")
     weight_data = torch.randn(hidden, dtype=dtype, device=f"cuda:{rank}")
-
-    # Broadcast weight so all ranks have same weight (it's replicated in practice)
-    dist.broadcast(weight_data, src=0)
 
     # === PyTorch reference ===
     ref_partial = partial_data.clone()
@@ -159,11 +160,14 @@ def test_fused_ar_rmsnorm_distribution(distribution):
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
 
+    # Partial is different per rank
     torch.manual_seed(42 + rank)
     partial_data = torch.randn(tokens, hidden, dtype=dtype, device=f"cuda:{rank}")
+
+    # Residual and weight are replicated (tensor parallelism invariant)
+    torch.manual_seed(42)
     residual_data = torch.randn(tokens, hidden, dtype=dtype, device=f"cuda:{rank}")
     weight_data = torch.randn(hidden, dtype=dtype, device=f"cuda:{rank}")
-    dist.broadcast(weight_data, src=0)
 
     # Reference
     ref_partial = partial_data.clone()
@@ -218,11 +222,14 @@ def test_fused_ar_rmsnorm_deterministic():
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
 
+    # Partial is different per rank
     torch.manual_seed(42 + rank)
     partial_data = torch.randn(tokens, hidden, dtype=dtype, device=f"cuda:{rank}")
+
+    # Residual and weight are replicated
+    torch.manual_seed(42)
     residual_data = torch.randn(tokens, hidden, dtype=dtype, device=f"cuda:{rank}")
     weight_data = torch.randn(hidden, dtype=dtype, device=f"cuda:{rank}")
-    dist.broadcast(weight_data, src=0)
 
     # Run twice with fresh inputs
     results = []
