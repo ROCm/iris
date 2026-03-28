@@ -74,9 +74,14 @@ class P2PState:
     """
     Pre-allocated P2P buffers and flags.  Created collectively by all ranks.
 
+    Uses double-buffering so the sender can write the next message while the
+    receiver is still copying the previous one.
+
     Layout on each rank's symmetric heap:
-        recv_buf : (world_size * max_numel,)  dtype — slot[i] holds data from rank i
-        flags    : (world_size,)              int32 — flags[i] = epoch from rank i
+        recv_buf : (2 * world_size * max_numel,) dtype
+                   Two slots per peer, selected by epoch % 2.
+                   slot(peer, epoch) = (peer * 2 + epoch % 2) * max_numel
+        flags    : (world_size,) int32 — flags[i] = epoch from rank i
     """
 
     def __init__(self, ctx, max_numel: int = 2**20, dtype=None, config: Optional[P2PConfig] = None):
@@ -89,7 +94,8 @@ class P2PState:
         self._world_size = ctx.get_num_ranks()
 
         # Collective allocations — all ranks must execute in the same order.
-        self.recv_buf = ctx.zeros((self._world_size * max_numel,), dtype=dtype)
+        # Double-buffered: 2 slots per peer to avoid overwrite races.
+        self.recv_buf = ctx.zeros((2 * self._world_size * max_numel,), dtype=dtype)
         self.flags = ctx.zeros((self._world_size,), dtype=torch.int32)
 
         # Host-side epoch tracking (per peer).
@@ -208,7 +214,10 @@ def isend(ctx, tensor: torch.Tensor, dst: int, p2p_state: P2PState, group=None, 
 
     heap_bases = ctx.get_heap_bases()
     cfg = p2p_state._config
-    slot_offset = rank_in_group * p2p_state._max_numel
+    # Double-buffered: alternate between two sub-slots per peer.
+    epoch = p2p_state._send_epoch[dst]
+    buf_idx = epoch % 2
+    slot_offset = (rank_in_group * 2 + buf_idx) * p2p_state._max_numel
     grid = (triton.cdiv(numel, cfg.block_size),)
 
     _p2p_store_kernel[grid](
@@ -248,7 +257,11 @@ def irecv(ctx, tensor: torch.Tensor, src: int, p2p_state: P2PState, group=None, 
     numel = tensor.numel()
 
     cfg = p2p_state._config
-    slot_offset = src * p2p_state._max_numel
+
+    # Double-buffered: match the sender's slot for this epoch.
+    epoch = p2p_state._recv_epoch[src]
+    buf_idx = epoch % 2
+    slot_offset = (src * 2 + buf_idx) * p2p_state._max_numel
 
     p2p_state._recv_epoch[src] += 1
     target_epoch = p2p_state._recv_epoch[src]
