@@ -11,6 +11,7 @@ Collective operations are accessed through the Iris instance's ccl attribute:
 """
 
 from .config import Config
+from .all_gather import AllGatherWorkspace
 from .utils import ReduceOp
 
-__all__ = ["Config", "ReduceOp"]
+__all__ = ["Config", "AllGatherWorkspace", "ReduceOp"]

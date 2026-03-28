@@ -1159,7 +1159,7 @@ class Iris:
 
             _all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
-        def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
+        def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None, workspace=None):
             """
             All-gather collective operation.
 
@@ -1170,29 +1170,46 @@ class Iris:
             Args:
                 output_tensor: Output tensor of shape (world_size * M, N) - will contain concatenated inputs
                 input_tensor: Input tensor of shape (M, N) - local rank's data to send
-                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                group: ProcessGroup or None. If None, uses all ranks in iris context.
                        Default: None.
                 async_op: If False, performs a barrier at the end. If True, returns immediately.
                           Default: False.
                 config: Config instance with kernel parameters (default: None).
                         If None, uses default Config values.
+                workspace: Optional AllGatherWorkspace from ``all_gather_preamble``.
+                           Avoids per-call heap allocation for ring variant.
 
             Example:
                 >>> ctx = iris.iris()
                 >>> # Input: (M, N), Output: (world_size * M, N)
                 >>> ctx.ccl.all_gather(output_tensor, input_tensor)
 
-                >>> # Custom configuration
+                >>> # Ring variant with pre-allocated workspace
                 >>> from iris.ccl import Config
-                >>> config = Config(block_size_m=128, block_size_n=32)
-                >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
-
-                >>> # Async operation (no barrier)
-                >>> ctx.ccl.all_gather(output_tensor, input_tensor, async_op=True)
+                >>> config = Config(all_gather_variant="ring")
+                >>> ws = ctx.ccl.all_gather_preamble(out, inp, config=config)
+                >>> ctx.ccl.all_gather(out, inp, config=config, workspace=ws)
             """
             from iris.ccl.all_gather import all_gather as _all_gather
 
-            _all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
+            _all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config, workspace=workspace)
+
+        def all_gather_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
+            """
+            Pre-allocate reusable workspace for ring-based all-gather.
+
+            Args:
+                output_tensor: Output tensor of shape (world_size * M, N).
+                input_tensor: Input tensor of shape (M, N).
+                config: Optional Config describing variant parameters.
+                workspace: Optional existing workspace to update/reuse.
+
+            Returns:
+                AllGatherWorkspace that can be passed to ``all_gather``.
+            """
+            from iris.ccl.all_gather import all_gather_preamble as _all_gather_preamble
+
+            return _all_gather_preamble(output_tensor, input_tensor, self._iris, config=config, workspace=workspace)
 
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """

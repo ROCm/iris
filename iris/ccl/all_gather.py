@@ -6,12 +6,32 @@ All-gather collective communication primitive for Iris.
 Gathers tensors from all ranks and concatenates them along the last dimension.
 """
 
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
 import torch
 import triton
 import triton.language as tl
 import iris
 from .config import Config
 from .utils import extract_group_info
+
+
+@dataclass
+class AllGatherWorkspace:
+    """
+    Holds reusable workspace allocations for ring-based all-gather.
+
+    Pre-allocate via ``all_gather_preamble`` and pass to ``all_gather``
+    to avoid per-call heap allocation overhead.
+    """
+
+    shape: Tuple[int, int] = ()
+    dtype: Optional[torch.dtype] = None
+    ring_buffer: Optional[torch.Tensor] = None
+    flags: Optional[torch.Tensor] = None
+    flags_per_tile: int = 0
+    prepared: bool = False
 
 # Conditional import for Gluon
 try:
@@ -594,6 +614,69 @@ def persistent_all_gather_ring(
             tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
 
 
+def all_gather_preamble(
+    output_tensor,
+    input_tensor,
+    ctx,
+    config=None,
+    workspace=None,
+):
+    """
+    Pre-allocate reusable workspace for ring-based all-gather.
+
+    Call once, then pass the returned workspace to ``all_gather`` on
+    every iteration to avoid per-call symmetric-heap allocation.
+
+    Args:
+        output_tensor: Output tensor of shape (world_size * M, N).
+        input_tensor: Input tensor of shape (M, N).
+        ctx: Iris context.
+        config: Config instance (default: None → default Config).
+        workspace: Existing workspace to reuse (default: None → create new).
+
+    Returns:
+        AllGatherWorkspace ready for the next ``all_gather`` call.
+    """
+    if config is None:
+        config = Config(block_size_m=32, block_size_n=64)
+
+    M, N = input_tensor.shape[:2]
+    dtype = input_tensor.dtype
+
+    if workspace is None:
+        workspace = AllGatherWorkspace()
+
+    workspace.shape = (M, N)
+    workspace.dtype = dtype
+    workspace.prepared = False
+
+    if config.all_gather_variant == "ring":
+        num_pid_m = triton.cdiv(M, config.block_size_m)
+        num_pid_n = triton.cdiv(N, config.block_size_n)
+        total_tiles = num_pid_m * num_pid_n
+        workspace.flags_per_tile = 1
+        total_flags = total_tiles * workspace.flags_per_tile
+
+        if (
+            workspace.ring_buffer is None
+            or workspace.ring_buffer.shape != (M, N)
+            or workspace.ring_buffer.dtype != dtype
+        ):
+            workspace.ring_buffer = ctx.zeros((M, N), dtype=dtype)
+        else:
+            workspace.ring_buffer.zero_()
+
+        if workspace.flags is None or workspace.flags.numel() != total_flags:
+            workspace.flags = ctx.zeros((total_flags,), dtype=torch.int32)
+        else:
+            workspace.flags.zero_()
+
+        ctx.barrier()
+
+    workspace.prepared = True
+    return workspace
+
+
 def all_gather(
     output_tensor,
     input_tensor,
@@ -601,6 +684,7 @@ def all_gather(
     group=None,
     async_op=False,
     config=None,
+    workspace=None,
 ):
     """
     Internal all-gather collective operation implementation.
@@ -729,15 +813,21 @@ def all_gather(
         heap_bases = ctx.get_heap_bases()
 
         if config.all_gather_variant == "ring":
-            # Ring variant: allocate ring buffer and flags for producer/consumer sync
-            ring_buffer = ctx.zeros((M, N), dtype=input_tensor.dtype)
-
-            num_pid_m = triton.cdiv(M, config.block_size_m)
-            num_pid_n = triton.cdiv(N, config.block_size_n)
-            total_tiles = num_pid_m * num_pid_n
-            flags_per_tile = 1
-            total_flags = total_tiles * flags_per_tile
-            flags = ctx.zeros((total_flags,), dtype=torch.int32)
+            # Ring variant: use workspace if provided, otherwise allocate
+            if workspace is not None and workspace.prepared:
+                ring_buffer = workspace.ring_buffer
+                flags = workspace.flags
+                flags_per_tile = workspace.flags_per_tile
+                workspace.prepared = False
+            else:
+                ring_buffer = ctx.zeros((M, N), dtype=input_tensor.dtype)
+                num_pid_m = triton.cdiv(M, config.block_size_m)
+                num_pid_n = triton.cdiv(N, config.block_size_n)
+                total_tiles = num_pid_m * num_pid_n
+                flags_per_tile = 1
+                total_flags = total_tiles * flags_per_tile
+                flags = ctx.zeros((total_flags,), dtype=torch.int32)
+                ctx.barrier()
 
             # Calculate next rank in the ring
             if group is None:
@@ -748,8 +838,6 @@ def all_gather(
                 group_ranks = dist.get_process_group_ranks(group)
                 next_rank_in_group = (rank_in_group + 1) % world_size
                 next_rank = group_ranks[next_rank_in_group]
-
-            ctx.barrier()
 
             persistent_all_gather_ring[(config.comm_sms,)](
                 input_tensor,
