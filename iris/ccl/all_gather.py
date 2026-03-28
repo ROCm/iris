@@ -553,7 +553,19 @@ def persistent_all_gather_ring(
             out_offset = rm_out[:, None] * stride_out_m + rn[None, :] * stride_out_n
             tl.store(output_ptr + out_offset, data, mask=mask, cache_modifier=".wt")
 
-        # Ring steps: forward data around the ring
+        # Ring steps: forward data around the ring.
+        #
+        # Critical invariant: we must NOT reset the local flag (allowing the
+        # predecessor to overwrite ring_buffer) until AFTER we've read ring_buffer
+        # for forwarding in the send phase. The sequence per step is:
+        #
+        #   1. SEND: read data (input at step 0, ring_buffer at step>0),
+        #      write to next rank's ring_buffer, signal next rank
+        #   2. Release ring_buffer from previous step (reset flag, step>0 only)
+        #   3. RECV: wait for predecessor's data, read ring_buffer, write to output
+        #   4. Do NOT reset flag yet — ring_buffer data needed for next step's send
+        #
+        # After the last step, reset the flag for cleanup.
         for _step in range(0, world_size - 1):
             # === SEND PHASE ===
             # Wait for next rank's chunk flag to be 0 (ring_buffer is free)
@@ -572,8 +584,10 @@ def persistent_all_gather_ring(
             ):
                 pass
 
-            # Write all tiles in this chunk to next rank's ring_buffer
-            # Step 0: read from input (own shard), step k>0: read from ring_buffer (received data)
+            # Write all tiles in this chunk to next rank's ring_buffer.
+            # Step 0: read from input (own shard)
+            # Step k>0: read from local ring_buffer (received from predecessor,
+            #   still valid because we haven't reset the local flag yet)
             for tile_in_chunk in range(tiles_per_chunk):
                 tile_m = tile_in_chunk // num_pid_n
                 tile_n = tile_in_chunk % num_pid_n
@@ -589,10 +603,8 @@ def persistent_all_gather_ring(
                 buf_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
 
                 if _step == 0:
-                    # First step: read from input
                     send_data = tl.load(input_ptr + buf_offset, mask=mask, other=0)
                 else:
-                    # Later steps: read from local ring_buffer (received from predecessor)
                     send_data = tl.load(ring_buffer + buf_offset, mask=mask, other=0)
 
                 iris.store(
@@ -616,6 +628,13 @@ def persistent_all_gather_ring(
                 sem="release",
                 scope="sys",
             )
+
+            # === RELEASE PREVIOUS STEP'S RING BUFFER ===
+            # We've finished reading ring_buffer for forwarding. Now safe to
+            # let the predecessor overwrite it for the next step.
+            if _step > 0:
+                tl.debug_barrier()
+                tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
 
             # === RECEIVE PHASE ===
             # Wait for local chunk flag to be 1 (predecessor wrote data)
@@ -646,9 +665,11 @@ def persistent_all_gather_ring(
                 out_offset_recv = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
                 tl.store(output_ptr + out_offset_recv, recv_data, mask=mask, cache_modifier=".wt")
 
-            tl.debug_barrier()
-            # Reset local flag to 0 (ring_buffer chunk region is free)
-            tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+            # Do NOT reset flag here — ring_buffer data is needed for next step's send.
+
+        # Final cleanup: release ring_buffer from last step
+        tl.debug_barrier()
+        tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
 
 
 def all_gather_preamble(
