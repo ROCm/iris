@@ -31,10 +31,10 @@ from iris.ccl import Config
 @pytest.mark.parametrize(
     "M, K_local, N",
     [
-        (128, 64, 64),        # Small
-        (1024, 1024, 1024),   # Medium
-        (2048, 2048, 4096),   # Large / TP-relevant (H=8192 with world_size=4)
-        (4096, 512, 512),     # Tall-skinny
+        (128, 64, 64),  # Small
+        (1024, 1024, 1024),  # Medium
+        (2048, 2048, 4096),  # Large / TP-relevant (H=8192 with world_size=4)
+        (4096, 512, 512),  # Tall-skinny
     ],
 )
 def test_fused_ag_gemm_correctness(dtype, atol, rtol, M, K_local, N):
@@ -91,8 +91,7 @@ def test_fused_ag_gemm_correctness(dtype, atol, rtol, M, K_local, N):
 
     try:
         assert torch.allclose(output, ref, atol=atol, rtol=rtol), (
-            f"Rank {rank}: max diff {max_diff}, expected < {atol} "
-            f"(M={M}, K_local={K_local}, N={N}, dtype={dtype})"
+            f"Rank {rank}: max diff {max_diff}, expected < {atol} (M={M}, K_local={K_local}, N={N}, dtype={dtype})"
         )
     finally:
         shmem.barrier()
@@ -106,8 +105,8 @@ def test_fused_ag_gemm_correctness(dtype, atol, rtol, M, K_local, N):
 @pytest.mark.parametrize(
     "M, K_local, N",
     [
-        (128, 48, 64),   # K_local not divisible by BLOCK_K=32
-        (128, 80, 64),   # K_local not divisible by BLOCK_K=64, but by 16
+        (128, 48, 64),  # K_local not divisible by BLOCK_K=32
+        (128, 80, 64),  # K_local not divisible by BLOCK_K=64, but by 16
     ],
 )
 def test_fused_ag_gemm_odd_k(M, K_local, N):

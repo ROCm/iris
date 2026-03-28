@@ -102,11 +102,24 @@ def _fused_ag_gemm_kernel(
         if is_full:
             # Local rank first (direct HBM, no XGMI) — rank index = group_rank
             acc = _accumulate_rank_fast(
-                shard_ptr, weight_ptr, acc,
-                rm, rn, K_local,
-                stride_am, stride_ak, stride_bk, stride_bn,
-                iris_rank, iris_rank, group_rank, heap_bases,
-                BLOCK_SIZE_K, NUM_K_BLOCKS_LOCAL, EVEN_K, K,
+                shard_ptr,
+                weight_ptr,
+                acc,
+                rm,
+                rn,
+                K_local,
+                stride_am,
+                stride_ak,
+                stride_bk,
+                stride_bn,
+                iris_rank,
+                iris_rank,
+                group_rank,
+                heap_bases,
+                BLOCK_SIZE_K,
+                NUM_K_BLOCKS_LOCAL,
+                EVEN_K,
+                K,
                 is_local=True,
             )
 
@@ -115,11 +128,24 @@ def _fused_ag_gemm_kernel(
                 source_rank_idx = (group_rank + j) % world_size
                 source_rank_global = rank_start + source_rank_idx * rank_stride
                 acc = _accumulate_rank_fast(
-                    shard_ptr, weight_ptr, acc,
-                    rm, rn, K_local,
-                    stride_am, stride_ak, stride_bk, stride_bn,
-                    iris_rank, source_rank_global, source_rank_idx, heap_bases,
-                    BLOCK_SIZE_K, NUM_K_BLOCKS_LOCAL, EVEN_K, K,
+                    shard_ptr,
+                    weight_ptr,
+                    acc,
+                    rm,
+                    rn,
+                    K_local,
+                    stride_am,
+                    stride_ak,
+                    stride_bk,
+                    stride_bn,
+                    iris_rank,
+                    source_rank_global,
+                    source_rank_idx,
+                    heap_bases,
+                    BLOCK_SIZE_K,
+                    NUM_K_BLOCKS_LOCAL,
+                    EVEN_K,
+                    K,
                     is_local=False,
                 )
 
@@ -130,11 +156,26 @@ def _fused_ag_gemm_kernel(
 
             # Local rank first
             acc = _accumulate_rank_slow(
-                shard_ptr, weight_ptr, acc,
-                rm, rn, m_mask, n_mask, K_local,
-                stride_am, stride_ak, stride_bk, stride_bn,
-                iris_rank, iris_rank, group_rank, heap_bases,
-                BLOCK_SIZE_K, NUM_K_BLOCKS_LOCAL, EVEN_K, K,
+                shard_ptr,
+                weight_ptr,
+                acc,
+                rm,
+                rn,
+                m_mask,
+                n_mask,
+                K_local,
+                stride_am,
+                stride_ak,
+                stride_bk,
+                stride_bn,
+                iris_rank,
+                iris_rank,
+                group_rank,
+                heap_bases,
+                BLOCK_SIZE_K,
+                NUM_K_BLOCKS_LOCAL,
+                EVEN_K,
+                K,
                 is_local=True,
             )
 
@@ -143,11 +184,26 @@ def _fused_ag_gemm_kernel(
                 source_rank_idx = (group_rank + j) % world_size
                 source_rank_global = rank_start + source_rank_idx * rank_stride
                 acc = _accumulate_rank_slow(
-                    shard_ptr, weight_ptr, acc,
-                    rm, rn, m_mask, n_mask, K_local,
-                    stride_am, stride_ak, stride_bk, stride_bn,
-                    iris_rank, source_rank_global, source_rank_idx, heap_bases,
-                    BLOCK_SIZE_K, NUM_K_BLOCKS_LOCAL, EVEN_K, K,
+                    shard_ptr,
+                    weight_ptr,
+                    acc,
+                    rm,
+                    rn,
+                    m_mask,
+                    n_mask,
+                    K_local,
+                    stride_am,
+                    stride_ak,
+                    stride_bk,
+                    stride_bn,
+                    iris_rank,
+                    source_rank_global,
+                    source_rank_idx,
+                    heap_bases,
+                    BLOCK_SIZE_K,
+                    NUM_K_BLOCKS_LOCAL,
+                    EVEN_K,
+                    K,
                     is_local=False,
                 )
 
@@ -163,10 +219,20 @@ def _fused_ag_gemm_kernel(
 
 @triton.jit()
 def _accumulate_rank_fast(
-    shard_ptr, weight_ptr, acc,
-    rm, rn, K_local,
-    stride_am, stride_ak, stride_bk, stride_bn,
-    iris_rank, source_rank_global, source_rank_idx, heap_bases,
+    shard_ptr,
+    weight_ptr,
+    acc,
+    rm,
+    rn,
+    K_local,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    iris_rank,
+    source_rank_global,
+    source_rank_idx,
+    heap_bases,
     BLOCK_SIZE_K: tl.constexpr,
     NUM_K_BLOCKS_LOCAL: tl.constexpr,
     EVEN_K: tl.constexpr,
@@ -223,10 +289,22 @@ def _accumulate_rank_fast(
 
 @triton.jit()
 def _accumulate_rank_slow(
-    shard_ptr, weight_ptr, acc,
-    rm, rn, m_mask, n_mask, K_local,
-    stride_am, stride_ak, stride_bk, stride_bn,
-    iris_rank, source_rank_global, source_rank_idx, heap_bases,
+    shard_ptr,
+    weight_ptr,
+    acc,
+    rm,
+    rn,
+    m_mask,
+    n_mask,
+    K_local,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    iris_rank,
+    source_rank_global,
+    source_rank_idx,
+    heap_bases,
     BLOCK_SIZE_K: tl.constexpr,
     NUM_K_BLOCKS_LOCAL: tl.constexpr,
     EVEN_K: tl.constexpr,
@@ -319,12 +397,8 @@ def all_gather_gemm(
     K, N = weight.shape
 
     expected_K = world_size * K_local
-    assert K == expected_K, (
-        f"weight K ({K}) must equal world_size ({world_size}) * K_local ({K_local})"
-    )
-    assert output_tensor.shape == (M, N), (
-        f"output must be ({M}, {N}), got {output_tensor.shape}"
-    )
+    assert K == expected_K, f"weight K ({K}) must equal world_size ({world_size}) * K_local ({K_local})"
+    assert output_tensor.shape == (M, N), f"output must be ({M}, {N}), got {output_tensor.shape}"
 
     heap_bases = shmem.get_heap_bases()
 

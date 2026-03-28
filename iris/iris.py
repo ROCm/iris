@@ -1316,7 +1316,9 @@ class Iris:
                 output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
             )
 
-        def all_gather_gemm(self, output_tensor, local_shard, weight, group=None, async_op=False, config=None, block_size_k=64):
+        def all_gather_gemm(
+            self, output_tensor, local_shard, weight, group=None, async_op=False, config=None, block_size_k=64
+        ):
             """
             Fused all-gather + GEMM collective operation.
 
@@ -1342,8 +1344,14 @@ class Iris:
             from iris.ccl.fused_ag_gemm import all_gather_gemm as _all_gather_gemm
 
             _all_gather_gemm(
-                output_tensor, local_shard, weight, self._iris,
-                group=group, async_op=async_op, config=config, block_size_k=block_size_k,
+                output_tensor,
+                local_shard,
+                weight,
+                self._iris,
+                group=group,
+                async_op=async_op,
+                config=config,
+                block_size_k=block_size_k,
             )
 
 
