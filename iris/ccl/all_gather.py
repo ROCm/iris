@@ -14,7 +14,7 @@ import triton
 import triton.language as tl
 import iris
 from .config import Config
-from .utils import extract_group_info
+from .utils import chiplet_transform_chunked, extract_group_info
 
 
 @dataclass
@@ -28,7 +28,6 @@ class AllGatherWorkspace:
 
     shape: Tuple[int, int] = ()
     dtype: Optional[torch.dtype] = None
-    ring_buffer: Optional[torch.Tensor] = None
     flags: Optional[torch.Tensor] = None
     flags_per_tile: int = 0
     prepared: bool = False
@@ -467,7 +466,6 @@ if GLUON_AVAILABLE:
 def persistent_all_gather_ring(
     input_ptr,
     output_ptr,
-    ring_buffer,
     flags,
     M,
     N,
@@ -488,116 +486,139 @@ def persistent_all_gather_ring(
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    NUM_RINGS: tl.constexpr,
     FLAGS_PER_TILE: tl.constexpr,
 ):
     """
-    Ring-based all-gather with per-tile producer/consumer handshake.
+    Ring-based all-gather with direct output writes.
 
-    Uses the same synchronization pattern as persistent_all_reduce_ring:
-    one flag per tile, two-phase handshake (send data + set flag=1,
-    receive data + reset flag=0). Each tile keeps forwarded data in
-    registers (send_data = recv_data), avoiding the double-buffer problem.
+    Key optimization: writes directly to the next rank's output buffer
+    (no intermediate ring_buffer), matching RCCL's directRecvCopyDirectSend
+    pattern. Each step writes the shard to output[src_rank * M] on the
+    next rank, and reads from the local output buffer to forward.
+
+    Supports NUM_RINGS concurrent rings and chiplet-aware scheduling.
 
     Flags layout: one int32 per tile on symmetric heap.
-      flag=0 means ring_buffer tile is free (producer can write)
-      flag=1 means ring_buffer tile has data (consumer can read)
+      flag=0 means output tile slot is free (producer can write)
+      flag=1 means output tile slot has data (consumer can read)
     """
-    pid = tl.program_id(0)
+    pid_raw = tl.program_id(0)
+
+    # Chiplet transform for XCD-aware scheduling
+    pid = pid_raw
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid_raw, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+
+    tl.static_assert(NUM_RINGS > 0, "NUM_RINGS must be >= 1")
+    tl.static_assert(FLAGS_PER_TILE >= 1, "FLAGS_PER_TILE must be at least 1")
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
-    tl.assume(total_tiles > 0)
 
-    for tile_id in range(pid, total_tiles, COMM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+    # Partition CTAs across rings
+    ctas_per_ring = (COMM_SMS + NUM_RINGS - 1) // NUM_RINGS
+    ring_id = pid % NUM_RINGS
+    cta_in_ring = pid // NUM_RINGS
 
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
-        tl.assume(stride_in_m >= 0)
-        tl.assume(stride_in_n >= 0)
-        tl.assume(stride_out_m >= 0)
-        tl.assume(stride_out_n >= 0)
+    if (cta_in_ring < ctas_per_ring) and (total_tiles > 0) and (total_tiles > ring_id):
+        tiles_per_ring = (total_tiles - ring_id + NUM_RINGS - 1) // NUM_RINGS
+        for tile_index_in_ring in range(cta_in_ring, tiles_per_ring, ctas_per_ring):
+            tile_id = ring_id + tile_index_in_ring * NUM_RINGS
+            if tile_id < total_tiles:
+                num_pid_in_group = GROUP_SIZE_M * num_pid_n
+                group_id = tile_id // num_pid_in_group
+                first_pid_m = group_id * GROUP_SIZE_M
+                group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+                pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+                pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        rm_base = pid_m * BLOCK_SIZE_M
-        rn_base = pid_n * BLOCK_SIZE_N
-        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
-        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+                tl.assume(pid_m >= 0)
+                tl.assume(pid_n >= 0)
 
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
-        tile_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+                rm_base = pid_m * BLOCK_SIZE_M
+                rn_base = pid_n * BLOCK_SIZE_N
+                rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+                rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+                rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+                rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-        flag_offset = tile_id * FLAGS_PER_TILE
-        remote_flag_ptr = flags + flag_offset
-        local_flag_ptr = flags + flag_offset
+                mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-        # Load own shard from input
-        send_data = tl.load(input_ptr + tile_offset, mask=mask, other=0)
+                # Load own shard from input
+                input_tile_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+                send_data = tl.load(input_ptr + input_tile_offset, mask=mask, other=0)
 
-        # Write own shard to local output
-        rm_out = rm + group_rank * M
-        out_offset = rm_out[:, None] * stride_out_m + rn[None, :] * stride_out_n
-        tl.store(output_ptr + out_offset, send_data, mask=mask, cache_modifier=".wt")
+                # Write own shard to local output[group_rank * M]
+                rm_local = rm + group_rank * M
+                local_out_offset = rm_local[:, None] * stride_out_m + rn[None, :] * stride_out_n
+                tl.store(output_ptr + local_out_offset, send_data, mask=mask, cache_modifier=".wt")
 
-        for _step in range(0, world_size - 1):
-            # === SEND PHASE ===
-            # Wait for next rank's flag to be 0 (ring_buffer tile is free)
-            while (
-                iris.atomic_cas(
-                    remote_flag_ptr, 0, 0,
-                    iris_rank, next_rank, heap_bases,
-                    sem="acquire", scope="sys",
-                )
-                != 0
-            ):
-                pass
+                # The data source rank for each step:
+                # step 0: we send our own shard (group_rank)
+                # step 1: we forward the shard we received (group_rank - 1)
+                # step s: we forward shard from (group_rank - s) mod world_size
 
-            # Write data to next rank's ring_buffer
-            iris.store(
-                ring_buffer + tile_offset,
-                send_data,
-                iris_rank,
-                next_rank,
-                heap_bases,
-                mask=mask,
-                cache_modifier=".wt",
-                hint=(1, BLOCK_SIZE_N),
-            )
-            tl.debug_barrier()
-            # Signal next rank: data is ready (set flag=1)
-            iris.atomic_xchg(
-                remote_flag_ptr, 1,
-                iris_rank, next_rank, heap_bases,
-                sem="release", scope="sys",
-            )
+                for _step in range(0, world_size - 1):
+                    # Compute which rank's shard we're sending this step
+                    src_rank_idx = (group_rank + world_size - _step) % world_size
 
-            # === RECEIVE PHASE ===
-            # Wait for local flag to be 1 (predecessor wrote data)
-            while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
-                pass
+                    # === SEND PHASE ===
+                    # Wait for next rank's flag to be 0 (output slot is free)
+                    flag_offset = tile_id * FLAGS_PER_TILE
+                    remote_flag_ptr = flags + flag_offset
+                    local_flag_ptr = flags + flag_offset
 
-            # Read received data from local ring_buffer
-            recv_data = tl.load(ring_buffer + tile_offset, mask=mask, other=0)
+                    while (
+                        iris.atomic_cas(
+                            remote_flag_ptr, 0, 0,
+                            iris_rank, next_rank, heap_bases,
+                            sem="acquire", scope="sys",
+                        )
+                        != 0
+                    ):
+                        pass
 
-            # Write received shard to output at correct slot
-            recv_rank_idx = (group_rank + world_size - _step - 1) % world_size
-            rm_recv = rm + recv_rank_idx * M
-            out_offset_recv = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
-            tl.store(output_ptr + out_offset_recv, recv_data, mask=mask, cache_modifier=".wt")
+                    # Write data directly to next rank's output[src_rank * M]
+                    rm_remote = rm + src_rank_idx * M
+                    remote_out_offset = rm_remote[:, None] * stride_out_m + rn[None, :] * stride_out_n
+                    iris.store(
+                        output_ptr + remote_out_offset,
+                        send_data,
+                        iris_rank,
+                        next_rank,
+                        heap_bases,
+                        mask=mask,
+                        cache_modifier=".wt",
+                        hint=(1, BLOCK_SIZE_N),
+                    )
+                    tl.debug_barrier()
+                    # Signal next rank: data is ready
+                    iris.atomic_xchg(
+                        remote_flag_ptr, 1,
+                        iris_rank, next_rank, heap_bases,
+                        sem="release", scope="sys",
+                    )
 
-            # Prepare for next step: forward received data (kept in registers)
-            send_data = recv_data
+                    # === RECEIVE PHASE ===
+                    # Wait for predecessor to write data to our output buffer
+                    while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
+                        pass
 
-            tl.debug_barrier()
-            # Reset local flag to 0 (ring_buffer tile is free for predecessor)
-            tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+                    # Read the received shard from local output buffer
+                    # Predecessor wrote to output[recv_rank * M] on our rank
+                    recv_rank_idx = (group_rank + world_size - _step - 1) % world_size
+                    rm_recv = rm + recv_rank_idx * M
+                    recv_out_offset = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
+                    recv_data = tl.load(output_ptr + recv_out_offset, mask=mask, other=0)
+
+                    # Forward this data in the next step
+                    send_data = recv_data
+
+                    tl.debug_barrier()
+                    # Reset local flag (slot is free for predecessor)
+                    tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
 
 
 def all_gather_preamble(
@@ -637,17 +658,8 @@ def all_gather_preamble(
     workspace.prepared = False
 
     if config.all_gather_variant == "ring":
-        # Single ring buffer (per-tile flag handshake keeps data in registers)
-        if (
-            workspace.ring_buffer is None
-            or workspace.ring_buffer.shape != (M, N)
-            or workspace.ring_buffer.dtype != dtype
-        ):
-            workspace.ring_buffer = ctx.zeros((M, N), dtype=dtype)
-        else:
-            workspace.ring_buffer.zero_()
-
-        # One flag per tile for producer/consumer handshake
+        # Direct-write ring: no ring_buffer needed, writes go to output buffer
+        # Only need flags for per-tile producer/consumer handshake
         num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
         num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
         total_tiles = num_pid_m * num_pid_n
@@ -800,14 +812,12 @@ def all_gather(
         heap_bases = ctx.get_heap_bases()
 
         if config.all_gather_variant == "ring":
-            # Ring variant: use workspace if provided, otherwise allocate
+            # Ring variant: direct-write to output (no ring_buffer needed)
             if workspace is not None and workspace.prepared:
-                ring_buffer = workspace.ring_buffer
                 flags = workspace.flags
                 flags_per_tile = workspace.flags_per_tile
                 workspace.prepared = False
             else:
-                ring_buffer = ctx.zeros((M, N), dtype=input_tensor.dtype)
                 num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
                 num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
                 total_tiles = num_pid_m * num_pid_n
@@ -826,10 +836,11 @@ def all_gather(
                 next_rank_in_group = (rank_in_group + 1) % world_size
                 next_rank = group_ranks[next_rank_in_group]
 
+            num_rings = config.all_gather_num_rings
+
             persistent_all_gather_ring[(config.comm_sms,)](
                 input_tensor,
                 output_tensor,
-                ring_buffer,
                 flags,
                 M,
                 N,
@@ -850,6 +861,7 @@ def all_gather(
                 config.comm_sms,
                 config.num_xcds,
                 config.chunk_size,
+                num_rings,
                 flags_per_tile,
                 num_stages=config.num_stages,
                 num_warps=config.num_warps,

@@ -86,6 +86,7 @@ class Config:
     chunk_size: int | None = None
     use_gluon: bool = False
     all_gather_variant: str = "persistent"  # "persistent", "partitioned", or "ring"
+    all_gather_num_rings: int = 1
     all_reduce_variant: str = "two_shot"
     all_reduce_distribution: int = 1
     all_reduce_num_rings: int = 1
