@@ -93,6 +93,10 @@ def persistent_all_gather(
     """
     pid = tl.program_id(0)
 
+    # Chiplet transform for XCD-aware scheduling
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
@@ -167,6 +171,100 @@ def persistent_all_gather(
 
 
 @triton.jit()
+def persistent_all_gather_pull(
+    input_ptr,
+    output_ptr,
+    M,
+    N,
+    stride_in_m,
+    stride_in_n,
+    stride_out_m,
+    stride_out_n,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+):
+    """
+    Pull-based all-gather: each rank gathers from all others via iris.load.
+
+    Instead of each rank pushing its data to all others (broadcast), each rank
+    pulls data from every other rank's input buffer. This avoids receiver-side
+    memory controller contention and is better for small-to-medium messages
+    where latency dominates.
+    """
+    pid = tl.program_id(0)
+
+    # Chiplet transform for XCD-aware scheduling
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+    tl.assume(total_tiles > 0)
+
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+        tl.assume(tile_id >= 0)
+        tl.assume(stride_in_m >= 0)
+        tl.assume(stride_in_n >= 0)
+        tl.assume(stride_out_m >= 0)
+        tl.assume(stride_out_n >= 0)
+
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+
+        # Gather from all ranks: load each rank's input tile and write to
+        # the corresponding slot in the local output buffer.
+        for rank_idx in tl.static_range(world_size):
+            # Stagger source rank order to distribute XGMI traffic
+            src_idx = (group_rank + rank_idx) % world_size
+            src_rank = rank_start + src_idx * rank_stride
+
+            if src_idx == group_rank:
+                # Local: load from own input buffer
+                data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
+            else:
+                # Remote: pull from src_rank's input buffer via iris.load
+                data = iris.load(
+                    input_ptr + input_offset,
+                    iris_rank,
+                    src_rank,
+                    heap_bases,
+                    mask=mask,
+                )
+
+            # Write to output[src_idx * M + rm, rn]
+            rm_out = rm + src_idx * M
+            out_offset = rm_out[:, None] * stride_out_m + rn[None, :] * stride_out_n
+            tl.store(output_ptr + out_offset, data, mask=mask, cache_modifier=".wt")
+
+
+@triton.jit()
 def persistent_all_gather_partitioned(
     input_ptr,
     output_ptr,
@@ -219,6 +317,10 @@ def persistent_all_gather_partitioned(
         CHUNK_SIZE: Chunk size for chiplet transform
     """
     pid = tl.program_id(0)
+
+    # Chiplet transform for XCD-aware scheduling
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
     # Partition PIDs across destination ranks
     pids_per_rank = COMM_SMS // world_size
@@ -867,6 +969,8 @@ def all_gather(
                 kernel_fn = persistent_all_gather
             elif config.all_gather_variant == "partitioned":
                 kernel_fn = persistent_all_gather_partitioned
+            elif config.all_gather_variant == "pull":
+                kernel_fn = persistent_all_gather_pull
             else:
                 raise ValueError(f"Unknown all_gather_variant: {config.all_gather_variant}")
 

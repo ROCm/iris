@@ -85,7 +85,7 @@ class Config:
     num_xcds: int | None = None
     chunk_size: int | None = None
     use_gluon: bool = False
-    all_gather_variant: str = "persistent"  # "persistent", "partitioned", or "ring"
+    all_gather_variant: str = "persistent"  # "persistent", "partitioned", "pull", or "ring"
     all_gather_num_rings: int = 1
     all_reduce_variant: str = "two_shot"
     all_reduce_distribution: int = 1
@@ -116,9 +116,9 @@ class Config:
             raise ValueError(f"comm_sms must be positive, got {self.comm_sms}")
         if self.num_xcds <= 0:
             raise ValueError(f"num_xcds must be positive, got {self.num_xcds}")
-        if self.all_gather_variant not in ["persistent", "partitioned", "ring"]:
+        if self.all_gather_variant not in ["persistent", "partitioned", "pull", "ring"]:
             raise ValueError(
-                f"all_gather_variant must be one of: 'persistent', 'partitioned', 'ring', got {self.all_gather_variant}"
+                f"all_gather_variant must be one of: 'persistent', 'partitioned', 'pull', 'ring', got {self.all_gather_variant}"
             )
         if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock"]:
             raise ValueError(
