@@ -18,7 +18,7 @@ across calls. This avoids the expensive symmetric heap allocation
 (which includes dist.barrier + DMA-BUF re-import) on the hot path.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import triton
@@ -26,7 +26,6 @@ import triton.language as tl
 import torch
 from .config import Config
 from .all_reduce import all_reduce, all_reduce_preamble, AllReduceWorkspace
-from .utils import extract_group_info
 
 
 @dataclass
@@ -162,11 +161,19 @@ def all_reduce_rmsnorm_preamble(
         workspace = AllReduceRMSNormWorkspace()
 
     # Allocate reduced buffer
-    if workspace.reduced is None or workspace.reduced.shape != (tokens, hidden) or workspace.reduced.dtype != partial.dtype:
+    if (
+        workspace.reduced is None
+        or workspace.reduced.shape != (tokens, hidden)
+        or workspace.reduced.dtype != partial.dtype
+    ):
         workspace.reduced = ctx.zeros((tokens, hidden), dtype=partial.dtype)
 
     # Allocate norm_out buffer
-    if workspace.norm_out is None or workspace.norm_out.shape != (tokens, hidden) or workspace.norm_out.dtype != partial.dtype:
+    if (
+        workspace.norm_out is None
+        or workspace.norm_out.shape != (tokens, hidden)
+        or workspace.norm_out.dtype != partial.dtype
+    ):
         workspace.norm_out = ctx.zeros((tokens, hidden), dtype=partial.dtype)
 
     # Prepare allreduce workspace
@@ -178,7 +185,9 @@ def all_reduce_rmsnorm_preamble(
         block_size_n=config.block_size_n,
     )
     workspace.ar_config = ar_config
-    workspace.ar_workspace = all_reduce_preamble(workspace.reduced, partial, ctx, config=ar_config, workspace=workspace.ar_workspace)
+    workspace.ar_workspace = all_reduce_preamble(
+        workspace.reduced, partial, ctx, config=ar_config, workspace=workspace.ar_workspace
+    )
 
     return workspace
 

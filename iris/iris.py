@@ -1298,7 +1298,9 @@ class Iris:
                 workspace=workspace,
             )
 
-        def all_reduce_rmsnorm(self, partial, residual, weight, eps=1e-6, group=None, async_op=False, config=None, workspace=None):
+        def all_reduce_rmsnorm(
+            self, partial, residual, weight, eps=1e-6, group=None, async_op=False, config=None, workspace=None
+        ):
             """
             Fused AllReduce + Residual Add + RMSNorm.
 
