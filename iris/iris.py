@@ -1192,7 +1192,15 @@ class Iris:
             """
             from iris.ccl.all_gather import all_gather as _all_gather
 
-            _all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config, workspace=workspace)
+            _all_gather(
+                output_tensor,
+                input_tensor,
+                self._iris,
+                group=group,
+                async_op=async_op,
+                config=config,
+                workspace=workspace,
+            )
 
         def all_gather_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
