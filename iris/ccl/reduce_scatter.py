@@ -28,10 +28,12 @@ def _default_config(block_size_m, block_size_n, comm_sms=64, distribution=1):
 
 
 @triton.jit()
-def _apply_delta(ptr, delta, hint: tl.constexpr = None):
-    """Translate pointer using pre-computed delta (remote_base - local_base)."""
-    ptr_byte = tl.cast(ptr, tl.pointer_type(tl.int8))
-    translated_byte = ptr_byte + delta
+def _translate_fast(ptr, local_base, remote_base, hint: tl.constexpr = None):
+    """Fast pointer translation with pre-loaded bases (avoids repeated heap_bases loads)."""
+    ptr_int = tl.cast(ptr, tl.uint64)
+    offset = ptr_int - local_base
+    remote_byte = tl.cast(remote_base, tl.pointer_type(tl.int8))
+    translated_byte = remote_byte + offset
     translated = tl.cast(translated_byte, ptr.dtype)
     if hint is not None:
         translated = tl.max_contiguous(tl.multiple_of(translated, hint), hint)
@@ -63,15 +65,14 @@ def persistent_reduce_scatter_two_shot(
     DISTRIBUTION: tl.constexpr,
 ):
     """
-    Reduce-scatter using two-shot approach with delta-based pointer translation.
+    Reduce-scatter using two-shot approach with hoisted heap base loads.
 
     Each rank reduces its assigned tiles from all ranks and stores the result
     only to its own output (no broadcast to other ranks).
 
     Optimizations:
-    - Pre-computes pointer deltas (remote_base - local_base) per rank once.
-    - Each remote load is just ptr + delta (single addition vs subtract+add).
-    - local_base loaded once, remote bases loaded once each outside tile loop.
+    - Pre-loads local heap base once outside the tile loop.
+    - Uses _translate_fast() with pre-loaded bases (avoids repeated heap_bases loads).
     """
     pid = tl.program_id(0)
 
@@ -84,8 +85,7 @@ def persistent_reduce_scatter_two_shot(
 
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
 
-    # Pre-compute pointer deltas: delta[r] = heap_bases[r] - heap_bases[iris_rank]
-    # This makes translation just ptr + delta (one add vs subtract+add).
+    # Pre-load local base once (avoids repeated heap_bases loads in _translate_fast)
     local_base = tl.load(heap_bases + iris_rank)
 
     tiles_per_rank = tl.cdiv(total_tiles, world_size)
@@ -136,15 +136,16 @@ def persistent_reduce_scatter_two_shot(
         # Fast path: NO MASKS (full tiles)
         if is_full:
             start_rank_idx = pid % world_size
-            # Load from first rank using delta-based translation
             first_rank = rank_start + start_rank_idx * rank_stride
-            delta_0 = tl.load(heap_bases + first_rank) - local_base
-            acc = tl.load(_apply_delta(base_ptr, delta_0, hint=(1, BLOCK_SIZE_N))).to(acc_dtype)
+            remote_base_0 = tl.load(heap_bases + first_rank)
+            translated_0 = _translate_fast(base_ptr, local_base, remote_base_0, hint=(1, BLOCK_SIZE_N))
+            acc = tl.load(translated_0).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                delta_i = tl.load(heap_bases + remote_rank) - local_base
-                acc += tl.load(_apply_delta(base_ptr, delta_i, hint=(1, BLOCK_SIZE_N))).to(acc_dtype)
+                remote_base_i = tl.load(heap_bases + remote_rank)
+                translated_i = _translate_fast(base_ptr, local_base, remote_base_i, hint=(1, BLOCK_SIZE_N))
+                acc += tl.load(translated_i).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
             tl.store(out_ptr, reduced, cache_modifier=".wt")
@@ -155,15 +156,15 @@ def persistent_reduce_scatter_two_shot(
 
             start_rank_idx = pid % world_size
             first_rank = rank_start + start_rank_idx * rank_stride
-            delta_0 = tl.load(heap_bases + first_rank) - local_base
-            acc = tl.load(_apply_delta(base_ptr, delta_0, hint=(1, BLOCK_SIZE_N)), mask=mask, other=0.0).to(acc_dtype)
+            remote_base_0 = tl.load(heap_bases + first_rank)
+            translated_0 = _translate_fast(base_ptr, local_base, remote_base_0, hint=(1, BLOCK_SIZE_N))
+            acc = tl.load(translated_0, mask=mask, other=0.0).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                delta_i = tl.load(heap_bases + remote_rank) - local_base
-                acc += tl.load(_apply_delta(base_ptr, delta_i, hint=(1, BLOCK_SIZE_N)), mask=mask, other=0.0).to(
-                    acc_dtype
-                )
+                remote_base_i = tl.load(heap_bases + remote_rank)
+                translated_i = _translate_fast(base_ptr, local_base, remote_base_i, hint=(1, BLOCK_SIZE_N))
+                acc += tl.load(translated_i, mask=mask, other=0.0).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
