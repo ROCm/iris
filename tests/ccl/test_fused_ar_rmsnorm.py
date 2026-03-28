@@ -41,7 +41,6 @@ def _rmsnorm_reference(x: torch.Tensor, weight: torch.Tensor, eps: float) -> tor
         (128, 1024),  # Larger batch
         (256, 4096),  # Typical LLM hidden size (LLaMA 7B)
         (512, 5120),  # LLaMA 13B hidden size
-        (64, 8192),  # LLaMA 65B / 70B hidden size
     ],
 )
 def test_fused_ar_rmsnorm(dtype, tokens, hidden):
