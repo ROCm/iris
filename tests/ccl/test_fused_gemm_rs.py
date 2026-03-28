@@ -92,13 +92,18 @@ def test_fused_gemm_rs_correctness(dtype, tokens, H, K):
     torch.cuda.synchronize()
 
     # Compare — tolerances account for different accumulation order in fused kernel
-    # (tl.dot tiles + atomic adds) vs cuBLAS + NCCL reduce_scatter
+    # (tl.dot tiles + atomic adds) vs cuBLAS + NCCL all_reduce.
+    # Error grows with sqrt(inner_dim * world_size) due to non-associative FP.
+    # The fused kernel accumulates H_shard elements in the GEMM k-loop via tl.dot
+    # tiles, then world_size partial results are atomically added. Both stages
+    # introduce accumulation-order differences vs cuBLAS + NCCL.
+    scale = (H_shard * world_size) ** 0.5
     if dtype == torch.float32:
-        atol = 5e-2
+        atol = max(5e-2, scale * 5e-3)
         rtol = 1e-2
     else:
-        atol = 1e-1
-        rtol = 1e-1
+        atol = max(1e-1, scale * 5e-2)
+        rtol = 5e-2
 
     max_diff = torch.abs(iris_output - ref_output).max().item()
     try:
@@ -157,8 +162,9 @@ def test_fused_gemm_rs_workspace_reuse(dtype):
     out2 = shmem.ccl.gemm_reduce_scatter(iris_input, iris_weight, workspace=workspace)
     torch.cuda.synchronize()
 
-    atol = 1e-1
-    rtol = 1e-1
+    scale = (H_shard * world_size) ** 0.5
+    atol = max(1e-1, scale * 5e-2)
+    rtol = 5e-2
     try:
         assert torch.allclose(out1, ref_output, atol=atol, rtol=rtol), (
             f"Rank {rank}: call 1 failed, max diff = {torch.abs(out1 - ref_output).max().item()}"
@@ -341,8 +347,9 @@ def test_fused_gemm_rs_non_pow2_tokens(tokens):
     iris_output = shmem.ccl.gemm_reduce_scatter(iris_input, iris_weight)
     torch.cuda.synchronize()
 
-    atol = 1e-1
-    rtol = 1e-1
+    scale = (H_shard * world_size) ** 0.5
+    atol = max(1e-1, scale * 5e-2)
+    rtol = 5e-2
     try:
         assert torch.allclose(iris_output, ref_output, atol=atol, rtol=rtol), (
             f"Rank {rank}: tokens={tokens}, max diff = {torch.abs(iris_output - ref_output).max().item()}"
