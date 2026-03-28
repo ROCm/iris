@@ -113,9 +113,9 @@ def test_all_gather_ring(dtype, M, N, block_size_m, block_size_n):
         pytest.skip("torch.distributed not initialized")
 
     heap_size = 2**33  # 8GB
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
 
     # Reference: PyTorch all_gather_into_tensor
     pytorch_input_tensor = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
@@ -123,19 +123,19 @@ def test_all_gather_ring(dtype, M, N, block_size_m, block_size_n):
 
     pytorch_output_tensor = torch.zeros(world_size * M, N, dtype=dtype, device=f"cuda:{rank}")
 
-    shmem.barrier()
+    ctx.barrier()
     dist.all_gather_into_tensor(pytorch_output_tensor, pytorch_input_tensor)
     torch.cuda.synchronize()
 
     # Iris all_gather with ring variant
-    iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
+    iris_input_tensor = ctx.zeros((M, N), dtype=dtype)
     iris_input_tensor.copy_(pytorch_input_tensor)
 
-    iris_output_tensor = shmem.zeros((world_size * M, N), dtype=dtype)
+    iris_output_tensor = ctx.zeros((world_size * M, N), dtype=dtype)
 
-    shmem.barrier()
+    ctx.barrier()
     config = Config(block_size_m=block_size_m, block_size_n=block_size_n, all_gather_variant="ring")
-    shmem.ccl.all_gather(iris_output_tensor, iris_input_tensor, config=config)
+    ctx.ccl.all_gather(iris_output_tensor, iris_input_tensor, config=config)
     torch.cuda.synchronize()
 
     atol = 1e-3 if dtype == torch.float16 else 1e-5
@@ -147,8 +147,8 @@ def test_all_gather_ring(dtype, M, N, block_size_m, block_size_n):
             f"Rank {rank}: Iris output (ring) doesn't match PyTorch's all_gather_into_tensor"
         )
     finally:
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         import gc
 
         gc.collect()
