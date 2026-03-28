@@ -203,7 +203,6 @@ def persistent_reduce_scatter_ring(
 
     # ALL ranks process ALL tiles through the ring
     for tile_id in range(pid, total_tiles, COMM_SMS):
-
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
         first_pid_m = group_id * GROUP_SIZE_M
@@ -504,9 +503,7 @@ def reduce_scatter(
             waves_per_eu=config.waves_per_eu,
         )
     else:
-        raise ValueError(
-            f"reduce_scatter_variant must be 'two_shot' or 'ring_chunked', got '{variant}'."
-        )
+        raise ValueError(f"reduce_scatter_variant must be 'two_shot' or 'ring_chunked', got '{variant}'.")
 
     if not async_op:
         shmem.barrier()

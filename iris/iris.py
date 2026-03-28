@@ -1275,7 +1275,9 @@ class Iris:
                 workspace=workspace,
             )
 
-        def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None, workspace=None):
+        def reduce_scatter(
+            self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None, workspace=None
+        ):
             """
             Reduce-scatter collective operation.
 
@@ -1313,7 +1315,14 @@ class Iris:
                 op = ReduceOp.SUM
 
             _reduce_scatter(
-                output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config, workspace=workspace
+                output_tensor,
+                input_tensor,
+                self._iris,
+                op=op,
+                group=group,
+                async_op=async_op,
+                config=config,
+                workspace=workspace,
             )
 
 
