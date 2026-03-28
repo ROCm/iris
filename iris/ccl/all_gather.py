@@ -668,9 +668,14 @@ def persistent_all_gather_ring(
 
                     while (
                         iris.atomic_cas(
-                            remote_flag_ptr, 0, 0,
-                            iris_rank, next_rank, heap_bases,
-                            sem="acquire", scope="sys",
+                            remote_flag_ptr,
+                            0,
+                            0,
+                            iris_rank,
+                            next_rank,
+                            heap_bases,
+                            sem="acquire",
+                            scope="sys",
                         )
                         != 0
                     ):
@@ -692,9 +697,13 @@ def persistent_all_gather_ring(
                     tl.debug_barrier()
                     # Signal next rank: data is ready
                     iris.atomic_xchg(
-                        remote_flag_ptr, 1,
-                        iris_rank, next_rank, heap_bases,
-                        sem="release", scope="sys",
+                        remote_flag_ptr,
+                        1,
+                        iris_rank,
+                        next_rank,
+                        heap_bases,
+                        sem="release",
+                        scope="sys",
                     )
 
                     # === RECEIVE PHASE ===
