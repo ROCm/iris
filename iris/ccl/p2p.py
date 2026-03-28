@@ -16,7 +16,7 @@ Usage:
     ...     ctx.ccl.recv(tensor, src=0, p2p_state=p2p)
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, NamedTuple, Optional
 
 import torch

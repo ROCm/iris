@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 
 import iris
-from iris.ccl.p2p import P2PConfig, P2POp, isend, irecv
+from iris.ccl.p2p import P2POp, isend, irecv
 
 
 def benchmark(fn, warmup=50, measured=200):
@@ -43,6 +43,70 @@ def benchmark(fn, warmup=50, measured=200):
 
     times.sort()
     return times[len(times) // 2]
+
+
+def _make_pingpong_fn(ctx, t, p2p, rank):
+    def fn():
+        if rank == 0:
+            ctx.ccl.send(t, dst=1, p2p_state=p2p)
+            ctx.ccl.recv(t, src=1, p2p_state=p2p)
+        elif rank == 1:
+            ctx.ccl.recv(t, src=0, p2p_state=p2p)
+            ctx.ccl.send(t, dst=0, p2p_state=p2p)
+    return fn
+
+
+def _make_rccl_pingpong_fn(buf, rank):
+    def fn():
+        if rank == 0:
+            dist.send(buf, dst=1)
+            dist.recv(buf, src=1)
+        elif rank == 1:
+            dist.recv(buf, src=0)
+            dist.send(buf, dst=0)
+    return fn
+
+
+def _make_uni_fn(ctx, t, p2p, rank):
+    def fn():
+        if rank == 0:
+            ctx.ccl.send(t, dst=1, p2p_state=p2p)
+        elif rank == 1:
+            ctx.ccl.recv(t, src=0, p2p_state=p2p)
+    return fn
+
+
+def _make_rccl_uni_fn(buf, rank):
+    def fn():
+        if rank == 0:
+            dist.send(buf, dst=1)
+        elif rank == 1:
+            dist.recv(buf, src=0)
+    return fn
+
+
+def _make_ring_fn(ctx, send_buf, recv_buf, p2p, dst, src):
+    def fn():
+        ops = [
+            P2POp(op=isend, tensor=send_buf, peer=dst),
+            P2POp(op=irecv, tensor=recv_buf, peer=src),
+        ]
+        works = ctx.ccl.batch_isend_irecv(ops, p2p)
+        for w in works:
+            w.wait()
+    return fn
+
+
+def _make_rccl_ring_fn(send_buf, recv_buf, dst, src):
+    def fn():
+        ops_rccl = [
+            dist.P2POp(dist.isend, send_buf, dst),
+            dist.P2POp(dist.irecv, recv_buf, src),
+        ]
+        reqs = dist.batch_isend_irecv(ops_rccl)
+        for r in reqs:
+            r.wait()
+    return fn
 
 
 def main():
@@ -79,30 +143,11 @@ def main():
         t = ctx.zeros((N,), dtype=dtype)
         t.fill_(float(rank))
 
-        def iris_pingpong():
-            if rank == 0:
-                ctx.ccl.send(t, dst=1, p2p_state=p2p)
-                ctx.ccl.recv(t, src=1, p2p_state=p2p)
-            elif rank == 1:
-                ctx.ccl.recv(t, src=0, p2p_state=p2p)
-                ctx.ccl.send(t, dst=0, p2p_state=p2p)
+        iris_us = benchmark(_make_pingpong_fn(ctx, t, p2p, rank), warmup=50, measured=200)
 
-        iris_us = benchmark(iris_pingpong, warmup=50, measured=200)
-
-        # RCCL reference
         rccl_buf = torch.zeros(N, dtype=dtype, device=f"cuda:{rank}")
+        rccl_us = benchmark(_make_rccl_pingpong_fn(rccl_buf, rank), warmup=50, measured=200)
 
-        def rccl_pingpong():
-            if rank == 0:
-                dist.send(rccl_buf, dst=1)
-                dist.recv(rccl_buf, src=1)
-            elif rank == 1:
-                dist.recv(rccl_buf, src=0)
-                dist.send(rccl_buf, dst=0)
-
-        rccl_us = benchmark(rccl_pingpong, warmup=50, measured=200)
-
-        # Half-RTT
         iris_half = iris_us / 2
         rccl_half = rccl_us / 2
 
@@ -133,23 +178,10 @@ def main():
         t = ctx.zeros((N,), dtype=dtype)
         t.fill_(float(rank))
 
-        def iris_uni():
-            if rank == 0:
-                ctx.ccl.send(t, dst=1, p2p_state=p2p)
-            elif rank == 1:
-                ctx.ccl.recv(t, src=0, p2p_state=p2p)
-
-        iris_us = benchmark(iris_uni, warmup=50, measured=200)
+        iris_us = benchmark(_make_uni_fn(ctx, t, p2p, rank), warmup=50, measured=200)
 
         rccl_buf = torch.zeros(N, dtype=dtype, device=f"cuda:{rank}")
-
-        def rccl_uni():
-            if rank == 0:
-                dist.send(rccl_buf, dst=1)
-            elif rank == 1:
-                dist.recv(rccl_buf, src=0)
-
-        rccl_us = benchmark(rccl_uni, warmup=50, measured=200)
+        rccl_us = benchmark(_make_rccl_uni_fn(rccl_buf, rank), warmup=50, measured=200)
 
         if rank == 0:
             nbytes = N * elem_bytes
@@ -187,30 +219,11 @@ def main():
         dst = (rank + 1) % world_size
         src = (rank - 1 + world_size) % world_size
 
-        def iris_ring():
-            ops = [
-                P2POp(op=isend, tensor=send_buf, peer=dst),
-                P2POp(op=irecv, tensor=recv_buf, peer=src),
-            ]
-            works = ctx.ccl.batch_isend_irecv(ops, p2p)
-            for w in works:
-                w.wait()
-
-        iris_us = benchmark(iris_ring, warmup=50, measured=200)
+        iris_us = benchmark(_make_ring_fn(ctx, send_buf, recv_buf, p2p, dst, src), warmup=50, measured=200)
 
         rccl_send = torch.zeros(N, dtype=dtype, device=f"cuda:{rank}")
         rccl_recv = torch.zeros(N, dtype=dtype, device=f"cuda:{rank}")
-
-        def rccl_ring():
-            ops_rccl = [
-                dist.P2POp(dist.isend, rccl_send, dst),
-                dist.P2POp(dist.irecv, rccl_recv, src),
-            ]
-            reqs = dist.batch_isend_irecv(ops_rccl)
-            for r in reqs:
-                r.wait()
-
-        rccl_us = benchmark(rccl_ring, warmup=50, measured=200)
+        rccl_us = benchmark(_make_rccl_ring_fn(rccl_send, rccl_recv, dst, src), warmup=50, measured=200)
 
         if rank == 0:
             nbytes = N * elem_bytes
