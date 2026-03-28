@@ -28,6 +28,19 @@ def _default_config(block_size_m, block_size_n, comm_sms=64, distribution=1):
 
 
 @triton.jit()
+def _translate_fast(ptr, local_base, remote_base, hint: tl.constexpr = None):
+    """Fast pointer translation with pre-loaded bases (avoids repeated heap_bases loads)."""
+    ptr_int = tl.cast(ptr, tl.uint64)
+    offset = ptr_int - local_base
+    remote_byte = tl.cast(remote_base, tl.pointer_type(tl.int8))
+    translated_byte = remote_byte + offset
+    translated = tl.cast(translated_byte, ptr.dtype)
+    if hint is not None:
+        translated = tl.max_contiguous(tl.multiple_of(translated, hint), hint)
+    return translated
+
+
+@triton.jit()
 def persistent_reduce_scatter_two_shot(
     input_ptr,
     output_ptr,
@@ -52,10 +65,13 @@ def persistent_reduce_scatter_two_shot(
     DISTRIBUTION: tl.constexpr,
 ):
     """
-    Reduce-scatter using two-shot approach.
+    Reduce-scatter using two-shot approach with hoisted pointer translation.
 
     Each rank reduces its assigned tiles from all ranks and stores the result
     only to its own output (no broadcast to other ranks).
+
+    Optimization: pre-loads heap base addresses outside the rank loop to avoid
+    redundant global loads in iris.load()'s __translate() call.
     """
     pid = tl.program_id(0)
 
@@ -67,6 +83,9 @@ def persistent_reduce_scatter_two_shot(
     total_tiles = num_pid_m * num_pid_n
 
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
+
+    # Hoist local heap base load — same for all remote reads on this rank.
+    local_base = tl.load(heap_bases + iris_rank)
 
     tiles_per_rank = tl.cdiv(total_tiles, world_size)
     if DISTRIBUTION == 0:
@@ -114,43 +133,40 @@ def persistent_reduce_scatter_two_shot(
         out_ptr = output_ptr + output_offset
 
         # Fast path: NO MASKS (full tiles)
-        # The masking is problem size dependent, and the compiler does not recognize it can have two paths
-        # (one with masks and one without). Separate unmasked paths allow the compiler to generate
-        # more efficient vectorized instructions.
         if is_full:
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+            # First rank — use hoisted local_base for translation
+            remote_base_0 = tl.load(heap_bases + start_rank_global)
+            translated_0 = _translate_fast(base_ptr, local_base, remote_base_0, hint=(1, BLOCK_SIZE_N))
+            acc = tl.load(translated_0).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+                remote_base_i = tl.load(heap_bases + remote_rank)
+                translated_i = _translate_fast(base_ptr, local_base, remote_base_i, hint=(1, BLOCK_SIZE_N))
+                acc += tl.load(translated_i).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
-
-            # Store only to own rank (no broadcast)
             tl.store(out_ptr, reduced, cache_modifier=".wt")
 
-        # Slow path: MASKED (only boundary tiles land here)
-        # This path handles tiles at tensor boundaries where not all elements are valid.
+        # Slow path: MASKED (only boundary tiles)
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(
-                acc_dtype
-            )
+            remote_base_0 = tl.load(heap_bases + start_rank_global)
+            translated_0 = _translate_fast(base_ptr, local_base, remote_base_0, hint=(1, BLOCK_SIZE_N))
+            acc = tl.load(translated_0, mask=mask, other=0.0).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(
-                    acc_dtype
-                )
+                remote_base_i = tl.load(heap_bases + remote_rank)
+                translated_i = _translate_fast(base_ptr, local_base, remote_base_i, hint=(1, BLOCK_SIZE_N))
+                acc += tl.load(translated_i, mask=mask, other=0.0).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
-
-            # Store only to own rank (no broadcast)
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
 
 
