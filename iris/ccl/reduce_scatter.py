@@ -135,17 +135,15 @@ def persistent_reduce_scatter_two_shot(
 
         # Fast path: NO MASKS (full tiles)
         if is_full:
-            start_rank_idx = pid % world_size
-            first_rank = rank_start + start_rank_idx * rank_stride
-            remote_base_0 = tl.load(heap_bases + first_rank)
-            translated_0 = _translate_fast(base_ptr, local_base, remote_base_0, hint=(1, BLOCK_SIZE_N))
-            acc = tl.load(translated_0).to(acc_dtype)
-            for i in tl.static_range(1, world_size):
-                remote_rank_idx = (start_rank_idx + i) % world_size
-                remote_rank = rank_start + remote_rank_idx * rank_stride
-                remote_base_i = tl.load(heap_bases + remote_rank)
-                translated_i = _translate_fast(base_ptr, local_base, remote_base_i, hint=(1, BLOCK_SIZE_N))
-                acc += tl.load(translated_i).to(acc_dtype)
+            # Load local data first (no XGMI, no translation — direct HBM read)
+            acc = tl.load(base_ptr).to(acc_dtype)
+            # Then load from remote ranks only (XGMI reads)
+            for i in tl.static_range(world_size):
+                remote_rank_global = rank_start + i * rank_stride
+                if remote_rank_global != iris_rank:
+                    remote_base_i = tl.load(heap_bases + remote_rank_global)
+                    translated_i = _translate_fast(base_ptr, local_base, remote_base_i, hint=(1, BLOCK_SIZE_N))
+                    acc += tl.load(translated_i).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
             tl.store(out_ptr, reduced, cache_modifier=".wt")
@@ -154,17 +152,15 @@ def persistent_reduce_scatter_two_shot(
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-            start_rank_idx = pid % world_size
-            first_rank = rank_start + start_rank_idx * rank_stride
-            remote_base_0 = tl.load(heap_bases + first_rank)
-            translated_0 = _translate_fast(base_ptr, local_base, remote_base_0, hint=(1, BLOCK_SIZE_N))
-            acc = tl.load(translated_0, mask=mask, other=0.0).to(acc_dtype)
-            for i in tl.static_range(1, world_size):
-                remote_rank_idx = (start_rank_idx + i) % world_size
-                remote_rank = rank_start + remote_rank_idx * rank_stride
-                remote_base_i = tl.load(heap_bases + remote_rank)
-                translated_i = _translate_fast(base_ptr, local_base, remote_base_i, hint=(1, BLOCK_SIZE_N))
-                acc += tl.load(translated_i, mask=mask, other=0.0).to(acc_dtype)
+            # Load local data first (no XGMI, no translation)
+            acc = tl.load(base_ptr, mask=mask, other=0.0).to(acc_dtype)
+            # Then load from remote ranks only
+            for i in tl.static_range(world_size):
+                remote_rank_global = rank_start + i * rank_stride
+                if remote_rank_global != iris_rank:
+                    remote_base_i = tl.load(heap_bases + remote_rank_global)
+                    translated_i = _translate_fast(base_ptr, local_base, remote_base_i, hint=(1, BLOCK_SIZE_N))
+                    acc += tl.load(translated_i, mask=mask, other=0.0).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
