@@ -17,7 +17,6 @@ import gc
 import importlib.util
 import os
 import sys
-import time
 from pathlib import Path
 
 import torch
@@ -178,14 +177,14 @@ def main():
     ]
 
     if rank == 0:
-        print(f"# MoE Dispatch/Combine Benchmark — iris vs naive all_to_all")
-        print(f"## Hardware")
+        print("# MoE Dispatch/Combine Benchmark — iris vs naive all_to_all")
+        print("## Hardware")
         print(f"- GPUs: {world_size}x MI300X (or similar)")
         print(f"- dtype: {dtype}")
-        print(f"- Warmup: 20 iterations, Measured: 100 iterations")
+        print("- Warmup: 20 iterations, Measured: 100 iterations")
         print()
-        print(f"| T_local | H    | E_tot | k | iris (us) | naive (us) | Speedup |")
-        print(f"|---------|------|-------|---|-----------|------------|---------|")
+        print("| T_local | H    | E_tot | k | iris (us) | naive (us) | Speedup |")
+        print("|---------|------|-------|---|-----------|------------|---------|")
 
     for n_tokens_local, d_model, n_expts_tot, n_expts_act in configs:
         n_tokens = n_tokens_local * world_size
@@ -220,13 +219,11 @@ def main():
         ctx.barrier()
 
         # Benchmark iris
-        iris_time, _, _ = benchmark(
-            lambda: iris_dispatch_combine(
-                x_local, topk_result.indx, topk_result.vals,
-                w_local, b_local, dispatcher, None
-            ),
-            warmup=20, measured=100,
-        )
+        def _iris_fn(x=x_local, idx=topk_result.indx, vals=topk_result.vals,
+                     w=w_local, b=b_local, d=dispatcher):
+            return iris_dispatch_combine(x, idx, vals, w, b, d, None)
+
+        iris_time, _, _ = benchmark(_iris_fn, warmup=20, measured=100)
 
         # Benchmark naive
         naive_time, _, _ = benchmark(
