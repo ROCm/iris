@@ -26,7 +26,6 @@ import iris
 from .moe_utils import (
     ExptAssignment,
     RaggedTensorMetadata,
-    BitmatrixMetadata,
     _make_bitmatrix_metadata,
     make_ragged_tensor_metadata,
     remap_ragged_tensor_metadata,
@@ -240,9 +239,7 @@ class MoEDispatcher:
             from .moe_utils import make_expt_dict_uniform, make_expt_assignment
 
             expt_dict = make_expt_dict_uniform(self._world_size, num_experts)
-            self._expt_assignment = make_expt_assignment(
-                self._world_size, num_experts, expt_dict, self._device
-            )
+            self._expt_assignment = make_expt_assignment(self._world_size, num_experts, expt_dict, self._device)
 
         # Pre-allocate buffers
         max_T_global = max_tokens * self._world_size

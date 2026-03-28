@@ -1316,8 +1316,9 @@ class Iris:
                 output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
             )
 
-        def moe_dispatcher(self, hidden_dim, num_experts, topk, max_tokens,
-                           group=None, config=None, expt_assignment=None):
+        def moe_dispatcher(
+            self, hidden_dim, num_experts, topk, max_tokens, group=None, config=None, expt_assignment=None
+        ):
             """
             Create a pre-allocated MoE token dispatcher for expert-parallel inference.
 
@@ -1346,9 +1347,16 @@ class Iris:
             """
             from iris.ccl.moe_dispatch import MoEDispatcher
 
-            return MoEDispatcher(self._iris, hidden_dim, num_experts, topk,
-                                 max_tokens, group=group, config=config,
-                                 expt_assignment=expt_assignment)
+            return MoEDispatcher(
+                self._iris,
+                hidden_dim,
+                num_experts,
+                topk,
+                max_tokens,
+                group=group,
+                config=config,
+                expt_assignment=expt_assignment,
+            )
 
 
 @triton.jit

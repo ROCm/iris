@@ -23,16 +23,11 @@ import torch
 import torch.distributed as dist
 
 import iris
-from iris.ccl import MoEDispatcher, MoEDispatchConfig
+from iris.ccl import MoEDispatcher
 from iris.ccl.moe_utils import (
-    ExptAssignment,
     make_expt_dict_uniform,
     make_expt_assignment,
     topk,
-    _make_bitmatrix_metadata,
-    make_ragged_tensor_metadata,
-    remap_ragged_tensor_metadata,
-    reduce,
 )
 
 # ---------------------------------------------------------------------------
@@ -111,9 +106,7 @@ def test_dispatch_combine_e2e(n_tokens_local, d_model, n_expts_act, dtype):
         n_expts_tot = world_size * 2
         n_tokens = n_tokens_local * world_size
 
-        x_global, l_global, w_global, b_global = _make_global_data(
-            n_tokens, d_model, n_expts_tot, dtype, device
-        )
+        x_global, l_global, w_global, b_global = _make_global_data(n_tokens, d_model, n_expts_tot, dtype, device)
 
         # Reference: single-device MoE
         y_ref = mixture_of_expt_nosharded(x_global, l_global, w_global, b_global, n_expts_act)
@@ -135,7 +128,11 @@ def test_dispatch_combine_e2e(n_tokens_local, d_model, n_expts_act, dtype):
 
         # Create dispatcher
         dispatcher = MoEDispatcher(
-            ctx, d_model, n_expts_tot, n_expts_act, n_tokens_local,
+            ctx,
+            d_model,
+            n_expts_tot,
+            n_expts_act,
+            n_tokens_local,
             expt_assignment=expt_assignment,
         )
 
@@ -143,7 +140,9 @@ def test_dispatch_combine_e2e(n_tokens_local, d_model, n_expts_act, dtype):
 
         # Dispatch
         dispatch_buf, local_meta, handle = dispatcher.dispatch(
-            x_local, topk_result.indx, topk_result.vals,
+            x_local,
+            topk_result.indx,
+            topk_result.vals,
         )
 
         # Expert computation (grouped matmul on local experts)
@@ -179,9 +178,7 @@ def test_dispatch_only(n_tokens_local, d_model):
         n_tokens = n_tokens_local * world_size
         dtype = torch.bfloat16
 
-        x_global, l_global, _, _ = _make_global_data(
-            n_tokens, d_model, n_expts_tot, dtype, device
-        )
+        x_global, l_global, _, _ = _make_global_data(n_tokens, d_model, n_expts_tot, dtype, device)
 
         expt_dict = make_expt_dict_uniform(world_size, n_expts_tot)
         expt_assignment = make_expt_assignment(world_size, n_expts_tot, expt_dict, device)
@@ -194,14 +191,20 @@ def test_dispatch_only(n_tokens_local, d_model):
         topk_result = topk(l_local, n_expts_act, apply_softmax=True)
 
         dispatcher = MoEDispatcher(
-            ctx, d_model, n_expts_tot, n_expts_act, n_tokens_local,
+            ctx,
+            d_model,
+            n_expts_tot,
+            n_expts_act,
+            n_tokens_local,
             expt_assignment=expt_assignment,
         )
 
         ctx.barrier()
 
         dispatch_buf, local_meta, handle = dispatcher.dispatch(
-            x_local, topk_result.indx, topk_result.vals,
+            x_local,
+            topk_result.indx,
+            topk_result.vals,
         )
 
         # Verify dispatch buffer has correct shape
@@ -236,9 +239,7 @@ def test_combine_only(n_tokens_local, d_model):
         n_tokens = n_tokens_local * world_size
         dtype = torch.bfloat16
 
-        x_global, l_global, w_global, b_global = _make_global_data(
-            n_tokens, d_model, n_expts_tot, dtype, device
-        )
+        x_global, l_global, w_global, b_global = _make_global_data(n_tokens, d_model, n_expts_tot, dtype, device)
 
         expt_dict = make_expt_dict_uniform(world_size, n_expts_tot)
         expt_assignment = make_expt_assignment(world_size, n_expts_tot, expt_dict, device)
@@ -253,7 +254,11 @@ def test_combine_only(n_tokens_local, d_model):
         topk_result = topk(l_local, n_expts_act, apply_softmax=True)
 
         dispatcher = MoEDispatcher(
-            ctx, d_model, n_expts_tot, n_expts_act, n_tokens_local,
+            ctx,
+            d_model,
+            n_expts_tot,
+            n_expts_act,
+            n_tokens_local,
             expt_assignment=expt_assignment,
         )
 
@@ -261,7 +266,9 @@ def test_combine_only(n_tokens_local, d_model):
 
         # Full pipeline
         dispatch_buf, local_meta, handle = dispatcher.dispatch(
-            x_local, topk_result.indx, topk_result.vals,
+            x_local,
+            topk_result.indx,
+            topk_result.vals,
         )
         expert_out = grouped_matmul(dispatch_buf, w_local, b_local, local_meta)
         z_local = dispatcher.combine(expert_out, handle)
@@ -295,7 +302,11 @@ def test_buffer_reuse():
         expt_assignment = make_expt_assignment(world_size, n_expts_tot, expt_dict, device)
 
         dispatcher = MoEDispatcher(
-            ctx, d_model, n_expts_tot, n_expts_act, max_tokens,
+            ctx,
+            d_model,
+            n_expts_tot,
+            n_expts_act,
+            max_tokens,
             expt_assignment=expt_assignment,
         )
 
@@ -303,9 +314,7 @@ def test_buffer_reuse():
         for n_tokens_local in [32, 64]:
             n_tokens = n_tokens_local * world_size
 
-            x_global, l_global, w_global, b_global = _make_global_data(
-                n_tokens, d_model, n_expts_tot, dtype, device
-            )
+            x_global, l_global, w_global, b_global = _make_global_data(n_tokens, d_model, n_expts_tot, dtype, device)
 
             y_ref = mixture_of_expt_nosharded(x_global, l_global, w_global, b_global, n_expts_act)
 
@@ -320,7 +329,9 @@ def test_buffer_reuse():
             ctx.barrier()
 
             dispatch_buf, local_meta, handle = dispatcher.dispatch(
-                x_local, topk_result.indx, topk_result.vals,
+                x_local,
+                topk_result.indx,
+                topk_result.vals,
             )
             expert_out = grouped_matmul(dispatch_buf, w_local, b_local, local_meta)
             z_local = dispatcher.combine(expert_out, handle)
@@ -351,9 +362,7 @@ def test_topk_1():
         n_tokens = n_tokens_local * world_size
         dtype = torch.bfloat16
 
-        x_global, l_global, w_global, b_global = _make_global_data(
-            n_tokens, d_model, n_expts_tot, dtype, device
-        )
+        x_global, l_global, w_global, b_global = _make_global_data(n_tokens, d_model, n_expts_tot, dtype, device)
 
         y_ref = mixture_of_expt_nosharded(x_global, l_global, w_global, b_global, n_expts_act)
 
@@ -370,14 +379,20 @@ def test_topk_1():
         topk_result = topk(l_local, n_expts_act, apply_softmax=True)
 
         dispatcher = MoEDispatcher(
-            ctx, d_model, n_expts_tot, n_expts_act, n_tokens_local,
+            ctx,
+            d_model,
+            n_expts_tot,
+            n_expts_act,
+            n_tokens_local,
             expt_assignment=expt_assignment,
         )
 
         ctx.barrier()
 
         dispatch_buf, local_meta, handle = dispatcher.dispatch(
-            x_local, topk_result.indx, topk_result.vals,
+            x_local,
+            topk_result.indx,
+            topk_result.vals,
         )
         expert_out = grouped_matmul(dispatch_buf, w_local, b_local, local_meta)
         z_local = dispatcher.combine(expert_out, handle)
@@ -420,14 +435,20 @@ def test_handle_frozen():
         topk_result = topk(l_local, n_expts_act, apply_softmax=True)
 
         dispatcher = MoEDispatcher(
-            ctx, d_model, n_expts_tot, n_expts_act, n_tokens_local,
+            ctx,
+            d_model,
+            n_expts_tot,
+            n_expts_act,
+            n_tokens_local,
             expt_assignment=expt_assignment,
         )
 
         ctx.barrier()
 
         _, _, handle = dispatcher.dispatch(
-            x_local, topk_result.indx, topk_result.vals,
+            x_local,
+            topk_result.indx,
+            topk_result.vals,
         )
 
         with pytest.raises(AttributeError):
