@@ -134,33 +134,27 @@ def persistent_all_gather(
         # Load local input data once for this tile
         data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
 
-        # Send local shard data to all destination ranks
-        # Each rank's input goes to output[group_rank * M : (group_rank + 1) * M, :] on all ranks
-        for i in tl.static_range(world_size):
-            target_rank = rank_start + i * rank_stride
+        # Compute global output row indices: offset by group_rank * M
+        rm_output = rm_input + group_rank * M
+        output_mask = (rm_output[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
+        combined_mask = input_mask & output_mask
 
-            # Compute global output row indices: offset by group_rank * M
-            rm_output = rm_input + group_rank * M
+        output_base_m = rm_output[:, None] * stride_out_m
+        output_base_n = rn[None, :] * stride_out_n
+        output_offset = output_base_m + output_base_n
+        output_ptr_target = output_ptr + output_offset
+        output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-            # Output mask: only write where input was valid
-            output_mask = (rm_output[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
+        # Traffic-shaped stores: stagger write order per rank so each rank
+        # writes to a different target at any given moment, avoiding memory
+        # controller contention on the receiver side.
+        for rank_idx in tl.static_range(world_size):
+            dest_idx = (group_rank + rank_idx) % world_size
+            target_rank = rank_start + dest_idx * rank_stride
 
-            # Combine masks: must be valid in both input and output
-            combined_mask = input_mask & output_mask
-
-            # Compute output offset
-            output_base_m = rm_output[:, None] * stride_out_m
-            output_base_n = rn[None, :] * stride_out_n
-            output_offset = output_base_m + output_base_n
-            output_ptr_target = output_ptr + output_offset
-            output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-
-            if i == group_rank:
-                # Local destination (i == group_rank): use direct store
+            if dest_idx == group_rank:
                 tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
             else:
-                # Remote destination: use iris.store to send data to remote destination
-                # Use iris_rank for iris RMA operations (heap_bases indexing)
                 iris.store(
                     output_ptr_target,
                     data,
