@@ -1125,6 +1125,10 @@ def all_reduce(
         workspace.prepared = False
 
     if not async_op:
-        shmem.device_barrier(group=group)
+        # all_pairs_chunked only writes to local output (no remote stores),
+        # so a post-kernel barrier is unnecessary — cuda stream ordering
+        # already guarantees local writes are visible to subsequent ops.
+        if variant != VARIANT_ALL_PAIRS_CHUNKED:
+            shmem.device_barrier(group=group)
 
     return workspace
