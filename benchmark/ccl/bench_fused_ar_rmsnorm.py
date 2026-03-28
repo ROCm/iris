@@ -24,7 +24,7 @@ def _rmsnorm_torch(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.T
 @bench.axis("hidden", [1024, 2048, 4096, 5120])
 @bench.axis("dtype", [torch.bfloat16])
 def fused_ar_rmsnorm(state, ctx):
-    """Iris fused AllReduce + Residual Add + RMSNorm."""
+    """Iris fused AllReduce + Residual Add + RMSNorm (with workspace pre-allocation)."""
     tokens, hidden, dtype = state["tokens"], state["hidden"], state["dtype"]
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
@@ -43,8 +43,11 @@ def fused_ar_rmsnorm(state, ctx):
 
     config = Config(all_reduce_variant="two_shot", all_reduce_distribution=1)
 
+    # Pre-allocate workspace ONCE (outside timed region)
+    workspace = ctx.ccl.all_reduce_rmsnorm_preamble(partial, residual, config=config)
+
     def run():
-        ctx.ccl.all_reduce_rmsnorm(partial, residual, weight, eps=eps, config=config)
+        ctx.ccl.all_reduce_rmsnorm(partial, residual, weight, eps=eps, config=config, workspace=workspace)
 
     def preamble():
         residual.fill_(1.0)

@@ -1275,7 +1275,30 @@ class Iris:
                 workspace=workspace,
             )
 
-        def all_reduce_rmsnorm(self, partial, residual, weight, eps=1e-6, group=None, async_op=False, config=None):
+        def all_reduce_rmsnorm_preamble(self, partial, residual, config=None, workspace=None):
+            """
+            Prepare reusable workspace for fused AllReduce + RMSNorm.
+
+            Args:
+                partial: [tokens, hidden] — shape template for allocation.
+                residual: [tokens, hidden] — shape template (for API symmetry).
+                config: Optional Config instance. Default: None.
+                workspace: Optional existing workspace to reuse. Default: None.
+
+            Returns:
+                AllReduceRMSNormWorkspace that can be passed to ``all_reduce_rmsnorm``.
+            """
+            from iris.ccl.fused_ar_rmsnorm import all_reduce_rmsnorm_preamble as _all_reduce_rmsnorm_preamble
+
+            return _all_reduce_rmsnorm_preamble(
+                partial,
+                residual,
+                self._iris,
+                config=config,
+                workspace=workspace,
+            )
+
+        def all_reduce_rmsnorm(self, partial, residual, weight, eps=1e-6, group=None, async_op=False, config=None, workspace=None):
             """
             Fused AllReduce + Residual Add + RMSNorm.
 
@@ -1283,6 +1306,9 @@ class Iris:
               1. Sums partials across all ranks (AllReduce)
               2. Adds the reduced result to the residual (in-place)
               3. Applies RMSNorm with the given weight
+
+            For best performance, call all_reduce_rmsnorm_preamble() once
+            and pass the workspace to avoid per-call heap allocation.
 
             Args:
                 partial: [tokens, hidden] — each rank's partial (on symmetric heap).
@@ -1292,6 +1318,7 @@ class Iris:
                 group: ProcessGroup or None. Default: None.
                 async_op: If False, barrier at end. Default: False.
                 config: Config instance with kernel parameters. Default: None.
+                workspace: Pre-allocated AllReduceRMSNormWorkspace. Default: None.
 
             Returns:
                 norm_out: [tokens, hidden] — normalized output (on symmetric heap).
@@ -1311,6 +1338,7 @@ class Iris:
                 group=group,
                 async_op=async_op,
                 config=config,
+                workspace=workspace,
             )
 
         def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
