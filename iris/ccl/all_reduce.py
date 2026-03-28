@@ -22,6 +22,7 @@ VARIANT_RING = "ring"
 VARIANT_TWO_SHOT = "two_shot"
 VARIANT_ONE_SHOT = "one_shot"
 VARIANT_SPINLOCK = "spinlock"
+VARIANT_ALL_PAIRS_CHUNKED = "all_pairs_chunked"
 
 
 @dataclass
@@ -67,9 +68,9 @@ def all_reduce_preamble(
         config = Config()
 
     variant = config.all_reduce_variant.lower()
-    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK]:
+    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK, VARIANT_ALL_PAIRS_CHUNKED]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}, {VARIANT_ALL_PAIRS_CHUNKED}"
         )
 
     M, N = input_tensor.shape[:2]
@@ -423,6 +424,117 @@ def persistent_all_reduce_one_shot(
 
 
 @triton.jit()
+def persistent_all_reduce_all_pairs_chunked(
+    input_ptr,
+    output_ptr,
+    M,
+    N,
+    stride_in_m,
+    stride_in_n,
+    stride_out_m,
+    stride_out_n,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+):
+    """
+    All-pairs chunked all-reduce: every rank reads all others, accumulates locally.
+
+    Pure read-based algorithm: no remote writes, no flags. Each CTA gathers all
+    partials via iris.load() and writes the reduced result to the local output.
+    Optimal for fully-connected XGMI topologies.
+
+    Optimizations over one_shot:
+    - Traffic-shaped reads: stagger read order per rank to distribute XGMI traffic
+    - Write-through stores: bypass L1/L2 for output writes
+    - Chiplet transform: XCD-aware scheduling for MI355X
+
+    Args:
+        input_ptr: Pointer to input tensor (local partial data) of shape (M, N)
+        output_ptr: Pointer to output tensor (reduced result) of shape (M, N)
+        M, N: Tensor dimensions
+        stride_in_m, stride_in_n: Input tensor strides
+        stride_out_m, stride_out_n: Output tensor strides
+        heap_bases: Heap base pointers for all ranks
+        group_rank: Position within the ProcessGroup (0 to world_size-1)
+        iris_rank: Global rank for iris RMA operations
+        world_size: Total ranks in the group
+        rank_start: Starting global rank in the group
+        rank_stride: Stride between consecutive ranks
+        BLOCK_SIZE_M, BLOCK_SIZE_N: Tile dimensions
+        GROUP_SIZE_M: Number of M-blocks to group for swizzle
+        COMM_SMS: Number of SMs for persistent scheduling
+        NUM_XCDS: Number of XCDs (chiplets)
+        CHUNK_SIZE: Chunk size for chiplet distribution
+    """
+    pid = tl.program_id(0)
+
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+
+    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
+
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+
+        input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+
+        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+
+        # Traffic-shaped reads: stagger order per rank so each rank reads
+        # from a different source at any given moment, distributing XGMI
+        # traffic across memory controllers.
+        for rank_idx in tl.static_range(world_size):
+            src_idx = (group_rank + rank_idx) % world_size
+            remote_rank = rank_start + src_idx * rank_stride
+            partial = iris.load(
+                input_ptr + input_offset,
+                iris_rank,
+                remote_rank,
+                heap_bases,
+                mask=mask,
+            )
+            acc += partial.to(acc_dtype)
+
+        tl.store(
+            output_ptr + output_offset,
+            acc.to(output_ptr.type.element_ty),
+            mask=mask,
+            cache_modifier=".wt",
+        )
+
+
+@triton.jit()
 def persistent_all_reduce_ring(
     input_ptr,
     output_ptr,
@@ -772,9 +884,10 @@ def all_reduce(
         VARIANT_RING,
         VARIANT_TWO_SHOT,
         VARIANT_ONE_SHOT,
+        VARIANT_ALL_PAIRS_CHUNKED,
     ]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_SPINLOCK}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_SPINLOCK}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_ALL_PAIRS_CHUNKED}"
         )
 
     slice_n = config.all_reduce_ring_slice_n
@@ -981,11 +1094,37 @@ def all_reduce(
             config.num_xcds,
             config.chunk_size,
         )
+    elif variant == VARIANT_ALL_PAIRS_CHUNKED:
+        persistent_all_reduce_all_pairs_chunked[(config.comm_sms,)](
+            input_tensor,
+            output_tensor,
+            M,
+            N,
+            stride_in_m,
+            stride_in_n,
+            stride_out_m,
+            stride_out_n,
+            heap_bases,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config.block_size_m,
+            config.block_size_n,
+            config.swizzle_size,
+            config.comm_sms,
+            config.num_xcds,
+            config.chunk_size,
+            num_stages=config.num_stages,
+            num_warps=config.num_warps,
+            waves_per_eu=config.waves_per_eu,
+        )
 
     if workspace is not None:
         workspace.prepared = False
 
     if not async_op:
-        shmem.barrier()
+        shmem.device_barrier(group=group)
 
     return workspace
