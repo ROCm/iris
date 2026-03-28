@@ -204,6 +204,7 @@ class MoEDispatcher:
         num_experts: int,
         topk: int,
         max_tokens: int,
+        dtype=None,
         group=None,
         config: MoEDispatchConfig | None = None,
         expt_assignment: ExptAssignment | None = None,
@@ -216,6 +217,7 @@ class MoEDispatcher:
             num_experts: total number of experts across all ranks.
             topk: number of experts activated per token (k).
             max_tokens: maximum tokens per rank per call.
+            dtype: data type for dispatch/combine buffers (default: bfloat16).
             group: reserved for future process group support.
             config: kernel tuning config.
             expt_assignment: expert-to-rank mapping.  If None, uses uniform
@@ -226,6 +228,7 @@ class MoEDispatcher:
         self._num_experts = num_experts
         self._topk = topk
         self._max_tokens = max_tokens
+        self._dtype = dtype or torch.bfloat16
         self._config = config or MoEDispatchConfig()
 
         self._rank = ctx.get_rank()
@@ -245,8 +248,8 @@ class MoEDispatcher:
         max_T_global = max_tokens * self._world_size
         max_slots = max_T_global * topk
 
-        self._dispatch_buf = ctx.zeros((max_slots, hidden_dim), dtype=torch.bfloat16)
-        self._combine_buf = ctx.zeros((max_tokens * topk, hidden_dim), dtype=torch.bfloat16)
+        self._dispatch_buf = ctx.zeros((max_slots, hidden_dim), dtype=self._dtype)
+        self._combine_buf = ctx.zeros((max_tokens * topk, hidden_dim), dtype=self._dtype)
         self._ag_indx_buf = ctx.zeros((max_T_global, topk), dtype=torch.int32)
         self._ag_vals_buf = ctx.zeros((max_T_global, topk), dtype=torch.float32)
 

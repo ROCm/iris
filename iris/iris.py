@@ -1317,7 +1317,7 @@ class Iris:
             )
 
         def moe_dispatcher(
-            self, hidden_dim, num_experts, topk, max_tokens, group=None, config=None, expt_assignment=None
+            self, hidden_dim, num_experts, topk, max_tokens, dtype=None, group=None, config=None, expt_assignment=None
         ):
             """
             Create a pre-allocated MoE token dispatcher for expert-parallel inference.
@@ -1330,6 +1330,7 @@ class Iris:
                 num_experts: Total number of experts across all ranks.
                 topk: Number of experts activated per token.
                 max_tokens: Maximum tokens per rank per call.
+                dtype: Data type for dispatch/combine buffers (default: bfloat16).
                 group: Reserved for future process group support.
                 config: MoEDispatchConfig with kernel tuning parameters.
                 expt_assignment: Expert-to-rank mapping. If None, uses uniform assignment.
@@ -1353,6 +1354,7 @@ class Iris:
                 num_experts,
                 topk,
                 max_tokens,
+                dtype=dtype,
                 group=group,
                 config=config,
                 expt_assignment=expt_assignment,

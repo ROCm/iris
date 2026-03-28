@@ -133,6 +133,7 @@ def test_dispatch_combine_e2e(n_tokens_local, d_model, n_expts_act, dtype):
             n_expts_tot,
             n_expts_act,
             n_tokens_local,
+            dtype=dtype,
             expt_assignment=expt_assignment,
         )
 
@@ -196,6 +197,7 @@ def test_dispatch_only(n_tokens_local, d_model):
             n_expts_tot,
             n_expts_act,
             n_tokens_local,
+            dtype=dtype,
             expt_assignment=expt_assignment,
         )
 
@@ -259,6 +261,7 @@ def test_combine_only(n_tokens_local, d_model):
             n_expts_tot,
             n_expts_act,
             n_tokens_local,
+            dtype=dtype,
             expt_assignment=expt_assignment,
         )
 
@@ -307,6 +310,7 @@ def test_buffer_reuse():
             n_expts_tot,
             n_expts_act,
             max_tokens,
+            dtype=dtype,
             expt_assignment=expt_assignment,
         )
 
@@ -384,6 +388,7 @@ def test_topk_1():
             n_expts_tot,
             n_expts_act,
             n_tokens_local,
+            dtype=dtype,
             expt_assignment=expt_assignment,
         )
 
@@ -440,6 +445,7 @@ def test_handle_frozen():
             n_expts_tot,
             n_expts_act,
             n_tokens_local,
+            dtype=dtype,
             expt_assignment=expt_assignment,
         )
 
