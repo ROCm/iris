@@ -413,10 +413,11 @@ def reduce_scatter(
     if config is None:
         # Adaptive defaults tuned on MI308X×4 vs RCCL.
         # Key insights:
-        # - Smaller block_size_m=16 creates more tiles for better SM utilization.
+        # - bm=16 creates more tiles for better SM utilization at all sizes.
         # - comm_sms sweet spot depends on tensor size:
-        #   - 64-128M: sms=48 reduces XGMI link contention (135 GB/s, 94% of roofline)
         #   - 128M+: sms=64 needed to process more tiles efficiently
+        #   - 64M: sms=48 reduces XGMI link contention (94% of roofline at peak fclk)
+        #   - <=16M: sms=48 reduces contention for fewer tiles
         # Uses _default_config() cache to avoid repeated HIP subprocess queries.
         M_in, N_in = input_tensor.shape[:2]
         total_elems = M_in * N_in
@@ -424,10 +425,8 @@ def reduce_scatter(
             config = _default_config(16, 64)  # comm_sms=64 default
         elif total_elems >= 64 * 1024 * 1024:  # >= 64M elements
             config = _default_config(16, 64, comm_sms=48)
-        elif total_elems >= 16 * 1024 * 1024:  # >= 16M elements
-            config = _default_config(16, 64)
         else:
-            config = _default_config(32, 64)
+            config = _default_config(16, 64, comm_sms=48)
 
     # Check for unsupported options
     if config.use_gluon:
