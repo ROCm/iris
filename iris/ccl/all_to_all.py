@@ -520,6 +520,7 @@ def all_to_all_v(
     group=None,
     async_op=False,
     config=None,
+    remote_recv_displs=None,
 ):
     """
     Variable-size all-to-all collective operation.
@@ -538,6 +539,11 @@ def all_to_all_v(
         group: ProcessGroup or None.
         async_op: If False, barrier at end.
         config: Config instance.
+        remote_recv_displs: Optional list[int] of length world_size. If provided,
+            remote_recv_displs[i] is the offset in rank i's output buffer where rank i
+            expects to receive data from this rank. Providing this skips an internal
+            all_gather call, which can save ~20ms of NCCL overhead. Callers like MoE
+            routers that already know the global displacement layout should pass this.
 
     Note:
         Caller must ensure send_counts[i] on rank A == recv_counts[A] on rank i.
@@ -558,34 +564,25 @@ def all_to_all_v(
     send_counts_t = torch.tensor(send_counts, dtype=torch.int64, device=device)
     send_displs_t = torch.tensor(send_displs, dtype=torch.int64, device=device)
 
-    # For remote stores, we need the receiver's displacement for data from us.
-    # recv_displs[i] on THIS rank is where data from rank i goes in OUR output.
-    # When we write to rank j, we need rank j's recv_displs[group_rank].
-    # We gather this via all_to_all on the displacements themselves.
-    #
-    # However, to keep this simple and avoid circular dependency, we require
-    # the caller to pass recv_displs that are consistent across ranks:
-    # recv_displs[i] on rank j == the offset in rank j's output for data from rank i.
-    #
-    # The kernel writes to the remote rank's output at the displacement that
-    # the remote rank expects for data from us. We collect this info via
-    # an all-to-all exchange of displacements.
+    if remote_recv_displs is not None:
+        # Caller provided pre-computed remote displacements — skip all_gather.
+        kernel_recv_displs_t = torch.tensor(remote_recv_displs, dtype=torch.int64, device=device)
+    else:
+        # Exchange recv_displs across ranks so each rank knows where to write
+        # on every remote rank's output buffer. This uses NCCL all_gather.
+        import torch.distributed as dist
 
-    # For remote stores, we need each remote rank's recv_displ for data from us.
-    # We gather all recv_displs via all_gather, then index into them.
-    import torch.distributed as dist
+        local_recv_displs_t = torch.tensor(recv_displs, dtype=torch.int64, device=device)
+        all_recv_displs_list = [
+            torch.zeros(world_size, dtype=torch.int64, device=device) for _ in range(world_size)
+        ]
+        dist.all_gather(all_recv_displs_list, local_recv_displs_t, group=group)
 
-    # All-gather recv_displs from all ranks into a [world_size, world_size] matrix.
-    # all_recv_displs[j][i] = rank j's recv_displs[i] = where rank j stores data from rank i.
-    local_recv_displs_t = torch.tensor(recv_displs, dtype=torch.int64, device=device)
-    all_recv_displs_list = [torch.zeros(world_size, dtype=torch.int64, device=device) for _ in range(world_size)]
-    dist.all_gather(all_recv_displs_list, local_recv_displs_t, group=group)
-
-    # kernel_recv_displs[i] = rank i's recv_displs[group_rank] = where rank i stores data from us.
-    kernel_recv_displs = torch.zeros(world_size, dtype=torch.int64, device=device)
-    for i in range(world_size):
-        kernel_recv_displs[i] = all_recv_displs_list[i][rank_in_group].item()
-    kernel_recv_displs_t = kernel_recv_displs.to(device)
+        # kernel_recv_displs[i] = rank i's recv_displs[group_rank]
+        #                       = where rank i stores data from us.
+        kernel_recv_displs_t = torch.zeros(world_size, dtype=torch.int64, device=device)
+        for i in range(world_size):
+            kernel_recv_displs_t[i] = all_recv_displs_list[i][rank_in_group].item()
 
     block_size = config.block_size_n  # Use block_size_n as the 1D tile size
 
@@ -595,7 +592,7 @@ def all_to_all_v(
         send_counts_t,
         send_displs_t,
         kernel_recv_displs_t,
-        kernel_recv_displs_t,  # recv_displs not used separately in kernel
+        kernel_recv_displs_t,  # recv_displs for self-copy path
         ctx.get_heap_bases(),
         rank_in_group,
         rank_global,

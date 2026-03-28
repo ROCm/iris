@@ -1170,6 +1170,7 @@ class Iris:
             group=None,
             async_op=False,
             config=None,
+            remote_recv_displs=None,
         ):
             """
             Variable-size all-to-all collective operation.
@@ -1187,6 +1188,8 @@ class Iris:
                 group: ProcessGroup or None.
                 async_op: If True, returns without barrier.
                 config: Config instance.
+                remote_recv_displs: Optional list[int]. If provided, skips internal
+                    all_gather for displacement exchange (~20ms saving).
             """
             from iris.ccl.all_to_all import all_to_all_v as _all_to_all_v
 
@@ -1201,6 +1204,7 @@ class Iris:
                 group=group,
                 async_op=async_op,
                 config=config,
+                remote_recv_displs=remote_recv_displs,
             )
 
         def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
