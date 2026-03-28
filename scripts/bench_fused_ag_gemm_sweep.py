@@ -15,7 +15,6 @@ Usage:
 import gc
 import os
 import sys
-import time
 
 import torch
 import torch.distributed as dist
@@ -63,6 +62,7 @@ def benchmark_sequential(A_shard, weight, rank, world_size, warmup=50, rep=200):
 
 def benchmark_fused(shmem, A_shard_sym, weight_sym, output, config, block_size_k, warmup=50, rep=200):
     """Benchmark fused AG+GEMM."""
+
     def fn():
         shmem.ccl.all_gather_gemm(output, A_shard_sym, weight_sym, config=config, block_size_k=block_size_k)
 
@@ -92,15 +92,15 @@ def main():
 
     # Problem sizes: (M, K_local, N)
     problem_sizes = [
-        (128, 64, 64),       # Small — batch-1 inference
-        (256, 128, 256),     # Small-medium
+        (128, 64, 64),  # Small — batch-1 inference
+        (256, 128, 256),  # Small-medium
         (1024, 1024, 1024),  # Medium
         (2048, 2048, 4096),  # Large TP (H=8192 with world_size=4)
-        (4096, 512, 512),    # Tall-skinny
+        (4096, 512, 512),  # Tall-skinny
         (4096, 2048, 4096),  # Large TP
         # LLM-relevant sizes (Llama-70B style with TP=4)
-        (1, 2048, 8192),     # Batch-1 inference, TP linear
-        (32, 2048, 8192),    # Small batch inference
+        (1, 2048, 8192),  # Batch-1 inference, TP linear
+        (32, 2048, 8192),  # Small batch inference
         (1024, 2048, 8192),  # Medium batch
         (4096, 3584, 3584),  # Near-square
     ]
@@ -134,7 +134,9 @@ def main():
 
     if rank == 0:
         print("=" * 140)
-        print(f"{'M':>6} {'K_local':>7} {'N':>6} {'K':>6} | {'Config':>16} | {'BLK_M':>5} {'BLK_N':>5} {'BLK_K':>5} {'GSM':>3} {'W':>2} {'S':>2} {'SMS':>4} | {'Fused(us)':>10} {'Seq(us)':>10} {'Speedup':>8} {'TFLOPS':>7}")
+        print(
+            f"{'M':>6} {'K_local':>7} {'N':>6} {'K':>6} | {'Config':>16} | {'BLK_M':>5} {'BLK_N':>5} {'BLK_K':>5} {'GSM':>3} {'W':>2} {'S':>2} {'SMS':>4} | {'Fused(us)':>10} {'Seq(us)':>10} {'Speedup':>8} {'TFLOPS':>7}"
+        )
         print("=" * 140)
 
     results = []
@@ -159,7 +161,7 @@ def main():
         output = shmem.zeros((M, N), dtype=dtype)
         shmem.barrier()
 
-        best_fused_us = float('inf')
+        best_fused_us = float("inf")
         best_config_name = ""
 
         for blk_m, blk_n, blk_k, gsm, nw, ns, nsms, name in tiling_configs:
@@ -187,21 +189,41 @@ def main():
 
                 if rank == 0:
                     marker = " <-- best" if fused_us == best_fused_us else ""
-                    print(f"{M:>6} {K_local:>7} {N:>6} {K:>6} | {name:>16} | {blk_m:>5} {blk_n:>5} {blk_k:>5} {gsm:>3} {nw:>2} {ns:>2} {nsms:>4} | {fused_us:>10.1f} {seq_us:>10.1f} {speedup:>7.2f}x {tflops:>7.2f}{marker}")
+                    print(
+                        f"{M:>6} {K_local:>7} {N:>6} {K:>6} | {name:>16} | {blk_m:>5} {blk_n:>5} {blk_k:>5} {gsm:>3} {nw:>2} {ns:>2} {nsms:>4} | {fused_us:>10.1f} {seq_us:>10.1f} {speedup:>7.2f}x {tflops:>7.2f}{marker}"
+                    )
 
-                results.append({
-                    'M': M, 'K_local': K_local, 'N': N, 'K': K,
-                    'config': name, 'blk_m': blk_m, 'blk_n': blk_n, 'blk_k': blk_k,
-                    'gsm': gsm, 'nw': nw, 'ns': ns, 'nsms': nsms,
-                    'fused_us': fused_us, 'seq_us': seq_us, 'speedup': speedup, 'tflops': tflops,
-                })
+                results.append(
+                    {
+                        "M": M,
+                        "K_local": K_local,
+                        "N": N,
+                        "K": K,
+                        "config": name,
+                        "blk_m": blk_m,
+                        "blk_n": blk_n,
+                        "blk_k": blk_k,
+                        "gsm": gsm,
+                        "nw": nw,
+                        "ns": ns,
+                        "nsms": nsms,
+                        "fused_us": fused_us,
+                        "seq_us": seq_us,
+                        "speedup": speedup,
+                        "tflops": tflops,
+                    }
+                )
 
             except Exception as e:
                 if rank == 0:
-                    print(f"{M:>6} {K_local:>7} {N:>6} {K:>6} | {name:>16} | {blk_m:>5} {blk_n:>5} {blk_k:>5} {gsm:>3} {nw:>2} {ns:>2} {nsms:>4} | FAILED: {e}")
+                    print(
+                        f"{M:>6} {K_local:>7} {N:>6} {K:>6} | {name:>16} | {blk_m:>5} {blk_n:>5} {blk_k:>5} {gsm:>3} {nw:>2} {ns:>2} {nsms:>4} | FAILED: {e}"
+                    )
 
         if rank == 0:
-            print(f"{'':>6} {'':>7} {'':>6} {'':>6} | {'** BEST **':>16} | {best_config_name:>31} | {best_fused_us:>10.1f} {seq_us:>10.1f} {seq_us/best_fused_us:>7.2f}x")
+            print(
+                f"{'':>6} {'':>7} {'':>6} {'':>6} | {'** BEST **':>16} | {best_config_name:>31} | {best_fused_us:>10.1f} {seq_us:>10.1f} {seq_us / best_fused_us:>7.2f}x"
+            )
             print("-" * 140)
 
         # Cleanup symmetric tensors for this problem size
@@ -215,18 +237,22 @@ def main():
         print("=" * 100)
         print("SUMMARY: Best config per problem size")
         print("=" * 100)
-        print(f"{'M':>6} {'K_local':>7} {'N':>6} | {'Best Config':>16} | {'Fused(us)':>10} {'Seq(us)':>10} {'Speedup':>8} {'TFLOPS':>7}")
+        print(
+            f"{'M':>6} {'K_local':>7} {'N':>6} | {'Best Config':>16} | {'Fused(us)':>10} {'Seq(us)':>10} {'Speedup':>8} {'TFLOPS':>7}"
+        )
         print("-" * 100)
 
         seen = set()
         for r in results:
-            key = (r['M'], r['K_local'], r['N'])
+            key = (r["M"], r["K_local"], r["N"])
             if key in seen:
                 continue
             # Find best for this problem size
-            best = min([x for x in results if (x['M'], x['K_local'], x['N']) == key], key=lambda x: x['fused_us'])
+            best = min([x for x in results if (x["M"], x["K_local"], x["N"]) == key], key=lambda x: x["fused_us"])
             seen.add(key)
-            print(f"{best['M']:>6} {best['K_local']:>7} {best['N']:>6} | {best['config']:>16} | {best['fused_us']:>10.1f} {best['seq_us']:>10.1f} {best['speedup']:>7.2f}x {best['tflops']:>7.2f}")
+            print(
+                f"{best['M']:>6} {best['K_local']:>7} {best['N']:>6} | {best['config']:>16} | {best['fused_us']:>10.1f} {best['seq_us']:>10.1f} {best['speedup']:>7.2f}x {best['tflops']:>7.2f}"
+            )
 
         # Compute MI325X roofline
         print()

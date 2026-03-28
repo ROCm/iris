@@ -100,7 +100,7 @@ def main():
     if rank == 0:
         num_events = trace_data.get("metadata", {}).get("total_events", 0) if trace_data else 0
         print(f"Exported {num_events} trace events")
-        print(f"View at: https://ui.perfetto.dev")
+        print("View at: https://ui.perfetto.dev")
         print(f"Trace files in: {trace_dir}/")
 
     shmem.barrier()
