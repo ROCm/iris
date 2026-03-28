@@ -26,11 +26,12 @@ import torch.distributed as dist
 import iris
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
     "tokens, H, K",
     [
         (1, 256, 256),
+        (32, 256, 256),
         (32, 512, 512),
         (128, 1024, 1024),
         (512, 4096, 4096),
@@ -201,6 +202,59 @@ def test_fused_gemm_rs_single_rank():
     try:
         assert torch.allclose(iris_output, ref, atol=atol), (
             f"Single-rank: max diff = {torch.abs(iris_output - ref).max().item()}"
+        )
+    finally:
+        shmem.barrier()
+        del shmem
+        gc.collect()
+
+
+def test_fused_gemm_rs_deterministic():
+    """Debug test with deterministic fill values."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33
+    shmem = iris.iris(heap_size)
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+
+    tokens, H, K = 4, 128, 128
+    dtype = torch.float32
+    H_shard = H // world_size
+    shard_size = K // world_size
+
+    # All ranks use same input/weight: input filled with 1.0, weight filled with 1/H_shard
+    # So each partial = tokens x K matrix with all entries = 1.0
+    # After reduce-scatter sum: all entries = world_size * 1.0 = world_size
+    input_shard = torch.full((tokens, H_shard), 1.0, dtype=dtype, device=f"cuda:{rank}")
+    weight_shard = torch.full((H_shard, K), 1.0 / H_shard, dtype=dtype, device=f"cuda:{rank}")
+
+    # Reference
+    partial = torch.matmul(input_shard, weight_shard)
+    ref_output = torch.empty(tokens, shard_size, dtype=dtype, device=f"cuda:{rank}")
+    dist.reduce_scatter_tensor(ref_output, partial, op=dist.ReduceOp.SUM)
+    torch.cuda.synchronize()
+
+    # Iris
+    iris_input = shmem.zeros((tokens, H_shard), dtype=dtype)
+    iris_input.copy_(input_shard)
+
+    shmem.barrier()
+    iris_output = shmem.ccl.gemm_reduce_scatter(iris_input, weight_shard)
+    torch.cuda.synchronize()
+
+    if rank == 0:
+        print(f"\n  ref_output[0,:4] = {ref_output[0,:4]}")
+        print(f"  iris_output[0,:4] = {iris_output[0,:4]}")
+        print(f"  expected: all {float(world_size)}")
+
+    atol = 1e-2
+    try:
+        assert torch.allclose(iris_output, ref_output, atol=atol), (
+            f"Rank {rank}: max diff = {torch.abs(iris_output - ref_output).max().item()}\n"
+            f"iris_output[0,:4] = {iris_output[0,:4]}\n"
+            f"ref_output[0,:4]  = {ref_output[0,:4]}"
         )
     finally:
         shmem.barrier()
