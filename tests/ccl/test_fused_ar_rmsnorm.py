@@ -48,7 +48,7 @@ def test_fused_ar_rmsnorm(dtype, tokens, hidden):
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33  # 8GB
+    heap_size = 2**30  # 1GB
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
@@ -168,7 +168,7 @@ def test_fused_ar_rmsnorm_distribution(distribution):
     tokens, hidden = 128, 1024
     eps = 1e-6
 
-    heap_size = 2**33
+    heap_size = 2**30
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
 
@@ -230,7 +230,7 @@ def test_fused_ar_rmsnorm_deterministic():
     tokens, hidden = 64, 512
     eps = 1e-6
 
-    heap_size = 2**33
+    heap_size = 2**30
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
 
@@ -273,7 +273,7 @@ def test_fused_ar_rmsnorm_shape_validation():
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33
+    heap_size = 2**30
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
 
