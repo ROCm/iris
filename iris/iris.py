@@ -1160,8 +1160,16 @@ class Iris:
             _all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
         def all_to_all_v(
-            self, output_tensor, input_tensor, send_counts, send_displs, recv_counts, recv_displs,
-            group=None, async_op=False, config=None,
+            self,
+            output_tensor,
+            input_tensor,
+            send_counts,
+            send_displs,
+            recv_counts,
+            recv_displs,
+            group=None,
+            async_op=False,
+            config=None,
         ):
             """
             Variable-size all-to-all collective operation.
@@ -1183,9 +1191,16 @@ class Iris:
             from iris.ccl.all_to_all import all_to_all_v as _all_to_all_v
 
             _all_to_all_v(
-                output_tensor, input_tensor, send_counts, send_displs,
-                recv_counts, recv_displs, self._iris, group=group,
-                async_op=async_op, config=config,
+                output_tensor,
+                input_tensor,
+                send_counts,
+                send_displs,
+                recv_counts,
+                recv_displs,
+                self._iris,
+                group=group,
+                async_op=async_op,
+                config=config,
             )
 
         def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):

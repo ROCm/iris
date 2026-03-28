@@ -161,7 +161,12 @@ def test_all_to_all_v_uniform(dtype):
 
     ctx.barrier()
     ctx.ccl.all_to_all_v(
-        iris_output, iris_input, send_counts, send_displs, recv_counts, recv_displs,
+        iris_output,
+        iris_input,
+        send_counts,
+        send_displs,
+        recv_counts,
+        recv_displs,
     )
     torch.cuda.synchronize()
 
@@ -221,7 +226,8 @@ def test_all_to_all_v_variable(dtype):
 
     ctx.barrier()
     dist.all_to_all_single(
-        ref_output, ref_input,
+        ref_output,
+        ref_input,
         output_split_sizes=recv_counts,
         input_split_sizes=send_counts,
     )
@@ -229,7 +235,12 @@ def test_all_to_all_v_variable(dtype):
 
     ctx.barrier()
     ctx.ccl.all_to_all_v(
-        iris_output, iris_input, send_counts, send_displs, recv_counts, recv_displs,
+        iris_output,
+        iris_input,
+        send_counts,
+        send_displs,
+        recv_counts,
+        recv_displs,
     )
     torch.cuda.synchronize()
 
@@ -302,13 +313,16 @@ def test_all_to_all_v_empty_chunks(dtype):
     iris_output = ctx.zeros(max(total_recv, 1), dtype=dtype)
 
     # Reference
-    ref_input = iris_input[:total_send].clone() if total_send > 0 else torch.zeros(0, dtype=dtype, device=f"cuda:{rank}")
+    ref_input = (
+        iris_input[:total_send].clone() if total_send > 0 else torch.zeros(0, dtype=dtype, device=f"cuda:{rank}")
+    )
     ref_output = torch.zeros(max(total_recv, 0), dtype=dtype, device=f"cuda:{rank}")
 
     ctx.barrier()
     if total_send > 0 and total_recv > 0:
         dist.all_to_all_single(
-            ref_output[:total_recv], ref_input,
+            ref_output[:total_recv],
+            ref_input,
             output_split_sizes=recv_counts,
             input_split_sizes=send_counts,
         )
@@ -316,7 +330,12 @@ def test_all_to_all_v_empty_chunks(dtype):
 
     ctx.barrier()
     ctx.ccl.all_to_all_v(
-        iris_output, iris_input, send_counts, send_displs, recv_counts, recv_displs,
+        iris_output,
+        iris_input,
+        send_counts,
+        send_displs,
+        recv_counts,
+        recv_displs,
     )
     torch.cuda.synchronize()
 
