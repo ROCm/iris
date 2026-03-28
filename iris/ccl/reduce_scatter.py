@@ -416,13 +416,17 @@ def reduce_scatter(
         )
     if config is None:
         # Adaptive defaults tuned on MI308X×4 vs RCCL.
-        # Key insight: for very large tensors, fewer SMs (comm_sms=48) reduces
-        # XGMI link contention and improves bandwidth. Smaller block_size_m=16
-        # creates more tiles for better SM utilization.
+        # Key insights:
+        # - Smaller block_size_m=16 creates more tiles for better SM utilization.
+        # - comm_sms sweet spot depends on tensor size:
+        #   - 64-128M: sms=48 reduces XGMI link contention (135 GB/s, 94% of roofline)
+        #   - 128M+: sms=64 needed to process more tiles efficiently
         # Uses _default_config() cache to avoid repeated HIP subprocess queries.
         M_in, N_in = input_tensor.shape[:2]
         total_elems = M_in * N_in
-        if total_elems >= 64 * 1024 * 1024:  # >= 64M elements
+        if total_elems >= 128 * 1024 * 1024:  # >= 128M elements
+            config = _default_config(16, 64)  # comm_sms=64 default
+        elif total_elems >= 64 * 1024 * 1024:  # >= 64M elements
             config = _default_config(16, 64, comm_sms=48)
         elif total_elems >= 16 * 1024 * 1024:  # >= 16M elements
             config = _default_config(16, 64)
