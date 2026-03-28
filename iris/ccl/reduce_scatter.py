@@ -22,7 +22,9 @@ from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
 @functools.lru_cache(maxsize=8)
 def _default_config(block_size_m, block_size_n, comm_sms=64, distribution=1):
     """Cache default Config objects to avoid repeated HIP queries (subprocess overhead)."""
-    return Config(block_size_m=block_size_m, block_size_n=block_size_n, comm_sms=comm_sms, all_reduce_distribution=distribution)
+    return Config(
+        block_size_m=block_size_m, block_size_n=block_size_n, comm_sms=comm_sms, all_reduce_distribution=distribution
+    )
 
 
 @triton.jit()
