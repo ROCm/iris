@@ -256,8 +256,8 @@ def test_all_to_all_v_variable(dtype):
     atol = 1e-3 if dtype in (torch.float16, torch.bfloat16) else 1e-5
 
     try:
-        assert torch.allclose(iris_output, ref_output, atol=atol), (
-            f"Rank {rank}: max diff = {torch.abs(iris_output - ref_output).max().item()}\n"
+        assert torch.allclose(iris_output[:total_recv], ref_output, atol=atol), (
+            f"Rank {rank}: max diff = {torch.abs(iris_output[:total_recv] - ref_output).max().item()}\n"
             f"send_counts={send_counts}, recv_counts={recv_counts}"
         )
     finally:
