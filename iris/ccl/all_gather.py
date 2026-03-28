@@ -28,11 +28,9 @@ class AllGatherWorkspace:
 
     shape: Tuple[int, int] = ()
     dtype: Optional[torch.dtype] = None
-    ring_buffer_0: Optional[torch.Tensor] = None
-    ring_buffer_1: Optional[torch.Tensor] = None
+    ring_buffer: Optional[torch.Tensor] = None
     flags: Optional[torch.Tensor] = None
-    num_chunks: int = 0
-    chunk_rows: int = 0
+    flags_per_tile: int = 0
     prepared: bool = False
 
 
@@ -469,8 +467,7 @@ if GLUON_AVAILABLE:
 def persistent_all_gather_ring(
     input_ptr,
     output_ptr,
-    ring_buffer_0,
-    ring_buffer_1,
+    ring_buffer,
     flags,
     M,
     N,
@@ -491,186 +488,116 @@ def persistent_all_gather_ring(
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
-    NUM_CHUNKS: tl.constexpr,
-    CHUNK_ROWS: tl.constexpr,
+    FLAGS_PER_TILE: tl.constexpr,
 ):
     """
-    Ring-based all-gather with chunked pipelining and double-buffered handshake.
+    Ring-based all-gather with per-tile producer/consumer handshake.
 
-    The shard (M rows x N cols) is split into NUM_CHUNKS row-bands (chunks).
-    Each chunk is CHUNK_ROWS rows x N cols. One flag per chunk controls the
-    producer/consumer handshake, amortizing synchronization cost across all
-    tiles within a chunk.
+    Uses the same synchronization pattern as persistent_all_reduce_ring:
+    one flag per tile, two-phase handshake (send data + set flag=1,
+    receive data + reset flag=0). Each tile keeps forwarded data in
+    registers (send_data = recv_data), avoiding the double-buffer problem.
 
-    Double buffering solves the ring forwarding problem: at step k, the sender
-    reads from ring_buffer[k%2] while the predecessor writes to ring_buffer[(k+1)%2].
-    This eliminates the race between reading for forwarding and the predecessor
-    overwriting the buffer.
-
-    Flags layout: one int32 per chunk on symmetric heap.
-      flag=0 means ring_buffer chunk is free (producer can write)
-      flag=1 means ring_buffer chunk has data (consumer can read)
+    Flags layout: one int32 per tile on symmetric heap.
+      flag=0 means ring_buffer tile is free (producer can write)
+      flag=1 means ring_buffer tile has data (consumer can read)
     """
     pid = tl.program_id(0)
 
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    tiles_per_chunk_m = tl.cdiv(CHUNK_ROWS, BLOCK_SIZE_M)
-    tiles_per_chunk = tiles_per_chunk_m * num_pid_n
+    total_tiles = num_pid_m * num_pid_n
+    tl.assume(total_tiles > 0)
 
-    # Each CU handles one or more chunks round-robin
-    for chunk_id in range(pid, NUM_CHUNKS, COMM_SMS):
-        chunk_row_start = chunk_id * CHUNK_ROWS
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        # Flag pointers for this chunk (two flags: even/odd for double-buffer)
-        flag_ptr_0 = flags + chunk_id * 2
-        flag_ptr_1 = flags + chunk_id * 2 + 1
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+        tl.assume(stride_in_m >= 0)
+        tl.assume(stride_in_n >= 0)
+        tl.assume(stride_out_m >= 0)
+        tl.assume(stride_out_n >= 0)
 
-        # Step 0: Copy local shard chunk to output
-        for tile_in_chunk in range(tiles_per_chunk):
-            tile_m = tile_in_chunk // num_pid_n
-            tile_n = tile_in_chunk % num_pid_n
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-            rm_base = chunk_row_start + tile_m * BLOCK_SIZE_M
-            rn_base = tile_n * BLOCK_SIZE_N
-            rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
-            rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-            rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        tile_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
 
-            mask = (rm[:, None] < M) & (rn[None, :] < N)
-            in_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-            data = tl.load(input_ptr + in_offset, mask=mask, other=0)
+        flag_offset = tile_id * FLAGS_PER_TILE
+        remote_flag_ptr = flags + flag_offset
+        local_flag_ptr = flags + flag_offset
 
-            rm_out = rm + group_rank * M
-            out_offset = rm_out[:, None] * stride_out_m + rn[None, :] * stride_out_n
-            tl.store(output_ptr + out_offset, data, mask=mask, cache_modifier=".wt")
+        # Load own shard from input
+        send_data = tl.load(input_ptr + tile_offset, mask=mask, other=0)
 
-        # Ring steps with double-buffered ring_buffer.
-        # Even steps (0, 2, ...) write to ring_buffer_0, read from ring_buffer_1
-        # Odd steps (1, 3, ...) write to ring_buffer_1, read from ring_buffer_0
-        # This way the sender reads from one buffer while predecessor writes to the other.
+        # Write own shard to local output
+        rm_out = rm + group_rank * M
+        out_offset = rm_out[:, None] * stride_out_m + rn[None, :] * stride_out_n
+        tl.store(output_ptr + out_offset, send_data, mask=mask, cache_modifier=".wt")
+
         for _step in range(0, world_size - 1):
-            # Select buffers: write to write_buf on next rank, read from read_buf locally
-            # At step k, predecessor writes into our buf[k%2], so we read from buf[(k-1)%2]
-            # and forward into next rank's buf[k%2].
-            # write_flag: the flag on next rank for the buffer we're writing to
-            # read_flag: the flag on our local for the buffer we're reading from
-            if _step % 2 == 0:
-                write_buf = ring_buffer_0
-                read_buf = ring_buffer_1  # only used at step > 0
-                remote_flag_ptr = flag_ptr_0
-                local_flag_ptr = flag_ptr_0  # predecessor writes to buf_0 at even steps
-                local_reset_ptr = flag_ptr_1  # reset the previous step's flag (odd buf)
-            else:
-                write_buf = ring_buffer_1
-                read_buf = ring_buffer_0
-                remote_flag_ptr = flag_ptr_1
-                local_flag_ptr = flag_ptr_1
-                local_reset_ptr = flag_ptr_0
-
             # === SEND PHASE ===
-            # Wait for next rank's buffer to be free
+            # Wait for next rank's flag to be 0 (ring_buffer tile is free)
             while (
                 iris.atomic_cas(
-                    remote_flag_ptr,
-                    0,
-                    0,
-                    iris_rank,
-                    next_rank,
-                    heap_bases,
-                    sem="acquire",
-                    scope="sys",
+                    remote_flag_ptr, 0, 0,
+                    iris_rank, next_rank, heap_bases,
+                    sem="acquire", scope="sys",
                 )
                 != 0
             ):
                 pass
 
-            # Write all tiles in this chunk to next rank's write_buf
-            for tile_in_chunk in range(tiles_per_chunk):
-                tile_m = tile_in_chunk // num_pid_n
-                tile_n = tile_in_chunk % num_pid_n
-
-                rm_base = chunk_row_start + tile_m * BLOCK_SIZE_M
-                rn_base = tile_n * BLOCK_SIZE_N
-                rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
-                rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-                rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-                rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-                mask = (rm[:, None] < M) & (rn[None, :] < N)
-                buf_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-
-                if _step == 0:
-                    send_data = tl.load(input_ptr + buf_offset, mask=mask, other=0)
-                else:
-                    # Read from the OTHER buffer (previous step's receive)
-                    send_data = tl.load(read_buf + buf_offset, mask=mask, other=0)
-
-                iris.store(
-                    write_buf + buf_offset,
-                    send_data,
-                    iris_rank,
-                    next_rank,
-                    heap_bases,
-                    mask=mask,
-                    hint=(1, BLOCK_SIZE_N),
-                )
-
-            tl.debug_barrier()
-            # Signal next rank: all tiles in chunk are ready
-            iris.atomic_xchg(
-                remote_flag_ptr,
-                1,
+            # Write data to next rank's ring_buffer
+            iris.store(
+                ring_buffer + tile_offset,
+                send_data,
                 iris_rank,
                 next_rank,
                 heap_bases,
-                sem="release",
-                scope="sys",
+                mask=mask,
+                cache_modifier=".wt",
+                hint=(1, BLOCK_SIZE_N),
+            )
+            tl.debug_barrier()
+            # Signal next rank: data is ready (set flag=1)
+            iris.atomic_xchg(
+                remote_flag_ptr, 1,
+                iris_rank, next_rank, heap_bases,
+                sem="release", scope="sys",
             )
 
-            # Release the previous step's buffer (safe: we've forwarded its data)
-            if _step > 0:
-                tl.debug_barrier()
-                tl.atomic_xchg(local_reset_ptr, 0, sem="release", scope="sys")
-
             # === RECEIVE PHASE ===
-            # Wait for local buffer flag (predecessor wrote data to our write_buf)
+            # Wait for local flag to be 1 (predecessor wrote data)
             while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
                 pass
 
-            # Read received data from local write_buf and copy to output
+            # Read received data from local ring_buffer
+            recv_data = tl.load(ring_buffer + tile_offset, mask=mask, other=0)
+
+            # Write received shard to output at correct slot
             recv_rank_idx = (group_rank + world_size - _step - 1) % world_size
+            rm_recv = rm + recv_rank_idx * M
+            out_offset_recv = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
+            tl.store(output_ptr + out_offset_recv, recv_data, mask=mask, cache_modifier=".wt")
 
-            for tile_in_chunk in range(tiles_per_chunk):
-                tile_m = tile_in_chunk // num_pid_n
-                tile_n = tile_in_chunk % num_pid_n
+            # Prepare for next step: forward received data (kept in registers)
+            send_data = recv_data
 
-                rm_base = chunk_row_start + tile_m * BLOCK_SIZE_M
-                rn_base = tile_n * BLOCK_SIZE_N
-                rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
-                rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-                rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-                rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-                mask = (rm[:, None] < M) & (rn[None, :] < N)
-                buf_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-
-                # Read from write_buf (where predecessor put the data for this step)
-                recv_data = tl.load(write_buf + buf_offset, mask=mask, other=0)
-
-                rm_recv = rm + recv_rank_idx * M
-                out_offset_recv = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
-                tl.store(output_ptr + out_offset_recv, recv_data, mask=mask, cache_modifier=".wt")
-
-            # Don't reset this flag yet — data in write_buf is needed for
-            # next step's send (as read_buf). Will be reset at next step.
-
-        # Final cleanup: reset the last step's buffer flag
-        tl.debug_barrier()
-        if (world_size - 2) % 2 == 0:
-            tl.atomic_xchg(flag_ptr_0, 0, sem="release", scope="sys")
-        else:
-            tl.atomic_xchg(flag_ptr_1, 0, sem="release", scope="sys")
+            tl.debug_barrier()
+            # Reset local flag to 0 (ring_buffer tile is free for predecessor)
+            tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
 
 
 def all_gather_preamble(
@@ -710,29 +637,22 @@ def all_gather_preamble(
     workspace.prepared = False
 
     if config.all_gather_variant == "ring":
-        # Double-buffered ring buffers for per-chunk handshake.
-        # Even steps use buf_0, odd steps use buf_1 — prevents race between
-        # reading for forwarding and predecessor overwriting.
-        for attr in ("ring_buffer_0", "ring_buffer_1"):
-            buf = getattr(workspace, attr)
-            if buf is None or buf.shape != (M, N) or buf.dtype != dtype:
-                setattr(workspace, attr, ctx.zeros((M, N), dtype=dtype))
-            else:
-                buf.zero_()
+        # Single ring buffer (per-tile flag handshake keeps data in registers)
+        if (
+            workspace.ring_buffer is None
+            or workspace.ring_buffer.shape != (M, N)
+            or workspace.ring_buffer.dtype != dtype
+        ):
+            workspace.ring_buffer = ctx.zeros((M, N), dtype=dtype)
+        else:
+            workspace.ring_buffer.zero_()
 
-        # Chunk-based flags: split shard into num_chunks row-bands.
-        # Each chunk gets TWO flags (one per buffer for double-buffering).
-        num_chunks = min(config.comm_sms, max(1, M // config.block_size_m))
-        chunk_rows = (M + num_chunks - 1) // num_chunks
-        # Round up to block boundary for clean tiling
-        chunk_rows = ((chunk_rows + config.block_size_m - 1) // config.block_size_m) * config.block_size_m
-        # Recompute num_chunks based on rounded chunk_rows
-        num_chunks = (M + chunk_rows - 1) // chunk_rows
-
-        workspace.num_chunks = num_chunks
-        workspace.chunk_rows = chunk_rows
-
-        total_flags = num_chunks * 2
+        # One flag per tile for producer/consumer handshake
+        num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
+        num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
+        total_tiles = num_pid_m * num_pid_n
+        workspace.flags_per_tile = 1
+        total_flags = total_tiles * workspace.flags_per_tile
         if workspace.flags is None or workspace.flags.numel() != total_flags:
             workspace.flags = ctx.zeros((total_flags,), dtype=torch.int32)
         else:
@@ -882,20 +802,18 @@ def all_gather(
         if config.all_gather_variant == "ring":
             # Ring variant: use workspace if provided, otherwise allocate
             if workspace is not None and workspace.prepared:
-                ring_buffer_0 = workspace.ring_buffer_0
-                ring_buffer_1 = workspace.ring_buffer_1
+                ring_buffer = workspace.ring_buffer
                 flags = workspace.flags
-                num_chunks = workspace.num_chunks
-                chunk_rows = workspace.chunk_rows
+                flags_per_tile = workspace.flags_per_tile
                 workspace.prepared = False
             else:
-                ring_buffer_0 = ctx.zeros((M, N), dtype=input_tensor.dtype)
-                ring_buffer_1 = ctx.zeros((M, N), dtype=input_tensor.dtype)
-                num_chunks = min(config.comm_sms, max(1, M // config.block_size_m))
-                chunk_rows = (M + num_chunks - 1) // num_chunks
-                chunk_rows = ((chunk_rows + config.block_size_m - 1) // config.block_size_m) * config.block_size_m
-                num_chunks = (M + chunk_rows - 1) // chunk_rows
-                flags = ctx.zeros((num_chunks * 2,), dtype=torch.int32)
+                ring_buffer = ctx.zeros((M, N), dtype=input_tensor.dtype)
+                num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
+                num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
+                total_tiles = num_pid_m * num_pid_n
+                flags_per_tile = 1
+                total_flags = total_tiles * flags_per_tile
+                flags = ctx.zeros((total_flags,), dtype=torch.int32)
                 ctx.barrier()
 
             # Calculate next rank in the ring
@@ -911,8 +829,7 @@ def all_gather(
             persistent_all_gather_ring[(config.comm_sms,)](
                 input_tensor,
                 output_tensor,
-                ring_buffer_0,
-                ring_buffer_1,
+                ring_buffer,
                 flags,
                 M,
                 N,
@@ -933,8 +850,7 @@ def all_gather(
                 config.comm_sms,
                 config.num_xcds,
                 config.chunk_size,
-                num_chunks,
-                chunk_rows,
+                flags_per_tile,
                 num_stages=config.num_stages,
                 num_warps=config.num_warps,
                 waves_per_eu=config.waves_per_eu,
