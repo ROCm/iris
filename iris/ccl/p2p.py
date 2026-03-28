@@ -7,6 +7,13 @@ Point-to-point send/recv for Iris.
 Provides torch.distributed-compatible P2P operations using iris.store()
 for data movement and epoch-based atomic flags for per-pair synchronization.
 
+Flow control uses two flag arrays per rank:
+  - send_flags[i]: incremented by rank i on receiver after data store (data ready)
+  - recv_flags[i]: incremented by rank i on sender after copy (buffer free)
+
+The sender waits for recv_flags >= send_epoch before overwriting the slot,
+preventing data corruption when the sender is faster than the receiver.
+
 Usage:
     >>> ctx = iris.iris()
     >>> p2p = ctx.ccl.init_p2p(max_numel=2**20)
@@ -74,14 +81,16 @@ class P2PState:
     """
     Pre-allocated P2P buffers and flags.  Created collectively by all ranks.
 
-    Uses double-buffering so the sender can write the next message while the
-    receiver is still copying the previous one.
+    Flow control ensures the sender never overwrites a slot the receiver
+    hasn't finished reading.  Two flag arrays provide this:
+
+        send_flags[i] on receiver: incremented by sender i after data store
+        recv_flags[i] on sender:   incremented by receiver i after copy
 
     Layout on each rank's symmetric heap:
-        recv_buf : (2 * world_size * max_numel,) dtype
-                   Two slots per peer, selected by epoch % 2.
-                   slot(peer, epoch) = (peer * 2 + epoch % 2) * max_numel
-        flags    : (world_size,) int32 — flags[i] = epoch from rank i
+        recv_buf   : (world_size * max_numel,) dtype — slot[i] = data from rank i
+        send_flags : (world_size,) int32 — how many messages rank i has sent
+        recv_flags : (world_size,) int32 — how many messages rank i has consumed
     """
 
     def __init__(self, ctx, max_numel: int = 2**20, dtype=None, config: Optional[P2PConfig] = None):
@@ -94,9 +103,9 @@ class P2PState:
         self._world_size = ctx.get_num_ranks()
 
         # Collective allocations — all ranks must execute in the same order.
-        # Double-buffered: 2 slots per peer to avoid overwrite races.
-        self.recv_buf = ctx.zeros((2 * self._world_size * max_numel,), dtype=dtype)
-        self.flags = ctx.zeros((self._world_size,), dtype=torch.int32)
+        self.recv_buf = ctx.zeros((self._world_size * max_numel,), dtype=dtype)
+        self.send_flags = ctx.zeros((self._world_size,), dtype=torch.int32)
+        self.recv_flags = ctx.zeros((self._world_size,), dtype=torch.int32)
 
         # Host-side epoch tracking (per peer).
         self._send_epoch = [0] * self._world_size
@@ -113,7 +122,7 @@ def _p2p_store_kernel(
     src_ptr,
     recv_buf_ptr,
     numel,
-    slot_offset,  # = sender_group_rank * max_numel
+    slot_offset,
     heap_bases: tl.tensor,
     iris_rank: tl.constexpr,
     dst_rank: tl.constexpr,
@@ -141,7 +150,7 @@ def _p2p_store_kernel(
 @triton.jit
 def _p2p_signal_kernel(
     flags_ptr,
-    sender_slot,  # index into flags on receiver
+    sender_slot,
     heap_bases: tl.tensor,
     iris_rank: tl.constexpr,
     dst_rank: tl.constexpr,
@@ -203,7 +212,11 @@ def init_p2p(ctx, max_numel: int = 2**20, dtype=None, config: Optional[P2PConfig
 
 
 def isend(ctx, tensor: torch.Tensor, dst: int, p2p_state: P2PState, group=None, tag: int = 0) -> P2PWork:
-    """Non-blocking send.  Enqueues store + signal kernels, returns Work."""
+    """Non-blocking send.  Enqueues store + signal kernels, returns Work.
+
+    Flow control: if this is not the first send to dst, wait until the
+    receiver has finished copying the previous message (recv_flags >= epoch).
+    """
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
     dst_global = rank_start + dst * rank_stride
 
@@ -212,12 +225,20 @@ def isend(ctx, tensor: torch.Tensor, dst: int, p2p_state: P2PState, group=None, 
     if numel > p2p_state._max_numel:
         raise ValueError(f"Tensor has {numel} elements but P2PState max_numel={p2p_state._max_numel}")
 
+    epoch = p2p_state._send_epoch[dst]
+
+    # Flow control: wait for receiver to finish reading the previous message.
+    # recv_flags[dst] on our rank is incremented by the receiver after copy.
+    if epoch > 0:
+        _p2p_wait_kernel[(1,)](
+            p2p_state.recv_flags,
+            dst,
+            epoch,
+        )
+
     heap_bases = ctx.get_heap_bases()
     cfg = p2p_state._config
-    # Double-buffered: alternate between two sub-slots per peer.
-    epoch = p2p_state._send_epoch[dst]
-    buf_idx = epoch % 2
-    slot_offset = (rank_in_group * 2 + buf_idx) * p2p_state._max_numel
+    slot_offset = rank_in_group * p2p_state._max_numel
     grid = (triton.cdiv(numel, cfg.block_size),)
 
     _p2p_store_kernel[grid](
@@ -235,7 +256,7 @@ def isend(ctx, tensor: torch.Tensor, dst: int, p2p_state: P2PState, group=None, 
     )
 
     _p2p_signal_kernel[(1,)](
-        p2p_state.flags,
+        p2p_state.send_flags,
         rank_in_group,
         heap_bases,
         iris_rank=rank_global,
@@ -247,31 +268,34 @@ def isend(ctx, tensor: torch.Tensor, dst: int, p2p_state: P2PState, group=None, 
 
 
 def irecv(ctx, tensor: torch.Tensor, src: int, p2p_state: P2PState, group=None, tag: int = 0) -> P2PWork:
-    """Non-blocking recv.  Enqueues wait + copy kernels, returns Work."""
+    """Non-blocking recv.  Enqueues wait + copy + ack kernels, returns Work.
+
+    After copying data, signals the sender that the buffer is free via
+    recv_flags increment on the sender's memory.
+    """
     if src is None:
         raise ValueError("Wildcard recv (src=None) not supported; specify src.")
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
+    src_global = rank_start + src * rank_stride
 
     tensor = tensor.contiguous()
     numel = tensor.numel()
 
     cfg = p2p_state._config
-
-    # Double-buffered: match the sender's slot for this epoch.
-    epoch = p2p_state._recv_epoch[src]
-    buf_idx = epoch % 2
-    slot_offset = (src * 2 + buf_idx) * p2p_state._max_numel
+    slot_offset = src * p2p_state._max_numel
 
     p2p_state._recv_epoch[src] += 1
     target_epoch = p2p_state._recv_epoch[src]
 
+    # Wait for sender to finish writing data.
     _p2p_wait_kernel[(1,)](
-        p2p_state.flags,
+        p2p_state.send_flags,
         src,
         target_epoch,
     )
 
+    # Copy from recv_buf to user tensor.
     grid = (triton.cdiv(numel, cfg.block_size),)
     _p2p_copy_kernel[grid](
         tensor,
@@ -282,6 +306,16 @@ def irecv(ctx, tensor: torch.Tensor, src: int, p2p_state: P2PState, group=None, 
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
         waves_per_eu=cfg.waves_per_eu,
+    )
+
+    # Signal sender that we're done reading — buffer is free for reuse.
+    heap_bases = ctx.get_heap_bases()
+    _p2p_signal_kernel[(1,)](
+        p2p_state.recv_flags,
+        rank_in_group,
+        heap_bases,
+        iris_rank=rank_global,
+        dst_rank=src_global,
     )
 
     return P2PWork()
