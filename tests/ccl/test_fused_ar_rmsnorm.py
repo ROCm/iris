@@ -96,7 +96,7 @@ def test_fused_ar_rmsnorm(dtype, tokens, hidden):
     torch.cuda.synchronize()
 
     # === Compare ===
-    # Tolerances: fused kernel accumulates in fp32 so should be close to reference
+    # Tolerances for norm output: fused kernel accumulates in fp32 so should be close
     if dtype == torch.float16:
         atol = 1e-2
         rtol = 1e-2
@@ -106,6 +106,16 @@ def test_fused_ar_rmsnorm(dtype, tokens, hidden):
     else:
         atol = 1e-4
         rtol = 1e-4
+
+    # Residual tolerances are wider because the allreduce accumulation path differs
+    # between iris (fp32 accumulation in Triton) and RCCL (implementation-defined).
+    # With world_size=8 and bf16, the sum of 8 values can differ by multiple bf16 ULPs.
+    if dtype == torch.float16:
+        res_atol = 5e-2
+    elif dtype == torch.bfloat16:
+        res_atol = 2e-1
+    else:
+        res_atol = 1e-4
 
     # Check norm_out
     max_diff_norm = torch.abs(iris_norm_out - ref_norm_out).max().item()
@@ -124,8 +134,8 @@ def test_fused_ar_rmsnorm(dtype, tokens, hidden):
     # Check residual updated in-place
     max_diff_res = torch.abs(iris_residual - ref_residual).max().item()
     try:
-        assert torch.allclose(iris_residual, ref_residual, atol=atol, rtol=rtol), (
-            f"residual max diff: {max_diff_res}, atol={atol}, rtol={rtol}\n"
+        assert torch.allclose(iris_residual, ref_residual, atol=res_atol, rtol=res_atol), (
+            f"residual max diff: {max_diff_res}, atol={res_atol}\n"
             f"Rank {rank}: Iris residual doesn't match reference after fused op"
         )
     except AssertionError:
