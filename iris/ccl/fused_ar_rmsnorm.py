@@ -256,6 +256,10 @@ def all_reduce_rmsnorm(
     # No need to zero reduced — allreduce unconditionally writes all tiles
     all_reduce(reduced, partial, ctx, group=group, async_op=True, config=ar_config, workspace=ar_workspace)
 
+    # Barrier between phases: ensure all ranks have completed their allreduce
+    # broadcasts before any rank reads from the reduced buffer.
+    ctx.device_barrier(group=group)
+
     # Phase 2: Local fused residual add + RMSNorm
     BLOCK_HIDDEN = _next_power_of_2(hidden)
     BLOCK_TOKENS = 1
@@ -281,6 +285,10 @@ def all_reduce_rmsnorm(
         num_stages=1,
     )
 
+    # Phase 2 is local-only (no cross-rank writes), so no end barrier
+    # is needed for correctness. The inter-phase device_barrier above
+    # ensures allreduce completion. However, if async_op=False, provide
+    # a device_barrier so the caller can rely on completion semantics.
     if not async_op:
         ctx.device_barrier(group=group)
 
