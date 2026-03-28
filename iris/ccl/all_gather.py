@@ -13,6 +13,7 @@ import torch
 import triton
 import triton.language as tl
 import iris
+from iris import DeviceContext, TraceEvent
 from .config import Config
 from .utils import extract_group_info
 
@@ -489,6 +490,8 @@ def persistent_all_gather_ring(
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     FLAGS_PER_TILE: tl.constexpr,
+    context_tensor: tl.tensor = None,
+    TRACING: tl.constexpr = False,
 ):
     """
     Ring-based all-gather kernel using a single-buffer, producer/consumer
@@ -501,7 +504,16 @@ def persistent_all_gather_ring(
 
     The ring_buffer is an M x N scratch space on the symmetric heap used
     for receiving data from the predecessor.
+
+    When TRACING=True, records iris tracing events for remote operations
+    (iris.atomic_cas, iris.store, iris.atomic_xchg). Zero overhead when
+    TRACING=False due to constexpr dead-code elimination.
     """
+    # Initialize DeviceContext for tracing (zero-overhead when TRACING=False)
+    trace_ctx = DeviceContext.initialize(
+        context_tensor, iris_rank, world_size, tracing=TRACING
+    )
+
     pid = tl.program_id(0)
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
@@ -554,6 +566,14 @@ def persistent_all_gather_ring(
             source_rank_idx = (group_rank + world_size - _step) % world_size
 
             # Wait for next rank's flag to be 0 (ready to receive)
+            # Trace: record the poll as an atomic_cas event on the remote flag
+            h_poll = trace_ctx.tracing.record_event_start(
+                event_id=TraceEvent().atomic_cas,
+                target_rank=next_rank,
+                address=remote_flag_ptr,
+                pid_m=pid_m,
+                pid_n=pid_n,
+            )
             while (
                 iris.atomic_cas(
                     remote_flag_ptr,
@@ -568,8 +588,17 @@ def persistent_all_gather_ring(
                 != 0
             ):
                 pass
+            trace_ctx.tracing.record_event_end(h_poll)
 
             # Write shard into next rank's ring_buffer via iris.store
+            h_store = trace_ctx.tracing.record_event_start(
+                event_id=TraceEvent().store,
+                target_rank=next_rank,
+                address=ring_buffer + tile_offset,
+                pid_m=pid_m,
+                pid_n=pid_n,
+                mask=mask,
+            )
             iris.store(
                 ring_buffer + tile_offset,
                 send_data,
@@ -580,8 +609,16 @@ def persistent_all_gather_ring(
                 hint=(1, BLOCK_SIZE_N),
             )
             tl.debug_barrier()
+            trace_ctx.tracing.record_event_end(h_store)
 
             # Signal next rank that data is ready
+            h_signal = trace_ctx.tracing.record_event_start(
+                event_id=TraceEvent().atomic_xchg,
+                target_rank=next_rank,
+                address=remote_flag_ptr,
+                pid_m=pid_m,
+                pid_n=pid_n,
+            )
             iris.atomic_xchg(
                 remote_flag_ptr,
                 1,
@@ -591,6 +628,7 @@ def persistent_all_gather_ring(
                 sem="release",
                 scope="sys",
             )
+            trace_ctx.tracing.record_event_end(h_signal)
 
             # Wait for our predecessor to deliver data into our ring_buffer
             while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
@@ -686,6 +724,7 @@ def all_gather(
     async_op=False,
     config=None,
     workspace=None,
+    tracing=False,
 ):
     """
     Internal all-gather collective operation implementation.
@@ -840,6 +879,9 @@ def all_gather(
                 next_rank_in_group = (rank_in_group + 1) % world_size
                 next_rank = group_ranks[next_rank_in_group]
 
+            # Get context tensor for tracing support
+            context_tensor = ctx.get_device_context()
+
             persistent_all_gather_ring[(config.comm_sms,)](
                 input_tensor,
                 output_tensor,
@@ -865,6 +907,8 @@ def all_gather(
                 config.num_xcds,
                 config.chunk_size,
                 flags_per_tile,
+                context_tensor,
+                tracing,
                 num_stages=config.num_stages,
                 num_warps=config.num_warps,
                 waves_per_eu=config.waves_per_eu,

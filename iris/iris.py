@@ -1159,7 +1159,7 @@ class Iris:
 
             _all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
-        def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None, workspace=None):
+        def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None, workspace=None, tracing=False):
             """
             All-gather collective operation.
 
@@ -1178,6 +1178,8 @@ class Iris:
                         If None, uses default Config values.
                 workspace: Optional AllGatherWorkspace from ``all_gather_preamble``.
                            Avoids per-call heap allocation for ring variant.
+                tracing: Enable iris tracing for remote operations (default: False).
+                         Zero overhead when disabled.
 
             Example:
                 >>> ctx = iris.iris()
@@ -1189,6 +1191,11 @@ class Iris:
                 >>> config = Config(all_gather_variant="ring")
                 >>> ws = ctx.ccl.all_gather_preamble(out, inp, config=config)
                 >>> ctx.ccl.all_gather(out, inp, config=config, workspace=ws)
+
+                >>> # With tracing enabled
+                >>> ctx.tracing.enable(max_events=1_000_000)
+                >>> ctx.ccl.all_gather(out, inp, config=config, tracing=True)
+                >>> ctx.tracing.export("ring_trace.json")
             """
             from iris.ccl.all_gather import all_gather as _all_gather
 
@@ -1200,6 +1207,7 @@ class Iris:
                 async_op=async_op,
                 config=config,
                 workspace=workspace,
+                tracing=tracing,
             )
 
         def all_gather_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
