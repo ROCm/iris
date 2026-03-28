@@ -23,7 +23,6 @@ from typing import Optional
 import triton
 import triton.language as tl
 import torch
-import iris
 from .config import Config
 from .all_reduce import all_reduce, all_reduce_preamble
 from .utils import extract_group_info
