@@ -6,6 +6,7 @@ All-gather collective communication primitive for Iris.
 Gathers tensors from all ranks and concatenates them along the last dimension.
 """
 
+import torch
 import triton
 import triton.language as tl
 import iris
@@ -441,6 +442,171 @@ if GLUON_AVAILABLE:
                     gl.store(remote_ptrs, data, mask=mask)
 
 
+@triton.jit()
+def persistent_all_gather_ring(
+    input_ptr,
+    output_ptr,
+    flags,
+    M,
+    N,
+    stride_in_m,
+    stride_in_n,
+    stride_out_m,
+    stride_out_n,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    next_rank: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    FLAGS_PER_TILE: tl.constexpr,
+):
+    """
+    Ring-based all-gather kernel.
+
+    Instead of each rank writing its shard to all N-1 peers (O(N) writes),
+    each rank forwards data around a ring.  In step k, rank r reads the
+    shard that was deposited into its output buffer by its predecessor and
+    iris.store()s it to the next rank's output buffer.  After N-1 steps
+    every rank has all shards.  Total writes per rank: N-1 (one per step),
+    vs N-1 in all-pairs — the same count, but each step only touches one
+    peer, avoiding memory-controller contention from fan-out writes.
+
+    Sync: one flag per tile.  The producer writes the shard, then sets the
+    flag to the step number.  The consumer spins until the flag reaches the
+    expected step, reads the shard, and resets the flag for the next step.
+    """
+    pid = tl.program_id(0)
+
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+    tl.assume(total_tiles > 0)
+
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+        tl.assume(stride_in_m >= 0)
+        tl.assume(stride_in_n >= 0)
+        tl.assume(stride_out_m >= 0)
+        tl.assume(stride_out_n >= 0)
+
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        input_mask = (rm[:, None] < M) & (rn[None, :] < N)
+        input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+
+        # Step 0: copy local input to output[group_rank * M, :]
+        data = tl.load(input_ptr + input_offset, mask=input_mask, other=0.0)
+        rm_out = rm + group_rank * M
+        output_mask = (rm_out[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
+        combined_mask = input_mask & output_mask
+        out_offset = rm_out[:, None] * stride_out_m + rn[None, :] * stride_out_n
+        tl.store(output_ptr + out_offset, data, mask=combined_mask, cache_modifier=".wt")
+
+        flag_offset = tile_id * FLAGS_PER_TILE
+        remote_flag_ptr = flags + flag_offset
+        local_flag_ptr = flags + flag_offset
+
+        # Steps 1..world_size-1: forward around the ring
+        for step in range(1, world_size):
+            # The shard we're forwarding: written by our predecessor in the
+            # previous step.  At step k, this is the shard from rank
+            # (group_rank - k + 1) % world_size.
+            source_rank_idx = (group_rank - step + 1) % world_size
+
+            # Read shard from local output buffer
+            rm_src = rm + source_rank_idx * M
+            src_mask = (rm_src[:, None] < (source_rank_idx + 1) * M) & (rn[None, :] < N)
+            src_combined = input_mask & src_mask
+            src_offset = rm_src[:, None] * stride_out_m + rn[None, :] * stride_out_n
+
+            # For step 1, data is from the local copy above (no wait needed).
+            # For step > 1, we must wait for our predecessor to finish writing.
+            if step > 1:
+                # Wait for predecessor to signal that it has written step-1's data
+                while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != step - 1:
+                    pass
+
+            send_data = tl.load(output_ptr + src_offset, mask=src_combined, other=0.0)
+
+            if step > 1:
+                # Reset flag after reading
+                tl.debug_barrier()
+                tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+
+            # Destination offset on the next rank: same source_rank_idx slot
+            # Wait for next rank's flag to be 0 (ready to receive)
+            while (
+                iris.atomic_cas(
+                    remote_flag_ptr,
+                    0,
+                    0,
+                    iris_rank,
+                    next_rank,
+                    heap_bases,
+                    sem="acquire",
+                    scope="sys",
+                )
+                != 0
+            ):
+                pass
+
+            # Write shard to next rank's output buffer
+            iris.store(
+                output_ptr + src_offset,
+                send_data,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                mask=src_combined,
+                hint=(1, BLOCK_SIZE_N),
+            )
+
+            # Signal next rank: step number as the flag value
+            tl.debug_barrier()
+            iris.atomic_xchg(
+                remote_flag_ptr,
+                step,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                sem="release",
+                scope="sys",
+            )
+
+        # After final step, wait for predecessor's last write
+        if world_size > 2:
+            while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != world_size - 1:
+                pass
+            tl.debug_barrier()
+            tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+        elif world_size == 2:
+            while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
+                pass
+            tl.debug_barrier()
+            tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+
+
 def all_gather(
     output_tensor,
     input_tensor,
@@ -500,7 +666,7 @@ def all_gather(
             raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
 
         # Gluon only supports the persistent variant
-        if config.all_gather_variant != "persistent":
+        if config.all_gather_variant not in ("persistent",):
             raise ValueError(
                 f"Gluon all_gather only supports all_gather_variant='persistent', got '{config.all_gather_variant}'."
             )
@@ -575,39 +741,88 @@ def all_gather(
 
         heap_bases = shmem.get_heap_bases()
 
-        # Dispatch to the appropriate kernel based on variant
-        if config.all_gather_variant == "persistent":
-            kernel_fn = persistent_all_gather
-        elif config.all_gather_variant == "partitioned":
-            kernel_fn = persistent_all_gather_partitioned
-        else:
-            raise ValueError(f"Unknown all_gather_variant: {config.all_gather_variant}")
+        if config.all_gather_variant == "ring":
+            # Ring variant: allocate flags for producer/consumer sync
+            num_pid_m = triton.cdiv(M, config.block_size_m)
+            num_pid_n = triton.cdiv(N, config.block_size_n)
+            total_tiles = num_pid_m * num_pid_n
+            flags_per_tile = 1
+            total_flags = total_tiles * flags_per_tile
+            flags = shmem.zeros((total_flags,), dtype=torch.int32)
 
-        kernel_fn[(config.comm_sms,)](
-            input_tensor,
-            output_tensor,
-            M,
-            N,
-            stride_in_m,
-            stride_in_n,
-            stride_out_m,
-            stride_out_n,
-            heap_bases,
-            rank_in_group,
-            rank_global,
-            world_size,
-            rank_start,
-            rank_stride,
-            config.block_size_m,
-            config.block_size_n,
-            config.swizzle_size,
-            config.comm_sms,
-            config.num_xcds,
-            config.chunk_size,
-            num_stages=config.num_stages,
-            num_warps=config.num_warps,
-            waves_per_eu=config.waves_per_eu,
-        )
+            # Calculate next rank in the ring
+            if group is None:
+                next_rank = (rank_in_group + 1) % world_size
+            else:
+                import torch.distributed as dist
+                group_ranks = dist.get_process_group_ranks(group)
+                next_rank_in_group = (rank_in_group + 1) % world_size
+                next_rank = group_ranks[next_rank_in_group]
+
+            shmem.barrier()
+
+            persistent_all_gather_ring[(config.comm_sms,)](
+                input_tensor,
+                output_tensor,
+                flags,
+                M,
+                N,
+                stride_in_m,
+                stride_in_n,
+                stride_out_m,
+                stride_out_n,
+                heap_bases,
+                rank_in_group,
+                rank_global,
+                world_size,
+                rank_start,
+                rank_stride,
+                next_rank,
+                config.block_size_m,
+                config.block_size_n,
+                config.swizzle_size,
+                config.comm_sms,
+                config.num_xcds,
+                config.chunk_size,
+                flags_per_tile,
+                num_stages=config.num_stages,
+                num_warps=config.num_warps,
+                waves_per_eu=config.waves_per_eu,
+            )
+        else:
+            # Dispatch to the appropriate kernel based on variant
+            if config.all_gather_variant == "persistent":
+                kernel_fn = persistent_all_gather
+            elif config.all_gather_variant == "partitioned":
+                kernel_fn = persistent_all_gather_partitioned
+            else:
+                raise ValueError(f"Unknown all_gather_variant: {config.all_gather_variant}")
+
+            kernel_fn[(config.comm_sms,)](
+                input_tensor,
+                output_tensor,
+                M,
+                N,
+                stride_in_m,
+                stride_in_n,
+                stride_out_m,
+                stride_out_n,
+                heap_bases,
+                rank_in_group,
+                rank_global,
+                world_size,
+                rank_start,
+                rank_stride,
+                config.block_size_m,
+                config.block_size_n,
+                config.swizzle_size,
+                config.comm_sms,
+                config.num_xcds,
+                config.chunk_size,
+                num_stages=config.num_stages,
+                num_warps=config.num_warps,
+                waves_per_eu=config.waves_per_eu,
+            )
 
     if not async_op:
         shmem.barrier()

@@ -102,6 +102,70 @@ def test_all_gather(dtype, M, N, block_size_m, block_size_n):
     "M, N, block_size_m, block_size_n",
     [
         (128, 64, 32, 64),  # Small
+        (128, 128, 32, 32),  # Multi-block per rank
+        (1024, 256, 32, 64),  # Medium
+        (8192, 8192, 32, 64),  # Large
+    ],
+)
+def test_all_gather_ring(dtype, M, N, block_size_m, block_size_n):
+    """Test all-gather with ring variant by comparing against PyTorch's implementation."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33  # 8GB
+    shmem = iris.iris(heap_size)
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+
+    # Reference: PyTorch all_gather_into_tensor
+    pytorch_input_tensor = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
+    pytorch_input_tensor.fill_(float(rank + 1))
+
+    pytorch_output_tensor = torch.zeros(world_size * M, N, dtype=dtype, device=f"cuda:{rank}")
+
+    shmem.barrier()
+    dist.all_gather_into_tensor(pytorch_output_tensor, pytorch_input_tensor)
+    torch.cuda.synchronize()
+
+    # Iris all_gather with ring variant
+    iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
+    iris_input_tensor.copy_(pytorch_input_tensor)
+
+    iris_output_tensor = shmem.zeros((world_size * M, N), dtype=dtype)
+
+    shmem.barrier()
+    config = Config(block_size_m=block_size_m, block_size_n=block_size_n, all_gather_variant="ring")
+    shmem.ccl.all_gather(iris_output_tensor, iris_input_tensor, config=config)
+    torch.cuda.synchronize()
+
+    atol = 1e-3 if dtype == torch.float16 else 1e-5
+    max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
+
+    try:
+        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), (
+            f"Max difference: {max_diff}, expected < {atol}\n"
+            f"Rank {rank}: Iris output (ring) doesn't match PyTorch's all_gather_into_tensor"
+        )
+    finally:
+        shmem.barrier()
+        del shmem
+        import gc
+
+        gc.collect()
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.float16,
+        torch.float32,
+        torch.bfloat16,
+    ],
+)
+@pytest.mark.parametrize(
+    "M, N, block_size_m, block_size_n",
+    [
+        (128, 64, 32, 64),  # Small
         (128, 128, 32, 32),  # BLOCK_N < N/world_size (partial-width, multi-block per rank)
         (256, 128, 32, 16),  # Minimum BLOCK_N=16 (16-bit vectorization path)
         (1024, 256, 32, 64),  # Medium
