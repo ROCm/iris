@@ -25,7 +25,7 @@ from iris.ccl import Config
     [
         (torch.float16, 1e-1, 1e-1),
         (torch.bfloat16, 1e-1, 1e-1),
-        (torch.float32, 1e-3, 1e-3),
+        (torch.float32, 5e-2, 5e-2),  # TF32 truncation in tl.dot
     ],
 )
 @pytest.mark.parametrize(
