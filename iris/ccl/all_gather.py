@@ -13,7 +13,6 @@ import torch
 import triton
 import triton.language as tl
 import iris
-from iris import DeviceContext, TraceEvent
 from .config import Config
 from .utils import extract_group_info
 
