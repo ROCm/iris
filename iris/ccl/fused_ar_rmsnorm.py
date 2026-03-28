@@ -253,7 +253,7 @@ def all_reduce_rmsnorm(
     ar_workspace = workspace.ar_workspace
 
     # Phase 1: AllReduce (two-shot)
-    reduced.zero_()
+    # No need to zero reduced — allreduce unconditionally writes all tiles
     all_reduce(reduced, partial, ctx, group=group, async_op=True, config=ar_config, workspace=ar_workspace)
 
     # Phase 2: Local fused residual add + RMSNorm
@@ -282,6 +282,6 @@ def all_reduce_rmsnorm(
     )
 
     if not async_op:
-        ctx.barrier()
+        ctx.device_barrier(group=group)
 
     return norm_out
