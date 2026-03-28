@@ -43,7 +43,7 @@ class Config:
         all_reduce_ring_slice_n: Column slice size for ring reduce-scatter/all-gather
                                  (default: auto-set to block_size_n // world_size at runtime)
         reduce_scatter_variant: Variant for reduce-scatter operation (default: "two_shot")
-                                Only "two_shot" is supported
+                                Options: "two_shot", "ring_chunked"
         num_stages: Number of pipeline stages for the kernel (default: 1)
         num_warps: Number of warps per workgroup (default: 4). For gluon kernels,
                    this also sets WARPS_PER_CTA in the BlockedLayout. The product
@@ -141,8 +141,10 @@ class Config:
             raise ValueError(f"all_reduce_ring_slice_n must be a power of two, got {self.all_reduce_ring_slice_n}")
 
         # Validate reduce_scatter_variant
-        if self.reduce_scatter_variant != "two_shot":
-            raise ValueError(f"reduce_scatter_variant must be 'two_shot', got '{self.reduce_scatter_variant}'")
+        if self.reduce_scatter_variant not in ["two_shot", "ring_chunked"]:
+            raise ValueError(
+                f"reduce_scatter_variant must be one of: 'two_shot', 'ring_chunked', got '{self.reduce_scatter_variant}'"
+            )
 
         if self.threads_per_warp not in (32, 64):
             raise ValueError(f"threads_per_warp must be 32 (NVIDIA) or 64 (AMD), got {self.threads_per_warp}")

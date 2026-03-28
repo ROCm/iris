@@ -1275,7 +1275,7 @@ class Iris:
                 workspace=workspace,
             )
 
-        def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
+        def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None, workspace=None):
             """
             Reduce-scatter collective operation.
 
@@ -1294,15 +1294,15 @@ class Iris:
                           Default: False.
                 config: Config instance with kernel parameters (default: None).
                         If None, uses default Config values.
-                        Only supports reduce_scatter_variant="two_shot".
+                        Supports reduce_scatter_variant="two_shot" or "ring_chunked".
 
             Example:
                 >>> ctx = iris.iris()
                 >>> ctx.ccl.reduce_scatter(output_tensor, input_tensor)
 
-                >>> # Custom configuration
+                >>> # Ring-chunked variant
                 >>> from iris.ccl import Config
-                >>> config = Config(reduce_scatter_variant="two_shot", all_reduce_distribution=1)
+                >>> config = Config(reduce_scatter_variant="ring_chunked")
                 >>> ctx.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
             """
             from iris.ccl.reduce_scatter import reduce_scatter as _reduce_scatter
@@ -1313,7 +1313,7 @@ class Iris:
                 op = ReduceOp.SUM
 
             _reduce_scatter(
-                output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
+                output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config, workspace=workspace
             )
 
 
