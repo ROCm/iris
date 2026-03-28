@@ -28,7 +28,8 @@ class AllGatherWorkspace:
 
     shape: Tuple[int, int] = ()
     dtype: Optional[torch.dtype] = None
-    ring_buffer: Optional[torch.Tensor] = None
+    ring_buffer_0: Optional[torch.Tensor] = None
+    ring_buffer_1: Optional[torch.Tensor] = None
     flags: Optional[torch.Tensor] = None
     num_chunks: int = 0
     chunk_rows: int = 0
@@ -468,7 +469,8 @@ if GLUON_AVAILABLE:
 def persistent_all_gather_ring(
     input_ptr,
     output_ptr,
-    ring_buffer,
+    ring_buffer_0,
+    ring_buffer_1,
     flags,
     M,
     N,
@@ -493,30 +495,21 @@ def persistent_all_gather_ring(
     CHUNK_ROWS: tl.constexpr,
 ):
     """
-    Ring-based all-gather with chunked pipelining and per-chunk handshake.
+    Ring-based all-gather with chunked pipelining and double-buffered handshake.
 
     The shard (M rows x N cols) is split into NUM_CHUNKS row-bands (chunks).
     Each chunk is CHUNK_ROWS rows x N cols. One flag per chunk controls the
     producer/consumer handshake, amortizing synchronization cost across all
     tiles within a chunk.
 
-    CUs are assigned to chunks round-robin: chunk_id = pid % NUM_CHUNKS.
-    Each CU processes all tiles in its assigned chunk across W-1 ring steps.
-    Different CUs work on different chunks at different ring steps, creating
-    a pipeline that keeps XGMI links continuously busy.
-
-    Pipeline visualization (4 ranks, 4 chunks):
-      Time →
-      CU0: [chunk0 step0] [chunk0 step1] [chunk0 step2]
-      CU1: [chunk1 step0] [chunk1 step1] [chunk1 step2]
-      CU2: [chunk2 step0] [chunk2 step1] [chunk2 step2]
-      CU3: [chunk3 step0] [chunk3 step1] [chunk3 step2]
-
-    All CUs send/receive concurrently, saturating the ring bandwidth.
+    Double buffering solves the ring forwarding problem: at step k, the sender
+    reads from ring_buffer[k%2] while the predecessor writes to ring_buffer[(k+1)%2].
+    This eliminates the race between reading for forwarding and the predecessor
+    overwriting the buffer.
 
     Flags layout: one int32 per chunk on symmetric heap.
-      flag=0 means ring_buffer chunk region is free (producer can write)
-      flag=1 means ring_buffer chunk region has data (consumer can read)
+      flag=0 means ring_buffer chunk is free (producer can write)
+      flag=1 means ring_buffer chunk has data (consumer can read)
     """
     pid = tl.program_id(0)
 
@@ -528,9 +521,9 @@ def persistent_all_gather_ring(
     for chunk_id in range(pid, NUM_CHUNKS, COMM_SMS):
         chunk_row_start = chunk_id * CHUNK_ROWS
 
-        # Flag pointers for this chunk
-        remote_flag_ptr = flags + chunk_id
-        local_flag_ptr = flags + chunk_id
+        # Flag pointers for this chunk (two flags: even/odd for double-buffer)
+        flag_ptr_0 = flags + chunk_id * 2
+        flag_ptr_1 = flags + chunk_id * 2 + 1
 
         # Step 0: Copy local shard chunk to output
         for tile_in_chunk in range(tiles_per_chunk):
@@ -548,27 +541,35 @@ def persistent_all_gather_ring(
             in_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
             data = tl.load(input_ptr + in_offset, mask=mask, other=0)
 
-            # Write to output[group_rank * M + row, col]
             rm_out = rm + group_rank * M
             out_offset = rm_out[:, None] * stride_out_m + rn[None, :] * stride_out_n
             tl.store(output_ptr + out_offset, data, mask=mask, cache_modifier=".wt")
 
-        # Ring steps: forward data around the ring.
-        #
-        # Critical invariant: we must NOT reset the local flag (allowing the
-        # predecessor to overwrite ring_buffer) until AFTER we've read ring_buffer
-        # for forwarding in the send phase. The sequence per step is:
-        #
-        #   1. SEND: read data (input at step 0, ring_buffer at step>0),
-        #      write to next rank's ring_buffer, signal next rank
-        #   2. Release ring_buffer from previous step (reset flag, step>0 only)
-        #   3. RECV: wait for predecessor's data, read ring_buffer, write to output
-        #   4. Do NOT reset flag yet — ring_buffer data needed for next step's send
-        #
-        # After the last step, reset the flag for cleanup.
+        # Ring steps with double-buffered ring_buffer.
+        # Even steps (0, 2, ...) write to ring_buffer_0, read from ring_buffer_1
+        # Odd steps (1, 3, ...) write to ring_buffer_1, read from ring_buffer_0
+        # This way the sender reads from one buffer while predecessor writes to the other.
         for _step in range(0, world_size - 1):
+            # Select buffers: write to write_buf on next rank, read from read_buf locally
+            # At step k, predecessor writes into our buf[k%2], so we read from buf[(k-1)%2]
+            # and forward into next rank's buf[k%2].
+            # write_flag: the flag on next rank for the buffer we're writing to
+            # read_flag: the flag on our local for the buffer we're reading from
+            if _step % 2 == 0:
+                write_buf = ring_buffer_0
+                read_buf = ring_buffer_1  # only used at step > 0
+                remote_flag_ptr = flag_ptr_0
+                local_flag_ptr = flag_ptr_0  # predecessor writes to buf_0 at even steps
+                local_reset_ptr = flag_ptr_1  # reset the previous step's flag (odd buf)
+            else:
+                write_buf = ring_buffer_1
+                read_buf = ring_buffer_0
+                remote_flag_ptr = flag_ptr_1
+                local_flag_ptr = flag_ptr_1
+                local_reset_ptr = flag_ptr_0
+
             # === SEND PHASE ===
-            # Wait for next rank's chunk flag to be 0 (ring_buffer is free)
+            # Wait for next rank's buffer to be free
             while (
                 iris.atomic_cas(
                     remote_flag_ptr,
@@ -584,10 +585,7 @@ def persistent_all_gather_ring(
             ):
                 pass
 
-            # Write all tiles in this chunk to next rank's ring_buffer.
-            # Step 0: read from input (own shard)
-            # Step k>0: read from local ring_buffer (received from predecessor,
-            #   still valid because we haven't reset the local flag yet)
+            # Write all tiles in this chunk to next rank's write_buf
             for tile_in_chunk in range(tiles_per_chunk):
                 tile_m = tile_in_chunk // num_pid_n
                 tile_n = tile_in_chunk % num_pid_n
@@ -605,10 +603,11 @@ def persistent_all_gather_ring(
                 if _step == 0:
                     send_data = tl.load(input_ptr + buf_offset, mask=mask, other=0)
                 else:
-                    send_data = tl.load(ring_buffer + buf_offset, mask=mask, other=0)
+                    # Read from the OTHER buffer (previous step's receive)
+                    send_data = tl.load(read_buf + buf_offset, mask=mask, other=0)
 
                 iris.store(
-                    ring_buffer + buf_offset,
+                    write_buf + buf_offset,
                     send_data,
                     iris_rank,
                     next_rank,
@@ -629,19 +628,17 @@ def persistent_all_gather_ring(
                 scope="sys",
             )
 
-            # === RELEASE PREVIOUS STEP'S RING BUFFER ===
-            # We've finished reading ring_buffer for forwarding. Now safe to
-            # let the predecessor overwrite it for the next step.
+            # Release the previous step's buffer (safe: we've forwarded its data)
             if _step > 0:
                 tl.debug_barrier()
-                tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+                tl.atomic_xchg(local_reset_ptr, 0, sem="release", scope="sys")
 
             # === RECEIVE PHASE ===
-            # Wait for local chunk flag to be 1 (predecessor wrote data)
+            # Wait for local buffer flag (predecessor wrote data to our write_buf)
             while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
                 pass
 
-            # Read received data from local ring_buffer and copy to output
+            # Read received data from local write_buf and copy to output
             recv_rank_idx = (group_rank + world_size - _step - 1) % world_size
 
             for tile_in_chunk in range(tiles_per_chunk):
@@ -658,18 +655,22 @@ def persistent_all_gather_ring(
                 mask = (rm[:, None] < M) & (rn[None, :] < N)
                 buf_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
 
-                recv_data = tl.load(ring_buffer + buf_offset, mask=mask, other=0)
+                # Read from write_buf (where predecessor put the data for this step)
+                recv_data = tl.load(write_buf + buf_offset, mask=mask, other=0)
 
-                # Write to output at the correct rank slot
                 rm_recv = rm + recv_rank_idx * M
                 out_offset_recv = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
                 tl.store(output_ptr + out_offset_recv, recv_data, mask=mask, cache_modifier=".wt")
 
-            # Do NOT reset flag here — ring_buffer data is needed for next step's send.
+            # Don't reset this flag yet — data in write_buf is needed for
+            # next step's send (as read_buf). Will be reset at next step.
 
-        # Final cleanup: release ring_buffer from last step
+        # Final cleanup: reset the last step's buffer flag
         tl.debug_barrier()
-        tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+        if (world_size - 2) % 2 == 0:
+            tl.atomic_xchg(flag_ptr_0, 0, sem="release", scope="sys")
+        else:
+            tl.atomic_xchg(flag_ptr_1, 0, sem="release", scope="sys")
 
 
 def all_gather_preamble(
@@ -709,20 +710,18 @@ def all_gather_preamble(
     workspace.prepared = False
 
     if config.all_gather_variant == "ring":
-        # Single ring buffer for per-chunk handshake
-        if (
-            workspace.ring_buffer is None
-            or workspace.ring_buffer.shape != (M, N)
-            or workspace.ring_buffer.dtype != dtype
-        ):
-            workspace.ring_buffer = ctx.zeros((M, N), dtype=dtype)
-        else:
-            workspace.ring_buffer.zero_()
+        # Double-buffered ring buffers for per-chunk handshake.
+        # Even steps use buf_0, odd steps use buf_1 — prevents race between
+        # reading for forwarding and predecessor overwriting.
+        for attr in ("ring_buffer_0", "ring_buffer_1"):
+            buf = getattr(workspace, attr)
+            if buf is None or buf.shape != (M, N) or buf.dtype != dtype:
+                setattr(workspace, attr, ctx.zeros((M, N), dtype=dtype))
+            else:
+                buf.zero_()
 
         # Chunk-based flags: split shard into num_chunks row-bands.
-        # Each chunk gets one flag. More chunks = deeper pipeline but more
-        # flag overhead. Default: use comm_sms chunks (one per CU) clamped
-        # to a reasonable range based on problem size.
+        # Each chunk gets TWO flags (one per buffer for double-buffering).
         num_chunks = min(config.comm_sms, max(1, M // config.block_size_m))
         chunk_rows = (M + num_chunks - 1) // num_chunks
         # Round up to block boundary for clean tiling
@@ -733,8 +732,9 @@ def all_gather_preamble(
         workspace.num_chunks = num_chunks
         workspace.chunk_rows = chunk_rows
 
-        if workspace.flags is None or workspace.flags.numel() != num_chunks:
-            workspace.flags = ctx.zeros((num_chunks,), dtype=torch.int32)
+        total_flags = num_chunks * 2
+        if workspace.flags is None or workspace.flags.numel() != total_flags:
+            workspace.flags = ctx.zeros((total_flags,), dtype=torch.int32)
         else:
             workspace.flags.zero_()
 
@@ -882,18 +882,20 @@ def all_gather(
         if config.all_gather_variant == "ring":
             # Ring variant: use workspace if provided, otherwise allocate
             if workspace is not None and workspace.prepared:
-                ring_buffer = workspace.ring_buffer
+                ring_buffer_0 = workspace.ring_buffer_0
+                ring_buffer_1 = workspace.ring_buffer_1
                 flags = workspace.flags
                 num_chunks = workspace.num_chunks
                 chunk_rows = workspace.chunk_rows
                 workspace.prepared = False
             else:
-                ring_buffer = ctx.zeros((M, N), dtype=input_tensor.dtype)
+                ring_buffer_0 = ctx.zeros((M, N), dtype=input_tensor.dtype)
+                ring_buffer_1 = ctx.zeros((M, N), dtype=input_tensor.dtype)
                 num_chunks = min(config.comm_sms, max(1, M // config.block_size_m))
                 chunk_rows = (M + num_chunks - 1) // num_chunks
                 chunk_rows = ((chunk_rows + config.block_size_m - 1) // config.block_size_m) * config.block_size_m
                 num_chunks = (M + chunk_rows - 1) // chunk_rows
-                flags = ctx.zeros((num_chunks,), dtype=torch.int32)
+                flags = ctx.zeros((num_chunks * 2,), dtype=torch.int32)
                 ctx.barrier()
 
             # Calculate next rank in the ring
@@ -909,7 +911,8 @@ def all_gather(
             persistent_all_gather_ring[(config.comm_sms,)](
                 input_tensor,
                 output_tensor,
-                ring_buffer,
+                ring_buffer_0,
+                ring_buffer_1,
                 flags,
                 M,
                 N,
