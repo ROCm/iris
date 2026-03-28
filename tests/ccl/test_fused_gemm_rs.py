@@ -245,16 +245,16 @@ def test_fused_gemm_rs_deterministic():
     torch.cuda.synchronize()
 
     if rank == 0:
-        print(f"\n  ref_output[0,:4] = {ref_output[0,:4]}")
-        print(f"  iris_output[0,:4] = {iris_output[0,:4]}")
+        print(f"\n  ref_output[0,:4] = {ref_output[0, :4]}")
+        print(f"  iris_output[0,:4] = {iris_output[0, :4]}")
         print(f"  expected: all {float(world_size)}")
 
     atol = 1e-2
     try:
         assert torch.allclose(iris_output, ref_output, atol=atol), (
             f"Rank {rank}: max diff = {torch.abs(iris_output - ref_output).max().item()}\n"
-            f"iris_output[0,:4] = {iris_output[0,:4]}\n"
-            f"ref_output[0,:4]  = {ref_output[0,:4]}"
+            f"iris_output[0,:4] = {iris_output[0, :4]}\n"
+            f"ref_output[0,:4]  = {ref_output[0, :4]}"
         )
     finally:
         shmem.barrier()
