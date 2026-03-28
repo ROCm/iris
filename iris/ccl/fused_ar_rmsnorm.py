@@ -260,11 +260,11 @@ def all_reduce_rmsnorm(
     # Allocate output on symmetric heap
     norm_out = ctx.zeros((tokens, hidden), dtype=partial.dtype)
 
-    # Tile size for hidden dimension — balance between register pressure and tile count
-    BLOCK_H = min(_next_power_of_2(hidden), config.block_size_n if hasattr(config, "block_size_n") else 256)
-    # Ensure BLOCK_H is reasonable (not too small, not too large)
-    BLOCK_H = max(BLOCK_H, 64)
-    BLOCK_H = min(BLOCK_H, 1024)
+    # Tile size for hidden dimension — balance register pressure vs tile count.
+    # Too small (64) = too many tiles = massive loop unrolling = slow compilation.
+    # Too large (4096+) = register spilling = slow execution.
+    # Sweet spot: 512 elements per tile → 8 tiles for hidden=4096.
+    BLOCK_H = min(_next_power_of_2(hidden), 512)
     NUM_TILES = (hidden + BLOCK_H - 1) // BLOCK_H
 
     _fused_ar_rmsnorm_two_shot_kernel[(config.comm_sms,)](
