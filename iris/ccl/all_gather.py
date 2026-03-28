@@ -559,9 +559,14 @@ def persistent_all_gather_ring(
             # Wait for next rank's chunk flag to be 0 (ring_buffer is free)
             while (
                 iris.atomic_cas(
-                    remote_flag_ptr, 0, 0,
-                    iris_rank, next_rank, heap_bases,
-                    sem="acquire", scope="sys",
+                    remote_flag_ptr,
+                    0,
+                    0,
+                    iris_rank,
+                    next_rank,
+                    heap_bases,
+                    sem="acquire",
+                    scope="sys",
                 )
                 != 0
             ):
@@ -603,9 +608,13 @@ def persistent_all_gather_ring(
             tl.debug_barrier()
             # Signal next rank: all tiles in chunk are ready
             iris.atomic_xchg(
-                remote_flag_ptr, 1,
-                iris_rank, next_rank, heap_bases,
-                sem="release", scope="sys",
+                remote_flag_ptr,
+                1,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                sem="release",
+                scope="sys",
             )
 
             # === RECEIVE PHASE ===
@@ -680,7 +689,11 @@ def all_gather_preamble(
 
     if config.all_gather_variant == "ring":
         # Single ring buffer for per-chunk handshake
-        if workspace.ring_buffer is None or workspace.ring_buffer.shape != (M, N) or workspace.ring_buffer.dtype != dtype:
+        if (
+            workspace.ring_buffer is None
+            or workspace.ring_buffer.shape != (M, N)
+            or workspace.ring_buffer.dtype != dtype
+        ):
             workspace.ring_buffer = ctx.zeros((M, N), dtype=dtype)
         else:
             workspace.ring_buffer.zero_()

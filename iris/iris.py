@@ -1159,9 +1159,7 @@ class Iris:
 
             _all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
-        def all_gather(
-            self, output_tensor, input_tensor, group=None, async_op=False, config=None, workspace=None
-        ):
+        def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None, workspace=None):
             """
             All-gather collective operation.
 
