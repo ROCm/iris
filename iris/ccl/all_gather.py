@@ -510,9 +510,7 @@ def persistent_all_gather_ring(
     TRACING=False due to constexpr dead-code elimination.
     """
     # Initialize DeviceContext for tracing (zero-overhead when TRACING=False)
-    trace_ctx = DeviceContext.initialize(
-        context_tensor, iris_rank, world_size, tracing=TRACING
-    )
+    trace_ctx = DeviceContext.initialize(context_tensor, iris_rank, world_size, tracing=TRACING)
 
     pid = tl.program_id(0)
 
