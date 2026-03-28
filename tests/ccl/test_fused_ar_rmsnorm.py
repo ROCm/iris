@@ -91,9 +91,7 @@ def test_fused_ar_rmsnorm(dtype, tokens, hidden):
         all_reduce_variant="two_shot",
         all_reduce_distribution=1,
     )
-    iris_norm_out = shmem.ccl.all_reduce_rmsnorm(
-        iris_partial, iris_residual, weight_data, eps=eps, config=config
-    )
+    iris_norm_out = shmem.ccl.all_reduce_rmsnorm(iris_partial, iris_residual, weight_data, eps=eps, config=config)
     torch.cuda.synchronize()
 
     # === Compare ===
@@ -118,8 +116,8 @@ def test_fused_ar_rmsnorm(dtype, tokens, hidden):
     except AssertionError:
         # Print debug info
         print(f"Rank {rank}: norm_out max_diff={max_diff_norm}")
-        print(f"  ref_norm_out[:3,:5]={ref_norm_out[:3,:5]}")
-        print(f"  iris_norm_out[:3,:5]={iris_norm_out[:3,:5]}")
+        print(f"  ref_norm_out[:3,:5]={ref_norm_out[:3, :5]}")
+        print(f"  iris_norm_out[:3,:5]={iris_norm_out[:3, :5]}")
         raise
 
     # Check residual updated in-place
@@ -137,6 +135,7 @@ def test_fused_ar_rmsnorm(dtype, tokens, hidden):
     shmem.barrier()
     del shmem
     import gc
+
     gc.collect()
 
 
@@ -185,9 +184,7 @@ def test_fused_ar_rmsnorm_distribution(distribution):
         all_reduce_variant="two_shot",
         all_reduce_distribution=distribution,
     )
-    iris_norm_out = shmem.ccl.all_reduce_rmsnorm(
-        iris_partial, iris_residual, weight_data, eps=eps, config=config
-    )
+    iris_norm_out = shmem.ccl.all_reduce_rmsnorm(iris_partial, iris_residual, weight_data, eps=eps, config=config)
     torch.cuda.synchronize()
 
     atol = 1e-4
@@ -204,6 +201,7 @@ def test_fused_ar_rmsnorm_distribution(distribution):
     shmem.barrier()
     del shmem
     import gc
+
     gc.collect()
 
 
@@ -236,9 +234,7 @@ def test_fused_ar_rmsnorm_deterministic():
         shmem.barrier()
 
         config = Config(all_reduce_variant="two_shot", all_reduce_distribution=1)
-        norm_out = shmem.ccl.all_reduce_rmsnorm(
-            iris_partial, iris_residual, weight_data, eps=eps, config=config
-        )
+        norm_out = shmem.ccl.all_reduce_rmsnorm(iris_partial, iris_residual, weight_data, eps=eps, config=config)
         torch.cuda.synchronize()
         results.append((norm_out.clone(), iris_residual.clone()))
 
@@ -249,6 +245,7 @@ def test_fused_ar_rmsnorm_deterministic():
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()
 
 
@@ -284,4 +281,5 @@ def test_fused_ar_rmsnorm_shape_validation():
     shmem.barrier()
     del shmem
     import gc
+
     gc.collect()

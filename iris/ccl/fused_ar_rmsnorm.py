@@ -87,7 +87,7 @@ def _fused_ar_rmsnorm_two_shot_kernel(
     col_mask = col_offsets < hidden
 
     # Unmasked fast path check: BLOCK_HIDDEN == hidden (power-of-2 hidden dims)
-    is_full = (BLOCK_HIDDEN <= hidden)
+    is_full = BLOCK_HIDDEN <= hidden
 
     # Persistent loop: each CTA handles multiple rows
     for row_offset in range(pid, max_row_offset, COMM_SMS):
@@ -157,16 +157,12 @@ def _fused_ar_rmsnorm_two_shot_kernel(
 
             else:
                 # ---- Slow path: masked (BLOCK_HIDDEN > hidden) ----
-                acc = iris.load(
-                    partial_ptrs, iris_rank, start_rank_global, heap_bases, mask=col_mask
-                ).to(tl.float32)
+                acc = iris.load(partial_ptrs, iris_rank, start_rank_global, heap_bases, mask=col_mask).to(tl.float32)
 
                 for i in tl.static_range(1, world_size):
                     remote_rank_idx = (start_rank_idx + i) % world_size
                     remote_rank = rank_start + remote_rank_idx * rank_stride
-                    acc += iris.load(
-                        partial_ptrs, iris_rank, remote_rank, heap_bases, mask=col_mask
-                    ).to(tl.float32)
+                    acc += iris.load(partial_ptrs, iris_rank, remote_rank, heap_bases, mask=col_mask).to(tl.float32)
 
                 # Phase 2: Residual add + RMSNorm
                 res_offset = row * stride_res_t + col_offsets * stride_res_h
@@ -286,17 +282,11 @@ def all_reduce_rmsnorm(
 
     tokens, hidden = partial.shape
     if residual.shape != (tokens, hidden):
-        raise ValueError(
-            f"residual shape {residual.shape} doesn't match partial shape {partial.shape}"
-        )
+        raise ValueError(f"residual shape {residual.shape} doesn't match partial shape {partial.shape}")
     if weight.shape[0] != hidden:
-        raise ValueError(
-            f"weight size {weight.shape[0]} doesn't match hidden dimension {hidden}"
-        )
+        raise ValueError(f"weight size {weight.shape[0]} doesn't match hidden dimension {hidden}")
 
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(
-        group, shmem
-    )
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
 
     heap_bases = shmem.get_heap_bases()
 
