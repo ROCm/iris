@@ -563,15 +563,18 @@ def persistent_all_gather_ring(
             # (Triton uses C truncated-division semantics, not Python floored).
             source_rank_idx = (group_rank + world_size - _step) % world_size
 
-            # Wait for next rank's flag to be 0 (ready to receive)
-            # Trace: record the poll as an atomic_cas event on the remote flag
-            h_poll = trace_ctx.tracing.record_event_start(
-                event_id=TraceEvent().atomic_cas,
+            # Trace: record full ring step (poll + store + signal + wait + read + write)
+            # Uses the ring_buffer tile address (2D block) as representative address.
+            h_step = trace_ctx.tracing.record_event_start(
+                event_id=TraceEvent().store,
                 target_rank=next_rank,
-                address=remote_flag_ptr,
+                address=ring_buffer + tile_offset,
                 pid_m=pid_m,
                 pid_n=pid_n,
+                mask=mask,
             )
+
+            # Wait for next rank's flag to be 0 (ready to receive)
             while (
                 iris.atomic_cas(
                     remote_flag_ptr,
@@ -586,17 +589,8 @@ def persistent_all_gather_ring(
                 != 0
             ):
                 pass
-            trace_ctx.tracing.record_event_end(h_poll)
 
             # Write shard into next rank's ring_buffer via iris.store
-            h_store = trace_ctx.tracing.record_event_start(
-                event_id=TraceEvent().store,
-                target_rank=next_rank,
-                address=ring_buffer + tile_offset,
-                pid_m=pid_m,
-                pid_n=pid_n,
-                mask=mask,
-            )
             iris.store(
                 ring_buffer + tile_offset,
                 send_data,
@@ -607,16 +601,8 @@ def persistent_all_gather_ring(
                 hint=(1, BLOCK_SIZE_N),
             )
             tl.debug_barrier()
-            trace_ctx.tracing.record_event_end(h_store)
 
             # Signal next rank that data is ready
-            h_signal = trace_ctx.tracing.record_event_start(
-                event_id=TraceEvent().atomic_xchg,
-                target_rank=next_rank,
-                address=remote_flag_ptr,
-                pid_m=pid_m,
-                pid_n=pid_n,
-            )
             iris.atomic_xchg(
                 remote_flag_ptr,
                 1,
@@ -626,7 +612,6 @@ def persistent_all_gather_ring(
                 sem="release",
                 scope="sys",
             )
-            trace_ctx.tracing.record_event_end(h_signal)
 
             # Wait for our predecessor to deliver data into our ring_buffer
             while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
@@ -642,6 +627,8 @@ def persistent_all_gather_ring(
             rm_recv = rm + recv_rank_idx * M
             out_offset_recv = rm_recv[:, None] * stride_out_m + rn[None, :] * stride_out_n
             tl.store(output_ptr + out_offset_recv, recv_tile, mask=mask, cache_modifier=".wt")
+
+            trace_ctx.tracing.record_event_end(h_step)
 
             # Prepare to forward what we just received
             send_data = recv_tile
