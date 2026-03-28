@@ -10,14 +10,8 @@ Composes three ops that appear together in every LLM transformer layer:
   3. RMSNorm (normalize with learnable weight)
 
 Uses a two-phase approach:
-  Phase 1: AllReduce via the one-shot kernel (each rank reads all peers,
-           no broadcast, no inter-rank barrier needed).
+  Phase 1: AllReduce via the existing fast two-shot kernel.
   Phase 2: Local fused residual add + RMSNorm kernel (no communication).
-
-The one-shot variant is used instead of two-shot because it writes only
-to local memory (no iris.store to other ranks), so no device_barrier is
-needed between phases — GPU stream ordering guarantees the local store
-completes before the RMSNorm kernel reads.
 
 Buffers are allocated once via all_reduce_rmsnorm_preamble() and reused
 across calls. This avoids the expensive symmetric heap allocation
@@ -159,7 +153,7 @@ def all_reduce_rmsnorm_preamble(
         AllReduceRMSNormWorkspace with pre-allocated buffers.
     """
     if config is None:
-        config = Config(block_size_m=32, block_size_n=64)
+        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
 
     tokens, hidden = partial.shape
 
@@ -182,11 +176,10 @@ def all_reduce_rmsnorm_preamble(
     ):
         workspace.norm_out = ctx.zeros((tokens, hidden), dtype=partial.dtype)
 
-    # Prepare allreduce workspace — use one_shot variant.
-    # One-shot reads from all peers and writes locally only (no iris.store),
-    # so no device_barrier is needed between allreduce and RMSNorm.
+    # Prepare allreduce workspace
     ar_config = Config(
-        all_reduce_variant="one_shot",
+        all_reduce_variant="two_shot",
+        all_reduce_distribution=config.all_reduce_distribution,
         comm_sms=config.comm_sms,
         block_size_m=config.block_size_m,
         block_size_n=config.block_size_n,
@@ -231,7 +224,7 @@ def all_reduce_rmsnorm(
         norm_out: [tokens, hidden] -- normalized output (on symmetric heap).
     """
     if config is None:
-        config = Config(block_size_m=32, block_size_n=64)
+        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
 
     if config.use_gluon:
         raise ValueError("fused_ar_rmsnorm does not support use_gluon=True.")
@@ -259,12 +252,13 @@ def all_reduce_rmsnorm(
     ar_config = workspace.ar_config
     ar_workspace = workspace.ar_workspace
 
-    # Phase 1: AllReduce (one-shot)
-    # One-shot reads from all peers via iris.load and writes the reduced
-    # result to the local output buffer only — no iris.store to other ranks.
-    # This means no inter-phase barrier is needed: GPU stream ordering
-    # guarantees the local tl.store completes before the next kernel reads.
+    # Phase 1: AllReduce (two-shot)
+    # No need to zero reduced — allreduce unconditionally writes all tiles
     all_reduce(reduced, partial, ctx, group=group, async_op=True, config=ar_config, workspace=ar_workspace)
+
+    # Barrier between phases: ensure all ranks have completed their allreduce
+    # broadcasts before any rank reads from the reduced buffer.
+    ctx.device_barrier(group=group)
 
     # Phase 2: Local fused residual add + RMSNorm
     BLOCK_HIDDEN = _next_power_of_2(hidden)
@@ -291,10 +285,10 @@ def all_reduce_rmsnorm(
         num_stages=1,
     )
 
-    # Both phases are local-only from this rank's perspective (one-shot
-    # allreduce reads remotely but writes locally; RMSNorm is fully local).
-    # No device_barrier is needed for correctness. Provide one only if
-    # async_op=False for callers that need completion guarantees.
+    # Phase 2 is local-only (no cross-rank writes), so no end barrier
+    # is needed for correctness. The inter-phase device_barrier above
+    # ensures allreduce completion. However, if async_op=False, provide
+    # a device_barrier so the caller can rely on completion semantics.
     if not async_op:
         ctx.device_barrier(group=group)
 
