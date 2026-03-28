@@ -1316,6 +1316,40 @@ class Iris:
                 output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
             )
 
+        def moe_dispatcher(self, hidden_dim, num_experts, topk, max_tokens,
+                           group=None, config=None, expt_assignment=None):
+            """
+            Create a pre-allocated MoE token dispatcher for expert-parallel inference.
+
+            Provides dispatch (route tokens to expert-owning ranks) and combine
+            (send results back, weighted sum) via iris symmetric heap scatter.
+
+            Args:
+                hidden_dim: Model hidden dimension.
+                num_experts: Total number of experts across all ranks.
+                topk: Number of experts activated per token.
+                max_tokens: Maximum tokens per rank per call.
+                group: Reserved for future process group support.
+                config: MoEDispatchConfig with kernel tuning parameters.
+                expt_assignment: Expert-to-rank mapping. If None, uses uniform assignment.
+
+            Returns:
+                MoEDispatcher instance with dispatch() and combine() methods.
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> dispatcher = ctx.ccl.moe_dispatcher(hidden_dim=4096, num_experts=64,
+                ...                                     topk=2, max_tokens=4096)
+                >>> recv_tokens, local_meta, handle = dispatcher.dispatch(tokens, topk_idx, topk_weight)
+                >>> expert_out = run_experts(recv_tokens, local_meta)
+                >>> combined = dispatcher.combine(expert_out, handle)
+            """
+            from iris.ccl.moe_dispatch import MoEDispatcher
+
+            return MoEDispatcher(self._iris, hidden_dim, num_experts, topk,
+                                 max_tokens, group=group, config=config,
+                                 expt_assignment=expt_assignment)
+
 
 @triton.jit
 def __translate(ptr, from_rank, to_rank, heap_bases, hint: tl.constexpr = None):
