@@ -84,6 +84,7 @@ def _fused_ar_rmsnorm_two_shot_kernel(
         max_row_offset = tl.minimum(rows_per_rank, remaining)
 
     col_offsets = tl.arange(0, BLOCK_HIDDEN)
+    col_offsets = tl.max_contiguous(tl.multiple_of(col_offsets, BLOCK_HIDDEN), BLOCK_HIDDEN)
     col_mask = col_offsets < hidden
 
     # Unmasked fast path check: BLOCK_HIDDEN == hidden (power-of-2 hidden dims)
