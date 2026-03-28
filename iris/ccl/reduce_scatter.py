@@ -389,7 +389,14 @@ def reduce_scatter(
             "Support for other operations (PRODUCT, MAX, MIN, etc.) will be added in a future release."
         )
     if config is None:
-        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+        # Adaptive default: smaller block_size_m improves bandwidth for large tensors
+        # by creating more tiles and distributing work across SMs.
+        M_in, N_in = input_tensor.shape[:2]
+        total_elems = M_in * N_in
+        if total_elems >= 16 * 1024 * 1024:  # >= 16M elements
+            config = Config(block_size_m=16, block_size_n=64, all_reduce_distribution=1)
+        else:
+            config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
 
     # Check for unsupported options
     if config.use_gluon:
