@@ -1317,7 +1317,15 @@ class Iris:
             )
 
         def all_gather_gemm(
-            self, output_tensor, local_shard, weight, group=None, async_op=False, config=None, block_size_k=64
+            self,
+            output_tensor,
+            local_shard,
+            weight,
+            group=None,
+            async_op=False,
+            config=None,
+            block_size_k=64,
+            tracing=False,
         ):
             """
             Fused all-gather + GEMM collective operation.
@@ -1336,6 +1344,7 @@ class Iris:
                 async_op: If False, performs barrier at end. Default: False.
                 config: Config instance with kernel parameters. Default: None.
                 block_size_k: GEMM K-dimension block size. Default: 64.
+                tracing: If True, enable iris device-side tracing. Default: False.
 
             Example:
                 >>> ctx = iris.iris()
@@ -1352,6 +1361,7 @@ class Iris:
                 async_op=async_op,
                 config=config,
                 block_size_k=block_size_k,
+                tracing=tracing,
             )
 
 

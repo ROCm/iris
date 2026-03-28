@@ -13,9 +13,11 @@ rank's symmetric heap over XGMI, avoiding explicit staging buffers.
 Local rank is processed first to minimize XGMI traffic.
 """
 
+import torch
 import triton
 import triton.language as tl
 import iris
+from iris import DeviceContext, TraceEvent
 from .config import Config
 from .utils import extract_group_info, chiplet_transform_chunked
 
@@ -36,6 +38,7 @@ def _fused_ag_gemm_kernel(
     stride_cm,
     stride_cn,
     heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     iris_rank: tl.constexpr,
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
@@ -44,11 +47,12 @@ def _fused_ag_gemm_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    COMM_SMS: tl.constexpr,
+    NUM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     NUM_K_BLOCKS_LOCAL: tl.constexpr,
     EVEN_K: tl.constexpr,
+    TRACING: tl.constexpr = False,
 ):
     """
     Fused all-gather + GEMM persistent kernel.
@@ -59,10 +63,21 @@ def _fused_ag_gemm_kernel(
 
     Local rank is processed first (direct HBM, no XGMI translation).
     """
+    # Initialize DeviceContext for tracing (compiles away when TRACING=False)
+    ctx = DeviceContext.initialize(context_tensor, iris_rank, world_size, tracing=TRACING)
+
     pid = tl.program_id(0)
 
     if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+        pid = chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
+
+    # Stride assumptions for compiler optimization
+    tl.assume(stride_am > 0)
+    tl.assume(stride_ak > 0)
+    tl.assume(stride_bk > 0)
+    tl.assume(stride_bn > 0)
+    tl.assume(stride_cm > 0)
+    tl.assume(stride_cn > 0)
 
     # Group-relative index of the local rank
     group_rank = (iris_rank - rank_start) // rank_stride
@@ -71,7 +86,7 @@ def _fused_ag_gemm_kernel(
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
 
-    for tile_id in range(pid, total_tiles, COMM_SMS):
+    for tile_id in range(pid, total_tiles, NUM_SMS):
         # Swizzled tile indexing for L2 locality
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
@@ -116,9 +131,13 @@ def _fused_ag_gemm_kernel(
                 iris_rank,
                 group_rank,
                 heap_bases,
+                ctx,
+                pid_m,
+                pid_n,
                 BLOCK_SIZE_K,
                 NUM_K_BLOCKS_LOCAL,
                 EVEN_K,
+                TRACING,
                 K,
                 is_local=True,
             )
@@ -142,9 +161,13 @@ def _fused_ag_gemm_kernel(
                     source_rank_global,
                     source_rank_idx,
                     heap_bases,
+                    ctx,
+                    pid_m,
+                    pid_n,
                     BLOCK_SIZE_K,
                     NUM_K_BLOCKS_LOCAL,
                     EVEN_K,
+                    TRACING,
                     K,
                     is_local=False,
                 )
@@ -172,9 +195,13 @@ def _fused_ag_gemm_kernel(
                 iris_rank,
                 group_rank,
                 heap_bases,
+                ctx,
+                pid_m,
+                pid_n,
                 BLOCK_SIZE_K,
                 NUM_K_BLOCKS_LOCAL,
                 EVEN_K,
+                TRACING,
                 K,
                 is_local=True,
             )
@@ -200,9 +227,13 @@ def _fused_ag_gemm_kernel(
                     source_rank_global,
                     source_rank_idx,
                     heap_bases,
+                    ctx,
+                    pid_m,
+                    pid_n,
                     BLOCK_SIZE_K,
                     NUM_K_BLOCKS_LOCAL,
                     EVEN_K,
+                    TRACING,
                     K,
                     is_local=False,
                 )
@@ -233,52 +264,81 @@ def _accumulate_rank_fast(
     source_rank_global,
     source_rank_idx,
     heap_bases,
+    ctx,
+    pid_m,
+    pid_n,
     BLOCK_SIZE_K: tl.constexpr,
     NUM_K_BLOCKS_LOCAL: tl.constexpr,
     EVEN_K: tl.constexpr,
+    TRACING: tl.constexpr,
     K,
     is_local: tl.constexpr,
 ):
     """Accumulate one rank's contribution — unmasked fast path."""
     loop_k = NUM_K_BLOCKS_LOCAL if EVEN_K else NUM_K_BLOCKS_LOCAL - 1
 
+    # Initial K indices
+    rk = tl.arange(0, BLOCK_SIZE_K)
+    rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
+
+    # Base pointers for A and B
+    a_base = shard_ptr + rm[:, None] * stride_am
+    global_k_base = source_rank_idx * K_local
+    b_base = weight_ptr + rn[None, :] * stride_bn
+
     for k_block in range(0, loop_k):
         k_off = k_block * BLOCK_SIZE_K
-        rk = k_off + tl.arange(0, BLOCK_SIZE_K)
-        rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
+        rk_cur = k_off + rk
 
-        # Load A shard tile
-        a_ptrs = shard_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
+        # Load A shard tile with alignment hints
+        a_ptrs = a_base + rk_cur[None, :] * stride_ak
         if is_local:
-            a = tl.load(a_ptrs)
+            a = tl.load(tl.multiple_of(a_ptrs, (1, 16)))
         else:
+            if TRACING:
+                handle = ctx.tracing.record_event_start(
+                    event_id=TraceEvent().load,
+                    target_rank=source_rank_global,
+                    address=a_ptrs,
+                    pid_m=pid_m,
+                    pid_n=pid_n,
+                )
             a = iris.load(a_ptrs, iris_rank, source_rank_global, heap_bases, hint=(1, BLOCK_SIZE_K))
+            if TRACING:
+                ctx.tracing.record_event_end(handle)
 
-        # Load weight tile (always local — weight is replicated)
-        # source_rank_idx is the group-relative index (0..world_size-1)
-        global_k = source_rank_idx * K_local + k_off
-        rk_global = global_k + tl.arange(0, BLOCK_SIZE_K)
-        rk_global = tl.max_contiguous(tl.multiple_of(rk_global, BLOCK_SIZE_K), BLOCK_SIZE_K)
-        b_ptrs = weight_ptr + rk_global[:, None] * stride_bk + rn[None, :] * stride_bn
-        b = tl.load(b_ptrs)
+        # Load weight tile with alignment hints
+        rk_global = global_k_base + k_off + rk
+        b_ptrs = b_base + rk_global[:, None] * stride_bk
+        b = tl.load(tl.multiple_of(b_ptrs, (16, 1)))
 
         acc = tl.dot(a, b, acc, allow_tf32=True)
 
     # Remainder K block
     if not EVEN_K:
         k_off = loop_k * BLOCK_SIZE_K
-        rk = k_off + tl.arange(0, BLOCK_SIZE_K)
+        rk_cur = k_off + tl.arange(0, BLOCK_SIZE_K)
 
-        a_ptrs = shard_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
-        a_mask = rk[None, :] < K_local
+        a_ptrs = a_base + rk_cur[None, :] * stride_ak
+        a_mask = rk_cur[None, :] < K_local
         if is_local:
             a = tl.load(a_ptrs, mask=a_mask, other=0.0)
         else:
+            if TRACING:
+                handle = ctx.tracing.record_event_start(
+                    event_id=TraceEvent().load,
+                    target_rank=source_rank_global,
+                    address=a_ptrs,
+                    pid_m=pid_m,
+                    pid_n=pid_n,
+                    mask=a_mask,
+                )
             a = iris.load(a_ptrs, iris_rank, source_rank_global, heap_bases, mask=a_mask, hint=(1, BLOCK_SIZE_K))
+            if TRACING:
+                ctx.tracing.record_event_end(handle)
 
-        global_k = source_rank_idx * K_local + k_off
-        rk_global = global_k + tl.arange(0, BLOCK_SIZE_K)
-        b_ptrs = weight_ptr + rk_global[:, None] * stride_bk + rn[None, :] * stride_bn
+        rk_global = global_k_base + k_off + tl.arange(0, BLOCK_SIZE_K)
+        b_ptrs = b_base + rk_global[:, None] * stride_bk
         b_mask = rk_global[:, None] < K
         b = tl.load(b_ptrs, mask=b_mask, other=0.0)
 
@@ -305,31 +365,49 @@ def _accumulate_rank_slow(
     source_rank_global,
     source_rank_idx,
     heap_bases,
+    ctx,
+    pid_m,
+    pid_n,
     BLOCK_SIZE_K: tl.constexpr,
     NUM_K_BLOCKS_LOCAL: tl.constexpr,
     EVEN_K: tl.constexpr,
+    TRACING: tl.constexpr,
     K,
     is_local: tl.constexpr,
 ):
     """Accumulate one rank's contribution — masked slow path for boundary tiles."""
     loop_k = NUM_K_BLOCKS_LOCAL if EVEN_K else NUM_K_BLOCKS_LOCAL - 1
 
+    a_base = shard_ptr + rm[:, None] * stride_am
+    global_k_base = source_rank_idx * K_local
+    b_base = weight_ptr + rn[None, :] * stride_bn
+
     for k_block in range(0, loop_k):
         k_off = k_block * BLOCK_SIZE_K
         rk = k_off + tl.arange(0, BLOCK_SIZE_K)
 
         # Load A shard tile with M mask
-        a_ptrs = shard_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
+        a_ptrs = a_base + rk[None, :] * stride_ak
         a_mask_full = m_mask[:, None]
         if is_local:
             a = tl.load(a_ptrs, mask=a_mask_full, other=0.0)
         else:
+            if TRACING:
+                handle = ctx.tracing.record_event_start(
+                    event_id=TraceEvent().load,
+                    target_rank=source_rank_global,
+                    address=a_ptrs,
+                    pid_m=pid_m,
+                    pid_n=pid_n,
+                    mask=a_mask_full,
+                )
             a = iris.load(a_ptrs, iris_rank, source_rank_global, heap_bases, mask=a_mask_full, hint=(1, BLOCK_SIZE_K))
+            if TRACING:
+                ctx.tracing.record_event_end(handle)
 
         # Load weight tile with N mask
-        global_k = source_rank_idx * K_local + k_off
-        rk_global = global_k + tl.arange(0, BLOCK_SIZE_K)
-        b_ptrs = weight_ptr + rk_global[:, None] * stride_bk + rn[None, :] * stride_bn
+        rk_global = global_k_base + k_off + tl.arange(0, BLOCK_SIZE_K)
+        b_ptrs = b_base + rk_global[:, None] * stride_bk
         b_mask_full = n_mask[None, :]
         b = tl.load(b_ptrs, mask=b_mask_full, other=0.0)
 
@@ -340,16 +418,26 @@ def _accumulate_rank_slow(
         k_off = loop_k * BLOCK_SIZE_K
         rk = k_off + tl.arange(0, BLOCK_SIZE_K)
 
-        a_ptrs = shard_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
+        a_ptrs = a_base + rk[None, :] * stride_ak
         a_mask_full = m_mask[:, None] & (rk[None, :] < K_local)
         if is_local:
             a = tl.load(a_ptrs, mask=a_mask_full, other=0.0)
         else:
+            if TRACING:
+                handle = ctx.tracing.record_event_start(
+                    event_id=TraceEvent().load,
+                    target_rank=source_rank_global,
+                    address=a_ptrs,
+                    pid_m=pid_m,
+                    pid_n=pid_n,
+                    mask=a_mask_full,
+                )
             a = iris.load(a_ptrs, iris_rank, source_rank_global, heap_bases, mask=a_mask_full, hint=(1, BLOCK_SIZE_K))
+            if TRACING:
+                ctx.tracing.record_event_end(handle)
 
-        global_k = source_rank_idx * K_local + k_off
-        rk_global = global_k + tl.arange(0, BLOCK_SIZE_K)
-        b_ptrs = weight_ptr + rk_global[:, None] * stride_bk + rn[None, :] * stride_bn
+        rk_global = global_k_base + k_off + tl.arange(0, BLOCK_SIZE_K)
+        b_ptrs = b_base + rk_global[:, None] * stride_bk
         b_mask_full = (rk_global[:, None] < K) & n_mask[None, :]
         b = tl.load(b_ptrs, mask=b_mask_full, other=0.0)
 
@@ -367,6 +455,7 @@ def all_gather_gemm(
     async_op=False,
     config=None,
     block_size_k=64,
+    tracing=False,
 ):
     """
     Fused all-gather + GEMM collective operation.
@@ -387,6 +476,7 @@ def all_gather_gemm(
         async_op: If False, performs barrier at end. Default: False.
         config: Config instance with kernel parameters. Default: None (uses defaults).
         block_size_k: GEMM K-dimension block size. Default: 64.
+        tracing: If True, enable iris device-side tracing. Default: False.
     """
     if config is None:
         config = Config()
@@ -401,6 +491,7 @@ def all_gather_gemm(
     assert output_tensor.shape == (M, N), f"output must be ({M}, {N}), got {output_tensor.shape}"
 
     heap_bases = shmem.get_heap_bases()
+    context_tensor = shmem.get_device_context()
 
     stride_am, stride_ak = local_shard.stride()
     stride_bk, stride_bn = weight.stride()
@@ -410,7 +501,12 @@ def all_gather_gemm(
     even_k = K_local % BLOCK_K == 0
     num_k_blocks_local = (K_local + BLOCK_K - 1) // BLOCK_K
 
-    _fused_ag_gemm_kernel[(config.comm_sms,)](
+    # Auto-detect SM count if using default (64 is too few for GEMM)
+    num_sms = config.comm_sms
+    if num_sms <= 0:
+        num_sms = torch.cuda.get_device_properties(local_shard.device).multi_processor_count
+
+    _fused_ag_gemm_kernel[(num_sms,)](
         local_shard,
         weight,
         output_tensor,
@@ -425,6 +521,7 @@ def all_gather_gemm(
         stride_cm,
         stride_cn,
         heap_bases,
+        context_tensor,
         rank_global,
         world_size,
         rank_start,
@@ -433,11 +530,12 @@ def all_gather_gemm(
         config.block_size_n,
         BLOCK_K,
         config.swizzle_size,
-        config.comm_sms,
+        num_sms,
         config.num_xcds,
         config.chunk_size,
         num_k_blocks_local,
         even_k,
+        tracing,
         num_stages=config.num_stages,
         num_warps=config.num_warps,
         waves_per_eu=config.waves_per_eu,
