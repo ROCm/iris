@@ -1001,4 +1001,4 @@ def all_gather(
             )
 
     if not async_op:
-        ctx.barrier()
+        ctx.device_barrier(group=group)
