@@ -326,7 +326,7 @@ if GLUON_AVAILABLE:
 def all_to_all(
     output_tensor,
     input_tensor,
-    shmem,
+    ctx,
     group=None,
     async_op=False,
     config=None,
@@ -334,9 +334,9 @@ def all_to_all(
     """
     Internal all-to-all collective operation implementation.
 
-    This function is called internally by shmem.ccl.all_to_all().
+    This function is called internally by ctx.ccl.all_to_all().
     Users should use the Iris instance method instead:
-        >>> shmem.ccl.all_to_all(output_tensor, input_tensor)
+        >>> ctx.ccl.all_to_all(output_tensor, input_tensor)
 
     Each rank sends a tensor chunk to each other rank and receives
     a tensor chunk from each other rank. Input/output tensors should have
@@ -345,8 +345,8 @@ def all_to_all(
     Args:
         output_tensor: Output tensor of shape (M, N * world_size)
         input_tensor: Input tensor of shape (M, N * world_size)
-        shmem: Iris shmem context (regular Iris or Iris Gluon)
-        group: ProcessGroup or None. If None, uses all ranks in shmem context.
+        ctx: Iris context (regular Iris or Iris Gluon)
+        group: ProcessGroup or None. If None, uses all ranks in ctx.
                Default: None.
         async_op: If False, performs a barrier at the end. If True, returns immediately.
                   Default: False.
@@ -361,7 +361,7 @@ def all_to_all(
     # Extract group information
     # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
     # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
     M, total_N = input_tensor.shape[:2]
     N = total_N // world_size
@@ -371,11 +371,11 @@ def all_to_all(
 
     # Choose between Triton and Gluon implementation
     if config.use_gluon and GLUON_AVAILABLE:
-        # Check if shmem is Iris Gluon (has get_device_context method)
-        if not hasattr(shmem, "get_device_context"):
+        # Check if ctx is Iris Gluon (has get_device_context method)
+        if not hasattr(ctx, "get_device_context"):
             raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
 
-        context_tensor = shmem.get_device_context()
+        context_tensor = ctx.get_device_context()
 
         persistent_all_to_all_gluon[(config.comm_sms,)](
             IrisDeviceCtx,
@@ -417,7 +417,7 @@ def all_to_all(
             stride_in_n,
             stride_out_m,
             stride_out_n,
-            shmem.get_heap_bases(),
+            ctx.get_heap_bases(),
             rank_in_group,
             rank_global,
             world_size,
@@ -435,7 +435,7 @@ def all_to_all(
         )
 
     if not async_op:
-        shmem.barrier()
+        ctx.barrier()
 
 
 @triton.jit()
@@ -516,7 +516,7 @@ def all_to_all_v(
     send_displs,
     recv_counts,
     recv_displs,
-    shmem,
+    ctx,
     group=None,
     async_op=False,
     config=None,
@@ -534,7 +534,7 @@ def all_to_all_v(
         send_displs: list[int] of length world_size — element offsets in input for each rank.
         recv_counts: list[int] of length world_size — elements to receive from each rank.
         recv_displs: list[int] of length world_size — element offsets in output for each rank.
-        shmem: Iris context.
+        ctx: Iris context.
         group: ProcessGroup or None.
         async_op: If False, barrier at end.
         config: Config instance.
@@ -542,13 +542,15 @@ def all_to_all_v(
     Note:
         Caller must ensure send_counts[i] on rank A == recv_counts[A] on rank i.
         iris does not validate this.
+        Input and output tensors MUST be on the symmetric heap with identical
+        allocation sizes across all ranks (symmetric heap invariant).
     """
     import torch
 
     if config is None:
         config = Config(block_size_m=32, block_size_n=128)
 
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
     device = input_tensor.device
 
@@ -574,8 +576,8 @@ def all_to_all_v(
     # Use torch.distributed to exchange displacements
     import torch.distributed as dist
 
-    send_list = [torch.tensor([send_displs[i]], dtype=torch.int64, device=device) for i in range(world_size)]
-    # What we send: our recv_displ for data from each rank
+    # What we send to rank i: our recv_displ for data from rank i
+    # After exchange, recv_displs_exchange[j] = rank j's recv_displ for data from us
     send_displs_exchange = [torch.tensor([recv_displs[i]], dtype=torch.int64, device=device) for i in range(world_size)]
     recv_displs_exchange = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)]
 
@@ -601,7 +603,7 @@ def all_to_all_v(
         send_displs_t,
         kernel_recv_displs_t,
         kernel_recv_displs_t,  # recv_displs not used separately in kernel
-        shmem.get_heap_bases(),
+        ctx.get_heap_bases(),
         rank_in_group,
         rank_global,
         world_size,
@@ -617,4 +619,4 @@ def all_to_all_v(
     )
 
     if not async_op:
-        shmem.barrier()
+        ctx.barrier()

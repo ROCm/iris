@@ -213,15 +213,24 @@ def test_all_to_all_v_variable(dtype):
     total_send = sum(send_counts)
     total_recv = sum(recv_counts)
 
+    # Symmetric heap requires all ranks to allocate the same size.
+    # Use all_reduce to find the max across ranks.
+    max_send = torch.tensor([total_send], device=f"cuda:{rank}")
+    max_recv = torch.tensor([total_recv], device=f"cuda:{rank}")
+    dist.all_reduce(max_send, op=dist.ReduceOp.MAX)
+    dist.all_reduce(max_recv, op=dist.ReduceOp.MAX)
+    alloc_send = int(max_send.item())
+    alloc_recv = int(max_recv.item())
+
     # Input: fill each chunk with (rank * 1000 + dest)
-    iris_input = ctx.zeros(total_send, dtype=dtype)
+    iris_input = ctx.zeros(alloc_send, dtype=dtype)
     for j in range(world_size):
         iris_input[send_displs[j] : send_displs[j] + send_counts[j]] = rank * 1000 + j
 
-    iris_output = ctx.zeros(total_recv, dtype=dtype)
+    iris_output = ctx.zeros(alloc_recv, dtype=dtype)
 
     # Reference via torch.distributed.all_to_all_single
-    ref_input = iris_input.clone()
+    ref_input = iris_input[:total_send].clone()
     ref_output = torch.zeros(total_recv, dtype=dtype, device=f"cuda:{rank}")
 
     ctx.barrier()
@@ -305,12 +314,20 @@ def test_all_to_all_v_empty_chunks(dtype):
     total_send = sum(send_counts)
     total_recv = sum(recv_counts)
 
-    iris_input = ctx.zeros(max(total_send, 1), dtype=dtype)
+    # Symmetric heap requires all ranks to allocate the same size.
+    max_send = torch.tensor([total_send], device=f"cuda:{rank}")
+    max_recv = torch.tensor([total_recv], device=f"cuda:{rank}")
+    dist.all_reduce(max_send, op=dist.ReduceOp.MAX)
+    dist.all_reduce(max_recv, op=dist.ReduceOp.MAX)
+    alloc_send = max(int(max_send.item()), 1)
+    alloc_recv = max(int(max_recv.item()), 1)
+
+    iris_input = ctx.zeros(alloc_send, dtype=dtype)
     for j in range(world_size):
         if send_counts[j] > 0:
             iris_input[send_displs[j] : send_displs[j] + send_counts[j]] = rank * 100 + j
 
-    iris_output = ctx.zeros(max(total_recv, 1), dtype=dtype)
+    iris_output = ctx.zeros(alloc_recv, dtype=dtype)
 
     # Reference
     ref_input = (
