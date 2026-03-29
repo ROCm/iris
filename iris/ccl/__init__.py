@@ -12,5 +12,7 @@ Collective operations are accessed through the Iris instance's ccl attribute:
 
 from .config import Config
 from .utils import ReduceOp
+from .broadcast import broadcast
+from .reduce import reduce
 
-__all__ = ["Config", "ReduceOp"]
+__all__ = ["Config", "ReduceOp", "broadcast", "reduce"]

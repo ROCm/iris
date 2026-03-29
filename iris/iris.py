@@ -1316,6 +1316,57 @@ class Iris:
                 output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
             )
 
+        def broadcast(self, tensor, src=0, group=None, async_op=False, config=None):
+            """
+            Broadcast collective operation.
+
+            The rank identified by ``src`` broadcasts its data to all other ranks.
+            After the operation, all ranks hold a copy of the source rank's data.
+            The tensor is modified in-place.
+
+            Args:
+                tensor: Tensor on the symmetric heap. Modified in-place.
+                src: Source rank within the group (default: 0).
+                group: ProcessGroup or None. If None, uses all ranks.
+                async_op: If False, performs a barrier at the end.
+                config: Config instance with kernel parameters (default: None).
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> ctx.ccl.broadcast(tensor, src=0)
+            """
+            from iris.ccl.broadcast import broadcast as _broadcast
+
+            _broadcast(tensor, self._iris, src=src, group=group, async_op=async_op, config=config)
+
+        def reduce(self, tensor, dst=0, op=None, group=None, async_op=False, config=None):
+            """
+            Reduce collective operation.
+
+            All ranks contribute their data, and the rank identified by ``dst``
+            receives the element-wise reduction. Only the dst rank's tensor holds
+            the valid reduced result; other ranks' tensors are unchanged.
+
+            Args:
+                tensor: Tensor on the symmetric heap. Modified in-place on dst rank.
+                dst: Destination rank within the group (default: 0).
+                op: Reduction operation. Currently only ReduceOp.SUM is supported.
+                group: ProcessGroup or None. If None, uses all ranks.
+                async_op: If False, performs a barrier at the end.
+                config: Config instance with kernel parameters (default: None).
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> ctx.ccl.reduce(tensor, dst=0)
+            """
+            from iris.ccl.reduce import reduce as _reduce
+            from iris.ccl import ReduceOp
+
+            if op is None:
+                op = ReduceOp.SUM
+
+            _reduce(tensor, self._iris, dst=dst, op=op, group=group, async_op=async_op, config=config)
+
 
 @triton.jit
 def __translate(ptr, from_rank, to_rank, heap_bases, hint: tl.constexpr = None):
