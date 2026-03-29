@@ -120,8 +120,9 @@ def reduce(
     block_size = config.block_size_m * config.block_size_n
     grid = ((numel + block_size - 1) // block_size,)
 
-    # Barrier: ensure all ranks have written their input before root reads
-    shmem.barrier(group=group)
+    # Device barrier: ensure all ranks have written their input before root reads.
+    # Uses device-side barrier (CUDA-graph capturable, lower overhead than host barrier).
+    shmem.device_barrier(group=group)
 
     _reduce_kernel[grid](
         tensor_flat,
@@ -137,4 +138,4 @@ def reduce(
     )
 
     if not async_op:
-        shmem.barrier(group=group)
+        shmem.device_barrier(group=group)

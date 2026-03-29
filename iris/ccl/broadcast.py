@@ -99,8 +99,9 @@ def broadcast(
     block_size = config.block_size_m * config.block_size_n
     grid = ((numel + block_size - 1) // block_size,)
 
-    # Barrier: ensure src has written its data before others read
-    shmem.barrier(group=group)
+    # Device barrier: ensure src has written its data before others read.
+    # Uses device-side barrier (CUDA-graph capturable, lower overhead than host barrier).
+    shmem.device_barrier(group=group)
 
     _broadcast_kernel[grid](
         tensor_flat,
@@ -117,4 +118,4 @@ def broadcast(
     )
 
     if not async_op:
-        shmem.barrier(group=group)
+        shmem.device_barrier(group=group)
