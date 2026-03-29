@@ -13,7 +13,6 @@ from typing import Optional
 
 import triton
 import triton.language as tl
-import torch
 import iris
 from .config import Config
 from .utils import ReduceOp, extract_group_info
