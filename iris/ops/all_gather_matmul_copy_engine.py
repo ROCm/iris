@@ -19,7 +19,6 @@ import triton.language as tl
 import iris
 import iris.x
 
-from tritonblas.kernels.stages import GemmContext, ScheduleContext
 
 from iris.device_utils import read_realtime
 from iris.tracing.events import TraceEvent
@@ -134,9 +133,6 @@ def _copy_engine_all_gather_matmul_kernel(
     # Process K-blocks in GLOBAL order by K-flag-groups (like hbm_buffer)
     # Each K-flag-group contains K_PER_FLAG consecutive K-blocks (from all ranks)
     # ==================================================================
-    if TRACE:
-        _tile_wt = zero.to(tl.int64)
-
     # Total K-flag-groups across all ranks
     NUM_FLAG_GROUPS_K_TOTAL = (NUM_K_BLOCKS + K_PER_FLAG - 1) // K_PER_FLAG
 
