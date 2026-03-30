@@ -82,6 +82,7 @@ class TraceEvent:
     wg_fetch: tl.constexpr
     wg_gemm: tl.constexpr
     wg_gemm_wait: tl.constexpr
+    wg_sdma: tl.constexpr
 
     @triton.constexpr_function
     def __init__(self):
@@ -107,3 +108,4 @@ class TraceEvent:
         self.wg_fetch = tl.constexpr(14)
         self.wg_gemm = tl.constexpr(15)
         self.wg_gemm_wait = tl.constexpr(16)
+        self.wg_sdma = tl.constexpr(17)
