@@ -221,7 +221,12 @@ def parse_args():
     parser.add_argument("--a_col_major", action="store_true", help="A col-major (M-contiguous)")
     parser.add_argument("--single-run", action="store_true", help="1 iteration (for profiling)")
     parser.add_argument("--k_per_flag", type=int, default=4, help="K-blocks per ready flag")
-    parser.add_argument("--m_tiles_per_batch", type=int, default=None, help="M-tiles per batch for K-block batching (None = all M-tiles)")
+    parser.add_argument(
+        "--m_tiles_per_batch",
+        type=int,
+        default=None,
+        help="M-tiles per batch for K-block batching (None = all M-tiles)",
+    )
     parser.add_argument("--num_warps", type=int, default=None, help="Triton num_warps (auto if None)")
     parser.add_argument("--num_stages", type=int, default=None, help="Triton num_stages (auto if None)")
     parser.add_argument(
@@ -349,7 +354,7 @@ def _worker(args):
     shmem.info(
         f"Copy Engine variant: M={M} N={N} K={K} K_local={K_local} "
         f"block=({config.block_size_m},{config.block_size_n},{config.block_size_k}) "
-        f"buffer={buffer_mb:.0f}MB flags={num_flags} ({num_waves} waves × {num_k_block_groups} k_block_groups × {world_size-1} remote_ranks, k_per_flag={k_per_flag})"
+        f"buffer={buffer_mb:.0f}MB flags={num_flags} ({num_waves} waves × {num_k_block_groups} k_block_groups × {world_size - 1} remote_ranks, k_per_flag={k_per_flag})"
     )
 
     # ── Allocate tensors ─────────────────────────────────────────────────
