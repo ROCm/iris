@@ -142,7 +142,7 @@ def _copy_engine_all_gather_matmul_kernel(
         # k_block_end_global = min(k_block_start_global + K_PER_FLAG, NUM_K_BLOCKS)
 
         # Check if any K-block in this group is remote
-        # TODO assume K-block group is not split across ranks
+        # Assumption enforced by validation: flag groups don't span ranks
         src_rank = k_block_start_global // NUM_K_BLOCKS_LOCAL
         is_remote = src_rank != cur_rank
 
@@ -297,9 +297,14 @@ def all_gather_matmul_copy_engine_preamble(
     num_k_blocks_local = K_local // config.block_size_k
     num_remote_k_blocks = num_k_blocks - num_k_blocks_local
 
-    # Require k_per_flag to evenly divide num_k_blocks for branch-free kernel
-    assert num_k_blocks % k_per_flag == 0, (
-        f"num_k_blocks ({num_k_blocks}) must be divisible by k_per_flag ({k_per_flag})"
+    # Validate k_per_flag to ensure flag groups don't span ranks
+    assert k_per_flag <= num_k_blocks_local, (
+        f"k_per_flag ({k_per_flag}) must be <= num_k_blocks_local ({num_k_blocks_local}) "
+        f"to ensure flag groups don't span ranks"
+    )
+    assert num_k_blocks_local % k_per_flag == 0, (
+        f"num_k_blocks_local ({num_k_blocks_local}) must be divisible by k_per_flag ({k_per_flag}) "
+        f"to ensure even flag group alignment per rank"
     )
 
     # M-tiles per batch for K-block batching (user controlled)
@@ -470,9 +475,14 @@ def all_gather_matmul_copy_engine(
     num_m_tiles = M // config.block_size_m
     num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
 
-    # Require k_per_flag to evenly divide num_k_blocks for branch-free kernel
-    assert num_k_blocks % k_per_flag == 0, (
-        f"num_k_blocks ({num_k_blocks}) must be divisible by k_per_flag ({k_per_flag})"
+    # Validate k_per_flag to ensure flag groups don't span ranks
+    assert k_per_flag <= num_k_blocks_local, (
+        f"k_per_flag ({k_per_flag}) must be <= num_k_blocks_local ({num_k_blocks_local}) "
+        f"to ensure flag groups don't span ranks"
+    )
+    assert num_k_blocks_local % k_per_flag == 0, (
+        f"num_k_blocks_local ({num_k_blocks_local}) must be divisible by k_per_flag ({k_per_flag}) "
+        f"to ensure even flag group alignment per rank"
     )
 
     num_flag_groups_k_total = num_k_blocks // k_per_flag  # Global K-flag-groups (exact division)
