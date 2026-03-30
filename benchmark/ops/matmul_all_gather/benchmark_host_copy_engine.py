@@ -3,10 +3,11 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Benchmark for iris.ops matmul_all_gather fused operation.
+Benchmark for iris.ops matmul_all_gather_host_copy_engine fused operation.
 
-This benchmark showcases the fused GEMM + All-Gather operation where each rank
-computes a local matmul and then gathers results along M dimension.
+This benchmark showcases the host-initiated SDMA variant where the host pre-queues
+POLL+COPY packets and the device kernel just stores tiles and sets flags to trigger
+the pre-queued SDMA transfers.
 """
 
 import os
@@ -19,6 +20,10 @@ from examples.common.utils import JSONWriter
 
 import iris
 from iris.ops import FusedConfig
+from iris.ops.matmul_all_gather_host_copy_engine import (
+    matmul_all_gather_host_copy_engine,
+    matmul_all_gather_host_copy_engine_preamble,
+)
 
 torch.manual_seed(123)
 random.seed(123)
@@ -26,7 +31,7 @@ random.seed(123)
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Benchmark matmul_all_gather fused operation.",
+        description="Benchmark matmul_all_gather_host_copy_engine fused operation.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-m", type=int, default=16384, help="Number of rows per rank in matrix A (M_local)")
@@ -45,21 +50,22 @@ def parse_args():
     parser.add_argument(
         "--output_file",
         type=str,
-        default="matmul_all_gather.json",
+        default="matmul_all_gather_host_copy_engine.json",
         help="Output file",
     )
     parser.add_argument("--heap_size", type=int, default=1 << 34, help="Iris heap size")
     parser.add_argument("--comm_sms", type=int, default=None, help="Number of SMs for operation (auto-detect if None)")
     parser.add_argument(
-        "--benchmark_pytorch",
+        "--benchmark_baseline",
         action="store_true",
-        help="Also benchmark PyTorch (matmul + all_gather_into_tensor) for comparison",
+        help="Also benchmark baseline (non-copy-engine) variant for comparison",
     )
     parser.add_argument("--block_size_m", type=int, default=256, help="Block size for M dimension")
     parser.add_argument("--block_size_n", type=int, default=64, help="Block size for N dimension")
     parser.add_argument("--block_size_k", type=int, default=64, help="Block size for K dimension")
     parser.add_argument("--group_size_m", type=int, default=1, help="Group size for M dimension tiling")
     parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto-detected if not set)")
+
     return vars(parser.parse_args())
 
 
@@ -68,6 +74,7 @@ def _worker(args: dict):
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     backend = "nccl" if torch.cuda.is_available() else "gloo"
     dist.init_process_group(backend=backend)
+
     shmem = iris.iris(args["heap_size"])
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
@@ -105,7 +112,7 @@ def _worker(args: dict):
 
     json_writer = JSONWriter(args["output_file"])
     json_writer.add_field("world_size", world_size)
-    json_writer.add_field("operation", "matmul_all_gather")
+    json_writer.add_field("operation", "matmul_all_gather_host_copy_engine")
     json_writer.add_field("m_local", M_local)
     json_writer.add_field("m_total", M)
 
@@ -155,7 +162,13 @@ def _worker(args: dict):
     comm_stream = torch.cuda.Stream()
 
     kernel_timing = {
-        "matmul_all_gather": {
+        "host_copy_engine": {
+            "start_event": torch.cuda.Event(enable_timing=True),
+            "end_event": torch.cuda.Event(enable_timing=True),
+            "ms": 0,
+            "experiments": 0,
+        },
+        "baseline": {
             "start_event": torch.cuda.Event(enable_timing=True),
             "end_event": torch.cuda.Event(enable_timing=True),
             "ms": 0,
@@ -165,14 +178,44 @@ def _worker(args: dict):
 
     workspace = None
 
-    def run_experiment():
+    def run_host_copy_engine_experiment():
         nonlocal kernel_timing, workspace
 
         shmem.barrier()
 
-        torch.cuda.nvtx.range_push("Matmul-All-Gather")
+        torch.cuda.nvtx.range_push("Matmul-All-Gather-HostCopyEngine")
         with torch.cuda.stream(comm_stream):
-            kernel_timing["matmul_all_gather"]["start_event"].record()
+            kernel_timing["host_copy_engine"]["start_event"].record()
+            workspace = matmul_all_gather_host_copy_engine(
+                shmem,
+                C,
+                A_local,
+                B,
+                config=config,
+                async_op=False,
+                workspace=workspace,
+            )
+            kernel_timing["host_copy_engine"]["end_event"].record()
+            kernel_timing["host_copy_engine"]["experiments"] += 1
+        torch.cuda.nvtx.range_pop()
+
+        # Synchronize before querying event timing
+        shmem.barrier()
+
+        # Update timing
+        ms = kernel_timing["host_copy_engine"]["start_event"].elapsed_time(
+            kernel_timing["host_copy_engine"]["end_event"]
+        )
+        kernel_timing["host_copy_engine"]["ms"] += ms
+
+    def run_baseline_experiment():
+        nonlocal kernel_timing, workspace
+
+        shmem.barrier()
+
+        torch.cuda.nvtx.range_push("Matmul-All-Gather-Baseline")
+        with torch.cuda.stream(comm_stream):
+            kernel_timing["baseline"]["start_event"].record()
             shmem.ops.matmul_all_gather(
                 C,
                 A_local,
@@ -181,30 +224,30 @@ def _worker(args: dict):
                 async_op=False,
                 workspace=workspace,
             )
-            kernel_timing["matmul_all_gather"]["end_event"].record()
-            kernel_timing["matmul_all_gather"]["experiments"] += 1
+            kernel_timing["baseline"]["end_event"].record()
+            kernel_timing["baseline"]["experiments"] += 1
         torch.cuda.nvtx.range_pop()
 
         # Synchronize before querying event timing
         shmem.barrier()
 
         # Update timing
-        ms = kernel_timing["matmul_all_gather"]["start_event"].elapsed_time(
-            kernel_timing["matmul_all_gather"]["end_event"]
+        ms = kernel_timing["baseline"]["start_event"].elapsed_time(
+            kernel_timing["baseline"]["end_event"]
         )
-        kernel_timing["matmul_all_gather"]["ms"] += ms
+        kernel_timing["baseline"]["ms"] += ms
 
     # Synchronize across all GPUs
     shmem.barrier()
 
     if args["validate"]:
-        shmem.info("Validating...")
+        shmem.info("Validating host copy engine variant...")
 
         # Reset output before validation
         C.zero_()
         shmem.barrier()
 
-        run_experiment()
+        run_host_copy_engine_experiment()
         torch.cuda.synchronize()
         shmem.barrier()
 
@@ -215,9 +258,9 @@ def _worker(args: dict):
             shmem.error(f"Rank {rank}: Validation failed, max diff: {max_diff}")
 
         if success:
-            shmem.info("Matmul-all-gather validation passed!")
+            shmem.info("Matmul-all-gather host copy engine validation passed!")
         else:
-            shmem.error("Matmul-all-gather validation failed!")
+            shmem.error("Matmul-all-gather host copy engine validation failed!")
 
         json_writer.add_field("success", success)
 
@@ -226,13 +269,13 @@ def _worker(args: dict):
 
     if args["benchmark"]:
         # Warmup for benchmarking
-        for k in ["matmul_all_gather"]:
+        for k in ["host_copy_engine", "baseline"]:
             kernel_timing[k]["ms"] = 0
             kernel_timing[k]["experiments"] = 0
 
-        iris.do_bench(run_experiment, shmem.barrier, n_warmup=25, n_repeat=1)
+        iris.do_bench(run_host_copy_engine_experiment, shmem.barrier, n_warmup=25, n_repeat=1)
 
-        for k in ["matmul_all_gather"]:
+        for k in ["host_copy_engine", "baseline"]:
             kernel_timing[k]["ms"] = 0
             kernel_timing[k]["experiments"] = 0
 
@@ -240,15 +283,15 @@ def _worker(args: dict):
         C.zero_()
         shmem.barrier()
 
-        shmem.info("Benchmarking...")
+        shmem.info("Benchmarking host copy engine variant...")
 
         # Calculate TFLOPS: 2*M_local*N*K flops per rank (but total is same across all ranks)
         total_flops = 2 * M_local * N * K
         total_tflops_unit = total_flops * 1e-12
 
-        triton_ms = iris.do_bench(run_experiment, shmem.barrier)
+        triton_ms = iris.do_bench(run_host_copy_engine_experiment, shmem.barrier)
         tflops = total_tflops_unit / (
-            (kernel_timing["matmul_all_gather"]["ms"] / kernel_timing["matmul_all_gather"]["experiments"]) * 1e-3
+            (kernel_timing["host_copy_engine"]["ms"] / kernel_timing["host_copy_engine"]["experiments"]) * 1e-3
         )
 
         # Calculate bandwidth for all-gather part
@@ -259,76 +302,78 @@ def _worker(args: dict):
         total_bytes_gb = total_bytes / (1024**3)
 
         bandwidth_gbps = total_bytes_gb / (
-            (kernel_timing["matmul_all_gather"]["ms"] / kernel_timing["matmul_all_gather"]["experiments"]) * 1e-3
+            (kernel_timing["host_copy_engine"]["ms"] / kernel_timing["host_copy_engine"]["experiments"]) * 1e-3
         )
 
         shmem.info(
-            f"Matmul-all-gather (M_local={M_local}, M_total={M}, N={N}, K={K}, world_size={world_size}, dtype={args['datatype']}): "
+            f"Matmul-all-gather host copy engine (M_local={M_local}, M_total={M}, N={N}, K={K}, world_size={world_size}, dtype={args['datatype']}): "
             f"{triton_ms:.3f} ms, {tflops:.3f} TFLOPS, {bandwidth_gbps:.3f} GB/s"
         )
 
-        json_writer.add_field("tflops", tflops)
-        json_writer.add_field("bandwidth_gbps", bandwidth_gbps)
-        json_writer.add_field("total_ms", triton_ms)
+        json_writer.add_field("host_copy_engine_tflops", tflops)
+        json_writer.add_field("host_copy_engine_bandwidth_gbps", bandwidth_gbps)
+        json_writer.add_field("host_copy_engine_total_ms", triton_ms)
         json_writer.add_field("total_flops", total_flops)
         json_writer.add_field("total_bytes", total_bytes)
         json_writer.add_field("total_bytes_gb", total_bytes_gb)
         json_writer.add_field(
-            "matmul_all_gather_ms",
-            kernel_timing["matmul_all_gather"]["ms"] / kernel_timing["matmul_all_gather"]["experiments"],
+            "host_copy_engine_ms",
+            kernel_timing["host_copy_engine"]["ms"] / kernel_timing["host_copy_engine"]["experiments"],
         )
-        json_writer.add_field("matmul_all_gather_experiments", kernel_timing["matmul_all_gather"]["experiments"])
+        json_writer.add_field("host_copy_engine_experiments", kernel_timing["host_copy_engine"]["experiments"])
 
         # Wait for all to finish benchmarking
         shmem.barrier()
 
-    # Benchmark PyTorch (matmul + all_gather_into_tensor) for comparison
-    if args["benchmark_pytorch"]:
-        shmem.info("Benchmarking PyTorch (matmul + all_gather_into_tensor)...")
-
-        # Create PyTorch tensors (not on Iris heap)
-        pytorch_A_local = torch.randn(M_local, K, dtype=datatype, device=f"cuda:{rank}")
-        pytorch_B = torch.randn(K, N, dtype=datatype, device=f"cuda:{rank}")
-        pytorch_C_local = torch.zeros(M_local, N, dtype=datatype, device=f"cuda:{rank}")
-        pytorch_C = torch.zeros(M, N, dtype=datatype, device=f"cuda:{rank}")
+    # Benchmark baseline (compute scatter) for comparison
+    if args["benchmark_baseline"] and args["benchmark"]:
+        shmem.info("Benchmarking baseline (compute scatter) variant...")
 
         # Warmup
-        for _ in range(10):
-            pytorch_C_local = torch.matmul(pytorch_A_local, pytorch_B)
-            dist.all_gather_into_tensor(pytorch_C, pytorch_C_local)
-        torch.cuda.synchronize()
-        dist.barrier()
+        iris.do_bench(run_baseline_experiment, shmem.barrier, n_warmup=25, n_repeat=1)
 
-        # Benchmark
-        dist.barrier()
+        kernel_timing["baseline"]["ms"] = 0
+        kernel_timing["baseline"]["experiments"] = 0
 
-        def run_pytorch_experiment():
-            pytorch_C_local = torch.matmul(pytorch_A_local, pytorch_B)
-            dist.all_gather_into_tensor(pytorch_C, pytorch_C_local)
+        # Reset output before benchmarking
+        C.zero_()
+        shmem.barrier()
 
-        pytorch_ms = iris.do_bench(run_pytorch_experiment, dist.barrier)
+        # Calculate TFLOPS: 2*M_local*N*K flops per rank
+        total_flops = 2 * M_local * N * K
+        total_tflops_unit = total_flops * 1e-12
 
-        # Calculate TFLOPS and bandwidth
-        pytorch_tflops = total_tflops_unit / (pytorch_ms * 1e-3)
-        pytorch_bandwidth_gbps = total_bytes_gb / (pytorch_ms * 1e-3)
-
-        shmem.info(
-            f"PyTorch matmul+all_gather_into_tensor (M_local={M_local}, M_total={M}, N={N}, K={K}, world_size={world_size}, dtype={args['datatype']}): "
-            f"{pytorch_ms:.3f} ms, {pytorch_tflops:.3f} TFLOPS, {pytorch_bandwidth_gbps:.3f} GB/s"
+        baseline_ms = iris.do_bench(run_baseline_experiment, shmem.barrier)
+        baseline_tflops = total_tflops_unit / (
+            (kernel_timing["baseline"]["ms"] / kernel_timing["baseline"]["experiments"]) * 1e-3
         )
 
-        if args["benchmark"]:
-            # Calculate performance ratio
-            iris_tflops = tflops
-            speedup = (iris_tflops / pytorch_tflops) if pytorch_tflops > 0 else 0
-            shmem.info(f"Speedup (Iris/PyTorch): {speedup:.2f}x")
+        # Calculate bandwidth for all-gather part
+        element_size = torch.tensor([], dtype=datatype).element_size()
+        output_bytes = M_local * N * element_size
+        total_bytes = output_bytes * (world_size - 1)
+        total_bytes_gb = total_bytes / (1024**3)
 
-            json_writer.add_field("pytorch_tflops", pytorch_tflops)
-            json_writer.add_field("pytorch_bandwidth_gbps", pytorch_bandwidth_gbps)
-            json_writer.add_field("pytorch_ms", pytorch_ms)
-            json_writer.add_field("iris_speedup", speedup)
+        baseline_bandwidth_gbps = total_bytes_gb / (
+            (kernel_timing["baseline"]["ms"] / kernel_timing["baseline"]["experiments"]) * 1e-3
+        )
 
-        # Wait for all to finish PyTorch benchmarking
+        shmem.info(
+            f"Matmul-all-gather baseline (M_local={M_local}, M_total={M}, N={N}, K={K}, world_size={world_size}, dtype={args['datatype']}): "
+            f"{baseline_ms:.3f} ms, {baseline_tflops:.3f} TFLOPS, {baseline_bandwidth_gbps:.3f} GB/s"
+        )
+
+        # Calculate speedup
+        host_copy_engine_tflops = tflops
+        speedup = (host_copy_engine_tflops / baseline_tflops) if baseline_tflops > 0 else 0
+        shmem.info(f"Speedup (HostCopyEngine/Baseline): {speedup:.2f}x")
+
+        json_writer.add_field("baseline_tflops", baseline_tflops)
+        json_writer.add_field("baseline_bandwidth_gbps", baseline_bandwidth_gbps)
+        json_writer.add_field("baseline_ms", baseline_ms)
+        json_writer.add_field("speedup_vs_baseline", speedup)
+
+        # Wait for all to finish baseline benchmarking
         shmem.barrier()
 
     if rank == 0:
@@ -340,7 +385,7 @@ def _worker(args: dict):
 
 
 def main():
-    print("Starting matmul_all_gather benchmark...")
+    print("Starting matmul_all_gather_host_copy_engine benchmark...")
     args = parse_args()
     if "RANK" in os.environ or "LOCAL_RANK" in os.environ:
         _worker(args)
@@ -348,7 +393,7 @@ def main():
         print(
             "Please run with torchrun:\n"
             "  torchrun --nproc_per_node=N "
-            "benchmark/ops/matmul_all_gather/benchmark.py [OPTIONS]"
+            "benchmark/ops/matmul_all_gather/benchmark_host_copy_engine.py [OPTIONS]"
         )
 
 
