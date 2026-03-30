@@ -70,19 +70,22 @@ def _copy_engine_all_gather_matmul_kernel(
     NUM_K_BLOCKS: tl.constexpr,
     NUM_K_BLOCKS_LOCAL: tl.constexpr,
     NUM_REMOTE_K_BLOCKS: tl.constexpr,
-    M_TILES_PER_FLAG: tl.constexpr,
+    K_PER_FLAG: tl.constexpr,
+    NUM_K_BLOCK_GROUPS: tl.constexpr,
+    M_TILES_PER_BATCH: tl.constexpr,
     BIAS: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
     TRACE: tl.constexpr,
 ):
     """
-    Non-persistent GEMM kernel with whole M-tile transfers.
+    Non-persistent GEMM kernel with K-block-group batched transfers.
 
     Grid: (total_tiles,) - one workgroup per output tile
-    Each workgroup waits for its M-tile-group, then processes all K-blocks.
+    Each workgroup waits for K-block-groups as needed, processing K-blocks in order.
 
     All K-blocks (local and remote) are loaded from staged_a - no branches.
     Host pre-copies local K-blocks to staged_a before kernel launch.
+    Host batches same K-block-group across all wave's M-tiles for efficiency.
     """
     acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
     zero = tl.program_id(0) * 0
@@ -107,6 +110,10 @@ def _copy_engine_all_gather_matmul_kernel(
     acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
 
+    # Calculate which batch this M-tile belongs to
+    # Host batches K-block transfers across M-tiles: batch 0 gets data first, then batch 1, etc.
+    batch_id = pid_m // M_TILES_PER_BATCH
+
     # M and N tile indices
     rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -124,40 +131,58 @@ def _copy_engine_all_gather_matmul_kernel(
         _tile_wt = zero.to(tl.int64)  # Wait time for THIS tile only
 
     # ==================================================================
-    # PHASE: Wait for entire M-tile-group, then process ALL K-blocks
+    # Process K-blocks in GLOBAL order by K-flag-groups (like hbm_buffer)
+    # Each K-flag-group contains K_PER_FLAG consecutive K-blocks (from all ranks)
     # ==================================================================
-    # Wait for all remote ranks to transfer their K-blocks for this M-tile's group
-
     if TRACE:
-        _ws = read_realtime()
+        _tile_wt = zero.to(tl.int64)
 
-    # Single wait for entire M-tile group (all remote K-blocks)
-    m_tile_group_id = pid_m // M_TILES_PER_FLAG
-    flag_idx = m_tile_group_id
-    while tl.atomic_add(flags_ptr + flag_idx, 0, sem="acquire", scope="sys") < (world_size - 1):
-        pass
+    # Total K-flag-groups across all ranks
+    NUM_FLAG_GROUPS_K_TOTAL = (NUM_K_BLOCKS + K_PER_FLAG - 1) // K_PER_FLAG
 
-    if TRACE:
-        _tile_wt = (read_realtime() - _ws)
+    for k_fg in range(NUM_FLAG_GROUPS_K_TOTAL):
+        # Wait for this K-flag-group (unless all K-blocks in it are local)
+        k_block_start_global = k_fg * K_PER_FLAG
+        # k_block_end_global = min(k_block_start_global + K_PER_FLAG, NUM_K_BLOCKS)
 
-    # Process ALL K-blocks in global order (all from staged_a - no branch)
-    for k_block_global in range(NUM_K_BLOCKS):
-        # Load from staged_a (includes both local and remote K-blocks)
-        rk = k_block_global * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-        rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
+        # Check if any K-block in this group is remote
+        # TODO assume K-block group is not split across ranks
+        src_rank = k_block_start_global // NUM_K_BLOCKS_LOCAL
+        is_remote = (src_rank != cur_rank)
 
-        a_ptrs = staged_a + rm.to(tl.int64)[:, None] * stride_sa_m + rk[None, :] * stride_sa_k
-        a = tl.load(a_ptrs)
+        if is_remote:
+            if TRACE:
+                _ws = read_realtime()
 
-        # Load B at global K position
-        B_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-        b = tl.load(B_ptrs)
+            flag_idx = batch_id * NUM_FLAG_GROUPS_K_TOTAL + k_fg
+            # Spin using atomic_add to poll flag
+            # while tl.atomic_add(flags_ptr + flag_idx, 0, sem="acquire", scope="sys") == 0:
+            while tl.load(flags_ptr + flag_idx, cache_modifier=".cv", volatile=True) == 0:
+                pass
 
-        # Accumulate
-        if ALLOW_TF32:
-            acc = tl.dot(a, b, acc, allow_tf32=True)
-        else:
-            acc += tl.dot(a, b, allow_tf32=False)
+            if TRACE:
+                _tile_wt = _tile_wt + (read_realtime() - _ws)
+
+        # Process all K-blocks in this flag group
+        for k_off in range(K_PER_FLAG):
+            k_block_global = k_block_start_global + k_off
+
+            # Load from staged_a
+            rk = k_block_global * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+            rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
+
+            a_ptrs = staged_a + rm.to(tl.int64)[:, None] * stride_sa_m + rk[None, :] * stride_sa_k
+            a = tl.load(a_ptrs)
+
+            # Load B at global K position
+            B_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+            b = tl.load(B_ptrs)
+
+            # Accumulate
+            if ALLOW_TF32:
+                acc = tl.dot(a, b, acc, allow_tf32=True)
+            else:
+                acc += tl.dot(a, b, allow_tf32=False)
 
     # ==================================================================
     # Write output
@@ -196,10 +221,10 @@ def _get_wave_m_tile_schedule(num_sms, num_tiles_m, num_tiles_n, group_size_m):
     """
     # Non-persistent: wave-aware tile assignment (matches kernel logic)
     total_tiles = num_tiles_m * num_tiles_n
-    num_waves = (total_tiles + num_sms - 1) // num_sms
+    num_batches = (total_tiles + num_sms - 1) // num_sms
 
     waves = {}
-    for pid in range(min(total_tiles, num_sms * num_waves)):
+    for pid in range(min(total_tiles, num_sms * num_batches)):
         wave_num = pid // num_sms
 
         # Wave-aware assignment (matches kernel)
@@ -232,7 +257,8 @@ def all_gather_matmul_copy_engine_preamble(
     A_sharded: torch.Tensor,
     B: torch.Tensor,
     config: Optional[FusedConfig] = None,
-    m_tiles_per_flag: int = 1,
+    k_per_flag: int = 4,
+    m_tiles_per_batch: Optional[int] = None,
     staged_a_layout: str = "k_contiguous",
 ) -> FusedWorkspace:
     """
@@ -259,10 +285,22 @@ def all_gather_matmul_copy_engine_preamble(
     num_k_blocks_local = K_local // config.block_size_k
     num_remote_k_blocks = num_k_blocks - num_k_blocks_local
 
-    # Per-M-tile-group flags for batched M-tile transfers
-    # Each flag tracks when all remote K-blocks are ready for a group of M-tiles
-    num_m_tile_groups = (num_m_tiles + m_tiles_per_flag - 1) // m_tiles_per_flag
-    num_flags = num_m_tile_groups
+    # Require k_per_flag to evenly divide num_k_blocks for branch-free kernel
+    assert num_k_blocks % k_per_flag == 0, \
+        f"num_k_blocks ({num_k_blocks}) must be divisible by k_per_flag ({k_per_flag})"
+
+    # M-tiles per batch for K-block batching (user controlled)
+    # Default: No batching (all M-tiles in single batch)
+    if m_tiles_per_batch is None:
+        m_tiles_per_batch = num_m_tiles
+
+    num_batches = (num_m_tiles + m_tiles_per_batch - 1) // m_tiles_per_batch
+
+    # Per-(batch, K-flag-group-global) flags
+    # Each flag tracks when a K-flag-group (covering K_PER_FLAG consecutive global K-blocks) is ready for a batch of M-tiles
+    # Like hbm_buffer: K-flag-groups span the entire global K dimension
+    num_flag_groups_k_total = num_k_blocks // k_per_flag  # Exact division
+    num_flags = num_batches * num_flag_groups_k_total
 
     ws = FusedWorkspace(
         operation="all_gather_matmul_copy_engine",
@@ -281,17 +319,19 @@ def all_gather_matmul_copy_engine_preamble(
     else:
         ws.aux_buffer = shmem.zeros((M, K), dtype=A_sharded.dtype)
 
-    # Allocate per-M-tile flags
+    # Allocate per-(batch, K-flag-group-global) flags
     ws.locks = shmem.zeros((num_flags,), dtype=torch.int32)
 
     shmem.info(
-        f"Allocated {num_flags} per-M-tile-group flags "
-        f"({num_m_tiles} M-tiles, {m_tiles_per_flag} M-tiles per flag) "
+        f"Allocated {num_flags} per-(batch, K-flag-group) flags "
+        f"({num_batches} batches × {num_flag_groups_k_total} global K-flag-groups, "
+        f"{k_per_flag} K-blocks per flag, {m_tiles_per_batch} M-tiles per batch) "
         f"flags buffer at 0x{ws.locks.data_ptr():x}"
     )
 
     # Copy local K-blocks into staged_a (one-time setup in preamble)
     # This allows kernel to always load from staged_a without branches
+    # TODO revert
     rank = shmem.get_rank()
     k_start = rank * K_local
     k_end = (rank + 1) * K_local
@@ -384,13 +424,13 @@ def all_gather_matmul_copy_engine(
     async_op: bool = False,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
-    m_tiles_per_flag: int = 1,
+    k_per_flag: int = 4,
+    m_tiles_per_batch: Optional[int] = None,  # K-block batching across M-tiles
     staged_a_layout: str = "k_contiguous",
     num_warps: Optional[int] = None,
     num_stages: Optional[int] = None,
     trace: bool = False,
-    verbose: bool = True,
-    debug: bool = False,
+    verbose: bool = False,
 ) -> FusedWorkspace:
     """
     All-gather + matmul with copy engine orchestrating remote tile transfers.
@@ -422,12 +462,22 @@ def all_gather_matmul_copy_engine(
     num_k_blocks = K // config.block_size_k
     num_k_blocks_local = K_local // config.block_size_k
     num_remote_k_blocks = num_k_blocks - num_k_blocks_local
+    num_m_tiles = M // config.block_size_m
+    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
 
-    # Allow non-multiples of k_per_flag (last batch will have fewer tiles)
-    # assert num_remote_k_blocks % k_per_flag == 0
+    # Require k_per_flag to evenly divide num_k_blocks for branch-free kernel
+    assert num_k_blocks % k_per_flag == 0, \
+        f"num_k_blocks ({num_k_blocks}) must be divisible by k_per_flag ({k_per_flag})"
+
+    num_flag_groups_k_total = num_k_blocks // k_per_flag  # Global K-flag-groups (exact division)
+
+    # Set m_tiles_per_batch default BEFORE calling preamble
+    # Default: No batching (transfer to all M-tiles in single batch)
+    if m_tiles_per_batch is None:
+        m_tiles_per_batch = num_m_tiles
 
     if workspace is None:
-        workspace = all_gather_matmul_copy_engine_preamble(shmem, A_sharded, B, config, m_tiles_per_flag, staged_a_layout)
+        workspace = all_gather_matmul_copy_engine_preamble(shmem, A_sharded, B, config, k_per_flag, m_tiles_per_batch, staged_a_layout)
 
     workspace.locks.zero_()
 
@@ -447,15 +497,21 @@ def all_gather_matmul_copy_engine(
         stride_bias = 1
         use_bias = False
 
-    num_m_tiles = M // config.block_size_m
-    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
+    # num_m_tiles, num_tiles_n already calculated above
     total_tiles = num_m_tiles * num_tiles_n
 
-    # Calculate M-tile groups for flag structure
-    num_m_tile_groups = (num_m_tiles + m_tiles_per_flag - 1) // m_tiles_per_flag
+    # Auto-detect num_sms from device if not specified
+    num_sms = config.num_sms
+    if num_sms is None:
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        num_sms = props.multi_processor_count
 
     # Grid: non-persistent GEMM - one workgroup per output tile (like hbm_buffer)
     grid_size = total_tiles
+
+    # m_tiles_per_batch was already set above before calling preamble
+    # Calculate number of batches
+    num_batches = (num_m_tiles + m_tiles_per_batch - 1) // m_tiles_per_batch
 
     if trace:
         # Each tile generates 2 events (start + wait)
@@ -484,7 +540,7 @@ def all_gather_matmul_copy_engine(
             f"Kernel params: grid_size={grid_size}, num_m_tiles={num_m_tiles}, "
             f"num_tiles_n={num_tiles_n}, num_k_blocks={num_k_blocks}, "
             f"num_k_blocks_local={num_k_blocks_local}, group_size_m={config.group_size_m}, "
-            f"m_tiles_per_flag={m_tiles_per_flag}"
+            f"k_per_flag={k_per_flag}"
         )
         shmem.info(
             f"Pointers: A_sharded=0x{A_sharded.data_ptr():x}, "
@@ -529,7 +585,9 @@ def all_gather_matmul_copy_engine(
         num_k_blocks,
         num_k_blocks_local,
         num_remote_k_blocks,
-        m_tiles_per_flag,
+        k_per_flag,
+        num_flag_groups_k_total,  # Total K-flag-groups (was num_k_block_groups)
+        m_tiles_per_batch,
         use_bias,
         config.allow_tf32,
         trace,
@@ -550,11 +608,13 @@ def all_gather_matmul_copy_engine(
     wave_schedule = _get_wave_m_tile_schedule(num_sms, num_m_tiles, num_tiles_n, config.group_size_m)
 
     if verbose and rank == 0:
+        num_batches_calc = (num_m_tiles + m_tiles_per_batch - 1) // m_tiles_per_batch
         shmem.info(
             f"[Rank {rank}] Starting SDMA loop (batched M-tile transfers)... "
-            f"num_m_tiles={num_m_tiles}, m_tiles_per_flag={m_tiles_per_flag}, num_groups={num_m_tile_groups}"
+            f"num_m_tiles={num_m_tiles}, k_per_flag={k_per_flag}, num_flag_groups_k_total={num_flag_groups_k_total}, m_tiles_per_batch={m_tiles_per_batch}"
         )
-        shmem.info(f"[Rank {rank}] Wave schedule: {len(wave_schedule)} waves")
+        shmem.info(f"[Rank {rank}] Will transfer in {num_batches_calc} batches of {m_tiles_per_batch} M-tiles each")
+        shmem.info(f"[Rank {rank}] Wave schedule (GPU execution): {len(wave_schedule)} waves")
         for wave_num, m_tiles in wave_schedule[:3]:  # Show first 3 waves
             shmem.info(f"  Wave {wave_num}: needs {len(m_tiles)} new M-tiles: {m_tiles[:10]}{'...' if len(m_tiles) > 10 else ''}")
 
@@ -563,76 +623,83 @@ def all_gather_matmul_copy_engine(
     flags_base_addr = workspace.locks.data_ptr()
     tile_transfer_count = 0
 
-    # For each M-tile group, batch transfer all M-tiles to all remote ranks
-    for m_tile_group_id in range(num_m_tile_groups):
-        m_tile_start = m_tile_group_id * m_tiles_per_flag
-        m_tile_end = min(m_tile_start + m_tiles_per_flag, num_m_tiles)
-        num_m_tiles_in_group = m_tile_end - m_tile_start
+    # Group our local K-blocks by their global flag group (compute once, not per batch)
+    local_k_blocks_by_flag_group = {}
+    for k_block_local in range(num_k_blocks_local):
+        k_block_global = rank * num_k_blocks_local + k_block_local
+        k_fg_global = k_block_global // k_per_flag
+        if k_fg_global not in local_k_blocks_by_flag_group:
+            local_k_blocks_by_flag_group[k_fg_global] = []
+        local_k_blocks_by_flag_group[k_fg_global].append((k_block_global, k_block_local))
 
-        for dst_rank in range(world_size):
-            if dst_rank == rank:
-                continue
+    # Sequential SDMA posting with individual calls
+    batch_id = 0
+    for m_tile_start in range(0, num_m_tiles, m_tiles_per_batch):
+        m_tile_end = min(m_tile_start + m_tiles_per_batch, num_m_tiles)
+        num_m_tiles_in_batch = m_tile_end - m_tile_start
 
-            # Batch transfer all M-tiles in this group as one 2D transfer
-            # Source: A_sharded[m_tile_start:m_tile_end, :]
-            # Shape: (num_m_tiles_in_group * block_size_m, num_k_blocks_local * block_size_k)
-            k_block_start_global = rank * num_k_blocks_local
+        # Transfer each flag group to all other ranks
+        for k_fg_global, our_k_blocks in local_k_blocks_by_flag_group.items():
+            k_block_global_start = our_k_blocks[0][0]
+            k_block_local_start = our_k_blocks[0][1]
+            num_k_blocks_in_group = len(our_k_blocks)
 
-            tile = Tile()
-            tile.pid_m = m_tile_start
-            tile.pid_n = 0  # Our K-blocks start at column 0 in A_sharded
-            tile.block_m = num_m_tiles_in_group * config.block_size_m  # Batch multiple M-tiles
-            tile.block_n = num_k_blocks_local * config.block_size_k  # Entire width
-            tile.elem_size = elem_size
-            tile.src_stride = stride_am * elem_size
-            tile.data = A_sharded.data_ptr()
+            for dst_rank in range(world_size):
+                if dst_rank == rank:
+                    continue
 
-            # Destination offset: m_tile_start * M + k_block_global_start * K
-            dst_offset_bytes = (m_tile_start * config.block_size_m * stride_sa_m + k_block_start_global * config.block_size_k * stride_sa_k) * elem_size
-            dst_ptr_local = staged_a_base_addr + dst_offset_bytes
-            dst_ptr_remote = shmem.translate(dst_ptr_local, rank, dst_rank)
+                # Flag index: (batch, global-K-flag-group)
+                flag_idx = batch_id * num_flag_groups_k_total + k_fg_global
+                flag_addr_local = flags_base_addr + flag_idx * 4
+                flag_addr_remote = shmem.translate(flag_addr_local, rank, dst_rank)
 
-            # Get flag address
-            flag_idx = m_tile_group_id
-            flag_addr_local = flags_base_addr + flag_idx * 4
-            flag_addr_remote = shmem.translate(flag_addr_local, rank, dst_rank)
+                # Merge ALL M-tiles in batch AND all K-blocks in flag group into ONE 2D transfer
+                tile = Tile()
+                tile.pid_m = 0  # Set to 0 since we're computing offset manually in tile.data
+                tile.pid_n = 0
+                tile.block_m = num_m_tiles_in_batch * config.block_size_m  # Merged M dimension
+                tile.block_n = num_k_blocks_in_group * config.block_size_k  # Merged K dimension
+                tile.elem_size = elem_size
+                tile.src_stride = stride_am * elem_size
+                # Compute source offset manually and add to base pointer
+                src_offset_bytes = (m_tile_start * config.block_size_m * stride_am + k_block_local_start * config.block_size_k * stride_ak) * elem_size
+                tile.data = A_sharded.data_ptr() + src_offset_bytes
 
-            # Batched transfer + signal in one SDMA command
-            anvil_lib.host_put_tile_signal(rank, dst_rank, 0, tile, dst_ptr_remote, stride_sa_m * elem_size, flag_addr_remote, 1)
-            tile_transfer_count += 1
+                # Destination offset: (m_tile_start, k_block_global_start)
+                dst_offset_bytes = (m_tile_start * config.block_size_m * stride_sa_m + k_block_global_start * config.block_size_k * stride_sa_k) * elem_size
+                dst_ptr_local = staged_a_base_addr + dst_offset_bytes
+                dst_ptr_remote = shmem.translate(dst_ptr_local, rank, dst_rank)
 
-            if debug and m_tile_group_id < 2:
-                shmem.info(
-                    f"[Rank {rank}] Transferred M-tile-group={m_tile_group_id} (M-tiles {m_tile_start}-{m_tile_end-1}) "
-                    f"to dst_rank={dst_rank}, flag_idx={flag_idx}, size={tile.block_m}×{tile.block_n}"
-                )
+                # Single transfer with signal for entire batch × flag_group
+                anvil_lib.host_put_tile_signal(rank, dst_rank, 0, tile, dst_ptr_remote, stride_sa_m * elem_size, flag_addr_remote, 1)
+                tile_transfer_count += 1
+
+                if verbose and k_fg_global == 0 and batch_id == 0 and dst_rank == (rank + 1) % world_size:
+                    shmem.info(
+                        f"[Rank {rank}→{dst_rank}] Signaled batch={batch_id} k_fg={k_fg_global} flag_idx={flag_idx} "
+                        f"({num_m_tiles_in_batch} M-tiles × {num_k_blocks_in_group} K-blocks merged)"
+                    )
+
+        batch_id += 1
 
     sdma_end_post_time = time.perf_counter()
 
-    if debug:
-        shmem.info(f"[Rank {rank}] Posted all SDMA, now calling host_quiet...")
 
     # Ensure all SDMA operations complete
     for dst_rank in range(world_size):
         if dst_rank == rank:
             continue
-        if debug:
-            shmem.info(f"[Rank {rank}] Calling host_quiet for dst_rank={dst_rank}")
         anvil_lib.host_quiet(rank, dst_rank, 0)
-        if debug:
-            shmem.info(f"[Rank {rank}] host_quiet complete for dst_rank={dst_rank}")
 
     sdma_end_time = time.perf_counter()
 
-    if debug:
-        shmem.info(f"[Rank {rank}] All SDMA complete")
-    sdma_elapsed_ms = (sdma_end_time - sdma_start_time) * 1000.0
-    sdma_post_elapsed_ms = (sdma_end_post_time - sdma_start_time) * 1000.0
-
     if verbose:
+        post_ms = (sdma_end_post_time - sdma_start_time) * 1000.0
+        quiet_ms = (sdma_end_time - sdma_end_post_time) * 1000.0
+        total_ms = (sdma_end_time - sdma_start_time) * 1000.0
         shmem.info(
-            f"[Rank {rank}] PUSH complete. SDMA time: {sdma_elapsed_ms:.2f} ms "
-            f"(time to post SDMA commands: {sdma_post_elapsed_ms:.2f} ms) "
+            f"[Rank {rank}] SDMA complete. "
+            f"Post: {post_ms:.2f}ms, Quiet: {quiet_ms:.2f}ms, Total: {total_ms:.2f}ms, "
             f"transfers={tile_transfer_count}"
         )
 

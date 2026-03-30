@@ -220,7 +220,8 @@ def parse_args():
     parser.add_argument("--b_col_major", action="store_true", help="B col-major (K-contiguous)")
     parser.add_argument("--a_col_major", action="store_true", help="A col-major (M-contiguous)")
     parser.add_argument("--single-run", action="store_true", help="1 iteration (for profiling)")
-    parser.add_argument("--m_tiles_per_flag", type=int, default=1, help="M-tiles per ready flag")
+    parser.add_argument("--k_per_flag", type=int, default=4, help="K-blocks per ready flag")
+    parser.add_argument("--m_tiles_per_batch", type=int, default=None, help="M-tiles per batch for K-block batching (None = all M-tiles)")
     parser.add_argument("--num_warps", type=int, default=None, help="Triton num_warps (auto if None)")
     parser.add_argument("--num_stages", type=int, default=None, help="Triton num_stages (auto if None)")
     parser.add_argument(
@@ -329,13 +330,26 @@ def _worker(args):
 
     buffer_mb = M * K * torch.tensor([], dtype=datatype).element_size() / (1024**2)
     num_m_tiles = M // config.block_size_m
+    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
     num_k_blocks = K // config.block_size_k
-    m_tiles_per_flag = args["m_tiles_per_flag"]
-    num_m_tile_groups = (num_m_tiles + m_tiles_per_flag - 1) // m_tiles_per_flag
+    num_k_blocks_local = K_local // config.block_size_k
+    k_per_flag = args["k_per_flag"]
+    num_k_block_groups = (num_k_blocks_local + k_per_flag - 1) // k_per_flag
+
+    # TODO why is this needed here?
+    # Auto-detect num_sms from device if not specified
+    num_sms = config.num_sms
+    if num_sms is None:
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        num_sms = props.multi_processor_count
+
+    num_tiles_per_wave = min(num_m_tiles, num_sms // num_tiles_n)
+    num_waves = (num_m_tiles + num_tiles_per_wave - 1) // num_tiles_per_wave
+    num_flags = num_waves * num_k_block_groups * (world_size - 1)
     shmem.info(
         f"Copy Engine variant: M={M} N={N} K={K} K_local={K_local} "
         f"block=({config.block_size_m},{config.block_size_n},{config.block_size_k}) "
-        f"buffer={buffer_mb:.0f}MB flags={num_m_tile_groups} (m_tiles_per_flag={m_tiles_per_flag})"
+        f"buffer={buffer_mb:.0f}MB flags={num_flags} ({num_waves} waves × {num_k_block_groups} k_block_groups × {world_size-1} remote_ranks, k_per_flag={k_per_flag})"
     )
 
     # ── Allocate tensors ─────────────────────────────────────────────────
@@ -374,7 +388,9 @@ def _worker(args):
         expected_tensor.copy_(torch.matmul(A_gathered, B_data))
 
     # Pre-allocate workspace
-    workspace = all_gather_matmul_copy_engine_preamble(shmem, A_sharded, B, config, m_tiles_per_flag=m_tiles_per_flag)
+    workspace = all_gather_matmul_copy_engine_preamble(
+        shmem, A_sharded, B, config, k_per_flag=k_per_flag, m_tiles_per_batch=args["m_tiles_per_batch"]
+    )
 
     # ── Timing ───────────────────────────────────────────────────────────
     comm_stream = torch.cuda.Stream()
@@ -399,7 +415,8 @@ def _worker(args):
                 config=config,
                 async_op=False,
                 workspace=workspace,
-                m_tiles_per_flag=m_tiles_per_flag,
+                k_per_flag=k_per_flag,
+                m_tiles_per_batch=args["m_tiles_per_batch"],
                 num_warps=num_warps,
                 num_stages=num_stages,
             )
@@ -480,7 +497,8 @@ def _worker(args):
             config=config,
             async_op=False,
             workspace=workspace,
-            m_tiles_per_flag=m_tiles_per_flag,
+            k_per_flag=k_per_flag,
+            m_tiles_per_batch=args["m_tiles_per_batch"],
             num_warps=num_warps,
             num_stages=num_stages,
         )
@@ -524,7 +542,8 @@ def _worker(args):
             config=config,
             async_op=False,
             workspace=workspace,
-            m_tiles_per_flag=m_tiles_per_flag,
+            k_per_flag=k_per_flag,
+            m_tiles_per_batch=args["m_tiles_per_batch"],
             num_warps=num_warps,
             num_stages=num_stages,
             trace=True,
@@ -546,7 +565,8 @@ def _worker(args):
             config=config,
             async_op=False,
             workspace=workspace,
-            m_tiles_per_flag=m_tiles_per_flag,
+            k_per_flag=k_per_flag,
+            m_tiles_per_batch=args["m_tiles_per_batch"],
             num_warps=num_warps,
             num_stages=num_stages,
             trace=True,
