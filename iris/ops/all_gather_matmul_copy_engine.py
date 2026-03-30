@@ -148,7 +148,7 @@ def _copy_engine_all_gather_matmul_kernel(
         # Check if any K-block in this group is remote
         # TODO assume K-block group is not split across ranks
         src_rank = k_block_start_global // NUM_K_BLOCKS_LOCAL
-        is_remote = (src_rank != cur_rank)
+        is_remote = src_rank != cur_rank
 
         if is_remote:
             if TRACE:
@@ -163,19 +163,35 @@ def _copy_engine_all_gather_matmul_kernel(
             if TRACE:
                 _tile_wt = _tile_wt + (read_realtime() - _ws)
 
+        # Hoist pointer base and stride selection outside loop (constant per flag group)
+        if src_rank == cur_rank:
+            # Local K-blocks: use A_sharded with local K indexing
+            a_base = A_sharded
+            a_stride_m = stride_am
+            a_stride_k = stride_ak
+            k_block_offset = cur_rank * NUM_K_BLOCKS_LOCAL  # Subtract this to get local index
+        else:
+            # Remote K-blocks: use staged_a with global K indexing
+            a_base = staged_a
+            a_stride_m = stride_sa_m
+            a_stride_k = stride_sa_k
+            k_block_offset = 0  # No offset needed for global indexing
+
         # Process all K-blocks in this flag group
         for k_off in range(K_PER_FLAG):
             k_block_global = k_block_start_global + k_off
+            k_block_idx = k_block_global - k_block_offset  # Local idx if local, global idx if remote
 
-            # Load from staged_a
-            rk = k_block_global * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+            # Load A from selected buffer
+            rk = k_block_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
             rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
-
-            a_ptrs = staged_a + rm.to(tl.int64)[:, None] * stride_sa_m + rk[None, :] * stride_sa_k
+            a_ptrs = a_base + rm.to(tl.int64)[:, None] * a_stride_m + rk[None, :] * a_stride_k
             a = tl.load(a_ptrs)
 
             # Load B at global K position
-            B_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+            rk_global = k_block_global * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+            rk_global = tl.max_contiguous(tl.multiple_of(rk_global, BLOCK_SIZE_K), BLOCK_SIZE_K)
+            B_ptrs = B + rk_global[:, None] * stride_bk + rn[None, :] * stride_bn
             b = tl.load(B_ptrs)
 
             # Accumulate
@@ -286,8 +302,9 @@ def all_gather_matmul_copy_engine_preamble(
     num_remote_k_blocks = num_k_blocks - num_k_blocks_local
 
     # Require k_per_flag to evenly divide num_k_blocks for branch-free kernel
-    assert num_k_blocks % k_per_flag == 0, \
+    assert num_k_blocks % k_per_flag == 0, (
         f"num_k_blocks ({num_k_blocks}) must be divisible by k_per_flag ({k_per_flag})"
+    )
 
     # M-tiles per batch for K-block batching (user controlled)
     # Default: No batching (all M-tiles in single batch)
@@ -328,14 +345,6 @@ def all_gather_matmul_copy_engine_preamble(
         f"{k_per_flag} K-blocks per flag, {m_tiles_per_batch} M-tiles per batch) "
         f"flags buffer at 0x{ws.locks.data_ptr():x}"
     )
-
-    # Copy local K-blocks into staged_a (one-time setup in preamble)
-    # This allows kernel to always load from staged_a without branches
-    # TODO revert
-    rank = shmem.get_rank()
-    k_start = rank * K_local
-    k_end = (rank + 1) * K_local
-    ws.aux_buffer[:, k_start:k_end].copy_(A_sharded)
 
     # Share pointers across ranks for SDMA addressing
     # Need: A_sharded (source), staged_a (destination), flags (signaling)
@@ -466,8 +475,9 @@ def all_gather_matmul_copy_engine(
     num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
 
     # Require k_per_flag to evenly divide num_k_blocks for branch-free kernel
-    assert num_k_blocks % k_per_flag == 0, \
+    assert num_k_blocks % k_per_flag == 0, (
         f"num_k_blocks ({num_k_blocks}) must be divisible by k_per_flag ({k_per_flag})"
+    )
 
     num_flag_groups_k_total = num_k_blocks // k_per_flag  # Global K-flag-groups (exact division)
 
@@ -477,7 +487,9 @@ def all_gather_matmul_copy_engine(
         m_tiles_per_batch = num_m_tiles
 
     if workspace is None:
-        workspace = all_gather_matmul_copy_engine_preamble(shmem, A_sharded, B, config, k_per_flag, m_tiles_per_batch, staged_a_layout)
+        workspace = all_gather_matmul_copy_engine_preamble(
+            shmem, A_sharded, B, config, k_per_flag, m_tiles_per_batch, staged_a_layout
+        )
 
     workspace.locks.zero_()
 
@@ -616,7 +628,9 @@ def all_gather_matmul_copy_engine(
         shmem.info(f"[Rank {rank}] Will transfer in {num_batches_calc} batches of {m_tiles_per_batch} M-tiles each")
         shmem.info(f"[Rank {rank}] Wave schedule (GPU execution): {len(wave_schedule)} waves")
         for wave_num, m_tiles in wave_schedule[:3]:  # Show first 3 waves
-            shmem.info(f"  Wave {wave_num}: needs {len(m_tiles)} new M-tiles: {m_tiles[:10]}{'...' if len(m_tiles) > 10 else ''}")
+            shmem.info(
+                f"  Wave {wave_num}: needs {len(m_tiles)} new M-tiles: {m_tiles[:10]}{'...' if len(m_tiles) > 10 else ''}"
+            )
 
     elem_size = A_sharded.element_size()
     staged_a_base_addr = workspace.aux_buffer.data_ptr()
@@ -662,16 +676,24 @@ def all_gather_matmul_copy_engine(
                 tile.elem_size = elem_size
                 tile.src_stride = stride_am * elem_size
                 # Compute source offset manually and add to base pointer
-                src_offset_bytes = (m_tile_start * config.block_size_m * stride_am + k_block_local_start * config.block_size_k * stride_ak) * elem_size
+                src_offset_bytes = (
+                    m_tile_start * config.block_size_m * stride_am
+                    + k_block_local_start * config.block_size_k * stride_ak
+                ) * elem_size
                 tile.data = A_sharded.data_ptr() + src_offset_bytes
 
                 # Destination offset: (m_tile_start, k_block_global_start)
-                dst_offset_bytes = (m_tile_start * config.block_size_m * stride_sa_m + k_block_global_start * config.block_size_k * stride_sa_k) * elem_size
+                dst_offset_bytes = (
+                    m_tile_start * config.block_size_m * stride_sa_m
+                    + k_block_global_start * config.block_size_k * stride_sa_k
+                ) * elem_size
                 dst_ptr_local = staged_a_base_addr + dst_offset_bytes
                 dst_ptr_remote = shmem.translate(dst_ptr_local, rank, dst_rank)
 
                 # Single transfer with signal for entire batch × flag_group
-                anvil_lib.host_put_tile_signal(rank, dst_rank, 0, tile, dst_ptr_remote, stride_sa_m * elem_size, flag_addr_remote, 1)
+                anvil_lib.host_put_tile_signal(
+                    rank, dst_rank, 0, tile, dst_ptr_remote, stride_sa_m * elem_size, flag_addr_remote, 1
+                )
                 tile_transfer_count += 1
 
                 if verbose and k_fg_global == 0 and batch_id == 0 and dst_rank == (rank + 1) % world_size:
@@ -683,7 +705,6 @@ def all_gather_matmul_copy_engine(
         batch_id += 1
 
     sdma_end_post_time = time.perf_counter()
-
 
     # Ensure all SDMA operations complete
     for dst_rank in range(world_size):
