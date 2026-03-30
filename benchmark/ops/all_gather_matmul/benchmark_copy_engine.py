@@ -81,11 +81,13 @@ TICKS_PER_US = 100  # s_memrealtime runs at 100 MHz: 1 tick = 10 ns = 0.01 us
 
 
 def _plot_trace(trace_data, output_path, rank, M, N, K):
-    """Generate a Gantt chart showing GEMM workgroup activity.
+    """Generate a Gantt chart showing GEMM and SDMA workgroup activity.
 
     Y-axis: workgroup (sorted by start time)
     X-axis: time in microseconds
-    Colors: GEMM wait (red), GEMM compute (green)
+    Colors:
+      - GEMM: wait (red), compute (green)
+      - SDMA: SDMA posting (blue)
     """
     import matplotlib
 
@@ -99,23 +101,54 @@ def _plot_trace(trace_data, output_path, rank, M, N, K):
     xcds = trace_data["xcd"].numpy().astype(np.int32)
     grid_size = trace_data["grid_size"]
 
+    # Check for SDMA WG traces
+    has_sdma = "sdma_start" in trace_data and trace_data.get("num_sdma", 0) > 0
+    if has_sdma:
+        sdma_starts = trace_data["sdma_start"].numpy().astype(np.int64)
+        sdma_ends = trace_data["sdma_end"].numpy().astype(np.int64)
+        sdma_xcds = trace_data["sdma_xcd"].numpy().astype(np.int32)
+        num_sdma = trace_data["num_sdma"]
+    else:
+        num_sdma = 0
+
     # Convert to microseconds relative to earliest start
     t_min = starts.min()
+    if has_sdma and len(sdma_starts) > 0:
+        t_min = min(t_min, sdma_starts.min())
+
     starts_us = (starts - t_min) / TICKS_PER_US
     ends_us = (ends - t_min) / TICKS_PER_US
     waits_us = waits / TICKS_PER_US
 
-    # Sort by start time
+    if has_sdma:
+        sdma_starts_us = (sdma_starts - t_min) / TICKS_PER_US
+        sdma_ends_us = (sdma_ends - t_min) / TICKS_PER_US
+
+    # Sort GEMM by start time
     order = np.argsort(starts_us)
 
-    # Figure sizing
+    # Figure sizing - add SDMA rows at top
+    total_rows = grid_size + num_sdma
     row_h = 0.012
-    fig_h = max(12, grid_size * row_h + 2)
+    fig_h = max(12, total_rows * row_h + 2)
     fig, ax = plt.subplots(figsize=(18, fig_h))
 
     wait_color = "#F44336"  # red
     compute_color = "#4CAF50"  # green
+    sdma_color = "#2196F3"  # blue (for SDMA posting)
 
+    y_offset = 0
+
+    # Plot SDMA WGs at top (if any)
+    if has_sdma:
+        for sdma_idx in range(num_sdma):
+            s = sdma_starts_us[sdma_idx]
+            e = sdma_ends_us[sdma_idx]
+            dur = e - s
+            ax.barh(y_offset + sdma_idx, dur, left=s, height=0.8, color=sdma_color, edgecolor="none", linewidth=0)
+        y_offset = num_sdma
+
+    # Plot GEMM WGs
     for y_idx, wg_idx in enumerate(order):
         s = starts_us[wg_idx]
         e = ends_us[wg_idx]
@@ -124,8 +157,8 @@ def _plot_trace(trace_data, output_path, rank, M, N, K):
         # Split into wait (red) and compute (green)
         w = waits_us[wg_idx]
         comp = max(0, dur - w)
-        ax.barh(y_idx, w, left=s, height=0.8, color=wait_color, edgecolor="none", linewidth=0)
-        ax.barh(y_idx, comp, left=s + w, height=0.8, color=compute_color, edgecolor="none", linewidth=0)
+        ax.barh(y_offset + y_idx, w, left=s, height=0.8, color=wait_color, edgecolor="none", linewidth=0)
+        ax.barh(y_offset + y_idx, comp, left=s + w, height=0.8, color=compute_color, edgecolor="none", linewidth=0)
 
     # XCD annotations
     xcd_set = sorted(set(xcds.tolist()))
@@ -136,18 +169,29 @@ def _plot_trace(trace_data, output_path, rank, M, N, K):
             xcd_cmap[x] = cmap(i)
 
     x_max = ends_us.max() * 1.02
+    if has_sdma:
+        x_max = max(x_max, sdma_ends_us.max() * 1.02)
+
     for y_idx, wg_idx in enumerate(order):
         xcd_id = xcds[wg_idx]
         if xcd_id in xcd_cmap:
-            ax.plot(x_max, y_idx, marker="s", markersize=1.5, color=xcd_cmap[xcd_id], clip_on=False)
+            ax.plot(x_max, y_offset + y_idx, marker="s", markersize=1.5, color=xcd_cmap[xcd_id], clip_on=False)
+
+    if has_sdma:
+        for sdma_idx in range(num_sdma):
+            xcd_id = sdma_xcds[sdma_idx]
+            if xcd_id in xcd_cmap:
+                ax.plot(x_max, sdma_idx, marker="s", markersize=1.5, color=xcd_cmap[xcd_id], clip_on=False)
 
     ax.set_xlabel("Time (us)", fontsize=12)
-    ax.set_ylabel("Workgroup (sorted by start time)", fontsize=12)
-    ax.set_title(
-        f"Rank {rank}  |  Copy Engine All-Gather GEMM Trace  |  M={M} N={N} K={K}  |  {grid_size} GEMM workgroups",
-        fontsize=13,
-    )
-    ax.set_ylim(-1, grid_size + 1)
+    ax.set_ylabel("Workgroup (SDMA WGs at top, then GEMM sorted by start)", fontsize=12)
+    title = f"Rank {rank}  |  Copy Engine All-Gather GEMM Trace  |  M={M} N={N} K={K}  |  {grid_size} GEMM"
+    if has_sdma:
+        title += f" + {num_sdma} SDMA WGs"
+    else:
+        title += " workgroups"
+    ax.set_title(title, fontsize=13)
+    ax.set_ylim(-1, total_rows + 1)
     ax.set_xlim(0, x_max)
     ax.invert_yaxis()
 
@@ -156,6 +200,8 @@ def _plot_trace(trace_data, output_path, rank, M, N, K):
         Line2D([0], [0], color=wait_color, lw=6, label="GEMM: waiting on remote data"),
         Line2D([0], [0], color=compute_color, lw=6, label="GEMM: compute"),
     ]
+    if has_sdma:
+        legend_elements.append(Line2D([0], [0], color=sdma_color, lw=6, label="SDMA: posting transfers"))
     ax.legend(handles=legend_elements, loc="upper right", fontsize=10)
 
     # Summary stats
@@ -163,13 +209,23 @@ def _plot_trace(trace_data, output_path, rank, M, N, K):
     gemm_wait = waits_us
     gemm_compute = gemm_dur - gemm_wait
 
+    # Wall time is max(GEMM end, SDMA end) - min(GEMM start, SDMA start)
+    wall_time_us = ends_us.max()
+    if has_sdma and len(sdma_ends_us) > 0:
+        wall_time_us = max(wall_time_us, sdma_ends_us.max())
+
     stats_lines = [
         f"GEMM total: {gemm_dur.mean():.1f} us avg  ({gemm_dur.min():.1f}-{gemm_dur.max():.1f})",
         f"  wait: {gemm_wait.mean():.1f} us avg  ({gemm_wait.min():.1f}-{gemm_wait.max():.1f})",
         f"  compute: {gemm_compute.mean():.1f} us avg  ({gemm_compute.min():.1f}-{gemm_compute.max():.1f})",
         f"  wait%: {100 * gemm_wait.sum() / gemm_dur.sum():.1f}%",
-        f"Wall time: {ends_us.max():.1f} us",
     ]
+
+    if has_sdma and len(sdma_starts_us) > 0:
+        sdma_dur = sdma_ends_us - sdma_starts_us
+        stats_lines.append(f"SDMA: {sdma_dur.mean():.1f} us avg  ({sdma_dur.min():.1f}-{sdma_dur.max():.1f})")
+
+    stats_lines.append(f"Wall time: {wall_time_us:.1f} us")
     stats_text = "\n".join(stats_lines)
     ax.text(
         0.01,
@@ -231,6 +287,11 @@ def parse_args():
         help="Collect per-workgroup trace and save Gantt chart PNG",
     )
     parser.add_argument("--trace_output", type=str, default="trace_copy_engine.png", help="Output path for trace plot")
+    parser.add_argument(
+        "--device-initiated",
+        action="store_true",
+        help="Use device-side workgroups to initiate SDMA transfers instead of host (EXPERIMENTAL)",
+    )
     return vars(parser.parse_args())
 
 
@@ -311,7 +372,8 @@ def _worker(args):
         shmem.info(f"Model-derived defaults: {', '.join(model_applied)}")
     if rank == 0:
         param_summary = " ".join(f"{k}={args[k]}" for k in _MODEL_PARAMS)
-        shmem.info(f"Kernel params: {param_summary}")
+        device_init_str = f" device_initiated={args.get('device_initiated', False)}"
+        shmem.info(f"Kernel params: {param_summary}{device_init_str}")
 
     M = args["m"]
     N = args["n"]
@@ -419,6 +481,7 @@ def _worker(args):
                 m_tiles_per_batch=args["m_tiles_per_batch"],
                 num_warps=num_warps,
                 num_stages=num_stages,
+                device_initiated=args.get("device_initiated", False),
             )
             end_ev.record()
             num_experiments += 1
@@ -501,6 +564,7 @@ def _worker(args):
             m_tiles_per_batch=args["m_tiles_per_batch"],
             num_warps=num_warps,
             num_stages=num_stages,
+            device_initiated=args.get("device_initiated", False),
         )
         torch.cuda.synchronize()
         t_end = time.perf_counter()
@@ -546,6 +610,7 @@ def _worker(args):
             m_tiles_per_batch=args["m_tiles_per_batch"],
             num_warps=num_warps,
             num_stages=num_stages,
+            device_initiated=args.get("device_initiated", False),
             trace=True,
         )
         torch.cuda.synchronize()
@@ -569,6 +634,7 @@ def _worker(args):
             m_tiles_per_batch=args["m_tiles_per_batch"],
             num_warps=num_warps,
             num_stages=num_stages,
+            device_initiated=args.get("device_initiated", False),
             trace=True,
         )
         torch.cuda.synchronize()
