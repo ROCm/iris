@@ -22,7 +22,6 @@ import iris
 from iris.ops import FusedConfig
 from iris.ops.matmul_all_gather_copy_engine import (
     matmul_all_gather_copy_engine,
-    matmul_all_gather_copy_engine_preamble,
 )
 
 torch.manual_seed(123)
@@ -204,9 +203,7 @@ def _worker(args: dict):
         shmem.barrier()
 
         # Update timing
-        ms = kernel_timing["copy_engine"]["start_event"].elapsed_time(
-            kernel_timing["copy_engine"]["end_event"]
-        )
+        ms = kernel_timing["copy_engine"]["start_event"].elapsed_time(kernel_timing["copy_engine"]["end_event"])
         kernel_timing["copy_engine"]["ms"] += ms
 
     def run_baseline_experiment():
@@ -235,9 +232,7 @@ def _worker(args: dict):
         shmem.barrier()
 
         # Update timing
-        ms = kernel_timing["baseline"]["start_event"].elapsed_time(
-            kernel_timing["baseline"]["end_event"]
-        )
+        ms = kernel_timing["baseline"]["start_event"].elapsed_time(kernel_timing["baseline"]["end_event"])
         kernel_timing["baseline"]["ms"] += ms
 
     # Synchronize across all GPUs
