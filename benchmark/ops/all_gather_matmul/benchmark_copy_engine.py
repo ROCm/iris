@@ -40,7 +40,7 @@ try:
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     if _script_dir not in _sys.path:
         _sys.path.insert(0, _script_dir)
-    from derive_params import (
+    from derive_params_copy_engine import (
         derive as _derive_params,
         DEFAULT_NUM_CUS,
         DEFAULT_PEAK_TFLOPS_FP16,
@@ -58,20 +58,21 @@ _MODEL_PARAMS = (
     "block_size_n",
     "block_size_k",
     "group_size_m",
-    "num_fetch_sms",
     "k_per_flag",
+    "m_tiles_per_batch",
+    "device_initiated",
     "num_warps",
-    "num_fetch_stages",
-    "first_stage_fetch_sms",
 )
 
 _FALLBACK_DEFAULTS = {
     "block_size_m": 256,
     "block_size_n": 64,
     "block_size_k": 64,
-    "group_size_m": 1,
-    "k_per_flag": 1,
-    "num_fetch_stages": 1,
+    "group_size_m": 4,             # M-grouping for L2 cache reuse
+    "k_per_flag": 4,               # Copy engine default (larger batches)
+    "m_tiles_per_batch": 8,        # Default batch size
+    "device_initiated": True,      # Fallback: device mode (derive() should set this)
+    "num_warps": 4,
 }
 
 torch.manual_seed(123)
@@ -263,6 +264,7 @@ def parse_args():
         help="Tensor datatype",
     )
     parser.add_argument("--heap_size", type=int, default=1 << 34, help="Iris heap size")
+    parser.add_argument("--num_sms", type=int, default=None, help="Number of SMs (auto if None)")
     parser.add_argument(
         "--benchmark_pytorch",
         action="store_true",
@@ -293,9 +295,16 @@ def parse_args():
     )
     parser.add_argument("--trace_output", type=str, default="trace_copy_engine.png", help="Output path for trace plot")
     parser.add_argument(
-        "--device-initiated",
+        "--force-device-initiated",
         action="store_true",
-        help="Use device-side workgroups to initiate SDMA transfers instead of host (EXPERIMENTAL)",
+        dest="force_device_mode",
+        help="Force device-initiated SDMA mode (overrides model)",
+    )
+    parser.add_argument(
+        "--force-host-initiated",
+        action="store_true",
+        dest="force_host_mode",
+        help="Force host-initiated SDMA mode (overrides model)",
     )
     return vars(parser.parse_args())
 
@@ -308,6 +317,16 @@ def _apply_model_defaults(args, world_size, dtype_bytes=2):
     applied = []
     if _DERIVE_AVAILABLE:
         try:
+            # Determine device_initiated mode for derive():
+            # - If user forced a mode with --force-*-initiated, use that
+            # - Otherwise, auto-select (None)
+            if args.get("force_device_mode"):
+                device_initiated_arg = True
+            elif args.get("force_host_mode"):
+                device_initiated_arg = False
+            else:
+                device_initiated_arg = None
+
             p = _derive_params(
                 args["m"],
                 args["n"],
@@ -320,6 +339,7 @@ def _apply_model_defaults(args, world_size, dtype_bytes=2):
                 l2_size=DEFAULT_L2_SIZE_BYTES,
                 scheduling_factor=DEFAULT_SCHEDULING_FACTOR,
                 dtype_bytes=dtype_bytes,
+                device_initiated=device_initiated_arg,
             )
             for name in _MODEL_PARAMS:
                 if args.get(name) is None and name in p:
@@ -391,6 +411,8 @@ def _worker(args):
         "block_size_k": args["block_size_k"],
         "group_size_m": args["group_size_m"],
     }
+    if args["num_sms"] is not None:
+        config_kwargs["num_sms"] = args["num_sms"]
     if args["num_xcds"] is not None:
         config_kwargs["num_xcds"] = args["num_xcds"]
     config = FusedConfig(**config_kwargs)
@@ -403,20 +425,17 @@ def _worker(args):
     k_per_flag = args["k_per_flag"]
     num_k_block_groups = (num_k_blocks_local + k_per_flag - 1) // k_per_flag
 
-    # TODO why is this needed here?
-    # Auto-detect num_sms from device if not specified
-    num_sms = config.num_sms
-    if num_sms is None:
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        num_sms = props.multi_processor_count
+    # Calculate flag count for info message
+    # Note: num_sms is auto-detected by the kernel if not specified
+    total_gemm_tiles = num_m_tiles * num_tiles_n
+    num_flags = num_m_tiles * num_k_block_groups * (world_size - 1)
+    m_tiles_per_batch = args["m_tiles_per_batch"]
 
-    num_tiles_per_wave = min(num_m_tiles, num_sms // num_tiles_n)
-    num_waves = (num_m_tiles + num_tiles_per_wave - 1) // num_tiles_per_wave
-    num_flags = num_waves * num_k_block_groups * (world_size - 1)
     shmem.info(
         f"Copy Engine variant: M={M} N={N} K={K} K_local={K_local} "
         f"block=({config.block_size_m},{config.block_size_n},{config.block_size_k}) "
-        f"buffer={buffer_mb:.0f}MB flags={num_flags} ({num_waves} waves × {num_k_block_groups} k_block_groups × {world_size - 1} remote_ranks, k_per_flag={k_per_flag})"
+        f"buffer={buffer_mb:.0f}MB tiles={total_gemm_tiles} flags={num_flags} "
+        f"(k_per_flag={k_per_flag}, m_tiles_per_batch={m_tiles_per_batch})"
     )
 
     # ── Allocate tensors ─────────────────────────────────────────────────
