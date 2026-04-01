@@ -14,7 +14,7 @@ on:
 
 jobs:
   reset:
-    runs-on: [self-hosted, amdgpu]
+    runs-on: [self-hosted, mi3xx]
     steps:
       - name: Reset GPU bitmap
         run: |
