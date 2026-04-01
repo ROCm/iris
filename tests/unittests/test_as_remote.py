@@ -110,116 +110,116 @@ class TestAsRemoteHostGluon:
 
     def test_host_basic(self):
         """as_remote returns a tensor with matching shape/dtype/strides but different data_ptr."""
-        shmem = iris_gl.iris(1 << 20)
-        num_ranks = shmem.get_num_ranks()
-        cur_rank = shmem.get_rank()
+        ctx = iris_gl.iris(1 << 20)
+        num_ranks = ctx.get_num_ranks()
+        cur_rank = ctx.get_rank()
         if num_ranks < 2:
-            shmem.barrier()
-            del shmem
+            ctx.barrier()
+            del ctx
             gc.collect()
             pytest.skip("Need >= 2 ranks")
 
-        buf = shmem.zeros(128, dtype=torch.float32)
+        buf = ctx.zeros(128, dtype=torch.float32)
         target = (cur_rank + 1) % num_ranks
-        remote = shmem.as_remote(buf, target)
+        remote = ctx.as_remote(buf, target)
 
         assert remote.shape == buf.shape
         assert remote.dtype == buf.dtype
         assert remote.stride() == buf.stride()
         assert remote.data_ptr() != buf.data_ptr()
 
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         gc.collect()
 
     def test_host_pointer_math(self):
         """Offset from respective heap base must be identical."""
-        shmem = iris_gl.iris(1 << 20)
-        num_ranks = shmem.get_num_ranks()
-        cur_rank = shmem.get_rank()
+        ctx = iris_gl.iris(1 << 20)
+        num_ranks = ctx.get_num_ranks()
+        cur_rank = ctx.get_rank()
         if num_ranks < 2:
-            shmem.barrier()
-            del shmem
+            ctx.barrier()
+            del ctx
             gc.collect()
             pytest.skip("Need >= 2 ranks")
 
-        buf = shmem.zeros(64, dtype=torch.float32)
+        buf = ctx.zeros(64, dtype=torch.float32)
         target = (cur_rank + 1) % num_ranks
 
-        local_base = int(shmem.heap.heap_bases[cur_rank].item())
-        remote_base = int(shmem.heap.heap_bases[target].item())
+        local_base = int(ctx.heap.heap_bases[cur_rank].item())
+        remote_base = int(ctx.heap.heap_bases[target].item())
 
-        remote = shmem.as_remote(buf, target)
+        remote = ctx.as_remote(buf, target)
         assert remote.data_ptr() - remote_base == buf.data_ptr() - local_base
 
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         gc.collect()
 
     def test_host_self_rank(self):
         """as_remote(tensor, cur_rank) returns a tensor with the same data_ptr."""
-        shmem = iris_gl.iris(1 << 20)
-        cur_rank = shmem.get_rank()
+        ctx = iris_gl.iris(1 << 20)
+        cur_rank = ctx.get_rank()
 
-        buf = shmem.zeros(64, dtype=torch.float32)
-        remote = shmem.as_remote(buf, cur_rank)
+        buf = ctx.zeros(64, dtype=torch.float32)
+        remote = ctx.as_remote(buf, cur_rank)
         assert remote.data_ptr() == buf.data_ptr()
         assert remote.shape == buf.shape
 
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         gc.collect()
 
     def test_host_non_symmetric_raises(self):
         """as_remote on a non-symmetric tensor raises ValueError."""
-        shmem = iris_gl.iris(1 << 20)
+        ctx = iris_gl.iris(1 << 20)
         external = torch.zeros(64, dtype=torch.float32, device="cuda")
         with pytest.raises(ValueError, match="symmetric heap"):
-            shmem.as_remote(external, 0)
+            ctx.as_remote(external, 0)
 
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         gc.collect()
 
     def test_host_rank_out_of_range(self):
         """as_remote with invalid rank raises ValueError."""
-        shmem = iris_gl.iris(1 << 20)
-        buf = shmem.zeros(64, dtype=torch.float32)
+        ctx = iris_gl.iris(1 << 20)
+        buf = ctx.zeros(64, dtype=torch.float32)
         with pytest.raises(ValueError, match="out of range"):
-            shmem.as_remote(buf, shmem.get_num_ranks())
+            ctx.as_remote(buf, ctx.get_num_ranks())
         with pytest.raises(ValueError, match="out of range"):
-            shmem.as_remote(buf, -1)
+            ctx.as_remote(buf, -1)
 
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         gc.collect()
 
     def test_host_non_contiguous(self):
         """as_remote preserves strides of a non-contiguous (sliced) tensor."""
-        shmem = iris_gl.iris(1 << 20)
-        buf_2d = shmem.zeros(16, 16, dtype=torch.float32)
+        ctx = iris_gl.iris(1 << 20)
+        buf_2d = ctx.zeros(16, 16, dtype=torch.float32)
         sliced = buf_2d[::2, ::2]
         assert not sliced.is_contiguous()
 
-        remote = shmem.as_remote(sliced, shmem.get_rank())
+        remote = ctx.as_remote(sliced, ctx.get_rank())
         assert remote.shape == sliced.shape
         assert remote.stride() == sliced.stride()
 
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         gc.collect()
 
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
     def test_host_multi_dtype(self, dtype):
         """as_remote works across multiple dtypes."""
-        shmem = iris_gl.iris(1 << 20)
-        buf = shmem.zeros(64, dtype=dtype)
-        remote = shmem.as_remote(buf, shmem.get_rank())
+        ctx = iris_gl.iris(1 << 20)
+        buf = ctx.zeros(64, dtype=dtype)
+        remote = ctx.as_remote(buf, ctx.get_rank())
         assert remote.dtype == dtype
         assert remote.shape == buf.shape
 
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         gc.collect()
 
 
@@ -289,16 +289,16 @@ def as_remote_write_kernel(
 @pytest.mark.parametrize("BLOCK_SIZE", [16, 32])
 def test_device_as_remote_read(dtype, BLOCK_SIZE):
     """Rank reads from its partner using ctx.as_remote + gl.load."""
-    shmem = iris_gl.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    context_tensor = shmem.get_device_context()
-    source_rank = shmem.get_rank()
+    ctx = iris_gl.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    context_tensor = ctx.get_device_context()
+    source_rank = ctx.get_rank()
     partner = int((source_rank + num_ranks // 2) % num_ranks)
 
-    data = shmem.full((BLOCK_SIZE,), source_rank, dtype=dtype)
-    results = shmem.zeros_like(data)
+    data = ctx.full((BLOCK_SIZE,), source_rank, dtype=dtype)
+    results = ctx.zeros_like(data)
 
-    shmem.barrier()
+    ctx.barrier()
 
     as_remote_read_kernel[(1,)](
         iris_gl.IrisDeviceCtx,
@@ -310,7 +310,7 @@ def test_device_as_remote_read(dtype, BLOCK_SIZE):
         BLOCK_SIZE,
         num_warps=1,
     )
-    shmem.barrier()
+    ctx.barrier()
 
     expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda") * partner
 
@@ -322,8 +322,8 @@ def test_device_as_remote_read(dtype, BLOCK_SIZE):
         print("Actual:", results)
         raise
     finally:
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         gc.collect()
 
 
@@ -334,15 +334,15 @@ def test_device_as_remote_read(dtype, BLOCK_SIZE):
 @pytest.mark.parametrize("BLOCK_SIZE", [16, 32])
 def test_device_as_remote_write(dtype, BLOCK_SIZE):
     """Each rank writes 1s to all ranks using ctx.as_remote + gl.store."""
-    shmem = iris_gl.iris(1 << 20)
-    num_ranks = shmem.get_num_ranks()
-    context_tensor = shmem.get_device_context()
-    destination_rank = shmem.get_rank()
+    ctx = iris_gl.iris(1 << 20)
+    num_ranks = ctx.get_num_ranks()
+    context_tensor = ctx.get_device_context()
+    destination_rank = ctx.get_rank()
 
-    src = shmem.ones(BLOCK_SIZE, dtype=dtype)
-    results = shmem.zeros_like(src)
+    src = ctx.ones(BLOCK_SIZE, dtype=dtype)
+    results = ctx.zeros_like(src)
 
-    shmem.barrier()
+    ctx.barrier()
 
     as_remote_write_kernel[(1,)](
         iris_gl.IrisDeviceCtx,
@@ -354,7 +354,7 @@ def test_device_as_remote_write(dtype, BLOCK_SIZE):
         BLOCK_SIZE,
         num_warps=1,
     )
-    shmem.barrier()
+    ctx.barrier()
 
     expected = torch.ones(BLOCK_SIZE, dtype=dtype, device="cuda")
 
@@ -366,6 +366,6 @@ def test_device_as_remote_write(dtype, BLOCK_SIZE):
         print("Actual:", results)
         raise
     finally:
-        shmem.barrier()
-        del shmem
+        ctx.barrier()
+        del ctx
         gc.collect()
