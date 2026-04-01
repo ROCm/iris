@@ -456,7 +456,7 @@ def _run_benchmarks_worker(
 
                 counters = dict(state._counters)
                 counters["min_ms"] = min_ms
-                counters["skew_%"] = skew_pct
+                counters["skew_pct"] = skew_pct
 
                 all_results.append(
                     Result(
