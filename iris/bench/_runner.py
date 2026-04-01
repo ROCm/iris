@@ -432,8 +432,9 @@ def _run_benchmarks_worker(
 
                 # Cross-rank: gather every rank's median to compute
                 # max (true collective latency), min, and skew.
-                local_t = torch.tensor([local_median_ms], device="cuda")
-                gathered = [torch.zeros(1, device="cuda") for _ in range(world_size)]
+                gather_device = "cuda" if backend == "nccl" else "cpu"
+                local_t = torch.tensor([local_median_ms], device=gather_device)
+                gathered = [torch.zeros(1, device=gather_device) for _ in range(world_size)]
                 dist.all_gather(gathered, local_t)
                 rank_medians = [t.item() for t in gathered]
 
