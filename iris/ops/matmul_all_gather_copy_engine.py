@@ -115,46 +115,46 @@ def _fused_matmul_all_gather_copy_engine_kernel(
         global_offset = (rm + cur_rank * M_local)[:, None] * stride_cm + rn[None, :] * stride_cn
         mask = ((rm + cur_rank * M_local)[:, None] < M) & (rn[None, :] < N)
 
-        if USE_COPY_ENGINE:
-            # Store locally first (SDMA needs data in memory)
-            tl.store(C_gathered + global_offset, c, mask=mask, cache_modifier=".wt")
-            wait_cnt()
-            tl.debug_barrier()
+        # if USE_COPY_ENGINE:
+        # Store locally first (SDMA needs data in memory)
+        tl.store(C_gathered + global_offset, c, mask=mask, cache_modifier=".wt")
+        wait_cnt()
+        tl.debug_barrier()
 
-            # SDMA scatter to remote ranks
-            for remote_rank in range(world_size):
-                if remote_rank != cur_rank:
-                    iris.put(
-                        C_gathered + global_offset,  # from_ptr
-                        C_gathered + global_offset,  # to_ptr (same logical position)
-                        cur_rank,
-                        remote_rank,
-                        heap_bases,
-                        copy_engine_ctx,
-                        stride_tm=stride_cm,
-                        stride_tn=stride_cn,
-                        stride_fm=stride_cm,
-                        stride_fn=stride_cn,
-                        mask=mask,
-                        USE_COPY_ENGINE=True,
-                        IS_2D_COPY=True,
-                        from_base_ptr=C_gathered,
-                        to_base_ptr=C_gathered,
-                    )
-        else:
-            # Fallback: baseline scatter (for comparison)
-            for remote_rank in range(world_size):
-                if remote_rank == cur_rank:
-                    tl.store(C_gathered + global_offset, c, mask=mask)
-                else:
-                    iris.store(
-                        C_gathered + global_offset,
-                        c,
-                        cur_rank,
-                        remote_rank,
-                        heap_bases,
-                        mask=mask,
-                    )
+        # SDMA scatter to remote ranks
+        for remote_rank in range(world_size):
+            if remote_rank != cur_rank:
+                iris.put(
+                    C_gathered + global_offset,  # from_ptr
+                    C_gathered + global_offset,  # to_ptr (same logical position)
+                    cur_rank,
+                    remote_rank,
+                    heap_bases,
+                    copy_engine_ctx,
+                    stride_tm=stride_cm,
+                    stride_tn=stride_cn,
+                    stride_fm=stride_cm,
+                    stride_fn=stride_cn,
+                    mask=mask,
+                    USE_COPY_ENGINE=True,
+                    IS_2D_COPY=True,
+                    from_base_ptr=C_gathered,
+                    to_base_ptr=C_gathered,
+                )
+        # else:
+        #     # Fallback: baseline scatter (for comparison)
+        #     for remote_rank in range(world_size):
+        #         if remote_rank == cur_rank:
+        #             tl.store(C_gathered + global_offset, c, mask=mask)
+        #         else:
+        #             iris.store(
+        #                 C_gathered + global_offset,
+        #                 c,
+        #                 cur_rank,
+        #                 remote_rank,
+        #                 heap_bases,
+        #                 mask=mask,
+        #             )
 
     # ═══════════════════════════════════════════════════════════════════════
     # Synchronization: Signal completion to all ranks
@@ -200,12 +200,10 @@ def matmul_all_gather_copy_engine_preamble(
 
     M = M_local * world_size
 
-    # Allocate per-SM flags: num_sms * world_size
-    device = A.device
-    num_sms = config.num_sms
-    if num_sms is None:
-        props = torch.cuda.get_device_properties(device)
-        num_sms = props.multi_processor_count
+    # Calculate number of tiles
+    num_tiles_m = (M_local + config.block_size_m - 1) // config.block_size_m
+    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
+    num_tiles = num_tiles_m * num_tiles_n
 
     ws = FusedWorkspace(
         operation="matmul_all_gather_copy_engine",
@@ -215,8 +213,8 @@ def matmul_all_gather_copy_engine_preamble(
         prepared=True,
     )
 
-    # Allocate locks/flags for per-SM synchronization
-    ws.locks = shmem.zeros((num_sms * world_size,), dtype=torch.int32)
+    # Allocate per-tile flags
+    ws.locks = shmem.zeros((num_tiles,), dtype=torch.int32)
 
     return ws
 

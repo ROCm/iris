@@ -54,7 +54,7 @@ def parse_args():
         help="Output file",
     )
     parser.add_argument("--heap_size", type=int, default=1 << 34, help="Iris heap size")
-    parser.add_argument("--comm_sms", type=int, default=None, help="Number of SMs for operation (auto-detect if None)")
+    parser.add_argument("--sms", type=int, default=None, help="Number of SMs for operation (auto-detect if None)")
     parser.add_argument(
         "--benchmark_baseline",
         action="store_true",
@@ -103,8 +103,8 @@ def _worker(args: dict):
         "block_size_k": args["block_size_k"],
         "group_size_m": args["group_size_m"],
     }
-    if args["comm_sms"] is not None:
-        config_kwargs["num_sms"] = args["comm_sms"]
+    if args["sms"] is not None:
+        config_kwargs["num_sms"] = args["sms"]
     if args["num_xcds"] is not None:
         config_kwargs["num_xcds"] = args["num_xcds"]
 
