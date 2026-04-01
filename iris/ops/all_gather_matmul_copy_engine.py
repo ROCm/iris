@@ -853,7 +853,7 @@ def all_gather_matmul_copy_engine(
                             f"({num_m_tiles_in_batch} M-tiles × {num_k_blocks_in_group} K-blocks merged)"
                         )
 
-                batch_id += 1
+            batch_id += 1
 
         sdma_end_post_time = time.perf_counter()
 
