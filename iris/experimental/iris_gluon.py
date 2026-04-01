@@ -1425,6 +1425,7 @@ class IrisGluon:
             storage_bytes = (max_offset + 1) * elem_size
 
         from iris.tensor_utils import tensor_from_ptr
+
         flat = tensor_from_ptr(remote_ptr, storage_bytes, dtype=tensor.dtype, device=str(tensor.device))
         return torch.as_strided(flat, tensor.shape, tensor.stride())
 
