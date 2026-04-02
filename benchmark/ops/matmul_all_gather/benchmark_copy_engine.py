@@ -25,6 +25,42 @@ from iris.ops.matmul_all_gather_copy_engine import (
     matmul_all_gather_copy_engine_preamble,
 )
 
+# Try to import performance model
+_DERIVE_AVAILABLE = False
+try:
+    import sys as _sys
+
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    if _script_dir not in _sys.path:
+        _sys.path.insert(0, _script_dir)
+    from derive_params import (
+        derive as _derive_params,
+        DEFAULT_NUM_CUS,
+        DEFAULT_PEAK_TFLOPS_FP16,
+        DEFAULT_HBM_BW_GBPS,
+        DEFAULT_L2_SIZE_BYTES,
+        DEFAULT_SCHEDULING_FACTOR,
+    )
+
+    _DERIVE_AVAILABLE = True
+except Exception:
+    pass
+
+_MODEL_PARAMS = (
+    "block_size_m",
+    "block_size_n",
+    "block_size_k",
+    "group_size_m",
+    "num_warps",
+)
+
+_FALLBACK_DEFAULTS = {
+    "block_size_m": 256,
+    "block_size_n": 128,
+    "block_size_k": 64,
+    "group_size_m": 4,
+}
+
 torch.manual_seed(123)
 random.seed(123)
 
@@ -60,9 +96,9 @@ def parse_args():
         action="store_true",
         help="Also benchmark baseline (non-copy-engine) variant for comparison",
     )
-    parser.add_argument("--block_size_m", type=int, default=256, help="Block size for M dimension")
-    parser.add_argument("--block_size_n", type=int, default=64, help="Block size for N dimension")
-    parser.add_argument("--block_size_k", type=int, default=64, help="Block size for K dimension")
+    parser.add_argument("--block_size_m", type=int, default=None, help="Block size for M dimension (auto if None)")
+    parser.add_argument("--block_size_n", type=int, default=None, help="Block size for N dimension (auto if None)")
+    parser.add_argument("--block_size_k", type=int, default=None, help="Block size for K dimension (auto if None)")
     parser.add_argument("--group_size_m", type=int, default=1, help="Group size for M dimension tiling")
     parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto-detected if not set)")
 

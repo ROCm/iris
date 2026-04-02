@@ -20,6 +20,42 @@ from examples.common.utils import JSONWriter
 import iris
 from iris.ops import FusedConfig
 
+# Try to import performance model
+_DERIVE_AVAILABLE = False
+try:
+    import sys as _sys
+
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    if _script_dir not in _sys.path:
+        _sys.path.insert(0, _script_dir)
+    from derive_params import (
+        derive as _derive_params,
+        DEFAULT_NUM_CUS,
+        DEFAULT_PEAK_TFLOPS_FP16,
+        DEFAULT_HBM_BW_GBPS,
+        DEFAULT_L2_SIZE_BYTES,
+        DEFAULT_SCHEDULING_FACTOR,
+    )
+
+    _DERIVE_AVAILABLE = True
+except Exception:
+    pass
+
+_MODEL_PARAMS = (
+    "block_size_m",
+    "block_size_n",
+    "block_size_k",
+    "group_size_m",
+    "num_warps",
+)
+
+_FALLBACK_DEFAULTS = {
+    "block_size_m": 256,
+    "block_size_n": 128,
+    "block_size_k": 64,
+    "group_size_m": 4,
+}
+
 torch.manual_seed(123)
 random.seed(123)
 
@@ -55,12 +91,56 @@ def parse_args():
         action="store_true",
         help="Also benchmark PyTorch (matmul + all_gather_into_tensor) for comparison",
     )
-    parser.add_argument("--block_size_m", type=int, default=256, help="Block size for M dimension")
-    parser.add_argument("--block_size_n", type=int, default=64, help="Block size for N dimension")
-    parser.add_argument("--block_size_k", type=int, default=64, help="Block size for K dimension")
-    parser.add_argument("--group_size_m", type=int, default=1, help="Group size for M dimension tiling")
+    parser.add_argument("--block_size_m", type=int, default=None, help="Block size for M dimension (auto if None)")
+    parser.add_argument("--block_size_n", type=int, default=None, help="Block size for N dimension (auto if None)")
+    parser.add_argument("--block_size_k", type=int, default=None, help="Block size for K dimension (auto if None)")
+    parser.add_argument("--group_size_m", type=int, default=None, help="Group size for M dimension tiling (auto if None)")
+    parser.add_argument("--num_warps", type=int, default=None, help="Number of warps (auto if None)")
     parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto-detected if not set)")
     return vars(parser.parse_args())
+
+
+def _apply_model_defaults(args, world_size, dtype_bytes=2):
+    """Fill None-valued kernel parameters with model-derived predictions.
+
+    Returns a list of parameter names that were set by the model.
+    """
+    applied = []
+    if _DERIVE_AVAILABLE:
+        try:
+            # Note: args["m"] is M_local (rows per rank)
+            M_local = args["m"]
+            M = M_local * world_size  # Total M after gather
+            N = args["n"]
+            K = args["k"]
+
+            # Derive parameters from performance model
+            p = _derive_params(
+                M,
+                N,
+                K,
+                world_size=world_size,
+                link_bw=50.0,  # Default, could be profiled
+                num_cus=DEFAULT_NUM_CUS,
+                peak_tflops=DEFAULT_PEAK_TFLOPS_FP16,
+                hbm_bw_gbps=DEFAULT_HBM_BW_GBPS,
+                l2_size=DEFAULT_L2_SIZE_BYTES,
+                scheduling_factor=DEFAULT_SCHEDULING_FACTOR,
+                dtype_bytes=dtype_bytes,
+            )
+            for name in _MODEL_PARAMS:
+                if args.get(name) is None and name in p:
+                    args[name] = p[name]
+                    applied.append(name)
+        except Exception:
+            pass
+
+    # Apply fallback defaults for any remaining None values
+    for name, fallback in _FALLBACK_DEFAULTS.items():
+        if args.get(name) is None:
+            args[name] = fallback
+
+    return applied
 
 
 def _worker(args: dict):
@@ -83,6 +163,16 @@ def _worker(args: dict):
     else:
         print("Unknown datatype.")
         exit(1)
+
+    dtype_bytes = torch.tensor([], dtype=datatype).element_size()
+
+    # Apply model-derived defaults
+    model_applied = _apply_model_defaults(args, world_size, dtype_bytes)
+    if rank == 0 and model_applied:
+        shmem.info(f"Model-derived defaults: {', '.join(model_applied)}")
+    if rank == 0:
+        param_summary = " ".join(f"{k}={args[k]}" for k in _MODEL_PARAMS)
+        shmem.info(f"Kernel params: {param_summary}")
 
     M_local = args["m"]  # Local M dimension
     M = M_local * world_size  # Total M after gather
