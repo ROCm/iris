@@ -21,7 +21,6 @@ from examples.common.utils import JSONWriter
 import iris
 from iris.ops.matmul_all_gather_host_copy_engine import (
     matmul_all_gather_host_copy_engine,
-    matmul_all_gather_host_copy_engine_preamble,
 )
 from iris.ops import FusedConfig
 
@@ -310,7 +309,6 @@ def _apply_model_defaults(args, world_size, dtype_bytes=2):
     return applied
 
 
-
 def _worker(args: dict):
     """Worker function for PyTorch distributed execution."""
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -410,7 +408,6 @@ def _worker(args: dict):
     total_ms = 0.0
     num_experiments = 0
 
-
     def run_experiment():
         nonlocal total_ms, num_experiments
         shmem.barrier()
@@ -480,7 +477,6 @@ def _worker(args: dict):
         total_bytes = output_bytes * (world_size - 1)
         total_bytes_gb = total_bytes / (1024**3)
         bw_gbps = (total_bytes / (1024**3)) / (avg_ms * 1e-3) if avg_ms > 0 else 0
-
 
         shmem.info(
             f"Matmul-all-gather host copy engine (M_local={M_local}, M_total={M}, N={N}, K={K}, world_size={world_size}, dtype={args['datatype']}): "

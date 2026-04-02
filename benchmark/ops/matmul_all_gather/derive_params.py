@@ -106,6 +106,7 @@ def profile_link_bandwidth(world_size=DEFAULT_WORLD_SIZE):
 
 # ── Tile / block size heuristics (COPIED from all_gather_matmul/derive_params.py) ──
 
+
 def _choose_block_sizes(M_local, N, K):
     """Heuristic tile-size selection for MI300X MFMA."""
     bk = 64
@@ -131,6 +132,7 @@ def _choose_block_sizes(M_local, N, K):
 
 
 # ── Per-tile roofline model (COPIED from all_gather_matmul/derive_params.py) ──
+
 
 def _tile_roofline(bm, bn, bk, M_local, K, N, dtype_bytes, peak_tflops, hbm_bw_gbps, l2_size):
     """Compute achievable per-CU TFLOPS from tile arithmetic intensity.
@@ -162,6 +164,7 @@ def _tile_roofline(bm, bn, bk, M_local, K, N, dtype_bytes, peak_tflops, hbm_bw_g
 
 # ── matmul_all_gather specific models ──
 
+
 def _gemm_wg_time_us(bm, bn, bk, K, roofline_tflops, num_cus):
     """Estimate per-WG local GEMM execution time.
 
@@ -178,7 +181,7 @@ def _gemm_wg_time_us(bm, bn, bk, K, roofline_tflops, num_cus):
     occupancy_factor = 1.25 if bm * bn >= 256 * 256 else 1.10
 
     # Signaling overhead per output tile
-    signal_us = 2.5 # TODO use parameters
+    signal_us = 2.5  # TODO use parameters
     return ideal_us * occupancy_factor + signal_us
 
 
@@ -229,6 +232,7 @@ def _estimate_kernel_time(num_tiles, gemm_wg_us, scatter_wg_us, num_cus, schedul
 
 
 # ── Main derivation function ──
+
 
 def derive(
     M,
@@ -325,6 +329,7 @@ def derive(
 
 # ── CLI ──
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Derive parameters for matmul_all_gather_copy_engine",
@@ -352,15 +357,18 @@ def main():
 
     # Derive parameters
     params = derive(
-        args.m, args.n, args.k, args.world_size,
+        args.m,
+        args.n,
+        args.k,
+        args.world_size,
         link_bw=args.link_bw,
         dtype_bytes=dtype_bytes,
     )
 
     # Print results
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("MATMUL_ALL_GATHER_COPY_ENGINE: DERIVED PARAMETERS")
-    print("="*80)
+    print("=" * 80)
 
     print(f"\nProblem:")
     print(f"  M_local = {params['M_local']}, M_total = {params['M_total']}, N = {args.n}, K = {args.k}")
@@ -388,15 +396,15 @@ def main():
     print(f"  Sequential:        {params['sequential_ms']:.2f} ms (GEMM then scatter)")
     print(f"  Speedup:           {params['speedup']:.2f}x")
 
-    if params['scatter_wg_us'] > params['gemm_wg_us']:
-        ratio = params['scatter_wg_us'] / params['gemm_wg_us']
+    if params["scatter_wg_us"] > params["gemm_wg_us"]:
+        ratio = params["scatter_wg_us"] / params["gemm_wg_us"]
         print(f"\n  ⚠ Scatter dominates ({ratio:.1f}x slower than GEMM per tile)")
         print(f"    → Communication-bound workload")
     else:
         print(f"\n  ✓ GEMM dominates")
         print(f"    → Compute-bound workload")
 
-    print("="*80)
+    print("=" * 80)
 
     print("\nBenchmark command:")
     print(f"  torchrun --nproc_per_node={args.world_size} \\")

@@ -94,7 +94,9 @@ def parse_args():
     parser.add_argument("--block_size_m", type=int, default=None, help="Block size for M dimension (auto if None)")
     parser.add_argument("--block_size_n", type=int, default=None, help="Block size for N dimension (auto if None)")
     parser.add_argument("--block_size_k", type=int, default=None, help="Block size for K dimension (auto if None)")
-    parser.add_argument("--group_size_m", type=int, default=None, help="Group size for M dimension tiling (auto if None)")
+    parser.add_argument(
+        "--group_size_m", type=int, default=None, help="Group size for M dimension tiling (auto if None)"
+    )
     parser.add_argument("--num_warps", type=int, default=None, help="Number of warps (auto if None)")
     parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto-detected if not set)")
     return vars(parser.parse_args())

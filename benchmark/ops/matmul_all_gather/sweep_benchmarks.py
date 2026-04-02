@@ -80,11 +80,15 @@ def run_benchmark(
         "torchrun",
         f"--nproc_per_node={NUM_GPUS}",
         script,
-        "-m", str(m),
-        "-n", str(n),
-        "-k", str(k),
+        "-m",
+        str(m),
+        "-n",
+        str(n),
+        "-k",
+        str(k),
         "--benchmark",
-        "--output_file", output_file,
+        "--output_file",
+        output_file,
     ] + extra_args
 
     log(f"  Running {benchmark_name}: M={m}, N={n}, K={k}")
@@ -104,7 +108,7 @@ def run_benchmark(
             log(f"    Return code: {result.returncode}")
             # Show last few lines of output for debugging
             output = result.stdout + result.stderr
-            lines = output.strip().split('\n')
+            lines = output.strip().split("\n")
             log("    Last output lines:")
             for line in lines[-5:]:
                 log(f"      {line}")
@@ -116,7 +120,7 @@ def run_benchmark(
             log(f"    ✗ Failed: JSON output file not found: {json_path}")
             return None
 
-        with open(json_path, 'r') as f:
+        with open(json_path, "r") as f:
             data = json.load(f)
 
         log(f"    ✓ Success: Loaded JSON results")
@@ -158,12 +162,7 @@ def main():
     for idx, (m, n, k) in enumerate(permutations, 1):
         log(f"[{idx}/{len(permutations)}] Testing M={m}, N={n}, K={k}")
 
-        row = {
-            "M": m,
-            "N": n,
-            "K": k,
-            "benchmarks": {}
-        }
+        row = {"M": m, "N": n, "K": k, "benchmarks": {}}
 
         # Run each benchmark variant
         for bench_key, bench_config in BENCHMARKS.items():
@@ -187,7 +186,7 @@ def main():
 
     # Write JSON file
     log(f"Writing results to {output_file}...")
-    with open(output_file, 'w') as f:
+    with open(output_file, "w") as f:
         json.dump(results, f, indent=2)
 
     log(f"✓ Results saved to {output_file}\n")

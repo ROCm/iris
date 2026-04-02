@@ -18,7 +18,6 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-import iris
 
 from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view
 
@@ -32,6 +31,7 @@ try:
     Tile = anvil.Tile
 except (ImportError, AttributeError):
     Tile = None  # Will raise error later if needed
+
 
 @triton.jit()
 def wait_cnt():
