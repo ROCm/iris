@@ -125,15 +125,17 @@ def _fused_matmul_all_gather_host_copy_engine_kernel(
 
         # Store to local memory (SDMA will read from here when flag is set)
         tl.store(C_gathered + global_offset, c, mask=mask, cache_modifier=".wt")
-        wait_cnt()
-        tl.debug_barrier()
+        # TODO which one is better
+        # wait_cnt()
+        # tl.debug_barrier()
 
         # ═══════════════════════════════════════════════════════════════════
         # Signal Phase: Set flag to trigger pre-queued SDMA transfers
         # ═══════════════════════════════════════════════════════════════════
         # Set flag for this tile (host has pre-queued POLL packets waiting for this)
         # Use tile_id as the flag index
-        tl.store(flags + tile_id, 1, cache_modifier=".wt")
+        # tl.store(flags + tile_id, 1, cache_modifier=".wt")
+        tl.atomic_add(flags + tile_id, 1, scope="gpu", sem="release")
 
 
 def matmul_all_gather_host_copy_engine_preamble(
@@ -351,11 +353,13 @@ def matmul_all_gather_host_copy_engine(
 
     # Wait for SDMA to complete (all flags have been set, SDMA transfers should finish)
     # Use anvil quiet to wait for SDMA completion
+    # TODO part of async_op ?
     for remote_rank in range(world_size):
         if remote_rank != rank:
             anvil_lib.host_quiet(rank, remote_rank, 0)
 
     if not async_op:
+        torch.cuda.synchronize()
         shmem.barrier()
 
     return workspace
