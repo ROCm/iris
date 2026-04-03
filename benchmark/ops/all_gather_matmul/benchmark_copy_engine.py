@@ -68,10 +68,10 @@ _FALLBACK_DEFAULTS = {
     "block_size_m": 256,
     "block_size_n": 64,
     "block_size_k": 64,
-    "group_size_m": 4,             # M-grouping for L2 cache reuse
-    "k_per_flag": 4,               # Copy engine default (larger batches)
-    "m_tiles_per_batch": 8,        # Default batch size
-    "device_initiated": True,      # Fallback: device mode (derive() should set this)
+    "group_size_m": 4,  # M-grouping for L2 cache reuse
+    "k_per_flag": 4,  # Copy engine default (larger batches)
+    "m_tiles_per_batch": 8,  # Default batch size
+    "device_initiated": True,  # Fallback: device mode (derive() should set this)
     "num_warps": 4,
 }
 

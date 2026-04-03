@@ -81,9 +81,12 @@ def run_benchmark(
         "torchrun",
         f"--nproc_per_node={NUM_GPUS}",
         script,
-        "-m", str(m),
-        "-n", str(n),
-        "-k", str(k),
+        "-m",
+        str(m),
+        "-n",
+        str(n),
+        "-k",
+        str(k),
         "--benchmark",
     ] + extra_args
 
@@ -114,7 +117,7 @@ def run_benchmark(
             if result.returncode != 0:
                 log(f"    Return code: {result.returncode}")
                 # Show last few lines of output for debugging
-                lines = output.strip().split('\n')
+                lines = output.strip().split("\n")
                 log("    Last output lines:")
                 for line in lines[-5:]:
                     log(f"      {line}")
@@ -150,7 +153,9 @@ def main():
 
     # Prepare CSV header
     fieldnames = [
-        "M", "N", "K",
+        "M",
+        "N",
+        "K",
         "pytorch_ms",
         "hbm_buffer_ms",
         "copy_engine_host_ms",
@@ -192,7 +197,7 @@ def main():
 
     # Write CSV file
     log(f"Writing results to {output_file}...")
-    with open(output_file, 'w', newline='') as f:
+    with open(output_file, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in results:
