@@ -18,9 +18,12 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
+import iris
 
 from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view
 
+from iris.device_utils import read_realtime
+from iris.tracing.events import TraceEvent
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 
@@ -36,6 +39,52 @@ except (ImportError, AttributeError):
 @triton.jit()
 def wait_cnt():
     tl.inline_asm_elementwise("s_waitcnt vmcnt(0)", "=r", [], dtype=tl.int32, is_pure=False, pack=1)
+
+
+# Event IDs (must match iris.tracing.events.TraceEvent)
+_WG_GEMM = 15
+
+
+def _extract_wg_trace(shmem, grid_size, num_tiles, sdma_timestamps=None, **metadata):
+    """Extract per-tile trace data from DeviceTracing events.
+
+    For host-initiated SDMA:
+    - Each tile generates trace events (not per workgroup)
+    - SDMA timestamps captured by host via timestamp packets
+    """
+    import numpy as np
+
+    bufs = shmem.tracing.trace_buffers
+    n = min(shmem.tracing.trace_counter.item(), shmem.tracing.max_events)
+
+    event_ids = bufs["event_id"][:n].cpu().numpy()
+    pid_ms = bufs["pid_m"][:n].cpu().numpy()  # tile_id (not workgroup pid)
+    timestamps = bufs["timestamp"][:n].cpu().numpy().astype(np.int64)
+    end_ts = bufs["duration_cycles"][:n].cpu().numpy().astype(np.int64)
+    xcc_ids = bufs["xcc_id"][:n].cpu().numpy().astype(np.int32)
+
+    # Per-tile traces
+    starts = torch.zeros(num_tiles, dtype=torch.int64)
+    ends = torch.zeros(num_tiles, dtype=torch.int64)
+    waits = torch.zeros(num_tiles, dtype=torch.int64)  # Not used but needed for plot
+    xcds = torch.zeros(num_tiles, dtype=torch.int32)
+
+    for i in range(n):
+        eid = int(event_ids[i])
+        tile_id = int(pid_ms[i])
+
+        if eid == _WG_GEMM and tile_id < num_tiles:
+            starts[tile_id] = int(timestamps[i])
+            ends[tile_id] = int(end_ts[i])
+            xcds[tile_id] = int(xcc_ids[i])
+
+    result = {"start": starts, "end": ends, "wait": waits, "xcd": xcds, "grid_size": num_tiles, **metadata}
+
+    # Add SDMA timestamps if available (world_size x 2: start/end per rank)
+    if sdma_timestamps is not None:
+        result["sdma_timestamps"] = sdma_timestamps.cpu()
+
+    return result
 
 
 @triton.jit()
@@ -56,6 +105,7 @@ def _fused_matmul_all_gather_host_copy_engine_kernel(
     stride_cm,
     stride_cn,
     stride_bias,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -67,9 +117,11 @@ def _fused_matmul_all_gather_host_copy_engine_kernel(
     NUM_M_TILES: tl.constexpr,
     NUM_TILES_N: tl.constexpr,
     NUM_K_BLOCKS: tl.constexpr,
+    M_TILES_PER_BATCH: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
+    TRACE: tl.constexpr,
 ):
     """
     Fused GEMM + all-gather kernel using host-initiated SDMA with POLL packets.
@@ -77,13 +129,24 @@ def _fused_matmul_all_gather_host_copy_engine_kernel(
     Computes local GEMM tile, stores to local HBM, then sets flag to trigger
     pre-queued SDMA transfers.
     """
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size, tracing=TRACE)
+
     pid = tl.program_id(0)
 
     # Persistent loop over local tiles using scheduler
     start = pid
     total = NUM_M_TILES * NUM_TILES_N
     stride = NUM_SMS
+
     for tile_id in range(start, total, stride):
+        if TRACE:
+            _trace_handle = ctx.tracing.record_event_start(
+                event_id=TraceEvent().wg_gemm,
+                target_rank=cur_rank,
+                address=flags + tl.arange(0, 1),
+                pid_m=tile_id,
+                pid_n=0,
+            )
         # Wave-aware tile assignment (similar to hbm_buffer's group-based assignment)
         num_pid_in_group = GROUP_SIZE_M * NUM_TILES_N
         group_id = tile_id // num_pid_in_group
@@ -105,7 +168,6 @@ def _fused_matmul_all_gather_host_copy_engine_kernel(
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
 
         for k_block_idx in range(NUM_K_BLOCKS):
-
             # Load A from selected buffer
             rk = k_block_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
             rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
@@ -121,7 +183,6 @@ def _fused_matmul_all_gather_host_copy_engine_kernel(
                 acc = tl.dot(a, b, acc, allow_tf32=True)
             else:
                 acc += tl.dot(a, b, allow_tf32=False)
-
 
         # ==================================================================
         # Write output
@@ -149,10 +210,15 @@ def _fused_matmul_all_gather_host_copy_engine_kernel(
         # ═══════════════════════════════════════════════════════════════════
         # Signal Phase: Set flag to trigger pre-queued SDMA transfers
         # ═══════════════════════════════════════════════════════════════════
-        # Set flag for this tile (host has pre-queued POLL packets waiting for this)
-        # Use tile_id as the flag index
-        # tl.store(flags + tile_id, 1, cache_modifier=".wt")
-        tl.atomic_add(flags + tile_id, 1, scope="gpu", sem="release")
+        # Calculate which batch this M-tile belongs to
+        batch_id = pid_m // M_TILES_PER_BATCH
+
+        # Increment flag for this batch (one flag per batch, batching M_TILES_PER_BATCH M-rows × all N-tiles)
+        # When flag reaches M_TILES_PER_BATCH * NUM_TILES_N, all tiles in this batch are complete
+        tl.atomic_add(flags + batch_id, 1, scope="gpu", sem="release")
+
+        if TRACE:
+            ctx.tracing.record_event_end(_trace_handle)
 
 
 def matmul_all_gather_host_copy_engine_preamble(
@@ -160,8 +226,10 @@ def matmul_all_gather_host_copy_engine_preamble(
     A: torch.Tensor,
     B: torch.Tensor,
     config: Optional[FusedConfig] = None,
+    m_tiles_per_batch: int = 1,
+    trace: bool = False,
 ) -> FusedWorkspace:
-    """Allocate workspace for matmul_all_gather_host_copy_engine including per-tile flags."""
+    """Allocate workspace for matmul_all_gather_host_copy_engine including per-batch flags."""
     if config is None:
         config = FusedConfig()
 
@@ -178,6 +246,9 @@ def matmul_all_gather_host_copy_engine_preamble(
     num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
     num_tiles = num_tiles_m * num_tiles_n
 
+    # Calculate number of batches
+    num_batches = (num_tiles_m + m_tiles_per_batch - 1) // m_tiles_per_batch
+
     ws = FusedWorkspace(
         operation="matmul_all_gather_host_copy_engine",
         shape=(M, N, K),
@@ -186,8 +257,8 @@ def matmul_all_gather_host_copy_engine_preamble(
         prepared=True,
     )
 
-    # Allocate per-tile flags
-    ws.locks = shmem.zeros((num_tiles,), dtype=torch.int32)
+    # Allocate per-batch flags (one flag per batch, each batch contains m_tiles_per_batch M-rows)
+    ws.locks = shmem.zeros((num_batches,), dtype=torch.int32)
 
     return ws
 
@@ -201,6 +272,9 @@ def matmul_all_gather_host_copy_engine(
     async_op: bool = False,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
+    m_tiles_per_batch: int = 1,
+    trace: bool = False,
+    verbose: bool = False,
 ) -> FusedWorkspace:
     """
     Fused matrix multiplication and all-gather using host-initiated SDMA with POLL packets.
@@ -240,7 +314,7 @@ def matmul_all_gather_host_copy_engine(
 
     # Allocate workspace if not provided
     if workspace is None:
-        workspace = matmul_all_gather_host_copy_engine_preamble(shmem, A, B, config)
+        workspace = matmul_all_gather_host_copy_engine_preamble(shmem, A, B, config, m_tiles_per_batch, trace)
 
     stride_am, stride_ak = A.stride()
     stride_bk, stride_bn = B.stride()
@@ -265,10 +339,25 @@ def matmul_all_gather_host_copy_engine(
     even_k = K % config.block_size_k == 0
 
     # Calculate number of tiles
-    num_k_blocks = (K + config.block_size_k -1) // config.block_size_k
+    num_k_blocks = (K + config.block_size_k - 1) // config.block_size_k
     num_tiles_m = (M_local + config.block_size_m - 1) // config.block_size_m
     num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
     num_tiles = num_tiles_m * num_tiles_n
+
+    # Setup tracing if requested
+    if trace:
+        # Each tile generates 1 event (start + end)
+        max_trace_events = num_tiles * 2
+        if not shmem.tracing.enabled:
+            shmem.tracing.enable(max_events=max_trace_events)
+        else:
+            shmem.tracing.reset()
+
+        # Allocate timestamp buffers if tracing (2 timestamps per rank: start and end)
+        if trace:
+            sdma_timestamps = shmem.zeros((world_size, 2), dtype=torch.int64)
+
+    context_tensor = shmem.get_device_context()
 
     # Reset flags before kernel launch
     workspace.locks.zero_()
@@ -296,6 +385,7 @@ def matmul_all_gather_host_copy_engine(
         stride_cm,
         stride_cn,
         stride_bias,
+        context_tensor,
         rank,
         world_size,
         config.block_size_m,
@@ -307,78 +397,115 @@ def matmul_all_gather_host_copy_engine(
         num_tiles_m,
         num_tiles_n,
         num_k_blocks,
+        m_tiles_per_batch,
         use_bias,
         even_k,
         config.allow_tf32,
+        trace,
     )
 
     # ═══════════════════════════════════════════════════════════════════════
     # Host Phase: Enqueue SDMA POLL+COPY packets for all tiles
     # (While kernel is running in parallel on device)
     # ═══════════════════════════════════════════════════════════════════════
+    import time
+
     element_size = output_tensor.element_size()
     anvil_lib = shmem.copy_engines
 
-    # Queue POLL+COPY packets for each tile to each remote rank
-    # NOTE: Must use same wave-aware assignment as kernel!
-    for tile_id in range(num_tiles):
-        # Wave-aware tile assignment (must match kernel logic)
-        num_pid_in_group = config.group_size_m * num_tiles_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * config.group_size_m
-        first_pid_m = min(first_pid_m, num_tiles_m - 1)
-        group_sz = min(num_tiles_m - first_pid_m, config.group_size_m)
-        tile_m = first_pid_m + ((tile_id % num_pid_in_group) % group_sz)
-        tile_n = (tile_id % num_pid_in_group) // group_sz
-        tile_m = min(tile_m, num_tiles_m - 1)
+    # Calculate number of batches
+    num_batches = (num_tiles_m + m_tiles_per_batch - 1) // m_tiles_per_batch
 
-        # Calculate tile bounds
-        m_start = tile_m * config.block_size_m
-        m_end = min(m_start + config.block_size_m, M_local)
-        n_start = tile_n * config.block_size_n
-        n_end = min(n_start + config.block_size_n, N)
+    if verbose and rank == 0:
+        shmem.info(
+            f"[Rank {rank}] Starting SDMA loop (batched M-tile transfers)... "
+            f"num_m_tiles={num_tiles_m}, num_tiles_n={num_tiles_n}, m_tiles_per_batch={m_tiles_per_batch}"
+        )
+        shmem.info(f"[Rank {rank}] Will transfer in {num_batches} batches")
 
-        tile_height = m_end - m_start
-        tile_width = n_end - n_start
+    sdma_start_time = time.perf_counter()
+    tile_transfer_count = 0
 
-        # Create Tile object for 2D sub-window copy
+    # Submit start timestamp for each remote rank if tracing
+    if trace:
+        for remote_rank in range(world_size):
+            if remote_rank != rank:
+                timestamp_ptr = sdma_timestamps.data_ptr() + remote_rank * 2 * sdma_timestamps.element_size()
+                anvil_lib.host_timestamp(rank, remote_rank, 0, timestamp_ptr)
+
+    # Queue POLL+COPY packets for each batch (batching M_TILES_PER_BATCH M-rows × all N-tiles together)
+    for batch_id in range(num_batches):
+        # Calculate M-tile range for this batch
+        m_tile_start = batch_id * m_tiles_per_batch
+        m_tile_end = min(m_tile_start + m_tiles_per_batch, num_tiles_m)
+        num_m_tiles_in_batch = m_tile_end - m_tile_start
+
+        # Calculate batch bounds in rows
+        m_start = m_tile_start * config.block_size_m
+        m_end = min(m_tile_end * config.block_size_m, M_local)
+        batch_height = m_end - m_start
+
+        # Calculate total width (all N-tiles)
+        batch_width = N  # Full N dimension
+
+        # Create Tile object for 2D sub-window copy of entire batch
         tile_obj = Tile()
         tile_obj.pid_m = 0  # We'll handle offset in data pointer
         tile_obj.pid_n = 0
-        tile_obj.block_m = tile_height
-        tile_obj.block_n = tile_width
+        tile_obj.block_m = batch_height
+        tile_obj.block_n = batch_width
         tile_obj.elem_size = element_size
         tile_obj.src_stride = stride_cm * element_size  # Row stride in bytes
 
-        # Source data pointer (output tensor at this rank's tile location)
-        src_offset = (m_start + rank * M_local) * stride_cm + n_start * stride_cn
+        # Source data pointer (output tensor at this rank's batch location, full N width)
+        src_offset = (m_start + rank * M_local) * stride_cm
         tile_obj.data = output_tensor.data_ptr() + src_offset * element_size
 
         # For each remote rank, queue POLL+COPY
         for remote_rank in range(world_size):
             if remote_rank != rank:
                 # Destination is the same logical position on remote rank
-                dst_offset = (m_start + rank * M_local) * stride_cm + n_start * stride_cn
+                dst_offset = (m_start + rank * M_local) * stride_cm
                 dst_ptr_local = output_tensor.data_ptr() + dst_offset * element_size
 
                 # Translate local pointer to remote rank's address space
                 dst_ptr_remote = shmem.translate(dst_ptr_local, rank, remote_rank)
                 dst_stride = stride_cm * element_size  # Row stride in bytes
 
-                # Get flag pointer for this tile
-                flag_ptr = workspace.locks.data_ptr() + tile_id * workspace.locks.element_size()
+                # Get flag pointer for this batch
+                flag_ptr = workspace.locks.data_ptr() + batch_id * workspace.locks.element_size()
 
-                # Use anvil host API to queue POLL+SUB_WINDOW_COPY for 2D tile
+                # Wait for flag to reach num_m_tiles_in_batch * num_tiles_n (all tiles in this batch complete)
+                expected_flag_value = num_m_tiles_in_batch * num_tiles_n
+
+                # Use anvil host API to queue POLL+SUB_WINDOW_COPY for entire batch
                 anvil_lib.host_wait_flag_then_put_tile(
                     rank,
                     remote_rank,
                     0,  # channel_idx
                     flag_ptr,
-                    1,  # expected_value
+                    expected_flag_value,
                     tile_obj,
                     dst_ptr_remote,
                     dst_stride,
                 )
+                tile_transfer_count += 1
+
+                if verbose and batch_id == 0 and remote_rank == (rank + 1) % world_size:
+                    shmem.info(
+                        f"[Rank {rank}→{remote_rank}] Queued batch={batch_id} "
+                        f"({num_m_tiles_in_batch} M-tiles × {num_tiles_n} N-tiles, "
+                        f"{batch_height}×{batch_width} elements)"
+                    )
+
+    sdma_end_post_time = time.perf_counter()
+
+    # Submit end timestamp for each remote rank if tracing
+    if trace:
+        for remote_rank in range(world_size):
+            if remote_rank != rank:
+                timestamp_ptr = sdma_timestamps.data_ptr() + (remote_rank * 2 + 1) * sdma_timestamps.element_size()
+                anvil_lib.host_timestamp(rank, remote_rank, 0, timestamp_ptr)
 
     # Wait for SDMA to complete (all flags have been set, SDMA transfers should finish)
     # Use anvil quiet to wait for SDMA completion
@@ -387,8 +514,26 @@ def matmul_all_gather_host_copy_engine(
         if remote_rank != rank:
             anvil_lib.host_quiet(rank, remote_rank, 0)
 
+    sdma_end_time = time.perf_counter()
+
+    if verbose:
+        post_ms = (sdma_end_post_time - sdma_start_time) * 1000.0
+        quiet_ms = (sdma_end_time - sdma_end_post_time) * 1000.0
+        total_ms = (sdma_end_time - sdma_start_time) * 1000.0
+        shmem.info(
+            f"[Rank {rank}] SDMA complete. "
+            f"Post: {post_ms:.2f}ms, Quiet: {quiet_ms:.2f}ms, Total: {total_ms:.2f}ms, "
+            f"transfers={tile_transfer_count}"
+        )
+
     if not async_op:
         torch.cuda.synchronize()
         shmem.barrier()
+
+    # Extract trace data if tracing was enabled
+    if trace:
+        torch.cuda.synchronize()
+        # sdma_ts = workspace.sdma_timestamps if hasattr(workspace, 'sdma_timestamps') else None
+        workspace.trace_data = _extract_wg_trace(shmem, num_sms, num_tiles, sdma_timestamps=sdma_timestamps)
 
     return workspace

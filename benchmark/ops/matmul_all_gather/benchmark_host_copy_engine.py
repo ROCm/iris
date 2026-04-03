@@ -15,6 +15,7 @@ import torch
 import torch.distributed as dist
 import random
 import argparse
+import numpy as np
 
 from examples.common.utils import JSONWriter
 
@@ -51,6 +52,7 @@ _MODEL_PARAMS = (
     "block_size_k",
     "group_size_m",
     "num_warps",
+    "m_tiles_per_batch",
 )
 
 _FALLBACK_DEFAULTS = {
@@ -87,34 +89,49 @@ def _plot_trace(trace_data, output_path, rank, M, N, K):
     xcds = trace_data["xcd"].numpy().astype(np.int32)
     grid_size = trace_data["grid_size"]
 
-    # Check for SDMA WG traces
-    has_sdma = "sdma_start" in trace_data and trace_data.get("num_sdma", 0) > 0
-    if has_sdma:
-        sdma_starts = trace_data["sdma_start"].numpy().astype(np.int64)
-        sdma_ends = trace_data["sdma_end"].numpy().astype(np.int64)
-        sdma_xcds = trace_data["sdma_xcd"].numpy().astype(np.int32)
-        num_sdma = trace_data["num_sdma"]
+    # Check for SDMA timestamp traces (host-initiated SDMA)
+    has_sdma_timestamps = "sdma_timestamps" in trace_data
+    if has_sdma_timestamps:
+        # sdma_timestamps: (world_size, 2) where [:,0] = start, [:,1] = end
+        sdma_ts = trace_data["sdma_timestamps"].numpy().astype(np.int64)
+        num_sdma = sdma_ts.shape[0]  # world_size (includes current rank with zeros)
+        # Filter out invalid timestamps (zeros indicate no transfer to self)
+        valid_mask = (sdma_ts[:, 0] > 0) & (sdma_ts[:, 1] > 0)
+        sdma_starts = sdma_ts[valid_mask, 0]
+        sdma_ends = sdma_ts[valid_mask, 1]
+        sdma_rank_ids = np.arange(num_sdma)[valid_mask]
+        num_sdma = len(sdma_starts)
     else:
-        num_sdma = 0
+        # Check for old-style SDMA WG traces (device-initiated)
+        has_sdma = "sdma_start" in trace_data and trace_data.get("num_sdma", 0) > 0
+        if has_sdma:
+            sdma_starts = trace_data["sdma_start"].numpy().astype(np.int64)
+            sdma_ends = trace_data["sdma_end"].numpy().astype(np.int64)
+            sdma_xcds = trace_data["sdma_xcd"].numpy().astype(np.int32)
+            num_sdma = trace_data["num_sdma"]
+            sdma_rank_ids = None
+        else:
+            num_sdma = 0
+            sdma_rank_ids = None
 
     # Convert to microseconds relative to earliest start
     t_min = starts.min()
-    if has_sdma and len(sdma_starts) > 0:
+    if num_sdma > 0 and len(sdma_starts) > 0:
         t_min = min(t_min, sdma_starts.min())
 
     starts_us = (starts - t_min) / TICKS_PER_US
     ends_us = (ends - t_min) / TICKS_PER_US
     waits_us = waits / TICKS_PER_US
 
-    if has_sdma:
+    if num_sdma > 0:
         sdma_starts_us = (sdma_starts - t_min) / TICKS_PER_US
         sdma_ends_us = (sdma_ends - t_min) / TICKS_PER_US
 
     # Sort GEMM by start time
     order = np.argsort(starts_us)
 
-    # Figure sizing - add SDMA rows at top
-    total_rows = grid_size + num_sdma
+    # Figure sizing (SDMA bars disabled due to clock domain mismatch)
+    total_rows = grid_size  # + num_sdma (disabled)
     row_h = 0.012
     fig_h = max(12, total_rows * row_h + 2)
     fig, ax = plt.subplots(figsize=(18, fig_h))
@@ -125,14 +142,19 @@ def _plot_trace(trace_data, output_path, rank, M, N, K):
 
     y_offset = 0
 
-    # Plot SDMA WGs at top (if any)
-    if has_sdma:
-        for sdma_idx in range(num_sdma):
-            s = sdma_starts_us[sdma_idx]
-            e = sdma_ends_us[sdma_idx]
-            dur = e - s
-            ax.barh(y_offset + sdma_idx, dur, left=s, height=0.8, color=sdma_color, edgecolor="none", linewidth=0)
-        y_offset = num_sdma
+    # Skip plotting SDMA bars (clock domain mismatch with GPU timestamps)
+    # But we'll still show SDMA stats in the summary
+    # if num_sdma > 0:
+    #     for sdma_idx in range(num_sdma):
+    #         s = sdma_starts_us[sdma_idx]
+    #         e = sdma_ends_us[sdma_idx]
+    #         dur = e - s
+    #         ax.barh(y_offset + sdma_idx, dur, left=s, height=0.8, color=sdma_color, edgecolor="none", linewidth=0)
+    #         # Add rank label if available (use start position for label)
+    #         if sdma_rank_ids is not None:
+    #             label_text = f"R{sdma_rank_ids[sdma_idx]}"
+    #             ax.text(s - 5, y_offset + sdma_idx, label_text, ha='right', va='center', fontsize=7)
+    #     y_offset = num_sdma
 
     # Plot GEMM WGs
     for y_idx, wg_idx in enumerate(order):
@@ -155,27 +177,28 @@ def _plot_trace(trace_data, output_path, rank, M, N, K):
             xcd_cmap[x] = cmap(i)
 
     x_max = ends_us.max() * 1.02
-    if has_sdma:
-        x_max = max(x_max, sdma_ends_us.max() * 1.02)
+    # Don't include SDMA in x_max (clock domain mismatch)
+    # if num_sdma > 0:
+    #     x_max = max(x_max, sdma_ends_us.max() * 1.02)
 
     for y_idx, wg_idx in enumerate(order):
         xcd_id = xcds[wg_idx]
         if xcd_id in xcd_cmap:
             ax.plot(x_max, y_offset + y_idx, marker="s", markersize=1.5, color=xcd_cmap[xcd_id], clip_on=False)
 
-    if has_sdma:
+    # Only plot XCD markers for old-style SDMA WG traces (not host timestamps)
+    if num_sdma > 0 and sdma_rank_ids is None and "sdma_xcds" in locals():
         for sdma_idx in range(num_sdma):
             xcd_id = sdma_xcds[sdma_idx]
             if xcd_id in xcd_cmap:
                 ax.plot(x_max, sdma_idx, marker="s", markersize=1.5, color=xcd_cmap[xcd_id], clip_on=False)
 
     ax.set_xlabel("Time (us)", fontsize=12)
-    ax.set_ylabel("Workgroup (SDMA WGs at top, then GEMM sorted by start)", fontsize=12)
-    title = f"Rank {rank}  |  Copy Engine All-Gather GEMM Trace  |  M={M} N={N} K={K}  |  {grid_size} GEMM"
-    if has_sdma:
-        title += f" + {num_sdma} SDMA WGs"
-    else:
-        title += " workgroups"
+    ylabel = "Tile ID (sorted by start)" if has_sdma_timestamps else "Workgroup (sorted by start)"
+    ax.set_ylabel(ylabel, fontsize=12)
+
+    title = f"Rank {rank}  |  Host Copy Engine Matmul+AG Trace  |  M={M} N={N} K={K}  |  {grid_size} GEMM tiles"
+    # Note: SDMA bars not shown due to clock domain mismatch, but stats included below
     ax.set_title(title, fontsize=13)
     ax.set_ylim(-1, total_rows + 1)
     ax.set_xlim(0, x_max)
@@ -186,8 +209,11 @@ def _plot_trace(trace_data, output_path, rank, M, N, K):
         Line2D([0], [0], color=wait_color, lw=6, label="GEMM: waiting on remote data"),
         Line2D([0], [0], color=compute_color, lw=6, label="GEMM: compute"),
     ]
-    if has_sdma:
-        legend_elements.append(Line2D([0], [0], color=sdma_color, lw=6, label="SDMA: posting transfers"))
+    # Add SDMA to legend (stats shown below) even though bars not plotted
+    if has_sdma_timestamps or num_sdma > 0:
+        legend_elements.append(
+            Line2D([0], [0], color=sdma_color, lw=6, label="SDMA: see timing stats below", linestyle="--")
+        )
     ax.legend(handles=legend_elements, loc="upper right", fontsize=10)
 
     # Summary stats
@@ -195,10 +221,11 @@ def _plot_trace(trace_data, output_path, rank, M, N, K):
     gemm_wait = waits_us
     gemm_compute = gemm_dur - gemm_wait
 
-    # Wall time is max(GEMM end, SDMA end) - min(GEMM start, SDMA start)
+    # Wall time (GEMM only, SDMA not included due to clock domain mismatch)
     wall_time_us = ends_us.max()
-    if has_sdma and len(sdma_ends_us) > 0:
-        wall_time_us = max(wall_time_us, sdma_ends_us.max())
+    # Don't include SDMA in wall time calculation due to clock mismatch
+    # if num_sdma > 0 and len(sdma_ends_us) > 0:
+    #     wall_time_us = max(wall_time_us, sdma_ends_us.max())
 
     stats_lines = [
         f"GEMM total: {gemm_dur.mean():.1f} us avg  ({gemm_dur.min():.1f}-{gemm_dur.max():.1f})",
@@ -207,9 +234,10 @@ def _plot_trace(trace_data, output_path, rank, M, N, K):
         f"  wait%: {100 * gemm_wait.sum() / gemm_dur.sum():.1f}%",
     ]
 
-    if has_sdma and len(sdma_starts_us) > 0:
+    if num_sdma > 0 and len(sdma_starts_us) > 0:
         sdma_dur = sdma_ends_us - sdma_starts_us
-        stats_lines.append(f"SDMA: {sdma_dur.mean():.1f} us avg  ({sdma_dur.min():.1f}-{sdma_dur.max():.1f})")
+        label = "SDMA (per-rank)" if has_sdma_timestamps else "SDMA"
+        stats_lines.append(f"{label}: {sdma_dur.mean():.1f} us avg  ({sdma_dur.min():.1f}-{sdma_dur.max():.1f})")
 
     stats_lines.append(f"Wall time: {wall_time_us:.1f} us")
     stats_text = "\n".join(stats_lines)
@@ -241,6 +269,7 @@ def parse_args():
     parser.add_argument("-k", type=int, default=131072, help="Common dimension (K)")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
     parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking mode")
+    parser.add_argument("--trace", action="store_true", help="Enable trace mode (generates Gantt chart)")
     parser.add_argument(
         "--datatype",
         type=str,
@@ -255,6 +284,10 @@ def parse_args():
     parser.add_argument("--block_size_k", type=int, default=None, help="Block size K (model-derived if omitted)")
     parser.add_argument("--group_size_m", type=int, default=None, help="Group size M (model-derived if omitted)")
     parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto if None)")
+    parser.add_argument("--m_tiles_per_batch", type=int, default=1, help="Number of M-tiles to batch together for SDMA")
+    parser.add_argument(
+        "--trace_output", type=str, default="trace_host_copy_engine.png", help="Output file for trace plot"
+    )
     parser.add_argument(
         "--output_file",
         type=str,
@@ -279,7 +312,7 @@ def _apply_model_defaults(args, world_size, dtype_bytes=2):
             # M_total = M_local * world_size
 
             p = _derive_params(
-                args["m"], # M_local
+                args["m"],  # M_local
                 args["n"],
                 args["k"],
                 world_size,
@@ -360,6 +393,7 @@ def _worker(args: dict):
     json_writer.add_field("group_size_m", config.group_size_m)
     json_writer.add_field("num_sms", config.num_sms)
     json_writer.add_field("num_xcds", config.num_xcds)
+    json_writer.add_field("m_tiles_per_batch", args["m_tiles_per_batch"])
 
     # Create input and output tensors
     # A_local is M_local x K, output is M x N (gathered)
@@ -414,6 +448,7 @@ def _worker(args: dict):
                 A_local,
                 B,
                 config=config,
+                m_tiles_per_batch=args["m_tiles_per_batch"],
                 async_op=False,
                 workspace=workspace,
             )
@@ -429,7 +464,19 @@ def _worker(args: dict):
         shmem.info("Validating...")
         C.zero_()
         shmem.barrier()
-        run_experiment()
+
+        # Run validation with verbose output to show SDMA timing
+        matmul_all_gather_host_copy_engine(
+            shmem,
+            C,
+            A_local,
+            B,
+            config=config,
+            m_tiles_per_batch=args["m_tiles_per_batch"],
+            async_op=False,
+            workspace=workspace,
+            verbose=True,
+        )
         torch.cuda.synchronize()
         shmem.barrier()
 
@@ -485,6 +532,56 @@ def _worker(args: dict):
         json_writer.add_field("total_bytes", total_bytes)
         json_writer.add_field("total_bytes_gb", total_bytes_gb)
 
+        shmem.barrier()
+
+    # ── Trace ────────────────────────────────────────────────────────────
+    if args["trace"]:
+        # Warmup: compile the TRACE=True kernel variant before the real run
+        shmem.info("Trace warmup (compiling traced kernel variant)...")
+        C.zero_()
+        workspace.locks.zero_()
+        shmem.barrier()
+        matmul_all_gather_host_copy_engine(
+            shmem,
+            C,
+            A_local,
+            B,
+            config=config,
+            m_tiles_per_batch=args["m_tiles_per_batch"],
+            async_op=False,
+            workspace=workspace,
+            trace=True,
+        )
+        torch.cuda.synchronize()
+        shmem.barrier()
+
+        # Actual traced run (post-compilation, clean state)
+        shmem.info("Running single traced iteration...")
+        C.zero_()
+        workspace.locks.zero_()
+        shmem.barrier()
+        matmul_all_gather_host_copy_engine(
+            shmem,
+            C,
+            A_local,
+            B,
+            config=config,
+            m_tiles_per_batch=args["m_tiles_per_batch"],
+            async_op=False,
+            workspace=workspace,
+            trace=True,
+        )
+        torch.cuda.synchronize()
+        shmem.barrier()
+
+        if rank == 0 and hasattr(workspace, "trace_data"):
+            trace_out = args.get("trace_output", "trace_gantt.png")
+            try:
+                _plot_trace(workspace.trace_data, trace_out, rank, M, N, K)
+            except ImportError:
+                print("  (matplotlib not available -- skipping trace plot)")
+            except Exception as e:
+                print(f"  (Trace plot failed: {e})")
         shmem.barrier()
 
     if rank == 0:

@@ -265,6 +265,10 @@ def derive(
 
     # 1. Tile sizes
     bm, bn, bk, nw = _choose_block_sizes(M_local, N, K)
+    # TODO overwrite for testing
+    # bm = bm // 2
+    # bn = bn // 2
+    # if xgmi bound set to 1
     gm = 4  # M-dimension grouping for L2 cache reuse (matches all_gather_matmul)
 
     # 2. Per-tile roofline
@@ -276,6 +280,21 @@ def derive(
     num_m_tiles = M_local // bm
     num_n_tiles = (N + bn - 1) // bn
     total_tiles = num_m_tiles * num_n_tiles
+
+    # M-tiles fully computer per wave of num_cus
+    tiles_per_group = gm * num_n_tiles
+    groups_completing_per_wave = num_cus // tiles_per_group
+    m_tiles_per_batch = groups_completing_per_wave
+    print(f"block: {bm}x{bn}x{bk}")
+    print(f"m_tiles_per_batch {m_tiles_per_batch:.2f}")
+
+    # Calculate transfer time per group
+    # TODO add latency and signal overhead
+    bytes_per_group = tiles_per_group * bm * bn * dtype_bytes  # 256 * 128 * 256 * 2 = 16777216
+    transfer_time_per_group_us = bytes_per_group / (link_bw * 1e3)
+    print(f"transfer_time_per_group_us {transfer_time_per_group_us:.2f}")
+    transfer_time_per_wave_us = transfer_time_per_group_us * groups_completing_per_wave
+    print(f"transfer_time_per_wave_us {transfer_time_per_wave_us:.2f}")
 
     # Per-WG times
     gemm_wg_us_val = _gemm_wg_time_us(bm, bn, bk, K, roofline_tflops, num_cus)
