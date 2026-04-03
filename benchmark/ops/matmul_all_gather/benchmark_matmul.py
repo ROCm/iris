@@ -3,11 +3,10 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Benchmark for iris.ops matmul_all_gather_host_copy_engine fused operation.
+Benchmark for iris.ops matmul operation.
 
-This benchmark showcases the host-initiated SDMA variant where the host pre-queues
-POLL+COPY packets and the device kernel just stores tiles and sets flags to trigger
-the pre-queued SDMA transfers.
+This benchmark showcases the GEMM  operation where each rank
+computes a local matmul.
 """
 
 import os
@@ -19,12 +18,13 @@ import argparse
 from examples.common.utils import JSONWriter
 
 import iris
-from iris.ops.matmul_all_gather_host_copy_engine import (
-    matmul_all_gather_host_copy_engine,
-    matmul_all_gather_host_copy_engine_preamble,
+from iris.ops.matmul import (
+    matmul,
+    matmul_preamble,
 )
 from iris.ops import FusedConfig
 
+# Try to import performance model
 _DERIVE_AVAILABLE = False
 try:
     import sys as _sys
@@ -63,177 +63,10 @@ _FALLBACK_DEFAULTS = {
 torch.manual_seed(123)
 random.seed(123)
 
-TICKS_PER_US = 100  # s_memrealtime runs at 100 MHz: 1 tick = 10 ns = 0.01 us
-
-
-def _plot_trace(trace_data, output_path, rank, M, N, K):
-    """Generate a Gantt chart showing GEMM and SDMA workgroup activity.
-
-    Y-axis: workgroup (sorted by start time)
-    X-axis: time in microseconds
-    Colors:
-      - GEMM: wait (red), compute (green)
-      - SDMA: SDMA posting (blue)
-    """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.lines import Line2D
-
-    starts = trace_data["start"].numpy().astype(np.int64)
-    ends = trace_data["end"].numpy().astype(np.int64)
-    waits = trace_data["wait"].numpy().astype(np.int64)
-    xcds = trace_data["xcd"].numpy().astype(np.int32)
-    grid_size = trace_data["grid_size"]
-
-    # Check for SDMA WG traces
-    has_sdma = "sdma_start" in trace_data and trace_data.get("num_sdma", 0) > 0
-    if has_sdma:
-        sdma_starts = trace_data["sdma_start"].numpy().astype(np.int64)
-        sdma_ends = trace_data["sdma_end"].numpy().astype(np.int64)
-        sdma_xcds = trace_data["sdma_xcd"].numpy().astype(np.int32)
-        num_sdma = trace_data["num_sdma"]
-    else:
-        num_sdma = 0
-
-    # Convert to microseconds relative to earliest start
-    t_min = starts.min()
-    if has_sdma and len(sdma_starts) > 0:
-        t_min = min(t_min, sdma_starts.min())
-
-    starts_us = (starts - t_min) / TICKS_PER_US
-    ends_us = (ends - t_min) / TICKS_PER_US
-    waits_us = waits / TICKS_PER_US
-
-    if has_sdma:
-        sdma_starts_us = (sdma_starts - t_min) / TICKS_PER_US
-        sdma_ends_us = (sdma_ends - t_min) / TICKS_PER_US
-
-    # Sort GEMM by start time
-    order = np.argsort(starts_us)
-
-    # Figure sizing - add SDMA rows at top
-    total_rows = grid_size + num_sdma
-    row_h = 0.012
-    fig_h = max(12, total_rows * row_h + 2)
-    fig, ax = plt.subplots(figsize=(18, fig_h))
-
-    wait_color = "#F44336"  # red
-    compute_color = "#4CAF50"  # green
-    sdma_color = "#2196F3"  # blue (for SDMA posting)
-
-    y_offset = 0
-
-    # Plot SDMA WGs at top (if any)
-    if has_sdma:
-        for sdma_idx in range(num_sdma):
-            s = sdma_starts_us[sdma_idx]
-            e = sdma_ends_us[sdma_idx]
-            dur = e - s
-            ax.barh(y_offset + sdma_idx, dur, left=s, height=0.8, color=sdma_color, edgecolor="none", linewidth=0)
-        y_offset = num_sdma
-
-    # Plot GEMM WGs
-    for y_idx, wg_idx in enumerate(order):
-        s = starts_us[wg_idx]
-        e = ends_us[wg_idx]
-        dur = e - s
-
-        # Split into wait (red) and compute (green)
-        w = waits_us[wg_idx]
-        comp = max(0, dur - w)
-        ax.barh(y_offset + y_idx, w, left=s, height=0.8, color=wait_color, edgecolor="none", linewidth=0)
-        ax.barh(y_offset + y_idx, comp, left=s + w, height=0.8, color=compute_color, edgecolor="none", linewidth=0)
-
-    # XCD annotations
-    xcd_set = sorted(set(xcds.tolist()))
-    xcd_cmap = {}
-    if len(xcd_set) > 1:
-        cmap = matplotlib.colormaps.get_cmap("tab10").resampled(len(xcd_set))
-        for i, x in enumerate(xcd_set):
-            xcd_cmap[x] = cmap(i)
-
-    x_max = ends_us.max() * 1.02
-    if has_sdma:
-        x_max = max(x_max, sdma_ends_us.max() * 1.02)
-
-    for y_idx, wg_idx in enumerate(order):
-        xcd_id = xcds[wg_idx]
-        if xcd_id in xcd_cmap:
-            ax.plot(x_max, y_offset + y_idx, marker="s", markersize=1.5, color=xcd_cmap[xcd_id], clip_on=False)
-
-    if has_sdma:
-        for sdma_idx in range(num_sdma):
-            xcd_id = sdma_xcds[sdma_idx]
-            if xcd_id in xcd_cmap:
-                ax.plot(x_max, sdma_idx, marker="s", markersize=1.5, color=xcd_cmap[xcd_id], clip_on=False)
-
-    ax.set_xlabel("Time (us)", fontsize=12)
-    ax.set_ylabel("Workgroup (SDMA WGs at top, then GEMM sorted by start)", fontsize=12)
-    title = f"Rank {rank}  |  Copy Engine All-Gather GEMM Trace  |  M={M} N={N} K={K}  |  {grid_size} GEMM"
-    if has_sdma:
-        title += f" + {num_sdma} SDMA WGs"
-    else:
-        title += " workgroups"
-    ax.set_title(title, fontsize=13)
-    ax.set_ylim(-1, total_rows + 1)
-    ax.set_xlim(0, x_max)
-    ax.invert_yaxis()
-
-    # Legend
-    legend_elements = [
-        Line2D([0], [0], color=wait_color, lw=6, label="GEMM: waiting on remote data"),
-        Line2D([0], [0], color=compute_color, lw=6, label="GEMM: compute"),
-    ]
-    if has_sdma:
-        legend_elements.append(Line2D([0], [0], color=sdma_color, lw=6, label="SDMA: posting transfers"))
-    ax.legend(handles=legend_elements, loc="upper right", fontsize=10)
-
-    # Summary stats
-    gemm_dur = ends_us - starts_us
-    gemm_wait = waits_us
-    gemm_compute = gemm_dur - gemm_wait
-
-    # Wall time is max(GEMM end, SDMA end) - min(GEMM start, SDMA start)
-    wall_time_us = ends_us.max()
-    if has_sdma and len(sdma_ends_us) > 0:
-        wall_time_us = max(wall_time_us, sdma_ends_us.max())
-
-    stats_lines = [
-        f"GEMM total: {gemm_dur.mean():.1f} us avg  ({gemm_dur.min():.1f}-{gemm_dur.max():.1f})",
-        f"  wait: {gemm_wait.mean():.1f} us avg  ({gemm_wait.min():.1f}-{gemm_wait.max():.1f})",
-        f"  compute: {gemm_compute.mean():.1f} us avg  ({gemm_compute.min():.1f}-{gemm_compute.max():.1f})",
-        f"  wait%: {100 * gemm_wait.sum() / gemm_dur.sum():.1f}%",
-    ]
-
-    if has_sdma and len(sdma_starts_us) > 0:
-        sdma_dur = sdma_ends_us - sdma_starts_us
-        stats_lines.append(f"SDMA: {sdma_dur.mean():.1f} us avg  ({sdma_dur.min():.1f}-{sdma_dur.max():.1f})")
-
-    stats_lines.append(f"Wall time: {wall_time_us:.1f} us")
-    stats_text = "\n".join(stats_lines)
-    ax.text(
-        0.01,
-        0.99,
-        stats_text,
-        transform=ax.transAxes,
-        fontsize=9,
-        verticalalignment="top",
-        fontfamily="monospace",
-        bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.85),
-    )
-
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  [Rank {rank}] Trace plot saved to: {output_path}")
-    print(f"  {stats_text}")
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Benchmark matmul_all_gather_host_copy_engine fused operation.",
+        description="Benchmark matmul operation.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-m", type=int, default=16384, help="Number of rows per rank in matrix A (M_local)")
@@ -258,7 +91,7 @@ def parse_args():
     parser.add_argument(
         "--output_file",
         type=str,
-        default="matmul_all_gather_host_copy_engine.json",
+        default="matmul.json",
         help="Output file",
     )
 
@@ -273,11 +106,13 @@ def _apply_model_defaults(args, world_size, dtype_bytes=2):
     applied = []
     if _DERIVE_AVAILABLE:
         try:
-            # For matmul_all_gather, M is local dimension (sharded)
-            # Total M = M_local * world_size
+            # Note: args["m"] is M_local (rows per rank)
             # M_local = args["m"]
-            # M_total = M_local * world_size
+            # M = M_local * world_size  # Total M after gather
+            # N = args["n"]
+            # K = args["k"]
 
+            # Derive parameters from performance model
             p = _derive_params(
                 args["m"], # M_local
                 args["n"],
@@ -298,6 +133,7 @@ def _apply_model_defaults(args, world_size, dtype_bytes=2):
         except Exception:
             pass
 
+    # Apply fallback defaults for any remaining None values
     for name, fallback in _FALLBACK_DEFAULTS.items():
         if args.get(name) is None:
             args[name] = fallback
@@ -310,7 +146,6 @@ def _worker(args: dict):
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     backend = "nccl" if torch.cuda.is_available() else "gloo"
     dist.init_process_group(backend=backend)
-
     shmem = iris.iris(args["heap_size"])
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
@@ -319,6 +154,7 @@ def _worker(args: dict):
     datatype = datatype_map.get(args["datatype"], torch.float16)
     dtype_bytes = torch.tensor([], dtype=datatype).element_size()
 
+    # Apply model-derived defaults
     model_applied = _apply_model_defaults(args, world_size, dtype_bytes)
     if rank == 0 and model_applied:
         shmem.info(f"Model-derived defaults: {', '.join(model_applied)}")
@@ -326,8 +162,8 @@ def _worker(args: dict):
         param_summary = " ".join(f"{k}={args[k]}" for k in _MODEL_PARAMS)
         shmem.info(f"Kernel params: {param_summary}")
 
-    M_local = args["m"]  # Local M dimension
-    M = M_local * world_size  # Total M after gather
+    M_local = args["m"]  # Local M dimension (this is the only M for plain matmul)
+    M = M_local  # Plain matmul has no gather, M = M_local
     N = args["n"]
     K = args["k"]
 
@@ -346,7 +182,7 @@ def _worker(args: dict):
 
     json_writer = JSONWriter(args["output_file"])
     json_writer.add_field("world_size", world_size)
-    json_writer.add_field("operation", "matmul_all_gather_host_copy_engine")
+    json_writer.add_field("operation", "matmul")
     json_writer.add_field("m_local", M_local)
     json_writer.add_field("m_total", M)
 
@@ -362,10 +198,10 @@ def _worker(args: dict):
     json_writer.add_field("num_xcds", config.num_xcds)
 
     # Create input and output tensors
-    # A_local is M_local x K, output is M x N (gathered)
+    # A_local is M_local x K, output is M_local x N (local matmul, no gather)
     A_local = shmem.zeros((M_local, K), dtype=datatype)
     B = shmem.zeros((K, N), dtype=datatype)
-    C = shmem.zeros((M, N), dtype=datatype)
+    C = shmem.zeros((M_local, N), dtype=datatype)
 
     # Fill inputs with deterministic values
     # Each rank has different A_local, same B
@@ -380,21 +216,11 @@ def _worker(args: dict):
     # Expected
     expected_tensor = None
     if args["validate"]:
-        # Gather all A_local matrices and compute expected result
-        A_local_list = [torch.zeros((M_local, K), dtype=datatype, device=f"cuda:{rank}") for _ in range(world_size)]
-        dist.all_gather(A_local_list, A_local_data)
-
-        # Expected: [A_0 @ B; A_1 @ B; ...; A_n @ B] stacked along M
-        expected_tensor = shmem.zeros((M, N), dtype=datatype)
-        expected_parts = []
-        for i, A_rank_local in enumerate(A_local_list):
-            C_rank_local = torch.matmul(A_rank_local, B_data)
-            expected_parts.append(C_rank_local)
-        expected_result = torch.cat(expected_parts, dim=0)
-        expected_tensor.copy_(expected_result)
+        # Plain matmul: just A_local @ B (local computation, no gather)
+        expected_tensor = torch.matmul(A_local_data, B_data)
 
     # Pre-allocate workspace
-    workspace = matmul_all_gather_host_copy_engine_preamble(shmem, A_local, B, config)
+    workspace = matmul_preamble(shmem, A_local, B, config)
 
     # ── Timing ───────────────────────────────────────────────────────────
     comm_stream = torch.cuda.Stream()
@@ -406,9 +232,10 @@ def _worker(args: dict):
     def run_experiment():
         nonlocal total_ms, num_experiments
         shmem.barrier()
+
         with torch.cuda.stream(comm_stream):
             start_ev.record()
-            matmul_all_gather_host_copy_engine(
+            matmul(
                 shmem,
                 C,
                 A_local,
@@ -468,14 +295,16 @@ def _worker(args: dict):
         total_flops = 2 * M_local * N * K
         tflops = (total_flops * 1e-12) / (avg_ms * 1e-3) if avg_ms > 0 else 0
         element_size = torch.tensor([], dtype=datatype).element_size()
+        # Plain matmul has no communication, just local compute
+        input_bytes = (M_local * K + K * N) * element_size
         output_bytes = M_local * N * element_size
-        total_bytes = output_bytes * (world_size - 1)
+        total_bytes = input_bytes + output_bytes
         total_bytes_gb = total_bytes / (1024**3)
         bw_gbps = (total_bytes / (1024**3)) / (avg_ms * 1e-3) if avg_ms > 0 else 0
 
         shmem.info(
-            f"Matmul-all-gather host copy engine (M_local={M_local}, M_total={M}, N={N}, K={K}, world_size={world_size}, dtype={args['datatype']}): "
-            f"{avg_ms:.3f} ms, {tflops:.3f} TFLOPS, {bw_gbps:.3f} GB/s"
+            f"Matmul (M={M_local}, N={N}, K={K}, dtype={args['datatype']}): "
+            f"{avg_ms:.3f} ms, {tflops:.3f} TFLOPS, {bw_gbps:.3f} GB/s (HBM)"
         )
 
         json_writer.add_field("tflops", tflops)
@@ -496,7 +325,7 @@ def _worker(args: dict):
 
 
 def main():
-    print("Starting matmul_all_gather_host_copy_engine benchmark...")
+    print("Starting matmul benchmark...")
     args = parse_args()
     if "RANK" in os.environ or "LOCAL_RANK" in os.environ:
         _worker(args)
@@ -504,7 +333,7 @@ def main():
         print(
             "Please run with torchrun:\n"
             "  torchrun --nproc_per_node=N "
-            "benchmark/ops/matmul_all_gather/benchmark_host_copy_engine.py [OPTIONS]"
+            "benchmark/ops/matmul_all_gather/benchmark_matmul.py [OPTIONS]"
         )
 
 
