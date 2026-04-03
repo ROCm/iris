@@ -25,30 +25,41 @@ from typing import Optional, Dict, Any
 # Project root (3 levels up from this script)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
-# Dimension values to sweep
-DIMS = [131072, 2048, 16384]
+# Dimension configurations to test (M, N, K)
+# Each tuple is (M_local, N, K) where M_local is per-rank M dimension
+DIMENSION_CONFIGS = [
+    (2048, 2048, 16384),
+    (2048, 16384, 2048),
+    (2048, 16384, 16384),
+    (2048, 16384, 65536),
+    (2048, 131072, 16384),
+    (16384, 2048, 2048),
+    (16384, 2048, 16384),
+    (16384, 2048, 131072),
+    (16384, 16384, 2048),
+    (131072, 2048, 16384),
+]
 
 # Benchmark configurations
 BENCHMARKS = {
-    "baseline": {
+    "baseline_and_pytorch": {
         "script": "benchmark/ops/matmul_all_gather/benchmark.py",
+        # "extra_args": ["--benchmark_pytorch"],
         "extra_args": [],
         "output_file": "matmul_all_gather_baseline.json",
-    },
-    "copy_engine": {
-        "script": "benchmark/ops/matmul_all_gather/benchmark_copy_engine.py",
-        "extra_args": [],
-        "output_file": "matmul_all_gather_copy_engine.json",
+        "extract_multiple": True,  # Extract both baseline and pytorch from one run
     },
     "host_copy_engine": {
         "script": "benchmark/ops/matmul_all_gather/benchmark_host_copy_engine.py",
         "extra_args": [],
         "output_file": "matmul_all_gather_host_copy_engine.json",
+        "extract_multiple": False,
     },
-    "pytorch": {
-        "script": "benchmark/ops/matmul_all_gather/benchmark.py",
-        "extra_args": ["--benchmark_pytorch"],
-        "output_file": "matmul_all_gather_pytorch.json",
+    "matmul_only": {
+        "script": "benchmark/ops/matmul_all_gather/benchmark_matmul.py",
+        "extra_args": [],
+        "output_file": "matmul_only.json",
+        "extract_multiple": False,
     },
 }
 
@@ -86,6 +97,7 @@ def run_benchmark(
         str(n),
         "-k",
         str(k),
+        "--validate",
         "--benchmark",
         "--output_file",
         output_file,
@@ -123,7 +135,15 @@ def run_benchmark(
         with open(json_path, "r") as f:
             data = json.load(f)
 
-        log(f"    ✓ Success: Loaded JSON results")
+        # Check validation status
+        validation_status = ""
+        if "success" in data:
+            if data["success"]:
+                validation_status = " (validation: PASSED)"
+            else:
+                validation_status = " (validation: FAILED)"
+
+        log(f"    ✓ Success: Loaded JSON results{validation_status}")
         return data
 
     except subprocess.TimeoutExpired:
@@ -141,10 +161,11 @@ def main():
     log("=" * 80)
     log("Matmul-All-Gather Benchmark Sweep")
     log("=" * 80)
-    log(f"Dimensions to sweep: {DIMS}")
-    log(f"Total combinations: {len(DIMS) ** 3}")
-    log(f"Benchmarks per combination: {len(BENCHMARKS)}")
-    log(f"Total benchmarks: {len(DIMS) ** 3 * len(BENCHMARKS)}")
+    log(f"Dimension configurations: {len(DIMENSION_CONFIGS)}")
+    for m, n, k in DIMENSION_CONFIGS:
+        log(f"  - M={m}, N={n}, K={k}")
+    log(f"Benchmarks per configuration: {len(BENCHMARKS)}")
+    log(f"Total benchmarks: {len(DIMENSION_CONFIGS) * len(BENCHMARKS)}")
     log(f"Timeout per benchmark: {TIMEOUT_SECONDS}s")
     log(f"GPUs: {NUM_GPUS}")
     log("=" * 80)
@@ -154,13 +175,10 @@ def main():
     output_file = PROJECT_ROOT / "benchmark/ops/matmul_all_gather/benchmark_sweep_results.json"
     results = []
 
-    # Generate all permutations
-    permutations = list(itertools.permutations(DIMS, 3))
+    log(f"Running {len(DIMENSION_CONFIGS)} dimension configurations...\n")
 
-    log(f"Running {len(permutations)} dimension permutations...\n")
-
-    for idx, (m, n, k) in enumerate(permutations, 1):
-        log(f"[{idx}/{len(permutations)}] Testing M={m}, N={n}, K={k}")
+    for idx, (m, n, k) in enumerate(DIMENSION_CONFIGS, 1):
+        log(f"[{idx}/{len(DIMENSION_CONFIGS)}] Testing M={m}, N={n}, K={k}")
 
         row = {"M": m, "N": n, "K": k, "benchmarks": {}}
 
@@ -177,9 +195,36 @@ def main():
             )
 
             if result is not None:
-                row["benchmarks"][bench_key] = result
+                # Check if this benchmark produces multiple results
+                if bench_config.get("extract_multiple", False):
+                    # Extract baseline results (tflops, etc.)
+                    baseline_result = {k: v for k, v in result.items() if not k.startswith("pytorch_")}
+                    row["benchmarks"]["baseline"] = baseline_result
+
+                    # Extract pytorch results (pytorch_tflops, etc.)
+                    if "pytorch_tflops" in result:
+                        pytorch_result = {
+                            "tflops": result.get("pytorch_tflops"),
+                            "bandwidth_gbps": result.get("pytorch_bandwidth_gbps"),
+                            "total_ms": result.get("pytorch_ms"),
+                        }
+                        # Copy common fields
+                        for field in ["world_size", "operation", "m", "n", "k", "datatype"]:
+                            if field in result:
+                                pytorch_result[field] = result[field]
+                        row["benchmarks"]["pytorch"] = pytorch_result
+                    else:
+                        row["benchmarks"]["pytorch"] = {"status": "FAILED"}
+                else:
+                    # Single result benchmark
+                    row["benchmarks"][bench_key] = result
             else:
-                row["benchmarks"][bench_key] = {"status": "FAILED"}
+                # Failed benchmark
+                if bench_config.get("extract_multiple", False):
+                    row["benchmarks"]["baseline"] = {"status": "FAILED"}
+                    row["benchmarks"]["pytorch"] = {"status": "FAILED"}
+                else:
+                    row["benchmarks"][bench_key] = {"status": "FAILED"}
 
         results.append(row)
         log("")
