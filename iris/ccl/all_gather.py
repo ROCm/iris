@@ -699,11 +699,13 @@ def all_gather(
 
         if use_gfx1250_async:
             persistent_all_gather_gluon_gfx1250[(config.comm_sms,)](
-                *gluon_kernel_args, **gluon_kernel_kwargs,
+                *gluon_kernel_args,
+                **gluon_kernel_kwargs,
             )
         else:
             persistent_all_gather_gluon[(config.comm_sms,)](
-                *gluon_kernel_args, **gluon_kernel_kwargs,
+                *gluon_kernel_args,
+                **gluon_kernel_kwargs,
             )
     else:
         if config.use_gluon and not GLUON_AVAILABLE:
