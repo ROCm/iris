@@ -432,13 +432,15 @@ def _worker(args: dict):
 
     # ── Timing ───────────────────────────────────────────────────────────
     comm_stream = torch.cuda.Stream()
+    anvil_lib = shmem.copy_engines
     start_ev = torch.cuda.Event(enable_timing=True)
     end_ev = torch.cuda.Event(enable_timing=True)
     total_ms = 0.0
     num_experiments = 0
+    flag_iteration = 0
 
     def run_experiment():
-        nonlocal total_ms, num_experiments
+        nonlocal total_ms, num_experiments, flag_iteration
         shmem.barrier()
         with torch.cuda.stream(comm_stream):
             start_ev.record()
@@ -451,10 +453,12 @@ def _worker(args: dict):
                 m_tiles_per_batch=args["m_tiles_per_batch"],
                 async_op=False,
                 workspace=workspace,
+                flag_iteration=flag_iteration,
             )
             end_ev.record()
             num_experiments += 1
-        shmem.barrier()
+            flag_iteration += 1
+        shmem.barrier(comm_stream)
         total_ms += start_ev.elapsed_time(end_ev)
 
     shmem.barrier()
@@ -478,6 +482,9 @@ def _worker(args: dict):
             verbose=True,
         )
         torch.cuda.synchronize()
+        for remote_rank in range(world_size):
+            if remote_rank != rank:
+                anvil_lib.host_quiet(rank, remote_rank, 0)
         shmem.barrier()
 
         atol = 1e-1 if datatype == torch.float16 else 1e-3
@@ -501,6 +508,7 @@ def _worker(args: dict):
         # Warmup
         total_ms = 0.0
         num_experiments = 0
+        flag_iteration = 0
         if n_warmup > 0:
             iris.do_bench(run_experiment, shmem.barrier, n_warmup=n_warmup, n_repeat=1)
 
@@ -510,6 +518,11 @@ def _worker(args: dict):
         shmem.barrier()
 
         iris.do_bench(run_experiment, shmem.barrier, n_warmup=0, n_repeat=n_repeat)
+        torch.cuda.synchronize()
+        for remote_rank in range(world_size):
+            if remote_rank != rank:
+                anvil_lib.host_quiet(rank, remote_rank, 0)
+        shmem.barrier()
         avg_ms = total_ms / num_experiments if num_experiments > 0 else 0
 
         total_flops = 2 * M_local * N * K
@@ -553,6 +566,9 @@ def _worker(args: dict):
             trace=True,
         )
         torch.cuda.synchronize()
+        # for remote_rank in range(world_size):
+        #     if remote_rank != rank:
+        #         anvil_lib.host_quiet(rank, remote_rank, 0)
         shmem.barrier()
 
         # Actual traced run (post-compilation, clean state)
@@ -572,6 +588,9 @@ def _worker(args: dict):
             trace=True,
         )
         torch.cuda.synchronize()
+        # for remote_rank in range(world_size):
+        #     if remote_rank != rank:
+        #         anvil_lib.host_quiet(rank, remote_rank, 0)
         shmem.barrier()
 
         if rank == 0 and hasattr(workspace, "trace_data"):
@@ -588,6 +607,11 @@ def _worker(args: dict):
         json_writer.flush()
         json_writer.display()
 
+    # Synchronize device before exiting
+    torch.cuda.synchronize()
+    for remote_rank in range(world_size):
+        if remote_rank != rank:
+            anvil_lib.host_quiet(rank, remote_rank, 0)
     shmem.barrier()
     dist.destroy_process_group()
 

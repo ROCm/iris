@@ -272,6 +272,7 @@ def matmul_all_gather_host_copy_engine(
     async_op: bool = False,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
+    flag_iteration: int = 0,
     m_tiles_per_batch: int = 1,
     trace: bool = False,
     verbose: bool = False,
@@ -359,10 +360,12 @@ def matmul_all_gather_host_copy_engine(
 
     context_tensor = shmem.get_device_context()
 
-    # Reset flags before kernel launch
-    workspace.locks.zero_()
-    torch.cuda.synchronize()
-    shmem.barrier()
+    # Calculate flag offset for this experiment to avoid race conditions
+    # Each experiment uses a different slice of the locks buffer
+    # flag_offset = experiment_id * workspace.num_batches
+    # flags_slice = workspace.locks[flag_offset : flag_offset + workspace.num_batches]
+
+    # No need to reset flags - they start at zero and each experiment has its own slice
 
     # ═══════════════════════════════════════════════════════════════════════
     # Device Phase: Launch kernel to compute GEMM + store + set flags
@@ -472,11 +475,11 @@ def matmul_all_gather_host_copy_engine(
                 dst_ptr_remote = shmem.translate(dst_ptr_local, rank, remote_rank)
                 dst_stride = stride_cm * element_size  # Row stride in bytes
 
-                # Get flag pointer for this batch
+                # Get flag pointer for this batch (use flags_slice which is already offset)
                 flag_ptr = workspace.locks.data_ptr() + batch_id * workspace.locks.element_size()
 
                 # Wait for flag to reach num_m_tiles_in_batch * num_tiles_n (all tiles in this batch complete)
-                expected_flag_value = num_m_tiles_in_batch * num_tiles_n
+                expected_flag_value = (flag_iteration + 1) * num_m_tiles_in_batch * num_tiles_n
 
                 # Use anvil host API to queue POLL+SUB_WINDOW_COPY for entire batch
                 anvil_lib.host_wait_flag_then_put_tile(
@@ -510,9 +513,9 @@ def matmul_all_gather_host_copy_engine(
     # Wait for SDMA to complete (all flags have been set, SDMA transfers should finish)
     # Use anvil quiet to wait for SDMA completion
     # TODO part of async_op ?
-    for remote_rank in range(world_size):
-        if remote_rank != rank:
-            anvil_lib.host_quiet(rank, remote_rank, 0)
+    # for remote_rank in range(world_size):
+    #     if remote_rank != rank:
+    #         anvil_lib.host_quiet(rank, remote_rank, 0)
 
     sdma_end_time = time.perf_counter()
 
@@ -527,12 +530,15 @@ def matmul_all_gather_host_copy_engine(
         )
 
     if not async_op:
-        torch.cuda.synchronize()
+        # torch.cuda.synchronize()
         shmem.barrier()
 
     # Extract trace data if tracing was enabled
     if trace:
         torch.cuda.synchronize()
+        for remote_rank in range(world_size):
+            if remote_rank != rank:
+                anvil_lib.host_quiet(rank, remote_rank, 0)
         # sdma_ts = workspace.sdma_timestamps if hasattr(workspace, 'sdma_timestamps') else None
         workspace.trace_data = _extract_wg_trace(shmem, num_sms, num_tiles, sdma_timestamps=sdma_timestamps)
 
