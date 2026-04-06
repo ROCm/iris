@@ -23,7 +23,6 @@ Usage:
 
 import argparse
 import math
-import time
 
 # ── MI300X hardware defaults ──────────────────────────────────────────────
 DEFAULT_NUM_CUS = 304
@@ -101,9 +100,7 @@ def _choose_k_per_flag(num_k_blocks, num_k_blocks_local, target_groups=8):
     return kpf
 
 
-def _choose_m_tiles_per_batch(
-    num_m_tiles, num_n_tiles, tile_gemm_us, tile_transfer_us
-):
+def _choose_m_tiles_per_batch(num_m_tiles, num_n_tiles, tile_gemm_us, tile_transfer_us):
     """Choose m_tiles_per_batch to minimize exposed communication time.
 
     Wave-based model:
@@ -147,9 +144,7 @@ def _choose_m_tiles_per_batch(
                 wave_rest_us = (num_batches - 1) * gemm_per_batch_us
             else:
                 # Transfer exposed
-                wave_rest_us = (num_batches - 1) * (
-                    transfer_per_batch_us + gemm_per_batch_us
-                )
+                wave_rest_us = (num_batches - 1) * (transfer_per_batch_us + gemm_per_batch_us)
         else:
             wave_rest_us = 0
 
@@ -214,10 +209,11 @@ def _gemm_wg_time_us(bm, bn, bk, K, num_flag_groups, roofline_tflops, num_cus):
 
     return ideal_us * occupancy_factor + flag_us
 
+
 # ── Per-SDMA-WG timing (for device-initiated mode) ───────────────────────────
 
-def _sdma_wg_time_us(num_transfers_per_wg, bytes_per_transfer, sdma_latency_us,
-                     device_overhead_us, xgmi_bw_gbps):
+
+def _sdma_wg_time_us(num_transfers_per_wg, bytes_per_transfer, sdma_latency_us, device_overhead_us, xgmi_bw_gbps):
     """Estimate per-SDMA-WG execution time in microseconds.
 
     Analogous to _fetch_wg_time_us in HBM buffer variant. Each SDMA WG posts
@@ -246,7 +242,6 @@ def _sdma_wg_time_us(num_transfers_per_wg, bytes_per_transfer, sdma_latency_us,
     return post_time_us + bandwidth_time_us
 
 
-
 # ── Kernel time estimation (reused from HBM buffer) ──────────────────────────
 
 
@@ -262,10 +257,6 @@ def _estimate_kernel_time(total_gemm_wgs, gemm_wg_us, total_sdma_wgs, sdma_wg_us
     ideal_ms = total_cu_work_us / num_cus / 1e3
     estimated_ms = ideal_ms * scheduling_factor
     return estimated_ms, ideal_ms
-
-
-
-
 
 
 def derive(
@@ -342,12 +333,12 @@ def derive(
     tile_transfer_us = bytes_per_m_tile / (transfer_bw_gbps * 1e3)
 
     # 8. m_tiles_per_batch selection (minimize exposed communication)
-    m_tiles_per_batch = _choose_m_tiles_per_batch(
-        num_m_tiles, num_tiles_n, gemm_wg_us_val, tile_transfer_us
-    )
+    m_tiles_per_batch = _choose_m_tiles_per_batch(num_m_tiles, num_tiles_n, gemm_wg_us_val, tile_transfer_us)
 
     # Sanity check
-    assert num_m_tiles % m_tiles_per_batch == 0, f"m_tiles_per_batch={m_tiles_per_batch} must divide num_m_tiles={num_m_tiles}"
+    assert num_m_tiles % m_tiles_per_batch == 0, (
+        f"m_tiles_per_batch={m_tiles_per_batch} must divide num_m_tiles={num_m_tiles}"
+    )
     num_batches = num_m_tiles // m_tiles_per_batch
 
     # 9. device_initiated default
@@ -401,7 +392,6 @@ def derive(
 
     # 13. Staged A size
 
-
     # 14. Standalone GEMM estimate (rocBLAS-class efficiency for comparison)
     standalone_gemm_eff = 0.30
     standalone_tflops = roofline_tflops * standalone_gemm_eff
@@ -445,7 +435,6 @@ def derive(
         total_flops=total_flops,
         compute_time_ms=compute_time_ms,
         ratio=ratio,
-
         est_kernel_ms=est_kernel_ms,
         est_ideal_ms=est_ideal_ms,
         standalone_gemm_ms=standalone_gemm_ms,
@@ -492,33 +481,33 @@ def print_analysis(p, M, N, K_local, world_size):
     print("ALL_GATHER_MATMUL_COPY_ENGINE: PERFORMANCE MODEL & DERIVED PARAMETERS")
     print("=" * 80)
 
-    print(f"\nProblem Size:")
+    print("\nProblem Size:")
     print(f"  M = {M}, N = {N}, K_local = {K_local}, K_total = {K}, world_size = {world_size}")
     print(f"  Total GEMM: ({M}, {K}) @ ({K}, {N}) = ({M}, {N})")
     print(f"  Staged A buffer: {p['staged_a_gb']:.2f} GB")
 
-    print(f"\nBlock Sizes:")
+    print("\nBlock Sizes:")
     print(f"  BLOCK_M = {p['block_size_m']}, BLOCK_N = {p['block_size_n']}, BLOCK_K = {p['block_size_k']}")
     print(f"  num_warps = {p['num_warps']}")
 
-    print(f"\nGEMM Analysis (Roofline):")
+    print("\nGEMM Analysis (Roofline):")
     print(f"  Arithmetic Intensity: {p['tile_intensity']:.2f} FLOPs/byte")
     print(f"  Ridge Point: {p['ridge_point']:.2f} FLOPs/byte")
     print(f"  B in L2: {p['b_in_l2']}")
     print(f"  Achieved TFLOPS: {p['roofline_tflops']:.0f}")
     print(f"  Compute Time: {p['compute_time_ms']:.2f} ms")
 
-    print(f"\nCommunication Analysis:")
+    print("\nCommunication Analysis:")
     print(f"  Total Recv: {p['total_remote_bytes'] / 1e9:.2f} GB per rank")
     print(f"  Comm Time: {p['comm_time_ms']:.2f} ms")
 
-    print(f"\nCopy Engine Parameters:")
+    print("\nCopy Engine Parameters:")
     print(f"  k_per_flag:        {p['k_per_flag']}")
     print(f"  m_tiles_per_batch: {p['m_tiles_per_batch']}")
     print(f"  num_batches:       {p['num_batches']}")
     print(f"  device_initiated:  {p['device_initiated']}")
 
-    print(f"\nPipeline Performance:")
+    print("\nPipeline Performance:")
     print(f"  Pipeline Time:     {p['pipeline_time_ms']:.2f} ms")
     print(f"  Overlap Efficiency: {p['overlap_efficiency'] * 100:.1f}%")
 

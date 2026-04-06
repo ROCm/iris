@@ -17,7 +17,6 @@ Outputs results as JSON to stdout and benchmark_sweep_results.json.
 import subprocess
 import sys
 import json
-import itertools
 from pathlib import Path
 from typing import Optional, Dict, Any
 

@@ -389,19 +389,19 @@ def main():
     print("MATMUL_ALL_GATHER_COPY_ENGINE: DERIVED PARAMETERS")
     print("=" * 80)
 
-    print(f"\nProblem:")
+    print("\nProblem:")
     print(f"  M_local = {params['M_local']}, M_total = {params['M_total']}, N = {args.n}, K = {args.k}")
     print(f"  world_size = {args.world_size}")
     print(f"  Local GEMM: ({params['M_local']}, {args.k}) @ ({args.k}, {args.n})")
 
-    print(f"\nDerived Kernel Parameters:")
+    print("\nDerived Kernel Parameters:")
     print(f"  block_size_m:      {params['block_size_m']}")
     print(f"  block_size_n:      {params['block_size_n']}")
     print(f"  block_size_k:      {params['block_size_k']}")
     print(f"  num_warps:         {params['num_warps']}")
     print(f"  device_initiated:  {params['device_initiated']}")
 
-    print(f"\nPerformance Model:")
+    print("\nPerformance Model:")
     print(f"  Roofline TFLOPS:   {params['roofline_tflops']:.1f}")
     print(f"  Arith. Intensity:  {params['arithmetic_intensity']:.1f} FLOPs/byte")
     print(f"  B in L2:           {params['b_in_l2']}")
@@ -410,7 +410,7 @@ def main():
     print(f"  Total per tile:    {params['tile_time_us']:.2f} μs")
     print(f"  Total tiles:       {params['total_tiles']}")
 
-    print(f"\nEstimated Times:")
+    print("\nEstimated Times:")
     print(f"  Kernel (fused):    {params['kernel_time_ms']:.2f} ms")
     print(f"  Sequential:        {params['sequential_ms']:.2f} ms (GEMM then scatter)")
     print(f"  Speedup:           {params['speedup']:.2f}x")
@@ -418,22 +418,22 @@ def main():
     if params["scatter_wg_us"] > params["gemm_wg_us"]:
         ratio = params["scatter_wg_us"] / params["gemm_wg_us"]
         print(f"\n  ⚠ Scatter dominates ({ratio:.1f}x slower than GEMM per tile)")
-        print(f"    → Communication-bound workload")
+        print("    → Communication-bound workload")
     else:
-        print(f"\n  ✓ GEMM dominates")
-        print(f"    → Compute-bound workload")
+        print("\n  ✓ GEMM dominates")
+        print("    → Compute-bound workload")
 
     print("=" * 80)
 
     print("\nBenchmark command:")
     print(f"  torchrun --nproc_per_node={args.world_size} \\")
-    print(f"    benchmark/ops/matmul_all_gather/benchmark_copy_engine.py \\")
+    print("    benchmark/ops/matmul_all_gather/benchmark_copy_engine.py \\")
     print(f"    -m {params['M_local']} -n {args.n} -k {args.k} \\")
     print(f"    --block_size_m {params['block_size_m']} \\")
     print(f"    --block_size_n {params['block_size_n']} \\")
     print(f"    --block_size_k {params['block_size_k']} \\")
-    print(f"    --device_initiated \\")
-    print(f"    --benchmark --validate")
+    print("    --device_initiated \\")
+    print("    --benchmark --validate")
 
 
 if __name__ == "__main__":

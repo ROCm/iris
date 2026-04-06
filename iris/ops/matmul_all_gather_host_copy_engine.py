@@ -20,9 +20,7 @@ import triton
 import triton.language as tl
 import iris
 
-from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view
 
-from iris.device_utils import read_realtime
 from iris.tracing.events import TraceEvent
 from .config import FusedConfig
 from .workspace import FusedWorkspace

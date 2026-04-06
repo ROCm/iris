@@ -33,14 +33,6 @@ try:
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     if _script_dir not in _sys.path:
         _sys.path.insert(0, _script_dir)
-    from derive_params import (
-        derive as _derive_params,
-        DEFAULT_NUM_CUS,
-        DEFAULT_PEAK_TFLOPS_FP16,
-        DEFAULT_HBM_BW_GBPS,
-        DEFAULT_L2_SIZE_BYTES,
-        DEFAULT_SCHEDULING_FACTOR,
-    )
 
     _DERIVE_AVAILABLE = True
 except Exception:

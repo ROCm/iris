@@ -114,7 +114,7 @@ def _apply_model_defaults(args, world_size, dtype_bytes=2):
 
             # Derive parameters from performance model
             p = _derive_params(
-                args["m"], # M_local
+                args["m"],  # M_local
                 args["n"],
                 args["k"],
                 world_size,
