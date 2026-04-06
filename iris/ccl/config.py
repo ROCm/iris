@@ -146,6 +146,7 @@ class Config:
 
         if self.threads_per_warp is None:
             from triton.runtime import driver
+
             self.threads_per_warp = driver.active.get_current_target().warp_size
         if self.threads_per_warp not in (32, 64):
             raise ValueError(f"threads_per_warp must be 32 or 64, got {self.threads_per_warp}")
