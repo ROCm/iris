@@ -361,6 +361,10 @@ class iris {
       }
     }
 
+    [[nodiscard]] __host__ __device__ uintptr_t get_heap_base(int rank) const {
+      return heap_bases_[rank];
+    }
+
    private:
     int cur_rank_;
     int world_size_;
