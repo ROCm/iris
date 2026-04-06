@@ -44,7 +44,7 @@ def plot_sweep_results(input_file, output_file):
     """Create grouped bar chart from sweep results."""
 
     # Load results
-    with open(input_file, 'r') as f:
+    with open(input_file, "r") as f:
         results = json.load(f)
 
     if not results:
@@ -101,8 +101,8 @@ def plot_sweep_results(input_file, output_file):
             label=bench.replace("_", " ").title(),
             color=color,
             alpha=0.8,
-            edgecolor='black',
-            linewidth=0.5
+            edgecolor="black",
+            linewidth=0.5,
         )
 
         # Add value labels on top of bars (only for non-zero values)
@@ -112,22 +112,21 @@ def plot_sweep_results(input_file, output_file):
                 ax.text(
                     bar.get_x() + bar.get_width() / 2,
                     height,
-                    f'{val:.1f}',
-                    ha='center',
-                    va='bottom',
+                    f"{val:.1f}",
+                    ha="center",
+                    va="bottom",
                     fontsize=7,
-                    rotation=0
+                    rotation=0,
                 )
 
     # Customize plot
-    ax.set_xlabel('Dimension Configuration (M_local×N×K)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('TFLOPS', fontsize=12, fontweight='bold')
-    ax.set_title('Matmul-All-Gather Benchmark Sweep: TFLOPS Comparison',
-                 fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel("Dimension Configuration (M_local×N×K)", fontsize=12, fontweight="bold")
+    ax.set_ylabel("TFLOPS", fontsize=12, fontweight="bold")
+    ax.set_title("Matmul-All-Gather Benchmark Sweep: TFLOPS Comparison", fontsize=14, fontweight="bold", pad=20)
     ax.set_xticks(x)
-    ax.set_xticklabels([label for _, _, _, label in dim_configs], rotation=45, ha='right')
-    ax.legend(loc='upper left', fontsize=10)
-    ax.grid(axis='y', alpha=0.3, linestyle='--')
+    ax.set_xticklabels([label for _, _, _, label in dim_configs], rotation=45, ha="right")
+    ax.legend(loc="upper left", fontsize=10)
+    ax.grid(axis="y", alpha=0.3, linestyle="--")
 
     # Set y-axis to start from 0
     ax.set_ylim(bottom=0)
@@ -135,13 +134,13 @@ def plot_sweep_results(input_file, output_file):
     plt.tight_layout()
 
     # Save figure
-    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.savefig(output_file, dpi=300, bbox_inches="tight")
     print(f"Plot saved to: {output_file}")
 
     # Print summary statistics in formatted table
-    print("\n" + "="*120)
+    print("\n" + "=" * 120)
     print("SUMMARY STATISTICS")
-    print("="*120)
+    print("=" * 120)
     print()
 
     # Build table data
@@ -194,10 +193,16 @@ def plot_sweep_results(input_file, output_file):
         for row in table_data:
             col_widths[header] = max(col_widths[header], len(str(row[header])))
 
-    # Print header
+    # Print header with cleaner labels
     header_parts = []
     for h in headers:
-        header_parts.append(h.ljust(col_widths[h]))
+        # Format validation headers as "bench (✓/✗)"
+        if h.endswith("_validation"):
+            bench_name = h.replace("_validation", "")
+            display_name = f"{bench_name} (val)"
+        else:
+            display_name = h
+        header_parts.append(display_name.ljust(col_widths[h]))
     print("  ".join(header_parts))
 
     # Print separator
@@ -213,25 +218,24 @@ def plot_sweep_results(input_file, output_file):
             row_parts.append(str(row[h]).ljust(col_widths[h]))
         print("  ".join(row_parts))
 
-    print("\n" + "="*120)
+    print("\n" + "=" * 120)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot benchmark sweep results",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+        description="Plot benchmark sweep results", formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
         "--input",
         type=str,
         default="benchmark/ops/matmul_all_gather/benchmark_sweep_results.json",
-        help="Input JSON file with sweep results"
+        help="Input JSON file with sweep results",
     )
     parser.add_argument(
         "--output",
         type=str,
         default="benchmark/ops/matmul_all_gather/sweep_results_plot.png",
-        help="Output PNG file for plot"
+        help="Output PNG file for plot",
     )
 
     args = parser.parse_args()

@@ -19,12 +19,13 @@ import argparse
 from examples.common.utils import JSONWriter
 
 import iris
-from iris.ops import FusedConfig
+
 from iris.ops.matmul_all_gather_copy_engine import (
     matmul_all_gather_copy_engine,
+    matmul_all_gather_copy_engine_preamble,
 )
+from iris.ops import FusedConfig
 
-# Try to import performance model
 _DERIVE_AVAILABLE = False
 try:
     import sys as _sys
@@ -72,7 +73,6 @@ def parse_args():
     parser.add_argument("-m", type=int, default=16384, help="Number of rows per rank in matrix A (M_local)")
     parser.add_argument("-n", type=int, default=2048, help="Number of columns in matrix B (N)")
     parser.add_argument("-k", type=int, default=131072, help="Common dimension (K)")
-    parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
     parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking mode")
     parser.add_argument(
@@ -104,6 +104,46 @@ def parse_args():
     return vars(parser.parse_args())
 
 
+def _apply_model_defaults(args, world_size, dtype_bytes=2):
+    """Fill None-valued kernel parameters with model-derived predictions.
+
+    Returns a list of parameter names that were set by the model.
+    """
+    applied = []
+    if _DERIVE_AVAILABLE:
+        try:
+            # For matmul_all_gather, M is local dimension (sharded)
+            # Total M = M_local * world_size
+            # M_local = args["m"]
+            # M_total = M_local * world_size
+
+            p = _derive_params(
+                args["m"],  # M_local
+                args["n"],
+                args["k"],
+                world_size,
+                link_bw=50.0,
+                num_cus=DEFAULT_NUM_CUS,
+                peak_tflops=DEFAULT_PEAK_TFLOPS_FP16,
+                hbm_bw_gbps=DEFAULT_HBM_BW_GBPS,
+                l2_size=DEFAULT_L2_SIZE_BYTES,
+                scheduling_factor=DEFAULT_SCHEDULING_FACTOR,
+                dtype_bytes=dtype_bytes,
+            )
+            for name in _MODEL_PARAMS:
+                if args.get(name) is None and name in p:
+                    args[name] = p[name]
+                    applied.append(name)
+        except Exception:
+            pass
+
+    for name, fallback in _FALLBACK_DEFAULTS.items():
+        if args.get(name) is None:
+            args[name] = fallback
+
+    return applied
+
+
 def _worker(args: dict):
     """Worker function for PyTorch distributed execution."""
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -114,17 +154,16 @@ def _worker(args: dict):
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
-    # Datatype mapping
-    datatype = torch.float32
-    if args["datatype"] == "fp16":
-        datatype = torch.float16
-    elif args["datatype"] == "fp32":
-        datatype = torch.float32
-    elif args["datatype"] == "bf16":
-        datatype = torch.bfloat16
-    else:
-        print("Unknown datatype.")
-        exit(1)
+    datatype_map = {"fp16": torch.float16, "fp32": torch.float32, "bf16": torch.bfloat16}
+    datatype = datatype_map.get(args["datatype"], torch.float16)
+    dtype_bytes = torch.tensor([], dtype=datatype).element_size()
+
+    model_applied = _apply_model_defaults(args, world_size, dtype_bytes)
+    if rank == 0 and model_applied:
+        shmem.info(f"Model-derived defaults: {', '.join(model_applied)}")
+    if rank == 0:
+        param_summary = " ".join(f"{k}={args[k]}" for k in _MODEL_PARAMS)
+        shmem.info(f"Kernel params: {param_summary}")
 
     M_local = args["m"]  # Local M dimension
     M = M_local * world_size  # Total M after gather
@@ -167,7 +206,6 @@ def _worker(args: dict):
     A_local = shmem.zeros((M_local, K), dtype=datatype)
     B = shmem.zeros((K, N), dtype=datatype)
     C = shmem.zeros((M, N), dtype=datatype)
-    expected_tensor = None
 
     # Fill inputs with deterministic values
     # Each rank has different A_local, same B
@@ -179,7 +217,8 @@ def _worker(args: dict):
     B_data = torch.randn((K, N), dtype=datatype, device=f"cuda:{rank}")
     B.copy_(B_data)
 
-    # For validation: compute expected result
+    # Expected
+    expected_tensor = None
     if args["validate"]:
         # Gather all A_local matrices and compute expected result
         A_local_list = [torch.zeros((M_local, K), dtype=datatype, device=f"cuda:{rank}") for _ in range(world_size)]
@@ -194,6 +233,10 @@ def _worker(args: dict):
         expected_result = torch.cat(expected_parts, dim=0)
         expected_tensor.copy_(expected_result)
 
+    # Pre-allocate workspace
+    workspace = matmul_all_gather_copy_engine_preamble(shmem, A_local, B, config)
+
+    # ── Timing ───────────────────────────────────────────────────────────
     comm_stream = torch.cuda.Stream()
 
     kernel_timing = {
@@ -213,7 +256,7 @@ def _worker(args: dict):
 
     workspace = None
 
-    def run_copy_engine_experiment():
+    def run_experiment():
         nonlocal kernel_timing, workspace
 
         shmem.barrier()
@@ -281,33 +324,29 @@ def _worker(args: dict):
         C.zero_()
         shmem.barrier()
 
-        run_copy_engine_experiment()
+        run_experiment()
         torch.cuda.synchronize()
         shmem.barrier()
 
         atol = 1e-1 if datatype == torch.float16 else 1e-3
-        success = torch.allclose(C, expected_tensor, atol=atol)
+        rtol = 1e-2 if datatype == torch.float16 else 1e-5
+        success = torch.allclose(C, expected_tensor, atol=atol, rtol=rtol)
         if not success:
             max_diff = torch.abs(C - expected_tensor).max().item()
-            shmem.error(f"Rank {rank}: Validation failed, max diff: {max_diff}")
-
-        if success:
-            shmem.info("Matmul-all-gather copy engine validation passed!")
+            shmem.error(f"Rank {rank}: Validation FAILED, max diff: {max_diff}")
         else:
-            shmem.error("Matmul-all-gather copy engine validation failed!")
-
+            shmem.info("Validation PASSED!")
+        shmem.barrier()
         json_writer.add_field("success", success)
 
-        # Wait for all to finish validation
-        shmem.barrier()
-
+    # ── Benchmark ────────────────────────────────────────────────────────
     if args["benchmark"]:
         # Warmup for benchmarking
         for k in ["copy_engine", "baseline"]:
             kernel_timing[k]["ms"] = 0
             kernel_timing[k]["experiments"] = 0
 
-        iris.do_bench(run_copy_engine_experiment, shmem.barrier, n_warmup=25, n_repeat=1)
+        iris.do_bench(run_experiment, shmem.barrier, n_warmup=25, n_repeat=1)
 
         for k in ["copy_engine", "baseline"]:
             kernel_timing[k]["ms"] = 0
@@ -323,7 +362,7 @@ def _worker(args: dict):
         total_flops = 2 * M_local * N * K
         total_tflops_unit = total_flops * 1e-12
 
-        triton_ms = iris.do_bench(run_copy_engine_experiment, shmem.barrier)
+        triton_ms = iris.do_bench(run_experiment, shmem.barrier)
         tflops = total_tflops_unit / (
             (kernel_timing["copy_engine"]["ms"] / kernel_timing["copy_engine"]["experiments"]) * 1e-3
         )

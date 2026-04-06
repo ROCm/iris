@@ -44,8 +44,7 @@ DIMENSION_CONFIGS = [
 BENCHMARKS = {
     "baseline_and_pytorch": {
         "script": "benchmark/ops/matmul_all_gather/benchmark.py",
-        # "extra_args": ["--benchmark_pytorch"],
-        "extra_args": [],
+        "extra_args": ["--benchmark_pytorch"],
         "output_file": "matmul_all_gather_baseline.json",
         "extract_multiple": True,  # Extract both baseline and pytorch from one run
     },
@@ -53,6 +52,12 @@ BENCHMARKS = {
         "script": "benchmark/ops/matmul_all_gather/benchmark_host_copy_engine.py",
         "extra_args": [],
         "output_file": "matmul_all_gather_host_copy_engine.json",
+        "extract_multiple": False,
+    },
+    "device_copy_engine": {
+        "script": "benchmark/ops/matmul_all_gather/benchmark_copy_engine.py",
+        "extra_args": [],
+        "output_file": "matmul_all_gather_device_copy_engine.json",
         "extract_multiple": False,
     },
     "matmul_only": {

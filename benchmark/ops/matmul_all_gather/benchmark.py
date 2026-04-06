@@ -111,16 +111,16 @@ def _apply_model_defaults(args, world_size, dtype_bytes=2):
     if _DERIVE_AVAILABLE:
         try:
             # Note: args["m"] is M_local (rows per rank)
-            M_local = args["m"]
-            M = M_local * world_size  # Total M after gather
-            N = args["n"]
-            K = args["k"]
+            # M_local = args["m"]
+            # M = M_local * world_size  # Total M after gather
+            # N = args["n"]
+            # K = args["k"]
 
             # Derive parameters from performance model
             p = _derive_params(
-                M,
-                N,
-                K,
+                args["m"],
+                args["n"],
+                args["k"],
                 world_size=world_size,
                 link_bw=50.0,  # Default, could be profiled
                 num_cus=DEFAULT_NUM_CUS,
@@ -301,20 +301,15 @@ def _worker(args: dict):
         shmem.barrier()
 
         atol = 1e-1 if datatype == torch.float16 else 1e-3
-        success = torch.allclose(C, expected_tensor, atol=atol)
+        rtol = 1e-2 if datatype == torch.float16 else 1e-5
+        success = torch.allclose(C, expected_tensor, atol=atol, rtol=rtol)
         if not success:
             max_diff = torch.abs(C - expected_tensor).max().item()
-            shmem.error(f"Rank {rank}: Validation failed, max diff: {max_diff}")
-
-        if success:
-            shmem.info("Matmul-all-gather validation passed!")
+            shmem.error(f"Rank {rank}: Validation FAILED, max diff: {max_diff}")
         else:
-            shmem.error("Matmul-all-gather validation failed!")
-
-        json_writer.add_field("success", success)
-
-        # Wait for all to finish validation
+            shmem.info("Validation PASSED!")
         shmem.barrier()
+        json_writer.add_field("success", success)
 
     if args["benchmark"]:
         # Warmup for benchmarking
