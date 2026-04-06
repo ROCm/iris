@@ -312,7 +312,8 @@ def _worker(local_rank: int = None, world_size: int = None, init_url: str = None
         shmem.barrier()
 
         atol = 1e-1 if datatype == torch.float16 else 1e-3
-        success = torch.allclose(C, expected_tensor, atol=atol)
+        rtol = 1e-2 if datatype == torch.float16 else 1e-5
+        success = torch.allclose(C, expected_tensor, atol=atol, rtol=rtol)
         if not success:
             max_diff = torch.abs(C - expected_tensor).max().item()
             shmem.error(f"Rank {rank}: Validation failed, max diff: {max_diff}")

@@ -26,6 +26,8 @@ import random
 import argparse
 import numpy as np
 
+from examples.common.utils import JSONWriter
+
 import iris
 from iris.ops.all_gather_matmul_copy_engine import (
     all_gather_matmul_copy_engine,
@@ -68,10 +70,10 @@ _FALLBACK_DEFAULTS = {
     "block_size_m": 256,
     "block_size_n": 64,
     "block_size_k": 64,
-    "group_size_m": 4,             # M-grouping for L2 cache reuse
-    "k_per_flag": 4,               # Copy engine default (larger batches)
-    "m_tiles_per_batch": 8,        # Default batch size
-    "device_initiated": True,      # Fallback: device mode (derive() should set this)
+    "group_size_m": 4,  # M-grouping for L2 cache reuse
+    "k_per_flag": 4,  # Copy engine default (larger batches)
+    "m_tiles_per_batch": 8,  # Default batch size
+    "device_initiated": True,  # Fallback: device mode (derive() should set this)
     "num_warps": 4,
 }
 
@@ -306,6 +308,9 @@ def parse_args():
         dest="force_host_mode",
         help="Force host-initiated SDMA mode (overrides model)",
     )
+    parser.add_argument(
+        "--output_file", type=str, default="all_gather_matmul_copy_engine.json", help="Output JSON file"
+    )
     return vars(parser.parse_args())
 
 
@@ -416,6 +421,22 @@ def _worker(args):
     if args["num_xcds"] is not None:
         config_kwargs["num_xcds"] = args["num_xcds"]
     config = FusedConfig(**config_kwargs)
+
+    json_writer = JSONWriter(args["output_file"])
+    json_writer.add_field("world_size", world_size)
+    json_writer.add_field("operation", "all_gather_matmul_copy_engine")
+    json_writer.add_field("variant", "copy_engine")
+    json_writer.add_field("k_local", K_local)
+
+    for key, value in args.items():
+        json_writer.add_field(key, value)
+
+    # Export actual config values
+    json_writer.add_field("block_size_m", config.block_size_m)
+    json_writer.add_field("block_size_n", config.block_size_n)
+    json_writer.add_field("block_size_k", config.block_size_k)
+    json_writer.add_field("num_sms", config.num_sms)
+    json_writer.add_field("num_xcds", config.num_xcds)
 
     buffer_mb = M * K * torch.tensor([], dtype=datatype).element_size() / (1024**2)
     num_m_tiles = M // config.block_size_m
@@ -532,6 +553,7 @@ def _worker(args):
         else:
             shmem.info("Validation PASSED!")
         shmem.barrier()
+        json_writer.add_field("success", success)
 
     # ── Benchmark ────────────────────────────────────────────────────────
     if args["benchmark"]:
@@ -565,6 +587,14 @@ def _worker(args):
             f"ws={world_size}, dtype={args['datatype']}): "
             f"{avg_ms:.3f} ms, {tflops:.3f} TFLOPS, {bw_gbps:.3f} GB/s"
         )
+
+        json_writer.add_field("tflops", tflops)
+        json_writer.add_field("bandwidth_gbps", bw_gbps)
+        json_writer.add_field("avg_ms", avg_ms)
+        json_writer.add_field("total_flops", total_flops)
+        json_writer.add_field("total_bytes", total_bytes)
+        json_writer.add_field("total_bytes_gb", total_bytes / (1024**3))
+
         shmem.barrier()
 
         # ── Per-rank finish time measurement ─────────────────────────────
@@ -713,6 +743,10 @@ def _worker(args):
             shmem.info(f"Speedup (Copy Engine / PyTorch): {speedup:.2f}x")
 
         shmem.barrier()
+
+    if rank == 0:
+        json_writer.flush()
+        json_writer.display()
 
     shmem.barrier()
     dist.destroy_process_group()
