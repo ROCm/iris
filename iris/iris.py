@@ -969,6 +969,185 @@ class Iris:
         offset = ptr - from_base
         return to_base + offset
 
+    def put(self, src_tensor: torch.Tensor, dst_rank: int,
+            dst_tensor: torch.Tensor = None,
+            wait_flag: torch.Tensor = None, wait_value: int = None,
+            signal_flag: torch.Tensor = None, signal_value: int = 1,
+            async_op: bool = False, channel: int = 0):
+        """
+        One-sided put operation with optional wait (POLL) and signal (ATOMIC).
+
+        Supports:
+        - Simple copy: put(src, dst_rank)
+        - Copy + signal: put(src, dst_rank, signal_flag=flag)
+        - Wait + copy: put(src, dst_rank, wait_flag=flag, wait_value=N)
+        - Wait + copy + signal: put(src, dst_rank, wait_flag=..., signal_flag=...)
+
+        Args:
+            src_tensor: Source tensor (local, must be symmetric)
+            dst_rank: Destination rank
+            dst_tensor: Destination tensor (symmetric). If None, uses src_tensor.
+            wait_flag: Optional LOCAL flag tensor to poll before transfer (POLL packet)
+            wait_value: Expected value for wait_flag
+            signal_flag: Optional flag tensor to atomic-add on REMOTE rank after transfer (will be translated)
+            signal_value: Value to add to signal_flag (default 1)
+            async_op: If True, don't wait for completion
+            channel: SDMA channel to use
+
+        Examples:
+            >>> # Simple copy
+            >>> shmem.put(data, dst_rank=1)
+
+            >>> # Copy with completion signal
+            >>> shmem.put(data, dst_rank=1, signal_flag=completion_flag)
+
+            >>> # Wait for ready signal, then copy
+            >>> shmem.put(data, dst_rank=1, wait_flag=ready_flag, wait_value=1)
+
+            >>> # Full pipeline: wait, copy, signal
+            >>> shmem.put(data, dst_rank=1,
+            ...          wait_flag=batch_ready, wait_value=256,
+            ...          signal_flag=transfer_done, signal_value=1)
+        """
+        if dst_tensor is None:
+            dst_tensor = src_tensor
+
+        src_rank = self.get_rank()
+        src_ptr = src_tensor.data_ptr()
+        dst_ptr = self.translate(dst_tensor.data_ptr(), src_rank, dst_rank)
+        size = src_tensor.numel() * src_tensor.element_size()
+
+        # Determine which SDMA packet combination to use
+        has_wait = wait_flag is not None
+        has_signal = signal_flag is not None
+
+        if has_wait and has_signal:
+            # POLL + COPY + ATOMIC (two submissions)
+            wait_ptr = wait_flag.data_ptr()
+            signal_ptr = self.translate(signal_flag.data_ptr(), src_rank, dst_rank)
+
+            # First: POLL + COPY
+            self.copy_engines.host_wait_flag_then_put(
+                src_rank, dst_rank, channel, wait_ptr, wait_value, src_ptr, dst_ptr, size
+            )
+            # Then: ATOMIC
+            self.copy_engines.host_atomic_add(src_rank, dst_rank, channel, signal_ptr, signal_value)
+
+        elif has_wait:
+            # POLL + COPY
+            wait_ptr = wait_flag.data_ptr()
+            self.copy_engines.host_wait_flag_then_put(
+                src_rank, dst_rank, channel, wait_ptr, wait_value, src_ptr, dst_ptr, size
+            )
+
+        elif has_signal:
+            # COPY + ATOMIC (combined in one submission)
+            signal_ptr = self.translate(signal_flag.data_ptr(), src_rank, dst_rank)
+            self.copy_engines.host_put_signal(
+                src_rank, dst_rank, channel, src_ptr, dst_ptr, size, signal_ptr, signal_value
+            )
+
+        else:
+            # Simple COPY
+            self.copy_engines.host_put(src_rank, dst_rank, channel, src_ptr, dst_ptr, size)
+
+        if not async_op:
+            self.copy_engines.host_quiet(src_rank, dst_rank, channel)
+
+    def put_tile(self, tile, dst_rank: int,
+                 dst_ptr: int,
+                 dst_stride: int,
+                 wait_flag: int = None, wait_value: int = None,
+                 signal_flag: int = None, signal_value: int = 1,
+                 async_op: bool = False, channel: int = 0):
+        """
+        2D tile transfer with optional wait/signal (sub-window copy).
+
+        Low-level API - caller provides pre-translated pointers for performance.
+
+        Args:
+            tile: Pre-configured anvil.Tile object with data pointer and dimensions set
+            dst_rank: Destination rank
+            dst_ptr: Destination pointer (already translated to remote address space)
+            dst_stride: Destination row stride in bytes
+            wait_flag: Optional LOCAL flag pointer to poll before transfer
+            wait_value: Expected value for wait_flag
+            signal_flag: Optional REMOTE flag pointer to atomic-add after transfer (already translated)
+            signal_value: Value to add to signal_flag
+            async_op: If True, don't wait for completion
+            channel: SDMA channel to use
+
+        Examples:
+            >>> import anvil
+            >>> tile = anvil.Tile()
+            >>> tile.pid_m = 0
+            >>> tile.pid_n = 0
+            >>> tile.block_m = 256
+            >>> tile.block_n = 256
+            >>> tile.elem_size = A.element_size()
+            >>> tile.src_stride = A.stride(0) * tile.elem_size
+            >>> tile.data = A.data_ptr()
+            >>> dst_ptr = shmem.translate(A.data_ptr(), src_rank, dst_rank)
+            >>> dst_stride = A.stride(0) * tile.elem_size
+            >>> wait_ptr = flag.data_ptr()
+            >>> signal_ptr = shmem.translate(flag.data_ptr(), src_rank, dst_rank)
+            >>> shmem.put_tile(tile, dst_rank=1, dst_ptr=dst_ptr, dst_stride=dst_stride,
+            ...               wait_flag=wait_ptr, wait_value=256, signal_flag=signal_ptr)
+        """
+        src_rank = self.get_rank()
+
+        has_wait = wait_flag is not None
+        has_signal = signal_flag is not None
+
+        if has_wait and has_signal:
+            # POLL + SUB_WINDOW_COPY + ATOMIC (two submissions)
+            self.copy_engines.host_wait_flag_then_put_tile(
+                src_rank, dst_rank, channel, wait_flag, wait_value, tile, dst_ptr, dst_stride
+            )
+            self.copy_engines.host_atomic_add(src_rank, dst_rank, channel, signal_flag, signal_value)
+
+        elif has_wait:
+            # POLL + SUB_WINDOW_COPY
+            self.copy_engines.host_wait_flag_then_put_tile(
+                src_rank, dst_rank, channel, wait_flag, wait_value, tile, dst_ptr, dst_stride
+            )
+
+        elif has_signal:
+            # SUB_WINDOW_COPY + ATOMIC
+            self.copy_engines.host_put_tile_signal(
+                src_rank, dst_rank, channel, tile, dst_ptr, dst_stride, signal_flag, signal_value
+            )
+
+        else:
+            # Simple SUB_WINDOW_COPY
+            self.copy_engines.host_put_tile(src_rank, dst_rank, channel, tile, dst_ptr, dst_stride)
+
+        if not async_op:
+            self.copy_engines.host_quiet(src_rank, dst_rank, channel)
+
+    def quiet(self, dst_rank: int = None, channel: int = 0):
+        """
+        Wait for all outstanding SDMA operations to complete.
+
+        Args:
+            dst_rank: If specified, wait only for ops to this rank.
+                     If None, wait for ops to all ranks.
+            channel: SDMA channel
+
+        Example:
+            >>> shmem.put(tensor, dst_rank=1, async_op=True)
+            >>> shmem.quiet(dst_rank=1)  # Wait for completion
+            >>> shmem.quiet()  # Wait for all ranks
+        """
+        src_rank = self.get_rank()
+        if dst_rank is not None:
+            self.copy_engines.host_quiet(src_rank, dst_rank, channel)
+        else:
+            # Quiet to all ranks
+            for rank in range(self.get_num_ranks()):
+                if rank != src_rank:
+                    self.copy_engines.host_quiet(src_rank, rank, channel)
+
     def get_device_context(self):
         """
         Get the device context tensor for DeviceContext initialization.
@@ -1032,7 +1211,7 @@ class Iris:
 
         return context_tensor
 
-    def barrier(self, stream=None, group=None):
+    def barrier(self, stream=None, group=None, sync_copy_engine=False):
         """
         Synchronize ranks within the specified group and their CUDA devices.
 
@@ -1044,17 +1223,24 @@ class Iris:
             stream: If stream is given: wait only for that stream before barrier. If stream is None: legacy behavior (device-wide sync).
             group (ProcessGroup, optional): The process group to synchronize.
                 If None, uses the default process group (all ranks).
+            sync_copy_engine (bool, optional): If True, also wait for all outstanding SDMA operations to complete.
+                Default is False.
 
         Example:
             >>> ctx = iris.iris(1 << 20)
             >>> ctx.barrier()  # Synchronize all ranks
             >>> ctx.barrier(group=my_group)  # Synchronize only ranks in my_group
+            >>> ctx.barrier(sync_copy_engine=True)  # Synchronize GPU + SDMA
         """
         # Wait for all GPUs to finish work
         if stream is None:
             torch.cuda.synchronize()
         else:
             stream.synchronize()
+
+        # Wait for SDMA operations if requested
+        if sync_copy_engine:
+            self.quiet()
 
         # Distributed barrier
         distributed_barrier(group=group)

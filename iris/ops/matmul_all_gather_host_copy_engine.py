@@ -451,46 +451,45 @@ def matmul_all_gather_host_copy_engine(
         # Calculate total width (all N-tiles)
         batch_width = N  # Full N dimension
 
-        # Create Tile object for 2D sub-window copy of entire batch
+        # Wait for flag to reach expected value (all tiles in this batch complete)
+        expected_flag_value = (flag_iteration + 1) * num_m_tiles_in_batch * num_tiles_n
+
+        # Get flag pointer for this batch
+        wait_flag_ptr = workspace.locks.data_ptr() + batch_id * workspace.locks.element_size()
+
+        # Create Tile object for this batch (reuse across all remote ranks)
         tile_obj = Tile()
-        tile_obj.pid_m = 0  # We'll handle offset in data pointer
+        tile_obj.pid_m = 0  # We handle offset via data pointer
         tile_obj.pid_n = 0
         tile_obj.block_m = batch_height
         tile_obj.block_n = batch_width
         tile_obj.elem_size = element_size
-        tile_obj.src_stride = stride_cm * element_size  # Row stride in bytes
-
-        # Source data pointer (output tensor at this rank's batch location, full N width)
+        tile_obj.src_stride = stride_cm * element_size
+        # Source data pointer (output tensor at this rank's batch location)
         src_offset = (m_start + rank * M_local) * stride_cm
         tile_obj.data = output_tensor.data_ptr() + src_offset * element_size
 
-        # For each remote rank, queue POLL+COPY
+        # Pre-calculate destination pointer (same logical position, just needs translation)
+        dst_offset_local = (m_start + rank * M_local) * stride_cm
+        dst_ptr_local = output_tensor.data_ptr() + dst_offset_local * element_size
+        dst_stride = stride_cm * element_size
+
+        # For each remote rank, queue POLL+COPY using new API
         for remote_rank in range(world_size):
             if remote_rank != rank:
-                # Destination is the same logical position on remote rank
-                dst_offset = (m_start + rank * M_local) * stride_cm
-                dst_ptr_local = output_tensor.data_ptr() + dst_offset * element_size
-
-                # Translate local pointer to remote rank's address space
+                # Translate destination pointer to remote address space
                 dst_ptr_remote = shmem.translate(dst_ptr_local, rank, remote_rank)
-                dst_stride = stride_cm * element_size  # Row stride in bytes
 
-                # Get flag pointer for this batch (use flags_slice which is already offset)
-                flag_ptr = workspace.locks.data_ptr() + batch_id * workspace.locks.element_size()
-
-                # Wait for flag to reach num_m_tiles_in_batch * num_tiles_n (all tiles in this batch complete)
-                expected_flag_value = (flag_iteration + 1) * num_m_tiles_in_batch * num_tiles_n
-
-                # Use anvil host API to queue POLL+SUB_WINDOW_COPY for entire batch
-                anvil_lib.host_wait_flag_then_put_tile(
-                    rank,
-                    remote_rank,
-                    0,  # channel_idx
-                    flag_ptr,
-                    expected_flag_value,
+                # Use shmem.put_tile API with pre-calculated pointers
+                shmem.put_tile(
                     tile_obj,
-                    dst_ptr_remote,
-                    dst_stride,
+                    dst_rank=remote_rank,
+                    dst_ptr=dst_ptr_remote,
+                    dst_stride=dst_stride,
+                    wait_flag=wait_flag_ptr,
+                    wait_value=expected_flag_value,
+                    async_op=True,  # Don't wait yet, we'll call quiet later
+                    channel=0,
                 )
                 tile_transfer_count += 1
 
@@ -536,10 +535,7 @@ def matmul_all_gather_host_copy_engine(
     # Extract trace data if tracing was enabled
     if trace:
         torch.cuda.synchronize()
-        for remote_rank in range(world_size):
-            if remote_rank != rank:
-                anvil_lib.host_quiet(rank, remote_rank, 0)
-        # sdma_ts = workspace.sdma_timestamps if hasattr(workspace, 'sdma_timestamps') else None
+        shmem.quiet()  # Wait for all SDMA operations to complete
         workspace.trace_data = _extract_wg_trace(shmem, num_sms, num_tiles, sdma_timestamps=sdma_timestamps)
 
     return workspace
