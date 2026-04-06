@@ -19,8 +19,16 @@ try:
     from iris.experimental.iris_gluon import IrisDeviceCtx
 
     GLUON_AVAILABLE = True
+
+    try:
+        from triton.experimental.gluon.language.amd.gfx1250 import async_copy as gfx1250_async_copy
+
+        GFX1250_ASYNC_AVAILABLE = True
+    except ImportError:
+        GFX1250_ASYNC_AVAILABLE = False
 except ImportError:
     GLUON_AVAILABLE = False
+    GFX1250_ASYNC_AVAILABLE = False
 
 
 @triton.jit()
@@ -441,6 +449,119 @@ if GLUON_AVAILABLE:
                     gl.store(remote_ptrs, data, mask=mask)
 
 
+if GFX1250_ASYNC_AVAILABLE:
+
+    @gluon.jit
+    def persistent_all_gather_gluon_gfx1250(
+        IrisDeviceCtx: gl.constexpr,
+        context_tensor,
+        input_ptr,
+        output_ptr,
+        M,
+        N,
+        stride_in_m,
+        stride_in_n,
+        stride_out_m,
+        stride_out_n,
+        group_rank: gl.constexpr,
+        iris_rank: gl.constexpr,
+        world_size: gl.constexpr,
+        rank_start: gl.constexpr,
+        rank_stride: gl.constexpr,
+        BLOCK_SIZE_M: gl.constexpr,
+        BLOCK_SIZE_N: gl.constexpr,
+        GROUP_SIZE_M: gl.constexpr,
+        COMM_SMS: gl.constexpr,
+        THREADS_PER_WARP: gl.constexpr,
+        WARPS_PER_CTA: gl.constexpr,
+    ):
+        """
+        Persistent all-gather kernel using GFX1250 async copy through LDS.
+
+        Both loads (global → LDS) and stores (LDS → global) bypass registers
+        entirely, freeing VGPRs for pointer arithmetic and XGMI translation.
+        Uses the same flat-2D tiling and traffic-shaped store pattern as
+        persistent_all_gather_gluon.
+
+        Hardware requirement: GFX1250 (RDNA4) with async_copy support.
+        """
+        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=False)
+
+        pid = gl.program_id(0)
+
+        num_pid_m = gl.cdiv(M, BLOCK_SIZE_M)
+        num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
+        total_tiles = num_pid_m * num_pid_n
+
+        # Flat 1D layout covering BLOCK_SIZE_M * BLOCK_SIZE_N elements
+        TOTAL_ELEMS: gl.constexpr = BLOCK_SIZE_M * BLOCK_SIZE_N
+        ELEMS_PER_THREAD: gl.constexpr = TOTAL_ELEMS // (THREADS_PER_WARP * WARPS_PER_CTA)
+        flat_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
+
+        # Allocate LDS buffer for one tile (1D flat, shape must match pointer tensor)
+        dtype: gl.constexpr = input_ptr.dtype.element_ty
+        smem_layout: gl.constexpr = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[0])
+        smem = gl.allocate_shared_memory(dtype, [TOTAL_ELEMS], layout=smem_layout)
+
+        # Hoist local heap base outside the tile loop
+        local_base = gl.load(ctx.heap_bases + iris_rank)
+
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            # Swizzled tile index computation for better L2 locality
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+            # Flat index -> 2D row/col within tile
+            flat_idx = gl.arange(0, TOTAL_ELEMS, layout=flat_layout)
+            row_local = flat_idx // BLOCK_SIZE_N
+            col_local = flat_idx % BLOCK_SIZE_N
+
+            # Global row/col
+            row = pid_m * BLOCK_SIZE_M + row_local
+            col = pid_n * BLOCK_SIZE_N + col_local
+
+            mask = (row < M) & (col < N)
+
+            # === ASYNC LOAD: global → LDS (register-free for data) ===
+            input_offsets = row * stride_in_m + col * stride_in_n
+            input_ptrs = input_ptr + input_offsets
+            gfx1250_async_copy.global_to_shared(smem, input_ptrs, mask=mask, other=0.0)
+            gfx1250_async_copy.commit_group()
+            gfx1250_async_copy.wait_group(0)
+
+            # Output: this rank's data goes to output[group_rank * M + row, col]
+            output_row = group_rank * M + row
+            output_offsets = output_row * stride_out_m + col * stride_out_n
+
+            # === ASYNC STORES: LDS → global/XGMI (register-free for data) ===
+            # Traffic-shaped: staggered write order per rank to avoid
+            # memory controller contention on the receiver side.
+            for rank_idx in range(world_size):
+                dest_idx = (group_rank + rank_idx) % world_size
+                target_iris_rank = rank_start + dest_idx * rank_stride
+                output_ptrs = output_ptr + output_offsets
+
+                if dest_idx == group_rank:
+                    # Local destination: LDS → local HBM
+                    gfx1250_async_copy.shared_to_global(output_ptrs, smem, mask=mask)
+                else:
+                    # Remote destination: translate pointers, LDS → remote HBM via XGMI
+                    target_base = gl.load(ctx.heap_bases + target_iris_rank)
+                    ptr_delta = target_base - local_base
+                    output_ptrs_int = tl.cast(output_ptrs, gl.uint64)
+                    remote_ptrs_int = output_ptrs_int + ptr_delta
+                    remote_ptrs = tl.cast(remote_ptrs_int, output_ptrs.dtype)
+                    gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask)
+
+            # Wait for all stores to complete before reusing LDS on next tile
+            gfx1250_async_copy.commit_group()
+            gfx1250_async_copy.wait_group(0)
+
+
 def all_gather(
     output_tensor,
     input_tensor,
@@ -536,7 +657,18 @@ def all_gather(
 
         context_tensor = shmem.get_device_context()
 
-        persistent_all_gather_gluon[(config.comm_sms,)](
+        # Detect GFX1250 for register-free async copy path
+        import torch
+
+        use_gfx1250_async = False
+        if GFX1250_ASYNC_AVAILABLE:
+            try:
+                arch = torch.cuda.get_device_properties(input_tensor.device).gcnArchName
+                use_gfx1250_async = "gfx1250" in arch
+            except Exception:
+                pass
+
+        gluon_kernel_args = (
             IrisDeviceCtx,
             context_tensor,
             input_tensor,
@@ -558,10 +690,21 @@ def all_gather(
             config.comm_sms,
             config.threads_per_warp,
             config.num_warps,
+        )
+        gluon_kernel_kwargs = dict(
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,
         )
+
+        if use_gfx1250_async:
+            persistent_all_gather_gluon_gfx1250[(config.comm_sms,)](
+                *gluon_kernel_args, **gluon_kernel_kwargs,
+            )
+        else:
+            persistent_all_gather_gluon[(config.comm_sms,)](
+                *gluon_kernel_args, **gluon_kernel_kwargs,
+            )
     else:
         if config.use_gluon and not GLUON_AVAILABLE:
             raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False")
