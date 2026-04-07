@@ -516,23 +516,23 @@ if GFX1250_ASYNC_AVAILABLE:
             pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
             pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-            # Flat index -> 2D row/col within tile
-            flat_idx = gl.arange(0, TOTAL_ELEMS, layout=flat_layout)
-            row_local = flat_idx // BLOCK_SIZE_N
-            col_local = flat_idx % BLOCK_SIZE_N
+            # Flat index -> 2D row/col within tile (for mask computation only)
+            flat_idx_mask = gl.arange(0, TOTAL_ELEMS, layout=flat_layout)
+            row_local = flat_idx_mask // BLOCK_SIZE_N
+            col_local = flat_idx_mask % BLOCK_SIZE_N
 
-            # Global row/col
+            # Global row/col (for mask only)
             row = pid_m * BLOCK_SIZE_M + row_local
             col = pid_n * BLOCK_SIZE_N + col_local
 
             mask = (row < M) & (col < N)
 
             # === ASYNC LOAD: global → LDS (register-free for data) ===
-            # Use flat_idx directly to preserve pointer contiguity for async copy.
-            # For row-major layout: row*stride_m + col*stride_n = row*N + col
-            # = (pid_m*BM + flat_idx//BN)*N + (pid_n*BN + flat_idx%BN)
-            # = pid_m*BM*N + pid_n*BN + flat_idx
-            # Using flat_idx avoids div/mod which breaks AxisInfoAnalysis.
+            # Separate arange for pointer computation to preserve contiguity.
+            # AxisInfoAnalysis loses contiguity when an arange feeds div/mod ops,
+            # so we use an independent arange that only feeds addptr.
+            # For row-major contiguous layout: offset = tile_base + flat_idx.
+            flat_idx = gl.arange(0, TOTAL_ELEMS, layout=flat_layout)
             input_tile_base = pid_m * BLOCK_SIZE_M * stride_in_m + pid_n * BLOCK_SIZE_N * stride_in_n
             input_ptrs = input_ptr + input_tile_base + flat_idx
             gfx1250_async_copy.global_to_shared(smem, input_ptrs, mask=mask, other=0.0)
