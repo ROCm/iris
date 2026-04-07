@@ -42,6 +42,7 @@ def _copy_engine_all_gather_matmul_kernel(
     bias_ptr,
     staged_a,
     flags_ptr,
+    flag_iteration,
     M,
     N,
     K,
@@ -257,9 +258,10 @@ def _copy_engine_all_gather_matmul_kernel(
                 _ws = read_realtime()
 
             flag_idx = batch_id * NUM_FLAG_GROUPS_K_TOTAL + k_fg
-            # Spin using atomic_add to poll flag
-            # while tl.atomic_add(flags_ptr + flag_idx, 0, sem="acquire", scope="sys") == 0:
-            while tl.load(flags_ptr + flag_idx, cache_modifier=".cv", volatile=True) == 0:
+            # Spin until flag reaches expected value for this iteration
+            expected_flag_value = flag_iteration + 1
+            # while tl.atomic_add(flags_ptr + flag_idx, 0, sem="acquire", scope="sys") < expected_flag_value:
+            while tl.load(flags_ptr + flag_idx, cache_modifier=".cv", volatile=True) < expected_flag_value:
                 pass
 
             if TRACE:
@@ -320,7 +322,7 @@ def _copy_engine_all_gather_matmul_kernel(
             event_id=TraceEvent().wg_gemm_wait,
             target_rank=cur_rank,
             address=flags_ptr + tl.arange(0, 1),
-            pid_m=pid,
+            pid_m=gemm_pid,
             pid_n=_tile_wt.to(tl.int32),
         )
 
@@ -376,7 +378,7 @@ def all_gather_matmul_copy_engine_preamble(
     B: torch.Tensor,
     config: Optional[FusedConfig] = None,
     k_per_flag: int = 4,
-    m_tiles_per_batch: Optional[int] = None,
+    m_tiles_per_batch: int = 1,
     staged_a_layout: str = "k_contiguous",
 ) -> FusedWorkspace:
     """
@@ -412,11 +414,6 @@ def all_gather_matmul_copy_engine_preamble(
         f"num_k_blocks_local ({num_k_blocks_local}) must be divisible by k_per_flag ({k_per_flag}) "
         f"to ensure even flag group alignment per rank"
     )
-
-    # M-tiles per batch for K-block batching (user controlled)
-    # Default: No batching (all M-tiles in single batch)
-    if m_tiles_per_batch is None:
-        m_tiles_per_batch = num_m_tiles
 
     num_batches = (num_m_tiles + m_tiles_per_batch - 1) // m_tiles_per_batch
 
@@ -563,8 +560,9 @@ def all_gather_matmul_copy_engine(
     async_op: bool = False,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
+    flag_iteration: int = 0,
     k_per_flag: int = 4,
-    m_tiles_per_batch: Optional[int] = None,  # K-block batching across M-tiles
+    m_tiles_per_batch: int = 1,
     staged_a_layout: str = "k_contiguous",
     num_warps: Optional[int] = None,
     num_stages: Optional[int] = None,
@@ -618,17 +616,10 @@ def all_gather_matmul_copy_engine(
 
     num_flag_groups_k_total = num_k_blocks // k_per_flag  # Global K-flag-groups (exact division)
 
-    # Set m_tiles_per_batch default BEFORE calling preamble
-    # Default: No batching (transfer to all M-tiles in single batch)
-    if m_tiles_per_batch is None:
-        m_tiles_per_batch = num_m_tiles
-
     if workspace is None:
         workspace = all_gather_matmul_copy_engine_preamble(
             shmem, A_sharded, B, config, k_per_flag, m_tiles_per_batch, staged_a_layout
         )
-
-    workspace.locks.zero_()
 
     # Note: Local K-blocks already copied to staged_a in preamble
     stride_am, stride_ak = A_sharded.stride()
@@ -715,6 +706,7 @@ def all_gather_matmul_copy_engine(
         bias_ptr,
         workspace.aux_buffer,
         workspace.locks,
+        flag_iteration,
         M,
         N,
         K,
@@ -897,3 +889,5 @@ def all_gather_matmul_copy_engine(
             num_m_tiles=num_m_tiles,
             num_tiles_n=num_tiles_n,
         )
+
+    return workspace
