@@ -46,8 +46,7 @@ void finalize() { MPI_Finalize(); }
 namespace detail {
 void* malloc_fine_grained(std::size_t bytes) {
   void* ptr;
-  const auto flags = hipDeviceMallocFinegrained;
-  hip_try(hipExtMallocWithFlags(&ptr, bytes, flags));
+  hip_try(hipMalloc(&ptr, bytes));
 
   return ptr;
 }
