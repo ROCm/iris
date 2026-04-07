@@ -541,7 +541,9 @@ if GFX1250_ASYNC_AVAILABLE:
 
             # Output: this rank's data goes to output[group_rank * M + row, col]
             # Use flat_idx to preserve pointer contiguity (same reasoning as input).
-            output_tile_base = (group_rank * M + pid_m * BLOCK_SIZE_M) * stride_out_m + pid_n * BLOCK_SIZE_N * stride_out_n
+            output_tile_base = (
+                group_rank * M + pid_m * BLOCK_SIZE_M
+            ) * stride_out_m + pid_n * BLOCK_SIZE_N * stride_out_n
             output_base_ptrs = output_ptr + output_tile_base + flat_idx
 
             # === ASYNC STORES: LDS → global/XGMI (register-free for data) ===
