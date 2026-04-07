@@ -20,6 +20,7 @@ from iris.ops import FusedConfig, matmul_all_reduce_preamble
 
 # --- Unfused baseline: torch.mm + RCCL all-reduce ---
 
+
 @bench.register
 @bench.axis("num_ranks", [2, 4, 8])
 @bench.axis("M", [32, 896, 2048])
@@ -44,6 +45,7 @@ def unfused_mm_allreduce(state, ctx):
 
 
 # --- Fused GEMM+AR: sweep variant × tile config ---
+
 
 @bench.register
 @bench.axis("num_ranks", [2, 4, 8])
