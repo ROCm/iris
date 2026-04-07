@@ -500,6 +500,7 @@ if GFX1250_ASYNC_AVAILABLE:
 
         # Allocate LDS buffer for one tile (1D flat, shape must match pointer tensor)
         dtype: gl.constexpr = input_ptr.dtype.element_ty
+        ELEM_SIZE_BYTES: gl.constexpr = dtype.primitive_bitwidth // 8
         smem_layout: gl.constexpr = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[0])
         smem = gl.allocate_shared_memory(dtype, [TOTAL_ELEMS], layout=smem_layout)
 
@@ -550,11 +551,13 @@ if GFX1250_ASYNC_AVAILABLE:
                     gfx1250_async_copy.shared_to_global(output_ptrs, smem, mask=mask)
                 else:
                     # Remote destination: translate pointers, LDS → remote HBM via XGMI
+                    # Use element-space offset to preserve pointer contiguity for
+                    # async copy vectorization (avoids inttoptr/ptrtoint cast chain
+                    # which breaks AxisInfoAnalysis → scalar stores).
                     target_base = gl.load(ctx.heap_bases + target_iris_rank)
                     ptr_delta = target_base - local_base
-                    output_ptrs_int = tl.cast(output_ptrs, gl.uint64)
-                    remote_ptrs_int = output_ptrs_int + ptr_delta
-                    remote_ptrs = tl.cast(remote_ptrs_int, output_ptrs.dtype)
+                    elem_delta = ptr_delta // ELEM_SIZE_BYTES
+                    remote_ptrs = output_ptrs + elem_delta
                     gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask)
 
             # Wait for all stores to complete before reusing LDS on next tile
