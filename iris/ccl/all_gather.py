@@ -528,15 +528,21 @@ if GFX1250_ASYNC_AVAILABLE:
             mask = (row < M) & (col < N)
 
             # === ASYNC LOAD: global → LDS (register-free for data) ===
-            input_offsets = row * stride_in_m + col * stride_in_n
-            input_ptrs = input_ptr + input_offsets
+            # Use flat_idx directly to preserve pointer contiguity for async copy.
+            # For row-major layout: row*stride_m + col*stride_n = row*N + col
+            # = (pid_m*BM + flat_idx//BN)*N + (pid_n*BN + flat_idx%BN)
+            # = pid_m*BM*N + pid_n*BN + flat_idx
+            # Using flat_idx avoids div/mod which breaks AxisInfoAnalysis.
+            input_tile_base = pid_m * BLOCK_SIZE_M * stride_in_m + pid_n * BLOCK_SIZE_N * stride_in_n
+            input_ptrs = input_ptr + input_tile_base + flat_idx
             gfx1250_async_copy.global_to_shared(smem, input_ptrs, mask=mask, other=0.0)
             gfx1250_async_copy.commit_group()
             gfx1250_async_copy.wait_group(0)
 
             # Output: this rank's data goes to output[group_rank * M + row, col]
-            output_row = group_rank * M + row
-            output_offsets = output_row * stride_out_m + col * stride_out_n
+            # Use flat_idx to preserve pointer contiguity (same reasoning as input).
+            output_tile_base = (group_rank * M + pid_m * BLOCK_SIZE_M) * stride_out_m + pid_n * BLOCK_SIZE_N * stride_out_n
+            output_base_ptrs = output_ptr + output_tile_base + flat_idx
 
             # === ASYNC STORES: LDS → global/XGMI (register-free for data) ===
             # Traffic-shaped: staggered write order per rank to avoid
@@ -544,7 +550,7 @@ if GFX1250_ASYNC_AVAILABLE:
             for rank_idx in range(world_size):
                 dest_idx = (group_rank + rank_idx) % world_size
                 target_iris_rank = rank_start + dest_idx * rank_stride
-                output_ptrs = output_ptr + output_offsets
+                output_ptrs = output_base_ptrs
 
                 if dest_idx == group_rank:
                     # Local destination: LDS → local HBM
