@@ -197,8 +197,13 @@ def _ksplit_fused_matmul_reduce_scatter_kernel(
 
         # Fused reduce-scatter: atomic_add partial result to dest_rank's output
         iris.atomic_add(
-            C_ptr, c, cur_rank, dest_rank, ctx.heap_bases,
-            mask=mask, sem="relaxed",
+            C_ptr,
+            c,
+            cur_rank,
+            dest_rank,
+            ctx.heap_bases,
+            mask=mask,
+            sem="relaxed",
         )
 
 
@@ -319,12 +324,8 @@ def matmul_reduce_scatter(
     if config.ksplit:
         K_local = K
         N_local = N // world_size
-        assert N % world_size == 0, (
-            f"N ({N}) must be divisible by world_size ({world_size}) for ksplit"
-        )
-        assert C.shape == (M, N_local), (
-            f"Output C must be ({M}, {N_local}) for ksplit, got {C.shape}"
-        )
+        assert N % world_size == 0, f"N ({N}) must be divisible by world_size ({world_size}) for ksplit"
+        assert C.shape == (M, N_local), f"Output C must be ({M}, {N_local}) for ksplit, got {C.shape}"
 
         device = A.device
         num_sms = config.num_sms
