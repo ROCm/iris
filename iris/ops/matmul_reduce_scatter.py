@@ -13,7 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
-from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
+from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view, Tile
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
@@ -115,6 +115,91 @@ def _fused_matmul_reduce_scatter_kernel(
     dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
     iris.x.reduce_scatter(tile_obj, src_view, dst_view, locks, ctx)
+
+
+@triton.jit()
+def _ksplit_fused_matmul_reduce_scatter_kernel(
+    A_shard,
+    B_shard,
+    C,
+    M,
+    N,
+    N_local,
+    K_local,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    context_tensor: tl.tensor,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+):
+    """
+    K-split fused GEMM + Reduce-Scatter kernel.
+
+    Each rank has a K-slice of A (M x K_local) and the full B (K_local x N).
+    Computes partial GEMM and atomic_adds the result to the responsible rank's
+    output buffer, fusing the reduce-scatter into the store phase.
+
+    Input sharding:
+        A_shard: (M, K_local) where K_local = K / world_size
+        B_shard: (K_local, N)
+    Output:
+        C: (M, N_local) where N_local = N / world_size, on the responsible rank
+    """
+    # Setup persistent kernel over the FULL output tile space (M x N)
+    tensorA = make_tensor_view(A_shard, M, K_local, stride_am, stride_ak)
+    tensorB = make_tensor_view(B_shard, K_local, N, stride_bk, stride_bn)
+    gemm_ctx = GemmContext(
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=NUM_SMS,
+        num_xcds=NUM_XCDS,
+        group_size_m=GROUP_SIZE_M,
+        even_k=EVEN_K,
+        allow_tf32=ALLOW_TF32,
+    )
+    sched = ScheduleContext(M, N, K_local, gemm_ctx)
+
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+
+    num_tiles_n_local = tl.cdiv(N_local, BLOCK_SIZE_N)
+
+    start, total, stride = sched.persistent_tile_range()
+    for tile_id in range(start, total, stride):
+        out_tile = sched.get_tile_from_idx(tile_id)
+
+        # Compute partial product: C_partial = A_shard @ B_shard for this tile
+        acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
+        c = acc.to(C.type.element_ty)
+
+        # Determine which rank owns this N-tile (contiguous N distribution)
+        pid_n = out_tile.pid_n
+        dest_rank = pid_n // num_tiles_n_local
+        local_pid_n = pid_n % num_tiles_n_local
+
+        # Compute output pointer on dest_rank's C buffer
+        rm = out_tile.pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rn = local_pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        mask = (rm[:, None] < M) & (rn[None, :] < N_local)
+        C_ptr = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+
+        # Fused reduce-scatter: atomic_add partial result to dest_rank's output
+        iris.atomic_add(
+            C_ptr, c, cur_rank, dest_rank, ctx.heap_bases,
+            mask=mask, sem="relaxed",
+        )
 
 
 def matmul_reduce_scatter_preamble(
@@ -221,12 +306,82 @@ def matmul_reduce_scatter(
     if config is None:
         config = FusedConfig()
 
-    workspace = matmul_reduce_scatter_preamble(shmem, C, A, B, config, workspace)
-
     M, K = A.shape[:2]
     N = B.shape[1]
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # K-split path: each rank has A_shard (M, K_local) and B (K_local, N),
+    # computes partial GEMM and atomic_adds to responsible rank's output.
+    # No aux_buffer or locks needed.
+    # ═══════════════════════════════════════════════════════════════════════
+    if config.ksplit:
+        K_local = K
+        N_local = N // world_size
+        assert N % world_size == 0, (
+            f"N ({N}) must be divisible by world_size ({world_size}) for ksplit"
+        )
+        assert C.shape == (M, N_local), (
+            f"Output C must be ({M}, {N_local}) for ksplit, got {C.shape}"
+        )
+
+        device = A.device
+        num_sms = config.num_sms
+        if num_sms is None:
+            props = torch.cuda.get_device_properties(device)
+            num_sms = props.multi_processor_count
+
+        C.zero_()
+        shmem.barrier()
+
+        even_k = K_local % config.block_size_k == 0
+        grid = (num_sms,)
+
+        _ksplit_fused_matmul_reduce_scatter_kernel[grid](
+            A,
+            B,
+            C,
+            M,
+            N,
+            N_local,
+            K_local,
+            A.stride(0),
+            A.stride(1),
+            B.stride(0),
+            B.stride(1),
+            C.stride(0),
+            C.stride(1),
+            shmem.get_device_context(),
+            rank,
+            world_size,
+            config.block_size_m,
+            config.block_size_n,
+            config.block_size_k,
+            config.group_size_m,
+            num_sms,
+            config.num_xcds,
+            even_k,
+            config.allow_tf32,
+        )
+
+        if not async_op:
+            torch.cuda.synchronize()
+            shmem.barrier()
+
+        if workspace is None:
+            workspace = FusedWorkspace()
+        workspace.operation = "matmul_reduce_scatter_ksplit"
+        workspace.shape = (M, N, K_local)
+        workspace.dtype = A.dtype
+        workspace.world_size = world_size
+        workspace.prepared = True
+        return workspace
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Standard path: full GEMM + reduce-scatter via aux_buffer + locks
+    # ═══════════════════════════════════════════════════════════════════════
+    workspace = matmul_reduce_scatter_preamble(shmem, C, A, B, config, workspace)
 
     num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n

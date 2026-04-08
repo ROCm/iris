@@ -62,6 +62,9 @@ class FusedConfig:
     all_reduce_variant: str = "two_shot"  # atomic, ring, one_shot, two_shot, spinlock
     all_reduce_num_rings: int = 1
 
+    # K-split partitioning (for intra-GPU QPX/NPS4 or inter-GPU K-sharded workloads)
+    ksplit: bool = False
+
     def validate(self, world_size: Optional[int] = None):
         """
         Validate configuration parameters.
