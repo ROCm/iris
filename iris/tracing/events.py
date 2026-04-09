@@ -75,7 +75,7 @@ class TraceEvent:
     atomic_min: tl.constexpr
     atomic_max: tl.constexpr
 
-    @triton.constexpr_function
+    @triton.language.constexpr_function
     def __init__(self):
         # Data movement
         self.load = tl.constexpr(0)

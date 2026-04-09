@@ -125,7 +125,7 @@ class TileView:
     block_m: tl.constexpr
     block_n: tl.constexpr
 
-    @triton.constexpr_function
+    @triton.language.constexpr_function
     def __init__(self, pid_m, pid_n, block_m, block_n):
         """
         Create a tile view with runtime coordinates and compile-time sizes.
@@ -196,7 +196,7 @@ class Tile:
     block_n: tl.constexpr
     data: tl.tensor
 
-    @triton.constexpr_function
+    @triton.language.constexpr_function
     def __init__(self, pid_m, pid_n, block_m, block_n, data):
         """
         Create a tile with runtime coordinates, compile-time sizes, and data.
@@ -296,7 +296,7 @@ class TensorView:
     stride_m: tl.tensor
     stride_n: tl.tensor
 
-    @triton.constexpr_function
+    @triton.language.constexpr_function
     def __init__(self, ptr, M, N, stride_m, stride_n):
         """
         Create a tensor view with pointer and dimensions/strides.
@@ -474,7 +474,7 @@ class AllReduceConfig:
     variant_code: tl.constexpr  # Integer code for variant
     locks_ptr: tl.tensor  # Pointer to locks (always required, may be dummy)
 
-    @triton.constexpr_function
+    @triton.language.constexpr_function
     def __init__(self, variant_code, locks_ptr):
         """
         Create an all_reduce configuration.

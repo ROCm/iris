@@ -235,7 +235,7 @@ class IrisDeviceCtx:
     heap_bases: gl.tensor
     tracing: GluonDeviceTracing
 
-    @gluon.constexpr_function
+    @gluon.language.constexpr_function
     def __init__(self, cur_rank, num_ranks, heap_bases, tracing):
         self.cur_rank = cur_rank
         self.num_ranks = num_ranks

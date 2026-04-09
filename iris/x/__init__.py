@@ -72,6 +72,20 @@ from .gather import gather
 from .all_gather import all_gather
 from .all_to_all import all_to_all
 from .reduce_scatter import reduce_scatter
+from .prefill_attn import (
+    flash_prefill_step,
+    load_kv_tile_global_paged,
+    distributed_prefill_attn_kernel,
+    ring_prefill_attn_step_kernel,
+    finalize_prefill_output_kernel,
+    fused_ring_prefill_attn_kernel,
+    reference_prefill_attn,
+    paged_prefill_attn,
+)
+from .ring_kv_transfer import (
+    ring_kv_send,
+    ring_kv_recv,
+)
 
 __all__ = [
     # Core abstractions
@@ -93,4 +107,16 @@ __all__ = [
     "all_gather",
     "all_to_all",
     "reduce_scatter",
+    # Prefill ring attention primitives (Phases 1-8)
+    "flash_prefill_step",
+    "load_kv_tile_global_paged",
+    "distributed_prefill_attn_kernel",
+    "ring_prefill_attn_step_kernel",
+    "finalize_prefill_output_kernel",
+    "fused_ring_prefill_attn_kernel",
+    "reference_prefill_attn",
+    "paged_prefill_attn",
+    # Ring KV transfer primitives (Phase 6)
+    "ring_kv_send",
+    "ring_kv_recv",
 ]

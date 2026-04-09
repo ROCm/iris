@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
+import sys as _sys
+import os as _os
+_tb_include = _os.path.join('/workspace', 'projects', 'tritonblas', 'include')
+if _os.path.isdir(_tb_include) and _tb_include not in _sys.path:
+    _sys.path.insert(0, _tb_include)
+del _sys, _os, _tb_include
+
 """
 iris.ops: High-level API for fused GEMM+CCL operations.
 
