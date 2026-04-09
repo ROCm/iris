@@ -60,7 +60,6 @@ def all_gather_put_kernel(
     num_elements: gl.constexpr,
     BLOCK_SIZE: gl.constexpr,
     NUM_WARPS: gl.constexpr,
-    WARP_SIZE: gl.constexpr,
     TRACING: gl.constexpr,
 ):
     """
@@ -82,7 +81,6 @@ def all_gather_put_kernel(
         num_elements: per-rank element count (constexpr).
         BLOCK_SIZE: tile width in elements (constexpr).
         NUM_WARPS: number of warps per CTA (constexpr).
-        WARP_SIZE: threads per warp (constexpr, 64 for CDNA, 32 for RDNA4).
         TRACING: enable/disable tracing at compile time (constexpr).
     """
     ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)
@@ -93,10 +91,11 @@ def all_gather_put_kernel(
 
     pid = gl.program_id(0)
 
-    # Total threads per CTA = NUM_WARPS * WARP_SIZE.
-    # Each thread handles SPT = BLOCK_SIZE // (NUM_WARPS * WARP_SIZE) elements.
-    SPT: gl.constexpr = BLOCK_SIZE // (NUM_WARPS * WARP_SIZE)
-    layout: gl.constexpr = gl.BlockedLayout([SPT], [WARP_SIZE], [NUM_WARPS], [0])
+    # AMD GPUs have 64 threads per warp (wavefront size 64).
+    # Total threads per CTA = NUM_WARPS * 64.
+    # Each thread handles SPT = BLOCK_SIZE // (NUM_WARPS * 64) elements.
+    SPT: gl.constexpr = BLOCK_SIZE // (NUM_WARPS * 64)
+    layout: gl.constexpr = gl.BlockedLayout([SPT], [64], [NUM_WARPS], [0])
     offsets = pid * BLOCK_SIZE + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < num_elements
 
@@ -126,14 +125,15 @@ def all_gather_put_kernel(
 
 
 def _launch(shmem, local_buf, global_buf, context_tensor, enable_tracing: bool):
-    """Launch one iteration of the all-gather kernel."""
-    from triton.runtime import driver
+    """Launch one iteration of the all-gather kernel.
 
-    WARP_SIZE = driver.active.get_current_target().warp_size
-
+    Layout constraints for AMD GPUs (warp size = 64):
+      BLOCK_SIZE = sizePerThread * 64 * NUM_WARPS
+    Here NUM_WARPS=4, sizePerThread=1 → BLOCK_SIZE = 1 * 64 * 4 = 256.
+    """
     num_elements = local_buf.numel()
     NUM_WARPS = 4
-    BLOCK_SIZE = WARP_SIZE * NUM_WARPS  # 1 el/thread
+    BLOCK_SIZE = 64 * NUM_WARPS  # 256 elements per tile (1 el/thread, 64 threads/warp, 4 warps)
     grid = ((num_elements + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     all_gather_put_kernel[grid](
         iris_gl.IrisDeviceCtx,
@@ -143,7 +143,6 @@ def _launch(shmem, local_buf, global_buf, context_tensor, enable_tracing: bool):
         num_elements,
         BLOCK_SIZE,
         NUM_WARPS,
-        WARP_SIZE,
         enable_tracing,
         num_warps=NUM_WARPS,
     )
@@ -193,11 +192,7 @@ def main():
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
     if not dist.is_initialized():
-        backend = os.environ.get("IRIS_DIST_BACKEND", "nccl")
-        dist.init_process_group(
-            backend=backend,
-            **({"device_id": torch.device(f"cuda:{local_rank}")} if backend == "nccl" else {}),
-        )
+        dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
 
     shmem = iris_gl.iris(args.heap_size)
     rank = shmem.get_rank()
