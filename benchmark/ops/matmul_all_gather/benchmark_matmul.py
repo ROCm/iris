@@ -69,7 +69,7 @@ def parse_args():
         description="Benchmark matmul operation.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-m", type=int, default=16384, help="Number of rows per rank in matrix A (M_local)")
+    parser.add_argument("-m", type=int, default=16384, help="Number of rows per rank in matrix A (M)")
     parser.add_argument("-n", type=int, default=2048, help="Number of columns in matrix B (N)")
     parser.add_argument("-k", type=int, default=131072, help="Common dimension (K)")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
@@ -88,12 +88,20 @@ def parse_args():
     parser.add_argument("--block_size_k", type=int, default=None, help="Block size K (model-derived if omitted)")
     parser.add_argument("--group_size_m", type=int, default=None, help="Group size M (model-derived if omitted)")
     parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto if None)")
+    parser.add_argument("--num_warps", type=int, default=None, help="Triton num_warps (auto if None)")
+    parser.add_argument("--num_stages", type=int, default=None, help="Triton num_stages (auto if None)")
     parser.add_argument(
         "--output_file",
         type=str,
         default="matmul.json",
         help="Output file",
     )
+    parser.add_argument(
+        "--benchmark_pytorch",
+        action="store_true",
+        help="Also benchmark PyTorch (all_gather_into_tensor + matmul) for comparison",
+    )
+
 
     return vars(parser.parse_args())
 
@@ -106,15 +114,9 @@ def _apply_model_defaults(args, world_size, dtype_bytes=2):
     applied = []
     if _DERIVE_AVAILABLE:
         try:
-            # Note: args["m"] is M_local (rows per rank)
-            # M_local = args["m"]
-            # M = M_local * world_size  # Total M after gather
-            # N = args["n"]
-            # K = args["k"]
-
             # Derive parameters from performance model
             p = _derive_params(
-                args["m"],  # M_local
+                args["m"],
                 args["n"],
                 args["k"],
                 world_size,
@@ -162,8 +164,7 @@ def _worker(args: dict):
         param_summary = " ".join(f"{k}={args[k]}" for k in _MODEL_PARAMS)
         shmem.info(f"Kernel params: {param_summary}")
 
-    M_local = args["m"]  # Local M dimension (this is the only M for plain matmul)
-    M = M_local  # Plain matmul has no gather, M = M_local
+    M = args["m"]
     N = args["n"]
     K = args["k"]
 
@@ -183,8 +184,6 @@ def _worker(args: dict):
     json_writer = JSONWriter(args["output_file"])
     json_writer.add_field("world_size", world_size)
     json_writer.add_field("operation", "matmul")
-    json_writer.add_field("m_local", M_local)
-    json_writer.add_field("m_total", M)
 
     for key, value in args.items():
         json_writer.add_field(key, value)
@@ -198,15 +197,15 @@ def _worker(args: dict):
     json_writer.add_field("num_xcds", config.num_xcds)
 
     # Create input and output tensors
-    # A_local is M_local x K, output is M_local x N (local matmul, no gather)
-    A_local = shmem.zeros((M_local, K), dtype=datatype)
+    # A_local is M x K, output is M x N (local matmul, no gather)
+    A_local = shmem.zeros((M, K), dtype=datatype)
     B = shmem.zeros((K, N), dtype=datatype)
-    C = shmem.zeros((M_local, N), dtype=datatype)
+    C = shmem.zeros((M, N), dtype=datatype)
 
     # Fill inputs with deterministic values
     # Each rank has different A_local, same B
     torch.manual_seed(123 + rank)
-    A_local_data = torch.randn((M_local, K), dtype=datatype, device=f"cuda:{rank}")
+    A_local_data = torch.randn((M, K), dtype=datatype, device=f"cuda:{rank}")
     A_local.copy_(A_local_data)
 
     torch.manual_seed(456)  # Same B for all ranks
@@ -229,6 +228,9 @@ def _worker(args: dict):
     total_ms = 0.0
     num_experiments = 0
 
+    num_warps = args["num_warps"]
+    num_stages = args["num_stages"]
+
     def run_experiment():
         nonlocal total_ms, num_experiments
         shmem.barrier()
@@ -243,6 +245,8 @@ def _worker(args: dict):
                 config=config,
                 async_op=False,
                 workspace=workspace,
+                num_warps=num_warps,
+                num_stages=num_stages,
             )
             end_ev.record()
             num_experiments += 1
@@ -292,18 +296,18 @@ def _worker(args: dict):
         iris.do_bench(run_experiment, shmem.barrier, n_warmup=0, n_repeat=n_repeat)
         avg_ms = total_ms / num_experiments if num_experiments > 0 else 0
 
-        total_flops = 2 * M_local * N * K
+        total_flops = 2 * M * N * K
         tflops = (total_flops * 1e-12) / (avg_ms * 1e-3) if avg_ms > 0 else 0
         element_size = torch.tensor([], dtype=datatype).element_size()
         # Plain matmul has no communication, just local compute
-        input_bytes = (M_local * K + K * N) * element_size
-        output_bytes = M_local * N * element_size
+        input_bytes = (M * K + K * N) * element_size
+        output_bytes = M * N * element_size
         total_bytes = input_bytes + output_bytes
         total_bytes_gb = total_bytes / (1024**3)
         bw_gbps = (total_bytes / (1024**3)) / (avg_ms * 1e-3) if avg_ms > 0 else 0
 
         shmem.info(
-            f"Matmul (M={M_local}, N={N}, K={K}, dtype={args['datatype']}): "
+            f"Matmul (M={M}, N={N}, K={K}, dtype={args['datatype']}): "
             f"{avg_ms:.3f} ms, {tflops:.3f} TFLOPS, {bw_gbps:.3f} GB/s (HBM)"
         )
 
@@ -314,6 +318,66 @@ def _worker(args: dict):
         json_writer.add_field("total_bytes", total_bytes)
         json_writer.add_field("total_bytes_gb", total_bytes_gb)
 
+        # Wait for all to finish benchmarking
+        shmem.barrier()
+
+    # Benchmark PyTorch (all_gather_into_tensor + matmul) for comparison
+    if args["benchmark_pytorch"]:
+        shmem.info("Benchmarking PyTorch (all_gather_into_tensor + matmul)...")
+
+        # Create PyTorch tensors (not on Iris heap)
+        pytorch_A = torch.randn(M, K, dtype=datatype, device=f"cuda:{rank}")
+        pytorch_B = torch.randn(K, N, dtype=datatype, device=f"cuda:{rank}")
+        # pytorch_A_gathered = torch.zeros(M, K, dtype=datatype, device=f"cuda:{rank}")
+        pytorch_C = torch.zeros(M, N, dtype=datatype, device=f"cuda:{rank}")
+
+        # Warmup
+        for _ in range(10):
+            # dist.all_gather_into_tensor(pytorch_A_gathered, pytorch_A_sharded)
+            pytorch_C = torch.matmul(pytorch_A, pytorch_B)
+        torch.cuda.synchronize()
+        dist.barrier()
+
+        # Benchmark
+        dist.barrier()
+
+        # Calculate TFLOPS: 2*M*N*K flops
+        total_flops = 2 * M * N * K
+        total_tflops_unit = total_flops * 1e-12
+
+        # Calculate bandwidth for all-gather part
+        element_size = torch.tensor([], dtype=datatype).element_size()
+        input_bytes = M * K * element_size
+        total_bytes = input_bytes * (world_size - 1)
+        total_bytes_gb = total_bytes / (1024**3)
+
+        def run_pytorch_experiment():
+            # dist.all_gather_into_tensor(pytorch_A_gathered, pytorch_A_sharded)
+            pytorch_C = torch.matmul(pytorch_A, pytorch_B)
+
+        pytorch_ms = iris.do_bench(run_pytorch_experiment, dist.barrier)
+
+        # Calculate TFLOPS and bandwidth
+        pytorch_tflops = total_tflops_unit / (pytorch_ms * 1e-3)
+        pytorch_bandwidth_gbps = total_bytes_gb / (pytorch_ms * 1e-3)
+
+        shmem.info(
+            f"PyTorch all_gather_into_tensor+matmul (M={M}, K={K}, N={N}, world_size={world_size}, dtype={args['datatype']}): "
+            f"{pytorch_ms:.3f} ms, {pytorch_tflops:.3f} TFLOPS, {pytorch_bandwidth_gbps:.3f} GB/s"
+        )
+
+        if args["benchmark"]:
+            # Calculate performance ratio
+            iris_tflops = tflops
+            speedup = (iris_tflops / pytorch_tflops) if pytorch_tflops > 0 else 0
+            shmem.info(f"Speedup (Iris/PyTorch): {speedup:.2f}x")
+
+            json_writer.add_field("pytorch_tflops", pytorch_tflops)
+            json_writer.add_field("pytorch_bandwidth_gbps", pytorch_bandwidth_gbps)
+            json_writer.add_field("pytorch_ms", pytorch_ms)
+            json_writer.add_field("iris_speedup", speedup)
+
+        # Wait for all to finish PyTorch benchmarking
         shmem.barrier()
 
     if rank == 0:

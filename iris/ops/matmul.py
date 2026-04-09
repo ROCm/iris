@@ -153,6 +153,8 @@ def matmul(
     async_op: bool = False,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
+    num_warps: Optional[int] = None,
+    num_stages: Optional[int] = None,
 ) -> FusedWorkspace:
     """
     Local matrix multiplication.
@@ -219,6 +221,12 @@ def matmul(
     num_tiles_m = (M_local + config.block_size_m - 1) // config.block_size_m
     num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
     num_tiles = num_tiles_m * num_tiles_n
+
+    launch_kwargs = {"matrix_instr_nonkdim": 16}
+    if num_warps is not None:
+        launch_kwargs["num_warps"] = num_warps
+    if num_stages is not None:
+        launch_kwargs["num_stages"] = num_stages
 
     # Launch single fused kernel
     grid = (num_sms,)
