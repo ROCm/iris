@@ -557,20 +557,25 @@ if GFX1250_ASYNC_AVAILABLE:
             for rank_idx in range(world_size):
                 dest_idx = (group_rank + rank_idx) % world_size
                 target_iris_rank = rank_start + dest_idx * rank_stride
-                output_ptrs = output_base_ptrs
 
                 if dest_idx == group_rank:
                     # Local destination: LDS → local HBM
-                    gfx1250_async_copy.shared_to_global(output_ptrs, smem, mask=mask)
+                    gfx1250_async_copy.shared_to_global(output_base_ptrs, smem, mask=mask)
                 else:
-                    # Remote destination: translate pointers, LDS → remote HBM via XGMI
-                    # Use element-space offset to preserve pointer contiguity for
-                    # async copy vectorization (avoids inttoptr/ptrtoint cast chain
-                    # which breaks AxisInfoAnalysis → scalar stores).
+                    # Remote destination: translate base pointer, then build
+                    # pointer tensor from scratch as scalar + flat_idx.
+                    # CRITICAL: Adding a runtime offset to an existing pointer
+                    # tensor (output_ptrs + elem_delta) breaks AxisInfoAnalysis
+                    # contiguity in current Triton — the compiler falls back to
+                    # b16 stores which gfx1250 doesn't support.
+                    # Fix: build remote_ptrs as splat(remote_scalar) + arange,
+                    # the same pattern the compiler trusts for vectorization.
+                    # (Upstream fix: triton-lang/triton#9971)
                     target_base = gl.load(ctx.heap_bases + target_iris_rank)
                     ptr_delta = target_base - local_base
                     elem_delta = ptr_delta // ELEM_SIZE_BYTES
-                    remote_ptrs = output_ptrs + elem_delta
+                    remote_base = output_ptr + output_tile_base + elem_delta
+                    remote_ptrs = remote_base + flat_idx
                     gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask)
 
             # Wait for all stores to complete before reusing LDS on next tile
