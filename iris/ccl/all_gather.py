@@ -681,6 +681,15 @@ def all_gather(
             except Exception:
                 pass
 
+        # GFX1250 async copy supports 32/64/128-bit stores from LDS.
+        # With f16 (2 bytes), sizePerThread must be <= 8 to stay within
+        # 128 bits. Default num_warps=4 with 2048-element tile gives
+        # sizePerThread=16 (256 bits) which is too wide. Use num_warps=8
+        # to halve sizePerThread to 8 (128 bits).
+        num_warps = config.num_warps
+        if use_gfx1250_async and num_warps == 4:
+            num_warps = 8
+
         gluon_kernel_args = (
             IrisDeviceCtx,
             context_tensor,
@@ -702,11 +711,11 @@ def all_gather(
             config.swizzle_size,
             config.comm_sms,
             config.threads_per_warp,
-            config.num_warps,
+            num_warps,
         )
         gluon_kernel_kwargs = dict(
             num_stages=config.num_stages,
-            num_warps=config.num_warps,
+            num_warps=num_warps,
             waves_per_eu=config.waves_per_eu,
         )
 
