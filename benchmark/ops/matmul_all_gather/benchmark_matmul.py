@@ -24,41 +24,9 @@ from iris.ops.matmul import (
 )
 from iris.ops import FusedConfig
 
-# Try to import performance model
-_DERIVE_AVAILABLE = False
-try:
-    import sys as _sys
-
-    _script_dir = os.path.dirname(os.path.abspath(__file__))
-    if _script_dir not in _sys.path:
-        _sys.path.insert(0, _script_dir)
-    from derive_params import (
-        derive as _derive_params,
-        DEFAULT_NUM_CUS,
-        DEFAULT_PEAK_TFLOPS_FP16,
-        DEFAULT_HBM_BW_GBPS,
-        DEFAULT_L2_SIZE_BYTES,
-        DEFAULT_SCHEDULING_FACTOR,
-    )
-
-    _DERIVE_AVAILABLE = True
-except Exception:
-    pass
-
-_MODEL_PARAMS = (
-    "block_size_m",
-    "block_size_n",
-    "block_size_k",
-    "group_size_m",
-    "num_warps",
-)
-
-_FALLBACK_DEFAULTS = {
-    "block_size_m": 256,
-    "block_size_n": 128,
-    "block_size_k": 64,
-    "group_size_m": 4,
-}
+# NOTE: derive_params is no longer needed since iris now uses tritonBLAS,
+# which automatically selects optimal parameters via Origami heuristics.
+# The block size arguments are kept for API compatibility but are ignored.
 
 torch.manual_seed(123)
 random.seed(123)
@@ -106,43 +74,6 @@ def parse_args():
     return vars(parser.parse_args())
 
 
-def _apply_model_defaults(args, world_size, dtype_bytes=2):
-    """Fill None-valued kernel parameters with model-derived predictions.
-
-    Returns a list of parameter names that were set by the model.
-    """
-    applied = []
-    if _DERIVE_AVAILABLE:
-        try:
-            # Derive parameters from performance model
-            p = _derive_params(
-                args["m"],
-                args["n"],
-                args["k"],
-                world_size,
-                link_bw=50.0,
-                num_cus=DEFAULT_NUM_CUS,
-                peak_tflops=DEFAULT_PEAK_TFLOPS_FP16,
-                hbm_bw_gbps=DEFAULT_HBM_BW_GBPS,
-                l2_size=DEFAULT_L2_SIZE_BYTES,
-                scheduling_factor=DEFAULT_SCHEDULING_FACTOR,
-                dtype_bytes=dtype_bytes,
-            )
-            for name in _MODEL_PARAMS:
-                if args.get(name) is None and name in p:
-                    args[name] = p[name]
-                    applied.append(name)
-        except Exception:
-            pass
-
-    # Apply fallback defaults for any remaining None values
-    for name, fallback in _FALLBACK_DEFAULTS.items():
-        if args.get(name) is None:
-            args[name] = fallback
-
-    return applied
-
-
 def _worker(args: dict):
     """Worker function for PyTorch distributed execution."""
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -154,27 +85,18 @@ def _worker(args: dict):
 
     datatype_map = {"fp16": torch.float16, "fp32": torch.float32, "bf16": torch.bfloat16}
     datatype = datatype_map.get(args["datatype"], torch.float16)
-    dtype_bytes = torch.tensor([], dtype=datatype).element_size()
-
-    # Apply model-derived defaults
-    model_applied = _apply_model_defaults(args, world_size, dtype_bytes)
-    if rank == 0 and model_applied:
-        shmem.info(f"Model-derived defaults: {', '.join(model_applied)}")
+    # Note: tritonBLAS automatically selects optimal parameters via Origami
     if rank == 0:
-        param_summary = " ".join(f"{k}={args[k]}" for k in _MODEL_PARAMS)
-        shmem.info(f"Kernel params: {param_summary}")
+        shmem.info("Using tritonBLAS backend with automatic parameter selection (Origami)")
 
     M = args["m"]
     N = args["n"]
     K = args["k"]
 
-    # Create config with parameters
-    config_kwargs = {
-        "block_size_m": args["block_size_m"],
-        "block_size_n": args["block_size_n"],
-        "block_size_k": args["block_size_k"],
-        "group_size_m": args["group_size_m"],
-    }
+    # Create config
+    # Note: block_size_* and group_size_m are ignored by tritonBLAS backend
+    # tritonBLAS uses Origami to automatically select optimal parameters
+    config_kwargs = {}
     if args["num_sms"] is not None:
         config_kwargs["num_sms"] = args["num_sms"]
     if args["num_xcds"] is not None:
@@ -188,13 +110,11 @@ def _worker(args: dict):
     for key, value in args.items():
         json_writer.add_field(key, value)
 
-    # Export actual config values to JSON (including defaults)
-    json_writer.add_field("block_size_m", config.block_size_m)
-    json_writer.add_field("block_size_n", config.block_size_n)
-    json_writer.add_field("block_size_k", config.block_size_k)
-    json_writer.add_field("group_size_m", config.group_size_m)
-    json_writer.add_field("num_sms", config.num_sms)
-    json_writer.add_field("num_xcds", config.num_xcds)
+    # Export actual config values to JSON
+    # Note: block sizes are now chosen by tritonBLAS Origami heuristics
+    json_writer.add_field("backend", "tritonblas")
+    json_writer.add_field("num_sms", config.num_sms if hasattr(config, 'num_sms') else None)
+    json_writer.add_field("num_xcds", config.num_xcds if hasattr(config, 'num_xcds') else None)
 
     # Create input and output tensors
     # A_local is M x K, output is M x N (local matmul, no gather)
@@ -334,7 +254,7 @@ def _worker(args: dict):
         # Warmup
         for _ in range(10):
             # dist.all_gather_into_tensor(pytorch_A_gathered, pytorch_A_sharded)
-            pytorch_C = torch.matmul(pytorch_A, pytorch_B)
+            torch.matmul(pytorch_A, pytorch_B, out=pytorch_C)
         torch.cuda.synchronize()
         dist.barrier()
 
@@ -353,7 +273,7 @@ def _worker(args: dict):
 
         def run_pytorch_experiment():
             # dist.all_gather_into_tensor(pytorch_A_gathered, pytorch_A_sharded)
-            pytorch_C = torch.matmul(pytorch_A, pytorch_B)
+            torch.matmul(pytorch_A, pytorch_B, out=pytorch_C)
 
         pytorch_ms = iris.do_bench(run_pytorch_experiment, dist.barrier)
 

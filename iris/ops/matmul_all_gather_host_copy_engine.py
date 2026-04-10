@@ -12,6 +12,10 @@ This is more efficient than device-initiated SDMA because:
 - SDMA queue setup happens once on host (not per-tile)
 - Device kernel is lightweight (store + set flag)
 - SDMA hardware automatically performs scatter when flags are set
+
+This implementation supports two backends:
+- Custom Triton kernel (legacy, controlled by use_tritonblas=False)
+- tritonBLAS with CounterView (default, use_tritonblas=True)
 """
 
 from typing import Optional
@@ -20,10 +24,14 @@ import triton
 import triton.language as tl
 import iris
 
-
 from iris.tracing.events import TraceEvent
 from .config import FusedConfig
 from .workspace import FusedWorkspace
+
+# Import tritonBLAS
+from tritonblas.matmul import persistent_matmul_lt, _make_matmul_selector
+from tritonblas.config import matmul_preamble as tritonblas_preamble
+from tritonblas.matmul import create_counter_config
 
 # Import Tile class from anvil module
 try:
@@ -226,6 +234,7 @@ def matmul_all_gather_host_copy_engine_preamble(
     config: Optional[FusedConfig] = None,
     m_tiles_per_batch: int = 1,
     trace: bool = False,
+    use_tritonblas: bool = True,
 ) -> FusedWorkspace:
     """Allocate workspace for matmul_all_gather_host_copy_engine including per-batch flags."""
     if config is None:
@@ -240,8 +249,17 @@ def matmul_all_gather_host_copy_engine_preamble(
     M = M_local * world_size
 
     # Calculate number of tiles
-    num_tiles_m = (M_local + config.block_size_m - 1) // config.block_size_m
-    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
+    if use_tritonblas:
+        # tritonBLAS auto-selects block sizes, get selector to determine tile counts
+        selector = _make_matmul_selector(M_local, N, K, A.dtype, B.dtype, A.dtype, A.device, streamk=False)
+        num_tiles_m = (M_local + selector.block_m - 1) // selector.block_m
+        num_tiles_n = (N + selector.block_n - 1) // selector.block_n
+    else:
+        # Legacy: use config block sizes
+        num_tiles_m = (M_local + config.block_size_m - 1) // config.block_size_m
+        num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
+        selector = None
+
     num_tiles = num_tiles_m * num_tiles_n
 
     # Calculate number of batches
@@ -257,6 +275,13 @@ def matmul_all_gather_host_copy_engine_preamble(
 
     # Allocate per-batch flags (one flag per batch, each batch contains m_tiles_per_batch M-rows)
     ws.locks = shmem.zeros((num_batches,), dtype=torch.int32)
+
+    # Store metadata for later use
+    ws.selector = selector
+    ws.num_tiles_m = num_tiles_m
+    ws.num_tiles_n = num_tiles_n
+    ws.num_batches = num_batches
+    ws.use_tritonblas = use_tritonblas
 
     return ws
 
@@ -274,6 +299,7 @@ def matmul_all_gather_host_copy_engine(
     m_tiles_per_batch: int = 1,
     trace: bool = False,
     verbose: bool = False,
+    use_tritonblas: bool = True,
 ) -> FusedWorkspace:
     """
     Fused matrix multiplication and all-gather using host-initiated SDMA with POLL packets.
@@ -313,97 +339,141 @@ def matmul_all_gather_host_copy_engine(
 
     # Allocate workspace if not provided
     if workspace is None:
-        workspace = matmul_all_gather_host_copy_engine_preamble(shmem, A, B, config, m_tiles_per_batch, trace)
+        workspace = matmul_all_gather_host_copy_engine_preamble(
+            shmem, A, B, config, m_tiles_per_batch, trace, use_tritonblas
+        )
 
-    stride_am, stride_ak = A.stride()
-    stride_bk, stride_bn = B.stride()
+    # Get metadata from workspace
+    num_tiles_m = workspace.num_tiles_m
+    num_tiles_n = workspace.num_tiles_n
+    num_batches = workspace.num_batches
+
     stride_cm, stride_cn = output_tensor.stride()
-
-    if bias is not None:
-        assert bias.shape[0] == M_local
-        bias_ptr = bias
-        stride_bias = bias.stride()[0] if bias.dim() > 0 else 1
-        use_bias = True
-    else:
-        bias_ptr = output_tensor
-        stride_bias = 1
-        use_bias = False
-
     device = A.device
-    num_sms = config.num_sms
-    if num_sms is None:
-        props = torch.cuda.get_device_properties(device)
-        num_sms = props.multi_processor_count
 
-    even_k = K % config.block_size_k == 0
+    # Reset flags for this iteration
+    if flag_iteration == 0:
+        workspace.locks.zero_()
 
-    # Calculate number of tiles
-    num_k_blocks = (K + config.block_size_k - 1) // config.block_size_k
-    num_tiles_m = (M_local + config.block_size_m - 1) // config.block_size_m
-    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
-    num_tiles = num_tiles_m * num_tiles_n
+    # ═══════════════════════════════════════════════════════════════════════
+    # Device Phase: Compute GEMM + store + set flags
+    # ═══════════════════════════════════════════════════════════════════════
+    if use_tritonblas:
+        # tritonBLAS path with CounterView
+        selector = workspace.selector
 
-    # Setup tracing if requested
-    if trace:
-        # Each tile generates 1 event (start + end)
-        max_trace_events = num_tiles * 2
-        if not shmem.tracing.enabled:
-            shmem.tracing.enable(max_events=max_trace_events)
+        # Create a view of output_tensor at this rank's position
+        C_local_view = output_tensor[rank * M_local : (rank + 1) * M_local, :]
+
+        # Create counter config for batch-level tracking
+        # Use "block" mapping: block_group_m=m_tiles_per_batch, block_group_n=num_tiles_n
+        # This gives counter_id = batch_id (all tiles in a batch share one counter)
+        counter_config = create_counter_config(
+            num_counters=num_batches,
+            map_type="block",
+            block_group_m=m_tiles_per_batch,
+            block_group_n=num_tiles_n,
+            device=device,
+        )
+        counter_config["counter_buffer"] = workspace.locks
+
+        # Use work-stealing if enabled
+        use_work_stealing = config.work_stealing if hasattr(config, 'work_stealing') else False
+        tritonblas_config = None
+        if use_work_stealing:
+            tritonblas_config = tritonblas_preamble(selector)
+            tritonblas_config.reset(streamk=False, work_stealing=True)
+
+        # Warn about bias
+        if bias is not None:
+            import warnings
+            warnings.warn(
+                "Bias is not yet supported in tritonBLAS integration. "
+                "Consider adding bias manually after GEMM."
+            )
+
+        # Launch tritonBLAS GEMM with CounterView
+        persistent_matmul_lt(
+            A, B, C_local_view,
+            selector,
+            config=tritonblas_config,
+            bias=None,
+            work_stealing=use_work_stealing,
+            counter_config=counter_config,
+        )
+
+    else:
+        # Legacy custom Triton kernel path
+        stride_am, stride_ak = A.stride()
+        stride_bk, stride_bn = B.stride()
+
+        if bias is not None:
+            assert bias.shape[0] == M_local
+            bias_ptr = bias
+            stride_bias = bias.stride()[0] if bias.dim() > 0 else 1
+            use_bias = True
         else:
-            shmem.tracing.reset()
+            bias_ptr = output_tensor
+            stride_bias = 1
+            use_bias = False
 
-        # Allocate timestamp buffers if tracing (2 timestamps per rank: start and end)
+        num_sms = config.num_sms
+        if num_sms is None:
+            props = torch.cuda.get_device_properties(device)
+            num_sms = props.multi_processor_count
+
+        even_k = K % config.block_size_k == 0
+        num_k_blocks = (K + config.block_size_k - 1) // config.block_size_k
+        num_tiles = num_tiles_m * num_tiles_n
+
+        # Setup tracing if requested
         if trace:
+            max_trace_events = num_tiles * 2
+            if not shmem.tracing.enabled:
+                shmem.tracing.enable(max_events=max_trace_events)
+            else:
+                shmem.tracing.reset()
+
             sdma_timestamps = shmem.zeros((world_size, 2), dtype=torch.int64)
 
-    context_tensor = shmem.get_device_context()
+        context_tensor = shmem.get_device_context()
 
-    # Calculate flag offset for this experiment to avoid race conditions
-    # Each experiment uses a different slice of the locks buffer
-    # flag_offset = experiment_id * workspace.num_batches
-    # flags_slice = workspace.locks[flag_offset : flag_offset + workspace.num_batches]
-
-    # No need to reset flags - they start at zero and each experiment has its own slice
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # Device Phase: Launch kernel to compute GEMM + store + set flags
-    # ═══════════════════════════════════════════════════════════════════════
-    grid = (num_sms,)
-    _fused_matmul_all_gather_host_copy_engine_kernel[grid](
-        A,
-        B,
-        output_tensor,
-        bias_ptr,
-        workspace.locks,
-        M_local,
-        M,
-        N,
-        K,
-        stride_am,
-        stride_ak,
-        stride_bk,
-        stride_bn,
-        stride_cm,
-        stride_cn,
-        stride_bias,
-        context_tensor,
-        rank,
-        world_size,
-        config.block_size_m,
-        config.block_size_n,
-        config.block_size_k,
-        config.group_size_m,
-        num_sms,
-        config.num_xcds,
-        num_tiles_m,
-        num_tiles_n,
-        num_k_blocks,
-        m_tiles_per_batch,
-        use_bias,
-        even_k,
-        config.allow_tf32,
-        trace,
-    )
+        grid = (num_sms,)
+        _fused_matmul_all_gather_host_copy_engine_kernel[grid](
+            A,
+            B,
+            output_tensor,
+            bias_ptr,
+            workspace.locks,
+            M_local,
+            M,
+            N,
+            K,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_cm,
+            stride_cn,
+            stride_bias,
+            context_tensor,
+            rank,
+            world_size,
+            config.block_size_m,
+            config.block_size_n,
+            config.block_size_k,
+            config.group_size_m,
+            num_sms,
+            config.num_xcds,
+            num_tiles_m,
+            num_tiles_n,
+            num_k_blocks,
+            m_tiles_per_batch,
+            use_bias,
+            even_k,
+            config.allow_tf32,
+            trace,
+        )
 
     # ═══════════════════════════════════════════════════════════════════════
     # Host Phase: Enqueue SDMA POLL+COPY packets for all tiles
@@ -434,6 +504,12 @@ def matmul_all_gather_host_copy_engine(
                 timestamp_ptr = sdma_timestamps.data_ptr() + remote_rank * 2 * sdma_timestamps.element_size()
                 anvil_lib.host_timestamp(rank, remote_rank, 0, timestamp_ptr)
 
+    # Get block size (depends on backend)
+    if use_tritonblas:
+        block_size_m = workspace.selector.block_m
+    else:
+        block_size_m = config.block_size_m
+
     # Queue POLL+COPY packets for each batch (batching M_TILES_PER_BATCH M-rows × all N-tiles together)
     for batch_id in range(num_batches):
         # Calculate M-tile range for this batch
@@ -442,8 +518,8 @@ def matmul_all_gather_host_copy_engine(
         num_m_tiles_in_batch = m_tile_end - m_tile_start
 
         # Calculate batch bounds in rows
-        m_start = m_tile_start * config.block_size_m
-        m_end = min(m_tile_end * config.block_size_m, M_local)
+        m_start = m_tile_start * block_size_m
+        m_end = min(m_tile_end * block_size_m, M_local)
         batch_height = m_end - m_start
 
         # Calculate total width (all N-tiles)
