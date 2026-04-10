@@ -564,18 +564,18 @@ if GFX1250_ASYNC_AVAILABLE:
                 else:
                     # Remote destination: translate base pointer, then build
                     # pointer tensor from scratch as scalar + flat_idx.
-                    # CRITICAL: Adding a runtime offset to an existing pointer
-                    # tensor (output_ptrs + elem_delta) breaks AxisInfoAnalysis
-                    # contiguity in current Triton — the compiler falls back to
-                    # b16 stores which gfx1250 doesn't support.
-                    # Fix: build remote_ptrs as splat(remote_scalar) + arange,
-                    # the same pattern the compiler trusts for vectorization.
+                    # The runtime divsi in elem_delta destroys divisibility info
+                    # in AxisInfoAnalysis, so we must use tl.multiple_of and
+                    # tl.max_contiguous to restore the contiguity hint.
+                    # Without these, the compiler falls back to b16 async stores
+                    # which gfx1250 doesn't support.
                     # (Upstream fix: triton-lang/triton#9971)
                     target_base = gl.load(ctx.heap_bases + target_iris_rank)
                     ptr_delta = target_base - local_base
                     elem_delta = ptr_delta // ELEM_SIZE_BYTES
                     remote_base = output_ptr + output_tile_base + elem_delta
                     remote_ptrs = remote_base + flat_idx
+                    remote_ptrs = tl.max_contiguous(tl.multiple_of(remote_ptrs, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
                     gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask)
 
             # Wait for all stores to complete before reusing LDS on next tile
