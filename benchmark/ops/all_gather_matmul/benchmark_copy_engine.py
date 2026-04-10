@@ -505,12 +505,13 @@ def _worker(args):
     end_ev = torch.cuda.Event(enable_timing=True)
     total_ms = 0.0
     num_experiments = 0
+    flag_iteration = 0
 
     num_warps = args["num_warps"]
     num_stages = args["num_stages"]
 
     def run_experiment():
-        nonlocal total_ms, num_experiments
+        nonlocal total_ms, num_experiments, flag_iteration
         shmem.barrier()
         with torch.cuda.stream(comm_stream):
             start_ev.record()
@@ -522,6 +523,7 @@ def _worker(args):
                 config=config,
                 async_op=False,
                 workspace=workspace,
+                flag_iteration=flag_iteration,
                 k_per_flag=k_per_flag,
                 m_tiles_per_batch=args["m_tiles_per_batch"],
                 num_warps=num_warps,
@@ -530,6 +532,7 @@ def _worker(args):
             )
             end_ev.record()
             num_experiments += 1
+            flag_iteration += 1
         shmem.barrier()
         total_ms += start_ev.elapsed_time(end_ev)
 
