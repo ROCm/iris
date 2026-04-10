@@ -533,19 +533,24 @@ if GFX1250_ASYNC_AVAILABLE:
             mask = flat_idx < valid_rows * BLOCK_SIZE_N
 
             # === ASYNC LOAD: global → LDS (register-free for data) ===
-            # For row-major contiguous layout: offset = tile_base + flat_idx.
-            # Using flat_idx directly preserves pointer contiguity for async copy.
-            input_tile_base = pid_m * BLOCK_SIZE_M * stride_in_m + pid_n * BLOCK_SIZE_N * stride_in_n
+            # IMPORTANT: Use N directly instead of strides to preserve pointer
+            # contiguity for AxisInfoAnalysis. Runtime stride multiplication
+            # (pid * BM * stride_m) produces a runtime-variable base that the
+            # compiler cannot prove is contiguous, breaking async_copy
+            # vectorization → falls back to b16 which gfx1250 doesn't support.
+            # With "ptr + scalar_base + flat_idx", flat_idx contiguity carries
+            # through → compiler emits global_load/store_async_from_lds_b128.
+            input_tile_base = pid_m * BLOCK_SIZE_M * N + pid_n * BLOCK_SIZE_N
             input_ptrs = input_ptr + input_tile_base + flat_idx
             gfx1250_async_copy.global_to_shared(smem, input_ptrs, mask=mask, other=0.0)
             gfx1250_async_copy.commit_group()
             gfx1250_async_copy.wait_group(0)
 
             # Output: this rank's data goes to output[group_rank * M + row, col]
-            # Use flat_idx to preserve pointer contiguity (same reasoning as input).
+            # Use N directly (not strides) to preserve contiguity — same as input.
             output_tile_base = (
                 group_rank * M + pid_m * BLOCK_SIZE_M
-            ) * stride_out_m + pid_n * BLOCK_SIZE_N * stride_out_n
+            ) * N + pid_n * BLOCK_SIZE_N
             output_base_ptrs = output_ptr + output_tile_base + flat_idx
 
             # === ASYNC STORES: LDS → global/XGMI (register-free for data) ===
