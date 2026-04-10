@@ -17,12 +17,16 @@ Outputs results as JSON to stdout and benchmark_sweep_results.json.
 import subprocess
 import sys
 import json
+import os
+import signal
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 
 # Project root (3 levels up from this script)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+OPERATION = "matmul_all_gather"
 
 # Dimension configurations to test (M, N, K)
 # Each tuple is (M_local, N, K) where M_local is per-rank M dimension
@@ -41,7 +45,7 @@ DIMENSION_CONFIGS = [
 
 # Benchmark configurations
 BENCHMARKS = {
-    "baseline_and_pytorch": {
+    "baseline": {
         "script": "benchmark/ops/matmul_all_gather/benchmark.py",
         "extra_args": ["--benchmark_pytorch"],
         "output_file": "matmul_all_gather_baseline.json",
@@ -61,13 +65,13 @@ BENCHMARKS = {
     },
     "matmul_only": {
         "script": "benchmark/ops/matmul_all_gather/benchmark_matmul.py",
-        "extra_args": [],
+        "extra_args": ["--benchmark_pytorch"],
         "output_file": "matmul_only.json",
-        "extract_multiple": False,
+        "extract_multiple": True,
     },
 }
 
-TIMEOUT_SECONDS = 60
+TIMEOUT_SECONDS = 90
 NUM_GPUS = 8
 
 
@@ -110,19 +114,43 @@ def run_benchmark(
     log(f"  Running {benchmark_name}: M={m}, N={n}, K={k}")
     log(f"    Command: {' '.join(cmd)}")
 
+    process = None
     try:
-        result = subprocess.run(
+        # Start process in new process group so we can kill all children
+        process = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=TIMEOUT_SECONDS,
             cwd=str(PROJECT_ROOT),
+            preexec_fn=os.setsid,  # Create new process group
         )
+        stdout, stderr = process.communicate(timeout=TIMEOUT_SECONDS)
+        result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
         if result.returncode != 0:
             log("    ✗ Failed: Non-zero return code")
             log(f"    Return code: {result.returncode}")
-            # Show last few lines of output for debugging
+
+            # Save full output to error log
+            error_log_file = PROJECT_ROOT / f"benchmark_error_{benchmark_name}_M{m}_N{n}_K{k}.log"
+            with open(error_log_file, "w") as f:
+                f.write(f"Benchmark: {benchmark_name}\n")
+                f.write(f"Dimensions: M={m}, N={n}, K={k}\n")
+                f.write(f"Command: {' '.join(cmd)}\n")
+                f.write(f"Return code: {result.returncode}\n\n")
+                f.write("=" * 80 + "\n")
+                f.write("STDOUT:\n")
+                f.write("=" * 80 + "\n")
+                f.write(result.stdout)
+                f.write("\n" + "=" * 80 + "\n")
+                f.write("STDERR:\n")
+                f.write("=" * 80 + "\n")
+                f.write(result.stderr)
+
+            log(f"    Full output saved to: {error_log_file}")
+
+            # Show last few lines for quick diagnosis
             output = result.stdout + result.stderr
             lines = output.strip().split("\n")
             log("    Last output lines:")
@@ -148,10 +176,51 @@ def run_benchmark(
                 validation_status = " (validation: FAILED)"
 
         log(f"    ✓ Success: Loaded JSON results{validation_status}")
+
+        # Add operation field to the data
+        data["operation"] = OPERATION
+
         return data
 
-    except subprocess.TimeoutExpired:
-        log(f"    ✗ Timeout after {TIMEOUT_SECONDS}s")
+    except subprocess.TimeoutExpired as timeout_err:
+        log(f"    ✗ Timeout after {TIMEOUT_SECONDS}s - killing process group")
+
+        # Capture any partial output from the timeout exception (decode bytes to str)
+        partial_stdout = timeout_err.stdout.decode('utf-8', errors='replace') if timeout_err.stdout else ""
+        partial_stderr = timeout_err.stderr.decode('utf-8', errors='replace') if timeout_err.stderr else ""
+
+        if process:
+            try:
+                # Kill entire process group (torchrun + all child processes)
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # Force kill if graceful termination fails
+                    log(f"    Process didn't terminate, force killing...")
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    process.wait()
+            except ProcessLookupError:
+                # Process already died
+                pass
+
+        # Log timeout error with partial output
+        error_log_file = PROJECT_ROOT / f"benchmark_timeout_{benchmark_name}_M{m}_N{n}_K{k}.log"
+        with open(error_log_file, "w") as f:
+            f.write(f"Benchmark: {benchmark_name}\n")
+            f.write(f"Dimensions: M={m}, N={n}, K={k}\n")
+            f.write(f"Command: {' '.join(cmd)}\n")
+            f.write(f"Status: TIMEOUT after {TIMEOUT_SECONDS}s\n\n")
+            f.write("=" * 80 + "\n")
+            f.write("PARTIAL STDOUT (before timeout):\n")
+            f.write("=" * 80 + "\n")
+            f.write(partial_stdout)
+            f.write("\n" + "=" * 80 + "\n")
+            f.write("PARTIAL STDERR (before timeout):\n")
+            f.write("=" * 80 + "\n")
+            f.write(partial_stderr)
+        log(f"    Timeout logged to: {error_log_file}")
+
         return None
     except json.JSONDecodeError as e:
         log(f"    ✗ Error: Failed to parse JSON: {e}")
@@ -188,6 +257,7 @@ def main():
 
         # Run each benchmark variant
         for bench_key, bench_config in BENCHMARKS.items():
+            pytorch_bench_key = "pytorch" + bench_key
             result = run_benchmark(
                 benchmark_name=bench_key,
                 script=bench_config["script"],
@@ -203,7 +273,7 @@ def main():
                 if bench_config.get("extract_multiple", False):
                     # Extract baseline results (tflops, etc.)
                     baseline_result = {k: v for k, v in result.items() if not k.startswith("pytorch_")}
-                    row["benchmarks"]["baseline"] = baseline_result
+                    row["benchmarks"][bench_key] = baseline_result
 
                     # Extract pytorch results (pytorch_tflops, etc.)
                     if "pytorch_tflops" in result:
@@ -216,17 +286,17 @@ def main():
                         for field in ["world_size", "operation", "m", "n", "k", "datatype"]:
                             if field in result:
                                 pytorch_result[field] = result[field]
-                        row["benchmarks"]["pytorch"] = pytorch_result
+                        row["benchmarks"][pytorch_bench_key] = pytorch_result
                     else:
-                        row["benchmarks"]["pytorch"] = {"status": "FAILED"}
+                        row["benchmarks"][pytorch_bench_key] = {"status": "FAILED"}
                 else:
                     # Single result benchmark
                     row["benchmarks"][bench_key] = result
             else:
                 # Failed benchmark
                 if bench_config.get("extract_multiple", False):
-                    row["benchmarks"]["baseline"] = {"status": "FAILED"}
-                    row["benchmarks"]["pytorch"] = {"status": "FAILED"}
+                    row["benchmarks"][bench_key] = {"status": "FAILED"}
+                    row["benchmarks"][pytorch_bench_key] = {"status": "FAILED"}
                 else:
                     row["benchmarks"][bench_key] = {"status": "FAILED"}
 
@@ -241,7 +311,7 @@ def main():
     log(f"✓ Results saved to {output_file}\n")
 
     # Print to stdout (clean JSON)
-    print(json.dumps(results, indent=2))
+    # print(json.dumps(results, indent=2))
 
     log("\n" + "=" * 80)
     log("Benchmark sweep complete!")
