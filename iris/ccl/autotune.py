@@ -34,14 +34,6 @@ import torch.distributed as dist
 import iris
 from .config import AUTOTUNE, Config
 
-# Default configs used as fallback when autotuning is disabled.
-_DEFAULTS: dict[str, dict[str, Any]] = {
-    "all_gather": {"block_size_m": 32, "block_size_n": 64},
-    "all_reduce": {"block_size_m": 32, "block_size_n": 64, "all_reduce_distribution": 1},
-    "reduce_scatter": {"block_size_m": 32, "block_size_n": 64, "all_reduce_distribution": 1},
-    "all_to_all": {"block_size_m": 32, "block_size_n": 128},
-}
-
 # ---------------------------------------------------------------------------
 # Cache key
 # ---------------------------------------------------------------------------
@@ -336,20 +328,15 @@ def resolve_config(
     # Env-var kill switch
     if os.environ.get("IRIS_AUTOTUNE", "1") == "0":
         if config is None:
-            defaults = _DEFAULTS.get(collective, {})
-            return Config(**defaults)
+            return Config()
         autotune_fields = config.get_autotune_fields()
         if not autotune_fields:
             return config
-        # Replace AUTOTUNE fields with defaults
-        defaults = _DEFAULTS.get(collective, {})
+        # Replace AUTOTUNE fields with their dataclass defaults
         resolved = {}
         for f in dataclass_fields(config):
             val = getattr(config, f.name)
-            if val is AUTOTUNE:
-                resolved[f.name] = defaults.get(f.name, Config.__dataclass_fields__[f.name].default)
-            else:
-                resolved[f.name] = val
+            resolved[f.name] = f.default if val is AUTOTUNE else val
         resolved["num_xcds"] = None
         resolved["chunk_size"] = None
         return Config(**resolved)
@@ -358,8 +345,7 @@ def resolve_config(
     # being called with a fully concrete config, so just use defaults.
     if _is_tuning():
         if config is None:
-            defaults = _DEFAULTS.get(collective, {})
-            return Config(**defaults)
+            return Config()
         return config
 
     # Case 1: config is None -> mark all tunable fields as AUTOTUNE
