@@ -26,6 +26,7 @@ Directory layout:
 """
 
 import atexit
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -85,22 +86,34 @@ def _get_kernel_name(kernel_fn) -> str:
 def _save(compiled, algorithm: str, kernel_name: str, rank: int, dtype, grid):
     """Extract and write artifacts from a CompiledKernel."""
     spec_dirname = _build_spec_dirname(compiled, dtype)
-    output_dir = _artifacts_dir / algorithm / kernel_name / f"rank_{rank}" / spec_dirname
+    codegen_hash = _codegen_hash(compiled)
+    output_dir = (
+        _artifacts_dir / algorithm / kernel_name / f"rank_{rank}"
+        / spec_dirname / codegen_hash
+    )
 
-    # Dedup: skip if already captured with same hash
-    kernel_hash = getattr(compiled, "hash", None)
+    # Dedup: skip if this exact codegen already captured
     metadata_path = output_dir / "metadata.json"
     if metadata_path.exists():
-        try:
-            existing = json.loads(metadata_path.read_text())
-            if existing.get("hash") == kernel_hash:
-                return
-        except (json.JSONDecodeError, OSError):
-            pass
+        return
 
     metadata = _extract_metadata(compiled, algorithm, kernel_name, rank, grid, dtype)
+    metadata["codegen_hash"] = codegen_hash
     _write_artifacts(output_dir, compiled, metadata)
-    _captured.append((algorithm, kernel_name, rank, spec_dirname, kernel_hash))
+    _captured.append((algorithm, kernel_name, rank, spec_dirname, codegen_hash))
+
+
+def _codegen_hash(compiled) -> str:
+    """Hash the AMDGCN assembly text to detect actual codegen changes.
+
+    Same source + same compiler = same hash.  Different Triton version or
+    compiler flags = different hash, even if constexprs are identical.
+    """
+    asm = getattr(compiled, "asm", {})
+    amdgcn = asm.get("amdgcn", "")
+    if isinstance(amdgcn, bytes):
+        amdgcn = amdgcn.decode("utf-8", errors="replace")
+    return hashlib.sha256(amdgcn.encode("utf-8")).hexdigest()[:12]
 
 
 def _build_spec_dirname(compiled, dtype=None) -> str:
@@ -267,14 +280,14 @@ def _write_summary():
 
     # Group by algorithm -> kernel -> rank
     summary = {}
-    for algorithm, kernel_name, rank, spec_dirname, kernel_hash in _captured:
+    for algorithm, kernel_name, rank, spec_dirname, codegen_hash in _captured:
         alg = summary.setdefault(algorithm, {})
         kern = alg.setdefault(kernel_name, {})
         rank_key = f"rank_{rank}"
         specs = kern.setdefault(rank_key, [])
         specs.append({
             "spec": spec_dirname,
-            "hash": kernel_hash,
+            "codegen_hash": codegen_hash,
         })
 
     summary_path = _artifacts_dir / "summary.json"
