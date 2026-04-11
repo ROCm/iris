@@ -5,7 +5,7 @@
 Configuration structures for iris-ccl collective operations.
 """
 
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 import iris
 
 
@@ -112,23 +112,47 @@ class Config:
         >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
     """
 
-    block_size_m: int = 32
-    block_size_n: int = 64
-    swizzle_size: int = 4
-    comm_sms: int = 64
+    block_size_m: int = field(default=32, metadata={
+        "search_space": [8, 16, 32, 64],
+        "search_space_overrides": {"all_to_all": [8, 16, 32, 64, 128]},
+    })
+    block_size_n: int = field(default=64, metadata={
+        "search_space": [32, 64, 128, 256],
+    })
+    swizzle_size: int = field(default=4, metadata={
+        "search_space": [2, 4, 6, 8],
+    })
+    comm_sms: int = field(default=64, metadata={
+        "search_space": [32, 48, 64, 80, 96, 108],
+    })
     num_xcds: int | None = None
     chunk_size: int | None = None
     use_gluon: bool = False
-    all_gather_variant: str = "persistent"
-    all_reduce_variant: str = "two_shot"
-    all_reduce_distribution: int = 1
+    all_gather_variant: str = field(default="persistent", metadata={
+        "search_space": ["persistent", "partitioned"],
+        "collectives": ["all_gather"],
+    })
+    all_reduce_variant: str = field(default="two_shot", metadata={
+        "search_space": ["two_shot", "one_shot", "atomic"],
+        "collectives": ["all_reduce"],
+    })
+    all_reduce_distribution: int = field(default=1, metadata={
+        "search_space": [0, 1],
+        "collectives": ["all_reduce", "reduce_scatter"],
+    })
     all_reduce_num_rings: int = 1
     all_reduce_ring_slice_n: int | None = None
     reduce_scatter_variant: str = "two_shot"
-    num_stages: int = 1
-    num_warps: int = 4
+    num_stages: int = field(default=1, metadata={
+        "search_space": [1, 2],
+    })
+    num_warps: int = field(default=4, metadata={
+        "search_space": [2, 4, 8],
+    })
     threads_per_warp: int = 64
-    waves_per_eu: int = 0
+    waves_per_eu: int = field(default=0, metadata={
+        "search_space": [0, 1, 2],
+    })
 
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
@@ -232,3 +256,31 @@ class Config:
         kwargs["num_xcds"] = None
         kwargs["chunk_size"] = None
         return cls(**kwargs)
+
+    @classmethod
+    def get_tunable_fields(cls, collective: str) -> list[str]:
+        """Return field names that are tunable for a given collective."""
+        result = []
+        for f in fields(cls):
+            meta = f.metadata
+            if "search_space" not in meta:
+                continue
+            collectives = meta.get("collectives")
+            if collectives is None or collective in collectives:
+                result.append(f.name)
+        return result
+
+    @classmethod
+    def get_search_space(cls, collective: str) -> dict[str, list]:
+        """Return ``{field_name: [candidate_values]}`` for a given collective."""
+        result = {}
+        for f in fields(cls):
+            meta = f.metadata
+            if "search_space" not in meta:
+                continue
+            collectives = meta.get("collectives")
+            if collectives is not None and collective not in collectives:
+                continue
+            overrides = meta.get("search_space_overrides", {})
+            result[f.name] = overrides.get(collective, meta["search_space"])
+        return result

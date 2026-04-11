@@ -34,100 +34,6 @@ import torch.distributed as dist
 import iris
 from .config import AUTOTUNE, Config
 
-# ---------------------------------------------------------------------------
-# Tunable fields per collective
-# ---------------------------------------------------------------------------
-# Fields that the autotuner will search over. Fields not listed here are never
-# auto-tuned (e.g., use_gluon, threads_per_warp, num_xcds).
-_TUNABLE_FIELDS: dict[str, list[str]] = {
-    "all_gather": [
-        "block_size_m",
-        "block_size_n",
-        "swizzle_size",
-        "comm_sms",
-        "num_warps",
-        "num_stages",
-        "waves_per_eu",
-        "all_gather_variant",
-    ],
-    "all_reduce": [
-        "block_size_m",
-        "block_size_n",
-        "swizzle_size",
-        "comm_sms",
-        "num_warps",
-        "num_stages",
-        "waves_per_eu",
-        "all_reduce_variant",
-        "all_reduce_distribution",
-    ],
-    "reduce_scatter": [
-        "block_size_m",
-        "block_size_n",
-        "swizzle_size",
-        "comm_sms",
-        "num_warps",
-        "num_stages",
-        "waves_per_eu",
-        "all_reduce_distribution",
-    ],
-    "all_to_all": [
-        "block_size_m",
-        "block_size_n",
-        "swizzle_size",
-        "comm_sms",
-        "num_warps",
-        "num_stages",
-        "waves_per_eu",
-    ],
-}
-
-# ---------------------------------------------------------------------------
-# Search spaces
-# ---------------------------------------------------------------------------
-_SEARCH_SPACES: dict[str, dict[str, list]] = {
-    "all_gather": {
-        "block_size_m": [8, 16, 32, 64],
-        "block_size_n": [32, 64, 128, 256],
-        "swizzle_size": [2, 4, 6, 8],
-        "comm_sms": [32, 48, 64, 80, 96, 108],
-        "num_warps": [2, 4, 8],
-        "num_stages": [1, 2],
-        "waves_per_eu": [0, 1, 2],
-        "all_gather_variant": ["persistent", "partitioned"],
-    },
-    "all_reduce": {
-        "block_size_m": [8, 16, 32, 64],
-        "block_size_n": [32, 64, 128, 256],
-        "swizzle_size": [2, 4, 6, 8],
-        "comm_sms": [32, 48, 64, 80, 96, 108],
-        "num_warps": [2, 4, 8],
-        "num_stages": [1, 2],
-        "waves_per_eu": [0, 1, 2],
-        "all_reduce_variant": ["two_shot", "one_shot", "atomic"],
-        "all_reduce_distribution": [0, 1],
-    },
-    "reduce_scatter": {
-        "block_size_m": [8, 16, 32, 64],
-        "block_size_n": [32, 64, 128, 256],
-        "swizzle_size": [2, 4, 6, 8],
-        "comm_sms": [32, 48, 64, 80, 96, 108],
-        "num_warps": [2, 4, 8],
-        "num_stages": [1, 2],
-        "waves_per_eu": [0, 1, 2],
-        "all_reduce_distribution": [0, 1],
-    },
-    "all_to_all": {
-        "block_size_m": [8, 16, 32, 64, 128],
-        "block_size_n": [32, 64, 128, 256],
-        "swizzle_size": [2, 4, 6, 8],
-        "comm_sms": [32, 48, 64, 80, 96, 108],
-        "num_warps": [2, 4, 8],
-        "num_stages": [1, 2],
-        "waves_per_eu": [0, 1, 2],
-    },
-}
-
 # Default configs used as fallback when autotuning is disabled.
 _DEFAULTS: dict[str, dict[str, Any]] = {
     "all_gather": {"block_size_m": 32, "block_size_n": 64},
@@ -248,7 +154,7 @@ def _generate_candidates(
     budget: int,
 ) -> list[dict[str, Any]]:
     """Generate up to `budget` candidate value dicts for the AUTOTUNE fields."""
-    spaces = _SEARCH_SPACES.get(collective, {})
+    spaces = Config.get_search_space(collective)
     ordered_fields = [f for f in autotune_field_names if f in spaces]
 
     if not ordered_fields:
