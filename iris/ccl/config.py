@@ -112,47 +112,77 @@ class Config:
         >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
     """
 
-    block_size_m: int = field(default=32, metadata={
-        "search_space": [8, 16, 32, 64],
-        "search_space_overrides": {"all_to_all": [8, 16, 32, 64, 128]},
-    })
-    block_size_n: int = field(default=64, metadata={
-        "search_space": [32, 64, 128, 256],
-    })
-    swizzle_size: int = field(default=4, metadata={
-        "search_space": [2, 4, 6, 8],
-    })
-    comm_sms: int = field(default=64, metadata={
-        "search_space": [32, 48, 64, 80, 96, 108],
-    })
+    block_size_m: int = field(
+        default=32,
+        metadata={
+            "search_space": [8, 16, 32, 64],
+            "search_space_overrides": {"all_to_all": [8, 16, 32, 64, 128]},
+        },
+    )
+    block_size_n: int = field(
+        default=64,
+        metadata={
+            "search_space": [32, 64, 128, 256],
+        },
+    )
+    swizzle_size: int = field(
+        default=4,
+        metadata={
+            "search_space": [2, 4, 6, 8],
+        },
+    )
+    comm_sms: int = field(
+        default=64,
+        metadata={
+            "search_space": [32, 48, 64, 80, 96, 108],
+        },
+    )
     num_xcds: int | None = None
     chunk_size: int | None = None
     use_gluon: bool = False
-    all_gather_variant: str = field(default="persistent", metadata={
-        "search_space": ["persistent", "partitioned"],
-        "collectives": ["all_gather"],
-    })
-    all_reduce_variant: str = field(default="two_shot", metadata={
-        "search_space": ["two_shot", "one_shot", "atomic"],
-        "collectives": ["all_reduce"],
-    })
-    all_reduce_distribution: int = field(default=1, metadata={
-        "search_space": [0, 1],
-        "collectives": ["all_reduce", "reduce_scatter"],
-    })
+    all_gather_variant: str = field(
+        default="persistent",
+        metadata={
+            "search_space": ["persistent", "partitioned"],
+            "collectives": ["all_gather"],
+        },
+    )
+    all_reduce_variant: str = field(
+        default="two_shot",
+        metadata={
+            "search_space": ["two_shot", "one_shot", "atomic"],
+            "collectives": ["all_reduce"],
+        },
+    )
+    all_reduce_distribution: int = field(
+        default=1,
+        metadata={
+            "search_space": [0, 1],
+            "collectives": ["all_reduce", "reduce_scatter"],
+        },
+    )
     all_reduce_num_rings: int = 1
     all_reduce_ring_slice_n: int | None = None
     reduce_scatter_variant: str = "two_shot"
-    num_stages: int = field(default=1, metadata={
-        "search_space": [1, 2],
-    })
-    num_warps: int = field(default=4, metadata={
-        "search_space": [2, 4, 8],
-    })
+    num_stages: int = field(
+        default=1,
+        metadata={
+            "search_space": [1, 2],
+        },
+    )
+    num_warps: int = field(
+        default=4,
+        metadata={
+            "search_space": [2, 4, 8],
+        },
+    )
     threads_per_warp: int = 64
-    waves_per_eu: int = field(default=0, metadata={
-        "search_space": [0, 1, 2],
-    })
+    waves_per_eu: int = field(
+        default=0,
+        metadata={
+            "search_space": [0, 1, 2],
+        },
+    )
 
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
