@@ -23,10 +23,8 @@ Directory layout:
     │                   ├── kernel.ttgir
     │                   ├── kernel.llir
     │                   └── kernel.amdgcn
-    └── summary.json
 """
 
-import atexit
 import hashlib
 import json
 import os
@@ -36,7 +34,6 @@ from typing import Any, Dict, Optional
 
 _artifacts_dir: Optional[Path] = None
 _enabled: bool = False
-_captured: list = []  # (algorithm, kernel_name, rank, spec_dirname, hash) tuples
 
 
 def _init():
@@ -45,7 +42,6 @@ def _init():
     if d:
         _artifacts_dir = Path(d)
         _enabled = True
-        atexit.register(_write_summary)
 
 
 def is_enabled() -> bool:
@@ -98,7 +94,6 @@ def _save(compiled, algorithm: str, kernel_name: str, rank: int, dtype, grid):
     metadata = _extract_metadata(compiled, algorithm, kernel_name, rank, grid, dtype)
     metadata["codegen_hash"] = codegen_hash
     _write_artifacts(output_dir, compiled, metadata)
-    _captured.append((algorithm, kernel_name, rank, spec_dirname, codegen_hash))
 
 
 def _codegen_hash(compiled) -> str:
@@ -268,30 +263,6 @@ def _write_artifacts(output_dir: Path, compiled, metadata: dict):
     # Write metadata
     metadata_path = output_dir / "metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2, default=str))
-
-
-def _write_summary():
-    """Write summary.json index at exit time."""
-    if not _captured or _artifacts_dir is None:
-        return
-
-    # Group by algorithm -> kernel -> rank
-    summary = {}
-    for algorithm, kernel_name, rank, spec_dirname, codegen_hash in _captured:
-        alg = summary.setdefault(algorithm, {})
-        kern = alg.setdefault(kernel_name, {})
-        rank_key = f"rank_{rank}"
-        specs = kern.setdefault(rank_key, [])
-        specs.append(
-            {
-                "spec": spec_dirname,
-                "codegen_hash": codegen_hash,
-            }
-        )
-
-    summary_path = _artifacts_dir / "summary.json"
-    _artifacts_dir.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(json.dumps(summary, indent=2))
 
 
 _init()
