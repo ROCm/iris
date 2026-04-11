@@ -88,10 +88,7 @@ def _save(compiled, algorithm: str, kernel_name: str, rank: int, dtype, grid):
     """Extract and write artifacts from a CompiledKernel."""
     spec_dirname = _build_spec_dirname(compiled, dtype)
     codegen_hash = _codegen_hash(compiled)
-    output_dir = (
-        _artifacts_dir / algorithm / kernel_name / f"rank_{rank}"
-        / spec_dirname / codegen_hash
-    )
+    output_dir = _artifacts_dir / algorithm / kernel_name / f"rank_{rank}" / spec_dirname / codegen_hash
 
     # Dedup: skip if this exact codegen already captured
     metadata_path = output_dir / "metadata.json"
@@ -206,8 +203,7 @@ def _extract_constexprs(compiled) -> Dict[str, Any]:
     return result
 
 
-def _extract_metadata(compiled, algorithm: str, kernel_name: str,
-                      rank: int, grid, dtype) -> dict:
+def _extract_metadata(compiled, algorithm: str, kernel_name: str, rank: int, grid, dtype) -> dict:
     """Build the metadata dict for a kernel specialization."""
     meta = compiled.metadata
     constexprs = _extract_constexprs(compiled)
@@ -286,10 +282,12 @@ def _write_summary():
         kern = alg.setdefault(kernel_name, {})
         rank_key = f"rank_{rank}"
         specs = kern.setdefault(rank_key, [])
-        specs.append({
-            "spec": spec_dirname,
-            "codegen_hash": codegen_hash,
-        })
+        specs.append(
+            {
+                "spec": spec_dirname,
+                "codegen_hash": codegen_hash,
+            }
+        )
 
     summary_path = _artifacts_dir / "summary.json"
     _artifacts_dir.mkdir(parents=True, exist_ok=True)

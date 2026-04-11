@@ -249,7 +249,8 @@ def all_gather_matmul(
     # Launch single fused kernel
     grid = (num_sms,)
     iris_launch(
-        _fused_all_gather_matmul_kernel, grid,
+        _fused_all_gather_matmul_kernel,
+        grid,
         A_sharded,
         B,
         output_tensor,
@@ -278,7 +279,9 @@ def all_gather_matmul(
         use_bias,
         even_k,
         config.allow_tf32,
-        algorithm="all_gather_matmul", rank=rank, dtype=A_sharded.dtype,
+        algorithm="all_gather_matmul",
+        rank=rank,
+        dtype=A_sharded.dtype,
     )
 
     if not async_op:

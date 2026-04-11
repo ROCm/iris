@@ -813,7 +813,8 @@ def all_reduce(
 
     if variant == VARIANT_ATOMIC:
         iris_launch(
-            persistent_all_reduce_atomic, (config.comm_sms,),
+            persistent_all_reduce_atomic,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             M,
@@ -834,7 +835,9 @@ def all_reduce(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
-            algorithm="all_reduce", rank=rank_global, dtype=input_tensor.dtype,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
 
     elif variant == VARIANT_SPINLOCK:
@@ -853,7 +856,8 @@ def all_reduce(
             )
 
         iris_launch(
-            persistent_all_reduce_spinlock, (config.comm_sms,),
+            persistent_all_reduce_spinlock,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             workspace.locks,
@@ -875,7 +879,9 @@ def all_reduce(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
-            algorithm="all_reduce", rank=rank_global, dtype=input_tensor.dtype,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
 
     elif variant == VARIANT_RING:
@@ -908,7 +914,8 @@ def all_reduce(
             next_rank = group_ranks[next_rank_in_group]
 
         iris_launch(
-            persistent_all_reduce_ring, (config.comm_sms,),
+            persistent_all_reduce_ring,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             workspace.ring_buffer,
@@ -935,12 +942,15 @@ def all_reduce(
             config.all_reduce_num_rings,
             slice_n,
             workspace.flags_per_tile,
-            algorithm="all_reduce", rank=rank_global, dtype=input_tensor.dtype,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
 
     elif variant == VARIANT_TWO_SHOT:
         iris_launch(
-            persistent_all_reduce_two_shot, (config.comm_sms,),
+            persistent_all_reduce_two_shot,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             M,
@@ -965,11 +975,14 @@ def all_reduce(
             num_warps=8,
             num_stages=1,
             waves_per_eu=1,
-            algorithm="all_reduce", rank=rank_global, dtype=input_tensor.dtype,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
     elif variant == VARIANT_ONE_SHOT:
         iris_launch(
-            persistent_all_reduce_one_shot, (config.comm_sms,),
+            persistent_all_reduce_one_shot,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             M,
@@ -990,7 +1003,9 @@ def all_reduce(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
-            algorithm="all_reduce", rank=rank_global, dtype=input_tensor.dtype,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
 
     if workspace is not None:

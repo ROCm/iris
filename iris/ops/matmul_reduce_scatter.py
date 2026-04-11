@@ -244,7 +244,8 @@ def matmul_reduce_scatter(
     even_k = K % config.block_size_k == 0
 
     iris_launch(
-        _fused_matmul_reduce_scatter_kernel, grid,
+        _fused_matmul_reduce_scatter_kernel,
+        grid,
         A,
         B,
         C,
@@ -266,7 +267,9 @@ def matmul_reduce_scatter(
         config.block_size_n,
         config.block_size_k,
         even_k,
-        algorithm="matmul_reduce_scatter", rank=rank, dtype=A.dtype,
+        algorithm="matmul_reduce_scatter",
+        rank=rank,
+        dtype=A.dtype,
     )
 
     if not async_op:

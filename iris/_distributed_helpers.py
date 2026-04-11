@@ -377,14 +377,16 @@ def distributed_device_barrier(flags, group, rank, num_ranks, heap_bases):
     """
     _, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, rank, num_ranks)
     iris_launch(
-        _device_barrier_kernel, (1,),
+        _device_barrier_kernel,
+        (1,),
         flags,
         rank_global,
         world_size,
         rank_start,
         rank_stride,
         heap_bases,
-        algorithm="barrier", rank=rank_global,
+        algorithm="barrier",
+        rank=rank_global,
     )
 
 

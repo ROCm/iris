@@ -231,7 +231,8 @@ def reduce_scatter(
     distribution = config.all_reduce_distribution
 
     iris_launch(
-        persistent_reduce_scatter_two_shot, (config.comm_sms,),
+        persistent_reduce_scatter_two_shot,
+        (config.comm_sms,),
         input_tensor,
         output_tensor,
         M,
@@ -256,7 +257,9 @@ def reduce_scatter(
         num_stages=config.num_stages,
         num_warps=config.num_warps,
         waves_per_eu=config.waves_per_eu,
-        algorithm="reduce_scatter", rank=rank_global, dtype=input_tensor.dtype,
+        algorithm="reduce_scatter",
+        rank=rank_global,
+        dtype=input_tensor.dtype,
     )
 
     if not async_op:

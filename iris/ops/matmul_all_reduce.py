@@ -316,7 +316,8 @@ def matmul_all_reduce(
     even_k = K % config.block_size_k == 0
 
     iris_launch(
-        _fused_matmul_all_reduce_kernel, grid,
+        _fused_matmul_all_reduce_kernel,
+        grid,
         A,
         B,
         C,
@@ -339,7 +340,9 @@ def matmul_all_reduce(
         config.block_size_k,
         even_k,
         config.all_reduce_variant,
-        algorithm="matmul_all_reduce", rank=rank, dtype=A.dtype,
+        algorithm="matmul_all_reduce",
+        rank=rank,
+        dtype=A.dtype,
     )
 
     # Mark workspace as used

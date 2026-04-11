@@ -538,7 +538,8 @@ def all_gather(
         context_tensor = shmem.get_device_context()
 
         iris_launch(
-            persistent_all_gather_gluon, (config.comm_sms,),
+            persistent_all_gather_gluon,
+            (config.comm_sms,),
             IrisDeviceCtx,
             context_tensor,
             input_tensor,
@@ -563,7 +564,9 @@ def all_gather(
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,
-            algorithm="all_gather", rank=rank_global, dtype=input_tensor.dtype,
+            algorithm="all_gather",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
     else:
         if config.use_gluon and not GLUON_AVAILABLE:
@@ -587,7 +590,8 @@ def all_gather(
             raise ValueError(f"Unknown all_gather_variant: {config.all_gather_variant}")
 
         iris_launch(
-            kernel_fn, (config.comm_sms,),
+            kernel_fn,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             M,
@@ -611,7 +615,9 @@ def all_gather(
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,
-            algorithm="all_gather", rank=rank_global, dtype=input_tensor.dtype,
+            algorithm="all_gather",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
 
     if not async_op:

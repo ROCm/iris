@@ -381,7 +381,8 @@ def all_to_all(
         context_tensor = shmem.get_device_context()
 
         iris_launch(
-            persistent_all_to_all_gluon, (config.comm_sms,),
+            persistent_all_to_all_gluon,
+            (config.comm_sms,),
             IrisDeviceCtx,
             context_tensor,
             input_tensor,
@@ -406,7 +407,9 @@ def all_to_all(
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,
-            algorithm="all_to_all", rank=rank_global, dtype=input_tensor.dtype,
+            algorithm="all_to_all",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
     else:
         # Use Triton implementation
@@ -414,7 +417,8 @@ def all_to_all(
             raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False")
 
         iris_launch(
-            persistent_all_to_all, (config.comm_sms,),
+            persistent_all_to_all,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             M,
@@ -438,7 +442,9 @@ def all_to_all(
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,
-            algorithm="all_to_all", rank=rank_global, dtype=input_tensor.dtype,
+            algorithm="all_to_all",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
 
     if not async_op:
