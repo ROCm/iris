@@ -115,8 +115,7 @@ class Config:
     block_size_m: int = field(
         default=32,
         metadata={
-            "search_space": [8, 16, 32, 64],
-            "search_space_overrides": {"all_to_all": [8, 16, 32, 64, 128]},
+            "search_space": [8, 16, 32, 64, 128],
         },
     )
     block_size_n: int = field(
@@ -311,6 +310,5 @@ class Config:
             collectives = meta.get("collectives")
             if collectives is not None and collective not in collectives:
                 continue
-            overrides = meta.get("search_space_overrides", {})
-            result[f.name] = overrides.get(collective, meta["search_space"])
+            result[f.name] = meta["search_space"]
         return result
