@@ -9,7 +9,7 @@ Gathers tensors from all ranks and concatenates them along the last dimension.
 import triton
 import triton.language as tl
 import iris
-from iris.kernel_artifacts import iris_launch
+from iris.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import extract_group_info
 

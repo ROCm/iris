@@ -7,7 +7,7 @@ import torch.distributed as dist
 import numpy as np
 import triton
 import triton.language as tl
-from iris.kernel_artifacts import iris_launch
+from iris.tracing.kernel_artifacts import iris_launch
 
 
 def _infer_device():

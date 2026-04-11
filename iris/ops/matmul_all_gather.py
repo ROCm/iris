@@ -16,7 +16,7 @@ import triton
 import triton.language as tl
 import iris
 import iris.x
-from iris.kernel_artifacts import iris_launch
+from iris.tracing.kernel_artifacts import iris_launch
 
 from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view
 

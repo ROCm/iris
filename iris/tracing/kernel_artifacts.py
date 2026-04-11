@@ -17,11 +17,12 @@ Directory layout:
     │   └── persistent_all_reduce_atomic/
     │       └── rank_0/
     │           └── BM32_BN64_fp16_w4/
-    │               ├── metadata.json
-    │               ├── kernel.ttir
-    │               ├── kernel.ttgir
-    │               ├── kernel.llir
-    │               └── kernel.amdgcn
+    │               └── a1b2c3d4e5f6/          # codegen hash (SHA-256 of AMDGCN, first 12 chars)
+    │                   ├── metadata.json
+    │                   ├── kernel.ttir
+    │                   ├── kernel.ttgir
+    │                   ├── kernel.llir
+    │                   └── kernel.amdgcn
     └── summary.json
 """
 
