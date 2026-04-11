@@ -77,6 +77,7 @@ from . import experimental
 from . import ops
 from . import tensor_creation
 from . import bench
+from . import kernel_artifacts
 from .logging import (
     set_logger_level,
     logger,
