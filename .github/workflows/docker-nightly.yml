@@ -12,8 +12,8 @@ on:
     branches:
       - muhaawad/docker-nightly  # TEMPORARY: remove before merge
   schedule:
-    # 06:17 UTC daily (off-minute to reduce GH Actions surge)
-    - cron: "17 6 * * *"
+    # midnight PST = 08:00 UTC (off-minute to reduce GH Actions surge)
+    - cron: "3 8 * * *"
   workflow_dispatch:
 
 env:
@@ -32,7 +32,9 @@ jobs:
       matrix:
         include:
           - base_image: rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
+            tag_latest: true
           - base_image: rocm7.1.1_ubuntu24.04_py3.13_pytorch_release_2.10.0
+            tag_latest: false
 
     steps:
       - name: Free up disk space
@@ -114,6 +116,14 @@ jobs:
           echo "docker pull ${{ steps.check.outputs.full }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "Triton commit: \`${{ steps.triton.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tag and push latest
+        if: steps.check.outputs.skip != 'true' && matrix.tag_latest
+        run: |
+          LATEST="${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:latest"
+          docker tag "${{ steps.check.outputs.full }}" "$LATEST"
+          docker push "$LATEST"
+          echo "Also pushed as \`latest\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Skip summary
         if: steps.check.outputs.skip == 'true'
