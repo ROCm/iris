@@ -97,16 +97,20 @@ def _save(compiled, algorithm: str, kernel_name: str, rank: int, dtype, grid):
 
 
 def _codegen_hash(compiled) -> str:
-    """Hash the AMDGCN assembly text to detect actual codegen changes.
+    """Hash codegen output to detect actual codegen changes.
 
-    Same source + same compiler = same hash.  Different Triton version or
-    compiler flags = different hash, even if constexprs are identical.
+    Prefers AMDGCN assembly text. Falls back to compiled.hash when
+    assembly is unavailable (avoids empty-string hash collisions).
     """
-    asm = getattr(compiled, "asm", {})
-    amdgcn = asm.get("amdgcn", "")
-    if isinstance(amdgcn, bytes):
-        amdgcn = amdgcn.decode("utf-8", errors="replace")
-    return hashlib.sha256(amdgcn.encode("utf-8")).hexdigest()[:12]
+    asm = getattr(compiled, "asm", {}) or {}
+    blob = asm.get("amdgcn") or asm.get("hsaco")
+    if blob:
+        if isinstance(blob, bytes):
+            return hashlib.sha256(blob).hexdigest()[:12]
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+    # Fallback to Triton's compilation hash
+    h = getattr(compiled, "hash", None) or "unknown"
+    return hashlib.sha256(h.encode("utf-8")).hexdigest()[:12]
 
 
 def _build_spec_dirname(compiled, dtype=None) -> str:
@@ -258,11 +262,11 @@ def _write_artifacts(output_dir: Path, compiled, metadata: dict):
             if isinstance(content, bytes):
                 filepath.write_bytes(content)
             else:
-                filepath.write_text(content)
+                filepath.write_text(content, encoding="utf-8")
 
     # Write metadata
     metadata_path = output_dir / "metadata.json"
-    metadata_path.write_text(json.dumps(metadata, indent=2, default=str))
+    metadata_path.write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
 
 
 _init()
