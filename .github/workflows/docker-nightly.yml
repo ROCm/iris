@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# Nightly Docker image build for iris-dev
+# Base: rocm/pytorch + Triton nightly wheel
+# Push to docker.io/muhaawad/iris-dev
+#
+# No separate Dockerfile — everything is inline.
+
+name: Nightly Docker Build
+
+on:
+  schedule:
+    # 06:17 UTC daily (off-minute to reduce GH Actions surge)
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+env:
+  DOCKERHUB_USER: muhaawad
+  IMAGE_NAME: iris-dev
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - base_image: rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
+          - base_image: rocm7.1.1_ubuntu24.04_py3.13_pytorch_release_2.10.0
+
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+            /opt/ghc /opt/hostedtoolcache /usr/local/share/boost
+          df -h /
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USER }}
+          password: ${{ secrets.IRIS_DOCKERHUB_TOKEN }}
+
+      - name: Build image
+        run: |
+          docker build -t build-temp -f - . <<'DOCKERFILE'
+          FROM rocm/pytorch:${{ matrix.base_image }}
+          SHELL ["/bin/bash", "-c"]
+
+          ENV ROCM_PATH=/opt/rocm \
+              OMPI_MCA_mtl="^ofi" \
+              OMPI_MCA_pml="ob1" \
+              OMPI_ALLOW_RUN_AS_ROOT=1 \
+              OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+          ENV LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH \
+              PATH="$ROCM_PATH/bin:$PATH"
+
+          # Replace base image triton with nightly
+          RUN pip3 uninstall -y triton pytorch-triton-rocm 2>/dev/null; \
+              pip3 install --pre triton
+
+          # Make site-packages writable for dev use
+          RUN find /opt -path '*/site-packages' -exec chmod -R a+w {} + 2>/dev/null || true
+
+          WORKDIR /workspace
+          LABEL org.opencontainers.image.source="https://github.com/ROCm/iris"
+          LABEL org.opencontainers.image.description="iris-dev: ROCm + PyTorch + Triton nightly"
+          DOCKERFILE
+
+      - name: Extract Triton version and tag
+        id: tag
+        run: |
+          TRITON_VER=$(docker run --rm build-temp python3 -c "import triton; print(triton.__version__)")
+          # Version looks like "3.3.0+git1a2b3c4" — extract short hash
+          TRITON_ID=$(echo "$TRITON_VER" | sed 's/.*+git//' | head -c 7)
+          if [ "$TRITON_ID" = "$(echo "$TRITON_VER" | head -c 7)" ]; then
+            TRITON_ID=$(echo "$TRITON_VER" | tr '.' '-')
+          fi
+          TAG="${{ matrix.base_image }}_triton_${TRITON_ID}"
+          FULL="${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "full=${FULL}" >> "$GITHUB_OUTPUT"
+          echo "triton_ver=${TRITON_VER}" >> "$GITHUB_OUTPUT"
+          docker tag build-temp "${FULL}"
+          echo "Tagged: ${FULL}"
+
+      - name: Check if tag already exists
+        id: check
+        run: |
+          if docker manifest inspect "${{ steps.tag.outputs.full }}" > /dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Image ${{ steps.tag.outputs.full }} already exists — skipping push"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push image
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          docker push "${{ steps.tag.outputs.full }}"
+          echo "### Pushed image" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "docker pull ${{ steps.tag.outputs.full }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "Triton: ${{ steps.tag.outputs.triton_ver }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip summary
+        if: steps.check.outputs.skip == 'true'
+        run: |
+          echo "### Skipped (no new Triton nightly)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag \`${{ steps.tag.outputs.tag }}\` already exists on Docker Hub." >> "$GITHUB_STEP_SUMMARY"
