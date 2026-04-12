@@ -8,9 +8,6 @@
 name: Nightly Docker Build
 
 on:
-  push:
-    branches:
-      - muhaawad/docker-nightly  # TEMPORARY: remove before merge
   schedule:
     # midnight PST = 08:00 UTC (off-minute to reduce GH Actions surge)
     - cron: "3 8 * * *"
