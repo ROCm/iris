@@ -79,10 +79,21 @@ jobs:
         id: tag
         run: |
           TRITON_VER=$(docker run --rm build-temp python3 -c "import triton; print(triton.__version__)")
-          # Version looks like "3.3.0+git1a2b3c4" — extract short hash
-          TRITON_ID=$(echo "$TRITON_VER" | sed 's/.*+git//' | head -c 7)
-          if [ "$TRITON_ID" = "$(echo "$TRITON_VER" | head -c 7)" ]; then
-            TRITON_ID=$(echo "$TRITON_VER" | tr '.' '-')
+          # Try to get the git commit from the installed package metadata
+          TRITON_COMMIT=$(docker run --rm build-temp python3 -c "
+          try:
+              from triton.compiler import __version_git_hash__ as h; print(h[:7])
+          except Exception:
+              pass
+          " 2>/dev/null || true)
+          # If version has +gitXXXXXXX, extract the hash
+          if echo "$TRITON_VER" | grep -q '+git'; then
+            TRITON_ID=$(echo "$TRITON_VER" | sed 's/.*+git//' | head -c 7)
+          elif [ -n "$TRITON_COMMIT" ]; then
+            TRITON_ID="$TRITON_COMMIT"
+          else
+            # No commit info — use version + date for uniqueness
+            TRITON_ID="${TRITON_VER}_$(date -u +%Y%m%d)"
           fi
           TAG="${{ matrix.base_image }}_triton_${TRITON_ID}"
           FULL="${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:${TAG}"
