@@ -51,10 +51,11 @@ jobs:
       - name: Get latest triton commit SHA
         id: triton
         run: |
-          SHA=$(git ls-remote https://github.com/triton-lang/triton.git HEAD | cut -f1)
-          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "short=${SHA:0:7}" >> "$GITHUB_OUTPUT"
-          echo "Triton HEAD: ${SHA:0:7}"
+          SHA=$(git ls-remote https://github.com/triton-lang/triton.git HEAD | awk '{print $1}')
+          SHORT=$(echo "$SHA" | head -c 7)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "Triton HEAD: $SHORT"
 
       - name: Check if tag already exists
         id: check
