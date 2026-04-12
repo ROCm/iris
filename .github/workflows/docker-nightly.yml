@@ -2,10 +2,8 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Nightly Docker image build for iris-dev
-# Base: rocm/pytorch + Triton nightly wheel
+# Base: rocm/pytorch + Triton built from source (latest main)
 # Push to docker.io/muhaawad/iris-dev
-#
-# No separate Dockerfile — everything is inline.
 
 name: Nightly Docker Build
 
@@ -27,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     strategy:
       fail-fast: false
@@ -40,7 +38,8 @@ jobs:
       - name: Free up disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
-            /opt/ghc /opt/hostedtoolcache /usr/local/share/boost
+            /opt/ghc /opt/hostedtoolcache /usr/local/share/boost \
+            /usr/local/graalvm /usr/local/.ghcup /usr/local/share/powershell
           df -h /
 
       - name: Log in to Docker Hub
@@ -49,9 +48,32 @@ jobs:
           username: ${{ env.DOCKERHUB_USER }}
           password: ${{ secrets.IRIS_DOCKERHUB_TOKEN }}
 
-      - name: Build image
+      - name: Get latest triton commit SHA
+        id: triton
         run: |
-          docker build -t build-temp -f - . <<'DOCKERFILE'
+          SHA=$(git ls-remote https://github.com/triton-lang/triton.git HEAD | cut -f1)
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "short=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "Triton HEAD: ${SHA:0:7}"
+
+      - name: Check if tag already exists
+        id: check
+        run: |
+          TAG="${{ matrix.base_image }}_triton_${{ steps.triton.outputs.short }}"
+          FULL="${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:${TAG}"
+          if docker manifest inspect "${FULL}" > /dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Image ${FULL} already exists — skipping build"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "full=${FULL}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          docker build -t "${{ steps.check.outputs.full }}" -f - . <<'DOCKERFILE'
           FROM rocm/pytorch:${{ matrix.base_image }}
           SHELL ["/bin/bash", "-c"]
 
@@ -63,68 +85,37 @@ jobs:
           ENV LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH \
               PATH="$ROCM_PATH/bin:$PATH"
 
-          # Replace base image triton with nightly
+          RUN apt-get update && \
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                  git build-essential cmake ninja-build && \
+              rm -rf /var/lib/apt/lists/*
+
+          # Remove base image triton, install from source at pinned commit
+          ARG TRITON_SHA
           RUN pip3 uninstall -y triton pytorch-triton-rocm 2>/dev/null; \
-              pip3 install --pre triton
+              pip3 install "triton @ git+https://github.com/triton-lang/triton.git@${TRITON_SHA}"
 
           # Make site-packages writable for dev use
           RUN find /opt -path '*/site-packages' -exec chmod -R a+w {} + 2>/dev/null || true
 
           WORKDIR /workspace
           LABEL org.opencontainers.image.source="https://github.com/ROCm/iris"
-          LABEL org.opencontainers.image.description="iris-dev: ROCm + PyTorch + Triton nightly"
+          LABEL org.opencontainers.image.description="iris-dev: ROCm + PyTorch + Triton (source)"
           DOCKERFILE
-
-      - name: Extract Triton version and tag
-        id: tag
-        run: |
-          TRITON_VER=$(docker run --rm build-temp python3 -c "import triton; print(triton.__version__)")
-          # Try to get the git commit from the installed package metadata
-          TRITON_COMMIT=$(docker run --rm build-temp python3 -c "
-          try:
-              from triton.compiler import __version_git_hash__ as h; print(h[:7])
-          except Exception:
-              pass
-          " 2>/dev/null || true)
-          # If version has +gitXXXXXXX, extract the hash
-          if echo "$TRITON_VER" | grep -q '+git'; then
-            TRITON_ID=$(echo "$TRITON_VER" | sed 's/.*+git//' | head -c 7)
-          elif [ -n "$TRITON_COMMIT" ]; then
-            TRITON_ID="$TRITON_COMMIT"
-          else
-            # No commit info — use version + date for uniqueness
-            TRITON_ID="${TRITON_VER}_$(date -u +%Y%m%d)"
-          fi
-          TAG="${{ matrix.base_image }}_triton_${TRITON_ID}"
-          FULL="${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:${TAG}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "full=${FULL}" >> "$GITHUB_OUTPUT"
-          echo "triton_ver=${TRITON_VER}" >> "$GITHUB_OUTPUT"
-          docker tag build-temp "${FULL}"
-          echo "Tagged: ${FULL}"
-
-      - name: Check if tag already exists
-        id: check
-        run: |
-          if docker manifest inspect "${{ steps.tag.outputs.full }}" > /dev/null 2>&1; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Image ${{ steps.tag.outputs.full }} already exists — skipping push"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+          --build-arg TRITON_SHA=${{ steps.triton.outputs.sha }}
 
       - name: Push image
         if: steps.check.outputs.skip != 'true'
         run: |
-          docker push "${{ steps.tag.outputs.full }}"
+          docker push "${{ steps.check.outputs.full }}"
           echo "### Pushed image" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "docker pull ${{ steps.tag.outputs.full }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "docker pull ${{ steps.check.outputs.full }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "Triton: ${{ steps.tag.outputs.triton_ver }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Triton commit: \`${{ steps.triton.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Skip summary
         if: steps.check.outputs.skip == 'true'
         run: |
-          echo "### Skipped (no new Triton nightly)" >> "$GITHUB_STEP_SUMMARY"
-          echo "Tag \`${{ steps.tag.outputs.tag }}\` already exists on Docker Hub." >> "$GITHUB_STEP_SUMMARY"
+          echo "### Skipped (triton unchanged)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag \`${{ steps.check.outputs.tag }}\` already exists on Docker Hub." >> "$GITHUB_STEP_SUMMARY"
