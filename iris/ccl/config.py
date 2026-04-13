@@ -36,7 +36,7 @@ class Config:
                            - "persistent": Each PID handles multiple tiles and sends to all ranks
                            - "partitioned": PIDs partitioned across ranks, eliminates inner loop
         all_reduce_variant: Variant for all-reduce operation (default: "atomic")
-                           Options: "atomic", "ring", "two_shot", "one_shot", "spinlock"
+                           Options: "atomic", "ring", "two_shot", "one_shot", "spinlock", "ll"
         all_reduce_distribution: Distribution for two-shot all-reduce (default: 0)
                                0 for striding, 1 for block distribution
         all_reduce_num_rings: Number of concurrent rings to form in ring-based all-reduce (default: 1)
@@ -118,9 +118,9 @@ class Config:
             raise ValueError(
                 f"all_gather_variant must be one of: 'persistent', 'partitioned', got {self.all_gather_variant}"
             )
-        if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock"]:
+        if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock", "ll"]:
             raise ValueError(
-                f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'spinlock', got {self.all_reduce_variant}"
+                f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'spinlock', 'll', got {self.all_reduce_variant}"
             )
         if self.all_reduce_distribution not in [0, 1]:
             raise ValueError(

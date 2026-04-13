@@ -23,6 +23,7 @@ VARIANT_RING = "ring"
 VARIANT_TWO_SHOT = "two_shot"
 VARIANT_ONE_SHOT = "one_shot"
 VARIANT_SPINLOCK = "spinlock"
+VARIANT_LL = "ll"
 
 
 @dataclass
@@ -68,9 +69,9 @@ def all_reduce_preamble(
         config = Config()
 
     variant = config.all_reduce_variant.lower()
-    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK]:
+    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK, VARIANT_LL]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}, {VARIANT_LL}"
         )
 
     M, N = input_tensor.shape[:2]
@@ -110,6 +111,28 @@ def all_reduce_preamble(
             workspace.flags.zero_()
 
         output_tensor.zero_()
+        shmem.barrier()
+
+    elif variant == VARIANT_LL:
+        total_elems = M * N
+        # One flag per BLOCK_SIZE chunk of elements, for both reduce-scatter and all-gather.
+        # We use flag value encoding (step+1) so a single flag array suffices.
+        ll_block = getattr(config, "block_size_n", 256)
+        num_chunks = (total_elems + ll_block - 1) // ll_block
+        if (
+            workspace.ring_buffer is None
+            or workspace.ring_buffer.shape != (M, N)
+            or workspace.ring_buffer.dtype != dtype
+        ):
+            workspace.ring_buffer = shmem.zeros((M, N), dtype=dtype)
+        else:
+            workspace.ring_buffer.zero_()
+
+        if workspace.flags is None or workspace.flags.numel() != num_chunks:
+            workspace.flags = shmem.zeros((num_chunks,), dtype=torch.int32)
+        else:
+            workspace.flags.zero_()
+
         shmem.barrier()
 
     elif variant == VARIANT_TWO_SHOT:
@@ -570,6 +593,131 @@ def persistent_all_reduce_ring(
                 )
 
 
+@triton.jit()
+def persistent_all_reduce_ll(
+    input_ptr,
+    output_ptr,
+    ring_buffer,
+    flags,
+    total_elems,
+    stride_in_m,
+    stride_in_n,
+    N,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    next_rank: tl.constexpr,
+    prev_rank: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+):
+    """
+    Low-latency ring all-reduce inspired by RCCL's LL protocol.
+
+    Linearizes the (M,N) tensor and splits it into chunks of BLOCK_SIZE
+    elements.  Each CTA owns a set of chunks and drives them through all
+    (world_size-1) ring steps independently — no inter-CTA barrier needed.
+
+    In each step a CTA:
+      1. Waits until next_rank's flag is clear (back-pressure).
+      2. Writes its current send data to next_rank's ring buffer.
+      3. Sets next_rank's flag to signal arrival.
+      4. Polls its own flag until prev_rank has written.
+      5. Reads the received data, adds it to its running accumulator,
+         and forwards the raw received data (not the sum) for the next hop.
+      6. Resets its flag so prev_rank can write again.
+
+    After (world_size-1) hops every rank's contribution has been seen by
+    every other rank, so the accumulator holds the fully reduced result.
+    No separate all-gather phase is needed.
+
+    Flag protocol: one int32 flag per chunk on the symmetric heap.
+    """
+    pid_raw = tl.program_id(0)
+    pid = pid_raw
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid_raw, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+
+    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
+    elem_ty = input_ptr.type.element_ty
+
+    total_chunks = tl.cdiv(total_elems, BLOCK_SIZE)
+
+    # Each CTA iterates over its assigned chunks.  For each chunk it drives
+    # the full reduce-scatter + all-gather pipeline independently.
+    for chunk_id in range(pid, total_chunks, COMM_SMS):
+        elem_start = chunk_id * BLOCK_SIZE
+        offs = elem_start + tl.arange(0, BLOCK_SIZE)
+        mask = offs < total_elems
+
+        # Compute 2-D indices for strided input/output access.
+        rows = offs // N
+        cols = offs % N
+        io_offs = rows * stride_in_m + cols * stride_in_n
+
+        # Load this CTA's local input once.
+        local_data = tl.load(input_ptr + io_offs, mask=mask, other=0).to(acc_dtype)
+        acc = local_data  # running accumulator (starts with our own contribution)
+        send_data = local_data.to(elem_ty)
+
+        ring_offs = elem_start + tl.arange(0, BLOCK_SIZE)
+        local_flag_ptr = flags + chunk_id
+        remote_flag_ptr = flags + chunk_id
+
+        # ── Reduce-scatter: world_size-1 hops ──
+        for step in range(0, world_size - 1):
+            flag_val = step + 1
+
+            # 1. Wait until next_rank's flag is clear (== 0) so we don't
+            #    overwrite data it hasn't consumed yet.
+            while (
+                iris.atomic_cas(
+                    remote_flag_ptr, 0, 0,
+                    iris_rank, next_rank, heap_bases,
+                    sem="acquire", scope="sys",
+                ) != 0
+            ):
+                pass
+
+            # 2. Write data to next_rank's ring buffer.
+            iris.store(
+                ring_buffer + ring_offs, send_data,
+                iris_rank, next_rank, heap_bases,
+                mask=mask,
+            )
+            tl.debug_barrier()
+
+            # 3. Set flag on next_rank to signal data is ready.
+            iris.atomic_xchg(
+                remote_flag_ptr, flag_val,
+                iris_rank, next_rank, heap_bases,
+                sem="release", scope="sys",
+            )
+
+            # 4. Wait for prev_rank to write our ring buffer.
+            while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != flag_val:
+                pass
+
+            # 5. Load received data, reduce.  Forward the raw received data
+            #    (not the accumulated sum) so each rank's contribution
+            #    traverses the ring exactly once.
+            recv = tl.load(ring_buffer + ring_offs, mask=mask, other=0)
+            acc += recv.to(acc_dtype)
+            send_data = recv
+            tl.debug_barrier()
+
+            # 6. Reset our flag so prev_rank can write again next step.
+            tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+
+        # Every rank has the full reduction in acc — write to output.
+        tl.store(output_ptr + io_offs, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt")
+
+
 @triton.jit
 def persistent_all_reduce_two_shot(
     input_ptr,
@@ -773,9 +921,10 @@ def all_reduce(
         VARIANT_RING,
         VARIANT_TWO_SHOT,
         VARIANT_ONE_SHOT,
+        VARIANT_LL,
     ]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_SPINLOCK}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_SPINLOCK}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_LL}"
         )
 
     slice_n = config.all_reduce_ring_slice_n
@@ -1000,6 +1149,55 @@ def all_reduce(
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
+            config.comm_sms,
+            config.num_xcds,
+            config.chunk_size,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
+        )
+
+    elif variant == VARIANT_LL:
+        if workspace is None or workspace.ring_buffer is None or workspace.flags is None:
+            raise RuntimeError(
+                "LL variant requires workspace preparation. Call all_reduce_preamble before all_reduce."
+            )
+
+        # Calculate next and prev rank in the ring
+        if group is None:
+            next_rank = (rank_in_group + 1) % world_size
+            prev_rank = (rank_in_group - 1 + world_size) % world_size
+        else:
+            import torch.distributed as dist
+
+            group_ranks = dist.get_process_group_ranks(group)
+            next_rank_in_group = (rank_in_group + 1) % world_size
+            prev_rank_in_group = (rank_in_group - 1 + world_size) % world_size
+            next_rank = group_ranks[next_rank_in_group]
+            prev_rank = group_ranks[prev_rank_in_group]
+
+        total_elems = M * N
+
+        iris_launch(
+            persistent_all_reduce_ll,
+            (config.comm_sms,),
+            input_tensor,
+            output_tensor,
+            workspace.ring_buffer,
+            workspace.flags,
+            total_elems,
+            stride_in_m,
+            stride_in_n,
+            N,
+            heap_bases,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            next_rank,
+            prev_rank,
+            config.block_size_n,
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,

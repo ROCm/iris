@@ -14,7 +14,7 @@ from iris.ccl import Config
 @bench.axis("M", bench.power_of_two(10, 14))
 @bench.axis("N", bench.power_of_two(10, 14))
 @bench.axis("dtype", [torch.float16, torch.bfloat16])
-@bench.axis("variant", ["two_shot"])
+@bench.axis("variant", ["two_shot", "ll"])
 def all_reduce(state, ctx):
     M, N, dtype = state["M"], state["N"], state["dtype"]
     variant = state["variant"]
