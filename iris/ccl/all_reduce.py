@@ -114,21 +114,9 @@ def all_reduce_preamble(
         shmem.barrier()
 
     elif variant == VARIANT_LL:
-        rank_in_group, _, ws, _, _ = extract_group_info(None, shmem)
-        # LL uses 2*world_size flags: [0..W-1] = ready epoch, [W..2W-1] = done epoch
-        num_flags = 2 * ws
-        workspace.ring_buffer = None  # Not used in V3
-
-        if workspace.flags is None or workspace.flags.numel() != num_flags:
-            workspace.flags = shmem.zeros((num_flags,), dtype=torch.int32)
-        else:
-            workspace.flags.zero_()
-
-        # Track epoch counter for the in-kernel barrier protocol
-        if not hasattr(workspace, "epoch"):
-            workspace.epoch = 0
-
-        shmem.barrier()
+        # LL reads from all ranks and writes locally — no workspace needed.
+        # Synchronization is via external shmem.barrier().
+        pass
 
     elif variant == VARIANT_TWO_SHOT:
         pass
@@ -592,8 +580,6 @@ def persistent_all_reduce_ring(
 def persistent_all_reduce_ll(
     input_ptr,
     output_ptr,
-    ring_buffer,  # unused but kept for workspace compat
-    flags,        # int32[2 * world_size] on shmem — epoch counters
     M,
     N,
     stride_in_m,
@@ -612,21 +598,17 @@ def persistent_all_reduce_ll(
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
-    EPOCH: tl.constexpr,
 ):
     """
-    Low-latency all-reduce with in-kernel flag synchronization.
+    Low-latency all-reduce: every rank reads all tiles, reduces, writes locally.
 
-    Same read-reduce-broadcast pattern as two_shot, but replaces the
-    external shmem.barrier() with a lightweight in-kernel epoch protocol:
+    Unlike two_shot (which distributes tiles across ranks and broadcasts),
+    this kernel has every rank compute every tile.  This eliminates the
+    broadcast phase entirely — each rank just reads from all peers and
+    writes its own output.  For small messages the redundant compute is
+    negligible and the saved broadcast stores are a net win.
 
-    1. CTA 0 on each rank signals "ready" (epoch counter) to all peers
-    2. All CTAs wait until all peers' epochs match
-    3. All CTAs read tiles from all ranks, reduce, broadcast result
-    4. CTA 0 signals "done" epoch to all peers for next-call safety
-
-    Uses only 2*world_size flag slots (vs hundreds in the ring approach),
-    so the atomic overhead is minimal.
+    Synchronization: relies on external shmem.barrier() (same as two_shot).
     """
     pid = tl.program_id(0)
 
@@ -636,51 +618,6 @@ def persistent_all_reduce_ll(
 
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
 
-    # ── Phase 0: Signal "input ready" and wait for all peers ──
-    # flags[0..W-1] = "ready" epoch per rank (input is populated).
-    # flags[W..2W-1] = "done" epoch per rank (output stores complete).
-    #
-    # Before reading any peer's input, we must ensure:
-    #   (a) all peers have populated their input (ready epoch >= EPOCH)
-    #   (b) all peers finished PREVIOUS iteration's stores (done epoch >= EPOCH-1)
-    #
-    # CTA 0 handles signaling; all CTAs poll.
-
-    if pid == 0:
-        # Wait for all peers' "done" from previous iteration
-        # (ensures their stores from last call are visible).
-        if EPOCH > 1:
-            prev_epoch = EPOCH - 1
-            for i in tl.static_range(0, world_size):
-                if i != group_rank:
-                    remote_rank = rank_start + i * rank_stride
-                    while iris.atomic_cas(
-                        flags + world_size + i, 0, 0,
-                        iris_rank, remote_rank, heap_bases,
-                        sem="acquire", scope="sys",
-                    ) < prev_epoch:
-                        pass
-
-        # Signal "ready" to all peers
-        for i in tl.static_range(0, world_size):
-            if i != group_rank:
-                remote_rank = rank_start + i * rank_stride
-                iris.atomic_xchg(
-                    flags + group_rank, EPOCH,
-                    iris_rank, remote_rank, heap_bases,
-                    sem="release", scope="sys",
-                )
-        # Also set local copy
-        tl.atomic_xchg(flags + group_rank, EPOCH, sem="release", scope="sys")
-
-    # All CTAs: wait for all peers' "ready" epoch
-    for i in tl.static_range(0, world_size):
-        if i != group_rank:
-            while tl.atomic_cas(flags + i, 0, 0,
-                                sem="acquire", scope="sys") < EPOCH:
-                pass
-
-    # ── Phase 1: Read-reduce-broadcast (same as two_shot) ──
     for tile_offset in range(pid, total_tiles, COMM_SMS):
         tile_id = tile_offset
 
@@ -709,6 +646,7 @@ def persistent_all_reduce_ll(
         out_ptr = output_ptr + output_offset
 
         if is_full:
+            # Read from all ranks and reduce
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
             acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
@@ -717,14 +655,8 @@ def persistent_all_reduce_ll(
                 remote_rank = rank_start + remote_rank_idx * rank_stride
                 acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
 
-            reduced = acc.to(output_ptr.type.element_ty)
-            tl.store(out_ptr, reduced, cache_modifier=".wt")
-
-            for i in tl.static_range(0, world_size):
-                remote_rank_idx = (start_rank_idx + i) % world_size
-                remote_rank = rank_start + remote_rank_idx * rank_stride
-                if remote_rank_idx != group_rank:
-                    iris.store(out_ptr, reduced, iris_rank, remote_rank, heap_bases, hint=(1, BLOCK_SIZE_N))
+            # Write locally only — no broadcast needed since all ranks compute all tiles
+            tl.store(out_ptr, acc.to(output_ptr.type.element_ty), cache_modifier=".wt")
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
@@ -736,27 +668,7 @@ def persistent_all_reduce_ll(
                 remote_rank = rank_start + remote_rank_idx * rank_stride
                 acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
 
-            reduced = acc.to(output_ptr.type.element_ty)
-            tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
-
-            for i in tl.static_range(0, world_size):
-                remote_rank_idx = (start_rank_idx + i) % world_size
-                remote_rank = rank_start + remote_rank_idx * rank_stride
-                if remote_rank_idx != group_rank:
-                    iris.store(out_ptr, reduced, iris_rank, remote_rank, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N))
-
-    # ── Phase 2: Signal "done" to all peers ──
-    if pid == 0:
-        tl.debug_barrier()
-        for i in tl.static_range(0, world_size):
-            if i != group_rank:
-                remote_rank = rank_start + i * rank_stride
-                iris.atomic_xchg(
-                    flags + world_size + group_rank, EPOCH,
-                    iris_rank, remote_rank, heap_bases,
-                    sem="release", scope="sys",
-                )
-        tl.atomic_xchg(flags + world_size + group_rank, EPOCH, sem="release", scope="sys")
+            tl.store(out_ptr, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt")
 
 
 @triton.jit
@@ -1199,21 +1111,11 @@ def all_reduce(
         )
 
     elif variant == VARIANT_LL:
-        if workspace is None or workspace.flags is None:
-            raise RuntimeError("LL variant requires workspace preparation. Call all_reduce_preamble before all_reduce.")
-
-        # Increment epoch counter for in-kernel barrier protocol
-        if not hasattr(workspace, "epoch"):
-            workspace.epoch = 0
-        workspace.epoch += 1
-
         iris_launch(
             persistent_all_reduce_ll,
             (config.comm_sms,),
             input_tensor,
             output_tensor,
-            workspace.flags,  # ring_buffer placeholder (unused)
-            workspace.flags,
             M,
             N,
             stride_in_m,
@@ -1232,7 +1134,6 @@ def all_reduce(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
-            workspace.epoch,
             num_warps=8,
             num_stages=1,
             waves_per_eu=1,
