@@ -20,14 +20,15 @@ from iris.ccl import Config
 
 # Focus on the hot-path decode shapes + the best prefill case
 SHAPES = [
-    (8, 2880),   # gpt-oss decode, attn proj (45 KB)
-    (8, 3072),   # gpt-oss decode, MoE/FFN proj (48 KB)
-    (8, 4096),   # Mixtral decode (64 KB)
+    (8, 2880),  # gpt-oss decode, attn proj (45 KB)
+    (8, 3072),  # gpt-oss decode, MoE/FFN proj (48 KB)
+    (8, 4096),  # Mixtral decode (64 KB)
     (64, 4096),  # Mixtral prefill (512 KB) — largest message
 ]
 
 
 # ─── RCCL baseline ──────────────────────────────────────────────────────
+
 
 @bench.register
 @bench.axis("num_ranks", [8])
@@ -47,6 +48,7 @@ def rccl(state, ctx):
 
 
 # ─── Variant sweep ──────────────────────────────────────────────────────
+
 
 @bench.register
 @bench.axis("num_ranks", [8])
@@ -72,6 +74,7 @@ def iris_variant(state, ctx):
 
 # ─── comm_sms sweep (best variant from above will be clear) ─────────
 
+
 @bench.register
 @bench.axis("num_ranks", [8])
 @bench.axis("shape", SHAPES)
@@ -95,6 +98,7 @@ def iris_comm_sms(state, ctx):
 
 
 # ─── block_size sweep ───────────────────────────────────────────────
+
 
 @bench.register
 @bench.axis("num_ranks", [8])
@@ -120,6 +124,7 @@ def iris_block_size(state, ctx):
 
 # ─── distribution sweep ─────────────────────────────────────────────
 
+
 @bench.register
 @bench.axis("num_ranks", [8])
 @bench.axis("shape", SHAPES)
@@ -143,6 +148,7 @@ def iris_distribution(state, ctx):
 
 
 # ─── one_shot tuning (likely best for small msgs) ───────────────────
+
 
 @bench.register
 @bench.axis("num_ranks", [8])
