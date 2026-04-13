@@ -637,8 +637,11 @@ def persistent_all_reduce_ll(
             )
 
     # --- Phase 2: Wait for all peers to be ready ---
+    # Use >= comparison: a higher epoch means the peer already finished
+    # this epoch's data, so it's safe to read.  atomic_add(0) is an
+    # atomic load.
     for i in tl.static_range(world_size):
-        while tl.atomic_cas(flags_ptr + i, epoch, epoch, sem="acquire", scope="sys") != epoch:
+        while tl.atomic_add(flags_ptr + i, 0, sem="acquire", scope="sys") < epoch:
             pass
 
     # --- Phase 3: Read-reduce-write ---
