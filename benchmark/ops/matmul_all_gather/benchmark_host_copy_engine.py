@@ -35,6 +35,9 @@ try:
         _sys.path.insert(0, _script_dir)
     from derive_params import (
         derive as _derive_params,
+        _tile_roofline,
+        _gemm_wg_time_us,
+        _scatter_sdma_time_us,
         DEFAULT_NUM_CUS,
         DEFAULT_PEAK_TFLOPS_FP16,
         DEFAULT_HBM_BW_GBPS,
@@ -45,22 +48,6 @@ try:
     _DERIVE_AVAILABLE = True
 except Exception:
     pass
-
-_MODEL_PARAMS = (
-    "block_size_m",
-    "block_size_n",
-    "block_size_k",
-    "group_size_m",
-    "num_warps",
-    "m_tiles_per_batch",
-)
-
-_FALLBACK_DEFAULTS = {
-    "block_size_m": 256,
-    "block_size_n": 128,
-    "block_size_k": 64,
-    "group_size_m": 4,
-}
 
 torch.manual_seed(123)
 random.seed(123)
@@ -284,7 +271,7 @@ def parse_args():
     parser.add_argument("--block_size_k", type=int, default=None, help="Block size K (model-derived if omitted)")
     parser.add_argument("--group_size_m", type=int, default=None, help="Group size M (model-derived if omitted)")
     parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto if None)")
-    parser.add_argument("--m_tiles_per_batch", type=int, default=1, help="Number of M-tiles to batch together for SDMA")
+    parser.add_argument("--m_tiles_per_batch", type=int, default=None, help="Number of M-tiles to batch together for SDMA")
     parser.add_argument(
         "--trace_output", type=str, default="trace_host_copy_engine.png", help="Output file for trace plot"
     )
@@ -294,48 +281,152 @@ def parse_args():
         default="matmul_all_gather_host_copy_engine.json",
         help="Output file",
     )
+    parser.add_argument(
+        "--link_bw",
+        type=float,
+        default=50.0,
+        help="XGMI link bandwidth in GB/s (for performance model)",
+    )
 
     return vars(parser.parse_args())
 
 
-def _apply_model_defaults(args, world_size, dtype_bytes=2):
-    """Fill None-valued kernel parameters with model-derived predictions.
+def _apply_model_defaults(args, world_size, dtype, device, dtype_bytes=2):
+    """Fill None-valued kernel parameters using tritonBLAS selector.
 
-    Returns a list of parameter names that were set by the model.
+    Priority:
+    1. User-specified values (keep as-is)
+    2. tritonBLAS selector (always)
+
+    Returns a list of parameter names that were set by the selector.
     """
     applied = []
-    if _DERIVE_AVAILABLE:
-        try:
-            # For matmul_all_gather, M is local dimension (sharded)
-            # Total M = M_local * world_size
-            # M_local = args["m"]
-            # M_total = M_local * world_size
 
-            p = _derive_params(
-                args["m"],  # M_local
-                args["n"],
-                args["k"],
-                world_size,
-                link_bw=50.0,
-                num_cus=DEFAULT_NUM_CUS,
-                peak_tflops=DEFAULT_PEAK_TFLOPS_FP16,
-                hbm_bw_gbps=DEFAULT_HBM_BW_GBPS,
-                l2_size=DEFAULT_L2_SIZE_BYTES,
-                scheduling_factor=DEFAULT_SCHEDULING_FACTOR,
-                dtype_bytes=dtype_bytes,
-            )
-            for name in _MODEL_PARAMS:
-                if args.get(name) is None and name in p:
-                    args[name] = p[name]
-                    applied.append(name)
-        except Exception:
-            pass
+    # Import tritonBLAS selector
+    from tritonblas.matmul import _make_matmul_selector
 
-    for name, fallback in _FALLBACK_DEFAULTS.items():
-        if args.get(name) is None:
-            args[name] = fallback
+    # Always use tritonBLAS selector for block sizes
+    selector = _make_matmul_selector(
+        args["m"],  # M_local
+        args["n"],
+        args["k"],
+        dtype,
+        dtype,
+        dtype,
+        device,
+        streamk=False,
+    )
+
+    # Only apply if not user-specified
+    if args.get("block_size_m") is None:
+        args["block_size_m"] = selector.block_m
+        applied.append("block_size_m (tritonBLAS)")
+    if args.get("block_size_n") is None:
+        args["block_size_n"] = selector.block_n
+        applied.append("block_size_n (tritonBLAS)")
+    if args.get("block_size_k") is None:
+        args["block_size_k"] = selector.block_k
+        applied.append("block_size_k (tritonBLAS)")
+    if args.get("group_size_m") is None:
+        args["group_size_m"] = selector.group_m
+        applied.append("group_size_m (tritonBLAS)")
 
     return applied
+
+
+def _analyze_performance(bm, bn, bk, M_local, N, K, world_size, link_bw, dtype_bytes):
+    """Analyze GEMM vs scatter bottleneck using performance model from derive_params.
+
+    Returns dict with performance metrics (to be written to JSON):
+        - gemm_wg_us: Per-workgroup GEMM time
+        - scatter_wg_us: Per-workgroup scatter time
+        - bottleneck: "compute" or "communication"
+        - ratio: scatter_wg_us / gemm_wg_us
+        - roofline_tflops: Achievable TFLOPS from roofline model
+        - intensity: Arithmetic intensity (FLOPs/byte)
+    """
+    if not _DERIVE_AVAILABLE:
+        return None
+
+    try:
+        # Roofline model for GEMM
+        roofline_tflops, intensity, ridge, b_in_l2 = _tile_roofline(
+            bm, bn, bk, M_local, K, N,
+            dtype_bytes,
+            DEFAULT_PEAK_TFLOPS_FP16,
+            DEFAULT_HBM_BW_GBPS,
+            DEFAULT_L2_SIZE_BYTES,
+        )
+
+        # Per-WG GEMM time
+        gemm_wg_us = _gemm_wg_time_us(
+            bm, bn, bk, K,
+            roofline_tflops,
+            DEFAULT_NUM_CUS,
+        )
+
+        # Per-WG scatter time
+        scatter_wg_us = _scatter_sdma_time_us(
+            bm, bn, world_size, link_bw, dtype_bytes
+        )
+
+        # Determine bottleneck
+        ratio = scatter_wg_us / gemm_wg_us
+        bottleneck = "communication" if ratio > 1.0 else "compute"
+
+        return {
+            "gemm_wg_us": gemm_wg_us,
+            "scatter_wg_us": scatter_wg_us,
+            "bottleneck": bottleneck,
+            "ratio": ratio,
+            "roofline_tflops": roofline_tflops,
+            "intensity": intensity,
+        }
+    except Exception as e:
+        print(f"Warning: Performance analysis failed ({e})")
+        return None
+
+
+def _auto_tune_batching(perf_analysis, num_m_tiles, num_n_tiles, group_size_m, bm, bn, dtype_bytes):
+    """Auto-tune m_tiles_per_batch based on bottleneck analysis.
+
+    m_tiles_per_batch is always set to groups_per_wave (hardware wave boundaries).
+    For communication-bound workloads, we reduce tile sizes to create more tiles.
+
+    Returns: (m_tiles_per_batch, adjusted_block_m, adjusted_block_n)
+    """
+    if perf_analysis is None:
+        return 1, bm, bn  # Conservative default
+
+    num_cus = DEFAULT_NUM_CUS
+
+    # Always batch by wave boundaries (natural GPU execution pattern)
+    tiles_per_group = group_size_m * num_n_tiles
+    groups_per_wave = max(1, num_cus // tiles_per_group)
+    m_tiles_per_batch = max(1, groups_per_wave)
+
+    if perf_analysis["bottleneck"] == "compute":
+        # Compute-bound: keep original block sizes
+        # Larger tiles = more compute per tile = better amortization
+        adjusted_bm, adjusted_bn = bm, bn
+    else:
+        # Communication-bound: reduce tile sizes to increase overlap
+        ratio = perf_analysis["ratio"]
+
+        # TODO need a better way to determine if we can halve
+        if ratio > 1.0:  # Severely communication-bound
+            print(f"Communication-bound (ratio={ratio:.2f}x), halving tile sizes for better overlap")
+            # Halve block sizes to create MORE tiles (but enforce minimum)
+            MIN_BLOCK_SIZE = 64
+            adjusted_bm = MIN_BLOCK_SIZE #max(MIN_BLOCK_SIZE, bm // 4)
+            adjusted_bn = MIN_BLOCK_SIZE #max(MIN_BLOCK_SIZE, bn // 4)
+        else:
+            adjusted_bm, adjusted_bn = bm, bn
+
+    # Clamp to valid range
+    m_tiles_per_batch = max(1, min(m_tiles_per_batch, num_m_tiles))
+
+    return m_tiles_per_batch, adjusted_bm, adjusted_bn
 
 
 def _worker(args: dict):
@@ -352,17 +443,71 @@ def _worker(args: dict):
     datatype = datatype_map.get(args["datatype"], torch.float16)
     dtype_bytes = torch.tensor([], dtype=datatype).element_size()
 
-    model_applied = _apply_model_defaults(args, world_size, dtype_bytes)
+    # Get device for tritonBLAS selector
+    device = torch.device(f"cuda:{local_rank}")
+
+    # Apply tritonBLAS selector to get block sizes
+    model_applied = _apply_model_defaults(args, world_size, datatype, device, dtype_bytes)
     if rank == 0 and model_applied:
-        shmem.info(f"Model-derived defaults: {', '.join(model_applied)}")
-    if rank == 0:
-        param_summary = " ".join(f"{k}={args[k]}" for k in _MODEL_PARAMS)
-        shmem.info(f"Kernel params: {param_summary}")
+        shmem.info(f"tritonBLAS selector applied: {', '.join(model_applied)}")
 
     M_local = args["m"]  # Local M dimension
     M = M_local * world_size  # Total M after gather
     N = args["n"]
     K = args["k"]
+
+    # Performance analysis
+    perf_analysis = _analyze_performance(
+        args["block_size_m"],
+        args["block_size_n"],
+        args["block_size_k"],
+        M_local,
+        N,
+        K,
+        world_size,
+        args.get("link_bw", 50.0),
+        dtype_bytes,
+    )
+
+    # Auto-tune m_tiles_per_batch if not user-specified
+    if args.get("m_tiles_per_batch") is None:
+        num_m_tiles = (M_local + args["block_size_m"] - 1) // args["block_size_m"]
+        num_n_tiles = (N + args["block_size_n"] - 1) // args["block_size_n"]
+
+        m_tiles_per_batch, adj_bm, adj_bn = _auto_tune_batching(
+            perf_analysis, num_m_tiles, num_n_tiles, args["group_size_m"],
+            args["block_size_m"], args["block_size_n"], dtype_bytes
+        )
+
+        # Apply tuned values
+        args["m_tiles_per_batch"] = m_tiles_per_batch
+
+        # If block sizes were adjusted, update config
+        if adj_bm != args["block_size_m"] or adj_bn != args["block_size_n"]:
+            if rank == 0:
+                shmem.info(f"Adjusted block sizes for communication-bound: {adj_bm}×{adj_bn}")
+            args["block_size_m"] = adj_bm
+            args["block_size_n"] = adj_bn
+
+        if rank == 0:
+            shmem.info(f"Auto-tuned m_tiles_per_batch: {m_tiles_per_batch}")
+
+    # Print performance analysis
+    if rank == 0 and perf_analysis is not None:
+        shmem.info("\n" + "="*80)
+        shmem.info("PERFORMANCE ANALYSIS")
+        shmem.info("="*80)
+        shmem.info(f"Block sizes: {args['block_size_m']}×{args['block_size_n']}×{args['block_size_k']}")
+        num_m_tiles = (M_local + args["block_size_m"] - 1) // args["block_size_m"]
+        num_n_tiles = (N + args["block_size_n"] - 1) // args["block_size_n"]
+        shmem.info(f"Tiles: {num_m_tiles} M-tiles × {num_n_tiles} N-tiles = {num_m_tiles * num_n_tiles} total")
+        shmem.info(f"\nPer-tile timing:")
+        shmem.info(f"  GEMM:    {perf_analysis['gemm_wg_us']:.2f} μs")
+        shmem.info(f"  Scatter: {perf_analysis['scatter_wg_us']:.2f} μs")
+        shmem.info(f"  Ratio:   {perf_analysis['ratio']:.2f}x")
+        shmem.info(f"\nBottleneck: {perf_analysis['bottleneck'].upper()}")
+        shmem.info(f"m_tiles_per_batch: {args['m_tiles_per_batch']}")
+        shmem.info("="*80 + "\n")
 
     # Create config with parameters
     config_kwargs = {
@@ -385,6 +530,11 @@ def _worker(args: dict):
 
     for key, value in args.items():
         json_writer.add_field(key, value)
+
+    # Write performance analysis to JSON
+    if perf_analysis is not None:
+        for key, value in perf_analysis.items():
+            json_writer.add_field(f"perf_analysis_{key}", value)
 
     # Export actual config values to JSON (including defaults)
     json_writer.add_field("block_size_m", config.block_size_m)

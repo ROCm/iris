@@ -51,6 +51,17 @@ def plot_sweep_results(input_file, output_file):
         print("No results found in input file")
         return
 
+    # Detect operation type from first result
+    operation = "matmul_all_gather"  # default
+    for result in results:
+        if "benchmarks" in result:
+            for bench_data in result["benchmarks"].values():
+                if "operation" in bench_data:
+                    operation = bench_data["operation"]
+                    break
+            if operation != "matmul_all_gather":
+                break
+
     # Extract dimension configurations and benchmark names
     dim_configs = []
     benchmark_names = set()
@@ -120,9 +131,14 @@ def plot_sweep_results(input_file, output_file):
                 )
 
     # Customize plot
-    ax.set_xlabel("Dimension Configuration (M_local×N×K)", fontsize=12, fontweight="bold")
+    ax.set_xlabel("Dimension Configuration (M×N×K)", fontsize=12, fontweight="bold")
     ax.set_ylabel("TFLOPS", fontsize=12, fontweight="bold")
-    ax.set_title("Matmul-All-Gather Benchmark Sweep: TFLOPS Comparison", fontsize=14, fontweight="bold", pad=20)
+    # Set title based on operation type
+    if operation == "all_gather_matmul":
+        title = "All-Gather-Matmul Benchmark Sweep: TFLOPS Comparison"
+    else:
+        title = "Matmul-All-Gather Benchmark Sweep: TFLOPS Comparison"
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
     ax.set_xticks(x)
     ax.set_xticklabels([label for _, _, _, label in dim_configs], rotation=45, ha="right")
     ax.legend(loc="upper left", fontsize=10)
