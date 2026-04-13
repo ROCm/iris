@@ -677,26 +677,39 @@ def persistent_all_reduce_ll(
             #    overwrite data it hasn't consumed yet.
             while (
                 iris.atomic_cas(
-                    remote_flag_ptr, 0, 0,
-                    iris_rank, next_rank, heap_bases,
-                    sem="acquire", scope="sys",
-                ) != 0
+                    remote_flag_ptr,
+                    0,
+                    0,
+                    iris_rank,
+                    next_rank,
+                    heap_bases,
+                    sem="acquire",
+                    scope="sys",
+                )
+                != 0
             ):
                 pass
 
             # 2. Write data to next_rank's ring buffer.
             iris.store(
-                ring_buffer + ring_offs, send_data,
-                iris_rank, next_rank, heap_bases,
+                ring_buffer + ring_offs,
+                send_data,
+                iris_rank,
+                next_rank,
+                heap_bases,
                 mask=mask,
             )
             tl.debug_barrier()
 
             # 3. Set flag on next_rank to signal data is ready.
             iris.atomic_xchg(
-                remote_flag_ptr, flag_val,
-                iris_rank, next_rank, heap_bases,
-                sem="release", scope="sys",
+                remote_flag_ptr,
+                flag_val,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                sem="release",
+                scope="sys",
             )
 
             # 4. Wait for prev_rank to write our ring buffer.
@@ -1159,9 +1172,7 @@ def all_reduce(
 
     elif variant == VARIANT_LL:
         if workspace is None or workspace.ring_buffer is None or workspace.flags is None:
-            raise RuntimeError(
-                "LL variant requires workspace preparation. Call all_reduce_preamble before all_reduce."
-            )
+            raise RuntimeError("LL variant requires workspace preparation. Call all_reduce_preamble before all_reduce.")
 
         # Calculate next and prev rank in the ring
         if group is None:

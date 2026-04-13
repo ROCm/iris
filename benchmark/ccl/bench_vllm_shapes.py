@@ -38,9 +38,9 @@ from iris.ccl import Config
 
 ALLREDUCE_SHAPES = [
     # (M, N) — decode shapes (hot path)
-    (8, 2880),   # gpt-oss attn output
-    (8, 3072),   # gpt-oss MoE/FFN output
-    (8, 4096),   # Mixtral attn + MoE output
+    (8, 2880),  # gpt-oss attn output
+    (8, 3072),  # gpt-oss MoE/FFN output
+    (8, 4096),  # Mixtral attn + MoE output
     # prefill shapes (variable token counts)
     (6, 2880),
     (7, 2880),
@@ -100,15 +100,15 @@ def vllm_all_reduce(state, ctx):
 ALLGATHER_SHAPES_BY_RANKS = {
     # num_ranks -> list of (M, N) per-rank input shapes
     2: [
-        (8, 100544),   # gpt-oss vocab/2
+        (8, 100544),  # gpt-oss vocab/2
     ],
     4: [
-        (8, 50272),    # gpt-oss vocab/4
-        (8, 8000),     # Mixtral vocab/4
+        (8, 50272),  # gpt-oss vocab/4
+        (8, 8000),  # Mixtral vocab/4
     ],
     8: [
-        (8, 25136),    # gpt-oss vocab/8
-        (8, 4000),     # Mixtral vocab/8
+        (8, 25136),  # gpt-oss vocab/8
+        (8, 4000),  # Mixtral vocab/8
     ],
 }
 

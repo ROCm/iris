@@ -16,9 +16,9 @@ from iris.ccl import Config
 
 
 SHAPES = [
-    (8, 2880),   # gpt-oss attn output (45 KB)
-    (8, 3072),   # gpt-oss MoE/FFN output (48 KB)
-    (8, 4096),   # Mixtral (64 KB)
+    (8, 2880),  # gpt-oss attn output (45 KB)
+    (8, 3072),  # gpt-oss MoE/FFN output (48 KB)
+    (8, 4096),  # Mixtral (64 KB)
     (64, 4096),  # Mixtral prefill (512 KB)
 ]
 
