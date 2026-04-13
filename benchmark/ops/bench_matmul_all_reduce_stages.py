@@ -9,7 +9,6 @@ Sweeps optimization stages (atomic → two_shot → one_shot) across
 vLLM-shaped workloads (decode / hybrid / prefill) and compares
 against the unfused baseline (torch.mm + dist.all_reduce).
 
-Based on: https://github.com/aamarnat/vllm/blob/fused-gemm-ar-cudagraph-compat/test_stage_profiling.py
 """
 
 import torch
