@@ -24,6 +24,7 @@ VARIANT_TWO_SHOT = "two_shot"
 VARIANT_ONE_SHOT = "one_shot"
 VARIANT_SPINLOCK = "spinlock"
 VARIANT_LL = "ll"
+VARIANT_LL128 = "ll128"
 
 
 @dataclass
@@ -69,9 +70,9 @@ def all_reduce_preamble(
         config = Config()
 
     variant = config.all_reduce_variant.lower()
-    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK, VARIANT_LL]:
+    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK, VARIANT_LL, VARIANT_LL128]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}, {VARIANT_LL}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}, {VARIANT_LL}, {VARIANT_LL128}"
         )
 
     M, N = input_tensor.shape[:2]
@@ -118,6 +119,18 @@ def all_reduce_preamble(
         num_ranks = shmem.get_num_ranks()
         if workspace.flags is None or workspace.flags.numel() != num_ranks:
             workspace.flags = shmem.zeros((num_ranks,), dtype=torch.int32)
+        if not hasattr(workspace, "ll_epoch"):
+            workspace.ll_epoch = 0
+
+    elif variant == VARIANT_LL128:
+        # LL128: f32 staging buffer with data+flag per cache line.
+        # 31 f32 data + 1 f32 flag = 32 f32 = 128 bytes per cache line.
+        payload = 31
+        total_elems = M * N
+        num_lines = (total_elems + payload - 1) // payload
+        staging_size = num_lines * 32  # 32 f32 per line
+        if workspace.ring_buffer is None or workspace.ring_buffer.numel() != staging_size:
+            workspace.ring_buffer = shmem.zeros((staging_size,), dtype=torch.float32)
         if not hasattr(workspace, "ll_epoch"):
             workspace.ll_epoch = 0
 
@@ -702,6 +715,88 @@ def persistent_all_reduce_ll(
             tl.store(out_ptr, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt")
 
 
+@triton.jit()
+def persistent_all_reduce_ll128(
+    input_ptr,
+    output_ptr,
+    staging_ptr,
+    epoch,
+    total_elems,
+    num_lines,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    PAYLOAD: tl.constexpr,
+):
+    """
+    LL128-style all-reduce: data+flag in same 128-byte cache line.
+
+    Each rank stages its input (upcast to f32) into a buffer where every
+    128-byte cache line contains 31 f32 data words + 1 f32 flag.  A
+    coalesced 32×f32 write lands atomically on a cache line.  Readers
+    poll the flag word; when it matches, the 31 data words are valid.
+    No explicit atomics needed — relies on cache-line write atomicity.
+    """
+    pid = tl.program_id(0)
+    epoch_f32 = epoch.to(tl.float32)
+
+    LINE = PAYLOAD + 1  # 32 (full cache line in f32)
+    line_offsets = tl.arange(0, LINE)
+    is_data = line_offsets < PAYLOAD
+
+    # --- Phase 1: Stage local data with embedded flags ---
+    for line_idx in range(pid, num_lines, COMM_SMS):
+        data_start = line_idx * PAYLOAD
+        # Load from input tensor (bf16), upcast to f32
+        elem_offsets = data_start + tl.arange(0, LINE)
+        elem_mask = is_data & (elem_offsets < total_elems)
+        safe_offsets = tl.where(is_data, elem_offsets, 0)
+        data = tl.load(input_ptr + safe_offsets, mask=elem_mask, other=0.0).to(tl.float32)
+
+        # Merge data + flag into one 128-byte cache line
+        line = tl.where(is_data, data, epoch_f32)
+
+        # Single coalesced store — cache line atomic
+        line_base = line_idx * LINE
+        tl.store(staging_ptr + line_base + line_offsets, line, cache_modifier=".wt")
+
+    # --- Phase 2: Read from all peers, reduce ---
+    for line_idx in range(pid, num_lines, COMM_SMS):
+        data_start = line_idx * PAYLOAD
+        line_base = line_idx * LINE
+        elem_offsets = data_start + tl.arange(0, LINE)
+        elem_mask = is_data & (elem_offsets < total_elems)
+
+        acc = tl.zeros((LINE,), dtype=tl.float32)
+
+        for r in tl.static_range(world_size):
+            remote_rank = rank_start + r * rank_stride
+
+            # Poll flag (element 31 of the cache line)
+            flag_ptr = staging_ptr + line_base + PAYLOAD
+            while iris.load(flag_ptr, iris_rank, remote_rank, heap_bases).to(tl.float32) < epoch_f32:
+                pass
+
+            # Flag matched — read the full line (data is valid, same cache line)
+            remote_line = iris.load(
+                staging_ptr + line_base + line_offsets,
+                iris_rank, remote_rank, heap_bases,
+            )
+            # Zero out the flag position so it doesn't pollute the sum
+            remote_data = tl.where(is_data, remote_line.to(tl.float32), 0.0)
+            acc += remote_data
+
+        # Write to output (downcast f32 → bf16)
+        out_offsets = data_start + tl.arange(0, LINE)
+        out_mask = is_data & (out_offsets < total_elems)
+        safe_out = tl.where(is_data, out_offsets, 0)
+        tl.store(output_ptr + safe_out, acc.to(output_ptr.type.element_ty), mask=out_mask)
+
+
 @triton.jit
 def persistent_all_reduce_two_shot(
     input_ptr,
@@ -906,9 +1001,10 @@ def all_reduce(
         VARIANT_TWO_SHOT,
         VARIANT_ONE_SHOT,
         VARIANT_LL,
+        VARIANT_LL128,
     ]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_SPINLOCK}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_LL}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_SPINLOCK}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_LL}, {VARIANT_LL128}"
         )
 
     slice_n = config.all_reduce_ring_slice_n
@@ -932,6 +1028,7 @@ def all_reduce(
         or (variant == VARIANT_RING and workspace.flags_per_tile != 1)
         or (variant == VARIANT_SPINLOCK and (workspace.locks is None))
         or (variant == VARIANT_LL and (workspace.flags is None or not hasattr(workspace, "ll_epoch")))
+        or (variant == VARIANT_LL128 and (workspace.ring_buffer is None or not hasattr(workspace, "ll_epoch")))
     )
 
     if needs_prepare:
@@ -1177,10 +1274,40 @@ def all_reduce(
             dtype=input_tensor.dtype,
         )
 
+    elif variant == VARIANT_LL128:
+        workspace.ll_epoch += 1
+        total_elems = M * N
+        payload = 31
+        num_lines = (total_elems + payload - 1) // payload
+        iris_launch(
+            persistent_all_reduce_ll128,
+            (config.comm_sms,),
+            input_tensor,
+            output_tensor,
+            workspace.ring_buffer,
+            workspace.ll_epoch,
+            total_elems,
+            num_lines,
+            heap_bases,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config.comm_sms,
+            payload,
+            num_warps=8,
+            num_stages=1,
+            waves_per_eu=1,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
+        )
+
     if workspace is not None:
         workspace.prepared = False
 
-    if not async_op and variant != VARIANT_LL:
+    if not async_op and variant not in (VARIANT_LL, VARIANT_LL128):
         shmem.barrier()
 
     return workspace
