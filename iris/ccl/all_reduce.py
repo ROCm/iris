@@ -114,9 +114,11 @@ def all_reduce_preamble(
         shmem.barrier()
 
     elif variant == VARIANT_LL:
-        # LL reads from all ranks and writes locally — no workspace needed.
-        # Synchronization is via external shmem.barrier().
-        pass
+        # LL uses per-rank flags for in-kernel synchronization (no barrier).
+        if workspace.flags is None or workspace.flags.numel() != world_size:
+            workspace.flags = shmem.zeros((world_size,), dtype=torch.int32)
+        if not hasattr(workspace, "ll_epoch"):
+            workspace.ll_epoch = 0
 
     elif variant == VARIANT_TWO_SHOT:
         pass
@@ -580,6 +582,8 @@ def persistent_all_reduce_ring(
 def persistent_all_reduce_ll(
     input_ptr,
     output_ptr,
+    flags_ptr,
+    epoch,
     M,
     N,
     stride_in_m,
@@ -600,18 +604,41 @@ def persistent_all_reduce_ll(
     CHUNK_SIZE: tl.constexpr,
 ):
     """
-    Low-latency all-reduce: every rank reads all tiles, reduces, writes locally.
+    Low-latency all-reduce with in-kernel flag synchronization.
 
-    Unlike two_shot (which distributes tiles across ranks and broadcasts),
-    this kernel has every rank compute every tile.  This eliminates the
-    broadcast phase entirely — each rank just reads from all peers and
-    writes its own output.  For small messages the redundant compute is
-    negligible and the saved broadcast stores are a net win.
+    Every rank reads all tiles from all peers, reduces, writes locally.
+    Synchronization via per-rank flags in shared memory -- no external
+    barrier needed.
 
-    Synchronization: relies on external shmem.barrier() (same as two_shot).
+    Protocol:
+    1. CTA 0 on each rank writes epoch to its own flag slot on every peer
+       (signals "my input is ready").
+    2. All CTAs poll local flag slots for all ranks until they all == epoch.
+    3. All CTAs read from all ranks, reduce, write locally.
     """
     pid = tl.program_id(0)
 
+    # --- Phase 1: Signal readiness to all peers ---
+    if pid == 0:
+        for i in tl.static_range(world_size):
+            remote_rank = rank_start + i * rank_stride
+            # Write our epoch to our own slot (group_rank) on peer i
+            iris.atomic_xchg(
+                flags_ptr + group_rank,
+                epoch,
+                iris_rank,
+                remote_rank,
+                heap_bases,
+                sem="release",
+                scope="sys",
+            )
+
+    # --- Phase 2: Wait for all peers to be ready ---
+    for i in tl.static_range(world_size):
+        while tl.atomic_cas(flags_ptr + i, epoch, epoch, sem="acquire", scope="sys") != epoch:
+            pass
+
+    # --- Phase 3: Read-reduce-write ---
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
@@ -646,7 +673,6 @@ def persistent_all_reduce_ll(
         out_ptr = output_ptr + output_offset
 
         if is_full:
-            # Read from all ranks and reduce
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
             acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
@@ -655,7 +681,6 @@ def persistent_all_reduce_ll(
                 remote_rank = rank_start + remote_rank_idx * rank_stride
                 acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
 
-            # Write locally only — no broadcast needed since all ranks compute all tiles
             tl.store(out_ptr, acc.to(output_ptr.type.element_ty), cache_modifier=".wt")
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
@@ -900,6 +925,7 @@ def all_reduce(
         or (variant == VARIANT_RING and workspace.num_rings != config.all_reduce_num_rings)
         or (variant == VARIANT_RING and workspace.flags_per_tile != 1)
         or (variant == VARIANT_SPINLOCK and (workspace.locks is None))
+        or (variant == VARIANT_LL and (workspace.flags is None or not hasattr(workspace, "ll_epoch")))
     )
 
     if needs_prepare:
@@ -1111,11 +1137,14 @@ def all_reduce(
         )
 
     elif variant == VARIANT_LL:
+        workspace.ll_epoch += 1
         iris_launch(
             persistent_all_reduce_ll,
             (config.comm_sms,),
             input_tensor,
             output_tensor,
+            workspace.flags,
+            workspace.ll_epoch,
             M,
             N,
             stride_in_m,
@@ -1145,7 +1174,7 @@ def all_reduce(
     if workspace is not None:
         workspace.prepared = False
 
-    if not async_op:
+    if not async_op and variant != VARIANT_LL:
         shmem.barrier()
 
     return workspace
