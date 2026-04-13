@@ -1,0 +1,27 @@
+# Mixtral-8x7B hidden dim: N=4096
+# See oss_traced.yaml for full context.
+
+n: 4096
+datatype: bf16
+num_ranks: 8
+
+variants:
+  - rccl
+  - two_shot
+
+sweep_ms:
+  decode:
+    - 8
+  prefill:
+    - 7
+    - 64
+
+comm_sms: 64
+block_size_m: 64
+block_size_n: 64
+swizzle_size: 4
+distribution: 1
+num_rings: 1
+
+warmup: 50
+iters: 200

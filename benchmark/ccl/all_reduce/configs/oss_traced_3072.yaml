@@ -1,0 +1,30 @@
+# gpt-oss MoE/FFN projection output: N=3072
+# See oss_traced.yaml for full context.
+
+n: 3072
+datatype: bf16
+num_ranks: 8
+
+variants:
+  - rccl
+  - two_shot
+
+sweep_ms:
+  decode:
+    - 8
+  prefill:
+    - 6
+    - 7
+    - 14
+    - 46
+    - 53
+
+comm_sms: 64
+block_size_m: 64
+block_size_n: 64
+swizzle_size: 4
+distribution: 1
+num_rings: 1
+
+warmup: 50
+iters: 200

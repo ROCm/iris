@@ -1,0 +1,54 @@
+# All-reduce shapes extracted from vLLM profiling traces on MI300X
+#
+# Source: vLLM (rocm/vllm:latest) profiling of gpt-oss-20b, gpt-oss-120b,
+# and Mixtral-8x7B at TP=2,4,8 with bf16 dtype.
+#
+# Key finding: all-reduce shapes are INDEPENDENT of TP — the hidden dim
+# is never sharded for all-reduce. Only the number of participating ranks
+# changes.
+#
+# Usage:
+#   # 8-GPU MI300X node, inside rocm/pytorch-nightly or iris docker:
+#   cd /path/to/iris
+#   HSA_NO_SCRATCH_RECLAIM=1 python3 -u benchmark/ccl/all_reduce/benchmark.py \
+#     --config benchmark/ccl/all_reduce/configs/oss_traced.yaml
+#
+# Models & hidden dims:
+#   gpt-oss-20b/120b: N=2880 (attn proj), N=3072 (MoE/FFN proj)
+#   Mixtral-8x7B:     N=4096 (attn + MoE)
+#
+# Token counts observed:
+#   Decode (dominant, thousands of calls): M=8
+#   Prefill (few calls per inference):     M=6,7,14,46,53,64
+
+n: 2880
+datatype: bf16
+num_ranks: 8
+
+variants:
+  - rccl
+  - two_shot
+
+sweep_ms:
+  # --- Decode (hot path, >98% of all-reduce calls) ---
+  decode:
+    - 8        # batch_size=8 decode tokens (all models)
+  # --- Prefill (variable token counts from tokenization) ---
+  prefill:
+    - 6
+    - 7
+    - 14
+    - 46
+    - 53
+    - 64       # Mixtral prefill
+
+# Default kernel config
+comm_sms: 64
+block_size_m: 64
+block_size_n: 64
+swizzle_size: 4
+distribution: 1
+num_rings: 1
+
+warmup: 50
+iters: 200
