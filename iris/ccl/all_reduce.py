@@ -621,9 +621,11 @@ def persistent_all_reduce_ll(
 
     # --- Phase 1: Signal readiness to all peers ---
     if pid == 0:
+        # Set our own flag locally (iris may not handle self-writes)
+        tl.atomic_xchg(flags_ptr + group_rank, epoch, sem="release", scope="sys")
+        # Signal to all remote peers
         for i in tl.static_range(world_size):
             remote_rank = rank_start + i * rank_stride
-            # Write our epoch to our own slot (group_rank) on peer i
             iris.atomic_xchg(
                 flags_ptr + group_rank,
                 epoch,
