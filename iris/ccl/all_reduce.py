@@ -115,10 +115,13 @@ def all_reduce_preamble(
 
     elif variant == VARIANT_LL:
         total_elems = M * N
-        # One flag per BLOCK_SIZE chunk of elements, for both reduce-scatter and all-gather.
-        # We use flag value encoding (step+1) so a single flag array suffices.
         ll_block = getattr(config, "block_size_n", 256)
-        num_chunks = (total_elems + ll_block - 1) // ll_block
+        # Partition into world_size rank-chunks.  Need one flag per
+        # (rank_chunk, block_within_chunk) for the handshake protocol.
+        rank_in_group, _, ws, _, _ = extract_group_info(None, shmem)
+        elems_per_rank = (total_elems + ws - 1) // ws
+        blocks_per_rank = (elems_per_rank + ll_block - 1) // ll_block
+        num_flags = ws * blocks_per_rank
         if (
             workspace.ring_buffer is None
             or workspace.ring_buffer.shape != (M, N)
@@ -128,8 +131,8 @@ def all_reduce_preamble(
         else:
             workspace.ring_buffer.zero_()
 
-        if workspace.flags is None or workspace.flags.numel() != num_chunks:
-            workspace.flags = shmem.zeros((num_chunks,), dtype=torch.int32)
+        if workspace.flags is None or workspace.flags.numel() != num_flags:
+            workspace.flags = shmem.zeros((num_flags,), dtype=torch.int32)
         else:
             workspace.flags.zero_()
 
@@ -615,28 +618,25 @@ def persistent_all_reduce_ll(
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    ELEMS_PER_RANK: tl.constexpr,
+    BLOCKS_PER_RANK: tl.constexpr,
 ):
     """
-    Low-latency ring all-reduce inspired by RCCL's LL protocol.
+    Low-latency ring all-reduce: reduce-scatter + all-gather.
 
-    Linearizes the (M,N) tensor and splits it into chunks of BLOCK_SIZE
-    elements.  Each CTA owns a set of chunks and drives them through all
-    (world_size-1) ring steps independently — no inter-CTA barrier needed.
+    Like RCCL's ring algorithm, partitions data into world_size rank-chunks.
+    Reduce-scatter does (W-1) steps moving 1/W of data per step.
+    All-gather does (W-1) steps moving 1/W of data per step.
+    Total data moved: 2*(W-1)/W * msg_size ≈ 2x (same as RCCL).
 
-    In each step a CTA:
-      1. Waits until next_rank's flag is clear (back-pressure).
-      2. Writes its current send data to next_rank's ring buffer.
-      3. Sets next_rank's flag to signal arrival.
-      4. Polls its own flag until prev_rank has written.
-      5. Reads the received data, adds it to its running accumulator,
-         and forwards the raw received data (not the sum) for the next hop.
-      6. Resets its flag so prev_rank can write again.
+    Each CTA owns a fixed set of blocks (by offset within a rank-chunk)
+    and drives those blocks through ALL steps independently.  In step k
+    the CTA works on a different rank-chunk but at the same block offset,
+    so there is no inter-CTA dependency and no grid-wide barrier.
 
-    After (world_size-1) hops every rank's contribution has been seen by
-    every other rank, so the accumulator holds the fully reduced result.
-    No separate all-gather phase is needed.
-
-    Flag protocol: one int32 flag per chunk on the symmetric heap.
+    Flag protocol: one int32 flag per (rank_chunk, block) on the symmetric
+    heap.  Writer sets flag to (step+1), reader polls until match, then
+    resets to 0.
     """
     pid_raw = tl.program_id(0)
     pid = pid_raw
@@ -646,89 +646,156 @@ def persistent_all_reduce_ll(
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
     elem_ty = input_ptr.type.element_ty
 
-    total_chunks = tl.cdiv(total_elems, BLOCK_SIZE)
+    # Each CTA owns blocks range(pid, BLOCKS_PER_RANK, COMM_SMS).
+    for blk in range(pid, BLOCKS_PER_RANK, COMM_SMS):
 
-    # Each CTA iterates over its assigned chunks.  For each chunk it drives
-    # the full reduce-scatter + all-gather pipeline independently.
-    for chunk_id in range(pid, total_chunks, COMM_SMS):
-        elem_start = chunk_id * BLOCK_SIZE
-        offs = elem_start + tl.arange(0, BLOCK_SIZE)
-        mask = offs < total_elems
-
-        # Compute 2-D indices for strided input/output access.
-        rows = offs // N
-        cols = offs % N
-        io_offs = rows * stride_in_m + cols * stride_in_n
-
-        # Load this CTA's local input once.
-        local_data = tl.load(input_ptr + io_offs, mask=mask, other=0).to(acc_dtype)
-        acc = local_data  # running accumulator (starts with our own contribution)
-        send_data = local_data.to(elem_ty)
-
-        ring_offs = elem_start + tl.arange(0, BLOCK_SIZE)
-        local_flag_ptr = flags + chunk_id
-        remote_flag_ptr = flags + chunk_id
-
-        # ── Reduce-scatter: world_size-1 hops ──
+        # ── Phase 1: Ring Reduce-Scatter (W-1 steps) ──
+        # After completion, rank r holds the fully reduced rank-chunk
+        # ((r+1) % W) in its ring_buffer.
         for step in range(0, world_size - 1):
+            # Which rank-chunk we send / receive this step.
+            send_rc = (group_rank - step + world_size) % world_size
+            recv_rc = (group_rank - step - 1 + world_size) % world_size
+
+            send_base = send_rc * ELEMS_PER_RANK + blk * BLOCK_SIZE
+            recv_base = recv_rc * ELEMS_PER_RANK + blk * BLOCK_SIZE
+
+            send_offs = send_base + tl.arange(0, BLOCK_SIZE)
+            recv_offs = recv_base + tl.arange(0, BLOCK_SIZE)
+            send_mask = send_offs < total_elems
+            recv_mask = recv_offs < total_elems
+
             flag_val = step + 1
 
-            # 1. Wait until next_rank's flag is clear (== 0) so we don't
-            #    overwrite data it hasn't consumed yet.
+            # ─ Send ─
+            if step == 0:
+                # First step: send from local input.
+                rows = send_offs // N
+                cols = send_offs % N
+                in_off = rows * stride_in_m + cols * stride_in_n
+                data = tl.load(input_ptr + in_off, mask=send_mask, other=0)
+            else:
+                # Subsequent: send the accumulated result we stored last step.
+                data = tl.load(ring_buffer + send_base + tl.arange(0, BLOCK_SIZE),
+                               mask=send_mask, other=0)
+
+            # Back-pressure: wait for next_rank to consume previous data.
+            send_flag_idx = send_rc * BLOCKS_PER_RANK + blk
             while (
                 iris.atomic_cas(
-                    remote_flag_ptr,
-                    0,
-                    0,
-                    iris_rank,
-                    next_rank,
-                    heap_bases,
-                    sem="acquire",
-                    scope="sys",
-                )
-                != 0
+                    flags + send_flag_idx, 0, 0,
+                    iris_rank, next_rank, heap_bases,
+                    sem="acquire", scope="sys",
+                ) != 0
             ):
                 pass
 
-            # 2. Write data to next_rank's ring buffer.
             iris.store(
-                ring_buffer + ring_offs,
-                send_data,
-                iris_rank,
-                next_rank,
-                heap_bases,
-                mask=mask,
+                ring_buffer + send_base + tl.arange(0, BLOCK_SIZE), data,
+                iris_rank, next_rank, heap_bases,
+                mask=send_mask,
             )
             tl.debug_barrier()
-
-            # 3. Set flag on next_rank to signal data is ready.
             iris.atomic_xchg(
-                remote_flag_ptr,
-                flag_val,
-                iris_rank,
-                next_rank,
-                heap_bases,
-                sem="release",
-                scope="sys",
+                flags + send_flag_idx, flag_val,
+                iris_rank, next_rank, heap_bases,
+                sem="release", scope="sys",
             )
 
-            # 4. Wait for prev_rank to write our ring buffer.
-            while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != flag_val:
+            # ─ Receive & reduce ─
+            recv_flag_idx = recv_rc * BLOCKS_PER_RANK + blk
+            while tl.atomic_cas(flags + recv_flag_idx, 0, 0,
+                                sem="acquire", scope="sys") != flag_val:
                 pass
 
-            # 5. Load received data, reduce.  Forward the raw received data
-            #    (not the accumulated sum) so each rank's contribution
-            #    traverses the ring exactly once.
-            recv = tl.load(ring_buffer + ring_offs, mask=mask, other=0)
-            acc += recv.to(acc_dtype)
-            send_data = recv
+            recv_data = tl.load(ring_buffer + recv_base + tl.arange(0, BLOCK_SIZE),
+                                mask=recv_mask, other=0).to(acc_dtype)
+
+            # Add our own local contribution for this chunk.
+            rows_r = recv_offs // N
+            cols_r = recv_offs % N
+            in_off_r = rows_r * stride_in_m + cols_r * stride_in_n
+            local = tl.load(input_ptr + in_off_r, mask=recv_mask, other=0).to(acc_dtype)
+            reduced = local + recv_data
+
+            # Store accumulated result into our ring_buffer (next step reads it).
+            tl.store(ring_buffer + recv_base + tl.arange(0, BLOCK_SIZE),
+                     reduced.to(elem_ty), mask=recv_mask)
             tl.debug_barrier()
+            tl.atomic_xchg(flags + recv_flag_idx, 0, sem="release", scope="sys")
 
-            # 6. Reset our flag so prev_rank can write again next step.
-            tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+        # After reduce-scatter, our fully-reduced chunk is at
+        # rank-chunk ((group_rank+1) % W).  Write it to output.
+        my_rc = (group_rank + 1) % world_size
+        out_base = my_rc * ELEMS_PER_RANK + blk * BLOCK_SIZE
+        out_flat = out_base + tl.arange(0, BLOCK_SIZE)
+        out_mask = out_flat < total_elems
 
-        # Every rank has the full reduction in acc — write to output.
-        tl.store(output_ptr + io_offs, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt")
+        full_data = tl.load(ring_buffer + out_base + tl.arange(0, BLOCK_SIZE),
+                            mask=out_mask, other=0)
+        rows_o = out_flat // N
+        cols_o = out_flat % N
+        io_off = rows_o * stride_in_m + cols_o * stride_in_n
+        tl.store(output_ptr + io_off, full_data, mask=out_mask, cache_modifier=".wt")
+
+        # ── Phase 2: Ring All-Gather (W-1 steps) ──
+        # Broadcast reduced rank-chunks so every rank has full output.
+        for step in range(0, world_size - 1):
+            send_rc = (my_rc - step + world_size) % world_size
+            recv_rc = (my_rc - step - 1 + world_size) % world_size
+
+            send_base = send_rc * ELEMS_PER_RANK + blk * BLOCK_SIZE
+            recv_base = recv_rc * ELEMS_PER_RANK + blk * BLOCK_SIZE
+
+            send_offs = send_base + tl.arange(0, BLOCK_SIZE)
+            recv_offs = recv_base + tl.arange(0, BLOCK_SIZE)
+            send_mask = send_offs < total_elems
+            recv_mask = recv_offs < total_elems
+
+            flag_val = step + 1
+
+            # Send from output (already has the reduced data).
+            rows_s = send_offs // N
+            cols_s = send_offs % N
+            io_s = rows_s * stride_in_m + cols_s * stride_in_n
+            data = tl.load(output_ptr + io_s, mask=send_mask, other=0)
+
+            send_flag_idx = send_rc * BLOCKS_PER_RANK + blk
+            while (
+                iris.atomic_cas(
+                    flags + send_flag_idx, 0, 0,
+                    iris_rank, next_rank, heap_bases,
+                    sem="acquire", scope="sys",
+                ) != 0
+            ):
+                pass
+
+            iris.store(
+                ring_buffer + send_base + tl.arange(0, BLOCK_SIZE), data,
+                iris_rank, next_rank, heap_bases,
+                mask=send_mask,
+            )
+            tl.debug_barrier()
+            iris.atomic_xchg(
+                flags + send_flag_idx, flag_val,
+                iris_rank, next_rank, heap_bases,
+                sem="release", scope="sys",
+            )
+
+            # Receive and write to output.
+            recv_flag_idx = recv_rc * BLOCKS_PER_RANK + blk
+            while tl.atomic_cas(flags + recv_flag_idx, 0, 0,
+                                sem="acquire", scope="sys") != flag_val:
+                pass
+
+            recv_data = tl.load(ring_buffer + recv_base + tl.arange(0, BLOCK_SIZE),
+                                mask=recv_mask, other=0)
+            rows_r2 = recv_offs // N
+            cols_r2 = recv_offs % N
+            io_r2 = rows_r2 * stride_in_m + cols_r2 * stride_in_n
+            tl.store(output_ptr + io_r2, recv_data, mask=recv_mask, cache_modifier=".wt")
+            tl.debug_barrier()
+            tl.atomic_xchg(flags + recv_flag_idx, 0, sem="release", scope="sys")
 
 
 @triton.jit
@@ -1188,6 +1255,8 @@ def all_reduce(
             prev_rank = group_ranks[prev_rank_in_group]
 
         total_elems = M * N
+        elems_per_rank = (total_elems + world_size - 1) // world_size
+        blocks_per_rank = (elems_per_rank + config.block_size_n - 1) // config.block_size_n
 
         iris_launch(
             persistent_all_reduce_ll,
@@ -1212,6 +1281,8 @@ def all_reduce(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            elems_per_rank,
+            blocks_per_rank,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
