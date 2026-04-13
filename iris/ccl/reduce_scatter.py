@@ -9,6 +9,7 @@ Uses the two-shot approach: reduce assigned tiles and store only to own rank.
 import triton
 import triton.language as tl
 import iris
+from iris.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
 
@@ -229,7 +230,9 @@ def reduce_scatter(
     # Use all_reduce_distribution for tile distribution
     distribution = config.all_reduce_distribution
 
-    persistent_reduce_scatter_two_shot[(config.comm_sms,)](
+    iris_launch(
+        persistent_reduce_scatter_two_shot,
+        (config.comm_sms,),
         input_tensor,
         output_tensor,
         M,
@@ -254,6 +257,9 @@ def reduce_scatter(
         num_stages=config.num_stages,
         num_warps=config.num_warps,
         waves_per_eu=config.waves_per_eu,
+        algorithm="reduce_scatter",
+        rank=rank_global,
+        dtype=input_tensor.dtype,
     )
 
     if not async_op:

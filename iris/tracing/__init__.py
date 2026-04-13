@@ -9,4 +9,6 @@ from .events import EVENT_NAMES, TraceEvent
 from .core import Tracing
 from .device import DeviceTracing
 
-__all__ = ["EVENT_NAMES", "TraceEvent", "Tracing", "DeviceTracing"]
+from . import kernel_artifacts
+
+__all__ = ["EVENT_NAMES", "TraceEvent", "Tracing", "DeviceTracing", "kernel_artifacts"]

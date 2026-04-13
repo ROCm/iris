@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# Nightly Docker image build for iris-dev
+# Base: rocm/pytorch + Triton built from source (latest main)
+# Push to docker.io/muhaawad/iris-dev
+
+name: Nightly Docker Build
+
+on:
+  schedule:
+    # midnight PST = 08:00 UTC (off-minute to reduce GH Actions surge)
+    - cron: "3 8 * * *"
+  workflow_dispatch:
+
+env:
+  DOCKERHUB_USER: muhaawad
+  IMAGE_NAME: iris-dev
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - base_image: rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
+            tag_latest: true
+          - base_image: rocm7.1.1_ubuntu24.04_py3.13_pytorch_release_2.10.0
+            tag_latest: false
+
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+            /opt/ghc /opt/hostedtoolcache /usr/local/share/boost \
+            /usr/local/graalvm /usr/local/.ghcup /usr/local/share/powershell
+          df -h /
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USER }}
+          password: ${{ secrets.IRIS_DOCKERHUB_TOKEN }}
+
+      - name: Get latest triton commit SHA
+        id: triton
+        run: |
+          SHA=$(git ls-remote https://github.com/triton-lang/triton.git HEAD | head -1 | awk '{print $1}')
+          SHORT="${SHA:0:7}"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "Triton HEAD: $SHORT"
+
+      - name: Check if tag already exists
+        id: check
+        run: |
+          TAG="${{ matrix.base_image }}_triton_${{ steps.triton.outputs.short }}"
+          FULL="${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:${TAG}"
+          if docker manifest inspect "${FULL}" > /dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Image ${FULL} already exists — skipping build"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "full=${FULL}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          docker build \
+            -t "${{ steps.check.outputs.full }}" \
+            --build-arg TRITON_SHA=${{ steps.triton.outputs.sha }} \
+            -f - . <<'DOCKERFILE'
+          FROM rocm/pytorch:${{ matrix.base_image }}
+          SHELL ["/bin/bash", "-c"]
+
+          ENV ROCM_PATH=/opt/rocm \
+              OMPI_MCA_mtl="^ofi" \
+              OMPI_MCA_pml="ob1" \
+              OMPI_ALLOW_RUN_AS_ROOT=1 \
+              OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+          ENV LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH \
+              PATH="$ROCM_PATH/bin:$PATH"
+
+          RUN apt-get update && \
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                  git build-essential cmake ninja-build && \
+              rm -rf /var/lib/apt/lists/*
+
+          # Remove base image triton, install from source at pinned commit
+          ARG TRITON_SHA
+          RUN pip3 uninstall -y triton pytorch-triton-rocm 2>/dev/null; \
+              pip3 install "triton @ git+https://github.com/triton-lang/triton.git@${TRITON_SHA}"
+
+          # Make site-packages writable for dev use
+          RUN find /opt -path '*/site-packages' -exec chmod -R a+w {} + 2>/dev/null || true
+
+          WORKDIR /workspace
+          LABEL org.opencontainers.image.source="https://github.com/ROCm/iris"
+          LABEL org.opencontainers.image.description="iris-dev: ROCm + PyTorch + Triton (source)"
+          DOCKERFILE
+
+      - name: Push image
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          docker push "${{ steps.check.outputs.full }}"
+          echo "### Pushed image" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "docker pull ${{ steps.check.outputs.full }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "Triton commit: \`${{ steps.triton.outputs.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tag and push latest
+        if: steps.check.outputs.skip != 'true' && matrix.tag_latest
+        run: |
+          LATEST="${{ env.DOCKERHUB_USER }}/${{ env.IMAGE_NAME }}:latest"
+          docker tag "${{ steps.check.outputs.full }}" "$LATEST"
+          docker push "$LATEST"
+          echo "Also pushed as \`latest\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip summary
+        if: steps.check.outputs.skip == 'true'
+        run: |
+          echo "### Skipped (triton unchanged)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag \`${{ steps.check.outputs.tag }}\` already exists on Docker Hub." >> "$GITHUB_STEP_SUMMARY"

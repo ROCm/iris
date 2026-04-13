@@ -7,6 +7,7 @@ import torch.distributed as dist
 import numpy as np
 import triton
 import triton.language as tl
+from iris.tracing.kernel_artifacts import iris_launch
 
 
 def _infer_device():
@@ -375,13 +376,17 @@ def distributed_device_barrier(flags, group, rank, num_ranks, heap_bases):
         heap_bases: Tensor of heap base addresses for all ranks.
     """
     _, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, rank, num_ranks)
-    _device_barrier_kernel[(1,)](
+    iris_launch(
+        _device_barrier_kernel,
+        (1,),
         flags,
         rank_global,
         world_size,
         rank_start,
         rank_stride,
         heap_bases,
+        algorithm="barrier",
+        rank=rank_global,
     )
 
 

@@ -19,6 +19,7 @@ from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
 import iris.x
+from iris.tracing.kernel_artifacts import iris_launch
 
 
 @triton.jit()
@@ -242,7 +243,9 @@ def matmul_reduce_scatter(
 
     even_k = K % config.block_size_k == 0
 
-    _fused_matmul_reduce_scatter_kernel[grid](
+    iris_launch(
+        _fused_matmul_reduce_scatter_kernel,
+        grid,
         A,
         B,
         C,
@@ -264,6 +267,9 @@ def matmul_reduce_scatter(
         config.block_size_n,
         config.block_size_k,
         even_k,
+        algorithm="matmul_reduce_scatter",
+        rank=rank,
+        dtype=A.dtype,
     )
 
     if not async_op:

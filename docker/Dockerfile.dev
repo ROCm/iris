@@ -1,0 +1,181 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+#
+# Dockerfile.dev
+#
+# Builds the entire ROCm stack from source using TheRock, which includes
+# rocm-systems as a submodule. Optionally replaces rocm-systems with a
+# custom fork (staged by build-dev.sh as TheRock/custom-rocm-systems).
+#
+# Build via build-dev.sh (recommended):
+#   ./build-dev.sh
+#   ./build-dev.sh -g gfx942
+#   ./build-dev.sh -r git@github.com:ROCm/rocm-systems.git
+#
+# Build args:
+#   AMDGPU_FAMILIES    - GPU architecture family (default: gfx110X-all)
+#   SWAP_ROCM_SYSTEMS  - Set to "true" to swap rocm-systems (default: false)
+#   BUILD_JOBS         - Parallel build jobs (default: nproc)
+
+# Base Ubuntu with build dependencies
+FROM ubuntu:24.04 AS base
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    wget \
+    gnupg2 \
+    git \
+    git-lfs \
+    build-essential \
+    cmake \
+    ninja-build \
+    pkg-config \
+    python3 \
+    python3-pip \
+    python3-dev \
+    python3-venv \
+    python3-setuptools \
+    libdrm-dev \
+    libelf-dev \
+    libnuma-dev \
+    libpci-dev \
+    libncurses-dev \
+    libsystemd-dev \
+    libcap-dev \
+    libudev-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    libgrpc++-dev \
+    protobuf-compiler-grpc \
+    libsqlite3-dev \
+    libfmt-dev \
+    libaio-dev \
+    libgtest-dev \
+    libegl1-mesa-dev \
+    libdwarf-dev \
+    xxd \
+    patchelf \
+    automake \
+    libtool \
+    texinfo \
+    bison \
+    flex \
+    gfortran \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r video 2>/dev/null || true && \
+    groupadd -r render 2>/dev/null || true
+
+# Build TheRock (full ROCm stack including rocm-systems)
+
+FROM base AS builder
+
+ARG AMDGPU_FAMILIES="gfx110X-all"
+ARG SWAP_ROCM_SYSTEMS="false"
+ARG BUILD_JOBS=""
+
+COPY TheRock /opt/TheRock-src
+WORKDIR /opt/TheRock-src
+
+RUN git config --global --add safe.directory '*'
+
+# Set up Python venv and install TheRock dependencies
+RUN python3 -m venv /opt/therock-venv && \
+    source /opt/therock-venv/bin/activate && \
+    pip install --upgrade pip && \
+    pip install -r requirements.txt
+
+# Fetch submodules and apply patches
+RUN source /opt/therock-venv/bin/activate && \
+    python3 ./build_tools/fetch_sources.py
+
+# Swap rocm-systems with custom version AFTER fetch_sources.py
+# so it doesn't get overwritten by submodule checkout
+RUN if [[ "$SWAP_ROCM_SYSTEMS" == "true" && -d /opt/TheRock-src/custom-rocm-systems ]]; then \
+        echo "===> Swapping rocm-systems with custom version" && \
+        rm -rf /opt/TheRock-src/rocm-systems && \
+        mv /opt/TheRock-src/custom-rocm-systems /opt/TheRock-src/rocm-systems; \
+    else \
+        echo "===> Using TheRock default rocm-systems"; \
+    fi
+
+# Configure
+RUN source /opt/therock-venv/bin/activate && \
+    cmake -B build -G Ninja . \
+    -DTHEROCK_AMDGPU_FAMILIES="${AMDGPU_FAMILIES}" \
+    -DBUILD_TESTING=OFF
+
+# Build (longest step - compiles LLVM, HIP, rocm-systems projects, etc.)
+RUN source /opt/therock-venv/bin/activate && \
+    cmake --build build --parallel ${BUILD_JOBS:-$(nproc)}
+
+# Install to /opt/rocm
+RUN mkdir -p /opt/rocm && \
+    cp -a build/dist/rocm/* /opt/rocm/
+
+# Final development image
+
+FROM base AS final
+
+COPY --from=builder /opt/rocm /opt/rocm
+
+ENV TRITON_PATH=/opt/triton \
+    ROCM_PATH=/opt/rocm \
+    OMPI_MCA_mtl="^ofi" \
+    OMPI_MCA_pml="ob1" \
+    HSA_NO_SCRATCH_RECLAIM=1
+
+ENV LD_LIBRARY_PATH=$ROCM_PATH/lib \
+    PATH="$ROCM_PATH/bin:$PATH"
+
+ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
+    OMPI_ALLOW_RUN_AS_ROOT=1
+
+# Set up Python venv (matches original rocm/pytorch base image pattern)
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Make the venv writable by all
+RUN chmod -R 777 /opt/venv
+
+# Install Python packages with pip
+RUN pip3 install --upgrade pip && \
+    pip3 install wheel jupyter
+
+# Install PyTorch (ROCm-compatible wheel)
+RUN pip3 install \
+    torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/rocm7.2
+
+# Clone and install Triton
+WORKDIR $TRITON_PATH
+RUN git clone https://github.com/triton-lang/triton.git $TRITON_PATH && \
+    git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e && \
+    pip3 install -e .
+ENV PYTHONPATH=$TRITON_PATH
+
+# Set up workspace
+WORKDIR /workspace
+
+# Create entrypoint script
+RUN echo '#!/bin/bash' > /entrypoint.sh && \
+    echo 'git config --global --add safe.directory "*" 2>/dev/null' >> /entrypoint.sh && \
+    echo 'echo "Welcome to the ROCm-from-source Docker image!"' >> /entrypoint.sh && \
+    echo 'echo "Built from TheRock (includes rocm-systems)"' >> /entrypoint.sh && \
+    echo 'echo "ROCm path: $ROCM_PATH"' >> /entrypoint.sh && \
+    echo 'if command -v rocminfo &>/dev/null; then' >> /entrypoint.sh && \
+    echo '    echo "rocminfo available: $(which rocminfo)"' >> /entrypoint.sh && \
+    echo 'fi' >> /entrypoint.sh && \
+    echo 'if [ $# -eq 0 ]; then' >> /entrypoint.sh && \
+    echo '    exec /bin/bash' >> /entrypoint.sh && \
+    echo 'else' >> /entrypoint.sh && \
+    echo '    exec "$@"' >> /entrypoint.sh && \
+    echo 'fi' >> /entrypoint.sh && \
+    chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/bin/bash", "-c", "source /entrypoint.sh && exec bash"]

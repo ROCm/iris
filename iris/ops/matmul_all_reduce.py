@@ -19,6 +19,7 @@ from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
 import iris.x
+from iris.tracing.kernel_artifacts import iris_launch
 
 
 @triton.jit()
@@ -314,7 +315,9 @@ def matmul_all_reduce(
 
     even_k = K % config.block_size_k == 0
 
-    _fused_matmul_all_reduce_kernel[grid](
+    iris_launch(
+        _fused_matmul_all_reduce_kernel,
+        grid,
         A,
         B,
         C,
@@ -337,6 +340,9 @@ def matmul_all_reduce(
         config.block_size_k,
         even_k,
         config.all_reduce_variant,
+        algorithm="matmul_all_reduce",
+        rank=rank,
+        dtype=A.dtype,
     )
 
     # Mark workspace as used

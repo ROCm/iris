@@ -77,6 +77,7 @@ from . import experimental
 from . import ops
 from . import tensor_creation
 from . import bench
+from .tracing import kernel_artifacts  # noqa: F401  # triggers _init() at import time
 from .logging import (
     set_logger_level,
     logger,

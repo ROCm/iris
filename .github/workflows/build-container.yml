@@ -1,0 +1,12 @@
+name: Build Container
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: [self-hosted, mi3xx, linux-mi325-8gpu-ossci-rad]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Iris container
+        run: bash .github/scripts/container_build.sh
