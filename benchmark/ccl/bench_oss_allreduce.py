@@ -28,10 +28,10 @@ from iris.ccl import Config
 # M = tokens, N = hidden dim. All bf16.
 # Shapes are constant across TP — only rank count changes.
 SHAPES = [
-    (8, 2880),   # gpt-oss decode, attn proj
-    (8, 3072),   # gpt-oss decode, MoE/FFN proj
-    (8, 4096),   # Mixtral decode
-    (7, 2880),   # prefill
+    (8, 2880),  # gpt-oss decode, attn proj
+    (8, 3072),  # gpt-oss decode, MoE/FFN proj
+    (8, 4096),  # Mixtral decode
+    (7, 2880),  # prefill
     (14, 2880),  # prefill
     (46, 2880),  # prefill
     (53, 2880),  # prefill
@@ -49,8 +49,7 @@ def rccl_all_reduce(state, ctx):
     world_size = ctx.get_num_ranks()
     rank = ctx.get_rank()
 
-    tensor = torch.full((M, N), float(rank + 1), dtype=dtype,
-                        device=f"cuda:{rank}")
+    tensor = torch.full((M, N), float(rank + 1), dtype=dtype, device=f"cuda:{rank}")
 
     state.set_bytes(int(M * N * tensor.element_size() * 2 * (world_size - 1) / world_size))
     state.add_counter("tokens", M)
