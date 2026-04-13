@@ -115,8 +115,9 @@ def all_reduce_preamble(
 
     elif variant == VARIANT_LL:
         # LL uses per-rank flags for in-kernel synchronization (no barrier).
-        if workspace.flags is None or workspace.flags.numel() != world_size:
-            workspace.flags = shmem.zeros((world_size,), dtype=torch.int32)
+        num_ranks = shmem.get_num_ranks()
+        if workspace.flags is None or workspace.flags.numel() != num_ranks:
+            workspace.flags = shmem.zeros((num_ranks,), dtype=torch.int32)
         if not hasattr(workspace, "ll_epoch"):
             workspace.ll_epoch = 0
 
