@@ -271,7 +271,9 @@ def parse_args():
     parser.add_argument("--block_size_k", type=int, default=None, help="Block size K (model-derived if omitted)")
     parser.add_argument("--group_size_m", type=int, default=None, help="Group size M (model-derived if omitted)")
     parser.add_argument("--num_xcds", type=int, default=None, help="Number of XCDs (auto if None)")
-    parser.add_argument("--m_tiles_per_batch", type=int, default=None, help="Number of M-tiles to batch together for SDMA")
+    parser.add_argument(
+        "--m_tiles_per_batch", type=int, default=None, help="Number of M-tiles to batch together for SDMA"
+    )
     parser.add_argument(
         "--trace_output", type=str, default="trace_host_copy_engine.png", help="Output file for trace plot"
     )
@@ -331,7 +333,7 @@ def _apply_model_defaults(args, world_size, dtype, device, dtype_bytes=2):
         args["group_size_m"] = selector.group_m
         applied.append("group_size_m (tritonBLAS)")
 
-    return applied
+    return selector, applied
 
 
 def _analyze_performance(bm, bn, bk, M_local, N, K, world_size, link_bw, dtype_bytes):
@@ -351,7 +353,12 @@ def _analyze_performance(bm, bn, bk, M_local, N, K, world_size, link_bw, dtype_b
     try:
         # Roofline model for GEMM
         roofline_tflops, intensity, ridge, b_in_l2 = _tile_roofline(
-            bm, bn, bk, M_local, K, N,
+            bm,
+            bn,
+            bk,
+            M_local,
+            K,
+            N,
             dtype_bytes,
             DEFAULT_PEAK_TFLOPS_FP16,
             DEFAULT_HBM_BW_GBPS,
@@ -360,15 +367,16 @@ def _analyze_performance(bm, bn, bk, M_local, N, K, world_size, link_bw, dtype_b
 
         # Per-WG GEMM time
         gemm_wg_us = _gemm_wg_time_us(
-            bm, bn, bk, K,
+            bm,
+            bn,
+            bk,
+            K,
             roofline_tflops,
             DEFAULT_NUM_CUS,
         )
 
         # Per-WG scatter time
-        scatter_wg_us = _scatter_sdma_time_us(
-            bm, bn, world_size, link_bw, dtype_bytes
-        )
+        scatter_wg_us = _scatter_sdma_time_us(bm, bn, world_size, link_bw, dtype_bytes)
 
         # Determine bottleneck
         ratio = scatter_wg_us / gemm_wg_us
@@ -414,14 +422,15 @@ def _auto_tune_batching(perf_analysis, num_m_tiles, num_n_tiles, group_size_m, b
         ratio = perf_analysis["ratio"]
 
         # TODO need a better way to determine if we can halve
-        if ratio > 1.0:  # Severely communication-bound
-            print(f"Communication-bound (ratio={ratio:.2f}x), halving tile sizes for better overlap")
-            # Halve block sizes to create MORE tiles (but enforce minimum)
-            MIN_BLOCK_SIZE = 64
-            adjusted_bm = MIN_BLOCK_SIZE #max(MIN_BLOCK_SIZE, bm // 4)
-            adjusted_bn = MIN_BLOCK_SIZE #max(MIN_BLOCK_SIZE, bn // 4)
-        else:
-            adjusted_bm, adjusted_bn = bm, bn
+        # TODO this breaks the selector
+        # if ratio > 1.0:  # Severely communication-bound
+        #     print(f"Communication-bound (ratio={ratio:.2f}x), halving tile sizes for better overlap")
+        #     # Halve block sizes to create MORE tiles (but enforce minimum)
+        #     MIN_BLOCK_SIZE = 64
+        #     adjusted_bm = MIN_BLOCK_SIZE #max(MIN_BLOCK_SIZE, bm // 4)
+        #     adjusted_bn = MIN_BLOCK_SIZE #max(MIN_BLOCK_SIZE, bn // 4)
+        # else:
+        adjusted_bm, adjusted_bn = bm, bn
 
     # Clamp to valid range
     m_tiles_per_batch = max(1, min(m_tiles_per_batch, num_m_tiles))
@@ -447,7 +456,7 @@ def _worker(args: dict):
     device = torch.device(f"cuda:{local_rank}")
 
     # Apply tritonBLAS selector to get block sizes
-    model_applied = _apply_model_defaults(args, world_size, datatype, device, dtype_bytes)
+    selector, model_applied = _apply_model_defaults(args, world_size, datatype, device, dtype_bytes)
     if rank == 0 and model_applied:
         shmem.info(f"tritonBLAS selector applied: {', '.join(model_applied)}")
 
@@ -455,6 +464,9 @@ def _worker(args: dict):
     M = M_local * world_size  # Total M after gather
     N = args["n"]
     K = args["k"]
+
+    # if args.get("m_tiles_per_batch") is None:
+    #     args["m_tiles_per_batch"] = 1
 
     # Performance analysis
     perf_analysis = _analyze_performance(
@@ -475,8 +487,13 @@ def _worker(args: dict):
         num_n_tiles = (N + args["block_size_n"] - 1) // args["block_size_n"]
 
         m_tiles_per_batch, adj_bm, adj_bn = _auto_tune_batching(
-            perf_analysis, num_m_tiles, num_n_tiles, args["group_size_m"],
-            args["block_size_m"], args["block_size_n"], dtype_bytes
+            perf_analysis,
+            num_m_tiles,
+            num_n_tiles,
+            args["group_size_m"],
+            args["block_size_m"],
+            args["block_size_n"],
+            dtype_bytes,
         )
 
         # Apply tuned values
@@ -494,9 +511,9 @@ def _worker(args: dict):
 
     # Print performance analysis
     if rank == 0 and perf_analysis is not None:
-        shmem.info("\n" + "="*80)
+        shmem.info("\n" + "=" * 80)
         shmem.info("PERFORMANCE ANALYSIS")
-        shmem.info("="*80)
+        shmem.info("=" * 80)
         shmem.info(f"Block sizes: {args['block_size_m']}×{args['block_size_n']}×{args['block_size_k']}")
         num_m_tiles = (M_local + args["block_size_m"] - 1) // args["block_size_m"]
         num_n_tiles = (N + args["block_size_n"] - 1) // args["block_size_n"]
@@ -507,7 +524,7 @@ def _worker(args: dict):
         shmem.info(f"  Ratio:   {perf_analysis['ratio']:.2f}x")
         shmem.info(f"\nBottleneck: {perf_analysis['bottleneck'].upper()}")
         shmem.info(f"m_tiles_per_batch: {args['m_tiles_per_batch']}")
-        shmem.info("="*80 + "\n")
+        shmem.info("=" * 80 + "\n")
 
     # Create config with parameters
     config_kwargs = {
@@ -579,6 +596,7 @@ def _worker(args: dict):
 
     # Pre-allocate workspace
     workspace = matmul_all_gather_host_copy_engine_preamble(shmem, A_local, B, config)
+    workspace.selector = selector
 
     # ── Timing ───────────────────────────────────────────────────────────
     comm_stream = torch.cuda.Stream()

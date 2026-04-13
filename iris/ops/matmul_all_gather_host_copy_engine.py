@@ -234,7 +234,6 @@ def matmul_all_gather_host_copy_engine_preamble(
     config: Optional[FusedConfig] = None,
     m_tiles_per_batch: int = 1,
     trace: bool = False,
-    use_tritonblas: bool = True,
 ) -> FusedWorkspace:
     """Allocate workspace for matmul_all_gather_host_copy_engine including per-batch flags."""
     if config is None:
@@ -249,16 +248,9 @@ def matmul_all_gather_host_copy_engine_preamble(
     M = M_local * world_size
 
     # Calculate number of tiles
-    if use_tritonblas:
-        # tritonBLAS auto-selects block sizes, get selector to determine tile counts
-        selector = _make_matmul_selector(M_local, N, K, A.dtype, B.dtype, A.dtype, A.device, streamk=False)
-        num_tiles_m = (M_local + selector.block_m - 1) // selector.block_m
-        num_tiles_n = (N + selector.block_n - 1) // selector.block_n
-    else:
-        # Legacy: use config block sizes
-        num_tiles_m = (M_local + config.block_size_m - 1) // config.block_size_m
-        num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
-        selector = None
+    # tritonBLAS auto-selects block sizes, get selector to determine tile counts
+    num_tiles_m = (M_local + config.block_size_m - 1) // config.block_size_m
+    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
 
     num_tiles = num_tiles_m * num_tiles_n
 
@@ -277,11 +269,9 @@ def matmul_all_gather_host_copy_engine_preamble(
     ws.locks = shmem.zeros((num_batches,), dtype=torch.int32)
 
     # Store metadata for later use
-    ws.selector = selector
     ws.num_tiles_m = num_tiles_m
     ws.num_tiles_n = num_tiles_n
     ws.num_batches = num_batches
-    ws.use_tritonblas = use_tritonblas
 
     return ws
 
@@ -351,10 +341,6 @@ def matmul_all_gather_host_copy_engine(
     stride_cm, stride_cn = output_tensor.stride()
     device = A.device
 
-    # Reset flags for this iteration
-    if flag_iteration == 0:
-        workspace.locks.zero_()
-
     # ═══════════════════════════════════════════════════════════════════════
     # Device Phase: Compute GEMM + store + set flags
     # ═══════════════════════════════════════════════════════════════════════
@@ -378,27 +364,25 @@ def matmul_all_gather_host_copy_engine(
         counter_config["counter_buffer"] = workspace.locks
 
         # Use work-stealing if enabled
-        use_work_stealing = config.work_stealing if hasattr(config, 'work_stealing') else False
         tritonblas_config = None
-        if use_work_stealing:
-            tritonblas_config = tritonblas_preamble(selector)
-            tritonblas_config.reset(streamk=False, work_stealing=True)
 
         # Warn about bias
         if bias is not None:
             import warnings
+
             warnings.warn(
-                "Bias is not yet supported in tritonBLAS integration. "
-                "Consider adding bias manually after GEMM."
+                "Bias is not yet supported in tritonBLAS integration. Consider adding bias manually after GEMM."
             )
 
         # Launch tritonBLAS GEMM with CounterView
         persistent_matmul_lt(
-            A, B, C_local_view,
+            A,
+            B,
+            C_local_view,
             selector,
             config=tritonblas_config,
             bias=None,
-            work_stealing=use_work_stealing,
+            work_stealing=False,
             counter_config=counter_config,
         )
 
