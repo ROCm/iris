@@ -70,7 +70,15 @@ def all_reduce_preamble(
         config = Config()
 
     variant = config.all_reduce_variant.lower()
-    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK, VARIANT_LL, VARIANT_LL128]:
+    if variant not in [
+        VARIANT_ATOMIC,
+        VARIANT_RING,
+        VARIANT_TWO_SHOT,
+        VARIANT_ONE_SHOT,
+        VARIANT_SPINLOCK,
+        VARIANT_LL,
+        VARIANT_LL128,
+    ]:
         raise ValueError(
             f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}, {VARIANT_LL}, {VARIANT_LL128}"
         )
@@ -784,7 +792,9 @@ def persistent_all_reduce_ll128(
             # Flag matched — read the full line (data is valid, same cache line)
             remote_line = iris.load(
                 staging_ptr + line_base + line_offsets,
-                iris_rank, remote_rank, heap_bases,
+                iris_rank,
+                remote_rank,
+                heap_bases,
             )
             # Zero out the flag position so it doesn't pollute the sum
             remote_data = tl.where(is_data, remote_line.to(tl.float32), 0.0)
