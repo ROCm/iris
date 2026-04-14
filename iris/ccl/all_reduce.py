@@ -161,7 +161,11 @@ def all_reduce_preamble(
         buf_size = M * N
         if workspace.ring_buffer is None or workspace.ring_buffer.numel() != buf_size:
             workspace.ring_buffer = ctx.zeros((buf_size,), dtype=torch.float32)
-        if not hasattr(workspace, "flag_buffer") or workspace.flag_buffer is None or workspace.flag_buffer.numel() != buf_size:
+        if (
+            not hasattr(workspace, "flag_buffer")
+            or workspace.flag_buffer is None
+            or workspace.flag_buffer.numel() != buf_size
+        ):
             workspace.flag_buffer = ctx.zeros((buf_size,), dtype=torch.float32)
         if not hasattr(workspace, "ll_epoch"):
             workspace.ll_epoch = 0
@@ -1202,7 +1206,9 @@ if GLUON_AVAILABLE:
                     expected_f32 = (epoch_base + step).to(gl.float32)
                     flag = gl.load(flag_buffer_ptr + global_idx, mask=mask, other=expected_f32, cache_modifier=".cv")
                     while gl.min(tl.where(mask, (flag == expected_f32).to(gl.int32), 1), axis=0) == 0:
-                        flag = gl.load(flag_buffer_ptr + global_idx, mask=mask, other=expected_f32, cache_modifier=".cv")
+                        flag = gl.load(
+                            flag_buffer_ptr + global_idx, mask=mask, other=expected_f32, cache_modifier=".cv"
+                        )
 
                     # Read accumulated data from my data buffer
                     prev_data = gl.load(data_buffer_ptr + global_idx, mask=mask, other=0.0, cache_modifier=".cv")
