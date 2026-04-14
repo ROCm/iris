@@ -351,6 +351,7 @@ def persistent_all_reduce_spinlock(
                 dest_rank,
                 heap_bases,
                 mask=mask,
+                hint=(1, BLOCK_SIZE_N),
             )
 
             # Add our local contribution
@@ -443,6 +444,7 @@ def persistent_all_reduce_one_shot(
                 remote_rank,
                 heap_bases,
                 mask=mask,
+                hint=(1, BLOCK_SIZE_N),
             )
             acc += partial.to(acc_dtype)
 
@@ -702,11 +704,11 @@ def persistent_all_reduce_ll(
         if is_full:
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
 
             tl.store(out_ptr, acc.to(output_ptr.type.element_ty), cache_modifier=".wt")
         else:
@@ -714,11 +716,11 @@ def persistent_all_reduce_ll(
 
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask).to(acc_dtype)
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
 
             tl.store(out_ptr, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt")
 
@@ -911,11 +913,11 @@ def persistent_all_reduce_two_shot(
 
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
@@ -934,11 +936,11 @@ def persistent_all_reduce_two_shot(
 
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask).to(acc_dtype)
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
