@@ -219,6 +219,7 @@ def matmul_reduce_scatter(
     C: torch.Tensor,
     A: torch.Tensor,
     B: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
     async_op: bool = False,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
