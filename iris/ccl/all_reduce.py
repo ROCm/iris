@@ -56,7 +56,7 @@ class AllReduceWorkspace:
 def all_reduce_preamble(
     output_tensor,
     input_tensor,
-    shmem,
+    ctx,
     config: Optional[Config] = None,
     workspace: Optional[AllReduceWorkspace] = None,
 ):
@@ -97,7 +97,7 @@ def all_reduce_preamble(
 
     if variant in (VARIANT_ATOMIC, VARIANT_SPINLOCK, VARIANT_ONE_SHOT):
         output_tensor.zero_()
-        shmem.barrier()
+        ctx.barrier()
 
     elif variant == VARIANT_RING:
         num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
@@ -110,23 +110,23 @@ def all_reduce_preamble(
             or workspace.ring_buffer.shape != (M, N)
             or workspace.ring_buffer.dtype != dtype
         ):
-            workspace.ring_buffer = shmem.zeros((M, N), dtype=dtype)
+            workspace.ring_buffer = ctx.zeros((M, N), dtype=dtype)
         else:
             workspace.ring_buffer.zero_()
 
         if workspace.flags is None or workspace.flags.numel() != total_flags:
-            workspace.flags = shmem.zeros((total_flags,), dtype=torch.int32)
+            workspace.flags = ctx.zeros((total_flags,), dtype=torch.int32)
         else:
             workspace.flags.zero_()
 
         output_tensor.zero_()
-        shmem.barrier()
+        ctx.barrier()
 
     elif variant == VARIANT_LL:
         # LL uses per-rank flags for in-kernel synchronization (no barrier).
-        num_ranks = shmem.get_num_ranks()
+        num_ranks = ctx.get_num_ranks()
         if workspace.flags is None or workspace.flags.numel() != num_ranks:
-            workspace.flags = shmem.zeros((num_ranks,), dtype=torch.int32)
+            workspace.flags = ctx.zeros((num_ranks,), dtype=torch.int32)
         if not hasattr(workspace, "ll_epoch"):
             workspace.ll_epoch = 0
 
@@ -138,7 +138,7 @@ def all_reduce_preamble(
         num_lines = (total_elems + payload - 1) // payload
         staging_size = num_lines * 32  # 32 f32 per line
         if workspace.ring_buffer is None or workspace.ring_buffer.numel() != staging_size:
-            workspace.ring_buffer = shmem.zeros((staging_size,), dtype=torch.float32)
+            workspace.ring_buffer = ctx.zeros((staging_size,), dtype=torch.float32)
         if not hasattr(workspace, "ll_epoch"):
             workspace.ll_epoch = 0
 
@@ -150,7 +150,7 @@ def all_reduce_preamble(
         num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
         total_tiles = num_pid_m * num_pid_n
         if workspace.locks is None or workspace.locks.numel() != total_tiles:
-            workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
+            workspace.locks = ctx.zeros((total_tiles,), dtype=torch.int32)
         else:
             workspace.locks.zero_()
 
@@ -970,7 +970,7 @@ def persistent_all_reduce_two_shot(
 def all_reduce(
     output_tensor,
     input_tensor,
-    shmem,
+    ctx,
     op=ReduceOp.SUM,
     group=None,
     async_op=False,
@@ -980,9 +980,9 @@ def all_reduce(
     """
     Internal all-reduce collective operation implementation.
 
-    This function is called internally by shmem.ccl.all_reduce().
+    This function is called internally by ctx.ccl.all_reduce().
     Users should use the Iris instance method instead:
-        >>> shmem.ccl.all_reduce(output_tensor, input_tensor)
+        >>> ctx.ccl.all_reduce(output_tensor, input_tensor)
 
     Each rank has a local input tensor, and all ranks compute the sum of all
     input tensors. The result is written to output_tensor on all ranks.
@@ -990,10 +990,10 @@ def all_reduce(
     Args:
         output_tensor: Output tensor of shape (M, N) - will contain sum of all inputs
         input_tensor: Input tensor of shape (M, N) - local rank's partial data
-        shmem: Iris shmem context
+        ctx: Iris context
         op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
             Default: ReduceOp.SUM.
-        group: ProcessGroup or None. If None, uses all ranks in shmem context.
+        group: ProcessGroup or None. If None, uses all ranks in iris context.
                Default: None.
         async_op: If False, performs a barrier at the end. If True, returns immediately.
                   Default: False.
@@ -1022,7 +1022,7 @@ def all_reduce(
     # Extract group information
     # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
     # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
     M, N = input_tensor.shape[:2]
 
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
@@ -1070,12 +1070,12 @@ def all_reduce(
         workspace = all_reduce_preamble(
             output_tensor,
             input_tensor,
-            shmem,
+            ctx,
             config=config,
             workspace=workspace,
         )
 
-    heap_bases = shmem.get_heap_bases()
+    heap_bases = ctx.get_heap_bases()
 
     if variant == VARIANT_ATOMIC:
         iris_launch(
@@ -1342,6 +1342,6 @@ def all_reduce(
         workspace.prepared = False
 
     if not async_op and variant not in (VARIANT_LL, VARIANT_LL128):
-        shmem.barrier()
+        ctx.barrier()
 
     return workspace
