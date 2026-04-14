@@ -1211,7 +1211,7 @@ if GLUON_AVAILABLE:
                 gl.store(next_data_ptr, acc, mask=mask, cache_modifier=".wt")
                 gl.store(
                     next_flag_ptr,
-                    tl.full([ELEMS_PER_CTA], flag_val_f32, gl.float32, layout=flat_layout),
+                    ((gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) * 0).to(gl.float32) + flag_val_f32),
                     mask=mask,
                     cache_modifier=".wt",
                 )
@@ -1260,7 +1260,7 @@ if GLUON_AVAILABLE:
                 gl.store(next_data_ptr, data, mask=mask, cache_modifier=".wt")
                 gl.store(
                     next_flag_ptr,
-                    tl.full([ELEMS_PER_CTA], ag_flag_f32, gl.float32, layout=flat_layout),
+                    ((gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) * 0).to(gl.float32) + ag_flag_f32),
                     mask=mask,
                     cache_modifier=".wt",
                 )
