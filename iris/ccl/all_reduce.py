@@ -1219,7 +1219,7 @@ if GLUON_AVAILABLE:
             # CTA completion: last CTA to finish sets the cross-GPU flag
             cta_done_idx = step  # RS steps use slots 0..W-2
             arrived = tl.atomic_add(cta_done_ptr + cta_done_idx, 1, sem="release", scope="gpu") + 1
-            if arrived == cta_target + COMM_SMS:
+            if arrived == cta_target:
                 ctx.atomic_xchg(flag_buffer_ptr + chunk_idx, flag_val, next_iris, sem="release", scope="sys")
 
         # --- Phase 2: Ring all-gather (world_size - 1 steps) ---
@@ -1260,7 +1260,7 @@ if GLUON_AVAILABLE:
             # CTA completion for all-gather steps: slots W-1..2W-3
             cta_done_idx = (world_size - 1) + step
             arrived = tl.atomic_add(cta_done_ptr + cta_done_idx, 1, sem="release", scope="gpu") + 1
-            if arrived == cta_target + COMM_SMS:
+            if arrived == cta_target:
                 ctx.atomic_xchg(
                     flag_buffer_ptr + ag_flag_idx, epoch_base + world_size + step, next_iris, sem="release", scope="sys"
                 )
