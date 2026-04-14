@@ -1214,6 +1214,9 @@ def all_reduce(
         )
 
     elif variant == VARIANT_TWO_SHOT:
+        # Use num_warps=8 for latency hiding, BLOCK_SIZE_N>=128 so
+        # 512 threads still get 8 bf16/thread = 16 bytes = dwordx4.
+        ar_block_n = max(config.block_size_n, 128)
         iris_launch(
             persistent_all_reduce_two_shot,
             (config.comm_sms,),
@@ -1232,12 +1235,14 @@ def all_reduce(
             rank_start,
             rank_stride,
             config.block_size_m,
-            config.block_size_n,
+            ar_block_n,
             config.swizzle_size,
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
             config.all_reduce_distribution,
+            num_warps=8,
+            num_stages=1,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
@@ -1273,6 +1278,7 @@ def all_reduce(
 
     elif variant == VARIANT_LL:
         workspace.ll_epoch += 1
+        ar_block_n = max(config.block_size_n, 128)
         iris_launch(
             persistent_all_reduce_ll,
             (config.comm_sms,),
@@ -1293,11 +1299,13 @@ def all_reduce(
             rank_start,
             rank_stride,
             config.block_size_m,
-            config.block_size_n,
+            ar_block_n,
             config.swizzle_size,
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            num_warps=8,
+            num_stages=1,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
