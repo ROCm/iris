@@ -1171,16 +1171,6 @@ if GLUON_AVAILABLE:
         # Chunk size: total_elems / world_size
         chunk_elems = total_elems // world_size
 
-        # Hoist heap bases
-        local_base = gl.load(ctx.heap_bases + iris_rank)
-        next_base = gl.load(ctx.heap_bases + next_iris)
-        next_delta = next_base - local_base
-
-        # Compute pointer delta from data_buffer to flag_buffer (constant offset)
-        data_base_int = tl.cast(data_buffer_ptr, gl.uint64)
-        flag_base_int = tl.cast(flag_buffer_ptr, gl.uint64)
-        flag_delta = flag_base_int - data_base_int
-
         # Base epoch offset for flag values
         epoch_base = epoch * (2 * world_size)
 
@@ -1214,18 +1204,12 @@ if GLUON_AVAILABLE:
                     prev_data = gl.load(data_buffer_ptr + global_idx, mask=mask, other=0.0, cache_modifier=".cv")
                     acc = local_data + prev_data
 
-                # Write data + flag to next_rank's buffers
-                # Compute next_rank's data_buffer and flag_buffer pointers
-                next_data_int = tl.cast(data_buffer_ptr + global_idx, gl.uint64) + next_delta
-                next_data_ptr = tl.cast(next_data_int, data_buffer_ptr.type)
-                next_flag_int = next_data_int + flag_delta
-                next_flag_ptr = tl.cast(next_flag_int, flag_buffer_ptr.type)
-
-                # Store data first, then flag (flag signals data is ready)
-                gl.store(next_data_ptr, acc, mask=mask, cache_modifier=".wt")
-                gl.store(
-                    next_flag_ptr,
+                # Write data + flag to next_rank's buffers using ctx.store
+                ctx.store(data_buffer_ptr + global_idx, acc, next_iris, mask=mask, cache_modifier=".wt")
+                ctx.store(
+                    flag_buffer_ptr + global_idx,
                     ((gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) * 0).to(gl.float32) + flag_val_f32),
+                    next_iris,
                     mask=mask,
                     cache_modifier=".wt",
                 )
@@ -1266,16 +1250,12 @@ if GLUON_AVAILABLE:
                 # Write to output
                 gl.store(output_ptr + global_idx, data.to(output_ptr.type.element_ty), mask=mask)
 
-                # Forward to next rank's buffers
-                next_data_int = tl.cast(data_buffer_ptr + global_idx, gl.uint64) + next_delta
-                next_data_ptr = tl.cast(next_data_int, data_buffer_ptr.type)
-                next_flag_int = next_data_int + flag_delta
-                next_flag_ptr = tl.cast(next_flag_int, flag_buffer_ptr.type)
-
-                gl.store(next_data_ptr, data, mask=mask, cache_modifier=".wt")
-                gl.store(
-                    next_flag_ptr,
+                # Forward to next rank's buffers using ctx.store
+                ctx.store(data_buffer_ptr + global_idx, data, next_iris, mask=mask, cache_modifier=".wt")
+                ctx.store(
+                    flag_buffer_ptr + global_idx,
                     ((gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) * 0).to(gl.float32) + ag_flag_f32),
+                    next_iris,
                     mask=mask,
                     cache_modifier=".wt",
                 )
