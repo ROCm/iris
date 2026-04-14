@@ -163,7 +163,7 @@ def all_reduce_preamble(
         buf_size = M * N
         if workspace.ring_buffer is None or workspace.ring_buffer.numel() != buf_size:
             workspace.ring_buffer = ctx.zeros((buf_size,), dtype=torch.float32)
-        flag_size = 2 * world_size
+        flag_size = 2 * ctx.get_num_ranks()
         if (
             not hasattr(workspace, "flag_buffer")
             or workspace.flag_buffer is None
