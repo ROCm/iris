@@ -1185,7 +1185,10 @@ if GLUON_AVAILABLE:
             if step > 0:
                 # All CTAs poll MY local flag for this chunk
                 expected = epoch_base + step
-                while tl.atomic_cas(flag_buffer_ptr + chunk_idx, expected, expected, sem="acquire", scope="sys") != expected:
+                while (
+                    tl.atomic_cas(flag_buffer_ptr + chunk_idx, expected, expected, sem="acquire", scope="sys")
+                    != expected
+                ):
                     pass
 
             for elem_offset in range(pid * ELEMS_PER_CTA, chunk_elems, COMM_SMS * ELEMS_PER_CTA):
@@ -1231,11 +1234,17 @@ if GLUON_AVAILABLE:
             # All CTAs poll MY local flag for this chunk
             if step == 0:
                 expected = epoch_base + world_size - 1
-                while tl.atomic_cas(flag_buffer_ptr + chunk_idx, expected, expected, sem="acquire", scope="sys") != expected:
+                while (
+                    tl.atomic_cas(flag_buffer_ptr + chunk_idx, expected, expected, sem="acquire", scope="sys")
+                    != expected
+                ):
                     pass
             else:
                 expected = epoch_base + world_size + step - 1
-                while tl.atomic_cas(flag_buffer_ptr + ag_flag_idx, expected, expected, sem="acquire", scope="sys") != expected:
+                while (
+                    tl.atomic_cas(flag_buffer_ptr + ag_flag_idx, expected, expected, sem="acquire", scope="sys")
+                    != expected
+                ):
                     pass
 
             for elem_offset in range(pid * ELEMS_PER_CTA, chunk_elems, COMM_SMS * ELEMS_PER_CTA):
