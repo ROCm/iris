@@ -35,6 +35,7 @@ VARIANT_ONE_SHOT = "one_shot"
 VARIANT_SPINLOCK = "spinlock"
 VARIANT_LL = "ll"
 VARIANT_LL128 = "ll128"
+VARIANT_RCCL_LL = "rccl_ll"
 
 
 @dataclass
@@ -88,9 +89,10 @@ def all_reduce_preamble(
         VARIANT_SPINLOCK,
         VARIANT_LL,
         VARIANT_LL128,
+        VARIANT_RCCL_LL,
     ]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}, {VARIANT_LL}, {VARIANT_LL128}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}, {VARIANT_LL}, {VARIANT_LL128}, {VARIANT_RCCL_LL}"
         )
 
     M, N = input_tensor.shape[:2]
@@ -149,6 +151,16 @@ def all_reduce_preamble(
         staging_size = num_lines * 32  # 32 f32 per line
         if workspace.ring_buffer is None or workspace.ring_buffer.numel() != staging_size:
             workspace.ring_buffer = ctx.zeros((staging_size,), dtype=torch.float32)
+        if not hasattr(workspace, "ll_epoch"):
+            workspace.ll_epoch = 0
+
+    elif variant == VARIANT_RCCL_LL:
+        # RCCL-style LL: interleaved [data_f32, flag_i32] per element.
+        # Buffer size: 2 * M * N float32 values (8 bytes per element).
+        # Flag = step counter. Epoch tracks generation to avoid stale flags.
+        buf_size = 2 * M * N
+        if workspace.ring_buffer is None or workspace.ring_buffer.numel() != buf_size:
+            workspace.ring_buffer = ctx.zeros((buf_size,), dtype=torch.float32)
         if not hasattr(workspace, "ll_epoch"):
             workspace.ll_epoch = 0
 
@@ -1103,6 +1115,171 @@ if GLUON_AVAILABLE:
             out_ptr = output_ptr + output_offsets
             gl.store(out_ptr, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt")
 
+    @gluon.jit
+    def persistent_all_reduce_rccl_ll_gluon(
+        IrisDeviceCtx: gl.constexpr,
+        context_tensor,
+        input_ptr,
+        output_ptr,
+        ll_buffer_ptr,
+        epoch,
+        total_elems,
+        group_rank: gl.constexpr,
+        iris_rank: gl.constexpr,
+        world_size: gl.constexpr,
+        rank_start: gl.constexpr,
+        rank_stride: gl.constexpr,
+        BLOCK_SIZE: gl.constexpr,
+        COMM_SMS: gl.constexpr,
+        THREADS_PER_WARP: gl.constexpr,
+        WARPS_PER_CTA: gl.constexpr,
+    ):
+        """
+        RCCL-style LL all-reduce using Gluon.
+
+        Ring reduce-scatter + ring all-gather with interleaved data+flag pairs.
+        Buffer layout: ll_buffer[2*i] = data_f32, ll_buffer[2*i+1] = flag_f32.
+
+        Key: prev_rank writes data+flag into MY buffer. I poll MY local buffer
+        for the flag, then read the data from MY local buffer. I then write
+        my result into next_rank's buffer.
+
+        Flag values (epoch-based to avoid stale flags):
+          reduce-scatter step k: epoch_base + k + 1  (k = 0..W-2)
+          all-gather step k:     epoch_base + W + k   (k = 0..W-2)
+        where epoch_base = epoch * (2 * world_size).
+        """
+        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=False)
+        pid = gl.program_id(0)
+
+        ELEMS_PER_CTA: gl.constexpr = BLOCK_SIZE
+        THREADS_PER_CTA: gl.constexpr = THREADS_PER_WARP * WARPS_PER_CTA
+        ELEMS_PER_THREAD: gl.constexpr = ELEMS_PER_CTA // THREADS_PER_CTA
+        flat_layout: gl.constexpr = gl.BlockedLayout(
+            [ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0]
+        )
+
+        # Ring neighbor: next_rank in ring
+        next_iris: gl.constexpr = rank_start + ((group_rank + 1) % world_size) * rank_stride
+
+        # Chunk size: total_elems / world_size
+        chunk_elems = total_elems // world_size
+
+        # Hoist heap bases
+        local_base = gl.load(ctx.heap_bases + iris_rank)
+        next_base = gl.load(ctx.heap_bases + next_iris)
+        next_delta = next_base - local_base
+
+        # Base epoch offset for flag values
+        epoch_base = epoch * (2 * world_size)
+
+        # --- Phase 1: Ring reduce-scatter (world_size - 1 steps) ---
+        for step in gl.static_range(world_size - 1):
+            chunk_idx = (group_rank - step) % world_size
+            chunk_start = chunk_idx * chunk_elems
+            flag_val_f32 = (epoch_base + step + 1).to(gl.float32)
+
+            for elem_offset in range(pid * ELEMS_PER_CTA, chunk_elems, COMM_SMS * ELEMS_PER_CTA):
+                idx = gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) + elem_offset
+                mask = idx < chunk_elems
+                global_idx = chunk_start + idx
+
+                # Load local input for this chunk
+                local_data = gl.load(input_ptr + global_idx, mask=mask, other=0.0).to(gl.float32)
+
+                if step == 0:
+                    # First step: just send my data
+                    acc = local_data
+                else:
+                    # Poll MY local buffer for data written by prev_rank
+                    expected_f32 = (epoch_base + step).to(gl.float32)
+                    my_flag_ptr = ll_buffer_ptr + global_idx * 2 + 1
+                    flag = gl.load(my_flag_ptr, mask=mask, other=expected_f32, cache_modifier=".cv")
+                    while gl.min(tl.where(mask, (flag == expected_f32).to(gl.int32), 1), axis=0) == 0:
+                        flag = gl.load(my_flag_ptr, mask=mask, other=expected_f32, cache_modifier=".cv")
+
+                    # Read accumulated data from my buffer
+                    my_data_ptr = ll_buffer_ptr + global_idx * 2
+                    prev_data = gl.load(my_data_ptr, mask=mask, other=0.0, cache_modifier=".cv")
+                    acc = local_data + prev_data
+
+                # Write data + flag to next_rank's buffer
+                next_buf_data = ll_buffer_ptr + global_idx * 2
+                next_buf_flag = ll_buffer_ptr + global_idx * 2 + 1
+                next_data_int = tl.cast(next_buf_data, gl.uint64) + next_delta
+                next_flag_int = tl.cast(next_buf_flag, gl.uint64) + next_delta
+                next_data_ptr = tl.cast(next_data_int, next_buf_data.dtype)
+                next_flag_ptr = tl.cast(next_flag_int, next_buf_flag.dtype)
+                gl.store(next_data_ptr, acc, mask=mask, cache_modifier=".wt")
+                gl.store(next_flag_ptr, tl.full([ELEMS_PER_CTA], flag_val_f32, gl.float32, layout=flat_layout), mask=mask, cache_modifier=".wt")
+
+        # --- Phase 2: Ring all-gather (world_size - 1 steps) ---
+        # After reduce-scatter, rank r has the fully reduced chunk
+        # (group_rank + 1) % world_size in its buffer (written by prev_rank).
+        # We need to write that chunk to output AND forward all chunks around the ring.
+
+        for step in gl.static_range(world_size - 1):
+            # Which chunk arrives at this step
+            chunk_idx = (group_rank - step + 1) % world_size
+            chunk_start = chunk_idx * chunk_elems
+
+            # For step 0: expect the last reduce-scatter flag = epoch_base + (W-1)
+            # For step k: expect all-gather flag = epoch_base + W + (step - 1)
+            # Unified: epoch_base + W - 1 + step
+            expected_f32 = (epoch_base + world_size - 1 + step).to(gl.float32)
+            ag_flag_f32 = (epoch_base + world_size + step).to(gl.float32)
+
+            for elem_offset in range(pid * ELEMS_PER_CTA, chunk_elems, COMM_SMS * ELEMS_PER_CTA):
+                idx = gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) + elem_offset
+                mask = idx < chunk_elems
+                global_idx = chunk_start + idx
+
+                # Poll MY local buffer for data written by prev_rank
+                my_flag_ptr = ll_buffer_ptr + global_idx * 2 + 1
+                flag = gl.load(my_flag_ptr, mask=mask, other=expected_f32, cache_modifier=".cv")
+                while gl.min(tl.where(mask, (flag == expected_f32).to(gl.int32), 1), axis=0) == 0:
+                    flag = gl.load(my_flag_ptr, mask=mask, other=expected_f32, cache_modifier=".cv")
+
+                # Read data from my buffer
+                my_data_ptr = ll_buffer_ptr + global_idx * 2
+                data = gl.load(my_data_ptr, mask=mask, other=0.0, cache_modifier=".cv")
+
+                # Write to output
+                gl.store(output_ptr + global_idx, data.to(output_ptr.type.element_ty), mask=mask)
+
+                # Forward to next rank
+                next_buf_data = ll_buffer_ptr + global_idx * 2
+                next_buf_flag = ll_buffer_ptr + global_idx * 2 + 1
+                next_data_int = tl.cast(next_buf_data, gl.uint64) + next_delta
+                next_flag_int = tl.cast(next_buf_flag, gl.uint64) + next_delta
+                next_data_ptr = tl.cast(next_data_int, next_buf_data.dtype)
+                next_flag_ptr = tl.cast(next_flag_int, next_buf_flag.dtype)
+                gl.store(next_data_ptr, data, mask=mask, cache_modifier=".wt")
+                gl.store(next_flag_ptr, tl.full([ELEMS_PER_CTA], ag_flag_f32, gl.float32, layout=flat_layout), mask=mask, cache_modifier=".wt")
+
+        # Write own fully-reduced chunk to output
+        # This is the chunk that ended at me after reduce-scatter, i.e., chunk
+        # (group_rank + 1) % world_size. It was written by prev_rank with
+        # flag = epoch_base + (world_size - 1).
+        own_chunk_idx = (group_rank + 1) % world_size
+        own_chunk_start = own_chunk_idx * chunk_elems
+        own_flag_expected = (epoch_base + world_size - 1).to(gl.float32)
+
+        for elem_offset in range(pid * ELEMS_PER_CTA, chunk_elems, COMM_SMS * ELEMS_PER_CTA):
+            idx = gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) + elem_offset
+            mask = idx < chunk_elems
+            global_idx = own_chunk_start + idx
+
+            # Poll for reduce-scatter completion
+            my_flag_ptr = ll_buffer_ptr + global_idx * 2 + 1
+            flag = gl.load(my_flag_ptr, mask=mask, other=own_flag_expected, cache_modifier=".cv")
+            while gl.min(tl.where(mask, (flag == own_flag_expected).to(gl.int32), 1), axis=0) == 0:
+                flag = gl.load(my_flag_ptr, mask=mask, other=own_flag_expected, cache_modifier=".cv")
+
+            my_data_ptr = ll_buffer_ptr + global_idx * 2
+            data = gl.load(my_data_ptr, mask=mask, other=0.0, cache_modifier=".cv")
+            gl.store(output_ptr + global_idx, data.to(output_ptr.type.element_ty), mask=mask)
+
 
 def all_reduce(
     output_tensor,
@@ -1166,9 +1343,10 @@ def all_reduce(
         VARIANT_ONE_SHOT,
         VARIANT_LL,
         VARIANT_LL128,
+        VARIANT_RCCL_LL,
     ]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_SPINLOCK}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_LL}, {VARIANT_LL128}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_SPINLOCK}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_LL}, {VARIANT_LL128}, {VARIANT_RCCL_LL}"
         )
 
     slice_n = config.all_reduce_ring_slice_n
@@ -1517,10 +1695,59 @@ def all_reduce(
             dtype=input_tensor.dtype,
         )
 
+    elif variant == VARIANT_RCCL_LL:
+        if not GLUON_AVAILABLE:
+            raise ValueError("rccl_ll variant requires Gluon. Install Triton with Gluon support.")
+        workspace.ll_epoch += 1
+        total_elems = M * N
+
+        # Require total_elems divisible by world_size for ring chunking
+        if total_elems % world_size != 0:
+            raise ValueError(
+                f"rccl_ll requires total elements ({total_elems}) divisible by "
+                f"world_size ({world_size})"
+            )
+
+        block_size = 256  # elements per CTA tile
+        threads_per_cta = config.threads_per_warp * config.num_warps
+        if block_size % threads_per_cta != 0:
+            raise ValueError(
+                f"rccl_ll BLOCK_SIZE ({block_size}) must be divisible by "
+                f"threads_per_warp * num_warps ({threads_per_cta})"
+            )
+
+        context_tensor = ctx.get_device_context()
+        iris_launch(
+            persistent_all_reduce_rccl_ll_gluon,
+            (config.comm_sms,),
+            IrisDeviceCtx,
+            context_tensor,
+            input_tensor,
+            output_tensor,
+            workspace.ring_buffer,
+            workspace.ll_epoch,
+            total_elems,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            block_size,
+            config.comm_sms,
+            config.threads_per_warp,
+            config.num_warps,
+            num_stages=config.num_stages,
+            num_warps=config.num_warps,
+            waves_per_eu=config.waves_per_eu,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
+        )
+
     if workspace is not None:
         workspace.prepared = False
 
-    if not async_op and variant not in (VARIANT_LL, VARIANT_LL128):
+    if not async_op and variant not in (VARIANT_LL, VARIANT_LL128, VARIANT_RCCL_LL):
         ctx.barrier()
 
     return workspace

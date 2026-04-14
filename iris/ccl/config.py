@@ -118,9 +118,9 @@ class Config:
             raise ValueError(
                 f"all_gather_variant must be one of: 'persistent', 'partitioned', got {self.all_gather_variant}"
             )
-        if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock", "ll", "ll128"]:
+        if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock", "ll", "ll128", "rccl_ll"]:
             raise ValueError(
-                f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'spinlock', 'll', 'll128', got {self.all_reduce_variant}"
+                f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'spinlock', 'll', 'll128', 'rccl_ll', got {self.all_reduce_variant}"
             )
         if self.all_reduce_distribution not in [0, 1]:
             raise ValueError(
