@@ -913,8 +913,6 @@ def persistent_all_reduce_two_shot(
         # (one with masks and one without). Separate unmasked paths allow the compiler to generate
         # more efficient vectorized instructions.
         if is_full:
-            mask = (rm[:, None] < M) & (rn[None, :] < N)
-
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
             acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
@@ -1240,9 +1238,6 @@ def all_reduce(
             config.num_xcds,
             config.chunk_size,
             config.all_reduce_distribution,
-            num_warps=8,
-            num_stages=1,
-            waves_per_eu=1,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
@@ -1303,9 +1298,6 @@ def all_reduce(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
-            num_warps=8,
-            num_stages=1,
-            waves_per_eu=1,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
@@ -1333,9 +1325,6 @@ def all_reduce(
             rank_stride,
             config.comm_sms,
             payload,
-            num_warps=8,
-            num_stages=1,
-            waves_per_eu=1,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
