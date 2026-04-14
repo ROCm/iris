@@ -3,15 +3,14 @@
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Sweep benchmark script for matmul_all_gather variants.
+Unified sweep benchmark script for matmul and all-gather operations.
 
-Runs benchmarks across all permutations of M, N, K dimensions for:
-- PyTorch baseline (matmul + all_gather_into_tensor)
-- Baseline variant
-- Copy engine variant
-- Host copy engine variant
+Runs benchmarks across all permutations of M, N, K dimensions.
+Supports both operation types via --operation argument.
 
-Outputs results as JSON to stdout and benchmark_sweep_results.json.
+Usage:
+    python sweep_benchmarks.py --operation matmul_all_gather
+    python sweep_benchmarks.py --operation all_gather_matmul
 """
 
 import subprocess
@@ -19,14 +18,13 @@ import sys
 import json
 import os
 import signal
+import argparse
 from pathlib import Path
 from typing import Optional, Dict, Any
 
 
-# Project root (3 levels up from this script)
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-
-OPERATION = "matmul_all_gather"
+# Project root (2 levels up from this script)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Dimension configurations to test (M, N, K)
 # Each tuple is (M_local, N, K) where M_local is per-rank M dimension
@@ -43,31 +41,65 @@ DIMENSION_CONFIGS = [
     (131072, 2048, 16384),
 ]
 
-# Benchmark configurations
-BENCHMARKS = {
-    "baseline": {
-        "script": "benchmark/ops/matmul_all_gather/benchmark.py",
-        "extra_args": ["--benchmark_pytorch"],
-        "output_file": "matmul_all_gather_baseline.json",
-        "extract_multiple": True,  # Extract both baseline and pytorch from one run
+# Benchmark configurations per operation type
+BENCHMARK_CONFIGS = {
+    "matmul_all_gather": {
+        "baseline": {
+            "script": "benchmark/ops/matmul_all_gather/benchmark.py",
+            "extra_args": ["--benchmark_pytorch"],
+            "output_file": "matmul_all_gather_baseline.json",
+            "extract_multiple": True,
+        },
+        "host_copy_engine": {
+            "script": "benchmark/ops/matmul_all_gather/benchmark_host_copy_engine.py",
+            "extra_args": [],
+            "output_file": "matmul_all_gather_host_copy_engine.json",
+            "extract_multiple": False,
+        },
+        "device_copy_engine": {
+            "script": "benchmark/ops/matmul_all_gather/benchmark_copy_engine.py",
+            "extra_args": [],
+            "output_file": "matmul_all_gather_device_copy_engine.json",
+            "extract_multiple": False,
+        },
+        "matmul_only": {
+            "script": "benchmark/ops/matmul_all_gather/benchmark_matmul.py",
+            "extra_args": ["--benchmark_pytorch"],
+            "output_file": "matmul_only.json",
+            "extract_multiple": True,
+        },
     },
-    "host_copy_engine": {
-        "script": "benchmark/ops/matmul_all_gather/benchmark_host_copy_engine.py",
-        "extra_args": [],
-        "output_file": "matmul_all_gather_host_copy_engine.json",
-        "extract_multiple": False,
-    },
-    "device_copy_engine": {
-        "script": "benchmark/ops/matmul_all_gather/benchmark_copy_engine.py",
-        "extra_args": [],
-        "output_file": "matmul_all_gather_device_copy_engine.json",
-        "extract_multiple": False,
-    },
-    "matmul_only": {
-        "script": "benchmark/ops/matmul_all_gather/benchmark_matmul.py",
-        "extra_args": ["--benchmark_pytorch"],
-        "output_file": "matmul_only.json",
-        "extract_multiple": True,
+    "all_gather_matmul": {
+        "baseline": {
+            "script": "benchmark/ops/all_gather_matmul/benchmark_torchrun.py",
+            "extra_args": ["--benchmark_pytorch"],
+            "output_file": "all_gather_matmul_baseline.json",
+            "extract_multiple": True,
+        },
+        "hbm_buffer": {
+            "script": "benchmark/ops/all_gather_matmul/benchmark_hbm_buffer.py",
+            "extra_args": [],
+            "output_file": "all_gather_matmul_hbm_buffer.json",
+            "extract_multiple": False,
+        },
+        "copy_engine_host": {
+            "script": "benchmark/ops/all_gather_matmul/benchmark_copy_engine.py",
+            "extra_args": ["--force-host-initiated", "--no-trace"],
+            "output_file": "all_gather_matmul_host_copy_engine.json",
+            "extract_multiple": False,
+        },
+        "copy_engine_device": {
+            "script": "benchmark/ops/all_gather_matmul/benchmark_copy_engine.py",
+            "extra_args": ["--force-device-initiated", "--no-trace"],
+            "output_file": "all_gather_matmul_device_copy_engine.json",
+            "extract_multiple": False,
+        },
+        "matmul_only": {
+            "script": "benchmark/ops/matmul_all_gather/benchmark_matmul.py",
+            "extra_args": ["--benchmark_pytorch"],
+            "output_file": "matmul_only.json",
+            "extract_multiple": True,
+        },
     },
 }
 
@@ -177,9 +209,6 @@ def run_benchmark(
 
         log(f"    ✓ Success: Loaded JSON results{validation_status}")
 
-        # Add operation field to the data
-        data["operation"] = OPERATION
-
         return data
 
     except subprocess.TimeoutExpired as timeout_err:
@@ -231,21 +260,48 @@ def run_benchmark(
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Run sweep benchmarks for matmul and all-gather operations",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--operation",
+        type=str,
+        required=True,
+        choices=["matmul_all_gather", "all_gather_matmul"],
+        help="Operation type to benchmark",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output JSON file path (default: benchmark/ops/{operation}/benchmark_sweep_results.json)",
+    )
+    args = parser.parse_args()
+
+    operation = args.operation
+    benchmarks = BENCHMARK_CONFIGS[operation]
+
+    # Determine output file
+    if args.output:
+        output_file = Path(args.output)
+    else:
+        output_file = PROJECT_ROOT / f"benchmark/ops/{operation}/benchmark_sweep_results.json"
+
     log("=" * 80)
-    log("Matmul-All-Gather Benchmark Sweep")
+    log(f"{operation.upper().replace('_', '-')} Benchmark Sweep")
     log("=" * 80)
     log(f"Dimension configurations: {len(DIMENSION_CONFIGS)}")
     for m, n, k in DIMENSION_CONFIGS:
         log(f"  - M={m}, N={n}, K={k}")
-    log(f"Benchmarks per configuration: {len(BENCHMARKS)}")
-    log(f"Total benchmarks: {len(DIMENSION_CONFIGS) * len(BENCHMARKS)}")
+    log(f"Benchmarks per configuration: {len(benchmarks)}")
+    log(f"Total benchmarks: {len(DIMENSION_CONFIGS) * len(benchmarks)}")
     log(f"Timeout per benchmark: {TIMEOUT_SECONDS}s")
     log(f"GPUs: {NUM_GPUS}")
+    log(f"Output file: {output_file}")
     log("=" * 80)
     log("")
 
-    # Open output file
-    output_file = PROJECT_ROOT / "benchmark/ops/matmul_all_gather/benchmark_sweep_results.json"
     results = []
 
     log(f"Running {len(DIMENSION_CONFIGS)} dimension configurations...\n")
@@ -253,10 +309,10 @@ def main():
     for idx, (m, n, k) in enumerate(DIMENSION_CONFIGS, 1):
         log(f"[{idx}/{len(DIMENSION_CONFIGS)}] Testing M={m}, N={n}, K={k}")
 
-        row = {"M": m, "N": n, "K": k, "benchmarks": {}}
+        row = {"M": m, "N": n, "K": k, "operation": operation, "benchmarks": {}}
 
         # Run each benchmark variant
-        for bench_key, bench_config in BENCHMARKS.items():
+        for bench_key, bench_config in benchmarks.items():
             pytorch_bench_key = "pytorch" + bench_key
             result = run_benchmark(
                 benchmark_name=bench_key,
@@ -305,13 +361,11 @@ def main():
 
     # Write JSON file
     log(f"Writing results to {output_file}...")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     with open(output_file, "w") as f:
         json.dump(results, f, indent=2)
 
     log(f"✓ Results saved to {output_file}\n")
-
-    # Print to stdout (clean JSON)
-    # print(json.dumps(results, indent=2))
 
     log("\n" + "=" * 80)
     log("Benchmark sweep complete!")
