@@ -156,20 +156,29 @@ def all_reduce_preamble(
 
     elif variant == VARIANT_RCCL_LL:
         # RCCL-style LL: data buffer for ring data, small flag buffer for per-chunk atomics,
-        # and a CTA completion counter for cross-CTA synchronization.
+        # and CTA completion counters for cross-CTA synchronization.
         # data_buffer[0..M*N] for data (contiguous f32).
         # flag_buffer[0..2*world_size] for per-chunk flags (i32, atomic).
-        # cta_done[0..1] for CTA completion counting (i32, atomic).
+        # cta_done[0..2*W+1] for CTA completion counting per step (i32, atomic).
         buf_size = M * N
         if workspace.ring_buffer is None or workspace.ring_buffer.numel() != buf_size:
             workspace.ring_buffer = ctx.zeros((buf_size,), dtype=torch.float32)
-        flag_size = 2 * ctx.get_num_ranks()
+        num_ranks = ctx.get_num_ranks()
+        flag_size = 2 * num_ranks
         if (
             not hasattr(workspace, "flag_buffer")
             or workspace.flag_buffer is None
             or workspace.flag_buffer.numel() != flag_size
         ):
             workspace.flag_buffer = ctx.zeros((flag_size,), dtype=torch.int32)
+        # CTA completion counters: 2*W-1 steps (W-1 RS + W-1 AG + 1 final)
+        cta_done_size = 2 * num_ranks + 1
+        if (
+            not hasattr(workspace, "cta_done")
+            or workspace.cta_done is None
+            or workspace.cta_done.numel() != cta_done_size
+        ):
+            workspace.cta_done = torch.zeros((cta_done_size,), dtype=torch.int32, device="cuda")
         if not hasattr(workspace, "ll_epoch"):
             workspace.ll_epoch = 0
 
@@ -1132,6 +1141,7 @@ if GLUON_AVAILABLE:
         output_ptr,
         data_buffer_ptr,
         flag_buffer_ptr,
+        cta_done_ptr,
         epoch,
         total_elems,
         group_rank: gl.constexpr,
@@ -1140,20 +1150,24 @@ if GLUON_AVAILABLE:
         rank_start: gl.constexpr,
         rank_stride: gl.constexpr,
         BLOCK_SIZE: gl.constexpr,
+        COMM_SMS: gl.constexpr,
         THREADS_PER_WARP: gl.constexpr,
         WARPS_PER_CTA: gl.constexpr,
     ):
         """
-        RCCL-style LL all-reduce using Gluon (single CTA version).
+        RCCL-style LL all-reduce using Gluon (multi-CTA version).
 
-        Ring reduce-scatter + ring all-gather.
+        Ring reduce-scatter + ring all-gather with multiple CTAs per step.
         data_buffer[0..N] for data (contiguous f32).
-        flag_buffer[0..2*W] for per-chunk flags (i32, atomic).
+        flag_buffer[0..2*W] for per-chunk cross-GPU flags (i32, atomic).
+        cta_done[0..2*W+1] for intra-GPU CTA completion counting (i32, atomic).
 
-        Single CTA processes all elements sequentially per step.
-        Per-chunk atomic flags with scope="sys" ensure cross-GPU ordering.
+        Multiple CTAs cooperatively process elements within each chunk.
+        After all CTAs finish their portion of a step, the last CTA to
+        arrive (via atomic_add) sets the cross-GPU flag.
         """
         ctx = IrisDeviceCtx.initialize(context_tensor, tracing=False)
+        pid = tl.program_id(0)
 
         ELEMS_PER_CTA: gl.constexpr = BLOCK_SIZE
         THREADS_PER_CTA: gl.constexpr = THREADS_PER_WARP * WARPS_PER_CTA
@@ -1166,8 +1180,10 @@ if GLUON_AVAILABLE:
         # Chunk size: total_elems / world_size
         chunk_elems = total_elems // world_size
 
-        # Base epoch offset for flag values
+        # Base epoch offset for flag values and CTA completion tracking
         epoch_base = epoch * (2 * world_size)
+        # CTA completion target: epoch * COMM_SMS (each CTA adds 1 per step)
+        cta_target = epoch * COMM_SMS
 
         # --- Phase 1: Ring reduce-scatter (world_size - 1 steps) ---
         for step in gl.static_range(world_size - 1):
@@ -1176,7 +1192,7 @@ if GLUON_AVAILABLE:
             flag_val = epoch_base + step + 1
 
             if step > 0:
-                # Poll MY local flag for this chunk
+                # Poll MY local flag for this chunk — ALL CTAs must wait
                 expected = epoch_base + step
                 while (
                     tl.atomic_cas(flag_buffer_ptr + chunk_idx, expected, expected, sem="acquire", scope="sys")
@@ -1184,7 +1200,8 @@ if GLUON_AVAILABLE:
                 ):
                     pass
 
-            for elem_offset in range(0, chunk_elems, ELEMS_PER_CTA):
+            # Each CTA processes a strided subset of element tiles
+            for elem_offset in range(pid * ELEMS_PER_CTA, chunk_elems, COMM_SMS * ELEMS_PER_CTA):
                 idx = gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) + elem_offset
                 mask = idx < chunk_elems
                 global_idx = chunk_start + idx
@@ -1199,12 +1216,13 @@ if GLUON_AVAILABLE:
 
                 ctx.store(data_buffer_ptr + global_idx, acc, next_iris, mask=mask, cache_modifier=".wt")
 
-            # All data written, set remote flag
-            ctx.atomic_xchg(flag_buffer_ptr + chunk_idx, flag_val, next_iris, sem="release", scope="sys")
+            # CTA completion: last CTA to finish sets the cross-GPU flag
+            cta_done_idx = step  # RS steps use slots 0..W-2
+            arrived = tl.atomic_add(cta_done_ptr + cta_done_idx, 1, sem="release", scope="gpu") + 1
+            if arrived == cta_target + COMM_SMS:
+                ctx.atomic_xchg(flag_buffer_ptr + chunk_idx, flag_val, next_iris, sem="release", scope="sys")
 
         # --- Phase 2: Ring all-gather (world_size - 1 steps) ---
-        # Covers chunks: (group_rank+1)%W, group_rank%W, (group_rank-1)%W, ..., (group_rank+3)%W
-        # Missing: chunk (group_rank+2)%W — handled separately below.
         for step in gl.static_range(world_size - 1):
             chunk_idx = (group_rank - step + 1) % world_size
             chunk_start = chunk_idx * chunk_elems
@@ -1225,7 +1243,7 @@ if GLUON_AVAILABLE:
                 ):
                     pass
 
-            for elem_offset in range(0, chunk_elems, ELEMS_PER_CTA):
+            for elem_offset in range(pid * ELEMS_PER_CTA, chunk_elems, COMM_SMS * ELEMS_PER_CTA):
                 idx = gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) + elem_offset
                 mask = idx < chunk_elems
                 global_idx = chunk_start + idx
@@ -1239,12 +1257,14 @@ if GLUON_AVAILABLE:
                 gl.store(output_ptr + global_idx, data.to(output_ptr.type.element_ty), mask=mask)
                 ctx.store(data_buffer_ptr + global_idx, data, next_iris, mask=mask, cache_modifier=".wt")
 
-            ag_flag_val = epoch_base + world_size + step
-            ctx.atomic_xchg(flag_buffer_ptr + ag_flag_idx, ag_flag_val, next_iris, sem="release", scope="sys")
+            # CTA completion for all-gather steps: slots W-1..2W-3
+            cta_done_idx = (world_size - 1) + step
+            arrived = tl.atomic_add(cta_done_ptr + cta_done_idx, 1, sem="release", scope="gpu") + 1
+            if arrived == cta_target + COMM_SMS:
+                ctx.atomic_xchg(flag_buffer_ptr + ag_flag_idx, epoch_base + world_size + step, next_iris, sem="release", scope="sys")
 
         # --- Final: write the missing chunk ---
         # Chunk (group_rank+2)%W was forwarded by prev_rank at all-gather step W-2.
-        # It arrives with flag = epoch_base + 2*W - 2.
         own_chunk_idx = (group_rank + 2) % world_size
         own_chunk_start = own_chunk_idx * chunk_elems
         own_ag_flag_idx = world_size + own_chunk_idx
@@ -1255,7 +1275,7 @@ if GLUON_AVAILABLE:
         ):
             pass
 
-        for elem_offset in range(0, chunk_elems, ELEMS_PER_CTA):
+        for elem_offset in range(pid * ELEMS_PER_CTA, chunk_elems, COMM_SMS * ELEMS_PER_CTA):
             idx = gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) + elem_offset
             mask = idx < chunk_elems
             global_idx = own_chunk_start + idx
@@ -1695,16 +1715,18 @@ def all_reduce(
                 f"threads_per_warp * num_warps ({threads_per_cta})"
             )
 
+        comm_sms = config.comm_sms
         context_tensor = ctx.get_device_context()
         iris_launch(
             persistent_all_reduce_rccl_ll_gluon,
-            (1,),  # Single CTA for correctness; multi-CTA optimization later
+            (comm_sms,),
             IrisDeviceCtx,
             context_tensor,
             input_tensor,
             output_tensor,
             workspace.ring_buffer,
             workspace.flag_buffer,
+            workspace.cta_done,
             workspace.ll_epoch,
             total_elems,
             rank_in_group,
@@ -1713,6 +1735,7 @@ def all_reduce(
             rank_start,
             rank_stride,
             block_size,
+            comm_sms,
             config.threads_per_warp,
             config.num_warps,
             num_stages=config.num_stages,
