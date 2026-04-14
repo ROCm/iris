@@ -1199,13 +1199,12 @@ if GLUON_AVAILABLE:
 
                 ctx.store(data_buffer_ptr + global_idx, acc, next_iris, mask=mask, cache_modifier=".wt")
 
-                if step == world_size - 2:
-                    gl.store(output_ptr + global_idx, acc.to(output_ptr.type.element_ty), mask=mask)
-
             # All data written, set remote flag
             ctx.atomic_xchg(flag_buffer_ptr + chunk_idx, flag_val, next_iris, sem="release", scope="sys")
 
         # --- Phase 2: Ring all-gather (world_size - 1 steps) ---
+        # Covers chunks: (group_rank+1)%W, group_rank%W, (group_rank-1)%W, ..., (group_rank+3)%W
+        # Missing: chunk (group_rank+2)%W — handled separately below.
         for step in gl.static_range(world_size - 1):
             chunk_idx = (group_rank - step + 1) % world_size
             chunk_start = chunk_idx * chunk_elems
@@ -1242,6 +1241,26 @@ if GLUON_AVAILABLE:
 
             ag_flag_val = epoch_base + world_size + step
             ctx.atomic_xchg(flag_buffer_ptr + ag_flag_idx, ag_flag_val, next_iris, sem="release", scope="sys")
+
+        # --- Final: write the missing chunk ---
+        # Chunk (group_rank+2)%W was forwarded by prev_rank at all-gather step W-2.
+        # It arrives with flag = epoch_base + 2*W - 2.
+        own_chunk_idx = (group_rank + 2) % world_size
+        own_chunk_start = own_chunk_idx * chunk_elems
+        own_ag_flag_idx = world_size + own_chunk_idx
+        own_expected = epoch_base + 2 * world_size - 2
+        while (
+            tl.atomic_cas(flag_buffer_ptr + own_ag_flag_idx, own_expected, own_expected, sem="acquire", scope="sys")
+            != own_expected
+        ):
+            pass
+
+        for elem_offset in range(0, chunk_elems, ELEMS_PER_CTA):
+            idx = gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) + elem_offset
+            mask = idx < chunk_elems
+            global_idx = own_chunk_start + idx
+            data = gl.load(data_buffer_ptr + global_idx, mask=mask, other=0.0, cache_modifier=".cv")
+            gl.store(output_ptr + global_idx, data.to(output_ptr.type.element_ty), mask=mask)
 
 
 def all_reduce(
