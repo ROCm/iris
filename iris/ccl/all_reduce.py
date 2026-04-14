@@ -170,8 +170,6 @@ def all_reduce_preamble(
             or workspace.flag_buffer.numel() != flag_size
         ):
             workspace.flag_buffer = ctx.zeros((flag_size,), dtype=torch.int32)
-        if not hasattr(workspace, "cta_done"):
-            workspace.cta_done = ctx.zeros((1,), dtype=torch.int32)
         if not hasattr(workspace, "ll_epoch"):
             workspace.ll_epoch = 0
 
@@ -1134,7 +1132,6 @@ if GLUON_AVAILABLE:
         output_ptr,
         data_buffer_ptr,
         flag_buffer_ptr,
-        cta_done_ptr,
         epoch,
         total_elems,
         group_rank: gl.constexpr,
@@ -1143,24 +1140,20 @@ if GLUON_AVAILABLE:
         rank_start: gl.constexpr,
         rank_stride: gl.constexpr,
         BLOCK_SIZE: gl.constexpr,
-        COMM_SMS: gl.constexpr,
         THREADS_PER_WARP: gl.constexpr,
         WARPS_PER_CTA: gl.constexpr,
     ):
         """
-        RCCL-style LL all-reduce using Gluon.
+        RCCL-style LL all-reduce using Gluon (single CTA version).
 
         Ring reduce-scatter + ring all-gather.
         data_buffer[0..N] for data (contiguous f32).
         flag_buffer[0..2*W] for per-chunk flags (i32, atomic).
-        cta_done[0] for cross-CTA completion counting.
 
-        Protocol: all CTAs process their tiles, then atomically increment
-        cta_done. The last CTA (counter == COMM_SMS) sets the remote flag
-        and resets the counter for the next step.
+        Single CTA processes all elements sequentially per step.
+        Per-chunk atomic flags with scope="sys" ensure cross-GPU ordering.
         """
         ctx = IrisDeviceCtx.initialize(context_tensor, tracing=False)
-        pid = gl.program_id(0)
 
         ELEMS_PER_CTA: gl.constexpr = BLOCK_SIZE
         THREADS_PER_CTA: gl.constexpr = THREADS_PER_WARP * WARPS_PER_CTA
@@ -1183,7 +1176,7 @@ if GLUON_AVAILABLE:
             flag_val = epoch_base + step + 1
 
             if step > 0:
-                # All CTAs poll MY local flag for this chunk
+                # Poll MY local flag for this chunk
                 expected = epoch_base + step
                 while (
                     tl.atomic_cas(flag_buffer_ptr + chunk_idx, expected, expected, sem="acquire", scope="sys")
@@ -1191,47 +1184,33 @@ if GLUON_AVAILABLE:
                 ):
                     pass
 
-            for elem_offset in range(pid * ELEMS_PER_CTA, chunk_elems, COMM_SMS * ELEMS_PER_CTA):
+            for elem_offset in range(0, chunk_elems, ELEMS_PER_CTA):
                 idx = gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) + elem_offset
                 mask = idx < chunk_elems
                 global_idx = chunk_start + idx
 
-                # Load local input for this chunk
                 local_data = gl.load(input_ptr + global_idx, mask=mask, other=0.0).to(gl.float32)
 
                 if step == 0:
                     acc = local_data
                 else:
-                    # Read accumulated data from my data buffer (flag confirmed)
                     prev_data = gl.load(data_buffer_ptr + global_idx, mask=mask, other=0.0, cache_modifier=".cv")
                     acc = local_data + prev_data
 
-                # Write data to next_rank's data buffer
                 ctx.store(data_buffer_ptr + global_idx, acc, next_iris, mask=mask, cache_modifier=".wt")
 
-                # At the last reduce-scatter step, acc is fully reduced.
                 if step == world_size - 2:
                     gl.store(output_ptr + global_idx, acc.to(output_ptr.type.element_ty), mask=mask)
 
-            # Cross-CTA sync: last CTA to finish sets remote flag
-            old_count = tl.atomic_add(cta_done_ptr, 1, sem="release", scope="gpu")
-            if old_count == COMM_SMS - 1:
-                # Last CTA: all data is written, safe to set remote flag
-                tl.atomic_xchg(cta_done_ptr, 0, sem="release", scope="gpu")
-                ctx.atomic_xchg(flag_buffer_ptr + chunk_idx, flag_val, next_iris, sem="release", scope="sys")
-            # Wait for counter reset before next step
-            while tl.atomic_cas(cta_done_ptr, 0, 0, sem="acquire", scope="gpu") != 0:
-                pass
+            # All data written, set remote flag
+            ctx.atomic_xchg(flag_buffer_ptr + chunk_idx, flag_val, next_iris, sem="release", scope="sys")
 
         # --- Phase 2: Ring all-gather (world_size - 1 steps) ---
         for step in gl.static_range(world_size - 1):
             chunk_idx = (group_rank - step + 1) % world_size
             chunk_start = chunk_idx * chunk_elems
-
-            # Use second half of flag buffer for all-gather flags
             ag_flag_idx = world_size + chunk_idx
 
-            # All CTAs poll MY local flag for this chunk
             if step == 0:
                 expected = epoch_base + world_size - 1
                 while (
@@ -1247,33 +1226,22 @@ if GLUON_AVAILABLE:
                 ):
                     pass
 
-            for elem_offset in range(pid * ELEMS_PER_CTA, chunk_elems, COMM_SMS * ELEMS_PER_CTA):
+            for elem_offset in range(0, chunk_elems, ELEMS_PER_CTA):
                 idx = gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) + elem_offset
                 mask = idx < chunk_elems
                 global_idx = chunk_start + idx
 
-                # Read data from my data buffer
                 data = gl.load(data_buffer_ptr + global_idx, mask=mask, other=0.0, cache_modifier=".cv")
 
-                # At step 0, buffer has sum of W-1 ranks; add own contribution
                 if step == 0:
                     local_data = gl.load(input_ptr + global_idx, mask=mask, other=0.0).to(gl.float32)
                     data = data + local_data
 
-                # Write to output
                 gl.store(output_ptr + global_idx, data.to(output_ptr.type.element_ty), mask=mask)
-
-                # Forward data to next rank's data buffer
                 ctx.store(data_buffer_ptr + global_idx, data, next_iris, mask=mask, cache_modifier=".wt")
 
-            # Cross-CTA sync: last CTA sets remote flag
-            old_count = tl.atomic_add(cta_done_ptr, 1, sem="release", scope="gpu")
-            if old_count == COMM_SMS - 1:
-                tl.atomic_xchg(cta_done_ptr, 0, sem="release", scope="gpu")
-                ag_flag_val = epoch_base + world_size + step
-                ctx.atomic_xchg(flag_buffer_ptr + ag_flag_idx, ag_flag_val, next_iris, sem="release", scope="sys")
-            while tl.atomic_cas(cta_done_ptr, 0, 0, sem="acquire", scope="gpu") != 0:
-                pass
+            ag_flag_val = epoch_base + world_size + step
+            ctx.atomic_xchg(flag_buffer_ptr + ag_flag_idx, ag_flag_val, next_iris, sem="release", scope="sys")
 
 
 def all_reduce(
@@ -1711,14 +1679,13 @@ def all_reduce(
         context_tensor = ctx.get_device_context()
         iris_launch(
             persistent_all_reduce_rccl_ll_gluon,
-            (config.comm_sms,),
+            (1,),  # Single CTA for correctness; multi-CTA optimization later
             IrisDeviceCtx,
             context_tensor,
             input_tensor,
             output_tensor,
             workspace.ring_buffer,
             workspace.flag_buffer,
-            workspace.cta_done,
             workspace.ll_epoch,
             total_elems,
             rank_in_group,
@@ -1727,7 +1694,6 @@ def all_reduce(
             rank_start,
             rank_stride,
             block_size,
-            config.comm_sms,
             config.threads_per_warp,
             config.num_warps,
             num_stages=config.num_stages,
