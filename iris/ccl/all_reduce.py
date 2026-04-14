@@ -155,12 +155,14 @@ def all_reduce_preamble(
             workspace.ll_epoch = 0
 
     elif variant == VARIANT_RCCL_LL:
-        # RCCL-style LL: interleaved [data_f32, flag_i32] per element.
-        # Buffer size: 2 * M * N float32 values (8 bytes per element).
-        # Flag = step counter. Epoch tracks generation to avoid stale flags.
-        buf_size = 2 * M * N
+        # RCCL-style LL: split data/flag buffers for contiguous vectorized access.
+        # data_buffer[0..M*N] for data, flag_buffer[0..M*N] for flags.
+        # Both are contiguous f32 arrays on the symmetric heap.
+        buf_size = M * N
         if workspace.ring_buffer is None or workspace.ring_buffer.numel() != buf_size:
             workspace.ring_buffer = ctx.zeros((buf_size,), dtype=torch.float32)
+        if not hasattr(workspace, "flag_buffer") or workspace.flag_buffer is None or workspace.flag_buffer.numel() != buf_size:
+            workspace.flag_buffer = ctx.zeros((buf_size,), dtype=torch.float32)
         if not hasattr(workspace, "ll_epoch"):
             workspace.ll_epoch = 0
 
@@ -1121,7 +1123,8 @@ if GLUON_AVAILABLE:
         context_tensor,
         input_ptr,
         output_ptr,
-        ll_buffer_ptr,
+        data_buffer_ptr,
+        flag_buffer_ptr,
         epoch,
         total_elems,
         group_rank: gl.constexpr,
@@ -1137,12 +1140,13 @@ if GLUON_AVAILABLE:
         """
         RCCL-style LL all-reduce using Gluon.
 
-        Ring reduce-scatter + ring all-gather with interleaved data+flag pairs.
-        Buffer layout: ll_buffer[2*i] = data_f32, ll_buffer[2*i+1] = flag_f32.
+        Ring reduce-scatter + ring all-gather with split data/flag buffers.
+        Buffer layout: data_buffer[0..N] for data, flag_buffer[0..N] for flags.
+        Both are contiguous f32 arrays for proper vectorization.
 
-        Key: prev_rank writes data+flag into MY buffer. I poll MY local buffer
-        for the flag, then read the data from MY local buffer. I then write
-        my result into next_rank's buffer.
+        Key: prev_rank writes data to MY data_buffer and flag to MY flag_buffer.
+        I poll MY flag_buffer, then read MY data_buffer. I then write to
+        next_rank's buffers.
 
         Flag values (epoch-based to avoid stale flags):
           reduce-scatter step k: epoch_base + k + 1  (k = 0..W-2)
@@ -1168,6 +1172,11 @@ if GLUON_AVAILABLE:
         next_base = gl.load(ctx.heap_bases + next_iris)
         next_delta = next_base - local_base
 
+        # Compute pointer delta from data_buffer to flag_buffer (constant offset)
+        data_base_int = tl.cast(data_buffer_ptr, gl.uint64)
+        flag_base_int = tl.cast(flag_buffer_ptr, gl.uint64)
+        flag_delta = flag_base_int - data_base_int
+
         # Base epoch offset for flag values
         epoch_base = epoch * (2 * world_size)
 
@@ -1189,25 +1198,24 @@ if GLUON_AVAILABLE:
                     # First step: just send my data
                     acc = local_data
                 else:
-                    # Poll MY local buffer for data written by prev_rank
+                    # Poll MY flag buffer for flag written by prev_rank
                     expected_f32 = (epoch_base + step).to(gl.float32)
-                    my_flag_ptr = ll_buffer_ptr + global_idx * 2 + 1
-                    flag = gl.load(my_flag_ptr, mask=mask, other=expected_f32, cache_modifier=".cv")
+                    flag = gl.load(flag_buffer_ptr + global_idx, mask=mask, other=expected_f32, cache_modifier=".cv")
                     while gl.min(tl.where(mask, (flag == expected_f32).to(gl.int32), 1), axis=0) == 0:
-                        flag = gl.load(my_flag_ptr, mask=mask, other=expected_f32, cache_modifier=".cv")
+                        flag = gl.load(flag_buffer_ptr + global_idx, mask=mask, other=expected_f32, cache_modifier=".cv")
 
-                    # Read accumulated data from my buffer
-                    my_data_ptr = ll_buffer_ptr + global_idx * 2
-                    prev_data = gl.load(my_data_ptr, mask=mask, other=0.0, cache_modifier=".cv")
+                    # Read accumulated data from my data buffer
+                    prev_data = gl.load(data_buffer_ptr + global_idx, mask=mask, other=0.0, cache_modifier=".cv")
                     acc = local_data + prev_data
 
-                # Write data + flag to next_rank's buffer
-                next_buf_data = ll_buffer_ptr + global_idx * 2
-                next_buf_flag = ll_buffer_ptr + global_idx * 2 + 1
-                next_data_int = tl.cast(next_buf_data, gl.uint64) + next_delta
-                next_flag_int = tl.cast(next_buf_flag, gl.uint64) + next_delta
-                next_data_ptr = tl.cast(next_data_int, next_buf_data.dtype)
-                next_flag_ptr = tl.cast(next_flag_int, next_buf_flag.dtype)
+                # Write data + flag to next_rank's buffers
+                # Compute next_rank's data_buffer and flag_buffer pointers
+                next_data_int = tl.cast(data_buffer_ptr + global_idx, gl.uint64) + next_delta
+                next_data_ptr = tl.cast(next_data_int, data_buffer_ptr.type)
+                next_flag_int = next_data_int + flag_delta
+                next_flag_ptr = tl.cast(next_flag_int, flag_buffer_ptr.type)
+
+                # Store data first, then flag (flag signals data is ready)
                 gl.store(next_data_ptr, acc, mask=mask, cache_modifier=".wt")
                 gl.store(
                     next_flag_ptr,
@@ -1222,18 +1230,12 @@ if GLUON_AVAILABLE:
                     gl.store(output_ptr + global_idx, acc.to(output_ptr.type.element_ty), mask=mask)
 
         # --- Phase 2: Ring all-gather (world_size - 1 steps) ---
-        # After reduce-scatter, next_rank has our fully reduced chunk in its buffer.
-        # Each rank also has a partially-reduced chunk from the previous rank.
-        # The all-gather distributes all other chunks around the ring.
-
         for step in gl.static_range(world_size - 1):
             # Which chunk arrives at this step
             chunk_idx = (group_rank - step + 1) % world_size
             chunk_start = chunk_idx * chunk_elems
 
-            # For step 0: expect the last reduce-scatter flag = epoch_base + (W-1)
-            # For step k: expect all-gather flag = epoch_base + W + (step - 1)
-            # Unified: epoch_base + W - 1 + step
+            # Expected flag: epoch_base + W - 1 + step
             expected_f32 = (epoch_base + world_size - 1 + step).to(gl.float32)
             ag_flag_f32 = (epoch_base + world_size + step).to(gl.float32)
 
@@ -1242,15 +1244,13 @@ if GLUON_AVAILABLE:
                 mask = idx < chunk_elems
                 global_idx = chunk_start + idx
 
-                # Poll MY local buffer for data written by prev_rank
-                my_flag_ptr = ll_buffer_ptr + global_idx * 2 + 1
-                flag = gl.load(my_flag_ptr, mask=mask, other=expected_f32, cache_modifier=".cv")
+                # Poll MY flag buffer
+                flag = gl.load(flag_buffer_ptr + global_idx, mask=mask, other=expected_f32, cache_modifier=".cv")
                 while gl.min(tl.where(mask, (flag == expected_f32).to(gl.int32), 1), axis=0) == 0:
-                    flag = gl.load(my_flag_ptr, mask=mask, other=expected_f32, cache_modifier=".cv")
+                    flag = gl.load(flag_buffer_ptr + global_idx, mask=mask, other=expected_f32, cache_modifier=".cv")
 
-                # Read data from my buffer
-                my_data_ptr = ll_buffer_ptr + global_idx * 2
-                data = gl.load(my_data_ptr, mask=mask, other=0.0, cache_modifier=".cv")
+                # Read data from my data buffer
+                data = gl.load(data_buffer_ptr + global_idx, mask=mask, other=0.0, cache_modifier=".cv")
 
                 # At step 0, the buffer has sum of W-1 ranks; add own contribution
                 if step == 0:
@@ -1260,13 +1260,12 @@ if GLUON_AVAILABLE:
                 # Write to output
                 gl.store(output_ptr + global_idx, data.to(output_ptr.type.element_ty), mask=mask)
 
-                # Forward to next rank
-                next_buf_data = ll_buffer_ptr + global_idx * 2
-                next_buf_flag = ll_buffer_ptr + global_idx * 2 + 1
-                next_data_int = tl.cast(next_buf_data, gl.uint64) + next_delta
-                next_flag_int = tl.cast(next_buf_flag, gl.uint64) + next_delta
-                next_data_ptr = tl.cast(next_data_int, next_buf_data.dtype)
-                next_flag_ptr = tl.cast(next_flag_int, next_buf_flag.dtype)
+                # Forward to next rank's buffers
+                next_data_int = tl.cast(data_buffer_ptr + global_idx, gl.uint64) + next_delta
+                next_data_ptr = tl.cast(next_data_int, data_buffer_ptr.type)
+                next_flag_int = next_data_int + flag_delta
+                next_flag_ptr = tl.cast(next_flag_int, flag_buffer_ptr.type)
+
                 gl.store(next_data_ptr, data, mask=mask, cache_modifier=".wt")
                 gl.store(
                     next_flag_ptr,
@@ -1274,11 +1273,6 @@ if GLUON_AVAILABLE:
                     mask=mask,
                     cache_modifier=".wt",
                 )
-
-        # No separate "own chunk" section needed:
-        # - The last reduce-scatter step writes chunk (group_rank+2)%W to output
-        # - All-gather step 0 writes chunk (group_rank+1)%W to output (with local data added)
-        # - All-gather steps 1..W-2 write the remaining W-2 chunks to output
 
 
 def all_reduce(
@@ -1722,6 +1716,7 @@ def all_reduce(
             input_tensor,
             output_tensor,
             workspace.ring_buffer,
+            workspace.flag_buffer,
             workspace.ll_epoch,
             total_elems,
             rank_in_group,
