@@ -780,17 +780,19 @@ def persistent_all_reduce_ll128(
             remote_rank = rank_start + r * rank_stride
 
             # Poll flag word (element 31 of the cache line)
+            # Use volatile to bypass L2 cache and see cross-GPU writes
             flag_ptr = staging_ptr + line_base + PAYLOAD
-            flag_val = iris.load(flag_ptr, iris_rank, remote_rank, heap_bases)
+            flag_val = iris.load(flag_ptr, iris_rank, remote_rank, heap_bases, volatile=True)
             while flag_val < epoch:
-                flag_val = iris.load(flag_ptr, iris_rank, remote_rank, heap_bases)
+                flag_val = iris.load(flag_ptr, iris_rank, remote_rank, heap_bases, volatile=True)
 
-            # Flag matched — data words 0..30 are valid (same cache line)
+            # Flag matched — read full cache line (volatile to bypass L2)
             remote_line = iris.load(
                 staging_ptr + line_base + line_offsets,
                 iris_rank,
                 remote_rank,
                 heap_bases,
+                volatile=True,
             )
             # Mask out flag position so it doesn't pollute the sum
             acc += tl.where(is_data, remote_line, 0.0)
