@@ -1261,7 +1261,9 @@ if GLUON_AVAILABLE:
             cta_done_idx = (world_size - 1) + step
             arrived = tl.atomic_add(cta_done_ptr + cta_done_idx, 1, sem="release", scope="gpu") + 1
             if arrived == cta_target + COMM_SMS:
-                ctx.atomic_xchg(flag_buffer_ptr + ag_flag_idx, epoch_base + world_size + step, next_iris, sem="release", scope="sys")
+                ctx.atomic_xchg(
+                    flag_buffer_ptr + ag_flag_idx, epoch_base + world_size + step, next_iris, sem="release", scope="sys"
+                )
 
         # --- Final: write the missing chunk ---
         # Chunk (group_rank+2)%W was forwarded by prev_rank at all-gather step W-2.
