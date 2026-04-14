@@ -750,58 +750,53 @@ def persistent_all_reduce_ll128(
     No explicit atomics needed — relies on cache-line write atomicity.
     """
     pid = tl.program_id(0)
-    epoch_f32 = epoch.to(tl.float32)
 
-    LINE = PAYLOAD + 1  # 32 (full cache line in f32)
+    LINE: tl.constexpr = PAYLOAD + 1  # 32 f32 = 128 bytes = one cache line
     line_offsets = tl.arange(0, LINE)
     is_data = line_offsets < PAYLOAD
 
-    # --- Phase 1: Stage local data with embedded flags ---
+    # --- Phase 1: Stage local data with embedded flag per cache line ---
     for line_idx in range(pid, num_lines, COMM_SMS):
         data_start = line_idx * PAYLOAD
-        # Load from input tensor (bf16), upcast to f32
-        elem_offsets = data_start + tl.arange(0, LINE)
-        elem_mask = is_data & (elem_offsets < total_elems)
-        safe_offsets = tl.where(is_data, elem_offsets, 0)
-        data = tl.load(input_ptr + safe_offsets, mask=elem_mask, other=0.0).to(tl.float32)
-
-        # Merge data + flag into one 128-byte cache line
-        line = tl.where(is_data, data, epoch_f32)
-
-        # Single coalesced store — cache line atomic
         line_base = line_idx * LINE
+        # Load input elems, upcast to f32; use LINE-sized vector with masking
+        full_offsets = data_start + line_offsets
+        full_mask = is_data & (full_offsets < total_elems)
+        safe_offsets = tl.where(is_data, full_offsets, 0)
+        line = tl.load(input_ptr + safe_offsets, mask=full_mask, other=0.0).to(tl.float32)
+        # Set element PAYLOAD (idx 31) to epoch flag; keep data in 0..30
+        line = tl.where(is_data, line, epoch)
+        # Single coalesced 128-byte store — atomic on cache line boundary
         tl.store(staging_ptr + line_base + line_offsets, line, cache_modifier=".wt")
 
-    # --- Phase 2: Read from all peers, reduce ---
+    # --- Phase 2: Read from all peers, poll flag, reduce ---
     for line_idx in range(pid, num_lines, COMM_SMS):
         data_start = line_idx * PAYLOAD
         line_base = line_idx * LINE
-        elem_offsets = data_start + tl.arange(0, LINE)
-        elem_mask = is_data & (elem_offsets < total_elems)
 
         acc = tl.zeros((LINE,), dtype=tl.float32)
 
         for r in tl.static_range(world_size):
             remote_rank = rank_start + r * rank_stride
 
-            # Poll flag (element 31 of the cache line)
+            # Poll flag word (element 31 of the cache line)
             flag_ptr = staging_ptr + line_base + PAYLOAD
-            while iris.load(flag_ptr, iris_rank, remote_rank, heap_bases).to(tl.float32) < epoch_f32:
-                pass
+            flag_val = iris.load(flag_ptr, iris_rank, remote_rank, heap_bases)
+            while flag_val < epoch:
+                flag_val = iris.load(flag_ptr, iris_rank, remote_rank, heap_bases)
 
-            # Flag matched — read the full line (data is valid, same cache line)
+            # Flag matched — data words 0..30 are valid (same cache line)
             remote_line = iris.load(
                 staging_ptr + line_base + line_offsets,
                 iris_rank,
                 remote_rank,
                 heap_bases,
             )
-            # Zero out the flag position so it doesn't pollute the sum
-            remote_data = tl.where(is_data, remote_line.to(tl.float32), 0.0)
-            acc += remote_data
+            # Mask out flag position so it doesn't pollute the sum
+            acc += tl.where(is_data, remote_line, 0.0)
 
-        # Write to output (downcast f32 → bf16)
-        out_offsets = data_start + tl.arange(0, LINE)
+        # Write reduced data to output (downcast f32 → bf16)
+        out_offsets = data_start + line_offsets
         out_mask = is_data & (out_offsets < total_elems)
         safe_out = tl.where(is_data, out_offsets, 0)
         tl.store(output_ptr + safe_out, acc.to(output_ptr.type.element_ty), mask=out_mask)
@@ -1295,7 +1290,7 @@ def all_reduce(
             input_tensor,
             output_tensor,
             workspace.ring_buffer,
-            workspace.ll_epoch,
+            float(workspace.ll_epoch),
             total_elems,
             num_lines,
             heap_bases,
