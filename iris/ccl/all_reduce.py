@@ -1216,10 +1216,15 @@ if GLUON_AVAILABLE:
                     cache_modifier=".wt",
                 )
 
+                # At the last reduce-scatter step, acc is fully reduced (all W ranks).
+                # Write directly to output — this chunk won't be covered by all-gather.
+                if step == world_size - 2:
+                    gl.store(output_ptr + global_idx, acc.to(output_ptr.type.element_ty), mask=mask)
+
         # --- Phase 2: Ring all-gather (world_size - 1 steps) ---
-        # After reduce-scatter, rank r has the fully reduced chunk
-        # (group_rank + 1) % world_size in its buffer (written by prev_rank).
-        # We need to write that chunk to output AND forward all chunks around the ring.
+        # After reduce-scatter, next_rank has our fully reduced chunk in its buffer.
+        # Each rank also has a partially-reduced chunk from the previous rank.
+        # The all-gather distributes all other chunks around the ring.
 
         for step in gl.static_range(world_size - 1):
             # Which chunk arrives at this step
@@ -1247,6 +1252,11 @@ if GLUON_AVAILABLE:
                 my_data_ptr = ll_buffer_ptr + global_idx * 2
                 data = gl.load(my_data_ptr, mask=mask, other=0.0, cache_modifier=".cv")
 
+                # At step 0, the buffer has sum of W-1 ranks; add own contribution
+                if step == 0:
+                    local_data = gl.load(input_ptr + global_idx, mask=mask, other=0.0).to(gl.float32)
+                    data = data + local_data
+
                 # Write to output
                 gl.store(output_ptr + global_idx, data.to(output_ptr.type.element_ty), mask=mask)
 
@@ -1265,28 +1275,10 @@ if GLUON_AVAILABLE:
                     cache_modifier=".wt",
                 )
 
-        # Write own fully-reduced chunk to output
-        # This is the chunk that ended at me after reduce-scatter, i.e., chunk
-        # (group_rank + 1) % world_size. It was written by prev_rank with
-        # flag = epoch_base + (world_size - 1).
-        own_chunk_idx = (group_rank + 1) % world_size
-        own_chunk_start = own_chunk_idx * chunk_elems
-        own_flag_expected = (epoch_base + world_size - 1).to(gl.float32)
-
-        for elem_offset in range(pid * ELEMS_PER_CTA, chunk_elems, COMM_SMS * ELEMS_PER_CTA):
-            idx = gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) + elem_offset
-            mask = idx < chunk_elems
-            global_idx = own_chunk_start + idx
-
-            # Poll for reduce-scatter completion
-            my_flag_ptr = ll_buffer_ptr + global_idx * 2 + 1
-            flag = gl.load(my_flag_ptr, mask=mask, other=own_flag_expected, cache_modifier=".cv")
-            while gl.min(tl.where(mask, (flag == own_flag_expected).to(gl.int32), 1), axis=0) == 0:
-                flag = gl.load(my_flag_ptr, mask=mask, other=own_flag_expected, cache_modifier=".cv")
-
-            my_data_ptr = ll_buffer_ptr + global_idx * 2
-            data = gl.load(my_data_ptr, mask=mask, other=0.0, cache_modifier=".cv")
-            gl.store(output_ptr + global_idx, data.to(output_ptr.type.element_ty), mask=mask)
+        # No separate "own chunk" section needed:
+        # - The last reduce-scatter step writes chunk (group_rank+2)%W to output
+        # - All-gather step 0 writes chunk (group_rank+1)%W to output (with local data added)
+        # - All-gather steps 1..W-2 write the remaining W-2 chunks to output
 
 
 def all_reduce(
