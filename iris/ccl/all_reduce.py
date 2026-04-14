@@ -1155,9 +1155,7 @@ if GLUON_AVAILABLE:
         ELEMS_PER_CTA: gl.constexpr = BLOCK_SIZE
         THREADS_PER_CTA: gl.constexpr = THREADS_PER_WARP * WARPS_PER_CTA
         ELEMS_PER_THREAD: gl.constexpr = ELEMS_PER_CTA // THREADS_PER_CTA
-        flat_layout: gl.constexpr = gl.BlockedLayout(
-            [ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0]
-        )
+        flat_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
 
         # Ring neighbor: next_rank in ring
         next_iris: gl.constexpr = rank_start + ((group_rank + 1) % world_size) * rank_stride
@@ -1211,7 +1209,12 @@ if GLUON_AVAILABLE:
                 next_data_ptr = tl.cast(next_data_int, next_buf_data.dtype)
                 next_flag_ptr = tl.cast(next_flag_int, next_buf_flag.dtype)
                 gl.store(next_data_ptr, acc, mask=mask, cache_modifier=".wt")
-                gl.store(next_flag_ptr, tl.full([ELEMS_PER_CTA], flag_val_f32, gl.float32, layout=flat_layout), mask=mask, cache_modifier=".wt")
+                gl.store(
+                    next_flag_ptr,
+                    tl.full([ELEMS_PER_CTA], flag_val_f32, gl.float32, layout=flat_layout),
+                    mask=mask,
+                    cache_modifier=".wt",
+                )
 
         # --- Phase 2: Ring all-gather (world_size - 1 steps) ---
         # After reduce-scatter, rank r has the fully reduced chunk
@@ -1255,7 +1258,12 @@ if GLUON_AVAILABLE:
                 next_data_ptr = tl.cast(next_data_int, next_buf_data.dtype)
                 next_flag_ptr = tl.cast(next_flag_int, next_buf_flag.dtype)
                 gl.store(next_data_ptr, data, mask=mask, cache_modifier=".wt")
-                gl.store(next_flag_ptr, tl.full([ELEMS_PER_CTA], ag_flag_f32, gl.float32, layout=flat_layout), mask=mask, cache_modifier=".wt")
+                gl.store(
+                    next_flag_ptr,
+                    tl.full([ELEMS_PER_CTA], ag_flag_f32, gl.float32, layout=flat_layout),
+                    mask=mask,
+                    cache_modifier=".wt",
+                )
 
         # Write own fully-reduced chunk to output
         # This is the chunk that ended at me after reduce-scatter, i.e., chunk
@@ -1703,10 +1711,7 @@ def all_reduce(
 
         # Require total_elems divisible by world_size for ring chunking
         if total_elems % world_size != 0:
-            raise ValueError(
-                f"rccl_ll requires total elements ({total_elems}) divisible by "
-                f"world_size ({world_size})"
-            )
+            raise ValueError(f"rccl_ll requires total elements ({total_elems}) divisible by world_size ({world_size})")
 
         block_size = 256  # elements per CTA tile
         threads_per_cta = config.threads_per_warp * config.num_warps
