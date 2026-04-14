@@ -1726,7 +1726,7 @@ def all_reduce(
     if workspace is not None:
         workspace.prepared = False
 
-    if not async_op and variant not in (VARIANT_LL, VARIANT_LL128, VARIANT_RCCL_LL):
+    if not async_op and variant not in (VARIANT_LL, VARIANT_LL128):
         ctx.barrier()
 
     return workspace
