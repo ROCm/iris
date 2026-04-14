@@ -9,8 +9,8 @@ name: Nightly Docker Build
 
 on:
   schedule:
-    # midnight PST = 08:00 UTC (off-minute to reduce GH Actions surge)
-    - cron: "3 8 * * *"
+    # 10 PM Pacific = 06:00 UTC (runs before nightly triton test at midnight)
+    - cron: "3 6 * * *"
   workflow_dispatch:
 
 env:
