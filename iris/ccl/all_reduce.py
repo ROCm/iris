@@ -1205,7 +1205,11 @@ if GLUON_AVAILABLE:
                     acc = local_data + prev_data
 
                 # Write data + flag to next_rank's buffers using ctx.store
+                # Data must be visible before flag (flag signals data readiness).
+                # debug_barrier includes s_waitcnt vmcnt(0) on AMD, ensuring
+                # the data store completes before the flag store.
                 ctx.store(data_buffer_ptr + global_idx, acc, next_iris, mask=mask, cache_modifier=".wt")
+                tl.debug_barrier()
                 ctx.store(
                     flag_buffer_ptr + global_idx,
                     ((gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) * 0).to(gl.float32) + flag_val_f32),
@@ -1252,6 +1256,7 @@ if GLUON_AVAILABLE:
 
                 # Forward to next rank's buffers using ctx.store
                 ctx.store(data_buffer_ptr + global_idx, data, next_iris, mask=mask, cache_modifier=".wt")
+                tl.debug_barrier()
                 ctx.store(
                     flag_buffer_ptr + global_idx,
                     ((gl.arange(0, ELEMS_PER_CTA, layout=flat_layout) * 0).to(gl.float32) + ag_flag_f32),
