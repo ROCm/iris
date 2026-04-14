@@ -1148,14 +1148,6 @@ def all_reduce(
     if config is None:
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
 
-    # Check for unsupported options
-    if config.use_gluon:
-        raise ValueError(
-            "all_reduce does not support use_gluon=True. "
-            "Gluon implementation is not available for all_reduce. "
-            "Use default config (use_gluon=False)."
-        )
-
     # Extract group information
     # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
     # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
