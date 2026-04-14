@@ -769,7 +769,7 @@ def persistent_all_reduce_ll128(
         # Single coalesced 128-byte store — atomic on cache line boundary
         tl.store(staging_ptr + line_base + line_offsets, line, cache_modifier=".wt")
 
-    # --- Phase 2: Read from all peers, poll flag, reduce ---
+    # --- Phase 2: Read from all peers, poll flag (via full cache line read), reduce ---
     for line_idx in range(pid, num_lines, COMM_SMS):
         data_start = line_idx * PAYLOAD
         line_base = line_idx * LINE
@@ -779,21 +779,30 @@ def persistent_all_reduce_ll128(
         for r in tl.static_range(world_size):
             remote_rank = rank_start + r * rank_stride
 
-            # Poll flag word (element 31 of the cache line)
-            # Use volatile to bypass L2 cache and see cross-GPU writes
-            flag_ptr = staging_ptr + line_base + PAYLOAD
-            flag_val = iris.load(flag_ptr, iris_rank, remote_rank, heap_bases, volatile=True)
-            while flag_val < epoch:
-                flag_val = iris.load(flag_ptr, iris_rank, remote_rank, heap_bases, volatile=True)
-
-            # Flag matched — read full cache line (volatile to bypass L2)
+            # Read the full 128-byte cache line (32 f32) and check flag (element 31)
+            # Use cache_modifier=".cv" to bypass all GPU caches for cross-GPU coherence
             remote_line = iris.load(
                 staging_ptr + line_base + line_offsets,
                 iris_rank,
                 remote_rank,
                 heap_bases,
-                volatile=True,
+                cache_modifier=".cv",
             )
+            # Extract flag value (element PAYLOAD = element 31)
+            flag_vals = tl.where(line_offsets == PAYLOAD, remote_line, 0.0)
+            flag_val = tl.sum(flag_vals)
+            while flag_val < epoch:
+                remote_line = iris.load(
+                    staging_ptr + line_base + line_offsets,
+                    iris_rank,
+                    remote_rank,
+                    heap_bases,
+                    cache_modifier=".cv",
+                )
+                flag_vals = tl.where(line_offsets == PAYLOAD, remote_line, 0.0)
+                flag_val = tl.sum(flag_vals)
+
+            # Flag matched — data words 0..30 are valid (same cache line load)
             # Mask out flag position so it doesn't pollute the sum
             acc += tl.where(is_data, remote_line, 0.0)
 
