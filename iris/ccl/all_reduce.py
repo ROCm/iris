@@ -17,6 +17,16 @@ from iris.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
 
+# Conditional import for Gluon
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+    from iris.experimental.iris_gluon import IrisDeviceCtx
+
+    GLUON_AVAILABLE = True
+except ImportError:
+    GLUON_AVAILABLE = False
+
 # Variant types
 VARIANT_ATOMIC = "atomic"
 VARIANT_RING = "ring"
@@ -967,6 +977,135 @@ def persistent_all_reduce_two_shot(
                     )
 
 
+if GLUON_AVAILABLE:
+
+    @gluon.jit
+    def chiplet_transform_chunked_gluon(
+        pid, num_xcds: gl.constexpr, num_workgroups: gl.constexpr, chunk_size: gl.constexpr
+    ):
+        if pid > (num_workgroups // (num_xcds * chunk_size)) * (num_xcds * chunk_size):
+            return pid
+        local_pid = pid // num_xcds
+        chunk_idx = local_pid // chunk_size
+        pos_in_chunk = local_pid % chunk_size
+        xcd = pid % num_xcds
+        new_pid = chunk_idx * num_xcds * chunk_size + xcd * chunk_size + pos_in_chunk
+        return new_pid
+
+    @gluon.jit
+    def persistent_all_reduce_ll_gluon(
+        IrisDeviceCtx: gl.constexpr,
+        context_tensor,
+        input_ptr,
+        output_ptr,
+        flags_ptr,
+        epoch,
+        M,
+        N,
+        stride_in_m,
+        stride_in_n,
+        stride_out_m,
+        stride_out_n,
+        group_rank: gl.constexpr,
+        iris_rank: gl.constexpr,
+        world_size: gl.constexpr,
+        rank_start: gl.constexpr,
+        rank_stride: gl.constexpr,
+        BLOCK_SIZE_M: gl.constexpr,
+        BLOCK_SIZE_N: gl.constexpr,
+        GROUP_SIZE_M: gl.constexpr,
+        COMM_SMS: gl.constexpr,
+        NUM_XCDS: gl.constexpr,
+        CHUNK_SIZE: gl.constexpr,
+        THREADS_PER_WARP: gl.constexpr,
+        WARPS_PER_CTA: gl.constexpr,
+    ):
+        """
+        Low-latency all-reduce using Gluon with flat-2D tiling.
+
+        Same algorithm as the Triton LL variant: per-rank epoch flags for
+        in-kernel synchronization, every rank reads all peers and reduces locally.
+
+        Gluon advantages: hoisted heap_bases, explicit BlockedLayout for
+        guaranteed dwordx4 vectorization, manual ptr_delta to avoid redundant
+        heap_bases loads.
+        """
+        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=False)
+        pid = gl.program_id(0)
+
+        if NUM_XCDS != 1:
+            pid = chiplet_transform_chunked_gluon(pid, NUM_XCDS, COMM_SMS, CHUNK_SIZE)
+
+        # --- Phase 1: Signal readiness to all peers ---
+        if pid == 0:
+            gl.atomic_xchg(flags_ptr + group_rank, epoch, sem="release", scope="sys")
+            for i in gl.static_range(world_size):
+                remote_rank = rank_start + i * rank_stride
+                ctx.atomic_xchg(flags_ptr + group_rank, epoch, remote_rank, sem="release", scope="sys")
+
+        # --- Phase 2: Wait for all peers to be ready ---
+        for i in gl.static_range(world_size):
+            while gl.atomic_add(flags_ptr + i, 0, sem="acquire", scope="sys") < epoch:
+                pass
+
+        # --- Phase 3: Read-reduce-write (flat-2D tiling) ---
+        num_pid_m = gl.cdiv(M, BLOCK_SIZE_M)
+        num_pid_n = gl.cdiv(N, BLOCK_SIZE_N)
+        total_tiles = num_pid_m * num_pid_n
+
+        TOTAL_ELEMS: gl.constexpr = BLOCK_SIZE_M * BLOCK_SIZE_N
+        ELEMS_PER_THREAD: gl.constexpr = TOTAL_ELEMS // (THREADS_PER_WARP * WARPS_PER_CTA)
+        flat_layout: gl.constexpr = gl.BlockedLayout(
+            [ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0]
+        )
+
+        # Hoist local heap base outside the tile loop
+        local_base = gl.load(ctx.heap_bases + iris_rank)
+
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            # Swizzled tile index computation
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+            # Flat index -> 2D row/col within tile
+            flat_idx = gl.arange(0, TOTAL_ELEMS, layout=flat_layout)
+            row_local = flat_idx // BLOCK_SIZE_N
+            col_local = flat_idx % BLOCK_SIZE_N
+
+            row = pid_m * BLOCK_SIZE_M + row_local
+            col = pid_n * BLOCK_SIZE_N + col_local
+            mask = (row < M) & (col < N)
+
+            input_offsets = row * stride_in_m + col * stride_in_n
+            output_offsets = row * stride_out_m + col * stride_out_n
+
+            # Stagger starting rank per CTA to spread load
+            start_rank_idx = pid % world_size
+            start_rank_global = rank_start + start_rank_idx * rank_stride
+
+            # First load: use ctx.load for initial rank
+            base_ptr = input_ptr + input_offsets
+            acc = ctx.load(base_ptr, start_rank_global, mask=mask, other=0.0).to(gl.float32)
+
+            # Remaining ranks: hoisted ptr_delta for efficiency
+            for i in gl.static_range(1, world_size):
+                remote_rank_idx = (start_rank_idx + i) % world_size
+                remote_rank = rank_start + remote_rank_idx * rank_stride
+                target_base = gl.load(ctx.heap_bases + remote_rank)
+                ptr_delta = target_base - local_base
+                remote_ptrs_int = tl.cast(base_ptr, gl.uint64) + ptr_delta
+                remote_ptrs = tl.cast(remote_ptrs_int, base_ptr.dtype)
+                acc += gl.load(remote_ptrs, mask=mask, other=0.0).to(gl.float32)
+
+            # Write reduced result locally
+            out_ptr = output_ptr + output_offsets
+            gl.store(out_ptr, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt")
+
+
 def all_reduce(
     output_tensor,
     input_tensor,
@@ -1279,37 +1418,87 @@ def all_reduce(
     elif variant == VARIANT_LL:
         workspace.ll_epoch += 1
         ar_block_n = max(config.block_size_n, 128)
-        iris_launch(
-            persistent_all_reduce_ll,
-            (config.comm_sms,),
-            input_tensor,
-            output_tensor,
-            workspace.flags,
-            workspace.ll_epoch,
-            M,
-            N,
-            stride_in_m,
-            stride_in_n,
-            stride_out_m,
-            stride_out_n,
-            heap_bases,
-            rank_in_group,
-            rank_global,
-            world_size,
-            rank_start,
-            rank_stride,
-            config.block_size_m,
-            ar_block_n,
-            config.swizzle_size,
-            config.comm_sms,
-            config.num_xcds,
-            config.chunk_size,
-            num_warps=8,
-            num_stages=1,
-            algorithm="all_reduce",
-            rank=rank_global,
-            dtype=input_tensor.dtype,
-        )
+
+        if config.use_gluon and GLUON_AVAILABLE:
+            # Gluon path: flat-2D tiling with explicit BlockedLayout
+            block_m = config.block_size_m
+            block_n = ar_block_n
+            total_elems = block_m * block_n
+            threads_per_cta = config.threads_per_warp * config.num_warps
+            if total_elems < threads_per_cta or total_elems % threads_per_cta != 0:
+                raise ValueError(
+                    f"Gluon LL requires block_size_m * block_size_n to be a "
+                    f"multiple of threads_per_warp * num_warps ({threads_per_cta}), "
+                    f"got {block_m} * {block_n} = {total_elems}."
+                )
+            context_tensor = ctx.get_device_context()
+            iris_launch(
+                persistent_all_reduce_ll_gluon,
+                (config.comm_sms,),
+                IrisDeviceCtx,
+                context_tensor,
+                input_tensor,
+                output_tensor,
+                workspace.flags,
+                workspace.ll_epoch,
+                M,
+                N,
+                stride_in_m,
+                stride_in_n,
+                stride_out_m,
+                stride_out_n,
+                rank_in_group,
+                rank_global,
+                world_size,
+                rank_start,
+                rank_stride,
+                block_m,
+                block_n,
+                config.swizzle_size,
+                config.comm_sms,
+                config.num_xcds,
+                config.chunk_size,
+                config.threads_per_warp,
+                config.num_warps,
+                num_stages=config.num_stages,
+                num_warps=config.num_warps,
+                waves_per_eu=config.waves_per_eu,
+                algorithm="all_reduce",
+                rank=rank_global,
+                dtype=input_tensor.dtype,
+            )
+        else:
+            iris_launch(
+                persistent_all_reduce_ll,
+                (config.comm_sms,),
+                input_tensor,
+                output_tensor,
+                workspace.flags,
+                workspace.ll_epoch,
+                M,
+                N,
+                stride_in_m,
+                stride_in_n,
+                stride_out_m,
+                stride_out_n,
+                heap_bases,
+                rank_in_group,
+                rank_global,
+                world_size,
+                rank_start,
+                rank_stride,
+                config.block_size_m,
+                ar_block_n,
+                config.swizzle_size,
+                config.comm_sms,
+                config.num_xcds,
+                config.chunk_size,
+                num_warps=8,
+                num_stages=1,
+                algorithm="all_reduce",
+                rank=rank_global,
+                dtype=input_tensor.dtype,
+            )
 
     elif variant == VARIANT_LL128:
         workspace.ll_epoch += 1
