@@ -58,9 +58,11 @@ class FusedConfig:
     cache_modifier_b: str = ".ca"
     allow_tf32: bool = True
 
-    # CCL-specific parameters
+    # Collective parameters
+    ksplit: bool = False  # K-sharded inputs (A is M×K_local per rank)
     all_reduce_variant: str = "two_shot"  # atomic, ring, one_shot, two_shot, spinlock
-    all_reduce_num_rings: int = 1
+    all_reduce_num_rings: int = 1  # concurrent rings (ring variant only)
+    reduce_scatter_variant: str = "two_shot"  # atomic, two_shot
 
     def validate(self, world_size: Optional[int] = None):
         """
@@ -91,6 +93,13 @@ class FusedConfig:
         valid_variants = ["atomic", "ring", "one_shot", "two_shot", "spinlock"]
         if self.all_reduce_variant not in valid_variants:
             raise ValueError(f"all_reduce_variant must be one of {valid_variants}, got {self.all_reduce_variant}")
+
+        # Validate reduce_scatter_variant
+        valid_rs_variants = ["atomic", "two_shot"]
+        if self.reduce_scatter_variant not in valid_rs_variants:
+            raise ValueError(
+                f"reduce_scatter_variant must be one of {valid_rs_variants}, got {self.reduce_scatter_variant}"
+            )
 
         # Ring variant requires block_size_n divisible by world_size
         if self.all_reduce_variant == "ring" and world_size is not None:

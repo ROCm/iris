@@ -6,6 +6,16 @@ High-level API for fused matrix multiplication and reduce-scatter.
 
 This module provides a torch-like interface for GEMM+Reduce-Scatter operations,
 automatically inferring dimensions, strides, and hardware parameters.
+
+Two reduce-scatter variants are supported:
+
+  - "two_shot" (default): Each rank has replicated A (M, K) and B (K, N).
+    Computes full GEMM to aux_buffer, signals via locks, then pulls and reduces
+    tiles from all ranks. Needs aux_buffer + locks workspace.
+
+  - "atomic": Each rank has K-sharded A (M, K_local) and full B (K_local, N).
+    Computes partial GEMM and atomic_adds directly to the destination rank's
+    output buffer via the symmetric heap. No workspace needed.
 """
 
 from typing import Optional
@@ -13,7 +23,7 @@ import torch
 import triton
 import triton.language as tl
 
-from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
+from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
@@ -31,6 +41,7 @@ def _fused_matmul_reduce_scatter_kernel(
     locks,
     M,
     N,
+    N_local,
     K,
     stride_am,
     stride_ak,
@@ -44,78 +55,93 @@ def _fused_matmul_reduce_scatter_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
     EVEN_K: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    VARIANT: tl.constexpr,
 ):
     """
-    Fused GEMM + Reduce-Scatter kernel.
+    Unified fused GEMM + Reduce-Scatter kernel.
 
-    Computes C = A @ B and then performs reduce-scatter on the result.
-    Each rank computes the full GEMM but only keeps its assigned tiles after reduction.
+    Supports two variants controlled by the VARIANT constexpr:
 
-    Args:
-        A: Pointer to input matrix A of shape (M, K) - replicated across ranks
-        B: Pointer to input matrix B of shape (K, N) - replicated across ranks
-        C: Pointer to output matrix C of shape (M, N) - will contain reduced result for assigned tiles
-        aux_buffer: Auxiliary buffer for intermediate GEMM results
-        locks: Pointer to locks array (one lock per tile)
-        M: Number of rows in A and C
-        N: Number of columns in B and C
-        K: Number of columns in A and rows in B
-        stride_am, stride_ak: Strides for A tensor
-        stride_bk, stride_bn: Strides for B tensor
-        stride_cm, stride_cn: Strides for C tensor
-        context_tensor: Device context tensor for RMA operations
-        cur_rank: Current rank
-        world_size: Total number of ranks
-        BLOCK_SIZE_M: Block size for M dimension
-        BLOCK_SIZE_N: Block size for N dimension
-        BLOCK_SIZE_K: Block size for K dimension
-        EVEN_K: Whether K is evenly divisible by BLOCK_SIZE_K
+      VARIANT == "atomic":
+        K-split approach. Each rank has A_shard (M, K_local) and B (K_local, N).
+        Computes partial GEMM and atomic_adds directly to the destination rank's
+        C buffer. No aux_buffer or locks needed.
+
+      VARIANT == "two_shot":
+        Replicated approach. Each rank has identical A (M, K) and B (K, N).
+        Computes full GEMM to aux_buffer, signals via locks, then iris.x.reduce_scatter
+        pulls and reduces tiles across ranks.
     """
-    pid = tl.program_id(axis=0)
-    num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
-    pid_m = pid // num_tiles_n
-    pid_n = pid % num_tiles_n
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # GEMM using tritonblas stages
-    # ═══════════════════════════════════════════════════════════════════════
     tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
     tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
     gemm_ctx = GemmContext(
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
         BLOCK_SIZE_K,
-        num_sms=1,
+        num_sms=NUM_SMS,
+        num_xcds=NUM_XCDS,
+        group_size_m=GROUP_SIZE_M,
         even_k=EVEN_K,
+        allow_tf32=ALLOW_TF32,
     )
-    out_tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-    acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
-
-    # Get row and column indices from tile
-    rm, rn = out_tile.indices()
-
-    c = acc.to(C.type.element_ty)
-
-    # Store GEMM result to aux_buffer
-    temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-    tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
-    tl.debug_barrier()
-
-    # Signal tile is ready
-    tile_id = pid_m * num_tiles_n + pid_n
-    lock_ptr = locks + tile_id
-    tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")
-
-    # Create tile object and context
-    tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+    sched = ScheduleContext(M, N, K, gemm_ctx)
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
-    # Create tensor views for source and destination
-    src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
-    dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
+    num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_tiles_n_local = tl.cdiv(N_local, BLOCK_SIZE_N)
 
-    iris.x.reduce_scatter(tile_obj, src_view, dst_view, locks, ctx)
+    # Two-shot needs views for the pull-based RS
+    if VARIANT == "two_shot":
+        src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
+        dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
+
+    start, total, stride = sched.persistent_tile_range()
+    for tile_idx in range(start, total, stride):
+        out_tile = sched.get_tile_from_idx(tile_idx)
+
+        # ── GEMM (shared across both variants) ──
+        acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
+        c = acc.to(C.type.element_ty)
+
+        # ── Reduction (variant-specific) ──
+        if VARIANT == "atomic":
+            # Push partial sum directly to dest rank's output buffer
+            pid_n = out_tile.pid_n
+            dest_rank = pid_n // num_tiles_n_local
+            local_pid_n = pid_n % num_tiles_n_local
+
+            rm = out_tile.pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            rn = local_pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            mask = (rm[:, None] < M) & (rn[None, :] < N_local)
+            C_ptr = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+
+            iris.atomic_add(
+                C_ptr,
+                c,
+                cur_rank,
+                dest_rank,
+                ctx.heap_bases,
+                mask=mask,
+                sem="relaxed",
+            )
+        else:
+            # Store to aux_buffer, signal lock, pull-based RS
+            rm, rn = out_tile.indices()
+            temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+            tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
+            tl.debug_barrier()
+
+            tile_id = out_tile.pid_m * num_tiles_n + out_tile.pid_n
+            lock_ptr = locks + tile_id
+            tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")
+
+            tile_obj = iris.x.Tile(out_tile.pid_m, out_tile.pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+            iris.x.reduce_scatter(tile_obj, src_view, dst_view, locks, ctx)
 
 
 def matmul_reduce_scatter_preamble(
@@ -127,7 +153,7 @@ def matmul_reduce_scatter_preamble(
     workspace: Optional[FusedWorkspace] = None,
 ) -> FusedWorkspace:
     """
-    Allocate and reset temporary buffers for matmul_reduce_scatter.
+    Allocate and reset temporary buffers for matmul_reduce_scatter (two_shot variant).
 
     Args:
         shmem: Iris shmem context
@@ -200,59 +226,76 @@ def matmul_reduce_scatter(
     """
     Fused matrix multiplication and reduce-scatter.
 
-    Computes: C = reduce_scatter(A @ B) where each rank keeps only its assigned tiles.
+    Two independent config axes:
 
-    This is equivalent to:
-    1. All ranks compute: result = A @ B
-    2. All ranks reduce: reduced_result = sum(result across ranks)
-    3. Each rank keeps only its contiguous block of tiles from reduced_result
+      config.ksplit (input sharding):
+        False (default): A (M, K) and B (K, N) replicated. C is (M, N).
+        True: A is K-sharded (M, K_local), B is (K_local, N). C is (M, N_local).
+
+      config.reduce_scatter_variant (reduction algorithm):
+        "two_shot" (default): Store to aux_buffer, signal locks, pull-based RS.
+        "atomic": atomic_add directly to dest rank's output buffer.
 
     Args:
         shmem: Iris shmem context
-        C: Output tensor (M, N) - will contain reduced tiles for this rank
-        A: Input matrix A (M, K) - replicated across ranks
-        B: Input matrix B (K, N) - replicated across ranks
+        C: Output tensor
+        A: Input matrix A
+        B: Input matrix B
         async_op: If True, returns immediately without synchronization
         config: Optional FusedConfig for tuning. If None, uses defaults.
-        workspace: Optional workspace to reuse. If None, allocates new.
+        workspace: Optional workspace to reuse (non-ksplit only). If None, allocates new.
 
     Returns:
-        FusedWorkspace with allocated temporary buffers.
+        FusedWorkspace with operation metadata.
     """
     if config is None:
         config = FusedConfig()
-
-    workspace = matmul_reduce_scatter_preamble(shmem, C, A, B, config, workspace)
 
     M, K = A.shape[:2]
     N = B.shape[1]
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
+    variant = config.reduce_scatter_variant
 
-    num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
-    num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    total_tiles = num_pid_m * num_pid_n
-
-    if workspace.locks is not None and workspace.locks.numel() < total_tiles:
-        raise ValueError(
-            f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
-            f"Pre-allocate workspace with the smallest block sizes you intend to use."
-        )
-
-    grid = (total_tiles,)
+    device = A.device
+    num_sms = config.num_sms
+    if num_sms is None:
+        props = torch.cuda.get_device_properties(device)
+        num_sms = props.multi_processor_count
 
     even_k = K % config.block_size_k == 0
 
+    # ── Shape setup: ksplit controls input/output sharding ──
+    if config.ksplit:
+        N_local = N // world_size
+        assert N % world_size == 0, f"N ({N}) must be divisible by world_size ({world_size})"
+        assert C.shape == (M, N_local), f"Output C must be ({M}, {N_local}) for ksplit, got {C.shape}"
+    else:
+        N_local = N
+
+    # ── Workspace setup: two_shot needs aux_buffer + locks ──
+    aux_buffer = None
+    locks = None
+    if variant == "two_shot":
+        workspace = matmul_reduce_scatter_preamble(shmem, C, A, B, config, workspace)
+        aux_buffer = workspace.aux_buffer
+        locks = workspace.locks
+    else:
+        C.zero_()
+        shmem.barrier()
+
+    # ── Single kernel launch ──
     iris_launch(
         _fused_matmul_reduce_scatter_kernel,
-        grid,
+        (num_sms,),
         A,
         B,
         C,
-        workspace.aux_buffer,
-        workspace.locks,
+        aux_buffer,
+        locks,
         M,
         N,
+        N_local,
         K,
         A.stride(0),
         A.stride(1),
@@ -266,7 +309,12 @@ def matmul_reduce_scatter(
         config.block_size_m,
         config.block_size_n,
         config.block_size_k,
+        config.group_size_m,
+        num_sms,
+        config.num_xcds,
         even_k,
+        config.allow_tf32,
+        variant,
         algorithm="matmul_reduce_scatter",
         rank=rank,
         dtype=A.dtype,
@@ -276,4 +324,13 @@ def matmul_reduce_scatter(
         torch.cuda.synchronize()
         shmem.barrier()
 
+    if workspace is None:
+        workspace = FusedWorkspace()
+    workspace.operation = f"matmul_reduce_scatter_{variant}"
+    if config.ksplit:
+        workspace.operation += "_ksplit"
+    workspace.shape = (M, N, K)
+    workspace.dtype = A.dtype
+    workspace.world_size = world_size
+    workspace.prepared = True
     return workspace
