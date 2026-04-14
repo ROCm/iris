@@ -139,35 +139,34 @@ class Iris:
         self.copy_engines = anvil.AnvilLib.get_instance()
         self.copy_engines.init()
 
-        # connect to all peers
+        # connect to all peers (including local)
         # TODO only connect local ranks
         # TODO get size
         context_size = 6
         self.copy_engines_device_ctx = torch.zeros((num_ranks, context_size), dtype=torch.uint64, device=self.device)
 
         for rank in range(num_ranks):
-            if rank != cur_rank:
-                # Device-initiated queues
-                self.copy_engines.connect(cur_rank, rank, 1, allocate_on_host=False)
-                # Host-initiated queues
-                self.copy_engines.connect(cur_rank, rank, 1, allocate_on_host=True)
+            # Device-initiated queues
+            self.copy_engines.connect(cur_rank, rank, 1, allocate_on_host=False)
+            # Host-initiated queues
+            self.copy_engines.connect(cur_rank, rank, 1, allocate_on_host=True)
 
-                queue = self.copy_engines.get_sdma_queue(cur_rank, rank, 0)
-                handle = queue.device_ctx()
-                self.info(f"---- Queue {rank} ------------")
-                self.info(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
-                self.info(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
-                self.info(f"wptr {handle.wptr:#x} at {id(handle.wptr):#x}")
-                self.info(f"doorbell {handle.doorbell:#x} at {id(handle.doorbell):#x}")
-                self.info(f"cached_write_ptr {handle.cached_wptr:#x} at {id(handle.cached_wptr):#x}")
-                self.info(f"committed_write_ptr {handle.committed_wptr:#x} at {id(handle.committed_wptr):#x}")
+            queue = self.copy_engines.get_sdma_queue(cur_rank, rank, 0)
+            handle = queue.device_ctx()
+            self.info(f"---- Queue {rank} ------------")
+            self.info(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
+            self.info(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
+            self.info(f"wptr {handle.wptr:#x} at {id(handle.wptr):#x}")
+            self.info(f"doorbell {handle.doorbell:#x} at {id(handle.doorbell):#x}")
+            self.info(f"cached_write_ptr {handle.cached_wptr:#x} at {id(handle.cached_wptr):#x}")
+            self.info(f"committed_write_ptr {handle.committed_wptr:#x} at {id(handle.committed_wptr):#x}")
 
-                self.copy_engines_device_ctx[rank][0] = handle.queue_buf
-                self.copy_engines_device_ctx[rank][1] = handle.rptr
-                self.copy_engines_device_ctx[rank][2] = handle.wptr
-                self.copy_engines_device_ctx[rank][3] = handle.doorbell
-                self.copy_engines_device_ctx[rank][4] = handle.cached_wptr
-                self.copy_engines_device_ctx[rank][5] = handle.committed_wptr
+            self.copy_engines_device_ctx[rank][0] = handle.queue_buf
+            self.copy_engines_device_ctx[rank][1] = handle.rptr
+            self.copy_engines_device_ctx[rank][2] = handle.wptr
+            self.copy_engines_device_ctx[rank][3] = handle.doorbell
+            self.copy_engines_device_ctx[rank][4] = handle.cached_wptr
+            self.copy_engines_device_ctx[rank][5] = handle.committed_wptr
         # Initialize CCL interface
         self.ccl = self.CCL(self)
 
@@ -2641,7 +2640,7 @@ def atomic_add(
         packet_offset_bytes = base + offset
 
         # Place command packet
-        anvil.place_atomic_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val)
+        anvil.place_atomic_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, val)
 
         # Submit command
         pending_wptr = base + offset + command_in_bytes
@@ -2788,7 +2787,7 @@ def put_signal(
     # Place ATOMIC packet immediately after (32 bytes)
     atomic_offset_bytes = packet_offset_bytes + 80
     flag_dst_ptr_val = translated_flag_ptr.to(tl.uint64)
-    anvil.place_atomic_packet(queue_ptr_u32, atomic_offset_bytes, flag_dst_ptr_val)
+    anvil.place_atomic_packet(queue_ptr_u32, atomic_offset_bytes, flag_dst_ptr_val, flag_value)
 
     # Submit both packets in one doorbell ring
     pending_wptr = base + offset + command_in_bytes
@@ -2897,7 +2896,7 @@ def put_signal_rect(
 
     # Place ATOMIC packet immediately after (32 bytes)
     atomic_offset_bytes = packet_offset_bytes + 80
-    anvil.place_atomic_packet(queue_ptr_u32, atomic_offset_bytes, flag_dst_ptr_val)
+    anvil.place_atomic_packet(queue_ptr_u32, atomic_offset_bytes, flag_dst_ptr_val, flag_value)
 
     # Submit both packets in one doorbell ring
     pending_wptr = base + offset + command_in_bytes

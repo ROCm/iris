@@ -65,12 +65,12 @@ def _batch_poster_kernel(
     M_TILES_PER_BATCH: tl.constexpr,
     TRACE: tl.constexpr,
 ):
-    """Post one SDMA transfer per (batch, remote-rank)."""
+    """Post one SDMA transfer per (batch, rank) including local copy."""
     zero = tl.program_id(0) * 0
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size, tracing=TRACE)
 
     pid = tl.program_id(0)
-    dst_rank = pid if pid < cur_rank else pid + 1
+    dst_rank = pid
 
     if TRACE:
         _trace_handle = ctx.tracing.record_event_start(
@@ -196,12 +196,11 @@ def _nonpersistent_xcd_comm_gemm_kernel(
     zero = raw_pid * 0
 
     if raw_pid < COMM_WGS:
-        # Map poster WG to one remote rank. Extra COMM_WGS beyond the number
-        # of remote peers simply go idle.
-        dst_rank_raw = raw_pid
-        if dst_rank_raw >= world_size - 1:
+        # Map poster WG to one rank (including local). Extra COMM_WGS beyond
+        # world_size simply go idle.
+        dst_rank = raw_pid
+        if dst_rank >= world_size:
             return
-        dst_rank = dst_rank_raw if dst_rank_raw < cur_rank else dst_rank_raw + 1
 
         ctx = None
         if TRACE:
@@ -555,15 +554,7 @@ def all_gather_matmul_copy_engine(
             shmem, A_sharded, B, config, k_per_flag, m_tiles_per_batch, staged_a_layout
         )
 
-    # Keep the local K shard resident in its global-K slot of staged_a so the
-    # batched GEMM paths can read A entirely from staged_a.
-    # TODO this is cheat
-    rank = shmem.get_rank()
-    k_start = rank * K_local
-    k_end = (rank + 1) * K_local
-    workspace.aux_buffer[:, k_start:k_end].copy_(A_sharded)
-
-    # Note: Local K-blocks already copied to staged_a in preamble
+    # Local K-blocks will be copied via SDMA (host or device initiated)
     stride_am, stride_ak = A_sharded.stride()
     stride_bk, stride_bn = B.stride()
     stride_cm, stride_cn = output_tensor.stride()
@@ -659,7 +650,7 @@ def all_gather_matmul_copy_engine(
     wait_config = create_wait_config(
         wait_buffer=workspace.locks,
         expected_buffer=workspace.wait_expected,
-        expected_inc=world_size - 1,
+        expected_inc=world_size,
         map_type="block",
         block_group_m=m_tiles_per_batch,
         block_group_n=num_tiles_n,
@@ -685,7 +676,7 @@ def all_gather_matmul_copy_engine(
         # Device-initiated: keep the known-good split path in production.
         # The combined COMM_WGS+GEMM kernel remains in this file as an
         # experimental option, but we do not use it by default.
-        poster_grid = world_size - 1
+        poster_grid = world_size
         _batch_poster_kernel[(poster_grid,)](
             A_sharded,
             workspace.aux_buffer,
@@ -727,9 +718,6 @@ def all_gather_matmul_copy_engine(
             nonlocal tile_transfer_count
 
             for dst_rank in range(world_size):
-                if dst_rank == rank:
-                    continue
-
                 flag_idx = batch_id
                 flag_addr_local = flags_base_addr + flag_idx * 4
                 flag_addr_remote = shmem.translate(flag_addr_local, rank, dst_rank)
@@ -811,8 +799,6 @@ def all_gather_matmul_copy_engine(
 
         # Ensure all SDMA operations complete
         for dst_rank in range(world_size):
-            if dst_rank == rank:
-                continue
             anvil_lib.host_quiet(rank, dst_rank, 0)
 
         sdma_end_time = time.perf_counter()
@@ -830,7 +816,7 @@ def all_gather_matmul_copy_engine(
             sample_flags = workspace.locks[:sample_count].cpu().tolist()
             shmem.info(
                 f"[Rank {rank}] Flag sample after SDMA quiet: "
-                f"expected_inc={world_size - 1}, flags[:{sample_count}]={sample_flags}"
+                f"expected_inc={world_size}, flags[:{sample_count}]={sample_flags}"
             )
 
     # ======================================================================
