@@ -34,6 +34,7 @@ from iris.ops.all_gather_matmul_copy_engine import (
     all_gather_matmul_copy_engine_preamble,
 )
 from iris.ops import FusedConfig
+from tritonblas.matmul import _make_matmul_selector
 
 _DERIVE_AVAILABLE = False
 try:
@@ -314,50 +315,44 @@ def parse_args():
     return vars(parser.parse_args())
 
 
-def _apply_model_defaults(args, world_size, dtype_bytes=2):
-    """Fill None-valued kernel parameters with model-derived predictions.
+def _apply_model_defaults(args, world_size, dtype, device, dtype_bytes=2):
+    """Fill None-valued kernel parameters using tritonBLAS selector.
 
-    Returns a list of parameter names that were set by the model.
+    Priority:
+    1. User-specified values (keep as-is)
+    2. tritonBLAS selector (always)
+
+    Returns a list of parameter names that were set by the selector.
     """
     applied = []
-    if _DERIVE_AVAILABLE:
-        try:
-            # Determine device_initiated mode for derive():
-            # - If user forced a mode with --force-*-initiated, use that
-            # - Otherwise, auto-select (None)
-            if args.get("force_device_mode"):
-                device_initiated_arg = True
-            elif args.get("force_host_mode"):
-                device_initiated_arg = False
-            else:
-                device_initiated_arg = None
 
-            p = _derive_params(
-                args["m"],
-                args["n"],
-                args["k"],
-                world_size,
-                link_bw=50.0,
-                num_cus=DEFAULT_NUM_CUS,
-                peak_tflops=DEFAULT_PEAK_TFLOPS_FP16,
-                hbm_bw_gbps=DEFAULT_HBM_BW_GBPS,
-                l2_size=DEFAULT_L2_SIZE_BYTES,
-                scheduling_factor=DEFAULT_SCHEDULING_FACTOR,
-                dtype_bytes=dtype_bytes,
-                device_initiated=device_initiated_arg,
-            )
-            for name in _MODEL_PARAMS:
-                if args.get(name) is None and name in p:
-                    args[name] = p[name]
-                    applied.append(name)
-        except Exception:
-            pass
+    # Always use tritonBLAS selector for block sizes
+    selector = _make_matmul_selector(
+        args["m"],  # M_local
+        args["n"],
+        args["k"],
+        dtype,
+        dtype,
+        dtype,
+        device,
+        streamk=False,
+    )
 
-    for name, fallback in _FALLBACK_DEFAULTS.items():
-        if args.get(name) is None:
-            args[name] = fallback
+    # Only apply if not user-specified
+    if args.get("block_size_m") is None:
+        args["block_size_m"] = selector.block_m
+        applied.append("block_size_m (tritonBLAS)")
+    if args.get("block_size_n") is None:
+        args["block_size_n"] = selector.block_n
+        applied.append("block_size_n (tritonBLAS)")
+    if args.get("block_size_k") is None:
+        args["block_size_k"] = selector.block_k
+        applied.append("block_size_k (tritonBLAS)")
+    if args.get("group_size_m") is None:
+        args["group_size_m"] = selector.group_m
+        applied.append("group_size_m (tritonBLAS)")
 
-    return applied
+    return selector, applied
 
 
 def _worker(args):
@@ -397,19 +392,55 @@ def _worker(args):
     datatype = datatype_map.get(args["datatype"], torch.float16)
     dtype_bytes = torch.tensor([], dtype=datatype).element_size()
 
-    model_applied = _apply_model_defaults(args, world_size, dtype_bytes)
+    # Get device for tritonBLAS selector
+    device = torch.device(f"cuda:{local_rank}")
+
+    # TODO why are we passing datatype and dtype?
+    selector, model_applied = _apply_model_defaults(args, world_size, datatype, device, dtype_bytes)
     if rank == 0 and model_applied:
-        shmem.info(f"Model-derived defaults: {', '.join(model_applied)}")
+        shmem.info(f"tritonBLAS selector applied: {', '.join(model_applied)}")
+
+    if args.get("force_device_mode") and args.get("force_host_mode"):
+        raise ValueError("Cannot set both --force-device-initiated and --force-host-initiated")
+    if args.get("force_device_mode"):
+        args["device_initiated"] = True
+    elif args.get("force_host_mode"):
+        args["device_initiated"] = False
+    elif "device_initiated" not in args:
+        args["device_initiated"] = _FALLBACK_DEFAULTS["device_initiated"]
+
     if rank == 0:
-        param_summary = " ".join(f"{k}={args[k]}" for k in _MODEL_PARAMS)
-        device_init_str = f" device_initiated={args.get('device_initiated', False)}"
-        shmem.info(f"Kernel params: {param_summary}{device_init_str}")
+        param_summary = " ".join(f"{k}={args.get(k)}" for k in _MODEL_PARAMS)
+        shmem.info(f"Kernel params: {param_summary}")
 
     M = args["m"]
     N = args["n"]
     K = args["k"]
     K_local = K // world_size
 
+    perf_analysis = None
+    if args.get("m_tiles_per_batch") is None:
+        args["m_tiles_per_batch"] = 1
+
+
+    # Print performance analysis
+    if rank == 0 and perf_analysis is not None:
+        shmem.info("\n" + "=" * 80)
+        shmem.info("PERFORMANCE ANALYSIS")
+        shmem.info("=" * 80)
+        shmem.info(f"Block sizes: {args['block_size_m']}×{args['block_size_n']}×{args['block_size_k']}")
+        num_m_tiles = (M + args["block_size_m"] - 1) // args["block_size_m"]
+        num_n_tiles = (N + args["block_size_n"] - 1) // args["block_size_n"]
+        shmem.info(f"Tiles: {num_m_tiles} M-tiles × {num_n_tiles} N-tiles = {num_m_tiles * num_n_tiles} total")
+        shmem.info(f"\nPer-tile timing:")
+        shmem.info(f"  GEMM:    {perf_analysis['gemm_wg_us']:.2f} μs")
+        shmem.info(f"  Scatter: {perf_analysis['scatter_wg_us']:.2f} μs")
+        shmem.info(f"  Ratio:   {perf_analysis['ratio']:.2f}x")
+        shmem.info(f"\nBottleneck: {perf_analysis['bottleneck'].upper()}")
+        shmem.info(f"m_tiles_per_batch: {args['m_tiles_per_batch']}")
+        shmem.info("=" * 80 + "\n")
+
+    # Create config with parameters
     config_kwargs = {
         "block_size_m": args["block_size_m"],
         "block_size_n": args["block_size_n"],
@@ -430,6 +461,11 @@ def _worker(args):
 
     for key, value in args.items():
         json_writer.add_field(key, value)
+
+    # Write performance analysis to JSON
+    if perf_analysis is not None:
+        for key, value in perf_analysis.items():
+            json_writer.add_field(f"perf_analysis_{key}", value)
 
     # Export actual config values
     json_writer.add_field("block_size_m", config.block_size_m)
@@ -498,6 +534,15 @@ def _worker(args):
     workspace = all_gather_matmul_copy_engine_preamble(
         shmem, A_sharded, B, config, k_per_flag=k_per_flag, m_tiles_per_batch=args["m_tiles_per_batch"]
     )
+    # selector = _make_matmul_selector(
+    #     M, N, K, A_sharded.dtype, B.dtype, A_sharded.dtype, A_sharded.device, streamk=False
+    # )
+    workspace.selector = selector
+    # workspace.tb_num_tiles_m = (M + selector.block_m - 1) // selector.block_m
+    # workspace.tb_num_tiles_n = (N + selector.block_n - 1) // selector.block_n
+    # workspace.tb_num_batches = (workspace.tb_num_tiles_m + args["m_tiles_per_batch"] - 1) // args["m_tiles_per_batch"]
+    # if workspace.locks.numel() != workspace.tb_num_batches:
+    #     workspace.locks = shmem.zeros((workspace.tb_num_batches,), dtype=torch.int32)
 
     # ── Timing ───────────────────────────────────────────────────────────
     comm_stream = torch.cuda.Stream()

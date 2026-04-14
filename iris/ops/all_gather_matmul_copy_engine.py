@@ -18,6 +18,11 @@ import triton
 import triton.language as tl
 import iris
 import iris.x
+from tritonblas.matmul import persistent_matmul_lt, create_wait_config
+from tritonblas.kernels.stages import (
+    Tile as StageTile,
+    make_wait_view,
+)
 
 
 from iris.device_utils import read_realtime
@@ -35,341 +40,92 @@ except (ImportError, AttributeError):
 
 
 @triton.jit
-def _copy_engine_all_gather_matmul_kernel(
+def _batch_poster_kernel(
     A_sharded,
-    B,
-    C,
-    bias_ptr,
     staged_a,
     flags_ptr,
     flag_iteration,
     M,
-    N,
-    K,
     K_local,
     stride_am,
-    stride_ak,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
-    stride_sa_m,  # staged_a stride in M dim
-    stride_sa_k,  # staged_a stride in K dim
-    stride_bias,
+    stride_sa_m,
+    stride_sa_k,
     context_tensor: tl.tensor,
     heap_bases_ptr: tl.tensor,
     copy_engine_ctx: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    NUM_SMS: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
     NUM_M_TILES: tl.constexpr,
-    NUM_TILES_N: tl.constexpr,
-    NUM_K_BLOCKS: tl.constexpr,
-    NUM_K_BLOCKS_LOCAL: tl.constexpr,
-    NUM_REMOTE_K_BLOCKS: tl.constexpr,
-    K_PER_FLAG: tl.constexpr,
-    NUM_K_BLOCK_GROUPS: tl.constexpr,
     M_TILES_PER_BATCH: tl.constexpr,
-    BIAS: tl.constexpr,
-    ALLOW_TF32: tl.constexpr,
     TRACE: tl.constexpr,
-    DEVICE_INITIATED: tl.constexpr,
-    NUM_SDMA_WGS: tl.constexpr,
 ):
-    """
-    Non-persistent GEMM kernel with K-block-group batched transfers.
-
-    Grid: (total_tiles,) - one workgroup per output tile
-    Each workgroup waits for K-block-groups as needed, processing K-blocks in order.
-
-    All K-blocks (local and remote) are loaded from staged_a - no branches.
-    Host pre-copies local K-blocks to staged_a before kernel launch.
-    Host batches same K-block-group across all wave's M-tiles for efficiency.
-    """
-    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
+    """Post one SDMA transfer per (batch, remote-rank)."""
     zero = tl.program_id(0) * 0
-
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size, tracing=TRACE)
 
-    # Device-initiated mode: first NUM_SDMA_WGS pids are SDMA workgroups
     pid = tl.program_id(0)
-
-    if DEVICE_INITIATED and pid < NUM_SDMA_WGS:
-        # SDMA workgroup - posts transfers for one remote rank
-        # Map pid to dst_rank (skip cur_rank)
-        dst_rank_raw = pid
-        dst_rank = dst_rank_raw if dst_rank_raw < cur_rank else dst_rank_raw + 1
-
-        if TRACE:
-            _trace_handle = ctx.tracing.record_event_start(
-                event_id=TraceEvent().wg_sdma,
-                target_rank=dst_rank,
-                address=flags_ptr + tl.arange(0, 1),
-                pid_m=pid,
-                pid_n=zero,
-            )
-
-        # Number of batches (same calculation as host)
-        num_batches = (NUM_M_TILES + M_TILES_PER_BATCH - 1) // M_TILES_PER_BATCH
-        NUM_FLAG_GROUPS_K_TOTAL = (NUM_K_BLOCKS + K_PER_FLAG - 1) // K_PER_FLAG
-
-        # Number of K-flag-groups owned by cur_rank
-        num_k_flag_groups_local = (NUM_K_BLOCKS_LOCAL + K_PER_FLAG - 1) // K_PER_FLAG
-
-        # Element size for pointer arithmetic
-        ptr_dtype = A_sharded.dtype.element_ty
-        if ptr_dtype == tl.float16 or ptr_dtype == tl.bfloat16:
-            elem_size = 2
-        elif ptr_dtype == tl.float32 or ptr_dtype == tl.int32:
-            elem_size = 4
-        elif ptr_dtype == tl.float64 or ptr_dtype == tl.int64:
-            elem_size = 8
-        else:
-            elem_size = 4
-
-        # Loop over batches and K-flag-groups
-        # Use put_signal_rect to transfer entire batch×K-flag-group in one SDMA operation
-        for batch_id in range(num_batches):
-            # Calculate M-tile range for this batch
-            m_tile_start = batch_id * M_TILES_PER_BATCH
-            m_tile_end = min(m_tile_start + M_TILES_PER_BATCH, NUM_M_TILES)
-            num_m_tiles_in_batch = m_tile_end - m_tile_start
-
-            for k_fg_local in range(num_k_flag_groups_local):
-                # Convert local K-flag-group to global
-                k_block_local_start = k_fg_local * K_PER_FLAG
-                k_block_global_start = cur_rank * NUM_K_BLOCKS_LOCAL + k_block_local_start
-                k_fg_global = k_block_global_start // K_PER_FLAG
-
-                # Number of K-blocks in this flag group (handle boundary)
-                num_k_blocks_in_group = min(K_PER_FLAG, NUM_K_BLOCKS_LOCAL - k_block_local_start)
-
-                # Calculate source offset in A_sharded (M, K_local layout)
-                src_m_offset = m_tile_start * BLOCK_SIZE_M
-                src_k_offset = k_block_local_start * BLOCK_SIZE_K
-                src_offset = src_m_offset * stride_am + src_k_offset * stride_ak
-                src_ptr = A_sharded + src_offset
-
-                # Calculate destination offset in staged_a (M, K layout)
-                dst_m_offset = m_tile_start * BLOCK_SIZE_M
-                dst_k_offset = k_block_global_start * BLOCK_SIZE_K
-                dst_offset = dst_m_offset * stride_sa_m + dst_k_offset * stride_sa_k
-                dst_ptr = staged_a + dst_offset
-
-                # Tile dimensions for entire batch
-                tile_height = num_m_tiles_in_batch * BLOCK_SIZE_M
-                tile_width_elements = num_k_blocks_in_group * BLOCK_SIZE_K
-                tile_width_bytes = tile_width_elements * elem_size
-
-                # Source and destination pitches in bytes
-                src_pitch_bytes = stride_am * elem_size
-                dst_pitch_bytes = stride_sa_m * elem_size
-
-                # Flag pointer
-                flag_idx = batch_id * NUM_FLAG_GROUPS_K_TOTAL + k_fg_global
-                flag_ptr = flags_ptr + flag_idx
-
-                # Transfer entire batch×K-flag-group with signal
-                iris.put_signal_rect(
-                    src_ptr,
-                    dst_ptr,
-                    cur_rank,
-                    dst_rank,
-                    heap_bases_ptr,
-                    copy_engine_ctx,
-                    flag_ptr,
-                    1,  # flag_value
-                    width_bytes=tile_width_bytes,
-                    height=tile_height,
-                    src_pitch=src_pitch_bytes,
-                    dst_pitch=dst_pitch_bytes,
-                )
-
-        # SDMA WG done
-        if TRACE:
-            ctx.tracing.record_event_end(_trace_handle)
-        return
-
-    # GEMM workgroup logic
-    # Adjust pid for GEMM tiles if SDMA WGs are present
-    gemm_pid = pid - NUM_SDMA_WGS if DEVICE_INITIATED else pid
-
-    # Non-persistent GEMM: one workgroup per output tile (like hbm_buffer)
-    # Use wave-aware tile assignment with swizzling
-
-    # Wave-aware tile assignment (similar to hbm_buffer's group-based assignment)
-    num_pid_in_group = GROUP_SIZE_M * NUM_TILES_N
-    group_id = gemm_pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    first_pid_m = min(first_pid_m, NUM_M_TILES - 1)
-    group_sz = min(NUM_M_TILES - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((gemm_pid % num_pid_in_group) % group_sz)
-    pid_n = (gemm_pid % num_pid_in_group) // group_sz
-    pid_m = min(pid_m, NUM_M_TILES - 1)
-
-    # Initialize accumulator
-    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-
-    # Calculate which batch this M-tile belongs to
-    # Host batches K-block transfers across M-tiles: batch 0 gets data first, then batch 1, etc.
-    batch_id = pid_m // M_TILES_PER_BATCH
-
-    # M and N tile indices
-    rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-    rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    dst_rank = pid if pid < cur_rank else pid + 1
 
     if TRACE:
         _trace_handle = ctx.tracing.record_event_start(
-            event_id=TraceEvent().wg_gemm,
-            target_rank=cur_rank,
+            event_id=TraceEvent().wg_sdma,
+            target_rank=dst_rank,
             address=flags_ptr + tl.arange(0, 1),
-            pid_m=gemm_pid,
+            pid_m=pid,
             pid_n=zero,
         )
-        _tile_wt = zero.to(tl.int64)  # Wait time for THIS tile only
 
-    # ==================================================================
-    # Process K-blocks in GLOBAL order by K-flag-groups (like hbm_buffer)
-    # Each K-flag-group contains K_PER_FLAG consecutive K-blocks (from all ranks)
-    # ==================================================================
-    # Total K-flag-groups across all ranks
-    NUM_FLAG_GROUPS_K_TOTAL = (NUM_K_BLOCKS + K_PER_FLAG - 1) // K_PER_FLAG
+    ptr_dtype = A_sharded.dtype.element_ty
+    if ptr_dtype == tl.float16 or ptr_dtype == tl.bfloat16:
+        elem_size = 2
+    elif ptr_dtype == tl.float32 or ptr_dtype == tl.int32:
+        elem_size = 4
+    elif ptr_dtype == tl.float64 or ptr_dtype == tl.int64:
+        elem_size = 8
+    else:
+        elem_size = 4
 
-    for k_fg in range(NUM_FLAG_GROUPS_K_TOTAL):
-        # Wait for this K-flag-group (unless all K-blocks in it are local)
-        k_block_start_global = k_fg * K_PER_FLAG
-        # k_block_end_global = min(k_block_start_global + K_PER_FLAG, NUM_K_BLOCKS)
+    num_batches = (NUM_M_TILES + M_TILES_PER_BATCH - 1) // M_TILES_PER_BATCH
+    rows_per_batch = M_TILES_PER_BATCH * BLOCK_SIZE_M
 
-        # Check if any K-block in this group is remote
-        # Assumption enforced by validation: flag groups don't span ranks
-        src_rank = k_block_start_global // NUM_K_BLOCKS_LOCAL
-        is_remote = src_rank != cur_rank
+    for batch_id in range(num_batches):
+        src_m_offset = batch_id * rows_per_batch
+        remaining_rows = M - src_m_offset
+        tile_height = tl.minimum(remaining_rows, rows_per_batch)
 
-        if is_remote:
-            if TRACE:
-                _ws = read_realtime()
+        src_ptr = A_sharded + src_m_offset * stride_am
 
-            flag_idx = batch_id * NUM_FLAG_GROUPS_K_TOTAL + k_fg
-            # Spin until flag reaches expected value for this iteration
-            expected_flag_value = flag_iteration + 1
-            # while tl.atomic_add(flags_ptr + flag_idx, 0, sem="acquire", scope="sys") < expected_flag_value:
-            while tl.load(flags_ptr + flag_idx, cache_modifier=".cv", volatile=True) < expected_flag_value:
-                pass
+        dst_m_offset = src_m_offset
+        dst_k_offset = cur_rank * K_local
+        dst_ptr = staged_a + dst_m_offset * stride_sa_m + dst_k_offset * stride_sa_k
 
-            if TRACE:
-                _tile_wt = _tile_wt + (read_realtime() - _ws)
+        tile_width_bytes = K_local * elem_size
+        src_pitch_bytes = stride_am * elem_size
+        dst_pitch_bytes = stride_sa_m * elem_size
 
-        # Hoist pointer base and stride selection outside loop (constant per flag group)
-        if src_rank == cur_rank:
-            # Local K-blocks: use A_sharded with local K indexing
-            a_base = A_sharded
-            a_stride_m = stride_am
-            a_stride_k = stride_ak
-            k_block_offset = cur_rank * NUM_K_BLOCKS_LOCAL  # Subtract this to get local index
-        else:
-            # Remote K-blocks: use staged_a with global K indexing
-            a_base = staged_a
-            a_stride_m = stride_sa_m
-            a_stride_k = stride_sa_k
-            k_block_offset = 0  # No offset needed for global indexing
-
-        # Process all K-blocks in this flag group
-        for k_off in range(K_PER_FLAG):
-            k_block_global = k_block_start_global + k_off
-            k_block_idx = k_block_global - k_block_offset  # Local idx if local, global idx if remote
-
-            # Load A from selected buffer
-            rk = k_block_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
-            a_ptrs = a_base + rm.to(tl.int64)[:, None] * a_stride_m + rk[None, :] * a_stride_k
-            a = tl.load(a_ptrs)
-
-            # Load B at global K position
-            rk_global = k_block_global * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            rk_global = tl.max_contiguous(tl.multiple_of(rk_global, BLOCK_SIZE_K), BLOCK_SIZE_K)
-            B_ptrs = B + rk_global[:, None] * stride_bk + rn[None, :] * stride_bn
-            b = tl.load(B_ptrs)
-
-            # Accumulate
-            if ALLOW_TF32:
-                acc = tl.dot(a, b, acc, allow_tf32=True)
-            else:
-                acc += tl.dot(a, b, allow_tf32=False)
-
-    # ==================================================================
-    # Write output
-    # ==================================================================
-    if BIAS:
-        bias_val = tl.load(bias_ptr + rm * stride_bias, mask=rm < M, other=0.0)
-        acc = acc + bias_val[:, None]
-
-    c = acc.to(C.type.element_ty)
-    C_ptrs = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-    c_mask = (rm[:, None] < M) & (rn[None, :] < N)
-    tl.store(C_ptrs, c, mask=c_mask, cache_modifier=".wt")
+        iris.put_signal_rect(
+            src_ptr,
+            dst_ptr,
+            cur_rank,
+            dst_rank,
+            heap_bases_ptr,
+            copy_engine_ctx,
+            flags_ptr + batch_id,
+            1,
+            width_bytes=tile_width_bytes,
+            height=tile_height,
+            src_pitch=src_pitch_bytes,
+            dst_pitch=dst_pitch_bytes,
+        )
 
     if TRACE:
         ctx.tracing.record_event_end(_trace_handle)
-        ctx.tracing.record_event_start(
-            event_id=TraceEvent().wg_gemm_wait,
-            target_rank=cur_rank,
-            address=flags_ptr + tl.arange(0, 1),
-            pid_m=gemm_pid,
-            pid_n=_tile_wt.to(tl.int32),
-        )
 
 
 # ==========================================================================
 # Python API
 # ==========================================================================
-
-
-def _get_wave_m_tile_schedule(num_sms, num_tiles_m, num_tiles_n, group_size_m):
-    """
-    Analyze which M tiles need to be transferred before each wave (non-persistent scheduling).
-
-    Returns:
-        List of (wave_num, [m_tiles_to_copy]) tuples in execution order.
-    """
-    # Non-persistent: wave-aware tile assignment (matches kernel logic)
-    total_tiles = num_tiles_m * num_tiles_n
-    num_batches = (total_tiles + num_sms - 1) // num_sms
-
-    waves = {}
-    for pid in range(min(total_tiles, num_sms * num_batches)):
-        wave_num = pid // num_sms
-
-        # Wave-aware assignment (matches kernel)
-        num_pid_in_group = group_size_m * num_tiles_n
-        group_id = pid // num_pid_in_group
-        first_pid_m = group_id * group_size_m
-        first_pid_m = min(first_pid_m, num_tiles_m - 1)
-        group_sz = min(num_tiles_m - first_pid_m, group_size_m)
-        pid_m = first_pid_m + ((pid % num_pid_in_group) % group_sz)
-        pid_m = min(pid_m, num_tiles_m - 1)
-
-        if wave_num not in waves:
-            waves[wave_num] = set()
-        waves[wave_num].add(pid_m)
-
-    # Convert to ordered schedule (only transfer new M tiles each wave)
-    copied = set()
-    schedule = []
-    for wave_num in sorted(waves.keys()):
-        new_m_tiles = sorted(waves[wave_num] - copied)
-        if new_m_tiles:
-            schedule.append((wave_num, new_m_tiles))
-        copied.update(waves[wave_num])
-
-    return schedule
 
 
 def all_gather_matmul_copy_engine_preamble(
@@ -401,28 +157,11 @@ def all_gather_matmul_copy_engine_preamble(
     assert M % config.block_size_m == 0
 
     num_m_tiles = M // config.block_size_m
-    num_k_blocks = K // config.block_size_k
-    num_k_blocks_local = K_local // config.block_size_k
-    num_remote_k_blocks = num_k_blocks - num_k_blocks_local
-
-    # Validate k_per_flag to ensure flag groups don't span ranks
-    assert k_per_flag <= num_k_blocks_local, (
-        f"k_per_flag ({k_per_flag}) must be <= num_k_blocks_local ({num_k_blocks_local}) "
-        f"to ensure flag groups don't span ranks"
-    )
-    assert num_k_blocks_local % k_per_flag == 0, (
-        f"num_k_blocks_local ({num_k_blocks_local}) must be divisible by k_per_flag ({k_per_flag}) "
-        f"to ensure even flag group alignment per rank"
-    )
+    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
+    total_tiles = num_m_tiles * num_tiles_n
 
     num_batches = (num_m_tiles + m_tiles_per_batch - 1) // m_tiles_per_batch
-
-    # Per-(batch, K-flag-group-global) flags
-    # Each flag tracks when a K-flag-group (covering K_PER_FLAG consecutive global K-blocks) is ready for a batch of M-tiles
-    # Like hbm_buffer: K-flag-groups span the entire global K dimension
-    num_flag_groups_k_total = num_k_blocks // k_per_flag  # Exact division
-    num_flags = num_batches * num_flag_groups_k_total
-
+    num_flags = num_batches
     ws = FusedWorkspace(
         operation="all_gather_matmul_copy_engine",
         shape=(M, N, K),
@@ -440,13 +179,14 @@ def all_gather_matmul_copy_engine_preamble(
     else:
         ws.aux_buffer = shmem.zeros((M, K), dtype=A_sharded.dtype)
 
-    # Allocate per-(batch, K-flag-group-global) flags
+    # Allocate per-batch flags
     ws.locks = shmem.zeros((num_flags,), dtype=torch.int32)
+    ws.wait_expected = shmem.zeros((total_tiles,), dtype=torch.int32)
 
     shmem.info(
-        f"Allocated {num_flags} per-(batch, K-flag-group) flags "
-        f"({num_batches} batches × {num_flag_groups_k_total} global K-flag-groups, "
-        f"{k_per_flag} K-blocks per flag, {m_tiles_per_batch} M-tiles per batch) "
+        f"Allocated {num_flags} per-batch flags "
+        f"(config tiles={num_m_tiles}, "
+        f"{m_tiles_per_batch} M-tiles per batch) "
         f"flags buffer at 0x{ws.locks.data_ptr():x}"
     )
 
@@ -583,6 +323,7 @@ def all_gather_matmul_copy_engine(
             "k_contiguous" — (M,K) row-major, K is fast dim.
             "m_contiguous" — (M,K) with M as fast dim.
         device_initiated: If True, use device-side WGs to initiate SDMA transfers instead of host.
+        k_per_flag: Retained for call compatibility; ignored by the current per-batch design.
     """
     if config is None:
         config = FusedConfig()
@@ -598,28 +339,22 @@ def all_gather_matmul_copy_engine(
     assert K % config.block_size_k == 0
     assert K_local % config.block_size_k == 0
 
-    num_k_blocks = K // config.block_size_k
     num_k_blocks_local = K_local // config.block_size_k
-    num_remote_k_blocks = num_k_blocks - num_k_blocks_local
     num_m_tiles = M // config.block_size_m
     num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
-
-    # Validate k_per_flag to ensure flag groups don't span ranks
-    assert k_per_flag <= num_k_blocks_local, (
-        f"k_per_flag ({k_per_flag}) must be <= num_k_blocks_local ({num_k_blocks_local}) "
-        f"to ensure flag groups don't span ranks"
-    )
-    assert num_k_blocks_local % k_per_flag == 0, (
-        f"num_k_blocks_local ({num_k_blocks_local}) must be divisible by k_per_flag ({k_per_flag}) "
-        f"to ensure even flag group alignment per rank"
-    )
-
-    num_flag_groups_k_total = num_k_blocks // k_per_flag  # Global K-flag-groups (exact division)
 
     if workspace is None:
         workspace = all_gather_matmul_copy_engine_preamble(
             shmem, A_sharded, B, config, k_per_flag, m_tiles_per_batch, staged_a_layout
         )
+
+    # Keep the local K shard resident in its global-K slot of staged_a so the
+    # batched GEMM paths can read A entirely from staged_a.
+    # TODO this is cheat
+    rank = shmem.get_rank()
+    k_start = rank * K_local
+    k_end = (rank + 1) * K_local
+    workspace.aux_buffer[:, k_start:k_end].copy_(A_sharded)
 
     # Note: Local K-blocks already copied to staged_a in preamble
     stride_am, stride_ak = A_sharded.stride()
@@ -640,29 +375,31 @@ def all_gather_matmul_copy_engine(
     # num_m_tiles, num_tiles_n already calculated above
     total_tiles = num_m_tiles * num_tiles_n
 
+    # if workspace.wait_expected is None or workspace.wait_expected.numel() != total_tiles:
+    #     workspace.wait_expected = shmem.zeros((total_tiles,), dtype=torch.int32)
+
+    # workspace.locks.zero_()
+    # workspace.wait_expected.zero_()
+
+    # if trace:
+    #     if rank == 0:
+    #         shmem.info(
+    #             "Tracing is not yet supported for the persistent tritonBLAS path here; running without trace capture."
+    #         )
+    #     trace = False
+
     # Auto-detect num_sms from device if not specified
     num_sms = config.num_sms
     if num_sms is None:
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
         num_sms = props.multi_processor_count
 
-    # Grid: non-persistent GEMM - one workgroup per output tile (like hbm_buffer)
-    # For device-initiated, add orchestrator WGs: one per remote rank
     num_sdma_wgs = (world_size - 1) if device_initiated else 0
-    grid_size = total_tiles + num_sdma_wgs
+    gemm_tiles = total_tiles
 
     # m_tiles_per_batch was already set above before calling preamble
     # Calculate number of batches
     num_batches = (num_m_tiles + m_tiles_per_batch - 1) // m_tiles_per_batch
-
-    if trace:
-        # Each GEMM tile generates 2 events (start + wait)
-        # Each orchestrator WG generates 1 event (start + end)
-        max_trace_events = total_tiles * 2 + num_sdma_wgs * 2
-        if not shmem.tracing.enabled:
-            shmem.tracing.enable(max_events=max_trace_events)
-        else:
-            shmem.tracing.reset()
 
     launch_kwargs = {"matrix_instr_nonkdim": 16}
     if num_warps is not None:
@@ -680,10 +417,9 @@ def all_gather_matmul_copy_engine(
     if verbose and rank == 0:
         shmem.info(f"[Rank {rank}] Copy engines connected, launching kernel...")
         shmem.info(
-            f"Kernel params: grid_size={grid_size}, num_m_tiles={num_m_tiles}, "
-            f"num_tiles_n={num_tiles_n}, num_k_blocks={num_k_blocks}, "
-            f"num_k_blocks_local={num_k_blocks_local}, group_size_m={config.group_size_m}, "
-            f"k_per_flag={k_per_flag}"
+            f"Kernel params: num_m_tiles={num_m_tiles}, "
+            f"num_tiles_n={num_tiles_n}, num_k_blocks_local={num_k_blocks_local}, "
+            f"group_size_m={config.group_size_m}, m_tiles_per_batch={m_tiles_per_batch}"
         )
         shmem.info(
             f"Pointers: A_sharded=0x{A_sharded.data_ptr():x}, "
@@ -693,157 +429,172 @@ def all_gather_matmul_copy_engine(
             f"flags=0x{workspace.locks.data_ptr():x} (n={workspace.locks.numel()})"
         )
 
-    # Launch kernel (non-blocking to allow parallel SDMA posting)
     if verbose and rank == 0:
         shmem.info(
-            f"Launching kernel: grid_size={grid_size}, device_initiated={device_initiated}, num_sdma_wgs={num_sdma_wgs}"
+            f"Launching kernel: gemm_tiles={gemm_tiles}, "
+            f"device_initiated={device_initiated}, sdma_wgs={num_sdma_wgs}"
         )
 
-    _copy_engine_all_gather_matmul_kernel[(grid_size,)](
-        A_sharded,
-        B,
-        output_tensor,
-        bias_ptr,
-        workspace.aux_buffer,
-        workspace.locks,
-        flag_iteration,
-        M,
-        N,
-        K,
-        K_local,
-        stride_am,
-        stride_ak,
-        stride_bk,
-        stride_bn,
-        stride_cm,
-        stride_cn,
-        stride_sa_m,
-        stride_sa_k,
-        stride_bias,
-        shmem.get_device_context(),
-        shmem.get_heap_bases(),
-        shmem.get_copy_engine_ctx(),
-        rank,
-        world_size,
+    selector = workspace.selector
+    selector_shape = (
+        selector.block_m,
+        selector.block_n,
+        selector.block_k,
+        selector.group_m,
+    )
+    config_shape = (
         config.block_size_m,
         config.block_size_n,
         config.block_size_k,
         config.group_size_m,
-        grid_size,
-        config.num_xcds,
-        num_m_tiles,
-        num_tiles_n,
-        num_k_blocks,
-        num_k_blocks_local,
-        num_remote_k_blocks,
-        k_per_flag,
-        num_flag_groups_k_total,  # Total K-flag-groups (was num_k_block_groups)
-        m_tiles_per_batch,
-        use_bias,
-        config.allow_tf32,
-        trace,
-        device_initiated,
-        num_sdma_wgs,
-        **launch_kwargs,
+    )
+    if selector_shape != config_shape:
+        raise ValueError(
+            "all_gather_matmul_copy_engine requires selector/config geometry to match: "
+            f"selector(M,N,K,G)=({selector.block_m},{selector.block_n},{selector.block_k},{selector.group_m}) "
+            f"!= config(M,N,K,G)=({config.block_size_m},{config.block_size_n},{config.block_size_k},{config.group_size_m})"
+        )
+
+    tb_block_m = selector.block_m
+    wait_config = create_wait_config(
+        wait_buffer=workspace.locks,
+        expected_buffer=workspace.wait_expected,
+        expected_inc=world_size - 1,
+        map_type="block",
+        block_group_m=m_tiles_per_batch,
+        block_group_n=num_tiles_n,
     )
 
+    if use_bias:
+        import warnings
+
+        warnings.warn(
+            "Bias is not yet supported in the persistent tritonBLAS path for all_gather_matmul_copy_engine. "
+            "Ignoring bias for this launch."
+        )
+
     # ======================================================================
-    # SDMA transfer loop: Global K-block ordering (like hbm_buffer)
+    # Launch kernel and orchestrate SDMA transfers
     # ======================================================================
 
     import time
 
     sdma_start_time = time.perf_counter()
 
-    if not device_initiated:
-        # Host-initiated SDMA (original path)
-        # Analyze wave schedule to understand M-tile access patterns
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        num_sms = props.multi_processor_count
-        wave_schedule = _get_wave_m_tile_schedule(num_sms, num_m_tiles, num_tiles_n, config.group_size_m)
-
+    if device_initiated:
+        # Device-initiated: Launch SDMA poster kernel, then GEMM (both run on device)
+        poster_grid = world_size - 1
+        _batch_poster_kernel[(poster_grid,)](
+            A_sharded,
+            workspace.aux_buffer,
+            workspace.locks,
+            flag_iteration,
+            M,
+            K_local,
+            stride_am,
+            stride_sa_m,
+            stride_sa_k,
+            shmem.get_device_context(),
+            shmem.get_heap_bases(),
+            shmem.get_copy_engine_ctx(),
+            rank,
+            world_size,
+            config.block_size_m,
+            num_m_tiles,
+            # workspace.tb_num_tiles_m,
+            m_tiles_per_batch,
+            False,
+        )
+        persistent_matmul_lt(
+            workspace.aux_buffer,
+            B,
+            output_tensor,
+            selector,
+            bias=None,
+            wait_config=wait_config,
+        )
+    else:
+        # Host-initiated: Launch GEMM kernel first (async), then post SDMA transfers
+        # The kernel will wait on flags while host posts SDMA transfers
         if verbose and rank == 0:
-            num_batches_calc = (num_m_tiles + m_tiles_per_batch - 1) // m_tiles_per_batch
+            shmem.info(f"[Rank {rank}] Launching GEMM kernel (will wait on flags)...")
+
+        # Launch GEMM kernel (non-blocking)
+        persistent_matmul_lt(
+            workspace.aux_buffer,
+            B,
+            output_tensor,
+            selector,
+            bias=None,
+            wait_config=wait_config,
+        )
+
+        # Now post SDMA transfers while kernel is waiting
+        if verbose and rank == 0:
+            num_batches_calc = workspace.locks.numel()  # workspace.tb_num_batches
             shmem.info(
                 f"[Rank {rank}] Starting SDMA loop (batched M-tile transfers)... "
-                f"num_m_tiles={num_m_tiles}, k_per_flag={k_per_flag}, num_flag_groups_k_total={num_flag_groups_k_total}, m_tiles_per_batch={m_tiles_per_batch}"
+                f"num_tiles_m={num_m_tiles}, num_k_blocks_local={num_k_blocks_local}, "
+                f"m_tiles_per_batch={m_tiles_per_batch}, tb_block_m={tb_block_m}"
             )
             shmem.info(f"[Rank {rank}] Will transfer in {num_batches_calc} batches of {m_tiles_per_batch} M-tiles each")
-            shmem.info(f"[Rank {rank}] Wave schedule (GPU execution): {len(wave_schedule)} waves")
-            for wave_num, m_tiles in wave_schedule[:3]:  # Show first 3 waves
-                shmem.info(
-                    f"  Wave {wave_num}: needs {len(m_tiles)} new M-tiles: {m_tiles[:10]}{'...' if len(m_tiles) > 10 else ''}"
-                )
 
         elem_size = A_sharded.element_size()
         staged_a_base_addr = workspace.aux_buffer.data_ptr()
         flags_base_addr = workspace.locks.data_ptr()
         tile_transfer_count = 0
 
-        # Group our local K-blocks by their global flag group (compute once, not per batch)
-        local_k_blocks_by_flag_group = {}
-        for k_block_local in range(num_k_blocks_local):
-            k_block_global = rank * num_k_blocks_local + k_block_local
-            k_fg_global = k_block_global // k_per_flag
-            if k_fg_global not in local_k_blocks_by_flag_group:
-                local_k_blocks_by_flag_group[k_fg_global] = []
-            local_k_blocks_by_flag_group[k_fg_global].append((k_block_global, k_block_local))
-
         # Sequential SDMA posting with individual calls
         batch_id = 0
         for m_tile_start in range(0, num_m_tiles, m_tiles_per_batch):
             m_tile_end = min(m_tile_start + m_tiles_per_batch, num_m_tiles)
             num_m_tiles_in_batch = m_tile_end - m_tile_start
+            # src_row_start = m_tile_start * tb_block_m
+            # rows_in_batch = min(M - src_row_start, num_m_tiles_in_batch * tb_block_m)
 
-            # Transfer each flag group to all other ranks
-            for k_fg_global, our_k_blocks in local_k_blocks_by_flag_group.items():
-                k_block_global_start = our_k_blocks[0][0]
-                k_block_local_start = our_k_blocks[0][1]
-                num_k_blocks_in_group = len(our_k_blocks)
+            for dst_rank in range(world_size):
+                if dst_rank == rank:
+                    continue
 
-                for dst_rank in range(world_size):
-                    if dst_rank == rank:
-                        continue
+                flag_idx = batch_id
+                flag_addr_local = flags_base_addr + flag_idx * 4
+                flag_addr_remote = shmem.translate(flag_addr_local, rank, dst_rank)
 
-                    # Flag index: (batch, global-K-flag-group)
-                    flag_idx = batch_id * num_flag_groups_k_total + k_fg_global
-                    flag_addr_local = flags_base_addr + flag_idx * 4
-                    flag_addr_remote = shmem.translate(flag_addr_local, rank, dst_rank)
+                tile = Tile()
+                tile.pid_m = 0
+                tile.pid_n = 0
+                tile.block_m = num_m_tiles_in_batch * config.block_size_m
+                tile.block_n = K_local
+                tile.elem_size = elem_size
+                tile.src_stride = stride_am * elem_size
+                # Source is the local shard, so batches only advance in M.
+                src_offset_bytes = (m_tile_start * config.block_size_m * stride_am) * elem_size
+                tile.data = A_sharded.data_ptr() + src_offset_bytes
 
-                    # Merge ALL M-tiles in batch AND all K-blocks in flag group into ONE 2D transfer
-                    tile = Tile()
-                    tile.pid_m = 0  # Set to 0 since we're computing offset manually in tile.data
-                    tile.pid_n = 0
-                    tile.block_m = num_m_tiles_in_batch * config.block_size_m  # Merged M dimension
-                    tile.block_n = num_k_blocks_in_group * config.block_size_k  # Merged K dimension
-                    tile.elem_size = elem_size
-                    tile.src_stride = stride_am * elem_size
-                    # Compute source offset manually and add to base pointer
-                    src_offset_bytes = (
-                        m_tile_start * config.block_size_m * stride_am
-                        + k_block_local_start * config.block_size_k * stride_ak
-                    ) * elem_size
-                    tile.data = A_sharded.data_ptr() + src_offset_bytes
+                # Destination is this rank's global-K slot inside staged_a.
+                dst_offset_bytes = (
+                    m_tile_start * config.block_size_m * stride_sa_m + rank * K_local * stride_sa_k
+                ) * elem_size
+                dst_ptr_local = staged_a_base_addr + dst_offset_bytes
+                dst_ptr_remote = shmem.translate(dst_ptr_local, rank, dst_rank)
 
-                    # Destination offset: (m_tile_start, k_block_global_start)
-                    dst_offset_bytes = (
-                        m_tile_start * config.block_size_m * stride_sa_m
-                        + k_block_global_start * config.block_size_k * stride_sa_k
-                    ) * elem_size
-                    dst_ptr_local = staged_a_base_addr + dst_offset_bytes
-                    dst_ptr_remote = shmem.translate(dst_ptr_local, rank, dst_rank)
+                anvil_lib.host_put_tile_signal(
+                    rank,
+                    dst_rank,
+                    0,
+                    tile,
+                    dst_ptr_remote,
+                    stride_sa_m * elem_size,
+                    flag_addr_remote,
+                    1,
+                )
+                tile_transfer_count += 1
 
-                    # Single transfer with signal for entire batch × flag_group
-                    anvil_lib.host_put_tile_signal(
-                        rank, dst_rank, 0, tile, dst_ptr_remote, stride_sa_m * elem_size, flag_addr_remote, 1
+                if verbose and batch_id == 0 and dst_rank == (rank + 1) % world_size:
+                    shmem.info(
+                        f"[Rank {rank}→{dst_rank}] Signaled batch={batch_id} flag_idx={flag_idx} "
+                        f"({num_m_tiles_in_batch} rows × full local K shard)"
                     )
-                    tile_transfer_count += 1
-
-                    if verbose and k_fg_global == 0 and batch_id == 0 and dst_rank == (rank + 1) % world_size:
-                        shmem.info(
-                            f"[Rank {rank}→{dst_rank}] Signaled batch={batch_id} k_fg={k_fg_global} flag_idx={flag_idx} "
-                            f"({num_m_tiles_in_batch} M-tiles × {num_k_blocks_in_group} K-blocks merged)"
-                        )
 
             batch_id += 1
 
@@ -866,11 +617,12 @@ def all_gather_matmul_copy_engine(
                 f"Post: {post_ms:.2f}ms, Quiet: {quiet_ms:.2f}ms, Total: {total_ms:.2f}ms, "
                 f"transfers={tile_transfer_count}"
             )
-    else:
-        # Device-initiated SDMA: dedicated WGs post transfers on device
-        # SDMA timing measured by kernel execution (not separate posting phase)
-        if verbose and rank == 0:
-            shmem.info(f"[Rank {rank}] Device-initiated mode: {num_sdma_wgs} SDMA WGs will post transfers")
+            sample_count = min(8, workspace.locks.numel())
+            sample_flags = workspace.locks[:sample_count].cpu().tolist()
+            shmem.info(
+                f"[Rank {rank}] Flag sample after SDMA quiet: "
+                f"expected_inc={world_size - 1}, flags[:{sample_count}]={sample_flags}"
+            )
 
     # ======================================================================
     # Synchronize
@@ -879,15 +631,15 @@ def all_gather_matmul_copy_engine(
         torch.cuda.synchronize()  # Wait for kernel completion
         shmem.barrier()
 
-    if trace:
-        torch.cuda.synchronize()
-        total_tiles = num_m_tiles * num_tiles_n
-        workspace.trace_data = _extract_wg_trace(
-            shmem,
-            grid_size,
-            total_tiles,
-            num_m_tiles=num_m_tiles,
-            num_tiles_n=num_tiles_n,
-        )
+    # if trace:
+    #     torch.cuda.synchronize()
+    #     total_tiles = num_m_tiles * num_tiles_n
+    #     workspace.trace_data = _extract_wg_trace(
+    #         shmem,
+    #         grid_size,
+    #         total_tiles,
+    #         num_m_tiles=num_m_tiles,
+    #         num_tiles_n=num_tiles_n,
+    #     )
 
     return workspace
