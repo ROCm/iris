@@ -715,43 +715,16 @@ def all_gather_matmul_copy_engine(
             wait_config=wait_config,
         )
     else:
-        # Host-initiated: Launch GEMM kernel first (async), then post SDMA transfers
-        # The kernel will wait on flags while host posts SDMA transfers
-        if verbose and rank == 0:
-            shmem.info(f"[Rank {rank}] Launching GEMM kernel (will wait on flags)...")
-
-        # Launch GEMM kernel (non-blocking)
-        persistent_matmul_lt(
-            workspace.aux_buffer,
-            B,
-            output_tensor,
-            selector,
-            bias=None,
-            wait_config=wait_config,
-        )
-
-        # Now post SDMA transfers while kernel is waiting
-        if verbose and rank == 0:
-            num_batches_calc = workspace.locks.numel()  # workspace.tb_num_batches
-            shmem.info(
-                f"[Rank {rank}] Starting SDMA loop (batched M-tile transfers)... "
-                f"num_tiles_m={num_m_tiles}, num_k_blocks_local={num_k_blocks_local}, "
-                f"m_tiles_per_batch={m_tiles_per_batch}, tb_block_m={tb_block_m}"
-            )
-            shmem.info(f"[Rank {rank}] Will transfer in {num_batches_calc} batches of {m_tiles_per_batch} M-tiles each")
-
+        # Host-initiated: pre-post the first batch across all remote ranks,
+        # then launch GEMM so it can begin consuming batch 0 while later
+        # batches are still being enqueued.
         elem_size = A_sharded.element_size()
         staged_a_base_addr = workspace.aux_buffer.data_ptr()
         flags_base_addr = workspace.locks.data_ptr()
         tile_transfer_count = 0
 
-        # Sequential SDMA posting with individual calls
-        batch_id = 0
-        for m_tile_start in range(0, num_m_tiles, m_tiles_per_batch):
-            m_tile_end = min(m_tile_start + m_tiles_per_batch, num_m_tiles)
-            num_m_tiles_in_batch = m_tile_end - m_tile_start
-            # src_row_start = m_tile_start * tb_block_m
-            # rows_in_batch = min(M - src_row_start, num_m_tiles_in_batch * tb_block_m)
+        def post_host_batch(batch_id: int, m_tile_start: int, num_m_tiles_in_batch: int) -> None:
+            nonlocal tile_transfer_count
 
             for dst_rank in range(world_size):
                 if dst_rank == rank:
@@ -797,6 +770,41 @@ def all_gather_matmul_copy_engine(
                         f"({num_m_tiles_in_batch} rows × full local K shard)"
                     )
 
+        if verbose and rank == 0:
+            num_batches_calc = workspace.locks.numel()
+            shmem.info(
+                f"[Rank {rank}] Starting SDMA loop (batched M-tile transfers)... "
+                f"num_tiles_m={num_m_tiles}, num_k_blocks_local={num_k_blocks_local}, "
+                f"m_tiles_per_batch={m_tiles_per_batch}, tb_block_m={tb_block_m}"
+            )
+            shmem.info(
+                f"[Rank {rank}] Will transfer in {num_batches_calc} batches of {m_tiles_per_batch} M-tiles each"
+            )
+
+        # TODO not always faster
+        # Prime batch 0 before GEMM launch so the first released tile-group can
+        # start immediately instead of stalling on an empty wait queue.
+        first_batch_tiles = min(m_tiles_per_batch, num_m_tiles)
+        post_host_batch(0, 0, first_batch_tiles)
+
+        if verbose and rank == 0:
+            shmem.info(f"[Rank {rank}] Launching GEMM kernel after pre-posting batch 0...")
+
+        persistent_matmul_lt(
+            workspace.aux_buffer,
+            B,
+            output_tensor,
+            selector,
+            bias=None,
+            wait_config=wait_config,
+        )
+
+        # Post the remaining batches while GEMM is already running.
+        batch_id = 1
+        for m_tile_start in range(m_tiles_per_batch, num_m_tiles, m_tiles_per_batch):
+            m_tile_end = min(m_tile_start + m_tiles_per_batch, num_m_tiles)
+            num_m_tiles_in_batch = m_tile_end - m_tile_start
+            post_host_batch(batch_id, m_tile_start, num_m_tiles_in_batch)
             batch_id += 1
 
         sdma_end_post_time = time.perf_counter()
