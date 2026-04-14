@@ -1055,9 +1055,7 @@ if GLUON_AVAILABLE:
 
         TOTAL_ELEMS: gl.constexpr = BLOCK_SIZE_M * BLOCK_SIZE_N
         ELEMS_PER_THREAD: gl.constexpr = TOTAL_ELEMS // (THREADS_PER_WARP * WARPS_PER_CTA)
-        flat_layout: gl.constexpr = gl.BlockedLayout(
-            [ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0]
-        )
+        flat_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
 
         # Hoist local heap base outside the tile loop
         local_base = gl.load(ctx.heap_bases + iris_rank)
