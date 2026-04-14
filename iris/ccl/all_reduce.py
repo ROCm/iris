@@ -753,6 +753,8 @@ def persistent_all_reduce_ll128(
 
     LINE: tl.constexpr = PAYLOAD + 1  # 32 f32 = 128 bytes = one cache line
     line_offsets = tl.arange(0, LINE)
+    # Vectorization hint: offsets are contiguous and aligned to LINE
+    line_offsets = tl.max_contiguous(tl.multiple_of(line_offsets, LINE), LINE)
     is_data = line_offsets < PAYLOAD
 
     # --- Phase 1: Stage local data with embedded flag per cache line ---
@@ -767,7 +769,9 @@ def persistent_all_reduce_ll128(
         # Set element PAYLOAD (idx 31) to epoch flag; keep data in 0..30
         line = tl.where(is_data, line, epoch)
         # Single coalesced 128-byte store — atomic on cache line boundary
-        tl.store(staging_ptr + line_base + line_offsets, line, cache_modifier=".wt")
+        staging_line_ptr = staging_ptr + line_base + line_offsets
+        staging_line_ptr = tl.max_contiguous(tl.multiple_of(staging_line_ptr, LINE), LINE)
+        tl.store(staging_line_ptr, line, cache_modifier=".wt")
 
     # --- Phase 2: Read from all peers, poll flag (via full cache line read), reduce ---
     for line_idx in range(pid, num_lines, COMM_SMS):
@@ -776,28 +780,35 @@ def persistent_all_reduce_ll128(
 
         acc = tl.zeros((LINE,), dtype=tl.float32)
 
+        # Pointer to this cache line in the staging buffer (contiguous, aligned)
+        staging_line_ptr = staging_ptr + line_base + line_offsets
+        staging_line_ptr = tl.max_contiguous(tl.multiple_of(staging_line_ptr, LINE), LINE)
+
         for r in tl.static_range(world_size):
             remote_rank = rank_start + r * rank_stride
 
             # Read the full 128-byte cache line (32 f32) and check flag (element 31)
             # Use cache_modifier=".cv" to bypass all GPU caches for cross-GPU coherence
+            # hint=LINE tells iris.load to apply vectorization hints to the translated ptr
             remote_line = iris.load(
-                staging_ptr + line_base + line_offsets,
+                staging_line_ptr,
                 iris_rank,
                 remote_rank,
                 heap_bases,
                 cache_modifier=".cv",
+                hint=LINE,
             )
             # Extract flag value (element PAYLOAD = element 31)
             flag_vals = tl.where(line_offsets == PAYLOAD, remote_line, 0.0)
             flag_val = tl.sum(flag_vals)
             while flag_val < epoch:
                 remote_line = iris.load(
-                    staging_ptr + line_base + line_offsets,
+                    staging_line_ptr,
                     iris_rank,
                     remote_rank,
                     heap_bases,
                     cache_modifier=".cv",
+                    hint=LINE,
                 )
                 flag_vals = tl.where(line_offsets == PAYLOAD, remote_line, 0.0)
                 flag_val = tl.sum(flag_vals)
