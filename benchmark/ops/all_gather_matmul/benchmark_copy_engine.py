@@ -420,7 +420,7 @@ def _worker(args):
 
     perf_analysis = None
     if args.get("m_tiles_per_batch") is None:
-        args["m_tiles_per_batch"] = 1
+        args["m_tiles_per_batch"] = args["group_size_m"]
 
 
     # Print performance analysis
