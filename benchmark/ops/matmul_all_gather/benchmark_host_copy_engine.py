@@ -818,11 +818,7 @@ def _worker(args: dict):
         json_writer.display()
 
     # Synchronize device before exiting
-    torch.cuda.synchronize()
-    for remote_rank in range(world_size):
-        if remote_rank != rank:
-            anvil_lib.host_quiet(rank, remote_rank, 0)
-    shmem.barrier()
+    shmem.barrier(sync_copy_engine=True)
     dist.destroy_process_group()
 
 

@@ -587,28 +587,20 @@ def matmul_all_gather_host_copy_engine(
                 timestamp_ptr = sdma_timestamps.data_ptr() + (remote_rank * 2 + 1) * sdma_timestamps.element_size()
                 anvil_lib.host_timestamp(rank, remote_rank, 0, timestamp_ptr)
 
-    # Wait for SDMA to complete (all flags have been set, SDMA transfers should finish)
-    # Use anvil quiet to wait for SDMA completion
-    # TODO part of async_op ?
-    # for remote_rank in range(world_size):
-    #     if remote_rank != rank:
-    #         anvil_lib.host_quiet(rank, remote_rank, 0)
-
-    sdma_end_time = time.perf_counter()
-
-    if verbose:
-        post_ms = (sdma_end_post_time - sdma_start_time) * 1000.0
-        quiet_ms = (sdma_end_time - sdma_end_post_time) * 1000.0
-        total_ms = (sdma_end_time - sdma_start_time) * 1000.0
-        shmem.info(
-            f"[Rank {rank}] SDMA complete. "
-            f"Post: {post_ms:.2f}ms, Quiet: {quiet_ms:.2f}ms, Total: {total_ms:.2f}ms, "
-            f"transfers={tile_transfer_count}"
-        )
-
     if not async_op:
-        # torch.cuda.synchronize()
+        shmem.quiet()
+        sdma_end_time = time.perf_counter()
         shmem.barrier()
+        if verbose and rank == 0:
+            post_ms = (sdma_end_post_time - sdma_start_time) * 1000.0
+            quiet_ms = (sdma_end_time - sdma_end_post_time) * 1000.0
+            total_ms = (sdma_end_time - sdma_start_time) * 1000.0
+            shmem.info(
+                f"[Rank {rank}] SDMA complete. "
+                f"Post: {post_ms:.2f}ms, Quiet: {quiet_ms:.2f}ms, Total: {total_ms:.2f}ms, "
+                f"transfers={tile_transfer_count}"
+            )
+
 
     # Extract trace data if tracing was enabled
     if trace:
