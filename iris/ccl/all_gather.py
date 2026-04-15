@@ -537,7 +537,8 @@ def all_gather(
             )
 
         context_tensor = shmem.get_device_context()
-        tracing_enabled = getattr(shmem, "tracing", None) is not None and shmem.tracing.enabled
+        tracing = getattr(shmem, "tracing", None)
+        tracing_enabled = bool(tracing and getattr(tracing, "enabled", False))
 
         iris_launch(
             persistent_all_gather_gluon,
