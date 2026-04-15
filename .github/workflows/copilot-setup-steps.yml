@@ -30,6 +30,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e . --no-cache-dir
 
+      - name: Install build dependencies for IntelliKit
+        run: |
+          apt-get update -qq && apt-get install -y -qq libdwarf-dev libelf-dev > /dev/null
+
       - name: Install IntelliKit Python packages
         run: |
           source "$GITHUB_WORKSPACE/.venv/bin/activate"
@@ -59,7 +63,8 @@ jobs:
       - name: Make venv default for subsequent steps
         run: |
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
-          echo "PYTHONPATH=$GITHUB_WORKSPACE/.venv/lib/python3.13/site-packages:$GITHUB_WORKSPACE${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
+          PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/.venv/lib/python${PYVER}/site-packages:$GITHUB_WORKSPACE${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
 
       - name: Verify ROCm and GPU visibility
         run: |
