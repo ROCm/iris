@@ -6,6 +6,8 @@ All-gather collective communication primitive for Iris.
 Gathers tensors from all ranks and concatenates them along the last dimension.
 """
 
+import os
+
 import triton
 import triton.language as tl
 import iris
@@ -474,6 +476,8 @@ if GFX1250_ASYNC_AVAILABLE:
         COMM_SMS: gl.constexpr,
         THREADS_PER_WARP: gl.constexpr,
         WARPS_PER_CTA: gl.constexpr,
+        TRACING: gl.constexpr = False,
+        addr_dump=None,
     ):
         """
         Persistent all-gather kernel using GFX1250 async copy through LDS.
@@ -484,7 +488,16 @@ if GFX1250_ASYNC_AVAILABLE:
         persistent_all_gather_gluon.
 
         Hardware requirement: GFX1250 (RDNA4) with async_copy support.
+
+        When TRACING=True, stores are bracketed with record_event_start/end
+        and per-thread output addresses are dumped to addr_dump for
+        coalescing analysis. The entire tracing path is dead-code-eliminated
+        when TRACING=False (zero overhead).
         """
+        # addr_dump uses TRACING constexpr for per-thread address dumping.
+        # Iris event tracing (record_event_start/end) is disabled because
+        # device_utils intrinsics (s_memrealtime, HW_REG_XCC_ID) are not
+        # available on gfx1250. Keep tracing=False to avoid emitting them.
         ctx = IrisDeviceCtx.initialize(context_tensor, tracing=False)
 
         pid = gl.program_id(0)
@@ -550,6 +563,11 @@ if GFX1250_ASYNC_AVAILABLE:
             # Use N directly (not strides) to preserve contiguity — same as input.
             output_tile_base = (group_rank * M + pid_m * BLOCK_SIZE_M) * N + pid_n * BLOCK_SIZE_N
             output_base_ptrs = output_ptr + output_tile_base + flat_idx
+
+            # === TRACING: dump per-thread addresses for coalescing analysis ===
+            if TRACING:
+                output_addrs_i64 = tl.cast(output_base_ptrs, tl.int64)
+                gl.store(addr_dump + tile_id * TOTAL_ELEMS + flat_idx, output_addrs_i64)
 
             # === ASYNC STORES: LDS → global/XGMI (register-free for data) ===
             # Traffic-shaped: staggered write order per rank to avoid
@@ -617,6 +635,9 @@ def all_gather(
     # Use provided config or create default one
     if config is None:
         config = Config(block_size_m=32, block_size_n=64)
+
+    enable_tracing = False
+    addr_dump = None
 
     # Extract group information
     # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
@@ -689,6 +710,18 @@ def all_gather(
             except Exception:
                 pass
 
+        # Check env variable for tracing: IRIS_TRACE_ALLGATHER=1
+        enable_tracing = os.environ.get("IRIS_TRACE_ALLGATHER", "0") == "1"
+
+        # Allocate per-thread address dump buffer when tracing
+        addr_dump = None
+        if enable_tracing and use_gfx1250_async:
+            num_pid_m = (M + block_size_m - 1) // block_size_m
+            num_pid_n = (N + block_size_n - 1) // block_size_n
+            max_tiles = num_pid_m * num_pid_n
+            total_elems_per_tile = block_size_m * block_size_n
+            addr_dump = torch.zeros(max_tiles * total_elems_per_tile, dtype=torch.int64, device=input_tensor.device)
+
         gluon_kernel_args = (
             IrisDeviceCtx,
             context_tensor,
@@ -721,6 +754,8 @@ def all_gather(
         if use_gfx1250_async:
             persistent_all_gather_gluon_gfx1250[(config.comm_sms,)](
                 *gluon_kernel_args,
+                enable_tracing,
+                addr_dump,
                 **gluon_kernel_kwargs,
             )
         else:
@@ -774,6 +809,10 @@ def all_gather(
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,
         )
+
+    # Stash addr_dump on shmem for external analysis (e.g., coalescing probe)
+    if enable_tracing and addr_dump is not None:
+        shmem._last_addr_dump = addr_dump
 
     if not async_op:
         shmem.barrier()
