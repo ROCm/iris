@@ -446,7 +446,7 @@ if GLUON_AVAILABLE:
 def all_gather(
     output_tensor,
     input_tensor,
-    shmem,
+    ctx,
     group=None,
     async_op=False,
     config=None,
@@ -454,9 +454,9 @@ def all_gather(
     """
     Internal all-gather collective operation implementation.
 
-    This function is called internally by shmem.ccl.all_gather().
+    This function is called internally by ctx.ccl.all_gather().
     Users should use the Iris instance method instead:
-        >>> shmem.ccl.all_gather(output_tensor, input_tensor)
+        >>> ctx.ccl.all_gather(output_tensor, input_tensor)
 
     Each rank sends its input tensor to all ranks, and all ranks receive
     and concatenate all input tensors along dimension 0 (rows), matching
@@ -465,7 +465,7 @@ def all_gather(
     Args:
         output_tensor: Output tensor of shape (world_size * M, N) - will contain concatenated inputs
         input_tensor: Input tensor of shape (M, N) - local rank's data to send
-        shmem: Iris shmem context
+        ctx: Iris context
         group: ProcessGroup or None. If None, uses all ranks in `iris` context.
                Default: None.
         async_op: If False, performs a barrier at the end. If True, returns immediately.
@@ -481,7 +481,7 @@ def all_gather(
     # Extract group information
     # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
     # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
     M, N = input_tensor.shape[:2]
     expected_output_shape = (world_size * M, N)
@@ -497,8 +497,8 @@ def all_gather(
 
     # Choose between Triton and Gluon implementation
     if config.use_gluon and GLUON_AVAILABLE:
-        # Check if shmem is Iris Gluon (has get_device_context method)
-        if not hasattr(shmem, "get_device_context"):
+        # Check if ctx is Iris Gluon (has get_device_context method)
+        if not hasattr(ctx, "get_device_context"):
             raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
 
         # Gluon only supports the persistent variant
@@ -536,8 +536,8 @@ def all_gather(
                 f"Recommended: block_size_m=8, block_size_n=256."
             )
 
-        context_tensor = shmem.get_device_context()
-        tracing = getattr(shmem, "tracing", None)
+        context_tensor = ctx.get_device_context()
+        tracing = getattr(ctx, "tracing", None)
         tracing_enabled = bool(tracing and getattr(tracing, "enabled", False))
 
         iris_launch(
@@ -583,7 +583,7 @@ def all_gather(
                 f"Please adjust config.comm_sms to be a multiple of {world_size}."
             )
 
-        heap_bases = shmem.get_heap_bases()
+        heap_bases = ctx.get_heap_bases()
 
         # Dispatch to the appropriate kernel based on variant
         if config.all_gather_variant == "persistent":
@@ -625,4 +625,4 @@ def all_gather(
         )
 
     if not async_op:
-        shmem.barrier()
+        ctx.barrier()
