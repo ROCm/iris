@@ -10,6 +10,7 @@ Reads coalescing_results.json (produced by coalescing_probe.py) and generates:
 Usage:
     python3 analyze_coalescing.py [--input coalescing_results.json] [--output coalescing_plot.png]
 """
+
 import argparse
 import json
 import sys
@@ -53,7 +54,7 @@ def print_summary(results):
         next_first = per_warp[i + 1]["cache_lines_128B"][0]
         adj = next_first == this_last + 1
         sym = "OK" if adj else "GAP"
-        print(f"  Warp {i} -> {i+1}: line {this_last} -> {next_first}  [{sym}]")
+        print(f"  Warp {i} -> {i + 1}: line {this_last} -> {next_first}  [{sym}]")
 
     print()
     adj = results.get("cross_warp_adjacent", False)
@@ -73,6 +74,7 @@ def print_summary(results):
 def plot_scatter(results, output_path):
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.lines import Line2D
@@ -112,8 +114,12 @@ def plot_scatter(results, output_path):
     for w in range(num_warps):
         mask = warp_ids == w
         ax.scatter(
-            flat_indices[mask], offsets[mask],
-            c=[colors[w]], s=4, alpha=0.7, label=f"Warp {w}",
+            flat_indices[mask],
+            offsets[mask],
+            c=[colors[w]],
+            s=4,
+            alpha=0.7,
+            label=f"Warp {w}",
             edgecolors="none",
         )
 

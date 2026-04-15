@@ -20,12 +20,12 @@ Usage (inside FFM container on alola):
     # Multi-rank (requires torchrun):
     torchrun --nproc_per_node=4 examples/33_coalescing_probe/coalescing_probe.py
 """
+
 import argparse
 import json
 import os
 import sys
 
-import numpy as np
 import torch
 
 # Enable tracing via env variable BEFORE importing iris
@@ -90,6 +90,7 @@ def run_probe(block_size_m, block_size_n, num_warps, dtype_str):
 
     # The all_gather function checks IRIS_TRACE_ALLGATHER env var internally
     from iris.ccl.all_gather import all_gather
+
     all_gather(output_tensor, input_tensor, shmem, config=config)
 
     torch.cuda.synchronize()
@@ -131,7 +132,7 @@ def run_probe(block_size_m, block_size_n, num_warps, dtype_str):
     }
 
     if rank == 0:
-        print(f"=== Cross-warp coalescing probe (iris tracing) ===")
+        print("=== Cross-warp coalescing probe (iris tracing) ===")
         print(f"Config: BLOCK_SIZE_M={block_size_m}, BLOCK_SIZE_N={block_size_n}")
         print(f"  THREADS_PER_WARP={threads_per_warp}, WARPS_PER_CTA={num_warps}")
         print(f"  ELEMS_PER_THREAD={elems_per_thread}, TOTAL_ELEMS={total_elems}")
@@ -158,9 +159,11 @@ def run_probe(block_size_m, block_size_n, num_warps, dtype_str):
         results["per_warp"].append(warp_info)
 
         if rank == 0:
-            print(f"Warp {w}: bytes [{byte_offset_min}, {byte_offset_max})"
-                  f"  cache lines [{cl_min}, {cl_max}]"
-                  f"  ({cl_max - cl_min + 1} lines)")
+            print(
+                f"Warp {w}: bytes [{byte_offset_min}, {byte_offset_max})"
+                f"  cache lines [{cl_min}, {cl_max}]"
+                f"  ({cl_max - cl_min + 1} lines)"
+            )
 
     if rank == 0:
         print()
@@ -170,10 +173,10 @@ def run_probe(block_size_m, block_size_n, num_warps, dtype_str):
     for w in range(num_warps - 1):
         this_last = results["per_warp"][w]["cache_lines_128B"][1]
         next_first = results["per_warp"][w + 1]["cache_lines_128B"][0]
-        adjacent = (next_first == this_last + 1)
+        adjacent = next_first == this_last + 1
         if rank == 0:
             symbol = "OK" if adjacent else "GAP"
-            print(f"Warp {w}->{w+1}: line {this_last} -> {next_first}  [{symbol}]")
+            print(f"Warp {w}->{w + 1}: line {this_last} -> {next_first}  [{symbol}]")
         if not adjacent:
             all_adjacent = False
 
