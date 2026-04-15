@@ -40,12 +40,16 @@ import iris.bench as bench
 # Use aiter's Triton RMSNorm if available; fall back to torch
 try:
     from aiter.ops.triton.rmsnorm import rms_norm as _aiter_rms_norm
+
     def rmsnorm(x, weight, eps=1e-6):
         return _aiter_rms_norm(x, weight, eps)
+
     _RMSNORM_BACKEND = "aiter-triton"
 except Exception:
+
     def rmsnorm(x, weight, eps=1e-6):
         return F.rms_norm(x, [x.shape[-1]], weight=weight, eps=eps)
+
     _RMSNORM_BACKEND = "torch"
 
 
@@ -144,5 +148,6 @@ def fused_ready_rs_rmsnorm(state, ctx):
 
 if __name__ == "__main__":
     import iris.bench as _bench
+
     print(f"[info] RMSNorm backend: {_RMSNORM_BACKEND}")
     _bench.main()

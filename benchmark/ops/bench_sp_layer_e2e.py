@@ -46,15 +46,18 @@ import torch.nn.functional as F
 import iris.bench as bench
 from iris.ops import (
     FusedConfig,
-    matmul_reduce_scatter, matmul_reduce_scatter_preamble,
+    matmul_reduce_scatter,
+    matmul_reduce_scatter_preamble,
 )
 
 # Use aiter's Triton RMSNorm where available, fall back to torch
 try:
     from aiter.ops.triton.rmsnorm import rms_norm as _aiter_rms_norm
+
     def _rmsnorm(x, weight, eps=1e-6):
         return _aiter_rms_norm(x, weight, eps)
 except Exception:
+
     def _rmsnorm(x, weight, eps=1e-6):
         return F.rms_norm(x, [x.shape[-1]], weight=weight, eps=eps)
 
@@ -86,7 +89,7 @@ def unfused_gemm_rs_rmsnorm(state, ctx):
     # O_proj: each rank holds K_local columns of the weight
     A = torch.randn((M, K_local), device="cuda", dtype=dtype)
     B_out = torch.randn((K_local, N), device="cuda", dtype=dtype)
-    C_full = torch.empty((M, N), device="cuda", dtype=dtype)    # intermediate full GEMM output
+    C_full = torch.empty((M, N), device="cuda", dtype=dtype)  # intermediate full GEMM output
     C_local = torch.empty((M_local, N), device="cuda", dtype=dtype)  # RS output shard
 
     # RMSNorm weight (applied to the M_local shard in the SP region)
