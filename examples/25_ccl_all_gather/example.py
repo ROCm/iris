@@ -8,7 +8,10 @@ Example: iris.ccl.all_gather
 Each rank contributes an (M, N) tensor; every rank receives the concatenated (world_size*M, N) result.
 
 Run with:
-    torchrun --nproc_per_node=<num_gpus> --standalone example.py [--validate] [--use_gluon]
+    torchrun --nproc_per_node=<num_gpus> --standalone example.py [--validate] [--use_gluon] \\
+        [--use_inline] [--cache-modifier legacy|none|.wt|.cs]
+
+    ``--use_inline`` selects ``persistent_all_gather_inline`` (pointer translation + ``tl.store``).
 """
 
 import argparse
@@ -38,11 +41,28 @@ def parse_args():
     parser.add_argument("--num_warps", type=int, default=4, help="Number of warps")
     parser.add_argument("--waves_per_eu", type=int, default=0, help="Number of waves per EU")
     parser.add_argument("--use_gluon", action="store_true", help="Use Gluon kernel backend")
+    parser.add_argument(
+        "--use_inline",
+        action="store_true",
+        help="Use persistent_all_gather_inline (translation + tl.store; not with --use_gluon)",
+    )
+    parser.add_argument(
+        "--cache-modifier",
+        dest="cache_modifier_arg",
+        type=str,
+        default="legacy",
+        choices=["legacy", "none", ".wt", ".cs"],
+        help="Cache modifier for all kernel store paths: legacy=defaults per kernel; "
+        "none=empty string; .wt / .cs as in Triton store modifiers.",
+    )
     return vars(parser.parse_args())
 
 
 def main():
     args = parse_args()
+
+    if args["use_gluon"] and args["use_inline"]:
+        raise SystemExit("Cannot combine --use_gluon and --use_inline")
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
@@ -66,6 +86,9 @@ def main():
     input_tensor.fill_(float(rank + 1))
     output_tensor = ctx.zeros((world_size * M, N), dtype=dtype)
 
+    cm_arg = args["cache_modifier_arg"]
+    cache_modifier = None if cm_arg == "legacy" else ("" if cm_arg == "none" else cm_arg)
+
     config_kwargs = {
         "block_size_m": args["block_size_m"],
         "block_size_n": args["block_size_n"],
@@ -74,7 +97,11 @@ def main():
         "num_warps": args["num_warps"],
         "waves_per_eu": args["waves_per_eu"],
         "use_gluon": args["use_gluon"],
+        "cache_modifier": cache_modifier,
     }
+    if args["use_inline"]:
+        config_kwargs["all_gather_variant"] = "persistent_inline"
+
     config = Config(**config_kwargs)
 
     ctx.barrier()

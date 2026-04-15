@@ -32,9 +32,11 @@ class Config:
         use_gluon: If True, use Gluon-based implementation (default: False)
                    Gluon provides better control over warp-level traffic shaping
         all_gather_variant: Variant for all-gather operation (default: "persistent")
-                           Options: "persistent", "partitioned"
-                           - "persistent": Each PID handles multiple tiles and sends to all ranks
+                           Options: "persistent", "partitioned", "persistent_inline"
+                           - "persistent": Each PID handles multiple tiles; remote peers use ``iris.store``
                            - "partitioned": PIDs partitioned across ranks, eliminates inner loop
+                           - "persistent_inline": Same tile/load structure as ``persistent``; uses
+                             pointer translation + ``tl.store`` (local heap base loaded once per kernel).
         all_reduce_variant: Variant for all-reduce operation (default: "atomic")
                            Options: "atomic", "ring", "two_shot", "one_shot", "spinlock"
         all_reduce_distribution: Distribution for two-shot all-reduce (default: 0)
@@ -54,6 +56,12 @@ class Config:
                           Used by gluon kernels to construct BlockedLayout for
                           vectorized memory access.
         waves_per_eu: Waves per execution unit hint for occupancy (default: 0, auto)
+        cache_modifier: If None (default), each all-gather kernel keeps its prior
+            store behavior (local ``tl.store``/``gl.store`` uses ``.wt`` where that was
+            hardcoded; ``gfx1250_async_copy.shared_to_global`` uses the default empty
+            modifier; remote ``iris.store`` omits the argument). If set to ``""``,
+            ``".wt"``, or ``".cs"``, that value is passed to every applicable store
+            (``tl.store``, ``gl.store``, ``iris.store``, and ``shared_to_global``).
 
     Example:
         >>> import iris
@@ -94,6 +102,7 @@ class Config:
     num_warps: int = 4
     threads_per_warp: int | None = None
     waves_per_eu: int = 0
+    cache_modifier: str | None = None
 
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
@@ -114,9 +123,10 @@ class Config:
             raise ValueError(f"comm_sms must be positive, got {self.comm_sms}")
         if self.num_xcds <= 0:
             raise ValueError(f"num_xcds must be positive, got {self.num_xcds}")
-        if self.all_gather_variant not in ["persistent", "partitioned"]:
+        if self.all_gather_variant not in ["persistent", "partitioned", "persistent_inline"]:
             raise ValueError(
-                f"all_gather_variant must be one of: 'persistent', 'partitioned', got {self.all_gather_variant}"
+                f"all_gather_variant must be one of: 'persistent', 'partitioned', 'persistent_inline', "
+                f"got {self.all_gather_variant}"
             )
         if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock"]:
             raise ValueError(
@@ -152,3 +162,7 @@ class Config:
             raise ValueError(f"threads_per_warp must be 32 or 64, got {self.threads_per_warp}")
         if self.num_warps <= 0:
             raise ValueError(f"num_warps must be positive, got {self.num_warps}")
+        if self.cache_modifier is not None and self.cache_modifier not in ("", ".wt", ".cs"):
+            raise ValueError(
+                f"cache_modifier must be None, '', '.wt', or '.cs', got {self.cache_modifier!r}"
+            )

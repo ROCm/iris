@@ -23,12 +23,30 @@ try:
     try:
         from triton.experimental.gluon.language.amd.gfx1250 import async_copy as gfx1250_async_copy
 
-        GFX1250_ASYNC_AVAILABLE = True
+        GFX1250_ASYNC_AVAILABLE = False # True
     except ImportError:
         GFX1250_ASYNC_AVAILABLE = False
 except ImportError:
     GLUON_AVAILABLE = False
     GFX1250_ASYNC_AVAILABLE = False
+
+
+@triton.jit
+def _translate_with_bases(ptr, from_base, to_base, hint: tl.constexpr = None):
+    """
+    Translate pointer from one heap base to another (same math as ``iris.__translate``).
+
+    ``from_base`` / ``to_base`` are the loaded heap base values (e.g. from ``tl.load(heap_bases + rank)``),
+    not rank indices.
+    """
+    ptr_int = tl.cast(ptr, tl.uint64)
+    offset = ptr_int - from_base
+    to_base_byte = tl.cast(to_base, tl.pointer_type(tl.int8))
+    translated_ptr_byte = to_base_byte + offset
+    translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
+    if hint is not None:
+        translated_ptr = tl.max_contiguous(tl.multiple_of(translated_ptr, hint), hint)
+    return translated_ptr
 
 
 @triton.jit()
@@ -53,6 +71,8 @@ def persistent_all_gather(
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    USE_EXPLICIT_CACHE_MODIFIER: tl.constexpr,
+    CACHE_MODIFIER: tl.constexpr,
 ):
     """
     Persistent all-gather kernel.
@@ -144,19 +164,141 @@ def persistent_all_gather(
 
             if i == group_rank:
                 # Local destination (i == group_rank): use direct store
-                tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
+                if USE_EXPLICIT_CACHE_MODIFIER:
+                    tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=CACHE_MODIFIER)
+                else:
+                    tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
             else:
                 # Remote destination: use iris.store to send data to remote destination
                 # Use iris_rank for iris RMA operations (heap_bases indexing)
-                iris.store(
-                    output_ptr_target,
-                    data,
-                    iris_rank,
-                    target_rank,
-                    heap_bases,
-                    mask=combined_mask,
-                    hint=(1, BLOCK_SIZE_N),
-                )
+                if USE_EXPLICIT_CACHE_MODIFIER:
+                    iris.store(
+                        output_ptr_target,
+                        data,
+                        iris_rank,
+                        target_rank,
+                        heap_bases,
+                        mask=combined_mask,
+                        hint=(1, BLOCK_SIZE_N),
+                        cache_modifier=CACHE_MODIFIER,
+                    )
+                else:
+                    iris.store(
+                        output_ptr_target,
+                        data,
+                        iris_rank,
+                        target_rank,
+                        heap_bases,
+                        mask=combined_mask,
+                        hint=(1, BLOCK_SIZE_N),
+                    )
+
+
+@triton.jit()
+def persistent_all_gather_inline(
+    input_ptr,
+    output_ptr,
+    M,
+    N,
+    stride_in_m,
+    stride_in_n,
+    stride_out_m,
+    stride_out_n,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    USE_EXPLICIT_CACHE_MODIFIER: tl.constexpr,
+    CACHE_MODIFIER: tl.constexpr,
+):
+    """
+    Persistent all-gather using pointer translation and ``tl.store`` (no ``iris.store``).
+
+    Semantics match :func:`persistent_all_gather`, but every destination is written via
+    ``tl.store`` to a pointer translated from this rank's heap base to the target rank's
+    base. When ``i == group_rank``, translation is the identity.
+
+    This rank's heap base and every peer heap base are loaded once before the tile loop
+    (vectorized ``tl.load`` over group ranks). Each destination's ``to_base`` is selected
+    inside the inner ``static_range`` via a masked reduction—Triton does not support
+    ``hoisted_bases[i]`` with a loop index. Output pointers still depend on the tile and
+    are computed inside the tile loop.
+    """
+    pid = tl.program_id(0)
+
+    my_base = tl.load(heap_bases + iris_rank)
+    iris_ranks_line = rank_start + tl.arange(0, world_size) * rank_stride
+    hoisted_bases = tl.load(heap_bases + iris_ranks_line)
+
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+    tl.assume(total_tiles > 0)
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+        tl.assume(tile_id >= 0)
+        tl.assume(stride_in_m >= 0)
+        tl.assume(stride_in_n >= 0)
+        tl.assume(stride_out_m >= 0)
+        tl.assume(stride_out_n >= 0)
+
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+        rm_input = rm_base + tl.arange(0, BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+        rm_input = tl.max_contiguous(tl.multiple_of(rm_input, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        input_mask = (rm_input[:, None] < M) & (rn[None, :] < N)
+
+        input_base_m = rm_input[:, None] * stride_in_m
+        input_base_n = rn[None, :] * stride_in_n
+        input_offset = input_base_m + input_base_n
+        input_ptr_source = input_ptr + input_offset
+        input_ptr_source = tl.multiple_of(input_ptr_source, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+        data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
+
+        for i in tl.static_range(world_size):
+            rm_output = rm_input + group_rank * M
+            output_mask = (rm_output[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
+            combined_mask = input_mask & output_mask
+
+            output_base_m = rm_output[:, None] * stride_out_m
+            output_base_n = rn[None, :] * stride_out_n
+            output_offset = output_base_m + output_base_n
+            output_ptr_target = output_ptr + output_offset
+            output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+            peer_idx = tl.arange(0, world_size)
+            to_base = tl.sum(tl.where(peer_idx == i, hoisted_bases, hoisted_bases * 0))
+
+            dest_ptr = _translate_with_bases(
+                output_ptr_target,
+                my_base,
+                to_base,
+                hint=(1, BLOCK_SIZE_N),
+            )
+            if USE_EXPLICIT_CACHE_MODIFIER:
+                tl.store(dest_ptr, data, mask=combined_mask, cache_modifier=CACHE_MODIFIER)
+            else:
+                tl.store(dest_ptr, data, mask=combined_mask, cache_modifier=".wt")
 
 
 @triton.jit()
@@ -181,6 +323,8 @@ def persistent_all_gather_partitioned(
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    USE_EXPLICIT_CACHE_MODIFIER: tl.constexpr,
+    CACHE_MODIFIER: tl.constexpr,
 ):
     """
     Persistent all-gather kernel with rank-partitioned work distribution.
@@ -283,18 +427,33 @@ def persistent_all_gather_partitioned(
         # Send to the assigned destination rank
         if dest_rank_idx == group_rank:
             # Local destination: use direct store
-            tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
+            if USE_EXPLICIT_CACHE_MODIFIER:
+                tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=CACHE_MODIFIER)
+            else:
+                tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
         else:
             # Remote destination: use iris.store to send data to remote destination
-            iris.store(
-                output_ptr_target,
-                data,
-                iris_rank,
-                target_rank,
-                heap_bases,
-                mask=combined_mask,
-                hint=(1, BLOCK_SIZE_N),
-            )
+            if USE_EXPLICIT_CACHE_MODIFIER:
+                iris.store(
+                    output_ptr_target,
+                    data,
+                    iris_rank,
+                    target_rank,
+                    heap_bases,
+                    mask=combined_mask,
+                    hint=(1, BLOCK_SIZE_N),
+                    cache_modifier=CACHE_MODIFIER,
+                )
+            else:
+                iris.store(
+                    output_ptr_target,
+                    data,
+                    iris_rank,
+                    target_rank,
+                    heap_bases,
+                    mask=combined_mask,
+                    hint=(1, BLOCK_SIZE_N),
+                )
 
 
 # Gluon implementation: flat-2D tiling approach
@@ -333,6 +492,8 @@ if GLUON_AVAILABLE:
         COMM_SMS: gl.constexpr,
         THREADS_PER_WARP: gl.constexpr,
         WARPS_PER_CTA: gl.constexpr,
+        USE_EXPLICIT_CACHE_MODIFIER: gl.constexpr,
+        CACHE_MODIFIER: gl.constexpr,
     ):
         """
         Persistent all-gather kernel using Gluon with flat-2D tiling.
@@ -398,6 +559,12 @@ if GLUON_AVAILABLE:
         # gl.load(heap_bases) calls in the inner store loop.
         local_base = gl.load(ctx.heap_bases + iris_rank)
 
+        # Byte delta from this rank's heap base to each group member's heap (dest_idx 0..world_size-1).
+        # Indexed by dest_idx, matching rank_start + dest_idx * rank_stride — not a hard-coded width.
+        iris_ranks = rank_start + tl.arange(0, world_size) * rank_stride
+        target_bases = gl.load(ctx.heap_bases + iris_ranks)
+        ptr_deltas = target_bases - local_base
+
         for tile_id in range(pid, total_tiles, COMM_SMS):
             # Swizzled tile index computation for better L2 locality
             num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -436,7 +603,10 @@ if GLUON_AVAILABLE:
                 output_ptrs = output_ptr + output_offsets
 
                 if dest_idx == group_rank:
-                    gl.store(output_ptrs, data, mask=mask, cache_modifier=".wt")
+                    if USE_EXPLICIT_CACHE_MODIFIER:
+                        gl.store(output_ptrs, data, mask=mask, cache_modifier=CACHE_MODIFIER)
+                    else:
+                        gl.store(output_ptrs, data, mask=mask, cache_modifier=".wt")
                 else:
                     # Hoisted translation: compute ptr_delta from pre-loaded
                     # local_base rather than calling ctx.store() which would
@@ -446,7 +616,10 @@ if GLUON_AVAILABLE:
                     output_ptrs_int = tl.cast(output_ptrs, gl.uint64)
                     remote_ptrs_int = output_ptrs_int + ptr_delta
                     remote_ptrs = tl.cast(remote_ptrs_int, output_ptrs.dtype)
-                    gl.store(remote_ptrs, data, mask=mask)
+                    if USE_EXPLICIT_CACHE_MODIFIER:
+                        gl.store(remote_ptrs, data, mask=mask, cache_modifier=CACHE_MODIFIER)
+                    else:
+                        gl.store(remote_ptrs, data, mask=mask)
 
 
 if GFX1250_ASYNC_AVAILABLE:
@@ -474,6 +647,8 @@ if GFX1250_ASYNC_AVAILABLE:
         COMM_SMS: gl.constexpr,
         THREADS_PER_WARP: gl.constexpr,
         WARPS_PER_CTA: gl.constexpr,
+        USE_EXPLICIT_CACHE_MODIFIER: gl.constexpr,
+        CACHE_MODIFIER: gl.constexpr,
     ):
         """
         Persistent all-gather kernel using GFX1250 async copy through LDS.
@@ -560,7 +735,12 @@ if GFX1250_ASYNC_AVAILABLE:
 
                 if dest_idx == group_rank:
                     # Local destination: LDS → local HBM
-                    gfx1250_async_copy.shared_to_global(output_base_ptrs, smem, mask=mask)
+                    if USE_EXPLICIT_CACHE_MODIFIER:
+                        gfx1250_async_copy.shared_to_global(
+                            output_base_ptrs, smem, mask=mask, cache_modifier='.wt'
+                        )
+                    else:
+                        gfx1250_async_copy.shared_to_global(output_base_ptrs, smem, mask=mask, cache_modifier='.wt')
                 else:
                     # Remote destination: translate base pointer, then build
                     # pointer tensor from scratch as scalar + flat_idx.
@@ -576,7 +756,12 @@ if GFX1250_ASYNC_AVAILABLE:
                     remote_base = output_ptr + output_tile_base + elem_delta
                     remote_ptrs = remote_base + flat_idx
                     remote_ptrs = tl.max_contiguous(tl.multiple_of(remote_ptrs, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
-                    gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask)
+                    if USE_EXPLICIT_CACHE_MODIFIER:
+                        gfx1250_async_copy.shared_to_global(
+                            remote_ptrs, smem, mask=mask, cache_modifier='.wt'
+                        )
+                    else:
+                        gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask, cache_modifier='.wt')
 
             # Wait for all stores to complete before reusing LDS on next tile
             gfx1250_async_copy.commit_group()
@@ -612,11 +797,17 @@ def all_gather(
                   Default: False.
         config: Config instance with kernel parameters (default: None).
                 If None, uses default Config values.
-                Set config.all_gather_variant to choose variant: "persistent" or "partitioned"
+                Set config.all_gather_variant to choose variant: "persistent", "partitioned",
+                or "persistent_inline" (translation + ``tl.store``; local heap base hoisted once).
+                Set config.cache_modifier to None (legacy per-kernel defaults), or
+                to "", ".wt", or ".cs" to apply that modifier to all stores in the kernel.
     """
     # Use provided config or create default one
     if config is None:
         config = Config(block_size_m=32, block_size_n=64)
+
+    use_explicit_cache_modifier = config.cache_modifier is not None
+    cache_modifier_str = config.cache_modifier if config.cache_modifier is not None else ""
 
     # Extract group information
     # rank_in_group: position within the ProcessGroup (0, 1, 2, ...) - passed as group_rank to kernel
@@ -711,6 +902,8 @@ def all_gather(
             config.comm_sms,
             config.threads_per_warp,
             config.num_warps,
+            use_explicit_cache_modifier,
+            cache_modifier_str,
         )
         gluon_kernel_kwargs = dict(
             num_stages=config.num_stages,
@@ -744,6 +937,8 @@ def all_gather(
         # Dispatch to the appropriate kernel based on variant
         if config.all_gather_variant == "persistent":
             kernel_fn = persistent_all_gather
+        elif config.all_gather_variant == "persistent_inline":
+            kernel_fn = persistent_all_gather_inline
         elif config.all_gather_variant == "partitioned":
             kernel_fn = persistent_all_gather_partitioned
         else:
@@ -770,6 +965,8 @@ def all_gather(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            USE_EXPLICIT_CACHE_MODIFIER=use_explicit_cache_modifier,
+            CACHE_MODIFIER=cache_modifier_str,
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,
