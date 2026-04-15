@@ -50,7 +50,9 @@ def run_probe(block_size_m, block_size_n, num_warps, dtype_str):
     import torch.distributed as dist
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local_rank)
+    # On FFM simulation all ranks share device 0 (only 1 simulated GPU).
+    device_id = 0 if os.environ.get("IRIS_SIMULATION") == "1" else local_rank
+    torch.cuda.set_device(device_id)
 
     if not dist.is_initialized():
         # Single-rank mode: set env vars if not set by torchrun
