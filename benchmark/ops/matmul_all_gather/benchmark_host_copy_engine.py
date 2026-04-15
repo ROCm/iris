@@ -398,8 +398,7 @@ def _analyze_performance(bm, bn, bk, M_local, N, K, world_size, link_bw, dtype_b
 def _auto_tune_batching(perf_analysis, num_m_tiles, num_n_tiles, group_size_m, bm, bn, dtype_bytes):
     """Auto-tune m_tiles_per_batch based on bottleneck analysis.
 
-    m_tiles_per_batch is always set to groups_per_wave (hardware wave boundaries).
-    For communication-bound workloads, we reduce tile sizes to create more tiles.
+    Baseline heuristic: choose one wave-aligned batch worth of M-tiles.
 
     Returns: (m_tiles_per_batch, adjusted_block_m, adjusted_block_n)
     """
@@ -408,10 +407,10 @@ def _auto_tune_batching(perf_analysis, num_m_tiles, num_n_tiles, group_size_m, b
 
     num_cus = DEFAULT_NUM_CUS
 
-    # Always batch by wave boundaries (natural GPU execution pattern)
+    # Batch one wave's worth of M-tiles when possible.
     tiles_per_group = group_size_m * num_n_tiles
     groups_per_wave = max(1, num_cus // tiles_per_group)
-    m_tiles_per_batch = max(1, groups_per_wave)
+    m_tiles_per_batch = max(1, groups_per_wave * group_size_m)
 
     if perf_analysis["bottleneck"] == "compute":
         # Compute-bound: keep original block sizes
@@ -436,6 +435,45 @@ def _auto_tune_batching(perf_analysis, num_m_tiles, num_n_tiles, group_size_m, b
     m_tiles_per_batch = max(1, min(m_tiles_per_batch, num_m_tiles))
 
     return m_tiles_per_batch, adjusted_bm, adjusted_bn
+
+
+def _derive_batch_metadata(selector, m_local, n, m_tiles_per_batch):
+    """Return selector- and batching-derived metadata for JSON/reporting."""
+    block_size_m = selector.block_m
+    block_size_n = selector.block_n
+    block_size_k = selector.block_k
+    group_size_m = selector.group_m
+    num_stages = getattr(selector, "num_stages", 2)
+    waves_per_eu = getattr(selector, "waves_per_eu", 0)
+    active_cus = getattr(selector, "_ACTIVE_CU", None)
+    if active_cus is None:
+        active_cus = getattr(selector._hardware, "N_CU", getattr(selector._hardware, "NUM_XCD", 1))
+
+    num_tiles_m = (m_local + block_size_m - 1) // block_size_m
+    num_tiles_n = (n + block_size_n - 1) // block_size_n
+    tiles_per_group = max(1, group_size_m * num_tiles_n)
+    groups_per_wave = max(1, active_cus // tiles_per_group)
+    m_tiles_per_wave = min(num_tiles_m, groups_per_wave * group_size_m)
+    num_batches = (num_tiles_m + m_tiles_per_batch - 1) // m_tiles_per_batch
+    last_batch_m_tiles = num_tiles_m - max(0, num_batches - 1) * m_tiles_per_batch
+
+    return {
+        "output_tile_size_m": block_size_m,
+        "output_tile_size_n": block_size_n,
+        "output_tile_size_k": block_size_k,
+        "group_size_m": group_size_m,
+        "num_stages": num_stages,
+        "waves_per_eu": waves_per_eu,
+        "active_cus": active_cus,
+        "num_tiles_m": num_tiles_m,
+        "num_tiles_n": num_tiles_n,
+        "tiles_per_group": tiles_per_group,
+        "groups_per_wave": groups_per_wave,
+        "m_tiles_per_wave": m_tiles_per_wave,
+        "num_batches": num_batches,
+        "last_batch_m_tiles": last_batch_m_tiles,
+        "m_tiles_per_batch_over_wave": m_tiles_per_batch / max(1, m_tiles_per_wave),
+    }
 
 
 def _worker(args: dict):
@@ -526,6 +564,8 @@ def _worker(args: dict):
         shmem.info(f"m_tiles_per_batch: {args['m_tiles_per_batch']}")
         shmem.info("=" * 80 + "\n")
 
+    batch_metadata = _derive_batch_metadata(selector, M_local, N, args["m_tiles_per_batch"])
+
     # Create config with parameters
     config_kwargs = {
         "block_size_m": args["block_size_m"],
@@ -561,6 +601,8 @@ def _worker(args: dict):
     json_writer.add_field("num_sms", config.num_sms)
     json_writer.add_field("num_xcds", config.num_xcds)
     json_writer.add_field("m_tiles_per_batch", args["m_tiles_per_batch"])
+    for key, value in batch_metadata.items():
+        json_writer.add_field(key, value)
 
     # Create input and output tensors
     # A_local is M_local x K, output is M x N (gathered)

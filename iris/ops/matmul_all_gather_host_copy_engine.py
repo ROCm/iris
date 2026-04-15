@@ -15,7 +15,7 @@ This is more efficient than device-initiated SDMA because:
 
 This implementation supports two backends:
 - Custom Triton kernel (legacy, controlled by use_tritonblas=False)
-- tritonBLAS with CounterView (default, use_tritonblas=True)
+- tritonBLAS with SignalView (default, use_tritonblas=True)
 """
 
 from typing import Optional
@@ -269,9 +269,11 @@ def matmul_all_gather_host_copy_engine_preamble(
     ws.locks = shmem.zeros((num_batches,), dtype=torch.int32)
 
     # Store metadata for later use
+    # ws.selector = selector
     ws.num_tiles_m = num_tiles_m
     ws.num_tiles_n = num_tiles_n
     ws.num_batches = num_batches
+    # ws.m_tiles_per_batch = m_tiles_per_batch
 
     return ws
 
@@ -333,19 +335,39 @@ def matmul_all_gather_host_copy_engine(
             shmem, A, B, config, m_tiles_per_batch, trace, use_tritonblas
         )
 
+    stride_cm, stride_cn = output_tensor.stride()
+    device = A.device
+
     # Get metadata from workspace
     num_tiles_m = workspace.num_tiles_m
     num_tiles_n = workspace.num_tiles_n
     num_batches = workspace.num_batches
 
-    stride_cm, stride_cn = output_tensor.stride()
-    device = A.device
+    selector = workspace.selector
+    selector_shape = (
+        selector.block_m,
+        selector.block_n,
+        selector.block_k,
+        selector.group_m,
+    )
+    config_shape = (
+        config.block_size_m,
+        config.block_size_n,
+        config.block_size_k,
+        config.group_size_m,
+    )
+    if selector_shape != config_shape:
+        raise ValueError(
+            "all_gather_matmul_copy_engine requires selector/config geometry to match: "
+            f"selector(M,N,K,G)=({selector.block_m},{selector.block_n},{selector.block_k},{selector.group_m}) "
+            f"!= config(M,N,K,G)=({config.block_size_m},{config.block_size_n},{config.block_size_k},{config.group_size_m})"
+        )
 
     # ═══════════════════════════════════════════════════════════════════════
     # Device Phase: Compute GEMM + store + set flags
     # ═══════════════════════════════════════════════════════════════════════
     if use_tritonblas:
-        # tritonBLAS path with CounterView
+        # tritonBLAS path with SignalView
         selector = workspace.selector
 
         # Create a view of output_tensor at this rank's position
@@ -355,13 +377,11 @@ def matmul_all_gather_host_copy_engine(
         # Use "block" mapping: block_group_m=m_tiles_per_batch, block_group_n=num_tiles_n
         # This gives counter_id = batch_id (all tiles in a batch share one counter)
         counter_config = create_counter_config(
-            num_counters=num_batches,
+            workspace.locks,
             map_type="block",
             block_group_m=m_tiles_per_batch,
             block_group_n=num_tiles_n,
-            device=device,
         )
-        counter_config["counter_buffer"] = workspace.locks
 
         # Use work-stealing if enabled
         tritonblas_config = None
@@ -374,7 +394,7 @@ def matmul_all_gather_host_copy_engine(
                 "Bias is not yet supported in tritonBLAS integration. Consider adding bias manually after GEMM."
             )
 
-        # Launch tritonBLAS GEMM with CounterView
+        # Launch tritonBLAS GEMM with SignalView
         persistent_matmul_lt(
             A,
             B,
