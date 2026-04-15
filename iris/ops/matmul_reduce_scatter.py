@@ -231,7 +231,8 @@ def matmul_reduce_scatter(
 
       config.ksplit (input sharding):
         False (default): A (M, K) and B (K, N) replicated. C is (M, N).
-        True: A is K-sharded (M, K_local), B is (K_local, N). C is (M, N_local).
+        True: A is K-sharded (M, K_local), B is (K_local, N).
+              C is (M, N_local) for atomic, (M, N) for two_shot.
 
       config.reduce_scatter_variant (reduction algorithm):
         "two_shot" (default): Store to aux_buffer, signal locks, pull-based RS.
@@ -270,7 +271,11 @@ def matmul_reduce_scatter(
     if config.ksplit:
         N_local = N // world_size
         assert N % world_size == 0, f"N ({N}) must be divisible by world_size ({world_size})"
-        assert C.shape == (M, N_local), f"Output C must be ({M}, {N_local}) for ksplit, got {C.shape}"
+        if variant == "two_shot":
+            # two_shot RS assigns contiguous tile ranges across (M, N) — C must be full-size
+            assert C.shape == (M, N), f"Output C must be ({M}, {N}) for ksplit+two_shot, got {C.shape}"
+        else:
+            assert C.shape == (M, N_local), f"Output C must be ({M}, {N_local}) for ksplit+atomic, got {C.shape}"
     else:
         N_local = N
 
