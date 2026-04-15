@@ -326,6 +326,7 @@ if GLUON_AVAILABLE:
         COMM_SMS: gl.constexpr,
         THREADS_PER_WARP: gl.constexpr,
         WARPS_PER_CTA: gl.constexpr,
+        TRACING: gl.constexpr = False,
     ):
         """
         Persistent all-gather kernel using Gluon with flat-2D tiling.
@@ -374,7 +375,7 @@ if GLUON_AVAILABLE:
             THREADS_PER_WARP: Threads per warp/wavefront (64 for AMD, 32 for NVIDIA).
             WARPS_PER_CTA: Number of warps per workgroup. Must match num_warps.
         """
-        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=False)
+        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)
 
         pid = gl.program_id(0)
 
@@ -536,6 +537,7 @@ def all_gather(
             )
 
         context_tensor = shmem.get_device_context()
+        tracing_enabled = getattr(shmem, "tracing", None) is not None and shmem.tracing.enabled
 
         iris_launch(
             persistent_all_gather_gluon,
@@ -561,6 +563,7 @@ def all_gather(
             config.comm_sms,
             config.threads_per_warp,
             config.num_warps,
+            tracing_enabled,
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,

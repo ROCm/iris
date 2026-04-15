@@ -4,36 +4,32 @@
 """
 Device-side utility functions for Iris.
 
-This module provides low-level device intrinsics for accessing hardware
-information and timing within Triton kernels.
+Provides portable device intrinsics for timestamps and hardware topology
+that work across all supported AMD GPU architectures. Uses Triton's
+architecture-aware APIs (``tl.extra.hip``) where available.
 """
 
 import triton
 import triton.language as tl
+from triton.language.extra.hip import memrealtime, smid
+from triton.language.target_info import is_hip_cdna3, is_hip_cdna4
 
 
 @triton.jit
 def read_realtime():
     """
-    Read GPU wall clock timestamp from s_memrealtime.
+    Read GPU wall clock timestamp.
 
-    Returns a 64-bit timestamp from a constant 100MHz clock (not affected
-    by power modes or core clock frequency changes).
+    Returns a 64-bit value from the GPU's constant-frequency real-time
+    counter (100 MHz, unaffected by power states or clock gating).
+
+    Delegates to ``tl.extra.hip.memrealtime()`` which emits the correct
+    instruction for each architecture family.
 
     Returns:
-        int64: Current timestamp in cycles (100MHz constant clock)
+        int64: Current timestamp in cycles (100 MHz constant clock)
     """
-    tmp = tl.inline_asm_elementwise(
-        asm="""s_waitcnt vmcnt(0)
-        s_memrealtime $0
-        s_waitcnt lgkmcnt(0)""",
-        constraints=("=s"),
-        args=[],
-        dtype=tl.int64,
-        is_pure=False,
-        pack=1,
-    )
-    return tmp
+    return memrealtime()
 
 
 @triton.jit
@@ -41,53 +37,35 @@ def get_xcc_id():
     """
     Get XCC (GPU chiplet) ID.
 
+    On multi-XCC parts (CDNA3/CDNA4) reads ``HW_REG_XCC_ID``.
+    On single-die architectures returns 0.
+
     Returns:
         int32: XCC ID for the current execution
     """
-    xcc_id = tl.inline_asm_elementwise(
-        asm="s_getreg_b32 $0, hwreg(HW_REG_XCC_ID, 0, 16)",
-        constraints=("=s"),
-        args=[],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
-    return xcc_id
+    if is_hip_cdna3() or is_hip_cdna4():
+        return tl.inline_asm_elementwise(
+            asm="s_getreg_b32 $0, hwreg(HW_REG_XCC_ID, 0, 16)",
+            constraints=("=s"),
+            args=[],
+            dtype=tl.int32,
+            is_pure=False,
+            pack=1,
+        )
+    else:
+        return tl.cast(0, tl.int32)
 
 
 @triton.jit
 def get_cu_id():
     """
-    Get Compute Unit ID.
+    Get compute-unit / workgroup-processor ID for the current wave.
+
+    Delegates to ``tl.extra.hip.smid()`` which reads the appropriate
+    hardware register for each architecture family (CU_ID on CDNA,
+    WGP_ID on RDNA).
 
     Returns:
-        int32: CU ID for the current execution
+        int32: CU / WGP ID for the current execution
     """
-    cu_id = tl.inline_asm_elementwise(
-        asm="s_getreg_b32 $0, hwreg(HW_REG_HW_ID, 8, 4)",
-        constraints=("=s"),
-        args=[],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
-    return cu_id
-
-
-@triton.jit
-def get_se_id():
-    """
-    Get Shader Engine ID.
-
-    Returns:
-        int32: SE ID for the current execution
-    """
-    se_id = tl.inline_asm_elementwise(
-        asm="s_getreg_b32 $0, hwreg(HW_REG_HW_ID, 13, 3)",
-        constraints=("=s"),
-        args=[],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
-    return se_id
+    return smid()
