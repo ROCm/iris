@@ -29,8 +29,7 @@ from .config import FusedConfig
 from .workspace import FusedWorkspace
 
 # Import tritonBLAS
-from tritonblas.matmul import persistent_matmul_lt, _make_matmul_selector
-from tritonblas.config import matmul_preamble as tritonblas_preamble
+from tritonblas.matmul import persistent_matmul_lt
 from tritonblas.matmul import create_counter_config
 
 # Import Tile class from anvil module
@@ -600,7 +599,6 @@ def matmul_all_gather_host_copy_engine(
                 f"Post: {post_ms:.2f}ms, Quiet: {quiet_ms:.2f}ms, Total: {total_ms:.2f}ms, "
                 f"transfers={tile_transfer_count}"
             )
-
 
     # Extract trace data if tracing was enabled
     if trace:

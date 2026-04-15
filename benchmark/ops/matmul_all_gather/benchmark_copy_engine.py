@@ -15,7 +15,6 @@ import torch
 import torch.distributed as dist
 import random
 import argparse
-import numpy as np
 
 from examples.common.utils import JSONWriter
 
@@ -36,7 +35,6 @@ try:
     if _script_dir not in _sys.path:
         _sys.path.insert(0, _script_dir)
     from derive_params import (
-        derive as _derive_params,
         _tile_roofline,
         _gemm_wg_time_us,
         _scatter_sdma_time_us,
@@ -44,7 +42,6 @@ try:
         DEFAULT_PEAK_TFLOPS_FP16,
         DEFAULT_HBM_BW_GBPS,
         DEFAULT_L2_SIZE_BYTES,
-        DEFAULT_SCHEDULING_FACTOR,
     )
 
     _DERIVE_AVAILABLE = True
@@ -367,7 +364,7 @@ def _worker(args: dict):
         num_m_tiles = (M_local + args["block_size_m"] - 1) // args["block_size_m"]
         num_n_tiles = (N + args["block_size_n"] - 1) // args["block_size_n"]
         shmem.info(f"Tiles: {num_m_tiles} M-tiles × {num_n_tiles} N-tiles = {num_m_tiles * num_n_tiles} total")
-        shmem.info(f"\nPer-tile timing:")
+        shmem.info("\nPer-tile timing:")
         shmem.info(f"  GEMM:    {perf_analysis['gemm_wg_us']:.2f} μs")
         shmem.info(f"  Scatter: {perf_analysis['scatter_wg_us']:.2f} μs")
         shmem.info(f"  Ratio:   {perf_analysis['ratio']:.2f}x")
@@ -681,10 +678,10 @@ def _worker(args: dict):
     # Synchronize device before exiting
     for rank in range(world_size):
         _device_quiet_kernel[(world_size,)](
-                        shmem.get_copy_engine_ctx(),
-                        rank,
-                        world_size,
-                    )
+            shmem.get_copy_engine_ctx(),
+            rank,
+            world_size,
+        )
     shmem.barrier()
     dist.destroy_process_group()
 

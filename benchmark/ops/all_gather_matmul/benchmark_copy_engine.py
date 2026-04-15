@@ -43,14 +43,6 @@ try:
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     if _script_dir not in _sys.path:
         _sys.path.insert(0, _script_dir)
-    from derive_params_copy_engine import (
-        derive as _derive_params,
-        DEFAULT_NUM_CUS,
-        DEFAULT_PEAK_TFLOPS_FP16,
-        DEFAULT_HBM_BW_GBPS,
-        DEFAULT_L2_SIZE_BYTES,
-        DEFAULT_SCHEDULING_FACTOR,
-    )
 
     _DERIVE_AVAILABLE = True
 except Exception:
@@ -422,7 +414,6 @@ def _worker(args):
     if args.get("m_tiles_per_batch") is None:
         args["m_tiles_per_batch"] = args["group_size_m"]
 
-
     # Print performance analysis
     if rank == 0 and perf_analysis is not None:
         shmem.info("\n" + "=" * 80)
@@ -432,7 +423,7 @@ def _worker(args):
         num_m_tiles = (M + args["block_size_m"] - 1) // args["block_size_m"]
         num_n_tiles = (N + args["block_size_n"] - 1) // args["block_size_n"]
         shmem.info(f"Tiles: {num_m_tiles} M-tiles × {num_n_tiles} N-tiles = {num_m_tiles * num_n_tiles} total")
-        shmem.info(f"\nPer-tile timing:")
+        shmem.info("\nPer-tile timing:")
         shmem.info(f"  GEMM:    {perf_analysis['gemm_wg_us']:.2f} μs")
         shmem.info(f"  Scatter: {perf_analysis['scatter_wg_us']:.2f} μs")
         shmem.info(f"  Ratio:   {perf_analysis['ratio']:.2f}x")

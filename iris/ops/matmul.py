@@ -101,14 +101,18 @@ def matmul(
 
     # Create tritonBLAS selector to choose optimal block sizes
     selector = _make_matmul_selector(
-        M, N, K,
-        A.dtype, B.dtype, output_tensor.dtype,
+        M,
+        N,
+        K,
+        A.dtype,
+        B.dtype,
+        output_tensor.dtype,
         A.device,
-        streamk=False  # Use persistent kernel
+        streamk=False,  # Use persistent kernel
     )
 
     # Use tritonBLAS with work-stealing for better performance
-    use_work_stealing = config.work_stealing if hasattr(config, 'work_stealing') else False
+    use_work_stealing = config.work_stealing if hasattr(config, "work_stealing") else False
     tritonblas_config = None
 
     if use_work_stealing:
@@ -123,6 +127,7 @@ def matmul(
         # tritonBLAS bias is (N,) - broadcast across M
         # For now, warn if bias is used - needs different handling
         import warnings
+
         warnings.warn(
             "iris matmul bias (M,) is not directly compatible with tritonBLAS bias (N,). "
             "Bias will be ignored in this tritonBLAS integration. "
@@ -131,11 +136,13 @@ def matmul(
         bias = None
 
     persistent_matmul_lt(
-        A, B, output_tensor,
+        A,
+        B,
+        output_tensor,
         selector,
         config=tritonblas_config,
         bias=bias,  # Will be None for now due to dimension mismatch
-        work_stealing=use_work_stealing
+        work_stealing=use_work_stealing,
     )
 
     if not async_op:

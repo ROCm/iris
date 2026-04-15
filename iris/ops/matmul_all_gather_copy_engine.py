@@ -18,7 +18,7 @@ import iris
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
-from tritonblas.matmul import persistent_matmul_lt, _make_matmul_selector, create_counter_config
+from tritonblas.matmul import persistent_matmul_lt, create_counter_config
 
 
 @triton.jit()

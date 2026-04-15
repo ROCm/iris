@@ -215,8 +215,8 @@ def run_benchmark(
         log(f"    ✗ Timeout after {TIMEOUT_SECONDS}s - killing process group")
 
         # Capture any partial output from the timeout exception (decode bytes to str)
-        partial_stdout = timeout_err.stdout.decode('utf-8', errors='replace') if timeout_err.stdout else ""
-        partial_stderr = timeout_err.stderr.decode('utf-8', errors='replace') if timeout_err.stderr else ""
+        partial_stdout = timeout_err.stdout.decode("utf-8", errors="replace") if timeout_err.stdout else ""
+        partial_stderr = timeout_err.stderr.decode("utf-8", errors="replace") if timeout_err.stderr else ""
 
         if process:
             try:
@@ -226,7 +226,7 @@ def run_benchmark(
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     # Force kill if graceful termination fails
-                    log(f"    Process didn't terminate, force killing...")
+                    log("    Process didn't terminate, force killing...")
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
                     process.wait()
             except ProcessLookupError:

@@ -30,7 +30,6 @@ from tritonblas.kernels.stages import (
 )
 
 
-from iris.device_utils import read_realtime
 from iris.tracing.events import TraceEvent
 from .config import FusedConfig
 from .workspace import FusedWorkspace
@@ -765,9 +764,7 @@ def all_gather_matmul_copy_engine(
                 f"num_tiles_m={num_m_tiles}, num_k_blocks_local={num_k_blocks_local}, "
                 f"m_tiles_per_batch={m_tiles_per_batch}, tb_block_m={tb_block_m}"
             )
-            shmem.info(
-                f"[Rank {rank}] Will transfer in {num_batches_calc} batches of {m_tiles_per_batch} M-tiles each"
-            )
+            shmem.info(f"[Rank {rank}] Will transfer in {num_batches_calc} batches of {m_tiles_per_batch} M-tiles each")
 
         # TODO not always faster
         # Prime batch 0 before GEMM launch so the first released tile-group can
