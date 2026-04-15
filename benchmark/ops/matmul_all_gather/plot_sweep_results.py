@@ -15,8 +15,73 @@ Usage:
 import json
 import argparse
 from pathlib import Path
+from enum import Enum
 import matplotlib.pyplot as plt
 import numpy as np
+
+
+class BenchmarkType(Enum):
+    """Canonical benchmark types."""
+
+    IRIS_FUSED = "iris_fused"
+    IRIS_OPTIMIZED = "iris_optimized"
+    TRITON_DEVICE_SDMA = "triton_device_sdma"
+    TRITON_HOST_SDMA = "triton_host_sdma"
+    TRITON_GEMM_ONLY = "triton_gemm_only"
+    PYTORCH_RCCL = "pytorch_rccl"
+    PYTORCH_GEMM_ONLY = "pytorch_gemm_only"
+
+
+# Normalize benchmark names to canonical types
+BENCHMARK_NAME_MAP = {
+    "baseline": BenchmarkType.IRIS_FUSED,
+    "hbm_buffer": BenchmarkType.IRIS_OPTIMIZED,
+    "device_copy_engine": BenchmarkType.TRITON_DEVICE_SDMA,
+    "copy_engine_device": BenchmarkType.TRITON_DEVICE_SDMA,
+    "copy_engine": BenchmarkType.TRITON_DEVICE_SDMA,
+    "host_copy_engine": BenchmarkType.TRITON_HOST_SDMA,
+    "copy_engine_host": BenchmarkType.TRITON_HOST_SDMA,
+    "matmul_only": BenchmarkType.TRITON_GEMM_ONLY,
+    "matmulonly": BenchmarkType.TRITON_GEMM_ONLY,
+    "pytorchbaseline": BenchmarkType.PYTORCH_RCCL,
+    "pytorch_baseline": BenchmarkType.PYTORCH_RCCL,
+    "pytorchmatmul_only": BenchmarkType.PYTORCH_GEMM_ONLY,
+    "pytorch_matmul_only": BenchmarkType.PYTORCH_GEMM_ONLY,
+    "pytorchmatmulonly": BenchmarkType.PYTORCH_GEMM_ONLY,
+}
+
+# Display labels for each benchmark type
+BENCHMARK_LABELS = {
+    BenchmarkType.IRIS_FUSED: "Iris fused kernel",
+    BenchmarkType.IRIS_OPTIMIZED: "Iris optimized fused kernel",
+    BenchmarkType.TRITON_DEVICE_SDMA: "TritonBlas + device-initiated SDMA",
+    BenchmarkType.TRITON_HOST_SDMA: "TritonBlas + host-initiated SDMA",
+    BenchmarkType.TRITON_GEMM_ONLY: "TritonBlas (GEMM only)",
+    BenchmarkType.PYTORCH_RCCL: "Pytorch + RCCL",
+    BenchmarkType.PYTORCH_GEMM_ONLY: "Pytorch (GEMM only)",
+}
+
+# Colors for each benchmark type
+BENCHMARK_COLORS = {
+    BenchmarkType.IRIS_FUSED: "#2E7D32",  # Dark Green
+    BenchmarkType.IRIS_OPTIMIZED: "#66BB6A",  # Light Green
+    BenchmarkType.TRITON_DEVICE_SDMA: "#82E8FF",  # Light Blue
+    BenchmarkType.TRITON_HOST_SDMA: "#1976D2",  # Blue
+    BenchmarkType.TRITON_GEMM_ONLY: "#7B1FA2",  # Purple
+    BenchmarkType.PYTORCH_RCCL: "#F57C00",  # Orange
+    BenchmarkType.PYTORCH_GEMM_ONLY: "#FFB74D",  # Light Orange
+}
+
+# Preferred display order
+BENCHMARK_ORDER = [
+    BenchmarkType.IRIS_FUSED,
+    BenchmarkType.IRIS_OPTIMIZED,
+    BenchmarkType.TRITON_DEVICE_SDMA,
+    BenchmarkType.TRITON_HOST_SDMA,
+    BenchmarkType.TRITON_GEMM_ONLY,
+    BenchmarkType.PYTORCH_RCCL,
+    BenchmarkType.PYTORCH_GEMM_ONLY,
+]
 
 
 def extract_tflops(benchmark_data, benchmark_name):
@@ -40,7 +105,7 @@ def extract_tflops(benchmark_data, benchmark_name):
     return None
 
 
-def plot_sweep_results(input_file, output_file):
+def plot_sweep_results(input_file, output_file, device="MI300X"):
     """Create grouped bar chart from sweep results."""
 
     # Load results
@@ -62,54 +127,67 @@ def plot_sweep_results(input_file, output_file):
             if operation != "matmul_all_gather":
                 break
 
-    # Extract dimension configurations and benchmark names
+    # Extract dimension configurations and normalize benchmark names
     dim_configs = []
-    benchmark_names = set()
+    benchmark_types = set()
 
     for result in results:
         m, n, k = result["M"], result["N"], result["K"]
         dim_label = f"{m}×{n}×{k}"
         dim_configs.append((m, n, k, dim_label))
-        benchmark_names.update(result["benchmarks"].keys())
 
-    benchmark_names = sorted(benchmark_names)
+        # Normalize benchmark names to canonical types
+        for bench_name in result["benchmarks"].keys():
+            if bench_name in BENCHMARK_NAME_MAP:
+                benchmark_types.add(BENCHMARK_NAME_MAP[bench_name])
 
-    # Prepare data for plotting
-    data = {bench: [] for bench in benchmark_names}
+    # Sort by preferred order
+    def sort_key(bench_type):
+        try:
+            return BENCHMARK_ORDER.index(bench_type)
+        except ValueError:
+            return len(BENCHMARK_ORDER)  # Put unknowns at the end
+
+    benchmark_types = sorted(benchmark_types, key=sort_key)
+
+    # Prepare data for plotting - organize by benchmark type
+    data = {bench_type: [] for bench_type in benchmark_types}
 
     for result in results:
-        for bench in benchmark_names:
-            if bench in result["benchmarks"]:
-                tflops = extract_tflops(result["benchmarks"][bench], bench)
-                data[bench].append(tflops if tflops is not None else 0)
+        for bench_type in benchmark_types:
+            # Find all raw benchmark names that map to this type
+            matching_names = [
+                name
+                for name, btype in BENCHMARK_NAME_MAP.items()
+                if btype == bench_type and name in result["benchmarks"]
+            ]
+
+            if matching_names:
+                # Use the first matching benchmark name
+                bench_name = matching_names[0]
+                tflops = extract_tflops(result["benchmarks"][bench_name], bench_name)
+                data[bench_type].append(tflops if tflops is not None else 0)
             else:
-                data[bench].append(0)
+                data[bench_type].append(0)
 
     # Create plot
     fig, ax = plt.subplots(figsize=(14, 8))
 
     x = np.arange(len(dim_configs))
-    width = 0.8 / len(benchmark_names)  # Width of bars
+    width = 0.8 / len(benchmark_types)  # Width of bars
 
-    # Colors for different benchmarks
-    colors = {
-        "baseline": "#2E86AB",
-        "copy_engine": "#A23B72",
-        "host_copy_engine": "#F18F01",
-        "pytorch": "#C73E1D",
-    }
-
-    # Plot bars for each benchmark
-    for i, bench in enumerate(benchmark_names):
-        offset = width * (i - len(benchmark_names) / 2 + 0.5)
-        values = data[bench]
-        color = colors.get(bench, f"C{i}")
+    # Plot bars for each benchmark type
+    for i, bench_type in enumerate(benchmark_types):
+        offset = width * (i - len(benchmark_types) / 2 + 0.5)
+        values = data[bench_type]
+        color = BENCHMARK_COLORS.get(bench_type, f"C{i}")
+        display_label = BENCHMARK_LABELS.get(bench_type, str(bench_type))
 
         bars = ax.bar(
             x + offset,
             values,
             width,
-            label=bench.replace("_", " ").title(),
+            label=display_label,
             color=color,
             alpha=0.8,
             edgecolor="black",
@@ -135,9 +213,9 @@ def plot_sweep_results(input_file, output_file):
     ax.set_ylabel("TFLOPS", fontsize=12, fontweight="bold")
     # Set title based on operation type
     if operation == "all_gather_matmul":
-        title = "All-Gather-Matmul Benchmark Sweep: TFLOPS Comparison"
+        title = f"All-Gather-Matmul Benchmark Sweep: TFLOPS Comparison ({device})"
     else:
-        title = "Matmul-All-Gather Benchmark Sweep: TFLOPS Comparison"
+        title = f"Matmul-All-Gather Benchmark Sweep: TFLOPS Comparison ({device})"
     ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
     ax.set_xticks(x)
     ax.set_xticklabels([label for _, _, _, label in dim_configs], rotation=45, ha="right")
@@ -172,37 +250,52 @@ def plot_sweep_results(input_file, output_file):
             "Config": label,
         }
 
-        # Add TFLOPS values and validation status for each benchmark
-        for bench in benchmark_names:
-            val = data[bench][idx]
-            if val > 0:
-                row[bench] = f"{val:.2f}"
-            else:
-                row[bench] = "FAILED"
+        # Add TFLOPS values and validation status for each benchmark type
+        for bench_type in benchmark_types:
+            val = data[bench_type][idx]
+            label = BENCHMARK_LABELS.get(bench_type, str(bench_type))
 
-            # Add validation status column
-            bench_data = results[idx]["benchmarks"].get(bench, {})
-            validation_key = f"{bench}_validation"
-            if bench_data.get("success") is True:
-                row[validation_key] = "✓"
-            elif bench_data.get("success") is False:
-                row[validation_key] = "✗"
+            if val > 0:
+                row[label] = f"{val:.2f}"
+            else:
+                row[label] = "FAILED"
+
+            # Add validation status column - find the raw benchmark name
+            matching_names = [
+                name
+                for name, btype in BENCHMARK_NAME_MAP.items()
+                if btype == bench_type and name in results[idx]["benchmarks"]
+            ]
+
+            validation_key = f"{label}_validation"
+            if matching_names:
+                bench_data = results[idx]["benchmarks"].get(matching_names[0], {})
+                if bench_data.get("success") is True:
+                    row[validation_key] = "✓"
+                elif bench_data.get("success") is False:
+                    row[validation_key] = "✗"
+                else:
+                    row[validation_key] = "-"
             else:
                 row[validation_key] = "-"
 
         # Find best performer
-        valid_values = [(bench, data[bench][idx]) for bench in benchmark_names if data[bench][idx] > 0]
+        valid_values = [
+            (bench_type, data[bench_type][idx]) for bench_type in benchmark_types if data[bench_type][idx] > 0
+        ]
         if valid_values:
-            best_bench, best_val = max(valid_values, key=lambda x: x[1])
-            row["Best"] = f"{best_bench} ({best_val:.2f})"
+            best_type, best_val = max(valid_values, key=lambda x: x[1])
+            best_label = BENCHMARK_LABELS.get(best_type, str(best_type))
+            row["Best"] = f"{best_label} ({best_val:.2f})"
         else:
             row["Best"] = "NONE"
 
         table_data.append(row)
 
     # Calculate column widths
-    validation_headers = [f"{bench}_validation" for bench in benchmark_names]
-    headers = ["M", "N", "K", "Config"] + benchmark_names + validation_headers + ["Best"]
+    benchmark_labels = [BENCHMARK_LABELS.get(bt, str(bt)) for bt in benchmark_types]
+    validation_headers = [f"{label}_validation" for label in benchmark_labels]
+    headers = ["M", "N", "K", "Config"] + benchmark_labels + validation_headers + ["Best"]
     col_widths = {}
     for header in headers:
         col_widths[header] = len(header)
@@ -253,6 +346,12 @@ def main():
         default="benchmark/ops/matmul_all_gather/sweep_results_plot.png",
         help="Output PNG file for plot",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="MI300X",
+        help="Device name to display in plot title",
+    )
 
     args = parser.parse_args()
 
@@ -261,7 +360,7 @@ def main():
         print(f"Error: Input file not found: {input_path}")
         return 1
 
-    plot_sweep_results(input_path, args.output)
+    plot_sweep_results(input_path, args.output, args.device)
     return 0
 
 
