@@ -259,9 +259,7 @@ def main() -> None:
         env = os.environ.copy()
         proc = subprocess.run(cmd, cwd=here, env=env)
         if proc.returncode != 0:
-            sys.exit(
-                f"torchrun failed with exit code {proc.returncode} for m={m} n={n} cache_mod={cache_mod!r} ..."
-            )
+            sys.exit(f"torchrun failed with exit code {proc.returncode} for m={m} n={n} cache_mod={cache_mod!r} ...")
 
         for r in range(args.nproc_per_node):
             stem = cap_basename(kernel, m, n, bm, bn, sms, stages, dtype, cache_mod, warps, nproc, r)

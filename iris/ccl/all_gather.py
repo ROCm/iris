@@ -23,7 +23,7 @@ try:
     try:
         from triton.experimental.gluon.language.amd.gfx1250 import async_copy as gfx1250_async_copy
 
-        GFX1250_ASYNC_AVAILABLE = False # True
+        GFX1250_ASYNC_AVAILABLE = False  # True
     except ImportError:
         GFX1250_ASYNC_AVAILABLE = False
 except ImportError:
@@ -736,11 +736,9 @@ if GFX1250_ASYNC_AVAILABLE:
                 if dest_idx == group_rank:
                     # Local destination: LDS → local HBM
                     if USE_EXPLICIT_CACHE_MODIFIER:
-                        gfx1250_async_copy.shared_to_global(
-                            output_base_ptrs, smem, mask=mask, cache_modifier='.wt'
-                        )
+                        gfx1250_async_copy.shared_to_global(output_base_ptrs, smem, mask=mask, cache_modifier=".wt")
                     else:
-                        gfx1250_async_copy.shared_to_global(output_base_ptrs, smem, mask=mask, cache_modifier='.wt')
+                        gfx1250_async_copy.shared_to_global(output_base_ptrs, smem, mask=mask, cache_modifier=".wt")
                 else:
                     # Remote destination: translate base pointer, then build
                     # pointer tensor from scratch as scalar + flat_idx.
@@ -757,11 +755,9 @@ if GFX1250_ASYNC_AVAILABLE:
                     remote_ptrs = remote_base + flat_idx
                     remote_ptrs = tl.max_contiguous(tl.multiple_of(remote_ptrs, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
                     if USE_EXPLICIT_CACHE_MODIFIER:
-                        gfx1250_async_copy.shared_to_global(
-                            remote_ptrs, smem, mask=mask, cache_modifier='.wt'
-                        )
+                        gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask, cache_modifier=".wt")
                     else:
-                        gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask, cache_modifier='.wt')
+                        gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask, cache_modifier=".wt")
 
             # Wait for all stores to complete before reusing LDS on next tile
             gfx1250_async_copy.commit_group()

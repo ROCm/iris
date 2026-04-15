@@ -163,6 +163,4 @@ class Config:
         if self.num_warps <= 0:
             raise ValueError(f"num_warps must be positive, got {self.num_warps}")
         if self.cache_modifier is not None and self.cache_modifier not in ("", ".wt", ".cs"):
-            raise ValueError(
-                f"cache_modifier must be None, '', '.wt', or '.cs', got {self.cache_modifier!r}"
-            )
+            raise ValueError(f"cache_modifier must be None, '', '.wt', or '.cs', got {self.cache_modifier!r}")
