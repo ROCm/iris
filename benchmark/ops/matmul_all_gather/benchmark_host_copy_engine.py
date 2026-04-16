@@ -256,7 +256,12 @@ def parse_args():
     parser.add_argument("-k", type=int, default=131072, help="Common dimension (K)")
     parser.add_argument("-v", "--validate", action="store_true", help="Enable validation mode")
     parser.add_argument("-b", "--benchmark", action="store_true", help="Enable benchmarking mode")
-    parser.add_argument("--trace", action="store_true", help="Enable trace mode (generates Gantt chart)")
+    parser.add_argument(
+        "--trace",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Collect per-workgroup trace and save Gantt chart PNG",
+    )
     parser.add_argument(
         "--datatype",
         type=str,
@@ -637,7 +642,13 @@ def _worker(args: dict):
         expected_tensor.copy_(expected_result)
 
     # Pre-allocate workspace
-    workspace = matmul_all_gather_host_copy_engine_preamble(shmem, A_local, B, config)
+    workspace = matmul_all_gather_host_copy_engine_preamble(
+        shmem,
+        A_local,
+        B,
+        config,
+        m_tiles_per_batch=args["m_tiles_per_batch"],
+    )
     workspace.selector = selector
 
     # ── Timing ───────────────────────────────────────────────────────────
@@ -677,6 +688,8 @@ def _worker(args: dict):
     if args["validate"]:
         shmem.info("Validating...")
         C.zero_()
+        workspace.locks.zero_()
+        workspace.completion_signals.zero_()
         shmem.barrier()
 
         # Run validation with verbose output to show SDMA timing
@@ -692,9 +705,9 @@ def _worker(args: dict):
             verbose=True,
         )
         torch.cuda.synchronize()
-        for remote_rank in range(world_size):
-            if remote_rank != rank:
-                anvil_lib.host_quiet(rank, remote_rank, 0)
+        # for remote_rank in range(world_size):
+        #     if remote_rank != rank:
+        #         anvil_lib.host_quiet(rank, remote_rank, 0)
         shmem.barrier()
 
         atol = 1e-1 if datatype == torch.float16 else 1e-3
@@ -719,19 +732,24 @@ def _worker(args: dict):
         total_ms = 0.0
         num_experiments = 0
         flag_iteration = 0
+        workspace.locks.zero_()
+        workspace.completion_signals.zero_()
         if n_warmup > 0:
             iris.do_bench(run_experiment, shmem.barrier, n_warmup=n_warmup, n_repeat=1)
 
         total_ms = 0.0
         num_experiments = 0
+        flag_iteration = 0
         C.zero_()
+        workspace.locks.zero_()
+        workspace.completion_signals.zero_()
         shmem.barrier()
 
         iris.do_bench(run_experiment, shmem.barrier, n_warmup=0, n_repeat=n_repeat)
         torch.cuda.synchronize()
-        for remote_rank in range(world_size):
-            if remote_rank != rank:
-                anvil_lib.host_quiet(rank, remote_rank, 0)
+        # for remote_rank in range(world_size):
+        #     if remote_rank != rank:
+        #         anvil_lib.host_quiet(rank, remote_rank, 0)
         shmem.barrier()
         avg_ms = total_ms / num_experiments if num_experiments > 0 else 0
 
@@ -763,6 +781,7 @@ def _worker(args: dict):
         shmem.info("Trace warmup (compiling traced kernel variant)...")
         C.zero_()
         workspace.locks.zero_()
+        workspace.completion_signals.zero_()
         shmem.barrier()
         matmul_all_gather_host_copy_engine(
             shmem,
@@ -785,6 +804,7 @@ def _worker(args: dict):
         shmem.info("Running single traced iteration...")
         C.zero_()
         workspace.locks.zero_()
+        workspace.completion_signals.zero_()
         shmem.barrier()
         matmul_all_gather_host_copy_engine(
             shmem,

@@ -32,6 +32,7 @@ from .workspace import FusedWorkspace
 from tritonblas.matmul import persistent_matmul_lt, _make_matmul_selector
 from tritonblas.config import matmul_preamble as tritonblas_preamble
 from tritonblas.matmul import create_counter_config
+from .tritonblas_launch_wave_schedule import build_launch_wave_plan
 
 # Import Tile class from anvil module
 try:
@@ -49,6 +50,21 @@ def wait_cnt():
 
 # Event IDs (must match iris.tracing.events.TraceEvent)
 _WG_GEMM = 15
+
+
+@triton.jit()
+def _wait_completion_signals_kernel(
+    completion_signals,
+    expected_value,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+):
+    src_rank = tl.program_id(0)
+    if src_rank >= world_size or src_rank == cur_rank:
+        return
+    # while tl.atomic_add(completion_signals + src_rank, 0, sem="acquire", scope="sys") < expected_value:
+    while tl.load(completion_signals + src_rank, cache_modifier=".cv", volatile=True) < expected_value:
+        pass
 
 
 def _extract_wg_trace(shmem, grid_size, num_tiles, sdma_timestamps=None, **metadata):
@@ -234,8 +250,9 @@ def matmul_all_gather_host_copy_engine_preamble(
     config: Optional[FusedConfig] = None,
     m_tiles_per_batch: int = 1,
     trace: bool = False,
+    use_tritonblas: bool = True,
 ) -> FusedWorkspace:
-    """Allocate workspace for matmul_all_gather_host_copy_engine including per-batch flags."""
+    """Allocate workspace for matmul_all_gather_host_copy_engine."""
     if config is None:
         config = FusedConfig()
 
@@ -247,16 +264,6 @@ def matmul_all_gather_host_copy_engine_preamble(
 
     M = M_local * world_size
 
-    # Calculate number of tiles
-    # tritonBLAS auto-selects block sizes, get selector to determine tile counts
-    num_tiles_m = (M_local + config.block_size_m - 1) // config.block_size_m
-    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
-
-    num_tiles = num_tiles_m * num_tiles_n
-
-    # Calculate number of batches
-    num_batches = (num_tiles_m + m_tiles_per_batch - 1) // m_tiles_per_batch
-
     ws = FusedWorkspace(
         operation="matmul_all_gather_host_copy_engine",
         shape=(M, N, K),
@@ -265,15 +272,44 @@ def matmul_all_gather_host_copy_engine_preamble(
         prepared=True,
     )
 
-    # Allocate per-batch flags (one flag per batch, each batch contains m_tiles_per_batch M-rows)
-    ws.locks = shmem.zeros((num_batches,), dtype=torch.int32)
+    if use_tritonblas:
+        selector = _make_matmul_selector(
+            M_local,
+            N,
+            K,
+            A.dtype,
+            B.dtype,
+            A.dtype,
+            A.device,
+            streamk=False,
+        )
+        num_tiles_m = triton.cdiv(M_local, selector.block_m)
+        num_tiles_n = triton.cdiv(N, selector.block_n)
+        launch_wave_plan = build_launch_wave_plan(
+            num_tiles_m=num_tiles_m,
+            num_tiles_n=num_tiles_n,
+            group_size_m=selector.group_m,
+            launch_grid=num_tiles_m * num_tiles_n,
+            wave_size=selector._ACTIVE_CU,
+            num_xcds=selector.num_sms,
+        )
+        ws.selector = selector
+        ws.launch_wave_plan = launch_wave_plan
+        ws.locks = shmem.zeros((launch_wave_plan.num_waves,), dtype=torch.int32)
+        ws.num_tiles_m = num_tiles_m
+        ws.num_tiles_n = num_tiles_n
+        ws.num_batches = launch_wave_plan.num_waves
+        ws.num_waves = launch_wave_plan.num_waves
+    else:
+        num_tiles_m = (M_local + config.block_size_m - 1) // config.block_size_m
+        num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
+        num_batches = (num_tiles_m + m_tiles_per_batch - 1) // m_tiles_per_batch
+        ws.locks = shmem.zeros((num_batches,), dtype=torch.int32)
+        ws.num_tiles_m = num_tiles_m
+        ws.num_tiles_n = num_tiles_n
+        ws.num_batches = num_batches
 
-    # Store metadata for later use
-    # ws.selector = selector
-    ws.num_tiles_m = num_tiles_m
-    ws.num_tiles_n = num_tiles_n
-    ws.num_batches = num_batches
-    # ws.m_tiles_per_batch = m_tiles_per_batch
+    ws.completion_signals = shmem.zeros((world_size,), dtype=torch.int32)
 
     return ws
 
@@ -338,11 +374,6 @@ def matmul_all_gather_host_copy_engine(
     stride_cm, stride_cn = output_tensor.stride()
     device = A.device
 
-    # Get metadata from workspace
-    num_tiles_m = workspace.num_tiles_m
-    num_tiles_n = workspace.num_tiles_n
-    num_batches = workspace.num_batches
-
     selector = workspace.selector
     selector_shape = (
         selector.block_m,
@@ -362,6 +393,12 @@ def matmul_all_gather_host_copy_engine(
             f"selector(M,N,K,G)=({selector.block_m},{selector.block_n},{selector.block_k},{selector.group_m}) "
             f"!= config(M,N,K,G)=({config.block_size_m},{config.block_size_n},{config.block_size_k},{config.group_size_m})"
         )
+    launch_wave_plan = getattr(workspace, "launch_wave_plan", None)
+    num_tiles_m = workspace.num_tiles_m
+    num_tiles_n = workspace.num_tiles_n
+    num_batches = workspace.num_batches
+    if use_tritonblas and launch_wave_plan is None:
+        raise ValueError("workspace.launch_wave_plan must be initialized in preamble for the tritonBLAS path")
 
     # ═══════════════════════════════════════════════════════════════════════
     # Device Phase: Compute GEMM + store + set flags
@@ -373,14 +410,10 @@ def matmul_all_gather_host_copy_engine(
         # Create a view of output_tensor at this rank's position
         C_local_view = output_tensor[rank * M_local : (rank + 1) * M_local, :]
 
-        # Create counter config for batch-level tracking
-        # Use "block" mapping: block_group_m=m_tiles_per_batch, block_group_n=num_tiles_n
-        # This gives counter_id = batch_id (all tiles in a batch share one counter)
         counter_config = create_counter_config(
             workspace.locks,
-            map_type="block",
-            block_group_m=m_tiles_per_batch,
-            block_group_n=num_tiles_n,
+            map_type="launch_wave",
+            block_group_m=launch_wave_plan.wave_size,
         )
 
         # Use work-stealing if enabled
@@ -488,15 +521,23 @@ def matmul_all_gather_host_copy_engine(
     element_size = output_tensor.element_size()
     anvil_lib = shmem.copy_engines
 
-    # Calculate number of batches
-    num_batches = (num_tiles_m + m_tiles_per_batch - 1) // m_tiles_per_batch
-
     if verbose and rank == 0:
-        shmem.info(
-            f"[Rank {rank}] Starting SDMA loop (batched M-tile transfers)... "
-            f"num_m_tiles={num_tiles_m}, num_tiles_n={num_tiles_n}, m_tiles_per_batch={m_tiles_per_batch}"
-        )
-        shmem.info(f"[Rank {rank}] Will transfer in {num_batches} batches")
+        if use_tritonblas:
+            shmem.info(
+                f"[Rank {rank}] Starting SDMA loop (launch-wave transfers)... "
+                f"num_m_tiles={num_tiles_m}, num_tiles_n={num_tiles_n}, "
+                f"wave_size={launch_wave_plan.wave_size}"
+            )
+            shmem.info(
+                f"[Rank {rank}] Will transfer in {launch_wave_plan.num_waves} waves "
+                f"across {len(launch_wave_plan.transfers)} rects"
+            )
+        else:
+            shmem.info(
+                f"[Rank {rank}] Starting SDMA loop (batched M-tile transfers)... "
+                f"num_m_tiles={num_tiles_m}, num_tiles_n={num_tiles_n}, m_tiles_per_batch={m_tiles_per_batch}"
+            )
+            shmem.info(f"[Rank {rank}] Will transfer in {num_batches} batches")
 
     sdma_start_time = time.perf_counter()
     tile_transfer_count = 0
@@ -511,72 +552,140 @@ def matmul_all_gather_host_copy_engine(
     # Get block size (depends on backend)
     if use_tritonblas:
         block_size_m = workspace.selector.block_m
+        block_size_n = workspace.selector.block_n
     else:
         block_size_m = config.block_size_m
+        block_size_n = config.block_size_n
 
-    # Queue POLL+COPY packets for each batch (batching M_TILES_PER_BATCH M-rows × all N-tiles together)
-    for batch_id in range(num_batches):
-        # Calculate M-tile range for this batch
-        m_tile_start = batch_id * m_tiles_per_batch
-        m_tile_end = min(m_tile_start + m_tiles_per_batch, num_tiles_m)
-        num_m_tiles_in_batch = m_tile_end - m_tile_start
+    signal_ptr_local = workspace.completion_signals.data_ptr() + rank * workspace.completion_signals.element_size()
+    if use_tritonblas:
+        transfers_by_wave = [[] for _ in range(launch_wave_plan.num_waves)]
+        for transfer in launch_wave_plan.transfers:
+            transfers_by_wave[transfer.wave_id].append(transfer)
 
-        # Calculate batch bounds in rows
-        m_start = m_tile_start * block_size_m
-        m_end = min(m_tile_end * block_size_m, M_local)
-        batch_height = m_end - m_start
+        for wave_id, wave_transfers in enumerate(transfers_by_wave):
+            if not wave_transfers:
+                continue
 
-        # Calculate total width (all N-tiles)
-        batch_width = N  # Full N dimension
+            expected_flag_value = (flag_iteration + 1) * launch_wave_plan.wave_tile_counts[wave_id]
+            wait_flag_ptr = workspace.locks.data_ptr() + wave_id * workspace.locks.element_size()
+            is_last_wave = wave_id == (launch_wave_plan.num_waves - 1)
 
-        # Wait for flag to reach expected value (all tiles in this batch complete)
-        expected_flag_value = (flag_iteration + 1) * num_m_tiles_in_batch * num_tiles_n
+            tiles = []
+            dst_ptrs_local = []
+            dst_strides = []
 
-        # Get flag pointer for this batch
-        wait_flag_ptr = workspace.locks.data_ptr() + batch_id * workspace.locks.element_size()
+            for transfer in wave_transfers:
+                m_start = transfer.m_tile_start * block_size_m
+                n_start = transfer.n_tile_start * block_size_n
+                batch_height = min(transfer.m_tile_count * block_size_m, M_local - m_start)
+                batch_width = min(transfer.n_tile_count * block_size_n, N - n_start)
 
-        # Create Tile object for this batch (reuse across all remote ranks)
-        tile_obj = Tile()
-        tile_obj.pid_m = 0  # We handle offset via data pointer
-        tile_obj.pid_n = 0
-        tile_obj.block_m = batch_height
-        tile_obj.block_n = batch_width
-        tile_obj.elem_size = element_size
-        tile_obj.src_stride = stride_cm * element_size
-        # Source data pointer (output tensor at this rank's batch location)
-        src_offset = (m_start + rank * M_local) * stride_cm
-        tile_obj.data = output_tensor.data_ptr() + src_offset * element_size
+                tile_obj = Tile()
+                tile_obj.pid_m = 0
+                tile_obj.pid_n = 0
+                tile_obj.block_m = batch_height
+                tile_obj.block_n = batch_width
+                tile_obj.elem_size = element_size
+                tile_obj.src_stride = stride_cm * element_size
 
-        # Pre-calculate destination pointer (same logical position, just needs translation)
-        dst_offset_local = (m_start + rank * M_local) * stride_cm
-        dst_ptr_local = output_tensor.data_ptr() + dst_offset_local * element_size
-        dst_stride = stride_cm * element_size
+                src_offset = (m_start + rank * M_local) * stride_cm + n_start * stride_cn
+                tile_obj.data = output_tensor.data_ptr() + src_offset * element_size
+                dst_offset_local = (m_start + rank * M_local) * stride_cm + n_start * stride_cn
 
-        # For each remote rank, queue POLL+COPY using new API
-        for remote_rank in range(world_size):
-            if remote_rank != rank:
-                # Translate destination pointer to remote address space
-                dst_ptr_remote = shmem.translate(dst_ptr_local, rank, remote_rank)
+                tiles.append(tile_obj)
+                dst_ptrs_local.append(output_tensor.data_ptr() + dst_offset_local * element_size)
+                dst_strides.append(stride_cm * element_size)
 
-                # Use shmem.put_tile API with pre-calculated pointers
-                shmem.put_tile(
-                    tile_obj,
+            for remote_rank in range(world_size):
+                if remote_rank == rank:
+                    continue
+
+                dst_ptrs_remote = [
+                    shmem.translate(dst_ptr_local, rank, remote_rank) for dst_ptr_local in dst_ptrs_local
+                ]
+                signal_ptr_remote = None
+                if is_last_wave:
+                    signal_ptr_remote = shmem.translate(signal_ptr_local, rank, remote_rank)
+
+                shmem.put_tiles(
+                    tiles,
                     dst_rank=remote_rank,
-                    dst_ptr=dst_ptr_remote,
-                    dst_stride=dst_stride,
+                    dst_ptrs=dst_ptrs_remote,
+                    dst_strides=dst_strides,
                     wait_flag=wait_flag_ptr,
                     wait_value=expected_flag_value,
-                    async_op=True,  # Don't wait yet, we'll call quiet later
+                    signal_flag=signal_ptr_remote,
+                    signal_value=1,
+                    async_op=True,
                     channel=0,
                 )
-                tile_transfer_count += 1
+                tile_transfer_count += len(wave_transfers)
 
-                if verbose and batch_id == 0 and remote_rank == (rank + 1) % world_size:
+                if verbose and wave_id < 2 and remote_rank == (rank + 1) % world_size:
                     shmem.info(
-                        f"[Rank {rank}→{remote_rank}] Queued batch={batch_id} "
-                        f"({num_m_tiles_in_batch} M-tiles × {num_tiles_n} N-tiles, "
-                        f"{batch_height}×{batch_width} elements)"
+                        f"[Rank {rank}→{remote_rank}] Queued wave={wave_id} "
+                        f"transfers={len(wave_transfers)} tiles={launch_wave_plan.wave_tile_counts[wave_id]}"
                     )
+    else:
+        for batch_id in range(num_batches):
+            m_tile_start = batch_id * m_tiles_per_batch
+            m_tile_end = min(m_tile_start + m_tiles_per_batch, num_tiles_m)
+            num_m_tiles_in_batch = m_tile_end - m_tile_start
+
+            m_start = m_tile_start * block_size_m
+            m_end = min(m_tile_end * block_size_m, M_local)
+            batch_height = m_end - m_start
+            batch_width = N
+            expected_flag_value = (flag_iteration + 1) * num_m_tiles_in_batch * num_tiles_n
+            wait_flag_ptr = workspace.locks.data_ptr() + batch_id * workspace.locks.element_size()
+
+            tile_obj = Tile()
+            tile_obj.pid_m = 0
+            tile_obj.pid_n = 0
+            tile_obj.block_m = batch_height
+            tile_obj.block_n = batch_width
+            tile_obj.elem_size = element_size
+            tile_obj.src_stride = stride_cm * element_size
+            src_offset = (m_start + rank * M_local) * stride_cm
+            tile_obj.data = output_tensor.data_ptr() + src_offset * element_size
+
+            dst_offset_local = (m_start + rank * M_local) * stride_cm
+            dst_ptr_local = output_tensor.data_ptr() + dst_offset_local * element_size
+            dst_stride = stride_cm * element_size
+
+            for remote_rank in range(world_size):
+                if remote_rank == rank:
+                    continue
+                dst_ptr_remote = shmem.translate(dst_ptr_local, rank, remote_rank)
+                is_last_batch = batch_id == (num_batches - 1)
+
+                if is_last_batch:
+                    signal_ptr_remote = shmem.translate(signal_ptr_local, rank, remote_rank)
+                    shmem.put_tile(
+                        tile_obj,
+                        dst_rank=remote_rank,
+                        dst_ptr=dst_ptr_remote,
+                        dst_stride=dst_stride,
+                        wait_flag=wait_flag_ptr,
+                        wait_value=expected_flag_value,
+                        signal_flag=signal_ptr_remote,
+                        signal_value=1,
+                        async_op=True,
+                        channel=0,
+                    )
+                else:
+                    shmem.put_tile(
+                        tile_obj,
+                        dst_rank=remote_rank,
+                        dst_ptr=dst_ptr_remote,
+                        dst_stride=dst_stride,
+                        wait_flag=wait_flag_ptr,
+                        wait_value=expected_flag_value,
+                        async_op=True,
+                        channel=0,
+                    )
+                tile_transfer_count += 1
 
     sdma_end_post_time = time.perf_counter()
 
@@ -588,7 +697,12 @@ def matmul_all_gather_host_copy_engine(
                 anvil_lib.host_timestamp(rank, remote_rank, 0, timestamp_ptr)
 
     if not async_op:
-        shmem.quiet()
+        _wait_completion_signals_kernel[(world_size,)](
+            workspace.completion_signals,
+            flag_iteration + 1,
+            rank,
+            world_size,
+        )
         sdma_end_time = time.perf_counter()
         shmem.barrier()
         if verbose and rank == 0:
@@ -597,10 +711,9 @@ def matmul_all_gather_host_copy_engine(
             total_ms = (sdma_end_time - sdma_start_time) * 1000.0
             shmem.info(
                 f"[Rank {rank}] SDMA complete. "
-                f"Post: {post_ms:.2f}ms, Quiet: {quiet_ms:.2f}ms, Total: {total_ms:.2f}ms, "
+                f"Post: {post_ms:.2f}ms, Wait: {quiet_ms:.2f}ms, Total: {total_ms:.2f}ms, "
                 f"transfers={tile_transfer_count}"
             )
-
 
     # Extract trace data if tracing was enabled
     if trace:
