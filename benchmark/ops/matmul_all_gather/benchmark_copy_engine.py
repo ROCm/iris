@@ -22,7 +22,6 @@ from examples.common.utils import JSONWriter
 import iris
 
 from iris.ops.matmul_all_gather_copy_engine import (
-    _device_quiet_kernel,
     matmul_all_gather_copy_engine,
     matmul_all_gather_copy_engine_preamble,
 )
@@ -546,6 +545,9 @@ def _worker(args: dict):
 
         # Reset output before validation
         C.zero_()
+        workspace.locks.zero_()
+        if getattr(workspace, "completion_signals", None) is not None:
+            workspace.completion_signals.zero_()
         shmem.barrier()
 
         run_experiment()
@@ -569,15 +571,23 @@ def _worker(args: dict):
         for k in ["copy_engine", "baseline"]:
             kernel_timing[k]["ms"] = 0
             kernel_timing[k]["experiments"] = 0
+        flag_iteration = 0
+        workspace.locks.zero_()
+        if getattr(workspace, "completion_signals", None) is not None:
+            workspace.completion_signals.zero_()
 
         iris.do_bench(run_experiment, shmem.barrier, n_warmup=25, n_repeat=1)
 
         for k in ["copy_engine", "baseline"]:
             kernel_timing[k]["ms"] = 0
             kernel_timing[k]["experiments"] = 0
+        flag_iteration = 0
 
         # Reset output before benchmarking
         C.zero_()
+        workspace.locks.zero_()
+        if getattr(workspace, "completion_signals", None) is not None:
+            workspace.completion_signals.zero_()
         shmem.barrier()
 
         shmem.info("Benchmarking copy engine variant...")
@@ -678,13 +688,6 @@ def _worker(args: dict):
         json_writer.flush()
         json_writer.display()
 
-    # Synchronize device before exiting
-    for rank in range(world_size):
-        _device_quiet_kernel[(world_size,)](
-                        shmem.get_copy_engine_ctx(),
-                        rank,
-                        world_size,
-                    )
     shmem.barrier()
     dist.destroy_process_group()
 

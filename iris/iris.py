@@ -968,11 +968,18 @@ class Iris:
         offset = ptr - from_base
         return to_base + offset
 
-    def put(self, src_tensor: torch.Tensor, dst_rank: int,
-            dst_tensor: torch.Tensor = None,
-            wait_flag: torch.Tensor = None, wait_value: int = None,
-            signal_flag: torch.Tensor = None, signal_value: int = 1,
-            async_op: bool = False, channel: int = 0):
+    def put(
+        self,
+        src_tensor: torch.Tensor,
+        dst_rank: int,
+        dst_tensor: torch.Tensor = None,
+        wait_flag: torch.Tensor = None,
+        wait_value: int = None,
+        signal_flag: torch.Tensor = None,
+        signal_value: int = 1,
+        async_op: bool = False,
+        channel: int = 0,
+    ):
         """
         One-sided put operation with optional wait (POLL) and signal (ATOMIC).
 
@@ -1103,7 +1110,7 @@ class Iris:
             self.copy_engines.host_wait_flag_then_put_tile(
                 src_rank, dst_rank, channel, wait_flag, wait_value, tile, dst_ptr, dst_stride
             )
-            self.copy_engines.host_atomic_add(src_rank, dst_rank, channel, signal_flag, signal_value)
+            self.copy_engines.host_atomic_add_32(src_rank, dst_rank, channel, signal_flag, signal_value)
 
         elif has_wait:
             # POLL + SUB_WINDOW_COPY
@@ -1120,6 +1127,65 @@ class Iris:
         else:
             # Simple SUB_WINDOW_COPY
             self.copy_engines.host_put_tile(src_rank, dst_rank, channel, tile, dst_ptr, dst_stride)
+
+        if not async_op:
+            self.copy_engines.host_quiet(src_rank, dst_rank, channel)
+
+    def put_tiles(
+        self,
+        tiles,
+        dst_rank: int,
+        dst_ptrs,
+        dst_strides,
+        wait_flag: int = None,
+        wait_value: int = None,
+        signal_flag: int = None,
+        signal_value: int = 1,
+        async_op: bool = False,
+        channel: int = 0,
+    ):
+        """
+        Batched 2D tile transfer with optional shared wait/signal.
+
+        Args:
+            tiles: Sequence of pre-configured anvil.Tile objects
+            dst_rank: Destination rank
+            dst_ptrs: Sequence of translated destination pointers
+            dst_strides: Sequence of destination row strides in bytes
+            wait_flag: Optional LOCAL flag pointer to poll before all transfers
+            wait_value: Expected value for wait_flag
+            signal_flag: Optional REMOTE flag pointer to atomic-add after all transfers
+            signal_value: Value to add to signal_flag
+            async_op: If True, don't wait for completion
+            channel: SDMA channel to use
+        """
+        src_rank = self.get_rank()
+
+        if len(tiles) != len(dst_ptrs) or len(tiles) != len(dst_strides):
+            raise ValueError("tiles, dst_ptrs, and dst_strides must have the same length")
+
+        has_wait = wait_flag is not None
+        has_signal = signal_flag is not None
+
+        if has_wait:
+            self.copy_engines.host_wait_flag_then_put_tiles(
+                src_rank, dst_rank, channel, wait_flag, wait_value, tiles, dst_ptrs, dst_strides
+            )
+            if has_signal:
+                self.copy_engines.host_atomic_add_32(src_rank, dst_rank, channel, signal_flag, signal_value)
+        else:
+            for tile, dst_ptr, dst_stride in zip(tiles, dst_ptrs, dst_strides):
+                self.put_tile(
+                    tile,
+                    dst_rank=dst_rank,
+                    dst_ptr=dst_ptr,
+                    dst_stride=dst_stride,
+                    signal_flag=None,
+                    async_op=True,
+                    channel=channel,
+                )
+            if has_signal:
+                self.copy_engines.host_atomic_add_32(src_rank, dst_rank, channel, signal_flag, signal_value)
 
         if not async_op:
             self.copy_engines.host_quiet(src_rank, dst_rank, channel)
@@ -1144,8 +1210,7 @@ class Iris:
         else:
             # Quiet to all ranks
             for rank in range(self.get_num_ranks()):
-                if rank != src_rank:
-                    self.copy_engines.host_quiet(src_rank, rank, channel)
+                self.copy_engines.host_quiet(src_rank, rank, channel)
 
     def get_device_context(self):
         """
@@ -1541,6 +1606,18 @@ def __translate(ptr, from_rank, to_rank, heap_bases, hint: tl.constexpr = None):
     if hint is not None:
         translated_ptr = tl.max_contiguous(tl.multiple_of(translated_ptr, hint), hint)
     return translated_ptr
+
+
+@triton.jit
+def translate_ptr(ptr, from_rank, to_rank, heap_bases, hint: tl.constexpr = None):
+    """
+    Public device-side pointer translation helper.
+
+    This is a thin wrapper around the internal translation routine so Triton
+    kernels importing the top-level `iris` package can access address-space
+    translation without depending on a private symbol name.
+    """
+    return __translate(ptr, from_rank, to_rank, heap_bases, hint)
 
 
 @aggregate
@@ -2901,6 +2978,351 @@ def put_signal_rect(
     # Submit both packets in one doorbell ring
     pending_wptr = base + offset + command_in_bytes
     anvil.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def wait_then_put_rect(
+    from_ptr,
+    to_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    wait_flag_ptr,
+    wait_value,
+    width_bytes: tl.constexpr,
+    height: tl.constexpr,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    hint: tl.constexpr = None,
+):
+    """
+    Enqueue a POLL_REGMEM followed by a 2D SUB_WINDOW_COPY in one SDMA submission.
+
+    This is the device-side counterpart to the host wait-then-put-tile path.
+    The SDMA queue waits on a local flag and performs the copy autonomously
+    after the producer has completed the corresponding batch.
+    """
+    translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
+
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    poll_packet_bytes = 24
+    copy_packet_bytes = 80
+    command_in_bytes = poll_packet_bytes + copy_packet_bytes
+
+    base, offset = anvil.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+    anvil.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+    anvil.place_poll_regmem_packet(
+        queue_ptr_u32,
+        packet_offset_bytes,
+        wait_flag_ptr.to(tl.uint64),
+        wait_value,
+    )
+    anvil.place_sub_window_copy_packet(
+        queue_ptr_u32,
+        packet_offset_bytes + poll_packet_bytes,
+        from_ptr.to(tl.uint64),
+        translated_to_ptr.to(tl.uint64),
+        tile_width=width_bytes,
+        tile_height=height,
+        src_buffer_pitch=src_pitch,
+        dst_buffer_pitch=dst_pitch,
+        src_x=0,
+        src_y=0,
+        dst_x=0,
+        dst_y=0,
+    )
+
+    pending_wptr = base + offset + command_in_bytes
+    anvil.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def wait_then_put_rects(
+    from_base_ptr,
+    to_base_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    wait_flag_ptr,
+    wait_value,
+    transfer_row_offsets,
+    transfer_col_offsets,
+    transfer_width_bytes,
+    transfer_heights,
+    transfer_start,
+    transfer_count,
+    stride_n_bytes,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    MAX_RECTS: tl.constexpr,
+    hint: tl.constexpr = None,
+):
+    """
+    Enqueue one POLL_REGMEM followed by many 2D SUB_WINDOW_COPY packets.
+
+    The copy list is provided as flattened metadata arrays plus a per-wave
+    start/count pair so the poster can submit an entire wave with one queue
+    reservation and one doorbell ring.
+    """
+    translated_to_base_ptr = __translate(to_base_ptr, from_rank, to_rank, heap_bases, hint)
+
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    poll_packet_bytes = 24
+    copy_packet_bytes = 80
+    command_in_bytes = poll_packet_bytes + transfer_count * copy_packet_bytes
+
+    base, offset = anvil.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+    anvil.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+    anvil.place_poll_regmem_packet(
+        queue_ptr_u32,
+        packet_offset_bytes,
+        wait_flag_ptr.to(tl.uint64),
+        wait_value,
+    )
+
+    from_base_val = from_base_ptr.to(tl.uint64)
+    to_base_val = translated_to_base_ptr.to(tl.uint64)
+
+    for i in range(MAX_RECTS):
+        if i < transfer_count:
+            transfer_idx = transfer_start + i
+            row_offset = tl.load(transfer_row_offsets + transfer_idx)
+            col_offset = tl.load(transfer_col_offsets + transfer_idx)
+            width_bytes = tl.load(transfer_width_bytes + transfer_idx)
+            height = tl.load(transfer_heights + transfer_idx)
+            byte_offset = (row_offset.to(tl.uint64) * src_pitch) + (col_offset.to(tl.uint64) * stride_n_bytes)
+            copy_offset_bytes = packet_offset_bytes + poll_packet_bytes + i * copy_packet_bytes
+            anvil.place_sub_window_copy_packet(
+                queue_ptr_u32,
+                copy_offset_bytes,
+                from_base_val + byte_offset,
+                to_base_val + byte_offset,
+                tile_width=width_bytes,
+                tile_height=height,
+                src_buffer_pitch=src_pitch,
+                dst_buffer_pitch=dst_pitch,
+                src_x=0,
+                src_y=0,
+                dst_x=0,
+                dst_y=0,
+            )
+
+    pending_wptr = base + offset + command_in_bytes
+    anvil.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def wait_then_put_signal_rect(
+    from_ptr,
+    to_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    wait_flag_ptr,
+    wait_value,
+    signal_flag_ptr,
+    signal_value,
+    width_bytes: tl.constexpr,
+    height: tl.constexpr,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    hint: tl.constexpr = None,
+):
+    """
+    Enqueue POLL_REGMEM + 2D SUB_WINDOW_COPY + ATOMIC in one SDMA submission.
+
+    This is the device-side counterpart to host-side wait/copy/signal flows and is
+    useful for marking receiver-visible completion after the final copy in a queue.
+    """
+    translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
+    translated_signal_ptr = __translate(signal_flag_ptr, from_rank, to_rank, heap_bases, hint)
+
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    poll_packet_bytes = 24
+    copy_packet_bytes = 80
+    atomic_packet_bytes = 32
+    command_in_bytes = poll_packet_bytes + copy_packet_bytes + atomic_packet_bytes
+
+    base, offset = anvil.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+    anvil.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+    anvil.place_poll_regmem_packet(
+        queue_ptr_u32,
+        packet_offset_bytes,
+        wait_flag_ptr.to(tl.uint64),
+        wait_value,
+    )
+    anvil.place_sub_window_copy_packet(
+        queue_ptr_u32,
+        packet_offset_bytes + poll_packet_bytes,
+        from_ptr.to(tl.uint64),
+        translated_to_ptr.to(tl.uint64),
+        tile_width=width_bytes,
+        tile_height=height,
+        src_buffer_pitch=src_pitch,
+        dst_buffer_pitch=dst_pitch,
+        src_x=0,
+        src_y=0,
+        dst_x=0,
+        dst_y=0,
+    )
+    anvil.place_atomic_packet(
+        queue_ptr_u32,
+        packet_offset_bytes + poll_packet_bytes + copy_packet_bytes,
+        translated_signal_ptr.to(tl.uint64),
+        signal_value,
+    )
+
+    pending_wptr = base + offset + command_in_bytes
+    anvil.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def wait_then_put_signal_rects(
+    from_base_ptr,
+    to_base_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    wait_flag_ptr,
+    wait_value,
+    signal_flag_ptr,
+    signal_value,
+    transfer_row_offsets,
+    transfer_col_offsets,
+    transfer_width_bytes,
+    transfer_heights,
+    transfer_start,
+    transfer_count,
+    stride_n_bytes,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    MAX_RECTS: tl.constexpr,
+    hint: tl.constexpr = None,
+):
+    """
+    Enqueue one POLL_REGMEM, many 2D SUB_WINDOW_COPY packets, and one ATOMIC.
+    """
+    translated_to_base_ptr = __translate(to_base_ptr, from_rank, to_rank, heap_bases, hint)
+    translated_signal_ptr = __translate(signal_flag_ptr, from_rank, to_rank, heap_bases, hint)
+
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    poll_packet_bytes = 24
+    copy_packet_bytes = 80
+    atomic_packet_bytes = 32
+    command_in_bytes = poll_packet_bytes + transfer_count * copy_packet_bytes + atomic_packet_bytes
+
+    base, offset = anvil.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+    anvil.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+    anvil.place_poll_regmem_packet(
+        queue_ptr_u32,
+        packet_offset_bytes,
+        wait_flag_ptr.to(tl.uint64),
+        wait_value,
+    )
+
+    from_base_val = from_base_ptr.to(tl.uint64)
+    to_base_val = translated_to_base_ptr.to(tl.uint64)
+    for i in range(MAX_RECTS):
+        if i < transfer_count:
+            transfer_idx = transfer_start + i
+            row_offset = tl.load(transfer_row_offsets + transfer_idx)
+            col_offset = tl.load(transfer_col_offsets + transfer_idx)
+            width_bytes = tl.load(transfer_width_bytes + transfer_idx)
+            height = tl.load(transfer_heights + transfer_idx)
+            byte_offset = (row_offset.to(tl.uint64) * src_pitch) + (col_offset.to(tl.uint64) * stride_n_bytes)
+            copy_offset_bytes = packet_offset_bytes + poll_packet_bytes + i * copy_packet_bytes
+            anvil.place_sub_window_copy_packet(
+                queue_ptr_u32,
+                copy_offset_bytes,
+                from_base_val + byte_offset,
+                to_base_val + byte_offset,
+                tile_width=width_bytes,
+                tile_height=height,
+                src_buffer_pitch=src_pitch,
+                dst_buffer_pitch=dst_pitch,
+                src_x=0,
+                src_y=0,
+                dst_x=0,
+                dst_y=0,
+            )
+
+    anvil.place_atomic_packet(
+        queue_ptr_u32,
+        packet_offset_bytes + poll_packet_bytes + transfer_count * copy_packet_bytes,
+        translated_signal_ptr.to(tl.uint64),
+        signal_value,
+    )
+
+    pending_wptr = base + offset + command_in_bytes
+    anvil.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def quiet(copy_engine_ctx: tl.tensor, to_rank):
+    """
+    Device-side equivalent of host_quiet for a single destination queue.
+
+    Waits until the hardware read pointer catches up to the queue's committed
+    write pointer, meaning all packets submitted to that SDMA queue have
+    completed.
+    """
+    ctx = copy_engine_ctx + (6 * to_rank)
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    target_wptr = tl.load(committed_write_ptr, cache_modifier=".cv", volatile=True)
+    while tl.load(read_ptr, cache_modifier=".cv", volatile=True) != target_wptr:
+        pass
+
+    # tl.debug_barrier()
 
 
 @triton.jit

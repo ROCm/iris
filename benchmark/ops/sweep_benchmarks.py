@@ -52,7 +52,7 @@ BENCHMARK_CONFIGS = {
         },
         "host_copy_engine": {
             "script": "benchmark/ops/matmul_all_gather/benchmark_host_copy_engine.py",
-            "extra_args": [],
+            "extra_args": ["--no-trace"],
             "output_file": "matmul_all_gather_host_copy_engine.json",
             "extract_multiple": False,
         },
