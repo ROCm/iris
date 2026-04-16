@@ -62,3 +62,7 @@ core
 
 docker/TheRock/
 docker/rocm-systems/
+
+# IntelliKit / Copilot agent artifacts
+.intellikit
+.github/agents/skills/
