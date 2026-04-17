@@ -81,7 +81,7 @@ class Iris:
 
     Args:
         heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
-        allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem"
+        allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem", "vmem_pow2"
 
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap with torch allocator
@@ -90,6 +90,9 @@ class Iris:
 
         >>> # Use VMem allocator for memory oversubscription
         >>> ctx = iris.iris(heap_size=2**31, allocator_type="vmem")
+
+        >>> # Use power-of-two VMem allocator for efficient memory reuse
+        >>> ctx = iris.iris(heap_size=2**31, allocator_type="vmem_pow2")
     """
 
     def __init__(self, heap_size=1 << 30, allocator_type="torch"):
@@ -2668,8 +2671,8 @@ def iris(heap_size=1 << 30, allocator_type="torch"):
 
     Args:
         heap_size (int): Size of the heap in bytes. Defaults to 1GB.
-        allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem".
-                              Can be overridden with IRIS_ALLOCATOR environment variable.
+        allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem",
+                              "vmem_pow2". Can be overridden with IRIS_ALLOCATOR environment variable.
 
     Returns:
         Iris: An initialized Iris instance.
@@ -2681,6 +2684,10 @@ def iris(heap_size=1 << 30, allocator_type="torch"):
 
         >>> # Use VMem allocator
         >>> iris_ctx = iris.iris(2**30, allocator_type="vmem")
+        >>> tensor = iris_ctx.zeros(1024, 1024)
+
+        >>> # Use power-of-two VMem allocator for efficient memory reuse
+        >>> iris_ctx = iris.iris(2**30, allocator_type="vmem_pow2")
         >>> tensor = iris_ctx.zeros(1024, 1024)
     """
     return Iris(heap_size, allocator_type)

@@ -107,14 +107,16 @@ class VMemAllocator(BaseAllocator):
         Get list of allocation segments for segmented DMA-BUF export.
 
         Returns:
-            List of (offset, size, va) tuples for each allocation in order.
-            Each tuple describes one physically-backed segment that needs
-            to be exported/imported separately.
+            List of ``(offset, size, va, generation)`` tuples for each
+            allocation in order.  Each tuple describes one physically-backed
+            segment that needs to be exported/imported separately.
+            *generation* is always ``0`` for this allocator since it never
+            remaps a VA with fresh physical memory.
         """
         segments = []
         for offset, size in self.allocation_order:
             va = self.base_va + offset
-            segments.append((offset, size, va))
+            segments.append((offset, size, va, 0))
         return segments
 
     def get_minimum_allocation_size(self) -> int:

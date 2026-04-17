@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import os
 
-from iris.allocators import TorchAllocator, VMemAllocator
+from iris.allocators import TorchAllocator, VMemAllocator, VMemPow2Allocator
 from iris.fd_passing import setup_fd_infrastructure
 from iris._distributed_helpers import distributed_allgather
 from iris.util import is_simulation_env
@@ -25,7 +25,7 @@ class SymmetricHeap:
     Manages distributed memory with symmetric addressing across ranks,
     handling all allocator coordination and memory sharing internally.
 
-    Supports multiple allocator backends: 'torch' (default) and 'vmem'.
+    Supports multiple allocator backends: 'torch' (default), 'vmem', and 'vmem_pow2'.
     """
 
     def __init__(
@@ -44,7 +44,7 @@ class SymmetricHeap:
             device_id: GPU device ID
             cur_rank: Current process rank
             num_ranks: Total number of ranks
-            allocator_type: Type of allocator ("torch" or "vmem"); default "torch"
+            allocator_type: Type of allocator ("torch", "vmem", or "vmem_pow2"); default "torch"
 
         Raises:
             ValueError: If allocator_type is not supported
@@ -62,8 +62,10 @@ class SymmetricHeap:
             self.allocator = TorchAllocator(heap_size, device_id, cur_rank, num_ranks)
         elif allocator_type == "vmem":
             self.allocator = VMemAllocator(heap_size, device_id, cur_rank, num_ranks)
+        elif allocator_type == "vmem_pow2":
+            self.allocator = VMemPow2Allocator(heap_size, device_id, cur_rank, num_ranks)
         else:
-            raise ValueError(f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem'")
+            raise ValueError(f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem', 'vmem_pow2'")
 
         self.fd_conns = setup_fd_infrastructure(cur_rank, num_ranks)
         device = self.allocator.get_device()
@@ -162,6 +164,7 @@ class SymmetricHeap:
             export_dmabuf_handle,
             mem_import_from_shareable_handle,
             mem_map,
+            mem_unmap,
             mem_set_access,
             mem_address_reserve,
             hipMemAccessDesc,
@@ -199,9 +202,11 @@ class SymmetricHeap:
 
         my_segments = self.allocator.get_allocation_segments()
         my_exported_fds = []
-        for offset, size, va in my_segments:
+        for seg in my_segments:
+            offset, size, va = seg[0], seg[1], seg[2]
+            generation = seg[3] if len(seg) > 3 else 0
             dmabuf_fd, export_base, export_size = export_dmabuf_handle(va, size)
-            my_exported_fds.append((dmabuf_fd, export_size, offset))
+            my_exported_fds.append((dmabuf_fd, export_size, offset, generation))
 
         access_desc = hipMemAccessDesc()
         access_desc.location.type = hipMemLocationTypeDevice
@@ -222,7 +227,7 @@ class SymmetricHeap:
                 peer_va_base = self._peer_va_ranges[peer]
 
             peer_fds = []
-            for seg_idx, (my_fd, my_size, my_offset) in enumerate(my_exported_fds):
+            for my_fd, my_size, my_offset, my_gen in my_exported_fds:
                 # Exchange FDs (higher rank sends first to avoid deadlock)
                 if self.cur_rank > peer:
                     send_fd(sock, my_fd)
@@ -231,24 +236,37 @@ class SymmetricHeap:
                     peer_fd, _ = recv_fd(sock)
                     send_fd(sock, my_fd)
 
-                peer_fds.append((peer_fd, my_size, my_offset))
+                peer_fds.append((peer_fd, my_size, my_offset, my_gen))
 
             if not hasattr(self, "_peer_cumulative_sizes"):
                 self._peer_cumulative_sizes = {}
             cumulative_size = self._peer_cumulative_sizes.get(peer, 0)
 
-            if not hasattr(self, "_peer_imported_segments"):
-                self._peer_imported_segments = {}
-            if peer not in self._peer_imported_segments:
-                self._peer_imported_segments[peer] = set()
+            # _peer_segment_generations maps (offset, size) -> generation for each
+            # segment already imported from this peer.  When the generation changes
+            # the VA has been remapped with new physical memory and must be
+            # re-imported (unmap old handle, map new handle).
+            if not hasattr(self, "_peer_segment_generations"):
+                self._peer_segment_generations = {}
+            if peer not in self._peer_segment_generations:
+                self._peer_segment_generations[peer] = {}
 
-            for peer_fd, segment_size, offset in peer_fds:
-                segment_key = (offset, segment_size)
-                if segment_key in self._peer_imported_segments[peer]:
+            for peer_fd, segment_size, offset, generation in peer_fds:
+                seg_key = (offset, segment_size)
+                known_gen = self._peer_segment_generations[peer].get(seg_key)
+
+                if known_gen == generation:
+                    # Already imported this exact physical mapping; skip.
                     import os
 
                     os.close(peer_fd)
                     continue
+
+                if known_gen is not None:
+                    # Physical backing has changed (generation bumped after free+remap).
+                    # Unmap the stale peer mapping before importing the new one.
+                    peer_va = peer_va_base + offset
+                    mem_unmap(peer_va, segment_size)
 
                 imported_handle = mem_import_from_shareable_handle(peer_fd)
                 import os
@@ -257,17 +275,22 @@ class SymmetricHeap:
 
                 peer_va = peer_va_base + offset
                 mem_map(peer_va, segment_size, 0, imported_handle)
-                self._peer_imported_segments[peer].add(segment_key)
+                self._peer_segment_generations[peer][seg_key] = generation
 
                 new_cumulative = offset + segment_size
                 if new_cumulative > cumulative_size:
                     cumulative_size = new_cumulative
                     mem_set_access(peer_va_base, cumulative_size, access_desc)
+                elif known_gen is not None:
+                    # Physical backing changed but VA offset is already within the
+                    # cumulative range (no extension needed).  Re-set access for
+                    # just this segment so the new physical mapping is accessible.
+                    mem_set_access(peer_va, segment_size, access_desc)
 
             self._peer_cumulative_sizes[peer] = cumulative_size
             self.heap_bases[peer] = peer_va_base
 
-        for fd, _, _ in my_exported_fds:
+        for fd, _sz, _off, _gen in my_exported_fds:
             import os
 
             os.close(fd)
