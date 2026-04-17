@@ -26,19 +26,34 @@ from typing import Optional, Dict, Any
 # Project root (2 levels up from this script)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Dimension configurations to test (M, N, K)
-# Each tuple is (M_local, N, K) where M_local is per-rank M dimension
+# Dimension configurations to test.
+# Each entry contains M_local (per-rank M), N, K, and an optional label.
 DIMENSION_CONFIGS = [
-    (2048, 2048, 16384),
-    (2048, 16384, 2048),
-    (2048, 16384, 16384),
-    (2048, 16384, 65536),
-    (2048, 131072, 16384),
-    (16384, 2048, 2048),
-    (16384, 2048, 16384),
-    (16384, 2048, 131072),
-    (16384, 16384, 2048),
-    (131072, 2048, 16384),
+    {"m_local": 2048, "n": 2048, "k": 16384, "label": "M2048_N2048_K16384"},
+    {"m_local": 2048, "n": 16384, "k": 2048, "label": "M2048_N16384_K2048"},
+    {"m_local": 2048, "n": 16384, "k": 16384, "label": "M2048_N16384_K16384"},
+    {"m_local": 2048, "n": 16384, "k": 65536, "label": "M2048_N16384_K65536"},
+    {"m_local": 2048, "n": 131072, "k": 16384, "label": "M2048_N131072_K16384"},
+    {"m_local": 16384, "n": 2048, "k": 2048, "label": "M16384_N2048_K2048"},
+    {"m_local": 16384, "n": 2048, "k": 16384, "label": "M16384_N2048_K16384"},
+    {"m_local": 16384, "n": 2048, "k": 131072, "label": "M16384_N2048_K131072"},
+    {"m_local": 16384, "n": 16384, "k": 2048, "label": "M16384_N16384_K2048"},
+    {"m_local": 131072, "n": 2048, "k": 16384, "label": "M131072_N2048_K16384"},
+    {"m_local": 131072, "n": 16384, "k": 16384, "label": "g2"},
+    {"m_local": 147456, "n": 28672, "k": 4096, "label": "g14"},
+    # {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"}, # run out of heap memory
+    {"m_local": 229376, "n": 28672, "k": 4096, "label": "g16"},
+    {"m_local": 8192, "n": 8192, "k": 262144, "label": "g5"},
+    {"m_local": 262144, "n": 8192, "k": 8192, "label": "g6"},
+    {"m_local": 16384, "n": 16384, "k": 131072, "label": "g1"},
+    {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"}, # run out of heap memory
+    {"m_local": 196608, "n": 18432, "k": 16384, "label": "g9"},
+    {"m_local": 4096, "n": 14336, "k": 4096, "label": "mixtral_gate"},
+    {"m_local": 4096, "n": 11008, "k": 4096, "label": "llama7b_gate"},
+    {"m_local": 4096, "n": 4096, "k": 4096, "label": "pow2_4k"},
+    {"m_local": 1024, "n": 3584, "k": 8192, "label": "M1024_N3584_K8192"},
+    {"m_local": 4096, "n": 3584, "k": 8192, "label": "M4096_N3584_K8192"},
+    {"m_local": 16384, "n": 3584, "k": 8192, "label": "M16384_N3584_K8192"},
 ]
 
 # Benchmark configurations per operation type
@@ -103,13 +118,21 @@ BENCHMARK_CONFIGS = {
     },
 }
 
-TIMEOUT_SECONDS = 120
+TIMEOUT_SECONDS = 150
 NUM_GPUS = 8
 
 
 def log(msg: str):
     """Log to stderr to keep stdout clean for JSON."""
     print(msg, file=sys.stderr, flush=True)
+
+
+def _dimension_values(config: Dict[str, Any]) -> tuple[int, int, int]:
+    return int(config["m_local"]), int(config["n"]), int(config["k"])
+
+
+def _dimension_label(config: Dict[str, Any]) -> str:
+    return str(config.get("label") or f"M{config['m_local']}_N{config['n']}_K{config['k']}")
 
 
 def run_benchmark(
@@ -292,8 +315,9 @@ def main():
     log(f"{operation.upper().replace('_', '-')} Benchmark Sweep")
     log("=" * 80)
     log(f"Dimension configurations: {len(DIMENSION_CONFIGS)}")
-    for m, n, k in DIMENSION_CONFIGS:
-        log(f"  - M={m}, N={n}, K={k}")
+    for config in DIMENSION_CONFIGS:
+        m, n, k = _dimension_values(config)
+        log(f"  - {_dimension_label(config)}: M={m}, N={n}, K={k}")
     log(f"Benchmarks per configuration: {len(benchmarks)}")
     log(f"Total benchmarks: {len(DIMENSION_CONFIGS) * len(benchmarks)}")
     log(f"Timeout per benchmark: {TIMEOUT_SECONDS}s")
@@ -306,10 +330,12 @@ def main():
 
     log(f"Running {len(DIMENSION_CONFIGS)} dimension configurations...\n")
 
-    for idx, (m, n, k) in enumerate(DIMENSION_CONFIGS, 1):
-        log(f"[{idx}/{len(DIMENSION_CONFIGS)}] Testing M={m}, N={n}, K={k}")
+    for idx, config in enumerate(DIMENSION_CONFIGS, 1):
+        m, n, k = _dimension_values(config)
+        label = _dimension_label(config)
+        log(f"[{idx}/{len(DIMENSION_CONFIGS)}] Testing {label}: M={m}, N={n}, K={k}")
 
-        row = {"M": m, "N": n, "K": k, "operation": operation, "benchmarks": {}}
+        row = {"label": label, "M": m, "N": n, "K": k, "operation": operation, "benchmarks": {}}
 
         # Run each benchmark variant
         for bench_key, bench_config in benchmarks.items():
