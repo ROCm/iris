@@ -70,7 +70,6 @@ def parse_args():
         help="Also benchmark PyTorch (all_gather_into_tensor + matmul) for comparison",
     )
 
-
     return vars(parser.parse_args())
 
 
@@ -113,8 +112,8 @@ def _worker(args: dict):
     # Export actual config values to JSON
     # Note: block sizes are now chosen by tritonBLAS Origami heuristics
     json_writer.add_field("backend", "tritonblas")
-    json_writer.add_field("num_sms", config.num_sms if hasattr(config, 'num_sms') else None)
-    json_writer.add_field("num_xcds", config.num_xcds if hasattr(config, 'num_xcds') else None)
+    json_writer.add_field("num_sms", config.num_sms if hasattr(config, "num_sms") else None)
+    json_writer.add_field("num_xcds", config.num_xcds if hasattr(config, "num_xcds") else None)
 
     # Create input and output tensors
     # A_local is M x K, output is M x N (local matmul, no gather)

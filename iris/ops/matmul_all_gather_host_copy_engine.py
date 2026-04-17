@@ -29,8 +29,7 @@ from .config import FusedConfig
 from .workspace import FusedWorkspace
 
 # Import tritonBLAS
-from tritonblas.matmul import persistent_matmul_lt, _make_matmul_selector
-from tritonblas.config import matmul_preamble as tritonblas_preamble
+from tritonblas.matmul import persistent_matmul_lt
 from tritonblas.matmul import create_counter_config
 from .tritonblas_launch_wave_schedule import build_launch_wave_plan
 

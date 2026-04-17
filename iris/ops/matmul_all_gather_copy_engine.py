@@ -19,7 +19,7 @@ import iris
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
-from tritonblas.matmul import persistent_matmul_lt, _make_matmul_selector, create_counter_config
+from tritonblas.matmul import persistent_matmul_lt, create_counter_config
 from .tritonblas_launch_wave_schedule import build_launch_wave_plan
 
 
@@ -640,7 +640,6 @@ def matmul_all_gather_copy_engine(
     if timing_events is not None:
         timing_events["main_end"].record(timing_events["stream"])
 
-
     if not async_op:
         wait_cpu_start = time.perf_counter() if cpu_timing is not None else None
         if use_copy_engine:
@@ -665,9 +664,7 @@ def matmul_all_gather_copy_engine(
                 timing_events["poster_start"].elapsed_time(timing_events["poster_end"]) if use_copy_engine else 0.0
             )
             main_ms = timing_events["main_start"].elapsed_time(timing_events["main_end"])
-            quiet_ms = (
-                timing_events["quiet_start"].elapsed_time(timing_events["quiet_end"]) if use_copy_engine else 0.0
-            )
+            quiet_ms = timing_events["quiet_start"].elapsed_time(timing_events["quiet_end"]) if use_copy_engine else 0.0
             gpu_total_ms = poster_ms + main_ms + quiet_ms
             cpu_launch_total_ms = cpu_timing["poster_launch_ms"] + cpu_timing["main_launch_ms"]
             cpu_total_ms = (time.perf_counter() - cpu_timing["total_start"]) * 1000.0

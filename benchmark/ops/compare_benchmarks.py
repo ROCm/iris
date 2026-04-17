@@ -11,13 +11,13 @@ from typing import Dict, List, Tuple
 
 def load_json(filepath: str) -> List[Dict]:
     """Load and parse a JSON benchmark file."""
-    with open(filepath, 'r') as f:
+    with open(filepath, "r") as f:
         return json.load(f)
 
 
 def get_benchmark_key(config: Dict) -> Tuple:
     """Create a unique key for a benchmark configuration."""
-    return (config['M'], config['N'], config['K'], config['operation'])
+    return (config["M"], config["N"], config["K"], config["operation"])
 
 
 def compare_benchmarks(baseline_file: str, new_file: str) -> None:
@@ -37,9 +37,9 @@ def compare_benchmarks(baseline_file: str, new_file: str) -> None:
         print("No common benchmark configurations found between the two files.")
         return
 
-    print(f"\n{'='*100}")
+    print(f"\n{'=' * 100}")
     print(f"BENCHMARK COMPARISON: {baseline_file} vs {new_file}")
-    print(f"{'='*100}\n")
+    print(f"{'=' * 100}\n")
 
     # Track statistics
     improvements = []
@@ -55,13 +55,13 @@ def compare_benchmarks(baseline_file: str, new_file: str) -> None:
 
         m, n, k, operation = key
 
-        print(f"\n{'─'*100}")
+        print(f"\n{'─' * 100}")
         print(f"Configuration: M={m}, N={n}, K={k}, operation={operation}")
-        print(f"{'─'*100}")
+        print(f"{'─' * 100}")
 
         # Compare each benchmark variant
-        baseline_benchmarks = baseline_config.get('benchmarks', {})
-        new_benchmarks = new_config.get('benchmarks', {})
+        baseline_benchmarks = baseline_config.get("benchmarks", {})
+        new_benchmarks = new_config.get("benchmarks", {})
 
         common_variants = set(baseline_benchmarks.keys()) & set(new_benchmarks.keys())
 
@@ -76,8 +76,8 @@ def compare_benchmarks(baseline_file: str, new_file: str) -> None:
             new_variant = new_benchmarks[variant]
 
             # Only compare if both have success=true
-            baseline_success = baseline_variant.get('success', False)
-            new_success = new_variant.get('success', False)
+            baseline_success = baseline_variant.get("success", False)
+            new_success = new_variant.get("success", False)
 
             if not (baseline_success and new_success):
                 status_msg = []
@@ -88,8 +88,8 @@ def compare_benchmarks(baseline_file: str, new_file: str) -> None:
                 print(f"  {variant:25s} - SKIPPED ({', '.join(status_msg)})")
                 continue
 
-            baseline_tflops = baseline_variant.get('tflops', 0)
-            new_tflops = new_variant.get('tflops', 0)
+            baseline_tflops = baseline_variant.get("tflops", 0)
+            new_tflops = new_variant.get("tflops", 0)
 
             if baseline_tflops == 0:
                 print(f"  {variant:25s} - SKIPPED (baseline tflops is 0)")
@@ -113,51 +113,67 @@ def compare_benchmarks(baseline_file: str, new_file: str) -> None:
                 color_code = "-"
                 regressions.append((key, variant, baseline_tflops, new_tflops, percent_change))
 
-            variant_results.append({
-                'variant': variant,
-                'status': status,
-                'baseline_tflops': baseline_tflops,
-                'new_tflops': new_tflops,
-                'delta_tflops': delta_tflops,
-                'percent_change': percent_change
-            })
+            variant_results.append(
+                {
+                    "variant": variant,
+                    "status": status,
+                    "baseline_tflops": baseline_tflops,
+                    "new_tflops": new_tflops,
+                    "delta_tflops": delta_tflops,
+                    "percent_change": percent_change,
+                }
+            )
 
-            print(f"  {variant:25s} {status} {baseline_tflops:10.2f} → {new_tflops:10.2f} TFLOPs "
-                  f"({color_code}{percent_change:+7.2f}%)")
+            print(
+                f"  {variant:25s} {status} {baseline_tflops:10.2f} → {new_tflops:10.2f} TFLOPs "
+                f"({color_code}{percent_change:+7.2f}%)"
+            )
 
     # Print summary
-    print(f"\n{'='*100}")
-    print(f"SUMMARY")
-    print(f"{'='*100}\n")
+    print(f"\n{'=' * 100}")
+    print("SUMMARY")
+    print(f"{'=' * 100}\n")
 
     total_comparisons = len(improvements) + len(regressions) + len(no_change)
 
     print(f"Total comparisons:   {total_comparisons}")
-    print(f"Improvements:        {len(improvements)} ({len(improvements)/total_comparisons*100:.1f}%)" if total_comparisons > 0 else "Improvements:        0")
-    print(f"Regressions:         {len(regressions)} ({len(regressions)/total_comparisons*100:.1f}%)" if total_comparisons > 0 else "Regressions:         0")
-    print(f"No change:           {len(no_change)} ({len(no_change)/total_comparisons*100:.1f}%)" if total_comparisons > 0 else "No change:           0")
+    print(
+        f"Improvements:        {len(improvements)} ({len(improvements) / total_comparisons * 100:.1f}%)"
+        if total_comparisons > 0
+        else "Improvements:        0"
+    )
+    print(
+        f"Regressions:         {len(regressions)} ({len(regressions) / total_comparisons * 100:.1f}%)"
+        if total_comparisons > 0
+        else "Regressions:         0"
+    )
+    print(
+        f"No change:           {len(no_change)} ({len(no_change) / total_comparisons * 100:.1f}%)"
+        if total_comparisons > 0
+        else "No change:           0"
+    )
 
     if improvements:
-        print(f"\n{'─'*100}")
+        print(f"\n{'─' * 100}")
         print("TOP IMPROVEMENTS:")
-        print(f"{'─'*100}")
+        print(f"{'─' * 100}")
         # Sort by absolute improvement
         improvements.sort(key=lambda x: x[4], reverse=True)
         for i, (key, variant, baseline, new, pct) in enumerate(improvements[:10], 1):
             m, n, k, op = key
-            print(f"{i:2d}. {variant:25s} M={m:6d} N={n:6d} K={k:6d}: "
-                  f"{baseline:8.2f} → {new:8.2f} TFLOPs (+{pct:.2f}%)")
+            print(
+                f"{i:2d}. {variant:25s} M={m:6d} N={n:6d} K={k:6d}: {baseline:8.2f} → {new:8.2f} TFLOPs (+{pct:.2f}%)"
+            )
 
     if regressions:
-        print(f"\n{'─'*100}")
+        print(f"\n{'─' * 100}")
         print("TOP REGRESSIONS:")
-        print(f"{'─'*100}")
+        print(f"{'─' * 100}")
         # Sort by absolute regression
         regressions.sort(key=lambda x: x[4])
         for i, (key, variant, baseline, new, pct) in enumerate(regressions[:10], 1):
             m, n, k, op = key
-            print(f"{i:2d}. {variant:25s} M={m:6d} N={n:6d} K={k:6d}: "
-                  f"{baseline:8.2f} → {new:8.2f} TFLOPs ({pct:.2f}%)")
+            print(f"{i:2d}. {variant:25s} M={m:6d} N={n:6d} K={k:6d}: {baseline:8.2f} → {new:8.2f} TFLOPs ({pct:.2f}%)")
 
     print()
 

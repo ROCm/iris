@@ -1060,12 +1060,19 @@ class Iris:
         if not async_op:
             self.copy_engines.host_quiet(src_rank, dst_rank, channel)
 
-    def put_tile(self, tile, dst_rank: int,
-                 dst_ptr: int,
-                 dst_stride: int,
-                 wait_flag: int = None, wait_value: int = None,
-                 signal_flag: int = None, signal_value: int = 1,
-                 async_op: bool = False, channel: int = 0):
+    def put_tile(
+        self,
+        tile,
+        dst_rank: int,
+        dst_ptr: int,
+        dst_stride: int,
+        wait_flag: int = None,
+        wait_value: int = None,
+        signal_flag: int = None,
+        signal_value: int = 1,
+        async_op: bool = False,
+        channel: int = 0,
+    ):
         """
         2D tile transfer with optional wait/signal (sub-window copy).
 
