@@ -250,9 +250,7 @@ def _worker(local_rank: int = None, world_size: int = None, init_url: str = None
         A_gathered = torch.cat(A_sharded_list, dim=1)  # (M, K)
 
         # Expected: A_gathered @ B
-        expected_tensor = shmem.zeros((M, N), dtype=datatype)
-        expected_result = torch.matmul(A_gathered, B_data)
-        expected_tensor.copy_(expected_result)
+        expected_tensor = torch.matmul(A_gathered, B_data)
 
     comm_stream = torch.cuda.Stream()
 
@@ -269,33 +267,14 @@ def _worker(local_rank: int = None, world_size: int = None, init_url: str = None
     workspace = all_gather_matmul_preamble(shmem, A_sharded, B, config)
 
     def run_experiment():
-        nonlocal kernel_timing
-
-        shmem.barrier()
-
-        torch.cuda.nvtx.range_push("All-Gather-Matmul")
-        with torch.cuda.stream(comm_stream):
-            kernel_timing["all_gather_matmul"]["start_event"].record()
-            shmem.ops.all_gather_matmul(
-                C,
-                A_sharded,
-                B,
-                config=config,
-                async_op=False,
-                workspace=workspace,
-            )
-            kernel_timing["all_gather_matmul"]["end_event"].record()
-            kernel_timing["all_gather_matmul"]["experiments"] += 1
-        torch.cuda.nvtx.range_pop()
-
-        # Synchronize before querying event timing
-        shmem.barrier()
-
-        # Update timing
-        ms = kernel_timing["all_gather_matmul"]["start_event"].elapsed_time(
-            kernel_timing["all_gather_matmul"]["end_event"]
+        shmem.ops.all_gather_matmul(
+            C,
+            A_sharded,
+            B,
+            config=config,
+            async_op=False,
+            workspace=workspace,
         )
-        kernel_timing["all_gather_matmul"]["ms"] += ms
 
     # Synchronize across all GPUs
     shmem.barrier()
@@ -330,25 +309,25 @@ def _worker(local_rank: int = None, world_size: int = None, init_url: str = None
 
     if args["benchmark"]:
         # Determine warmup and repeat counts
-        if args.get("single_run", False):
-            n_warmup = 0
-            n_repeat = 1
-            shmem.info("Single-run mode: no warmup, 1 repeat")
-        else:
-            n_warmup = 25
-            n_repeat = 100  # default from iris.do_bench
+        # if args.get("single_run", False):
+        #     n_warmup = 0
+        #     n_repeat = 1
+        #     shmem.info("Single-run mode: no warmup, 1 repeat")
+        # else:
+        #     n_warmup = 25
+        #     n_repeat = 100  # default from iris.do_bench
 
-        # Warmup for benchmarking (skip if single-run)
-        if not args.get("single_run", False):
-            for k in ["all_gather_matmul"]:
-                kernel_timing[k]["ms"] = 0
-                kernel_timing[k]["experiments"] = 0
+        # # Warmup for benchmarking (skip if single-run)
+        # if not args.get("single_run", False):
+        #     for k in ["all_gather_matmul"]:
+        #         kernel_timing[k]["ms"] = 0
+        #         kernel_timing[k]["experiments"] = 0
 
-            iris.do_bench(run_experiment, shmem.barrier, n_warmup=n_warmup, n_repeat=1)
+        #     iris.do_bench(run_experiment, shmem.barrier, n_warmup=n_warmup, n_repeat=1)
 
-        for k in ["all_gather_matmul"]:
-            kernel_timing[k]["ms"] = 0
-            kernel_timing[k]["experiments"] = 0
+        # for k in ["all_gather_matmul"]:
+        #     kernel_timing[k]["ms"] = 0
+        #     kernel_timing[k]["experiments"] = 0
 
         # Reset output before benchmarking
         C.zero_()
@@ -360,10 +339,11 @@ def _worker(local_rank: int = None, world_size: int = None, init_url: str = None
         total_flops = 2 * M * N * K
         total_tflops_unit = total_flops * 1e-12
 
-        triton_ms = iris.do_bench(run_experiment, shmem.barrier, n_warmup=n_warmup, n_repeat=n_repeat)
-        tflops = total_tflops_unit / (
-            (kernel_timing["all_gather_matmul"]["ms"] / kernel_timing["all_gather_matmul"]["experiments"]) * 1e-3
-        )
+        triton_ms = iris.do_bench(run_experiment, shmem.barrier)  # , n_warmup=n_warmup, n_repeat=n_repeat)
+        # tflops = total_tflops_unit /
+        # Calculate TFLOPS and bandwidth
+        tflops = total_tflops_unit / (triton_ms * 1e-3)
+        # pytorch_bandwidth_gbps = total_bytes_gb / (pytorch_ms * 1e-3)
 
         # Calculate bandwidth for all-gather part
         # All-gather moves (world_size - 1) * M * K_local * element_size bytes
@@ -372,9 +352,7 @@ def _worker(local_rank: int = None, world_size: int = None, init_url: str = None
         total_bytes = input_bytes * (world_size - 1)
         total_bytes_gb = total_bytes / (1024**3)
 
-        bandwidth_gbps = total_bytes_gb / (
-            (kernel_timing["all_gather_matmul"]["ms"] / kernel_timing["all_gather_matmul"]["experiments"]) * 1e-3
-        )
+        bandwidth_gbps = total_bytes_gb / (triton_ms * 1e-3)
 
         shmem.info(
             f"All-gather-matmul (M={M}, K_local={K_local}, K_total={K}, N={N}, world_size={world_size}, dtype={args['datatype']}): "
@@ -389,9 +367,9 @@ def _worker(local_rank: int = None, world_size: int = None, init_url: str = None
         json_writer.add_field("total_bytes_gb", total_bytes_gb)
         json_writer.add_field(
             "all_gather_matmul_ms",
-            kernel_timing["all_gather_matmul"]["ms"] / kernel_timing["all_gather_matmul"]["experiments"],
+            triton_ms
         )
-        json_writer.add_field("all_gather_matmul_experiments", kernel_timing["all_gather_matmul"]["experiments"])
+        # json_writer.add_field("all_gather_matmul_experiments", kernel_timing["all_gather_matmul"]["experiments"])
 
         # Wait for all to finish benchmarking
         shmem.barrier()

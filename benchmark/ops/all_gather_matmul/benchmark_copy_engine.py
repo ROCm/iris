@@ -579,8 +579,7 @@ def _worker(args):
         A_list = [torch.zeros((M, K_local), dtype=datatype, device=f"cuda:{rank}") for _ in range(world_size)]
         dist.all_gather(A_list, A_data)
         A_gathered = torch.cat(A_list, dim=1)
-        expected_tensor = shmem.zeros((M, N), dtype=datatype)
-        expected_tensor.copy_(torch.matmul(A_gathered, B_data))
+        expected_tensor = torch.matmul(A_gathered, B_data)
 
     # Pre-allocate workspace
     workspace = all_gather_matmul_copy_engine_preamble(
