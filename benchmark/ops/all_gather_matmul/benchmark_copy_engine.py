@@ -34,6 +34,7 @@ from iris.ops.all_gather_matmul_copy_engine import (
     all_gather_matmul_copy_engine_preamble,
 )
 from iris.ops import FusedConfig
+from iris.ops.tritonblas_launch_wave_schedule import build_launch_wave_plan
 from tritonblas.matmul import _make_matmul_selector
 
 _DERIVE_AVAILABLE = False
@@ -355,6 +356,61 @@ def _apply_model_defaults(args, world_size, dtype, device, dtype_bytes=2):
     return selector, applied
 
 
+def _derive_batch_metadata(selector, m_local, n, m_tiles_per_batch):
+    """Return selector- and batching-derived metadata for JSON/reporting."""
+    block_size_m = selector.block_m
+    block_size_n = selector.block_n
+    block_size_k = selector.block_k
+    group_size_m = selector.group_m
+    num_stages = getattr(selector, "num_stages", 2)
+    waves_per_eu = getattr(selector, "waves_per_eu", 0)
+    active_cus = getattr(selector, "_ACTIVE_CU", None)
+    if active_cus is None:
+        active_cus = getattr(selector._hardware, "N_CU", getattr(selector._hardware, "NUM_XCD", 1))
+
+    num_tiles_m = (m_local + block_size_m - 1) // block_size_m
+    num_tiles_n = (n + block_size_n - 1) // block_size_n
+    tiles_per_group = max(1, group_size_m * num_tiles_n)
+    groups_per_wave = max(1, active_cus // tiles_per_group)
+    m_tiles_per_wave = min(num_tiles_m, groups_per_wave * group_size_m)
+    launch_wave_plan = build_launch_wave_plan(
+        num_tiles_m=num_tiles_m,
+        num_tiles_n=num_tiles_n,
+        group_size_m=group_size_m,
+        launch_grid=num_tiles_m * num_tiles_n,
+        wave_size=active_cus,
+        num_xcds=max(1, int(getattr(selector, "num_sms", 1))),
+    )
+    first_wave_m_tiles = set()
+    for transfer in launch_wave_plan.transfers:
+        if transfer.wave_id != 0:
+            break
+        first_wave_m_tiles.update(range(transfer.m_tile_start, transfer.m_tile_start + transfer.m_tile_count))
+    m_tiles_first_wave = len(first_wave_m_tiles)
+    num_batches = (num_tiles_m + m_tiles_per_batch - 1) // m_tiles_per_batch
+    last_batch_m_tiles = num_tiles_m - max(0, num_batches - 1) * m_tiles_per_batch
+
+    return {
+        "output_tile_size_m": block_size_m,
+        "output_tile_size_n": block_size_n,
+        "output_tile_size_k": block_size_k,
+        "group_size_m": group_size_m,
+        "num_stages": num_stages,
+        "waves_per_eu": waves_per_eu,
+        "active_cus": active_cus,
+        "num_tiles_m": num_tiles_m,
+        "num_tiles_n": num_tiles_n,
+        "tiles_per_group": tiles_per_group,
+        "groups_per_wave": groups_per_wave,
+        "m_tiles_per_wave": m_tiles_per_wave,
+        "m_tiles_first_wave": m_tiles_first_wave,
+        "schedule_iterations": launch_wave_plan.num_waves,
+        "num_batches": num_batches,
+        "last_batch_m_tiles": last_batch_m_tiles,
+        "m_tiles_per_batch_over_wave": m_tiles_per_batch / max(1, m_tiles_per_wave),
+    }
+
+
 def _worker(args):
     """Worker function for torchrun."""
     local_rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
@@ -422,7 +478,6 @@ def _worker(args):
     if args.get("m_tiles_per_batch") is None:
         args["m_tiles_per_batch"] = args["group_size_m"]
 
-
     # Print performance analysis
     if rank == 0 and perf_analysis is not None:
         shmem.info("\n" + "=" * 80)
@@ -439,6 +494,8 @@ def _worker(args):
         shmem.info(f"\nBottleneck: {perf_analysis['bottleneck'].upper()}")
         shmem.info(f"m_tiles_per_batch: {args['m_tiles_per_batch']}")
         shmem.info("=" * 80 + "\n")
+
+    batch_metadata = _derive_batch_metadata(selector, M, N, args["m_tiles_per_batch"])
 
     # Create config with parameters
     config_kwargs = {
@@ -473,6 +530,9 @@ def _worker(args):
     json_writer.add_field("block_size_k", config.block_size_k)
     json_writer.add_field("num_sms", config.num_sms)
     json_writer.add_field("num_xcds", config.num_xcds)
+    json_writer.add_field("m_tiles_per_batch", args["m_tiles_per_batch"])
+    for key, value in batch_metadata.items():
+        json_writer.add_field(key, value)
 
     buffer_mb = M * K * torch.tensor([], dtype=datatype).element_size() / (1024**2)
     num_m_tiles = M // config.block_size_m
