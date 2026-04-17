@@ -38,10 +38,6 @@ class FusedWorkspace:
     world_size: int = 1
     variant: str = ""
 
-    # Hardware configuration (detected in preamble)
-    num_sms: Optional[int] = None  # Number of streaming multiprocessors
-    num_xcds: int = 1  # Number of XCDs/chiplets
-
     # Temporary buffers (allocated as needed)
     aux_buffer: Optional[torch.Tensor] = None  # Generic buffer for intermediate results
     locks: Optional[torch.Tensor] = None  # Synchronization primitives

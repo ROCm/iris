@@ -1,0 +1,42 @@
+# vLLM / GPT-OSS shaped all-reduce benchmark config
+#
+# Usage:
+#   cd /home/work/iris
+#   HSA_NO_SCRATCH_RECLAIM=1 python3 -u benchmark/ccl/all_reduce/benchmark.py \
+#     --config benchmark/ccl/all_reduce/configs/vllm_shapes.yaml
+#
+# Hidden dimension N=2880 matches GPT-OSS / vLLM hidden-state width.
+# M values cover decode (1–512 tokens) and prefill (2048–8192 tokens).
+
+n: 2880
+datatype: bf16
+num_ranks: 8
+
+variants:
+  - rccl
+  - two_shot
+  - ring
+  - one_shot
+
+sweep_ms:
+  decode_like:
+    - 1
+    - 32
+    - 64
+    - 128
+    - 512
+  prefill_like:
+    - 2048
+    - 4096
+    - 8192
+
+# Default kernel config (used unless --tune is passed)
+comm_sms: 64
+block_size_m: 64
+block_size_n: 64
+swizzle_size: 4
+distribution: 1
+num_rings: 1
+
+warmup: 50
+iters: 200

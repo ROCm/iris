@@ -15,6 +15,7 @@ import os
 from iris.allocators import TorchAllocator, VMemAllocator
 from iris.fd_passing import setup_fd_infrastructure
 from iris._distributed_helpers import distributed_allgather
+from iris.util import is_simulation_env
 
 
 class SymmetricHeap:
@@ -54,6 +55,9 @@ class SymmetricHeap:
         self.num_ranks = num_ranks
         allocator_type = os.environ.get("IRIS_ALLOCATOR", allocator_type).lower()
 
+        if is_simulation_env():
+            allocator_type = "torch"
+
         if allocator_type == "torch":
             self.allocator = TorchAllocator(heap_size, device_id, cur_rank, num_ranks)
         elif allocator_type == "vmem":
@@ -68,8 +72,6 @@ class SymmetricHeap:
         # Create from numpy array to avoid kernel issue (torch.zeros on small tensors triggers problematic kernel)
         heap_bases_array = np.zeros(self.num_ranks, dtype=np.int64)
         # Create on CPU first, then move to device to avoid FFM ioctl issue
-        from iris.util import is_simulation_env
-
         if is_simulation_env():
             self.heap_bases = torch.tensor(heap_bases_array, device="cpu", dtype=torch.int64)
             self.heap_bases = self.heap_bases.to(device)

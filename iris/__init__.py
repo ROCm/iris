@@ -84,6 +84,7 @@ from . import hip
 from . import experimental
 from . import ops
 from . import tensor_creation
+from . import bench
 from .logging import (
     set_logger_level,
     logger,
@@ -127,6 +128,7 @@ __all__ = [
     "experimental",
     "ops",
     "tensor_creation",
+    "bench",
     "set_logger_level",
     "logger",
     "DEBUG",

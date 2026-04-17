@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Tests for fused all_gather + matmul operation.
+Tests for fused all_gather + matmul operations.
 
 Each rank has A_sharded (M x K_local), B is replicated.
 The operation gathers A from all ranks and computes C = A_gathered @ B.
+Covers both the baseline pull kernel and the HBM-buffered kernel.
 """
 
 import pytest
@@ -13,6 +14,91 @@ import torch
 import torch.distributed as dist
 
 import iris
+from iris.ops.all_gather_matmul_hbm_buffer import (
+    all_gather_matmul_hbm_buffer,
+    all_gather_matmul_hbm_buffer_preamble,
+)
+from iris.ops.config import FusedConfig
+
+
+def _make_reference(rank, world_size, M, K_local, N, dtype):
+    """Build a torch reference output for all_gather + matmul."""
+    device = f"cuda:{rank}"
+    K = K_local * world_size
+
+    torch.manual_seed(42 + rank)
+    A_sharded = torch.randn(M, K_local, dtype=dtype, device=device)
+
+    torch.manual_seed(123)
+    B = torch.randn(K, N, dtype=dtype, device=device)
+
+    A_gathered_list = [torch.zeros(M, K_local, dtype=dtype, device=device) for _ in range(world_size)]
+    dist.all_gather(A_gathered_list, A_sharded)
+    A_gathered_ref = torch.cat(A_gathered_list, dim=1)
+    ref_output = torch.matmul(A_gathered_ref, B)
+    torch.cuda.synchronize()
+    return A_sharded, B, ref_output
+
+
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float16, 1e-2, 1e-2),
+    ],
+)
+@pytest.mark.parametrize(
+    "M,K_local,N",
+    [
+        (128, 32, 64),
+        (256, 64, 128),
+    ],
+)
+def test_all_gather_matmul_baseline(dtype, atol, rtol, M, K_local, N):
+    """Test baseline all_gather_matmul against torch all_gather + matmul."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
+
+    K = K_local * world_size
+
+    min_block_size = 32
+    if M < min_block_size or K_local < min_block_size or N < min_block_size:
+        pytest.skip(f"Problem too small for min block size {min_block_size}")
+
+    A_sharded, B, ref_output = _make_reference(rank, world_size, M, K_local, N, dtype)
+    device = f"cuda:{rank}"
+
+    A_sharded_shmem = ctx.zeros((M, K_local), dtype=dtype)
+    A_sharded_shmem.copy_(A_sharded)
+    B_shmem = ctx.zeros((K, N), dtype=dtype)
+    B_shmem.copy_(B)
+    output = ctx.zeros((M, N), dtype=dtype)
+
+    ctx.barrier()
+
+    config = (
+        FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
+        if M <= 256 or K_local <= 64 or N <= 128
+        else FusedConfig()
+    )
+
+    assert M >= config.block_size_m
+    assert K_local >= config.block_size_k
+    assert N >= config.block_size_n
+
+    ctx.ops.all_gather_matmul(output, A_sharded_shmem, B_shmem, config=config)
+
+    torch.cuda.synchronize()
+    ctx.barrier()
+
+    max_diff = (output - ref_output).abs().max().item()
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
+        f"Rank {rank}: Max diff {max_diff}, expected < {atol}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -29,94 +115,124 @@ import iris
     ],
 )
 @pytest.mark.parametrize(
-    "variant",
+    "staged_a_layout",
     [
-        "pull",
+        "k_contiguous",
+        "m_contiguous",
     ],
 )
-def test_all_gather_matmul(dtype, atol, rtol, M, K_local, N, variant):
-    """Test all_gather_matmul against torch all_gather + matmul."""
+def test_all_gather_matmul_hbm_buffer(dtype, atol, rtol, M, K_local, N, staged_a_layout):
+    """Test all_gather_matmul_hbm_buffer against torch all_gather + matmul."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
     heap_size = 2**33
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
 
-    K = K_local * world_size  # Full K dimension
+    K = K_local * world_size
 
-    # Skip if problem size is too small for world_size or block sizes
-    # With default or custom configs, we need at least one tile
-    min_block_size = 32  # Smallest block size we use
-    if M < min_block_size:
-        pytest.skip(f"M={M} too small (need >= {min_block_size})")
-    if K_local < min_block_size:
-        pytest.skip(f"K_local={K_local} too small (need >= {min_block_size})")
-    if N < min_block_size:
-        pytest.skip(f"N={N} too small (need >= {min_block_size})")
+    A_sharded, B, ref_output = _make_reference(rank, world_size, M, K_local, N, dtype)
 
-    # Seed for reproducibility - different seed per rank for A_sharded
-    torch.manual_seed(42 + rank)
-    A_sharded = torch.randn(M, K_local, dtype=dtype, device=f"cuda:{rank}")
-
-    # B must be identical on all ranks
-    torch.manual_seed(123)
-    B = torch.randn(K, N, dtype=dtype, device=f"cuda:{rank}")
-
-    # Reference: torch all_gather + matmul
-    A_gathered_list = [torch.zeros(M, K_local, dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
-    dist.all_gather(A_gathered_list, A_sharded)
-    A_gathered_ref = torch.cat(A_gathered_list, dim=1)  # (M, K)
-    ref_output = torch.matmul(A_gathered_ref, B)
-    torch.cuda.synchronize()
-
-    # Create shmem tensors directly
-    A_sharded_shmem = shmem.zeros((M, K_local), dtype=dtype)
+    A_sharded_shmem = ctx.zeros((M, K_local), dtype=dtype)
     A_sharded_shmem.copy_(A_sharded)
-    B_shmem = shmem.zeros((K, N), dtype=dtype)
+    B_shmem = ctx.zeros((K, N), dtype=dtype)
     B_shmem.copy_(B)
-    output = shmem.zeros((M, N), dtype=dtype)
+    output = ctx.zeros((M, N), dtype=dtype)
 
-    shmem.barrier()
+    ctx.barrier()
 
-    # Run fused all_gather + matmul using shmem.ops API
-    from iris.ops.config import FusedConfig
+    config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
 
-    if rank == 0:
-        print(f"\n[Test] Testing variant={variant}, M={M}, K_local={K_local}, N={N}, dtype={dtype}")
+    workspace = all_gather_matmul_hbm_buffer_preamble(
+        ctx, A_sharded_shmem, B_shmem, config=config, staged_a_layout=staged_a_layout
+    )
 
-    # Use appropriate block sizes based on problem size
-    # For small problems, use smaller blocks
-    if M <= 256 or K_local <= 64 or N <= 128:
-        config = FusedConfig(
-            block_size_m=64,
-            block_size_n=64,
-            block_size_k=32,
-            all_gather_matmul_variant=variant,
-        )
-    else:
-        config = FusedConfig(all_gather_matmul_variant=variant)
-
-    # Validate config against problem size
-    assert M >= config.block_size_m, f"M ({M}) must be >= block_size_m ({config.block_size_m})"
-    assert K_local >= config.block_size_k, f"K_local ({K_local}) must be >= block_size_k ({config.block_size_k})"
-    assert N >= config.block_size_n, f"N ({N}) must be >= block_size_n ({config.block_size_n})"
-
-    shmem.ops.all_gather_matmul(output, A_sharded_shmem, B_shmem, config=config)
+    all_gather_matmul_hbm_buffer(
+        ctx,
+        output,
+        A_sharded_shmem,
+        B_shmem,
+        config=config,
+        workspace=workspace,
+        staged_a_layout=staged_a_layout,
+        trace=False,
+    )
 
     torch.cuda.synchronize()
-    shmem.barrier()
+    ctx.barrier()
 
     max_diff = (output - ref_output).abs().max().item()
-
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
-        f"Rank {rank}: Max diff {max_diff}, expected < {atol}"
+        f"Rank {rank}: Max diff {max_diff}, expected < {atol} "
+        f"(staged_a_layout={staged_a_layout}, M={M}, K_local={K_local}, N={N})"
+    )
+
+
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float16, 1e-2, 1e-2),
+    ],
+)
+@pytest.mark.parametrize(
+    "M,K_local,N",
+    [
+        (128, 32, 64),
+    ],
+)
+def test_all_gather_matmul_hbm_buffer_with_bias(dtype, atol, rtol, M, K_local, N):
+    """Test all_gather_matmul_hbm_buffer with a bias vector."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
+
+    K = K_local * world_size
+
+    A_sharded, B, ref_output_no_bias = _make_reference(rank, world_size, M, K_local, N, dtype)
+    device = f"cuda:{rank}"
+
+    torch.manual_seed(77)
+    bias = torch.randn(M, dtype=dtype, device=device)
+    ref_output = ref_output_no_bias + bias[:, None]
+
+    A_sharded_shmem = ctx.zeros((M, K_local), dtype=dtype)
+    A_sharded_shmem.copy_(A_sharded)
+    B_shmem = ctx.zeros((K, N), dtype=dtype)
+    B_shmem.copy_(B)
+    bias_shmem = ctx.zeros((M,), dtype=dtype)
+    bias_shmem.copy_(bias)
+    output = ctx.zeros((M, N), dtype=dtype)
+
+    ctx.barrier()
+
+    config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
+
+    all_gather_matmul_hbm_buffer(
+        ctx,
+        output,
+        A_sharded_shmem,
+        B_shmem,
+        bias=bias_shmem,
+        config=config,
+        trace=False,
+    )
+
+    torch.cuda.synchronize()
+    ctx.barrier()
+
+    max_diff = (output - ref_output).abs().max().item()
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
+        f"Rank {rank}: Max diff {max_diff}, expected < {atol} (with bias)"
     )
 
 
 if __name__ == "__main__":
-    # For quick debugging
     import sys
 
     if not dist.is_initialized():
@@ -125,7 +241,4 @@ if __name__ == "__main__":
 
     rank = dist.get_rank()
     torch.cuda.set_device(rank)
-
-    print(f"[Rank {rank}] Testing all_gather_matmul...")
-    test_all_gather_matmul(torch.float16, 128, 32, 64)
-    print(f"[Rank {rank}] ✓ Test passed!")
+    print(f"[Rank {rank}] Tests in this file require pytest + torchrun. See tests/run_tests_distributed.py")

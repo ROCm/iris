@@ -132,7 +132,7 @@ def _fused_matmul_all_reduce_kernel(
         # Use atomic_xchg with release semantics to ensure memory ordering
         tile_id = pid_m * num_tiles_n + pid_n
         lock_ptr = locks + tile_id
-        tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
+        tl.atomic_xchg(lock_ptr, 1, sem="release", scope="sys")  # Release ensures prior stores visible to remote GPUs
 
         # Create source view only when needed (aux_buffer is not None)
         src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
@@ -272,6 +272,11 @@ def matmul_all_reduce(
     if A.dtype != B.dtype or A.dtype != C.dtype:
         raise ValueError(f"All tensors must have same dtype, got A:{A.dtype}, B:{B.dtype}, C:{C.dtype}")
 
+    # Validate block sizes match problem dimensions
+    assert M >= config.block_size_m, f"M={M} too small for block_size_m={config.block_size_m}"
+    assert K >= config.block_size_k, f"K={K} too small for block_size_k={config.block_size_k}"
+    assert N >= config.block_size_n, f"N={N} too small for block_size_n={config.block_size_n}"
+
     # Extract strides
     stride_am, stride_ak = A.stride()
     stride_bk, stride_bn = B.stride()
@@ -295,7 +300,17 @@ def matmul_all_reduce(
     # Launch kernel
     num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    grid = (num_pid_m * num_pid_n,)
+    total_tiles = num_pid_m * num_pid_n
+    grid = (total_tiles,)
+
+    # Validate that the pre-allocated lock array is large enough for the current tile count.
+    # This can occur when the workspace was prepared with larger block sizes (fewer tiles)
+    # and is then reused with smaller block sizes (more tiles).
+    if workspace.locks is not None and workspace.locks.numel() < total_tiles:
+        raise ValueError(
+            f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
+            f"Pre-allocate workspace with the smallest block sizes you intend to use."
+        )
 
     even_k = K % config.block_size_k == 0
 

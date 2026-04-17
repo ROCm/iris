@@ -60,3 +60,7 @@ logs/
 *.cap
 hsakmt_counters.csv
 core
+.intellikit/
+.github/agents/docs/benchmark-results/
+.github/agents/
+docs/benchmark-results/*.png

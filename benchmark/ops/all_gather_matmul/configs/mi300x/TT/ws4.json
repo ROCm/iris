@@ -1,0 +1,10 @@
+{
+    "_meta": {
+        "description": "AG+MM ws=4 TT transpose on MI300X — DISABLED",
+        "source": "ws<8 is NO-GO across all transposes",
+        "gpu": "AMD Instinct MI300X (gfx942)",
+        "date": "2026-04-13"
+    },
+    "enabled": false,
+    "reason": "ws=4 loses vs PyTorch on all tested shapes. Best measured: 0.856x. LDS overflow at K=4096."
+}

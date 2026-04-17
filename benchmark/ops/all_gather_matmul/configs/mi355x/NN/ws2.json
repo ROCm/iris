@@ -1,0 +1,17 @@
+{
+    "_meta": {
+        "description": "AG+MM ws=2 on MI355X (gfx950) — defaults only, needs tuning",
+        "gpu": "AMD Instinct MI355X (gfx950)",
+        "date": "2026-04-15",
+        "validated": "unvalidated — no shape-specific tuning yet"
+    },
+    "enabled": true,
+    "shapes": {},
+    "default_params": {
+        "block_size_m": 256, "block_size_n": 256, "block_size_k": 64,
+        "group_size_m": 4, "num_xcds": 8, "allow_tf32": true,
+        "num_warps": 8, "num_stages": 2,
+        "k_per_flag": 16, "num_fetch_sms": 4,
+        "num_fetch_stages": 1, "first_stage_fetch_sms": 52
+    }
+}

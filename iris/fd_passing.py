@@ -140,6 +140,55 @@ def setup_fd_mesh(rank: int, world_size: int, all_paths: Dict[int, str]) -> Dict
     return conns
 
 
+def _allgather_paths_tensor(my_path: str, num_ranks: int):
+    """
+    Exchange socket paths across ranks using a fixed-size tensor all_gather.
+
+    Uses ``dist.all_gather`` with a fixed-size int8 tensor instead of
+    ``dist.all_gather_object`` to avoid injecting extra NCCL collective
+    calls (``all_gather_object`` internally issues two NCCL all_gathers for
+    size+data).  At ws<8 the additional collectives can interleave with
+    data-plane ``all_gather_into_tensor`` calls on the same process group,
+    causing a rank-asymmetric collective ordering deadlock.
+
+    AF_UNIX paths are at most 108 bytes; we use a 256-byte buffer for safety.
+    """
+    import torch
+    import torch.distributed as dist
+
+    _PATH_BUF_LEN = 256
+    path_bytes = my_path.encode("utf-8")
+    if len(path_bytes) >= _PATH_BUF_LEN:
+        raise ValueError(f"Socket path too long ({len(path_bytes)} bytes, max {_PATH_BUF_LEN - 1}): {my_path}")
+
+    # Encode into a fixed-size uint8 tensor (CPU for gloo, GPU for nccl).
+    # uint8 matches the [0,255] byte range; NCCL supports it natively.
+    buf = torch.zeros(_PATH_BUF_LEN, dtype=torch.uint8)
+    for i, b in enumerate(path_bytes):
+        buf[i] = b
+
+    backend = str(dist.get_backend()).lower()
+    if backend == "nccl" and torch.cuda.is_available():
+        device = torch.device("cuda", torch.cuda.current_device())
+        buf = buf.to(device)
+    # else: keep on CPU (gloo)
+
+    gathered = [torch.zeros_like(buf) for _ in range(num_ranks)]
+    dist.all_gather(gathered, buf)
+
+    all_paths = {}
+    for r in range(num_ranks):
+        raw = gathered[r].cpu().tolist()
+        # Find null terminator (first 0)
+        try:
+            end = raw.index(0)
+        except ValueError:
+            end = _PATH_BUF_LEN
+        all_paths[r] = bytes(raw[:end]).decode("utf-8")
+
+    return all_paths
+
+
 def setup_fd_infrastructure(cur_rank: int, num_ranks: int):
     """
     Setup FD passing infrastructure for multi-rank communication.
@@ -156,15 +205,17 @@ def setup_fd_infrastructure(cur_rank: int, num_ranks: int):
     if num_ranks <= 1:
         return None
 
-    import torch.distributed as dist
     from iris._distributed_helpers import distributed_barrier
 
     # Setup socket mesh for FD passing
     prefix = "iris-dmabuf"
     my_path = make_rank_sock_path(prefix, cur_rank)
-    obj_list = [None for _ in range(num_ranks)]
-    dist.all_gather_object(obj_list, my_path)
-    all_paths = {r: obj_list[r] for r in range(num_ranks)}
+
+    # Use tensor-based all_gather instead of all_gather_object to avoid
+    # injecting extra NCCL collectives that can deadlock with data-plane
+    # all_gather_into_tensor at ws<8 (see _allgather_paths_tensor docstring).
+    all_paths = _allgather_paths_tensor(my_path, num_ranks)
+
     distributed_barrier()
     fd_conns = setup_fd_mesh(cur_rank, num_ranks, all_paths)
     distributed_barrier()

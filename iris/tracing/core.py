@@ -71,6 +71,9 @@ class Tracing:
 
         self.iris.info(f"Device tracing enabled with max {max_events} events")
 
+        # Rebuild the cached device context to include tracing fields
+        self.iris._build_device_context()
+
     def reset(self):
         """
         Reset trace counter to start a new trace capture.
@@ -205,7 +208,7 @@ class Tracing:
             "traceEvents": trace_events,
             "displayTimeUnit": "ns",
             "metadata": {
-                "schema_version": "1.1",
+                "schema_version": "1.2",
                 "num_events": num_events,
                 "rank": self.iris.cur_rank,
                 "world_size": self.iris.num_ranks,
@@ -282,7 +285,7 @@ class Tracing:
                 "traceEvents": all_events,
                 "displayTimeUnit": "ns",
                 "metadata": {
-                    "schema_version": "1.1",
+                    "schema_version": "1.2",
                     "total_events": len(all_events),
                     "max_events": self.max_events,
                     "time_unit": "cycles (s_memrealtime @ 100MHz)",

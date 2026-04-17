@@ -2,6 +2,12 @@
 Trace event type IDs and Triton-side enumeration.
 
 EVENT_NAMES and TraceEvent must stay in sync: same IDs for the same operations.
+
+Event ID ranges:
+    0–1023      iris ops        (data movement, atomics)
+    1024–2047   user data movement  (fetch/prefetch)
+    2048–3071   user compute        (compute, reduce)
+    3072–4095   synchronization     (wait, barrier)
 """
 
 import triton
@@ -12,6 +18,7 @@ from triton.language.core import _aggregate as aggregate
 # Event type IDs to names mapping (used for export / display).
 # Keep in sync with TraceEvent below.
 EVENT_NAMES = {
+    # iris ops (0–1023)
     0: "load",
     1: "store",
     2: "get",
@@ -26,48 +33,58 @@ EVENT_NAMES = {
     11: "atomic_or",
     12: "atomic_min",
     13: "atomic_max",
-    14: "wg_fetch",
-    15: "wg_gemm",
-    16: "wg_gemm_wait",
+    # User data movement (1024–2047)
+    1024: "fetch",
+    # User compute (2048–3071)
+    2048: "compute",
+    2049: "reduce",
+    # Synchronization (3072–4095)
+    3072: "wait",
+    3073: "barrier",
 }
 
 
 @aggregate
 class TraceEvent:
     """
-    Trace event type enumeration for iris remote memory operations.
+    Trace event type enumeration for iris operations and kernel instrumentation.
+
+    Event ID ranges:
+        0–1023      iris ops            (data movement, atomics)
+        1024–2047   user data movement  (fetch/prefetch)
+        2048–3071   user compute        (compute, reduce)
+        3072–4095   synchronization     (wait, barrier)
 
     Usage:
         >>> ctx.record_event(event_id=TraceEvent().put, target_rank=1, address=ptr)
 
     Available event types:
-        Data Movement:
+        iris ops (0–1023):
         - load (0): Remote load operation
         - store (1): Remote store operation
         - get (2): Remote read (pull from remote to local)
         - put (3): Remote write (push from local to remote)
         - copy (4): Peer-to-peer copy between ranks
+        - atomic_add (5) .. atomic_max (13): Atomic operations
 
-        Atomic Operations:
-        - atomic_add (5): Atomic addition
-        - atomic_sub (6): Atomic subtraction
-        - atomic_cas (7): Atomic compare-and-swap
-        - atomic_xchg (8): Atomic exchange
-        - atomic_xor (9): Atomic XOR
-        - atomic_and (10): Atomic AND
-        - atomic_or (11): Atomic OR
-        - atomic_min (12): Atomic minimum
-        - atomic_max (13): Atomic maximum
+        User data movement (1024–2047):
+        - fetch (1024): Prefetching / staging data
+
+        User compute (2048–3071):
+        - compute (2048): Kernel compute phase (GEMM, FFT, etc.)
+        - reduce (2049): Reduction operation
+
+        Synchronization (3072–4095):
+        - wait (3072): Stalled on a dependency
+        - barrier (3073): Synchronization point
     """
 
-    # Data movement operations
+    # iris ops (0–1023)
     load: tl.constexpr
     store: tl.constexpr
     get: tl.constexpr
     put: tl.constexpr
     copy: tl.constexpr
-
-    # Atomic operations
     atomic_add: tl.constexpr
     atomic_sub: tl.constexpr
     atomic_cas: tl.constexpr
@@ -83,17 +100,25 @@ class TraceEvent:
     wg_gemm: tl.constexpr
     wg_gemm_wait: tl.constexpr
     wg_sdma: tl.constexpr
+    # User data movement (1024–2047)
+    fetch: tl.constexpr
+
+    # User compute (2048–3071)
+    compute: tl.constexpr
+    reduce: tl.constexpr
+
+    # Synchronization (3072–4095)
+    wait: tl.constexpr
+    barrier: tl.constexpr
 
     @triton.constexpr_function
     def __init__(self):
-        # Data movement
+        # iris ops (0–1023)
         self.load = tl.constexpr(0)
         self.store = tl.constexpr(1)
         self.get = tl.constexpr(2)
         self.put = tl.constexpr(3)
         self.copy = tl.constexpr(4)
-
-        # Atomics
         self.atomic_add = tl.constexpr(5)
         self.atomic_sub = tl.constexpr(6)
         self.atomic_cas = tl.constexpr(7)
@@ -109,3 +134,13 @@ class TraceEvent:
         self.wg_gemm = tl.constexpr(15)
         self.wg_gemm_wait = tl.constexpr(16)
         self.wg_sdma = tl.constexpr(17)
+        # User data movement (1024–2047)
+        self.fetch = tl.constexpr(1024)
+
+        # User compute (2048–3071)
+        self.compute = tl.constexpr(2048)
+        self.reduce = tl.constexpr(2049)
+
+        # Synchronization (3072–4095)
+        self.wait = tl.constexpr(3072)
+        self.barrier = tl.constexpr(3073)

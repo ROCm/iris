@@ -1,0 +1,201 @@
+{
+    "_meta": {
+        "description": "AG+MM ws=4 on MI300X \u2014 DISABLED (loses vs PyTorch on all shapes)",
+        "gpu": "AMD Instinct MI300X (gfx942)",
+        "date": "2026-04-13"
+    },
+    "enabled": false,
+    "reason": "ws=4 loses on all tested shapes. K=4096 shapes crash at ns=2 due to LDS overflow (65540>65536). ns=1 workaround constrains pipelining depth below break-even.",
+    "shapes": {
+        "262144x8192x8192": {
+            "label": "g6",
+            "M": 262144,
+            "N": 8192,
+            "K": 8192,
+            "params": {
+                "block_size_m": 256,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 24,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 64,
+                "num_fetch_sms": 52,
+                "num_fetch_stages": 4,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 161.027
+        },
+        "8192x8192x262144": {
+            "label": "g5",
+            "M": 8192,
+            "N": 8192,
+            "K": 262144,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 32,
+                "num_fetch_sms": 4,
+                "num_fetch_stages": 8,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 167.944
+        },
+        "131072x16384x16384": {
+            "label": "g2",
+            "M": 131072,
+            "N": 16384,
+            "K": 16384,
+            "params": {
+                "block_size_m": 256,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 24,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 32,
+                "num_fetch_sms": 4,
+                "num_fetch_stages": 64,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 209.556
+        },
+        "16384x16384x131072": {
+            "label": "g1",
+            "M": 16384,
+            "N": 16384,
+            "K": 131072,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 16,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 16,
+                "num_fetch_sms": 16,
+                "num_fetch_stages": 8,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 239.757
+        },
+        "4096x14336x4096": {
+            "label": "mixtral_gate",
+            "M": 4096,
+            "N": 14336,
+            "K": 4096,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 2,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 16
+            },
+            "expected_iris_ms": 2.192
+        },
+        "4096x11008x4096": {
+            "label": "llama7b_gate",
+            "M": 4096,
+            "N": 11008,
+            "K": 4096,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 2,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 16
+            },
+            "expected_iris_ms": 2.163
+        },
+        "4096x4096x4096": {
+            "label": "pow2_4k",
+            "M": 4096,
+            "N": 4096,
+            "K": 4096,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 2,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 16
+            },
+            "expected_iris_ms": 1.494
+        },
+        "5120x13824x5120": {
+            "label": "llama13b_gate",
+            "M": 5120,
+            "N": 13824,
+            "K": 5120,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 2,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 16
+            },
+            "expected_iris_ms": 3.257
+        },
+        "4096x4096x11008": {
+            "label": "llama7b_down",
+            "M": 4096,
+            "N": 4096,
+            "K": 11008,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 2,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 16
+            },
+            "expected_iris_ms": 2.578
+        }
+    },
+    "default_params": null
+}

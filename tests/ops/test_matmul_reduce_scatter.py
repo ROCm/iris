@@ -175,3 +175,45 @@ def test_matmul_reduce_scatter_semantics(dtype, atol, rtol):
     import gc
 
     gc.collect()
+
+
+def test_matmul_reduce_scatter_lock_too_small():
+    """Test that ValueError is raised when the lock array is too small for current tile count.
+
+    Scenario: workspace is prepared with larger block sizes (fewer tiles), then the
+    preamble is called again with smaller block sizes (more tiles). The undersized
+    lock array is detected and a ValueError is raised.
+    """
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33
+    shmem = iris.iris(heap_size)
+
+    from iris.ops.config import FusedConfig
+    from iris.ops.matmul_reduce_scatter import matmul_reduce_scatter_preamble
+
+    M, N, K = 512, 512, 64
+    dtype = torch.float16
+
+    iris_A = shmem.zeros((M, K), dtype=dtype)
+    iris_B = shmem.zeros((K, N), dtype=dtype)
+    iris_C = shmem.zeros((M, N), dtype=dtype)
+
+    shmem.barrier()
+
+    # Step 1: run preamble with larger block sizes → allocates a smaller lock array
+    config_large = FusedConfig(block_size_m=128, block_size_n=128, block_size_k=32)
+    workspace = matmul_reduce_scatter_preamble(shmem, iris_C, iris_A, iris_B, config=config_large)
+
+    # Step 2: call preamble again with smaller block sizes that need more tiles —
+    # the preamble detects that workspace.locks is too small and raises ValueError.
+    config_small = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
+    with pytest.raises(ValueError, match="Lock array too small"):
+        matmul_reduce_scatter_preamble(shmem, iris_C, iris_A, iris_B, config=config_small, workspace=workspace)
+
+    shmem.barrier()
+    del shmem
+    import gc
+
+    gc.collect()

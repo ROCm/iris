@@ -74,15 +74,15 @@ EXIT_CODE=0
 # shellcheck disable=SC2086
 "$SCRIPT_DIR/container_exec.sh" $GPU_ARG "
     set -e
-
+    
     echo \"Installing iris using method: $INSTALL_METHOD\"
     $INSTALL_CMD
-
+    
     # Run tests in the specified directory
     for test_file in tests/$TEST_DIR/test_*.py; do
         if [ -f \"\$test_file\" ]; then
             echo \"Testing: \$test_file with $NUM_RANKS ranks (install: $INSTALL_METHOD)\"
-            torchrun --nproc_per_node=$NUM_RANKS --standalone tests/run_tests_distributed.py \"\$test_file\" -v --tb=short --durations=10
+            torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 --nnodes=1 --nproc_per_node=$NUM_RANKS tests/run_tests_distributed.py \"\$test_file\" -v --tb=short --durations=10
         fi
     done
 " || { EXIT_CODE=$?; }
