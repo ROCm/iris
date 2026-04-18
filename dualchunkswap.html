@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DualChunkSwap — Visual Explainer</title>
+<style>
+:root {
+  --bg:#0d1117; --surface:#161b22; --surface2:#1c2330; --border:#30363d;
+  --text:#e6edf3; --muted:#8b949e;
+  --r0:#58a6ff; --r1:#3fb950; --r2:#ffa657; --r3:#bc8cff;
+  --r0d:#0c1e3a; --r1d:#0c1e0c; --r2d:#2a1500; --r3d:#1e1028;
+  --r0b:#1a3a5a; --r1b:#1a3a1a; --r2b:#3a2000; --r3b:#2a1840;
+  --yellow:#d29922; --red:#f85149; --green:#3fb950; --accent:#58a6ff;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;font-size:14px;line-height:1.6}
+header{background:var(--surface);border-bottom:1px solid var(--border);padding:20px 40px}
+.logo{font-size:20px;font-weight:700;color:var(--accent)}
+.subtitle{color:var(--muted);font-size:13px;margin-top:4px}
+main{max-width:1200px;margin:0 auto;padding:32px 40px}
+.section{margin-bottom:52px}
+.section-title{font-size:18px;font-weight:700;margin-bottom:6px;padding-bottom:10px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.num{background:var(--accent);color:var(--bg);border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
+.section-sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:20px 24px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:800px){.grid2{grid-template-columns:1fr}}
+.label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:10px}
+.mono{font-family:'SFMono-Regular',Consolas,monospace;font-size:12px}
+/* token box */
+.tok-row{display:flex;gap:3px;flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}
+.tok{width:44px;height:44px;border-radius:4px;display:flex;flex-direction:column;align-items:center;justify-content:center;flex-shrink:0;font-size:10px;font-weight:700;border:2px solid transparent;position:relative}
+.tok .pos{font-size:9px;font-weight:400;opacity:.75}
+.tok-r0{background:var(--r0d);border-color:var(--r0);color:var(--r0)}
+.tok-r1{background:var(--r1d);border-color:var(--r1);color:var(--r1)}
+.tok-r2{background:var(--r2d);border-color:var(--r2);color:var(--r2)}
+.tok-r3{background:var(--r3d);border-color:var(--r3);color:var(--r3)}
+.tok-head::after{content:'H';position:absolute;top:2px;right:4px;font-size:8px;opacity:.6}
+.tok-tail::after{content:'T';position:absolute;top:2px;right:4px;font-size:8px;opacity:.6}
+/* rank legend */
+.rank-legend{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px}
+.rl-item{display:flex;align-items:center;gap:8px;font-size:12px}
+.rl-swatch{width:14px;height:14px;border-radius:3px;border:2px solid}
+/* bar chart */
+.bar-chart{display:flex;flex-direction:column;gap:8px}
+.bc-row{display:flex;align-items:center;gap:10px}
+.bc-label{width:90px;font-size:12px;color:var(--muted);flex-shrink:0}
+.bc-track{flex:1;height:22px;background:var(--surface2);border-radius:3px;overflow:hidden;position:relative}
+.bc-fill{height:100%;border-radius:3px;display:flex;align-items:center;padding-left:8px;transition:width .3s}
+.bc-fill span{font-size:11px;font-weight:600;color:#000;white-space:nowrap}
+.bc-val{width:80px;font-size:12px;text-align:right;color:var(--text);flex-shrink:0}
+/* flow boxes */
+.flow{display:flex;align-items:flex-start;gap:0;flex-wrap:wrap}
+.flow-step{display:flex;align-items:center}
+.fbox{border-radius:6px;padding:10px 14px;font-size:12px;font-weight:600;white-space:nowrap;text-align:center;min-width:100px}
+.fbox-sub{font-size:10px;font-weight:400;color:var(--muted);margin-top:2px;white-space:normal;text-align:center}
+.farrow{font-size:18px;color:var(--muted);padding:0 4px;margin-top:-2px}
+.fbox-local{background:#1c2330;border:1px solid var(--border);color:var(--text)}
+.fbox-comm{background:#1a2a00;border:1px solid var(--green);color:var(--green)}
+.fbox-comm3{background:#3a1500;border:1px solid var(--yellow);color:var(--yellow)}
+.fbox-reorder{background:#1e1028;border:1px solid var(--r3);color:var(--r3)}
+.fbox-attn{background:#0c1e3a;border:1px solid var(--r0);color:var(--r0)}
+.fbox-extract{background:#1a1200;border:1px solid var(--yellow);color:var(--yellow)}
+.fbox-out{background:#0c1e0c;border:1px solid var(--green);color:var(--green)}
+.cost-tag{display:inline-block;font-size:10px;padding:1px 7px;border-radius:8px;font-weight:600;margin-left:6px;vertical-align:middle}
+.ct-extra{background:#3a1500;color:var(--yellow);border:1px solid var(--yellow)}
+.ct-same{background:#0c1e0c;color:var(--green);border:1px solid var(--green)}
+.note{background:var(--surface2);border-left:3px solid var(--accent);border-radius:0 6px 6px 0;padding:12px 16px;font-size:13px;line-height:1.7;margin-top:16px}
+.note strong{color:var(--accent)}
+/* gathered tensor display */
+.gat-row{display:flex;gap:2px;flex-wrap:nowrap;overflow-x:auto}
+.gtok{width:48px;height:52px;border-radius:4px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:9px;flex-shrink:0;border:1px solid}
+.gtok .gi{font-weight:700;font-size:11px}
+.gtok .gp{margin-top:2px;opacity:.65}
+.gtok .gl{font-size:8px;margin-top:1px;opacity:.8}
+.divider{display:flex;align-items:center;justify-content:center;width:6px;flex-shrink:0}
+.divider-line{width:2px;height:52px;background:var(--border);border-radius:1px}
+/* arrow between rows */
+.down-arrow{text-align:center;font-size:22px;color:var(--muted);margin:8px 0;letter-spacing:2px}
+/* comparison table */
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:16px}
+thead th{background:var(--surface2);color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:10px 14px;text-align:left;border-bottom:1px solid var(--border)}
+tbody tr{border-bottom:1px solid var(--border)}
+tbody tr:last-child{border-bottom:none}
+td{padding:10px 14px;vertical-align:top}
+.td-plus{color:var(--yellow);font-weight:700}
+.td-same{color:var(--green)}
+footer{background:var(--surface);border-top:1px solid var(--border);padding:14px 40px;color:var(--muted);font-size:12px;margin-top:40px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">DualChunkSwap — Visual Explainer</div>
+  <div class="subtitle">Token distribution strategy for Prefill Context Parallelism (PCP) · vLLM v1 · 4-rank example (ws=4, S=16)</div>
+</header>
+
+<main>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     1. THE PROBLEM: Sequential split is unbalanced
+═══════════════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-title"><span class="num">1</span>The Problem — Sequential Token Split is Unbalanced</div>
+  <div class="section-sub">Naive context parallelism assigns rank r tokens [r×S_local … (r+1)×S_local). Causal attention means later ranks do far more work.</div>
+
+  <div class="grid2">
+    <div class="card">
+      <div class="label">Sequential split — token ownership</div>
+      <div class="rank-legend">
+        <div class="rl-item"><div class="rl-swatch" style="background:var(--r0d);border-color:var(--r0)"></div><span style="color:var(--r0)">Rank 0</span></div>
+        <div class="rl-item"><div class="rl-swatch" style="background:var(--r1d);border-color:var(--r1)"></div><span style="color:var(--r1)">Rank 1</span></div>
+        <div class="rl-item"><div class="rl-swatch" style="background:var(--r2d);border-color:var(--r2)"></div><span style="color:var(--r2)">Rank 2</span></div>
+        <div class="rl-item"><div class="rl-swatch" style="background:var(--r3d);border-color:var(--r3)"></div><span style="color:var(--r3)">Rank 3</span></div>
+      </div>
+      <!-- Full sequence, colored by owner -->
+      <div class="tok-row">
+        <div class="tok tok-r0"><span class="pos">0</span></div>
+        <div class="tok tok-r0"><span class="pos">1</span></div>
+        <div class="tok tok-r0"><span class="pos">2</span></div>
+        <div class="tok tok-r0"><span class="pos">3</span></div>
+        <div class="tok tok-r1"><span class="pos">4</span></div>
+        <div class="tok tok-r1"><span class="pos">5</span></div>
+        <div class="tok tok-r1"><span class="pos">6</span></div>
+        <div class="tok tok-r1"><span class="pos">7</span></div>
+        <div class="tok tok-r2"><span class="pos">8</span></div>
+        <div class="tok tok-r2"><span class="pos">9</span></div>
+        <div class="tok tok-r2"><span class="pos">10</span></div>
+        <div class="tok tok-r2"><span class="pos">11</span></div>
+        <div class="tok tok-r3"><span class="pos">12</span></div>
+        <div class="tok tok-r3"><span class="pos">13</span></div>
+        <div class="tok tok-r3"><span class="pos">14</span></div>
+        <div class="tok tok-r3"><span class="pos">15</span></div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px">← 4 contiguous tokens per rank, left-to-right →</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Causal attention work per rank (QK pairs processed)</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        Token at position p attends to K[0…p] = p+1 keys. Total work = sum over this rank's positions.
+      </div>
+      <div class="bar-chart">
+        <div class="bc-row">
+          <div class="bc-label" style="color:var(--r0)">Rank 0</div>
+          <div class="bc-track"><div class="bc-fill" style="width:17.2%;background:var(--r0)"><span>10 pairs</span></div></div>
+          <div class="bc-val" style="color:var(--r0)">7%</div>
+        </div>
+        <div class="bc-row">
+          <div class="bc-label" style="color:var(--r1)">Rank 1</div>
+          <div class="bc-track"><div class="bc-fill" style="width:44.8%;background:var(--r1)"><span>26 pairs</span></div></div>
+          <div class="bc-val" style="color:var(--r1)">19%</div>
+        </div>
+        <div class="bc-row">
+          <div class="bc-label" style="color:var(--r2)">Rank 2</div>
+          <div class="bc-track"><div class="bc-fill" style="width:72.4%;background:var(--r2)"><span>42 pairs</span></div></div>
+          <div class="bc-val" style="color:var(--r2)">31%</div>
+        </div>
+        <div class="bc-row">
+          <div class="bc-label" style="color:var(--r3)">Rank 3</div>
+          <div class="bc-track"><div class="bc-fill" style="width:100%;background:var(--r3)"><span>58 pairs ← bottleneck</span></div></div>
+          <div class="bc-val" style="color:var(--r3)">43%</div>
+        </div>
+      </div>
+      <div class="note" style="margin-top:12px;border-color:var(--red)">
+        <strong style="color:var(--red)">Rank 3 does 5.8× more work than Rank 0.</strong> All ranks must wait for the slowest rank — so the whole step takes as long as Rank 3.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     2. THE SOLUTION: DualChunkSwap
+═══════════════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-title"><span class="num">2</span>The Solution — DualChunkSwap Token Assignment</div>
+  <div class="section-sub">Give each rank one "early" chunk (light work) and one "late" chunk (heavy work). They cancel out — every rank does equal total work.</div>
+
+  <div class="card" style="margin-bottom:20px">
+    <div class="label">How DualChunkSwap assigns tokens (ws=4, S=16, chunk=2)</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:14px">
+      Divide the sequence into 2×ws = 8 chunks. Rank r gets chunk r (HEAD, from the first half) and chunk 2×ws−r−1 (TAIL, from the second half — mirrored order).
+    </div>
+
+    <!-- The full sequence colored by DCS owner -->
+    <div class="label" style="margin-bottom:6px">Full sequence in position order — colored by DualChunkSwap owner</div>
+    <div class="tok-row">
+      <!-- 0,1 → R0 HEAD -->
+      <div class="tok tok-r0 tok-head"><span class="pos">0</span></div>
+      <div class="tok tok-r0 tok-head"><span class="pos">1</span></div>
+      <!-- 2,3 → R1 HEAD -->
+      <div class="tok tok-r1 tok-head"><span class="pos">2</span></div>
+      <div class="tok tok-r1 tok-head"><span class="pos">3</span></div>
+      <!-- 4,5 → R2 HEAD -->
+      <div class="tok tok-r2 tok-head"><span class="pos">4</span></div>
+      <div class="tok tok-r2 tok-head"><span class="pos">5</span></div>
+      <!-- 6,7 → R3 HEAD -->
+      <div class="tok tok-r3 tok-head"><span class="pos">6</span></div>
+      <div class="tok tok-r3 tok-head"><span class="pos">7</span></div>
+      <!-- 8,9 → R3 TAIL -->
+      <div class="tok tok-r3 tok-tail"><span class="pos">8</span></div>
+      <div class="tok tok-r3 tok-tail"><span class="pos">9</span></div>
+      <!-- 10,11 → R2 TAIL -->
+      <div class="tok tok-r2 tok-tail"><span class="pos">10</span></div>
+      <div class="tok tok-r2 tok-tail"><span class="pos">11</span></div>
+      <!-- 12,13 → R1 TAIL -->
+      <div class="tok tok-r1 tok-tail"><span class="pos">12</span></div>
+      <div class="tok tok-r1 tok-tail"><span class="pos">13</span></div>
+      <!-- 14,15 → R0 TAIL -->
+      <div class="tok tok-r0 tok-tail"><span class="pos">14</span></div>
+      <div class="tok tok-r0 tok-tail"><span class="pos">15</span></div>
+    </div>
+    <div style="display:flex;gap:0;margin-top:6px;font-size:10px;color:var(--muted)">
+      <div style="width:88px;text-align:center;border-top:2px solid var(--r0);color:var(--r0);padding-top:3px">R0 HEAD</div>
+      <div style="width:88px;text-align:center;border-top:2px solid var(--r1);color:var(--r1);padding-top:3px">R1 HEAD</div>
+      <div style="width:88px;text-align:center;border-top:2px solid var(--r2);color:var(--r2);padding-top:3px">R2 HEAD</div>
+      <div style="width:88px;text-align:center;border-top:2px solid var(--r3);color:var(--r3);padding-top:3px">R3 HEAD</div>
+      <div style="width:88px;text-align:center;border-top:2px solid var(--r3);color:var(--r3);padding-top:3px">R3 TAIL</div>
+      <div style="width:88px;text-align:center;border-top:2px solid var(--r2);color:var(--r2);padding-top:3px">R2 TAIL</div>
+      <div style="width:88px;text-align:center;border-top:2px solid var(--r1);color:var(--r1);padding-top:3px">R1 TAIL</div>
+      <div style="width:88px;text-align:center;border-top:2px solid var(--r0);color:var(--r0);padding-top:3px">R0 TAIL</div>
+    </div>
+    <div class="note" style="margin-top:16px">
+      <strong>The "V" / palindrome pattern:</strong> ownership reads R0 R1 R2 R3 R3 R2 R1 R0 (chunk-by-chunk). Rank 0 owns the very first and very last chunks. Rank 3 owns the two middle chunks. The pattern is symmetric — it mirrors around the midpoint.
+    </div>
+  </div>
+
+  <!-- Per-rank breakdown -->
+  <div class="grid2">
+    <div class="card">
+      <div class="label">Each rank's two chunks</div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <!-- R0 -->
+        <div>
+          <div style="color:var(--r0);font-size:12px;font-weight:600;margin-bottom:4px">Rank 0  — head=chunk 0, tail=chunk 7</div>
+          <div class="tok-row">
+            <div class="tok tok-r0 tok-head"><span class="pos">0</span></div>
+            <div class="tok tok-r0 tok-head"><span class="pos">1</span></div>
+            <div style="width:16px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:11px">+</div>
+            <div class="tok tok-r0 tok-tail"><span class="pos">14</span></div>
+            <div class="tok tok-r0 tok-tail"><span class="pos">15</span></div>
+          </div>
+        </div>
+        <!-- R1 -->
+        <div>
+          <div style="color:var(--r1);font-size:12px;font-weight:600;margin-bottom:4px">Rank 1  — head=chunk 1, tail=chunk 6</div>
+          <div class="tok-row">
+            <div class="tok tok-r1 tok-head"><span class="pos">2</span></div>
+            <div class="tok tok-r1 tok-head"><span class="pos">3</span></div>
+            <div style="width:16px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:11px">+</div>
+            <div class="tok tok-r1 tok-tail"><span class="pos">12</span></div>
+            <div class="tok tok-r1 tok-tail"><span class="pos">13</span></div>
+          </div>
+        </div>
+        <!-- R2 -->
+        <div>
+          <div style="color:var(--r2);font-size:12px;font-weight:600;margin-bottom:4px">Rank 2  — head=chunk 2, tail=chunk 5</div>
+          <div class="tok-row">
+            <div class="tok tok-r2 tok-head"><span class="pos">4</span></div>
+            <div class="tok tok-r2 tok-head"><span class="pos">5</span></div>
+            <div style="width:16px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:11px">+</div>
+            <div class="tok tok-r2 tok-tail"><span class="pos">10</span></div>
+            <div class="tok tok-r2 tok-tail"><span class="pos">11</span></div>
+          </div>
+        </div>
+        <!-- R3 -->
+        <div>
+          <div style="color:var(--r3);font-size:12px;font-weight:600;margin-bottom:4px">Rank 3  — head=chunk 3, tail=chunk 4</div>
+          <div class="tok-row">
+            <div class="tok tok-r3 tok-head"><span class="pos">6</span></div>
+            <div class="tok tok-r3 tok-head"><span class="pos">7</span></div>
+            <div style="width:16px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:11px">+</div>
+            <div class="tok tok-r3 tok-tail"><span class="pos">8</span></div>
+            <div class="tok tok-r3 tok-tail"><span class="pos">9</span></div>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:14px;background:var(--surface2);border-radius:6px;padding:10px 14px;font-family:monospace;font-size:11px;line-height:1.8">
+        <span style="color:var(--muted)"># General formula (0-indexed):</span><br>
+        head_start = r × chunk<br>
+        tail_start = (2×ws − r − 1) × chunk<br>
+        <span style="color:var(--muted)"># ws=4, chunk=2:</span><br>
+        Rank 0: head=[0,1]   tail=[14,15]<br>
+        Rank 1: head=[2,3]   tail=[12,13]<br>
+        Rank 2: head=[4,5]   tail=[10,11]<br>
+        Rank 3: head=[6,7]   tail=[ 8, 9]
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">Causal attention work per rank — perfectly balanced</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        Each rank's early HEAD chunk (few keys to attend to) + late TAIL chunk (many keys) cancel out to the same total for every rank.
+      </div>
+      <div class="bar-chart">
+        <div class="bc-row">
+          <div class="bc-label" style="color:var(--r0)">R0 head</div>
+          <div class="bc-track">
+            <div class="bc-fill" style="width:3.4%;background:var(--r0)"></div>
+          </div>
+          <div class="bc-val" style="color:var(--muted)">2 pairs</div>
+        </div>
+        <div class="bc-row">
+          <div class="bc-label" style="color:var(--r0)">R0 tail</div>
+          <div class="bc-track">
+            <div class="bc-fill" style="width:53.4%;background:var(--r0)"><span>pos 14+15</span></div>
+          </div>
+          <div class="bc-val" style="color:var(--muted)">32 pairs</div>
+        </div>
+        <div class="bc-row">
+          <div class="bc-label" style="color:var(--r0);font-weight:700">R0 total</div>
+          <div class="bc-track"><div class="bc-fill" style="width:58.6%;background:var(--r0)"><span>34 pairs</span></div></div>
+          <div class="bc-val" style="color:var(--r0)">25% ✓</div>
+        </div>
+        <div style="height:6px"></div>
+        <div class="bc-row">
+          <div class="bc-label" style="color:var(--r1);font-weight:700">R1 total</div>
+          <div class="bc-track"><div class="bc-fill" style="width:58.6%;background:var(--r1)"><span>34 pairs</span></div></div>
+          <div class="bc-val" style="color:var(--r1)">25% ✓</div>
+        </div>
+        <div class="bc-row">
+          <div class="bc-label" style="color:var(--r2);font-weight:700">R2 total</div>
+          <div class="bc-track"><div class="bc-fill" style="width:58.6%;background:var(--r2)"><span>34 pairs</span></div></div>
+          <div class="bc-val" style="color:var(--r2)">25% ✓</div>
+        </div>
+        <div class="bc-row">
+          <div class="bc-label" style="color:var(--r3);font-weight:700">R3 total</div>
+          <div class="bc-track"><div class="bc-fill" style="width:58.6%;background:var(--r3)"><span>34 pairs</span></div></div>
+          <div class="bc-val" style="color:var(--r3)">25% ✓</div>
+        </div>
+      </div>
+      <div class="note">
+        <strong>Perfect balance.</strong> Every rank does exactly 34 QK pairs — 25% of 136 total. vs sequential where Rank 3 alone did 43% and Rank 0 only 7%.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     3. ALLGATHER + RESTORE
+═══════════════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-title"><span class="num">3</span>AllGather + Restore — Getting Back to Sequential Order</div>
+  <div class="section-sub">After AllGather, tokens are in DualChunkSwap order (grouped by rank). <code>restore_idx</code> is a permutation that reorders them back to sequential positions 0…S−1.</div>
+
+  <!-- Step 1: local tokens on each rank -->
+  <div class="card" style="margin-bottom:16px">
+    <div class="label" style="margin-bottom:12px">Before AllGather — each rank holds its 4 local tokens (DualChunkSwap order)</div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <!-- Rank 0 -->
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="width:60px;font-size:12px;font-weight:600;color:var(--r0)">Rank 0</div>
+        <div class="tok-row">
+          <div class="tok tok-r0 tok-head" style="width:52px"><span style="font-size:10px">pos 0</span><span class="pos">H</span></div>
+          <div class="tok tok-r0 tok-head" style="width:52px"><span style="font-size:10px">pos 1</span><span class="pos">H</span></div>
+          <div class="tok tok-r0 tok-tail" style="width:52px"><span style="font-size:10px">pos 14</span><span class="pos">T</span></div>
+          <div class="tok tok-r0 tok-tail" style="width:52px"><span style="font-size:10px">pos 15</span><span class="pos">T</span></div>
+        </div>
+      </div>
+      <!-- Rank 1 -->
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="width:60px;font-size:12px;font-weight:600;color:var(--r1)">Rank 1</div>
+        <div class="tok-row">
+          <div class="tok tok-r1 tok-head" style="width:52px"><span style="font-size:10px">pos 2</span><span class="pos">H</span></div>
+          <div class="tok tok-r1 tok-head" style="width:52px"><span style="font-size:10px">pos 3</span><span class="pos">H</span></div>
+          <div class="tok tok-r1 tok-tail" style="width:52px"><span style="font-size:10px">pos 12</span><span class="pos">T</span></div>
+          <div class="tok tok-r1 tok-tail" style="width:52px"><span style="font-size:10px">pos 13</span><span class="pos">T</span></div>
+        </div>
+      </div>
+      <!-- Rank 2 -->
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="width:60px;font-size:12px;font-weight:600;color:var(--r2)">Rank 2</div>
+        <div class="tok-row">
+          <div class="tok tok-r2 tok-head" style="width:52px"><span style="font-size:10px">pos 4</span><span class="pos">H</span></div>
+          <div class="tok tok-r2 tok-head" style="width:52px"><span style="font-size:10px">pos 5</span><span class="pos">H</span></div>
+          <div class="tok tok-r2 tok-tail" style="width:52px"><span style="font-size:10px">pos 10</span><span class="pos">T</span></div>
+          <div class="tok tok-r2 tok-tail" style="width:52px"><span style="font-size:10px">pos 11</span><span class="pos">T</span></div>
+        </div>
+      </div>
+      <!-- Rank 3 -->
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="width:60px;font-size:12px;font-weight:600;color:var(--r3)">Rank 3</div>
+        <div class="tok-row">
+          <div class="tok tok-r3 tok-head" style="width:52px"><span style="font-size:10px">pos 6</span><span class="pos">H</span></div>
+          <div class="tok tok-r3 tok-head" style="width:52px"><span style="font-size:10px">pos 7</span><span class="pos">H</span></div>
+          <div class="tok tok-r3 tok-tail" style="width:52px"><span style="font-size:10px">pos 8</span><span class="pos">T</span></div>
+          <div class="tok tok-r3 tok-tail" style="width:52px"><span style="font-size:10px">pos 9</span><span class="pos">T</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Arrow -->
+  <div class="down-arrow">↓ dist.all_gather( ) — every rank gets everyone's tokens ↓</div>
+
+  <!-- Step 2: After AllGather — gathered order -->
+  <div class="card" style="margin-bottom:16px">
+    <div class="label" style="margin-bottom:12px">After AllGather — gathered tensor on each rank (DualChunkSwap order, NOT sequential)</div>
+    <div class="gat-row">
+      <!-- R0 block -->
+      <div class="gtok tok-r0"><span class="gi">p0</span><span class="gp">idx 0</span><span class="gl">R0·H</span></div>
+      <div class="gtok tok-r0"><span class="gi">p1</span><span class="gp">idx 1</span><span class="gl">R0·H</span></div>
+      <div class="gtok tok-r0"><span class="gi">p14</span><span class="gp">idx 2</span><span class="gl">R0·T</span></div>
+      <div class="gtok tok-r0"><span class="gi">p15</span><span class="gp">idx 3</span><span class="gl">R0·T</span></div>
+      <div class="divider"><div class="divider-line"></div></div>
+      <!-- R1 block -->
+      <div class="gtok tok-r1"><span class="gi">p2</span><span class="gp">idx 4</span><span class="gl">R1·H</span></div>
+      <div class="gtok tok-r1"><span class="gi">p3</span><span class="gp">idx 5</span><span class="gl">R1·H</span></div>
+      <div class="gtok tok-r1"><span class="gi">p12</span><span class="gp">idx 6</span><span class="gl">R1·T</span></div>
+      <div class="gtok tok-r1"><span class="gi">p13</span><span class="gp">idx 7</span><span class="gl">R1·T</span></div>
+      <div class="divider"><div class="divider-line"></div></div>
+      <!-- R2 block -->
+      <div class="gtok tok-r2"><span class="gi">p4</span><span class="gp">idx 8</span><span class="gl">R2·H</span></div>
+      <div class="gtok tok-r2"><span class="gi">p5</span><span class="gp">idx 9</span><span class="gl">R2·H</span></div>
+      <div class="gtok tok-r2"><span class="gi">p10</span><span class="gp">idx 10</span><span class="gl">R2·T</span></div>
+      <div class="gtok tok-r2"><span class="gi">p11</span><span class="gp">idx 11</span><span class="gl">R2·T</span></div>
+      <div class="divider"><div class="divider-line"></div></div>
+      <!-- R3 block -->
+      <div class="gtok tok-r3"><span class="gi">p6</span><span class="gp">idx 12</span><span class="gl">R3·H</span></div>
+      <div class="gtok tok-r3"><span class="gi">p7</span><span class="gp">idx 13</span><span class="gl">R3·H</span></div>
+      <div class="gtok tok-r3"><span class="gi">p8</span><span class="gp">idx 14</span><span class="gl">R3·T</span></div>
+      <div class="gtok tok-r3"><span class="gi">p9</span><span class="gp">idx 15</span><span class="gl">R3·T</span></div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:10px;line-height:1.6">
+      <strong style="color:var(--yellow)">Problem:</strong> The gathered tensor has p0, p1, p14, p15, p2, p3, p12, p13… — not sequential order. Flash attention with causal masking needs tokens in sequential position order to apply the correct mask.
+    </div>
+  </div>
+
+  <!-- restore_idx -->
+  <div class="card" style="margin-bottom:16px;background:#0d1a2a;border-color:#1a3a5a">
+    <div class="label" style="margin-bottom:8px;color:var(--accent)">restore_idx = argsort(all_positions_across_ranks)</div>
+    <div style="font-family:monospace;font-size:12px;line-height:1.9;color:var(--muted)">
+      all_pos (gathered order) = [<span style="color:var(--r0)">0,1,14,15</span>, <span style="color:var(--r1)">2,3,12,13</span>, <span style="color:var(--r2)">4,5,10,11</span>, <span style="color:var(--r3)">6,7,8,9</span>]<br>
+      restore_idx              = [<span style="color:var(--text)">0,1,4,5,8,9,12,13,14,15,10,11,6,7,2,3</span>]<br>
+      <br>
+      <span style="color:var(--muted)">Reading it:</span> restore_idx[i] <span style="color:var(--text)">=</span> <span style="color:var(--accent)">"to build sequential pos i, take gathered index restore_idx[i]"</span><br>
+      <span style="color:var(--muted)">→</span> seq[0] = gathered[<span style="color:var(--text)">0</span>] = p0  <span style="color:var(--muted)">✓</span><br>
+      <span style="color:var(--muted)">→</span> seq[2] = gathered[<span style="color:var(--text)">4</span>] = p2  <span style="color:var(--muted)">✓  (p2 is at index 4 in R1's block)</span><br>
+      <span style="color:var(--muted)">→</span> seq[14] = gathered[<span style="color:var(--text)">2</span>] = p14 <span style="color:var(--muted)">✓  (p14 is at index 2 in R0's tail)</span>
+    </div>
+  </div>
+
+  <!-- Arrow -->
+  <div class="down-arrow">↓ index_select(gathered, 0, restore_idx) — reorder to sequential ↓</div>
+
+  <!-- Step 3: After restore -->
+  <div class="card">
+    <div class="label" style="margin-bottom:12px">After restore_idx — sequential position order (what flash attention expects)</div>
+    <div class="tok-row">
+      <div class="tok tok-r0"><span class="pos">0</span></div>
+      <div class="tok tok-r0"><span class="pos">1</span></div>
+      <div class="tok tok-r1"><span class="pos">2</span></div>
+      <div class="tok tok-r1"><span class="pos">3</span></div>
+      <div class="tok tok-r2"><span class="pos">4</span></div>
+      <div class="tok tok-r2"><span class="pos">5</span></div>
+      <div class="tok tok-r3"><span class="pos">6</span></div>
+      <div class="tok tok-r3"><span class="pos">7</span></div>
+      <div class="tok tok-r3"><span class="pos">8</span></div>
+      <div class="tok tok-r3"><span class="pos">9</span></div>
+      <div class="tok tok-r2"><span class="pos">10</span></div>
+      <div class="tok tok-r2"><span class="pos">11</span></div>
+      <div class="tok tok-r1"><span class="pos">12</span></div>
+      <div class="tok tok-r1"><span class="pos">13</span></div>
+      <div class="tok tok-r0"><span class="pos">14</span></div>
+      <div class="tok tok-r0"><span class="pos">15</span></div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px">
+      Tokens 0–15 in order. Causal flash attention can now be applied correctly — each token attends to all predecessors. Ownership colors show the DualChunkSwap pattern (V-shape), but the ordering is sequential.
+    </div>
+    <div class="note">
+      <strong>Now flash_attn_varlen_func runs on global [Q_seq, K_seq, V_seq].</strong> After attention, each rank extracts its own output rows using <code>inv_restore</code> (the inverse permutation), then discards any padding.
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     4. FLOW COMPARISON
+═══════════════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-title"><span class="num">4</span>Flow Comparison — <code>cp_allgather_nccl</code> vs <code>cp_allgather_nccl_vllm</code></div>
+  <div class="section-sub">cp_allgather_nccl assumes sequential token sharding (simple, approximate). cp_allgather_nccl_vllm models the full DualChunkSwap path that iris_cp.py implements in production.</div>
+
+  <!-- cp_allgather_nccl -->
+  <div class="card" style="margin-bottom:20px;border-color:#1a3a1a">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+      <div style="width:10px;height:10px;border-radius:50%;background:var(--green)"></div>
+      <div style="font-weight:700;font-size:14px;color:var(--green)">cp_allgather_nccl — simple sequential sharding</div>
+      <span style="font-size:11px;color:var(--muted);margin-left:auto">2 collectives · 0 reordering · SDPA</span>
+    </div>
+
+    <div class="flow">
+      <div class="flow-step">
+        <div class="fbox fbox-local">
+          Local Q, K, V<br>
+          <div class="fbox-sub">[S_local, H/H_kv, D]<br>sequential chunk r</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-comm">
+          AllGather K+V<br>
+          <div class="fbox-sub">2 collectives<br>dist.all_gather</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-local">
+          Slice prefix<br>
+          <div class="fbox-sub">K_full[:(r+1)×S_local]<br>simple index, O(1)</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-attn">
+          SDPA<br>
+          <div class="fbox-sub">local Q,<br>causal K prefix</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-out">
+          out_local<br>
+          <div class="fbox-sub">[S_local, H, D]</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:16px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px;font-size:12px">
+      <div style="background:var(--surface2);border-radius:6px;padding:10px">
+        <div style="color:var(--muted);font-size:10px;text-transform:uppercase;margin-bottom:4px">Collectives</div>
+        <div style="color:var(--green);font-weight:700">2 × AllGather</div>
+        <div style="color:var(--muted);font-size:11px">K and V only</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:6px;padding:10px">
+        <div style="color:var(--muted);font-size:10px;text-transform:uppercase;margin-bottom:4px">Reordering</div>
+        <div style="color:var(--green);font-weight:700">None</div>
+        <div style="color:var(--muted);font-size:11px">sequential assumed</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:6px;padding:10px">
+        <div style="color:var(--muted);font-size:10px;text-transform:uppercase;margin-bottom:4px">Attention</div>
+        <div style="color:var(--green);font-weight:700">SDPA</div>
+        <div style="color:var(--muted);font-size:11px">simple prefix slice</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:6px;padding:10px">
+        <div style="color:var(--muted);font-size:10px;text-transform:uppercase;margin-bottom:4px">Q tensor</div>
+        <div style="color:var(--green);font-weight:700">Local only</div>
+        <div style="color:var(--muted);font-size:11px">[S_local, H, D]</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- cp_allgather_nccl_vllm -->
+  <div class="card" style="border-color:#1a3a5a">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+      <div style="width:10px;height:10px;border-radius:50%;background:var(--accent)"></div>
+      <div style="font-weight:700;font-size:14px;color:var(--accent)">cp_allgather_nccl_vllm — DualChunkSwap + full vLLM path</div>
+      <span style="font-size:11px;color:var(--muted);margin-left:auto">3 collectives · 3 index_select · flash_attn_varlen</span>
+    </div>
+
+    <!-- Row 1 of flow -->
+    <div style="margin-bottom:6px;font-size:11px;color:var(--muted);font-weight:600">Step 1: Gather all three tensors</div>
+    <div class="flow" style="margin-bottom:16px">
+      <div class="flow-step">
+        <div class="fbox fbox-local">
+          Local Q, K, V<br>
+          <div class="fbox-sub">[S_local_pcp, *, D]<br>DualChunkSwap order<br>(head + tail interleaved)</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-comm3">
+          AllGather K<br>
+          <div class="fbox-sub">collective 1 of 3</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-comm3">
+          AllGather V<br>
+          <div class="fbox-sub">collective 2 of 3</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-comm3" style="border-color:var(--yellow);color:var(--yellow)">
+          AllGather Q <span class="cost-tag ct-extra">extra!</span><br>
+          <div class="fbox-sub">collective 3 of 3<br>needed for global attn</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 2 -->
+    <div style="margin-bottom:6px;font-size:11px;color:var(--muted);font-weight:600">Step 2: Restore to sequential order</div>
+    <div class="flow" style="margin-bottom:16px">
+      <div class="flow-step">
+        <div class="fbox fbox-local">
+          K_gathered<br>
+          <div class="fbox-sub">DCS order<br>[padded,H_kv,D]</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-reorder">
+          index_select(K, restore_idx)<br>
+          <div class="fbox-sub">permute rows<br>→ sequential order</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-reorder">
+          index_select(V, restore_idx)<br>
+          <div class="fbox-sub">same permutation</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-reorder">
+          index_select(Q, restore_idx)<br>
+          <div class="fbox-sub">same permutation</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 3 -->
+    <div style="margin-bottom:6px;font-size:11px;color:var(--muted);font-weight:600">Step 3: Attention on global padded tensors</div>
+    <div class="flow" style="margin-bottom:16px">
+      <div class="flow-step">
+        <div class="fbox fbox-local">
+          Q_seq, K_seq, V_seq<br>
+          <div class="fbox-sub">sequential order<br>[padded, *, D]</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-attn">
+          flash_attn_varlen<br>
+          <div class="fbox-sub">causal=True<br>cu_seqlens per-request<br>handles GQA + padding</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-local">
+          out_padded<br>
+          <div class="fbox-sub">sequential order<br>[padded, H, D]</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 4 -->
+    <div style="margin-bottom:6px;font-size:11px;color:var(--muted);font-weight:600">Step 4: Extract this rank's output</div>
+    <div class="flow">
+      <div class="flow-step">
+        <div class="fbox fbox-local">
+          out_padded<br>
+          <div class="fbox-sub">[padded, H, D]<br>global sequential</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-extract">
+          index_select(out, inv_restore[rank_slice])<br>
+          <div class="fbox-sub">get this rank's rows<br>from sequential output<br>put back in DCS order</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-extract">
+          Filter padding<br>
+          <div class="fbox-sub">drop rows where<br>pos ≥ seq_len_total</div>
+        </div>
+      </div>
+      <div class="flow-step"><div class="farrow">→</div></div>
+      <div class="flow-step">
+        <div class="fbox fbox-out">
+          out_local<br>
+          <div class="fbox-sub">[n_real, H, D]<br>DCS order (for model)</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:16px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px;font-size:12px">
+      <div style="background:var(--surface2);border-radius:6px;padding:10px">
+        <div style="color:var(--muted);font-size:10px;text-transform:uppercase;margin-bottom:4px">Collectives</div>
+        <div style="color:var(--yellow);font-weight:700">3 × AllGather</div>
+        <div style="color:var(--muted);font-size:11px">K, V, and Q</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:6px;padding:10px">
+        <div style="color:var(--muted);font-size:10px;text-transform:uppercase;margin-bottom:4px">Reordering</div>
+        <div style="color:var(--yellow);font-weight:700">3 × index_select</div>
+        <div style="color:var(--muted);font-size:11px">K, V, Q + 1 inverse</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:6px;padding:10px">
+        <div style="color:var(--muted);font-size:10px;text-transform:uppercase;margin-bottom:4px">Attention</div>
+        <div style="color:var(--yellow);font-weight:700">flash_attn_varlen</div>
+        <div style="color:var(--muted);font-size:11px">global padded Q+K+V</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:6px;padding:10px">
+        <div style="color:var(--muted);font-size:10px;text-transform:uppercase;margin-bottom:4px">Q tensor</div>
+        <div style="color:var(--yellow);font-weight:700">Global AllGather</div>
+        <div style="color:var(--muted);font-size:11px">[padded, H, D]</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     5. SIDE-BY-SIDE COST TABLE
+═══════════════════════════════════════════════════════════════════ -->
+<div class="section">
+  <div class="section-title"><span class="num">5</span>Cost Comparison — What Each Step Adds</div>
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:30%">Step</th>
+          <th>cp_allgather_nccl</th>
+          <th>cp_allgather_nccl_vllm</th>
+          <th style="width:18%">Extra cost</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Token distribution</strong></td>
+          <td class="td-same">Sequential: rank r → tokens [r·S_local, (r+1)·S_local)</td>
+          <td class="td-plus">DualChunkSwap: rank r → tokens [r·chunk, (r+1)·chunk) ∪ [(2ws-r-1)·chunk, (2ws-r)·chunk)</td>
+          <td><span class="cost-tag ct-extra">different</span></td>
+        </tr>
+        <tr>
+          <td><strong>AllGather collectives</strong></td>
+          <td class="td-same">2 (K and V)</td>
+          <td class="td-plus">3 (K, V, and Q)</td>
+          <td><span class="cost-tag ct-extra">+1 AllGather</span></td>
+        </tr>
+        <tr>
+          <td><strong>Reordering ops</strong></td>
+          <td class="td-same">None — sequential K/V slice is trivial</td>
+          <td class="td-plus">3× index_select (K, V, Q) + 1× index_select for output extraction</td>
+          <td><span class="cost-tag ct-extra">4× index_select</span></td>
+        </tr>
+        <tr>
+          <td><strong>Attention kernel</strong></td>
+          <td class="td-same">SDPA on local Q vs causal K prefix<br>Q shape: [S_local, H, D]</td>
+          <td class="td-plus">flash_attn_varlen on global padded Q, K, V<br>Q shape: [padded, H, D] = ws× larger</td>
+          <td><span class="cost-tag ct-extra">ws× larger attn</span></td>
+        </tr>
+        <tr>
+          <td><strong>Causal mask</strong></td>
+          <td class="td-same">Implicit: K_causal = K_full[:(r+1)·S_local] — simple prefix slice</td>
+          <td class="td-plus">Correct: per-request cu_seqlens passed to flash_attn_varlen. Also where iris_cp.py should use head/tail two-pass (not yet — currently uses Q AllGather as simplification)</td>
+          <td><span class="cost-tag ct-extra">per-request</span></td>
+        </tr>
+        <tr>
+          <td><strong>KV cache writeback</strong></td>
+          <td class="td-same">No — just scratch buffers</td>
+          <td class="td-same">No (in benchmark) — iris_cp.py writes full global KV to paged cache for free decode</td>
+          <td><span class="cost-tag ct-same">not benchmarked</span></td>
+        </tr>
+        <tr>
+          <td><strong>Output shape returned</strong></td>
+          <td class="td-same">[S_local, H, D] in sequential order</td>
+          <td class="td-plus">[n_real, H, D] in DualChunkSwap order (matches what the model layer expects)</td>
+          <td><span class="cost-tag ct-extra">different order</span></td>
+        </tr>
+        <tr>
+          <td><strong>Load balance</strong></td>
+          <td><span style="color:var(--red)">Unbalanced for attention on AllGathered K</span><br><span style="font-size:11px;color:var(--muted)">Each rank's SDPA sees a different-length K prefix</span></td>
+          <td class="td-same">Balanced — DualChunkSwap guarantees equal QK pairs per rank</td>
+          <td><span class="cost-tag ct-same">DCS better</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="note" style="margin-top:16px;border-color:var(--accent)">
+      <strong>Why iris_cp.py does the extra Q AllGather:</strong> With DualChunkSwap, each rank's Q tokens are non-contiguous in the sequence (e.g. Rank 0 has positions 0,1,14,15). Running causal attention with local Q against the full global K would require per-token causal masks — not a simple prefix slice. The simplest correct solution is to AllGather Q, restore everything to sequential order, and run standard causal flash attention on the global sequence. This is what iris_cp.py currently does. The optimal solution (using the head/tail two-pass directly) is in the metadata builder but not yet wired to the forward pass.
+    </div>
+  </div>
+</div>
+
+</main>
+
+<footer>
+  DualChunkSwap explainer · iris CP attention · vLLM v1 PCP · example uses ws=4, S=16 for clarity; production uses ws=8
+</footer>
+
+</body>
+</html>
