@@ -1,0 +1,395 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
+
+"""
+Unified sweep benchmark script for matmul and all-gather operations.
+
+Runs benchmarks across all permutations of M, N, K dimensions.
+Supports both operation types via --operation argument.
+
+Usage:
+    python sweep_bench.py --operation matmul_all_gather
+    python sweep_bench.py --operation all_gather_matmul
+"""
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+
+# Project root (2 levels up from this script)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# Dimension configurations to test.
+# Each entry contains M_local (per-rank M), N, K, and an optional label.
+DIMENSION_CONFIGS = [
+    {"m_local": 2048, "n": 2048, "k": 16384, "label": "M2048_N2048_K16384"},
+    {"m_local": 2048, "n": 16384, "k": 2048, "label": "M2048_N16384_K2048"},
+    {"m_local": 2048, "n": 16384, "k": 16384, "label": "M2048_N16384_K16384"},
+    {"m_local": 2048, "n": 16384, "k": 65536, "label": "M2048_N16384_K65536"},
+    {"m_local": 2048, "n": 131072, "k": 16384, "label": "M2048_N131072_K16384"},
+    {"m_local": 16384, "n": 2048, "k": 2048, "label": "M16384_N2048_K2048"},
+    {"m_local": 16384, "n": 2048, "k": 16384, "label": "M16384_N2048_K16384"},
+    {"m_local": 16384, "n": 2048, "k": 131072, "label": "M16384_N2048_K131072"},
+    {"m_local": 16384, "n": 16384, "k": 2048, "label": "M16384_N16384_K2048"},
+    {"m_local": 131072, "n": 2048, "k": 16384, "label": "M131072_N2048_K16384"},
+    # {"m_local": 131072, "n": 16384, "k": 16384, "label": "g2"},
+    # {"m_local": 147456, "n": 28672, "k": 4096, "label": "g14"},
+    # # {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"}, # run out of heap memory
+    # {"m_local": 229376, "n": 28672, "k": 4096, "label": "g16"},
+    # {"m_local": 8192, "n": 8192, "k": 262144, "label": "g5"},
+    # {"m_local": 262144, "n": 8192, "k": 8192, "label": "g6"},
+    # {"m_local": 16384, "n": 16384, "k": 131072, "label": "g1"},
+    # {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"}, # run out of heap memory
+    # {"m_local": 196608, "n": 18432, "k": 16384, "label": "g9"},
+    # {"m_local": 4096, "n": 14336, "k": 4096, "label": "mixtral_gate"},
+    # {"m_local": 4096, "n": 11008, "k": 4096, "label": "llama7b_gate"},
+    # {"m_local": 4096, "n": 4096, "k": 4096, "label": "pow2_4k"},
+    # {"m_local": 1024, "n": 3584, "k": 8192, "label": "M1024_N3584_K8192"},
+    # {"m_local": 4096, "n": 3584, "k": 8192, "label": "M4096_N3584_K8192"},
+    # {"m_local": 16384, "n": 3584, "k": 8192, "label": "M16384_N3584_K8192"},
+]
+
+# Benchmark configurations per operation type
+BENCHMARK_CONFIGS = {
+    "matmul_all_gather": {
+        "pytorchbaseline": {
+            "script": "benchmark/ops/bench_matmul_all_gather.py",
+            "benchmark_filter": "^pytorch_matmul_all_gather$",
+            "axes": {"m": "M_local", "n": "N", "k": "K"},
+        },
+        "baseline": {
+            "script": "benchmark/ops/bench_matmul_all_gather.py",
+            "benchmark_filter": "^matmul_all_gather$",
+            "axes": {"m": "M_local", "n": "N", "k": "K"},
+        },
+        "host_copy_engine": {
+            "script": "benchmark/ops/bench_matmul_all_gather_copy_engine.py",
+            "benchmark_filter": "^matmul_all_gather_copy_engine_host$",
+            "axes": {"m": "M_local", "n": "N", "k": "K"},
+        },
+        "device_copy_engine": {
+            "script": "benchmark/ops/bench_matmul_all_gather_copy_engine.py",
+            "benchmark_filter": "^matmul_all_gather_copy_engine_device$",
+            "axes": {"m": "M_local", "n": "N", "k": "K"},
+        },
+        "matmul_only": {
+            "script": "benchmark/ops/bench_matmul.py",
+            "benchmark_filter": "^matmul_only_local$",
+            "axes": {"m": "M_local", "n": "N", "k": "K"},
+        },
+        "pytorchmatmul_only": {
+            "script": "benchmark/ops/bench_matmul.py",
+            "benchmark_filter": "^pytorch_matmul_only_local$",
+            "axes": {"m": "M_local", "n": "N", "k": "K"},
+        },
+    },
+    "all_gather_matmul": {
+        "pytorchbaseline": {
+            "script": "benchmark/ops/bench_all_gather_matmul.py",
+            "benchmark_filter": "^rccl_all_gather_matmul$",
+            "axes": {"m": "M", "n": "N", "k": "K"},
+        },
+        "hbm_buffer": {
+            "script": "benchmark/ops/bench_all_gather_matmul.py",
+            "benchmark_filter": "^all_gather_matmul_hbm_buffer$",
+            "axes": {"m": "M", "n": "N", "k": "K"},
+        },
+        "copy_engine_host": {
+            "script": "benchmark/ops/bench_all_gather_matmul_copy_engine.py",
+            "benchmark_filter": "^all_gather_matmul_copy_engine_host$",
+            "axes": {"m": "M", "n": "N", "k": "K"},
+        },
+        "copy_engine_device": {
+            "script": "benchmark/ops/bench_all_gather_matmul_copy_engine.py",
+            "benchmark_filter": "^all_gather_matmul_copy_engine_device$",
+            "axes": {"m": "M", "n": "N", "k": "K"},
+        },
+        "matmul_only": {
+            "script": "benchmark/ops/bench_matmul.py",
+            "benchmark_filter": "^matmul_only$",
+            "axes": {"m": "M", "n": "N", "k": "K"},
+        },
+        "pytorchmatmul_only": {
+            "script": "benchmark/ops/bench_matmul.py",
+            "benchmark_filter": "^pytorch_matmul_only$",
+            "axes": {"m": "M", "n": "N", "k": "K"},
+        },
+    },
+}
+
+TIMEOUT_SECONDS = 150
+NUM_GPUS = 8
+
+
+def log(msg: str):
+    """Log to stderr to keep stdout clean for JSON."""
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _dimension_values(config: Dict[str, Any]) -> tuple[int, int, int]:
+    return int(config["m_local"]), int(config["n"]), int(config["k"])
+
+
+def _dimension_label(config: Dict[str, Any]) -> str:
+    return str(config.get("label") or f"M{config['m_local']}_N{config['n']}_K{config['k']}")
+
+
+def _run_bench_benchmark(
+    benchmark_name: str,
+    script: str,
+    m: int,
+    n: int,
+    k: int,
+    benchmark_filter: str,
+    axes: Dict[str, str],
+) -> Optional[Dict[str, Any]]:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=f"_{benchmark_name}_M{m}_N{n}_K{k}.json",
+        dir=str(PROJECT_ROOT),
+        delete=False,
+    ) as tmp_file:
+        benchmark_out = tmp_file.name
+
+    cmd = [
+        sys.executable,
+        script,
+        "--benchmark_format=json",
+        f"--benchmark_out={benchmark_out}",
+        f"--benchmark_filter={benchmark_filter}",
+        f"--axis_num_ranks={NUM_GPUS}",
+        f"--axis_{axes['m']}={m}",
+        f"--axis_{axes['n']}={n}",
+        f"--axis_{axes['k']}={k}",
+        "--axis_dtype=fp16",
+    ]
+
+    log(f"  Running {benchmark_name}: M={m}, N={n}, K={k}")
+    log(f"    Command: {' '.join(cmd)}")
+
+    process = None
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(PROJECT_ROOT),
+            preexec_fn=os.setsid,
+        )
+        stdout, stderr = process.communicate(timeout=TIMEOUT_SECONDS)
+        result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+
+        if result.returncode != 0:
+            log("    ✗ Failed: Non-zero return code")
+            log(f"    Return code: {result.returncode}")
+            error_log_file = PROJECT_ROOT / f"benchmark_error_{benchmark_name}_M{m}_N{n}_K{k}.log"
+            with open(error_log_file, "w") as f:
+                f.write(f"Benchmark: {benchmark_name}\n")
+                f.write(f"Dimensions: M={m}, N={n}, K={k}\n")
+                f.write(f"Command: {' '.join(cmd)}\n")
+                f.write(f"Return code: {result.returncode}\n\n")
+                f.write("=" * 80 + "\n")
+                f.write("STDOUT:\n")
+                f.write("=" * 80 + "\n")
+                f.write(result.stdout)
+                f.write("\n" + "=" * 80 + "\n")
+                f.write("STDERR:\n")
+                f.write("=" * 80 + "\n")
+                f.write(result.stderr)
+            log(f"    Full output saved to: {error_log_file}")
+            lines = (result.stdout + result.stderr).strip().split("\n")
+            log("    Last output lines:")
+            for line in lines[-5:]:
+                log(f"      {line}")
+            return None
+
+        with open(benchmark_out, "r") as f:
+            records = json.load(f)
+        if not isinstance(records, list) or not records:
+            log("    ✗ Failed: bench JSON output was empty")
+            return None
+
+        record = next((r for r in records if not r.get("skipped")), None)
+        if record is None:
+            skip_reason = records[0].get("skip_reason", "")
+            log(f"    ✗ Failed: benchmark was skipped ({skip_reason})")
+            return {"status": "SKIPPED", "skip_reason": skip_reason}
+
+        params = record.get("params", {})
+        counters = record.get("counters", {})
+        data = {
+            "world_size": record.get("world_size"),
+            "operation": record.get("benchmark"),
+            "m": int(params.get(axes["m"], m)),
+            "n": int(params.get(axes["n"], n)),
+            "k": int(params.get(axes["k"], k)),
+            "datatype": params.get("dtype", "float16"),
+            "total_ms": record.get("gpu_time_ms"),
+            "gpu_time_ms": record.get("gpu_time_ms"),
+            "all_times_ms": record.get("all_times_ms", []),
+            "bandwidth_gbps": record.get("bandwidth_gbps"),
+            "tflops": record.get("tflops"),
+        }
+        data.update(counters)
+        log("    ✓ Success: Loaded bench JSON results")
+        return data
+
+    except subprocess.TimeoutExpired as timeout_err:
+        log(f"    ✗ Timeout after {TIMEOUT_SECONDS}s - killing process group")
+        partial_stdout = timeout_err.stdout.decode("utf-8", errors="replace") if timeout_err.stdout else ""
+        partial_stderr = timeout_err.stderr.decode("utf-8", errors="replace") if timeout_err.stderr else ""
+        if process:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    log("    Process didn't terminate, force killing...")
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    process.wait()
+            except ProcessLookupError:
+                pass
+        error_log_file = PROJECT_ROOT / f"benchmark_timeout_{benchmark_name}_M{m}_N{n}_K{k}.log"
+        with open(error_log_file, "w") as f:
+            f.write(f"Benchmark: {benchmark_name}\n")
+            f.write(f"Dimensions: M={m}, N={n}, K={k}\n")
+            f.write(f"Command: {' '.join(cmd)}\n")
+            f.write(f"Status: TIMEOUT after {TIMEOUT_SECONDS}s\n\n")
+            f.write("=" * 80 + "\n")
+            f.write("PARTIAL STDOUT (before timeout):\n")
+            f.write("=" * 80 + "\n")
+            f.write(partial_stdout)
+            f.write("\n" + "=" * 80 + "\n")
+            f.write("PARTIAL STDERR (before timeout):\n")
+            f.write("=" * 80 + "\n")
+            f.write(partial_stderr)
+        log(f"    Timeout logged to: {error_log_file}")
+        return None
+    except json.JSONDecodeError as e:
+        log(f"    ✗ Error: Failed to parse bench JSON: {e}")
+        return None
+    except Exception as e:
+        log(f"    ✗ Error: {e}")
+        return None
+    finally:
+        try:
+            os.remove(benchmark_out)
+        except OSError:
+            pass
+
+
+def run_benchmark(
+    benchmark_name: str,
+    bench_config: Dict[str, Any],
+    m: int,
+    n: int,
+    k: int,
+) -> Optional[Dict[str, Any]]:
+    return _run_bench_benchmark(
+        benchmark_name,
+        bench_config["script"],
+        m,
+        n,
+        k,
+        bench_config["benchmark_filter"],
+        bench_config.get("axes", {"m": "M", "n": "N", "k": "K"}),
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run sweep benchmarks for matmul and all-gather operations",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--operation",
+        type=str,
+        required=True,
+        choices=["matmul_all_gather", "all_gather_matmul"],
+        help="Operation type to benchmark",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output JSON file path (default: benchmark/ops/{operation}/benchmark_sweep_results.json)",
+    )
+    args = parser.parse_args()
+
+    operation = args.operation
+    benchmarks = BENCHMARK_CONFIGS[operation]
+
+    # Determine output file
+    if args.output:
+        output_file = Path(args.output)
+    else:
+        output_file = PROJECT_ROOT / f"benchmark/ops/{operation}/benchmark_sweep_results.json"
+
+    log("=" * 80)
+    log(f"{operation.upper().replace('_', '-')} Benchmark Sweep")
+    log("=" * 80)
+    log(f"Dimension configurations: {len(DIMENSION_CONFIGS)}")
+    for config in DIMENSION_CONFIGS:
+        m, n, k = _dimension_values(config)
+        log(f"  - {_dimension_label(config)}: M={m}, N={n}, K={k}")
+    log(f"Benchmarks per configuration: {len(benchmarks)}")
+    log(f"Total benchmarks: {len(DIMENSION_CONFIGS) * len(benchmarks)}")
+    log(f"Timeout per benchmark: {TIMEOUT_SECONDS}s")
+    log(f"GPUs: {NUM_GPUS}")
+    log(f"Output file: {output_file}")
+    log("=" * 80)
+    log("")
+
+    results = []
+
+    log(f"Running {len(DIMENSION_CONFIGS)} dimension configurations...\n")
+
+    for idx, config in enumerate(DIMENSION_CONFIGS, 1):
+        m, n, k = _dimension_values(config)
+        label = _dimension_label(config)
+        log(f"[{idx}/{len(DIMENSION_CONFIGS)}] Testing {label}: M={m}, N={n}, K={k}")
+
+        row = {"label": label, "M": m, "N": n, "K": k, "operation": operation, "benchmarks": {}}
+
+        # Run each benchmark variant
+        for bench_key, bench_config in benchmarks.items():
+            result = run_benchmark(
+                benchmark_name=bench_key,
+                bench_config=bench_config,
+                m=m,
+                n=n,
+                k=k,
+            )
+
+            if result is not None:
+                row["benchmarks"][bench_key] = result
+            else:
+                row["benchmarks"][bench_key] = {"status": "FAILED"}
+
+        results.append(row)
+        log("")
+
+    # Write JSON file
+    log(f"Writing results to {output_file}...")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_file, "w") as f:
+        json.dump(results, f, indent=2)
+
+    log(f"✓ Results saved to {output_file}\n")
+
+    log("\n" + "=" * 80)
+    log("Benchmark sweep complete!")
+    log("=" * 80)
+
+
+if __name__ == "__main__":
+    main()

@@ -2,30 +2,29 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
-"""Benchmark for fused GEMM + all-gather (iris.ops)."""
+"""Benchmarks for GEMM + all-gather and related baselines."""
 
 import torch
+import torch.distributed as dist
 import iris.bench as bench
+
 from iris.ops import FusedConfig
 
 
-@bench.register
-@bench.axis("num_ranks", [2, 4, 8])
-@bench.axis("M_local", [1024, 4096, 16384])
-@bench.axis("N", [3584])
-@bench.axis("K", [8192])
-@bench.axis("dtype", [torch.float16])
-def matmul_all_gather(state, ctx):
+def _register_fused_matmul_all_gather(state, ctx) -> None:
     M_local, N, K = state["M_local"], state["N"], state["K"]
     dtype = state["dtype"]
     world_size = ctx.get_num_ranks()
+    rank = ctx.get_rank()
     M = M_local * world_size
 
     A = ctx.zeros((M_local, K), dtype=dtype)
-    A.fill_(1.0)
+    torch.manual_seed(123 + rank)
+    A_data = torch.randn((M_local, K), device="cuda", dtype=dtype)
+    A.copy_(A_data)
+    torch.manual_seed(456)
     B = torch.randn((K, N), device="cuda", dtype=dtype)
     C = ctx.zeros((M, N), dtype=dtype)
-
     config = FusedConfig()
 
     state.set_flops(2 * M_local * N * K)
@@ -35,6 +34,49 @@ def matmul_all_gather(state, ctx):
         lambda: ctx.ops.matmul_all_gather(C, A, B, config=config),
         preamble_fn=lambda: C.zero_(),
     )
+
+
+def _register_pytorch_matmul_all_gather(state, ctx) -> None:
+    M_local, N, K = state["M_local"], state["N"], state["K"]
+    dtype = state["dtype"]
+    world_size = ctx.get_num_ranks()
+    rank = ctx.get_rank()
+    M = M_local * world_size
+
+    torch.manual_seed(123 + rank)
+    A = torch.randn((M_local, K), device="cuda", dtype=dtype)
+    torch.manual_seed(456)
+    B = torch.randn((K, N), device="cuda", dtype=dtype)
+    C_local = torch.empty((M_local, N), device="cuda", dtype=dtype)
+    C = torch.empty((M, N), device="cuda", dtype=dtype)
+
+    state.set_flops(2 * M_local * N * K)
+    state.set_bytes((world_size - 1) * M_local * N * A.element_size())
+
+    state.exec(
+        lambda: (
+            torch.mm(A, B, out=C_local),
+            dist.all_gather_into_tensor(C, C_local),
+        ),
+    )
+@bench.register
+@bench.axis("num_ranks", [2, 4, 8])
+@bench.axis("M_local", [1024, 4096, 16384])
+@bench.axis("N", [3584])
+@bench.axis("K", [8192])
+@bench.axis("dtype", [torch.float16])
+def pytorch_matmul_all_gather(state, ctx):
+    _register_pytorch_matmul_all_gather(state, ctx)
+
+
+@bench.register
+@bench.axis("num_ranks", [2, 4, 8])
+@bench.axis("M_local", [1024, 4096, 16384])
+@bench.axis("N", [3584])
+@bench.axis("K", [8192])
+@bench.axis("dtype", [torch.float16])
+def matmul_all_gather(state, ctx):
+    _register_fused_matmul_all_gather(state, ctx)
 
 
 if __name__ == "__main__":

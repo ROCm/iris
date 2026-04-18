@@ -35,9 +35,12 @@ def rccl_all_gather_matmul(state, ctx):
     M, N, K = state["M"], state["N"], state["K"]
     dtype = state["dtype"]
     world_size = dist.get_world_size()
+    rank = ctx.get_rank()
     K_local = K // world_size
 
-    A_sharded = torch.ones((M, K_local), device="cuda", dtype=dtype)
+    torch.manual_seed(123 + rank)
+    A_sharded = torch.randn((M, K_local), device="cuda", dtype=dtype)
+    torch.manual_seed(456)
     B = torch.randn((K, N), device="cuda", dtype=dtype)
     A_gathered = torch.empty((M, K), device="cuda", dtype=dtype)
     C = torch.empty((M, N), device="cuda", dtype=dtype)
@@ -64,6 +67,7 @@ def all_gather_matmul_hbm_buffer(state, ctx):
     M, N, K = state["M"], state["N"], state["K"]
     dtype = state["dtype"]
     world_size = ctx.get_num_ranks()
+    rank = ctx.get_rank()
     K_local = K // world_size
 
     result = select_ag_mm_config(M, N, K, world_size=world_size)
@@ -71,7 +75,10 @@ def all_gather_matmul_hbm_buffer(state, ctx):
     hbm = result.hbm_buffer_params
 
     A_sharded = ctx.zeros((M, K_local), dtype=dtype)
-    A_sharded.fill_(1.0)
+    torch.manual_seed(123 + rank)
+    A_sharded_data = torch.randn((M, K_local), device="cuda", dtype=dtype)
+    A_sharded.copy_(A_sharded_data)
+    torch.manual_seed(456)
     B = torch.randn((K, N), device="cuda", dtype=dtype)
     C = ctx.zeros((M, N), dtype=dtype)
 
