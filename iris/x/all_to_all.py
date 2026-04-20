@@ -5,6 +5,7 @@
 Tile-level all-to-all primitive for Iris.
 
 Performs all-to-all communication where each rank sends and receives data to/from all other ranks.
+Provides both Triton (@triton.jit) and Gluon (@gluon.jit) implementations.
 """
 
 import triton
@@ -12,6 +13,16 @@ import triton.language as tl
 import iris
 from iris.iris import DeviceContext
 from .core import Tile, TensorView
+
+# Conditional import for Gluon
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+    from iris.experimental.iris_gluon import IrisDeviceCtx as _IrisDeviceCtx  # noqa: F401
+
+    GLUON_AVAILABLE = True
+except ImportError:
+    GLUON_AVAILABLE = False
 
 
 @triton.jit()
@@ -121,3 +132,137 @@ def all_to_all(
                 mask=combined_mask,
             )
             tl.store(dst_view.ptr + dst_offsets, data, mask=combined_mask)
+
+
+# Gluon implementation
+if GLUON_AVAILABLE:
+
+    @gluon.jit
+    def all_to_all_gluon(
+        IrisDeviceCtx: gl.constexpr,
+        context_tensor,
+        src_ptr,
+        dst_ptr,
+        M,
+        N,
+        stride_src_m,
+        stride_src_n,
+        stride_dst_m,
+        stride_dst_n,
+        pid_m,
+        pid_n,
+        N_per_rank: gl.constexpr,
+        cur_rank: gl.constexpr,
+        world_size: gl.constexpr,
+        BLOCK_SIZE_M: gl.constexpr,
+        BLOCK_SIZE_N: gl.constexpr,
+    ):
+        """
+        Gluon tile-level all-to-all for iris.x.
+
+        Gluon port of all_to_all using IrisDeviceCtx. Can be called from
+        within a @gluon.jit kernel. Iterates over all source ranks with a
+        compile-time-unrolled loop (world_size is constexpr) and applies
+        masking to handle tiles that span rank-chunk boundaries.
+
+        Args:
+            IrisDeviceCtx: IrisDeviceCtx class (constexpr, passed as first arg).
+            context_tensor: Encoded context tensor from shmem.get_device_context().
+            src_ptr: Pointer to source tensor (local rank's input).
+            dst_ptr: Pointer to destination tensor (local rank's output).
+            M: Number of rows.
+            N: Total number of columns (world_size * N_per_rank).
+            stride_src_m, stride_src_n: Strides for source tensor.
+            stride_dst_m, stride_dst_n: Strides for destination tensor.
+            pid_m: Tile row index.
+            pid_n: Tile column index.
+            N_per_rank: Number of columns per rank (constexpr).
+            cur_rank: Current rank (constexpr).
+            world_size: Total number of ranks (constexpr).
+            BLOCK_SIZE_M: Block size for M dimension (constexpr).
+            BLOCK_SIZE_N: Block size for N dimension (constexpr).
+
+        Semantics:
+            Input:  Each rank has (M, world_size * N_per_rank)
+            Output: Each rank has (M, world_size * N_per_rank)
+
+            rank dst's output columns [src*N:(src+1)*N] receive rank src's
+            input columns [dst*N:(dst+1)*N].
+
+        Example:
+            @gluon.jit
+            def my_kernel(IrisDeviceCtx: gl.constexpr, context_tensor, ...):
+                pid_m = ...
+                pid_n = ...
+                iris.x.all_to_all_gluon(
+                    IrisDeviceCtx, context_tensor,
+                    src_ptr, dst_ptr, M, N,
+                    stride_src_m, stride_src_n,
+                    stride_dst_m, stride_dst_n,
+                    pid_m, pid_n, N_per_rank, rank, world_size,
+                    BLOCK_SIZE_M, BLOCK_SIZE_N,
+                )
+        """
+        ctx = IrisDeviceCtx.initialize(context_tensor)
+
+        # 1-D layout covering BLOCK_SIZE_N elements across 4 warps of 64 threads.
+        # Mirrors the layout used in persistent_all_to_all_gluon.
+        col_layout: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])
+
+        output_col_start = pid_n * BLOCK_SIZE_N
+        output_col_end = output_col_start + BLOCK_SIZE_N
+
+        # Destination column indices are the same regardless of source rank.
+        rn_dst = output_col_start + gl.arange(0, BLOCK_SIZE_N, layout=col_layout)
+
+        # Iterate over all source ranks (loop is unrolled because world_size is constexpr).
+        for src_rank in range(world_size):
+            src_chunk_out_start = src_rank * N_per_rank
+            src_chunk_out_end = (src_rank + 1) * N_per_rank
+
+            # Intersection of this tile's output range with src_rank's chunk.
+            tile_src_start = tl.maximum(output_col_start, src_chunk_out_start)
+            tile_src_end = tl.minimum(output_col_end, src_chunk_out_end)
+            num_cols = tile_src_end - tile_src_start
+
+            # Where the intersection starts within this tile and within src's chunk.
+            offset_in_tile = tile_src_start - output_col_start
+            offset_in_src_chunk = tile_src_start - src_chunk_out_start
+
+            # Source column in src_rank's input that maps to this output region.
+            src_col_offset = cur_rank * N_per_rank + offset_in_src_chunk
+
+            # Source column indices adjusted so that col offset_in_tile aligns correctly.
+            src_col_base = src_col_offset - offset_in_tile
+            rn_src = src_col_base + gl.arange(0, BLOCK_SIZE_N, layout=col_layout)
+
+            # Column validity masks.
+            src_col_valid = (
+                (rn_src >= src_col_offset) & (rn_src < src_col_offset + num_cols) & (rn_src >= 0) & (rn_src < N)
+            )
+            dst_col_valid = (
+                (rn_dst >= output_col_start + offset_in_tile)
+                & (rn_dst < output_col_start + offset_in_tile + num_cols)
+                & (rn_dst < N)
+            )
+            # Also skip this rank entirely when there is no overlap.
+            col_mask = src_col_valid & dst_col_valid & (num_cols > 0)
+
+            # Process each row in the tile (unrolled since BLOCK_SIZE_M is constexpr).
+            for i in range(BLOCK_SIZE_M):
+                row_m = pid_m * BLOCK_SIZE_M + i
+
+                src_offsets = row_m * stride_src_m + rn_src * stride_src_n
+                dst_offsets = row_m * stride_dst_m + rn_dst * stride_dst_n
+
+                # Combine column mask with row bounds check.
+                row_col_mask = col_mask & (row_m < M)
+
+                if src_rank == cur_rank:
+                    # Local copy: read from our own input.
+                    data = gl.load(src_ptr + src_offsets, mask=row_col_mask)
+                    gl.store(dst_ptr + dst_offsets, data, mask=row_col_mask)
+                else:
+                    # Remote read: translate pointer to src_rank's address space.
+                    data = ctx.load(src_ptr + src_offsets, src_rank, mask=row_col_mask)
+                    gl.store(dst_ptr + dst_offsets, data, mask=row_col_mask)

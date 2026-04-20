@@ -71,6 +71,13 @@ from .all_reduce import (
 from .gather import gather
 from .all_gather import all_gather
 from .all_to_all import all_to_all
+
+try:
+    from .all_to_all import all_to_all_gluon  # noqa: F401
+
+    _GLUON_ALL_TO_ALL_AVAILABLE = True
+except ImportError:
+    _GLUON_ALL_TO_ALL_AVAILABLE = False
 from .reduce_scatter import reduce_scatter
 
 __all__ = [
@@ -94,3 +101,6 @@ __all__ = [
     "all_to_all",
     "reduce_scatter",
 ]
+
+if _GLUON_ALL_TO_ALL_AVAILABLE:
+    __all__.append("all_to_all_gluon")
