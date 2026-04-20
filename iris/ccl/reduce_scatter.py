@@ -3,7 +3,10 @@
 
 """
 Reduce-scatter collective communication primitive for Iris.
-Uses the two-shot approach: reduce assigned tiles and store only to own rank.
+
+Supports a two-shot variant that uses ``iris.load`` for remote reads and an inline
+variant that hoists heap bases once per kernel while retaining ``iris.load``
+for remote reads to stay compatible with simulation/capture flows.
 """
 
 import triton
@@ -11,6 +14,34 @@ import triton.language as tl
 import iris
 from .config import Config
 from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
+
+
+@triton.jit
+def _select_peer_rank(peer_idx, ranks, world_size: tl.constexpr):
+    indices = tl.arange(0, world_size)
+    ranks_i64 = tl.cast(ranks, tl.int64)
+    selected_i64 = tl.sum(tl.where(indices == peer_idx, ranks_i64, 0))
+    return tl.cast(selected_i64, ranks.dtype)
+
+
+@triton.jit
+def _translate_with_bases(ptr, from_base, to_base, hint: tl.constexpr = None):
+    ptr_int = tl.cast(ptr, tl.uint64)
+    offset = ptr_int - from_base
+    to_base_byte = tl.cast(to_base, tl.pointer_type(tl.int8))
+    translated_ptr_byte = to_base_byte + offset
+    translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
+    if hint is not None:
+        translated_ptr = tl.max_contiguous(tl.multiple_of(translated_ptr, hint), hint)
+    return translated_ptr
+
+
+@triton.jit
+def _select_peer_base(peer_idx, hoisted_bases, world_size: tl.constexpr):
+    indices = tl.arange(0, world_size)
+    bases_u64 = tl.cast(hoisted_bases, tl.uint64)
+    selected_u64 = tl.sum(tl.where(indices == peer_idx, bases_u64, 0))
+    return tl.cast(selected_u64, hoisted_bases.dtype)
 
 
 @triton.jit()
@@ -48,6 +79,10 @@ def persistent_reduce_scatter_two_shot(
     if NUM_XCDS != 1:
         pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
+    my_base = tl.load(heap_bases + iris_rank)
+    iris_ranks_line = rank_start + tl.arange(0, world_size) * rank_stride
+    hoisted_bases = tl.load(heap_bases + iris_ranks_line)
+
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
@@ -67,7 +102,6 @@ def persistent_reduce_scatter_two_shot(
         remaining = total_tiles - start_tile
         remaining = tl.maximum(remaining, 0)
         max_tile_offset = tl.minimum(tiles_per_rank, remaining)
-
     for tile_offset in range(pid, max_tile_offset, COMM_SMS):
         tile_id = start_tile + tile_offset * stride
 
@@ -140,6 +174,139 @@ def persistent_reduce_scatter_two_shot(
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
 
 
+@triton.jit()
+def persistent_reduce_scatter_inline(
+    input_ptr,
+    output_ptr,
+    M,
+    N,
+    stride_in_m,
+    stride_in_n,
+    stride_out_m,
+    stride_out_n,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    DISTRIBUTION: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+
+    my_base = tl.load(heap_bases + iris_rank)
+    iris_ranks_line = rank_start + tl.arange(0, world_size) * rank_stride
+    hoisted_bases = tl.load(heap_bases + iris_ranks_line)
+
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+
+    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
+
+    tiles_per_rank = tl.cdiv(total_tiles, world_size)
+    if DISTRIBUTION == 0:
+        start_tile = group_rank
+        stride = world_size
+        remaining = total_tiles - start_tile
+        remaining = tl.maximum(remaining, 0)
+        max_tile_offset = tl.cdiv(remaining, stride)
+    else:
+        start_tile = group_rank * tiles_per_rank
+        stride = 1
+        remaining = total_tiles - start_tile
+        remaining = tl.maximum(remaining, 0)
+        max_tile_offset = tl.minimum(tiles_per_rank, remaining)
+
+    for tile_offset in range(pid, max_tile_offset, COMM_SMS):
+        tile_id = start_tile + tile_offset * stride
+
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+
+        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+
+        base_ptr = input_ptr + input_offset
+        base_ptr = tl.multiple_of(base_ptr, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        out_ptr = output_ptr + output_offset
+        out_ptr = tl.multiple_of(out_ptr, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+        start_rank_idx = pid % world_size
+
+        if is_full:
+            acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+
+            for i in tl.static_range(world_size):
+                peer_idx = (start_rank_idx + i) % world_size
+                peer_global = rank_start + peer_idx * rank_stride
+
+                if peer_global == iris_rank:
+                    tile = tl.load(base_ptr)
+                else:
+                    tile = iris.load(
+                        base_ptr,
+                        iris_rank,
+                        peer_global,
+                        heap_bases,
+                        hint=(1, BLOCK_SIZE_N),
+                    )
+                acc += tile.to(acc_dtype)
+
+            reduced = acc.to(output_ptr.type.element_ty)
+            tl.store(out_ptr, reduced, cache_modifier=".wt")
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+
+            for i in tl.static_range(world_size):
+                peer_idx = (start_rank_idx + i) % world_size
+                peer_global = rank_start + peer_idx * rank_stride
+
+                if peer_global == iris_rank:
+                    tile = tl.load(base_ptr, mask=mask, other=0.0)
+                else:
+                    tile = iris.load(
+                        base_ptr,
+                        iris_rank,
+                        peer_global,
+                        heap_bases,
+                        mask=mask,
+                        hint=(1, BLOCK_SIZE_N),
+                    )
+                acc += tile.to(acc_dtype)
+
+            reduced = acc.to(output_ptr.type.element_ty)
+            tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
+
+
 def reduce_scatter(
     output_tensor,
     input_tensor,
@@ -172,7 +339,7 @@ def reduce_scatter(
                   Default: False.
         config: Config instance with kernel parameters (default: None).
                 If None, uses default Config values.
-                Only supports reduce_scatter_variant="two_shot".
+                Set config.reduce_scatter_variant to "two_shot" or "two_shot_inline".
 
     Example:
         >>> shmem = iris.iris()
@@ -200,12 +367,11 @@ def reduce_scatter(
             "Use default config (use_gluon=False)."
         )
 
-    # Validate that only two_shot variant is used
+    # Validate supported variants
     variant = getattr(config, "reduce_scatter_variant", "two_shot")
-    if variant != "two_shot":
+    if variant not in ("two_shot", "two_shot_inline"):
         raise ValueError(
-            f"reduce_scatter only supports variant='two_shot', got '{variant}'. "
-            f"Set config.reduce_scatter_variant='two_shot' or use default config."
+            f"reduce_scatter_variant must be 'two_shot' or 'two_shot_inline', got '{variant}'."
         )
 
     # Extract group information
@@ -229,7 +395,7 @@ def reduce_scatter(
     # Use all_reduce_distribution for tile distribution
     distribution = config.all_reduce_distribution
 
-    persistent_reduce_scatter_two_shot[(config.comm_sms,)](
+    kernel_args = (
         input_tensor,
         output_tensor,
         M,
@@ -251,10 +417,15 @@ def reduce_scatter(
         config.num_xcds,
         config.chunk_size,
         distribution,
-        num_stages=config.num_stages,
-        num_warps=config.num_warps,
-        waves_per_eu=config.waves_per_eu,
     )
+
+    grid = (config.comm_sms,)
+    launch_kwargs = dict(num_stages=config.num_stages, num_warps=config.num_warps, waves_per_eu=config.waves_per_eu)
+
+    if variant == "two_shot_inline":
+        persistent_reduce_scatter_inline[grid](*kernel_args, **launch_kwargs)
+    else:
+        persistent_reduce_scatter_two_shot[grid](*kernel_args, **launch_kwargs)
 
     if not async_op:
         shmem.barrier()

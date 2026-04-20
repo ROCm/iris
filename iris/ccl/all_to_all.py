@@ -23,6 +23,26 @@ except ImportError:
     GLUON_AVAILABLE = False
 
 
+@triton.jit
+def _translate_with_bases(ptr, from_base, to_base, hint: tl.constexpr = None):
+    ptr_int = tl.cast(ptr, tl.uint64)
+    offset = ptr_int - from_base
+    to_base_byte = tl.cast(to_base, tl.pointer_type(tl.int8))
+    translated_ptr_byte = to_base_byte + offset
+    translated_ptr = tl.cast(translated_ptr_byte, ptr.dtype)
+    if hint is not None:
+        translated_ptr = tl.max_contiguous(tl.multiple_of(translated_ptr, hint), hint)
+    return translated_ptr
+
+
+@triton.jit
+def _select_peer_base(peer_idx, hoisted_bases, world_size: tl.constexpr):
+    indices = tl.arange(0, world_size)
+    bases_u64 = tl.cast(hoisted_bases, tl.uint64)
+    selected_u64 = tl.sum(tl.where(indices == peer_idx, bases_u64, 0))
+    return tl.cast(selected_u64, hoisted_bases.dtype)
+
+
 @triton.jit()
 def persistent_all_to_all(
     input_ptr,
@@ -186,6 +206,143 @@ def persistent_all_to_all(
                         mask=mask,
                         hint=(1, BLOCK_SIZE_N),
                     )
+
+
+@triton.jit()
+def persistent_all_to_all_inline(
+    input_ptr,
+    output_ptr,
+    M,
+    N,
+    stride_in_m,
+    stride_in_n,
+    stride_out_m,
+    stride_out_n,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    USE_EXPLICIT_CACHE_MODIFIER: tl.constexpr,
+    CACHE_MODIFIER: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+
+    my_base = tl.load(heap_bases + iris_rank)
+    iris_ranks_line = rank_start + tl.arange(0, world_size) * rank_stride
+    hoisted_bases = tl.load(heap_bases + iris_ranks_line)
+
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+
+        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        input_base_m = rm[:, None] * stride_in_m
+        output_base_m = rm[:, None] * stride_out_m
+        input_base_n = rn[None, :] * stride_in_n
+        output_base_n = rn[None, :] * stride_out_n
+
+        if is_full:
+            input_offset_local = input_base_m + (input_base_n + group_rank * N * stride_in_n)
+            output_offset_local = output_base_m + (output_base_n + group_rank * N * stride_out_n)
+            input_ptr_local = input_ptr + input_offset_local
+            output_ptr_local = output_ptr + output_offset_local
+            input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+            output_ptr_local = tl.multiple_of(output_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+            data = tl.load(input_ptr_local)
+            if USE_EXPLICIT_CACHE_MODIFIER:
+                tl.store(output_ptr_local, data, cache_modifier=CACHE_MODIFIER)
+            else:
+                tl.store(output_ptr_local, data, cache_modifier=".wt")
+
+            for i in tl.static_range(world_size):
+                if i != group_rank:
+                    input_offset_remote = input_base_m + (input_base_n + i * N * stride_in_n)
+                    output_offset_remote = output_base_m + (output_base_n + group_rank * N * stride_out_n)
+                    input_ptr_remote = input_ptr + input_offset_remote
+                    output_ptr_remote = output_ptr + output_offset_remote
+                    input_ptr_remote = tl.multiple_of(input_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+                    output_ptr_remote = tl.multiple_of(output_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+                    remote_data = tl.load(input_ptr_remote)
+                    dest_ptr = _translate_with_bases(
+                        output_ptr_remote,
+                        my_base,
+                        _select_peer_base(i, hoisted_bases, world_size),
+                        hint=(1, BLOCK_SIZE_N),
+                    )
+                    if USE_EXPLICIT_CACHE_MODIFIER:
+                        tl.store(dest_ptr, remote_data, cache_modifier=CACHE_MODIFIER)
+                    else:
+                        tl.store(dest_ptr, remote_data, cache_modifier=".wt")
+
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+
+            input_offset_local = input_base_m + (input_base_n + group_rank * N * stride_in_n)
+            output_offset_local = output_base_m + (output_base_n + group_rank * N * stride_out_n)
+            input_ptr_local = input_ptr + input_offset_local
+            output_ptr_local = output_ptr + output_offset_local
+            input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+            output_ptr_local = tl.multiple_of(output_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+            data = tl.load(input_ptr_local, mask=mask)
+            if USE_EXPLICIT_CACHE_MODIFIER:
+                tl.store(output_ptr_local, data, mask=mask, cache_modifier=CACHE_MODIFIER)
+            else:
+                tl.store(output_ptr_local, data, mask=mask, cache_modifier=".wt")
+
+            for i in tl.static_range(world_size):
+                if i != group_rank:
+                    input_offset_remote = input_base_m + (input_base_n + i * N * stride_in_n)
+                    output_offset_remote = output_base_m + (output_base_n + group_rank * N * stride_out_n)
+                    input_ptr_remote = input_ptr + input_offset_remote
+                    output_ptr_remote = output_ptr + output_offset_remote
+                    input_ptr_remote = tl.multiple_of(input_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+                    output_ptr_remote = tl.multiple_of(output_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+                    remote_data = tl.load(input_ptr_remote, mask=mask)
+                    dest_ptr = _translate_with_bases(
+                        output_ptr_remote,
+                        my_base,
+                        _select_peer_base(i, hoisted_bases, world_size),
+                        hint=(1, BLOCK_SIZE_N),
+                    )
+                    if USE_EXPLICIT_CACHE_MODIFIER:
+                        tl.store(dest_ptr, remote_data, mask=mask, cache_modifier=CACHE_MODIFIER)
+                    else:
+                        tl.store(dest_ptr, remote_data, mask=mask, cache_modifier=".wt")
 
 
 # Gluon implementation with traffic shaping based on micro-benchmark algorithm
@@ -410,31 +567,64 @@ def all_to_all(
         if config.use_gluon and not GLUON_AVAILABLE:
             raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False")
 
-        persistent_all_to_all[(config.comm_sms,)](
-            input_tensor,
-            output_tensor,
-            M,
-            N,
-            stride_in_m,
-            stride_in_n,
-            stride_out_m,
-            stride_out_n,
-            shmem.get_heap_bases(),
-            rank_in_group,
-            rank_global,
-            world_size,
-            rank_start,
-            rank_stride,
-            config.block_size_m,
-            config.block_size_n,
-            config.swizzle_size,
-            config.comm_sms,
-            config.num_xcds,
-            config.chunk_size,
-            num_stages=config.num_stages,
-            num_warps=config.num_warps,
-            waves_per_eu=config.waves_per_eu,
-        )
+        heap_bases = shmem.get_heap_bases()
+        use_explicit_cache_modifier = config.cache_modifier is not None
+        cache_modifier = config.cache_modifier if config.cache_modifier is not None else ".wt"
+
+        if config.all_to_all_variant == "persistent_inline":
+            persistent_all_to_all_inline[(config.comm_sms,)](
+                input_tensor,
+                output_tensor,
+                M,
+                N,
+                stride_in_m,
+                stride_in_n,
+                stride_out_m,
+                stride_out_n,
+                heap_bases,
+                rank_in_group,
+                rank_global,
+                world_size,
+                rank_start,
+                rank_stride,
+                config.block_size_m,
+                config.block_size_n,
+                config.swizzle_size,
+                config.comm_sms,
+                config.num_xcds,
+                config.chunk_size,
+                use_explicit_cache_modifier,
+                cache_modifier,
+                num_stages=config.num_stages,
+                num_warps=config.num_warps,
+                waves_per_eu=config.waves_per_eu,
+            )
+        else:
+            persistent_all_to_all[(config.comm_sms,)](
+                input_tensor,
+                output_tensor,
+                M,
+                N,
+                stride_in_m,
+                stride_in_n,
+                stride_out_m,
+                stride_out_n,
+                heap_bases,
+                rank_in_group,
+                rank_global,
+                world_size,
+                rank_start,
+                rank_stride,
+                config.block_size_m,
+                config.block_size_n,
+                config.swizzle_size,
+                config.comm_sms,
+                config.num_xcds,
+                config.chunk_size,
+                num_stages=config.num_stages,
+                num_warps=config.num_warps,
+                waves_per_eu=config.waves_per_eu,
+            )
 
     if not async_op:
         shmem.barrier()

@@ -38,6 +38,11 @@ def parse_args():
     parser.add_argument("--waves_per_eu", type=int, default=0, help="Number of waves per EU")
     parser.add_argument("--datatype", type=str, default="fp16", choices=["fp16", "fp32", "bf16"], help="Data type")
     parser.add_argument("-v", "--validate", action="store_true", help="Validate output against reference")
+    parser.add_argument(
+        "--use_inline",
+        action="store_true",
+        help="Use persistent_reduce_scatter_inline (pointer translation + iris.load).",
+    )
     return vars(parser.parse_args())
 
 
@@ -70,6 +75,17 @@ def main():
         "waves_per_eu": args["waves_per_eu"],
         "all_reduce_distribution": 1,
     }
+    requested_variant = None
+    if args["use_inline"]:
+        requested_variant = "two_shot_inline"
+    else:
+        heap_prefix = os.environ.get("IRIS_HEAP_BASES_PREFIX")
+        if heap_prefix == "persistent_reduce_scatter_inline":
+            requested_variant = "two_shot_inline"
+
+    if requested_variant:
+        config_kwargs["reduce_scatter_variant"] = requested_variant
+
     config = Config(**config_kwargs)
 
     ctx.barrier()

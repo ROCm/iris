@@ -23,7 +23,7 @@ try:
     try:
         from triton.experimental.gluon.language.amd.gfx1250 import async_copy as gfx1250_async_copy
 
-        GFX1250_ASYNC_AVAILABLE = False  # True
+        GFX1250_ASYNC_AVAILABLE = True  # True # For LDS
     except ImportError:
         GFX1250_ASYNC_AVAILABLE = False
 except ImportError:
@@ -47,6 +47,14 @@ def _translate_with_bases(ptr, from_base, to_base, hint: tl.constexpr = None):
     if hint is not None:
         translated_ptr = tl.max_contiguous(tl.multiple_of(translated_ptr, hint), hint)
     return translated_ptr
+
+
+@triton.jit
+def _select_peer_base(peer_idx, hoisted_bases, world_size: tl.constexpr):
+    indices = tl.arange(0, world_size)
+    bases_u64 = tl.cast(hoisted_bases, tl.uint64)
+    selected_u64 = tl.sum(tl.where(indices == peer_idx, bases_u64, 0))
+    return tl.cast(selected_u64, hoisted_bases.dtype)
 
 
 @triton.jit()
@@ -228,9 +236,9 @@ def persistent_all_gather_inline(
 
     This rank's heap base and every peer heap base are loaded once before the tile loop
     (vectorized ``tl.load`` over group ranks). Each destination's ``to_base`` is selected
-    inside the inner ``static_range`` via a masked reduction—Triton does not support
-    ``hoisted_bases[i]`` with a loop index. Output pointers still depend on the tile and
-    are computed inside the tile loop.
+    from a compile-time tuple populated from the hoisted bases, keeping the runtime loop
+    straight-line while avoiding per-rank loads. Output pointers still depend on the tile
+    and are computed inside the tile loop.
     """
     pid = tl.program_id(0)
 
@@ -286,8 +294,7 @@ def persistent_all_gather_inline(
             output_ptr_target = output_ptr + output_offset
             output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-            peer_idx = tl.arange(0, world_size)
-            to_base = tl.sum(tl.where(peer_idx == i, hoisted_bases, hoisted_bases * 0))
+            to_base = _select_peer_base(i, hoisted_bases, world_size)
 
             dest_ptr = _translate_with_bases(
                 output_ptr_target,

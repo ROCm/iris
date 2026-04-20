@@ -8,7 +8,8 @@ Example: iris.ccl.all_to_all
 Input and output are both (M, N*world_size): input[:, r*N:(r+1)*N] is sent to rank r.
 
 Run with:
-    torchrun --nproc_per_node=<num_gpus> --standalone example.py [--validate]
+    torchrun --nproc_per_node=<num_gpus> --standalone example.py [--validate] [--use_inline] \\
+        [--cache-modifier legacy|none|.wt|.cs]
 """
 
 import argparse
@@ -37,6 +38,20 @@ def parse_args():
     parser.add_argument("--waves_per_eu", type=int, default=0, help="Number of waves per EU")
     parser.add_argument("--datatype", type=str, default="fp16", choices=["fp16", "fp32", "bf16"], help="Data type")
     parser.add_argument("-v", "--validate", action="store_true", help="Validate output against reference")
+    parser.add_argument(
+        "--use_inline",
+        action="store_true",
+        help="Use persistent_all_to_all_inline (pointer translation + tl.store).",
+    )
+    parser.add_argument(
+        "--cache-modifier",
+        dest="cache_modifier_arg",
+        type=str,
+        default="legacy",
+        choices=["legacy", "none", ".wt", ".cs"],
+        help="Cache modifier for kernel stores: legacy=per-kernel defaults; none=empty string; "
+        ".wt/.cs use Triton modifiers.",
+    )
     return vars(parser.parse_args())
 
 
@@ -61,6 +76,9 @@ def main():
         input_tensor[:, target_rank * N : (target_rank + 1) * N] = float(rank * 10 + target_rank + 1)
     output_tensor = ctx.zeros((M, N * world_size), dtype=dtype)
 
+    cm_arg = args["cache_modifier_arg"]
+    cache_modifier = None if cm_arg == "legacy" else ("" if cm_arg == "none" else cm_arg)
+
     config_kwargs = {
         "block_size_m": args["block_size_m"],
         "block_size_n": args["block_size_n"],
@@ -68,7 +86,21 @@ def main():
         "num_stages": args["num_stages"],
         "num_warps": args["num_warps"],
         "waves_per_eu": args["waves_per_eu"],
+        "cache_modifier": cache_modifier,
     }
+
+    # Allow CLI or roccap wrapper (IRIS_HEAP_BASES_PREFIX) to select the inline kernel automatically.
+    requested_variant = None
+    if args["use_inline"]:
+        requested_variant = "persistent_inline"
+    else:
+        heap_prefix = os.environ.get("IRIS_HEAP_BASES_PREFIX")
+        if heap_prefix == "persistent_all_to_all_inline":
+            requested_variant = "persistent_inline"
+
+    if requested_variant:
+        config_kwargs["all_to_all_variant"] = requested_variant
+
     config = Config(**config_kwargs)
 
     ctx.barrier()

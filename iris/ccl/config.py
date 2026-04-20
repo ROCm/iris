@@ -45,7 +45,15 @@ class Config:
         all_reduce_ring_slice_n: Column slice size for ring reduce-scatter/all-gather
                                  (default: auto-set to block_size_n // world_size at runtime)
         reduce_scatter_variant: Variant for reduce-scatter operation (default: "two_shot")
-                                Only "two_shot" is supported
+                                Options: "two_shot", "two_shot_inline"
+                                - "two_shot": Existing implementation using ``iris.load`` for remote reads
+                                - "two_shot_inline": Hoists heap bases once and uses pointer translation +
+                                  ``tl.load`` for remote reads
+        all_to_all_variant: Variant for all-to-all operation (default: "persistent")
+                            Options: "persistent", "persistent_inline"
+                            - "persistent": Existing kernel with ``iris.store`` for remote peers
+                            - "persistent_inline": Hoists heap bases once and uses pointer
+                              translation + ``tl.store`` for remote peers.
         num_stages: Number of pipeline stages for the kernel (default: 1)
         num_warps: Number of warps per workgroup (default: 4). For gluon kernels,
                    this also sets WARPS_PER_CTA in the BlockedLayout. The product
@@ -98,6 +106,7 @@ class Config:
     all_reduce_num_rings: int = 1
     all_reduce_ring_slice_n: int | None = None
     reduce_scatter_variant: str = "two_shot"
+    all_to_all_variant: str = "persistent"
     num_stages: int = 1
     num_warps: int = 4
     threads_per_warp: int | None = None
@@ -151,8 +160,14 @@ class Config:
             raise ValueError(f"all_reduce_ring_slice_n must be a power of two, got {self.all_reduce_ring_slice_n}")
 
         # Validate reduce_scatter_variant
-        if self.reduce_scatter_variant != "two_shot":
-            raise ValueError(f"reduce_scatter_variant must be 'two_shot', got '{self.reduce_scatter_variant}'")
+        if self.reduce_scatter_variant not in ["two_shot", "two_shot_inline"]:
+            raise ValueError(
+                f"reduce_scatter_variant must be 'two_shot' or 'two_shot_inline', got '{self.reduce_scatter_variant}'"
+            )
+        if self.all_to_all_variant not in ["persistent", "persistent_inline"]:
+            raise ValueError(
+                f"all_to_all_variant must be one of: 'persistent', 'persistent_inline', got {self.all_to_all_variant}"
+            )
 
         if self.threads_per_warp is None:
             from triton.runtime import driver
