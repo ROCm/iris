@@ -78,7 +78,7 @@ def tile_ptr(ptr, M, N, stride_m, stride_n, pid_m, pid_n, BLOCK_SIZE_M: tl.const
     iris.load/iris.store for remote access.
     """
     rm, rn, mask = tile_layout(pid_m, pid_n, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N)
-    offset = rm[:, None] * stride_m + rn[None, :] * stride_n
+    offset = rm.to(tl.int64)[:, None] * stride_m.to(tl.int64) + rn.to(tl.int64)[None, :] * stride_n.to(tl.int64)
     tile_ptr = ptr + offset
     tile_ptr = tl.multiple_of(tile_ptr, (BLOCK_SIZE_M, BLOCK_SIZE_N))
     return tile_ptr, mask
@@ -99,7 +99,9 @@ def offset_ptr(ptr, stride_m, stride_n, offset_m, offset_n):
     Returns:
         New pointer with offset applied
     """
-    return ptr + offset_m * stride_m + offset_n * stride_n
+    offset_m_t = offset_m + 0 * stride_m
+    offset_n_t = offset_n + 0 * stride_n
+    return ptr + offset_m_t.to(tl.int64) * stride_m.to(tl.int64) + offset_n_t.to(tl.int64) * stride_n.to(tl.int64)
 
 
 @aggregate
@@ -360,7 +362,10 @@ class TensorView:
         mask = (rm[:, None] < self.M) & (rn[None, :] < self.N)
 
         # Compute pointer offsets
-        offset = rm[:, None] * self.stride_m + rn[None, :] * self.stride_n
+        offset = (
+            rm.to(tl.int64)[:, None] * self.stride_m.to(tl.int64)
+            + rn.to(tl.int64)[None, :] * self.stride_n.to(tl.int64)
+        )
         tile_ptr = self.ptr + offset
         tile_ptr = tl.multiple_of(tile_ptr, (block_m, block_n))
 

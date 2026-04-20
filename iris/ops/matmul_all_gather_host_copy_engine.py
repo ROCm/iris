@@ -31,6 +31,7 @@ from .workspace import FusedWorkspace
 # Import tritonBLAS
 from tritonblas.matmul import persistent_matmul_lt
 from tritonblas.matmul import create_counter_config
+from tritonblas.matmul import _make_matmul_selector
 from .tritonblas_launch_wave_schedule import build_launch_wave_plan
 
 # Import Tile class from anvil module
@@ -214,7 +215,12 @@ def _fused_matmul_all_gather_host_copy_engine_kernel(
 
         c = acc.to(C_gathered.type.element_ty)
 
-        global_offset = (rm + cur_rank * M_local)[:, None] * stride_cm + rn[None, :] * stride_cn
+        stride_cm_i64 = (stride_cm + 0 * rm).to(tl.int64)
+        stride_cn_i64 = (stride_cn + 0 * rn).to(tl.int64)
+        global_offset = (
+            (rm + cur_rank * M_local).to(tl.int64)[:, None] * stride_cm_i64
+            + rn.to(tl.int64)[None, :] * stride_cn_i64
+        )
         mask = ((rm + cur_rank * M_local)[:, None] < M) & (rn[None, :] < N)
 
         # Store to local memory (SDMA will read from here when flag is set)

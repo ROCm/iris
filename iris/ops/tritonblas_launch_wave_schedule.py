@@ -4,11 +4,11 @@
 """
 Helpers for describing the tritonBLAS launch-wave tile schedule.
 
-The current tritonBLAS path launches one program per output tile and lets the
-hardware schedule those programs in waves of active CUs. The helper in this
-module mirrors that launch order, including the chunked XCD remap, and
-coalesces the tiles of each hardware wave into one or more rectangular
-transfers.
+The current tritonBLAS GEMM path launches the full logical grid, applies the
+chunked XCD remap to each launched program id, and each launched program
+produces one tile. This helper mirrors that launch order and coalesces the
+tiles issued by each hardware wave of ``wave_size`` launched programs into one
+or more rectangular transfers.
 """
 
 from __future__ import annotations
@@ -229,15 +229,19 @@ def build_launch_wave_plan(
     wave_tile_counts: list[int] = []
     transfers: list[LaunchWaveTransfer] = []
 
-    for wave_id in range(num_waves):
-        pid_start = wave_id * wave_size
-        pid_end = min(pid_start + wave_size, launch_grid)
+    launched_tile_ids = [
+        chiplet_transform_chunked(pid, launch_grid, num_xcds, chunk_size)
+        for pid in range(launch_grid)
+    ]
 
+    for wave_id in range(num_waves):
         groups: dict[int, tuple[int, dict[int, set[int]]]] = {}
         tiles_in_wave = 0
 
-        for pid in range(pid_start, pid_end):
-            tile_id = chiplet_transform_chunked(pid, launch_grid, num_xcds, chunk_size)
+        wave_program_start = wave_id * wave_size
+        wave_program_end = min(wave_program_start + wave_size, launch_grid)
+        for launch_pid in range(wave_program_start, wave_program_end):
+            tile_id = launched_tile_ids[launch_pid]
             if tile_id >= total_tiles:
                 continue
 

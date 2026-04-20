@@ -14,11 +14,31 @@ import torch
 import torch.distributed as dist
 
 import iris
+import os
 from iris.ops.all_gather_matmul_hbm_buffer import (
     all_gather_matmul_hbm_buffer,
     all_gather_matmul_hbm_buffer_preamble,
 )
 from iris.ops.config import FusedConfig
+
+
+def _param_shapes():
+    if "IRIS_TEST_M" in os.environ:
+        return [
+            (
+                int(os.environ["IRIS_TEST_M"]),
+                int(os.environ["IRIS_TEST_K_LOCAL"]),
+                int(os.environ["IRIS_TEST_N"]),
+            )
+        ]
+    return [
+        (128, 32, 64),
+        (256, 64, 128),
+    ]
+
+
+def _heap_size() -> int:
+    return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 1 << 34))
 
 
 def _make_reference(rank, world_size, M, K_local, N, dtype):
@@ -48,17 +68,14 @@ def _make_reference(rank, world_size, M, K_local, N, dtype):
 )
 @pytest.mark.parametrize(
     "M,K_local,N",
-    [
-        (128, 32, 64),
-        (256, 64, 128),
-    ],
+    _param_shapes(),
 )
 def test_all_gather_matmul_baseline(dtype, atol, rtol, M, K_local, N):
     """Test baseline all_gather_matmul against torch all_gather + matmul."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33
+    heap_size = _heap_size()
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
@@ -109,10 +126,7 @@ def test_all_gather_matmul_baseline(dtype, atol, rtol, M, K_local, N):
 )
 @pytest.mark.parametrize(
     "M,K_local,N",
-    [
-        (128, 32, 64),
-        (256, 64, 128),
-    ],
+    _param_shapes(),
 )
 @pytest.mark.parametrize(
     "staged_a_layout",
@@ -126,7 +140,7 @@ def test_all_gather_matmul_hbm_buffer(dtype, atol, rtol, M, K_local, N, staged_a
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33
+    heap_size = _heap_size()
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
@@ -178,16 +192,14 @@ def test_all_gather_matmul_hbm_buffer(dtype, atol, rtol, M, K_local, N, staged_a
 )
 @pytest.mark.parametrize(
     "M,K_local,N",
-    [
-        (128, 32, 64),
-    ],
+    _param_shapes(),
 )
 def test_all_gather_matmul_hbm_buffer_with_bias(dtype, atol, rtol, M, K_local, N):
     """Test all_gather_matmul_hbm_buffer with a bias vector."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33
+    heap_size = _heap_size()
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()

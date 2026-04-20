@@ -98,11 +98,20 @@ def _batch_poster_kernel(
         remaining_rows = M - src_m_offset
         tile_height = tl.minimum(remaining_rows, rows_per_batch)
 
-        src_ptr = A_sharded + src_m_offset * stride_am
+        src_m_offset_i64 = (src_m_offset + 0 * stride_am).to(tl.int64)
+        stride_am_i64 = (stride_am + 0 * src_m_offset).to(tl.int64)
+        src_ptr = A_sharded + src_m_offset_i64 * stride_am_i64
 
         dst_m_offset = src_m_offset
         dst_k_offset = cur_rank * K_local
-        dst_ptr = staged_a + dst_m_offset * stride_sa_m + dst_k_offset * stride_sa_k
+        dst_m_offset_i64 = (dst_m_offset + 0 * stride_sa_m).to(tl.int64)
+        dst_k_offset_i64 = (dst_k_offset + 0 * stride_sa_k).to(tl.int64)
+        stride_sa_m_i64 = (stride_sa_m + 0 * dst_m_offset).to(tl.int64)
+        stride_sa_k_i64 = (stride_sa_k + 0 * dst_m_offset).to(tl.int64)
+        dst_ptr = staged_a + (
+            dst_m_offset_i64 * stride_sa_m_i64
+            + dst_k_offset_i64 * stride_sa_k_i64
+        )
 
         tile_width_bytes = K_local * elem_size
         src_pitch_bytes = stride_am * elem_size
@@ -235,10 +244,19 @@ def _nonpersistent_xcd_comm_gemm_kernel(
             remaining_rows = M - src_m_offset
             tile_height = tl.minimum(remaining_rows, rows_per_batch)
 
-            src_ptr = A_sharded + src_m_offset * stride_am
+            src_m_offset_i64 = (src_m_offset + 0 * stride_am).to(tl.int64)
+            stride_am_i64 = (stride_am + 0 * src_m_offset).to(tl.int64)
+            src_ptr = A_sharded + src_m_offset_i64 * stride_am_i64
             dst_m_offset = src_m_offset
             dst_k_offset = cur_rank * K_local
-            dst_ptr = staged_a + dst_m_offset * stride_sa_m + dst_k_offset * stride_sa_k
+            dst_m_offset_i64 = (dst_m_offset + 0 * stride_sa_m).to(tl.int64)
+            dst_k_offset_i64 = (dst_k_offset + 0 * stride_sa_k).to(tl.int64)
+            stride_sa_m_i64 = (stride_sa_m + 0 * dst_m_offset).to(tl.int64)
+            stride_sa_k_i64 = (stride_sa_k + 0 * dst_m_offset).to(tl.int64)
+            dst_ptr = staged_a + (
+                dst_m_offset_i64 * stride_sa_m_i64
+                + dst_k_offset_i64 * stride_sa_k_i64
+            )
 
             tile_width_bytes = K_local * elem_size
             src_pitch_bytes = stride_am * elem_size
