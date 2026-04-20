@@ -26,6 +26,10 @@ Example (API with default algorithms):
     >>>     ctx.all_gather(tile, src_view, dst_view, dim=0)
     >>>     ctx.all_to_all(tile, src_view, dst_view, N_per_rank)
     >>>     ctx.reduce_scatter(tile, src_view, dst_view)
+    >>>
+    >>>     # Standalone all_scatter (each rank pushes its tile to all ranks)
+    >>>     tile_with_data = iris.x.Tile(pid_m, pid_n, BLOCK_M, BLOCK_N, computed_data)
+    >>>     iris.x.all_scatter(tile_with_data, dst_view, ctx)
 
 Example (API with AllReduceConfig for algorithm selection):
     >>> @triton.jit
@@ -70,6 +74,7 @@ from .all_reduce import (
 )
 from .gather import gather
 from .all_gather import all_gather
+from .all_scatter import all_scatter
 from .all_to_all import all_to_all
 from .reduce_scatter import reduce_scatter
 
@@ -91,6 +96,7 @@ __all__ = [
     "all_reduce_spinlock",
     "gather",
     "all_gather",
+    "all_scatter",
     "all_to_all",
     "reduce_scatter",
 ]
