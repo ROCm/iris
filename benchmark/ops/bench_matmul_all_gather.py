@@ -59,6 +59,8 @@ def _register_pytorch_matmul_all_gather(state, ctx) -> None:
             dist.all_gather_into_tensor(C, C_local),
         ),
     )
+
+
 @bench.register
 @bench.axis("num_ranks", [2, 4, 8])
 @bench.axis("M_local", [1024, 4096, 16384])

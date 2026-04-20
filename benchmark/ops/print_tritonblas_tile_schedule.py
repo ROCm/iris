@@ -18,7 +18,6 @@ easy to see which tile coordinates are active in the first 304 WGs, second
 
 import argparse
 import importlib.util
-import os
 from pathlib import Path
 import sys
 
@@ -171,10 +170,7 @@ def main() -> None:
 
         print("  pid  xcd  remap  tile_id   m   n  group")
         for pid, xcd, transformed_pid, tile_id, pid_m, pid_n, group_id in entries:
-            print(
-                f"  {pid:3d}  {xcd:3d}  {transformed_pid:5d}  {tile_id:7d}  "
-                f"{pid_m:2d}  {pid_n:2d}  {group_id:5d}"
-            )
+            print(f"  {pid:3d}  {xcd:3d}  {transformed_pid:5d}  {tile_id:7d}  {pid_m:2d}  {pid_n:2d}  {group_id:5d}")
         print()
 
 

@@ -312,10 +312,9 @@ def _fused_matmul_all_gather_copy_engine_kernel(
 
         stride_cm_i64 = (stride_cm + 0 * rm).to(tl.int64)
         stride_cn_i64 = (stride_cn + 0 * rn).to(tl.int64)
-        global_offset = (
-            (rm + cur_rank * M_local).to(tl.int64)[:, None] * stride_cm_i64
-            + rn.to(tl.int64)[None, :] * stride_cn_i64
-        )
+        global_offset = (rm + cur_rank * M_local).to(tl.int64)[:, None] * stride_cm_i64 + rn.to(tl.int64)[
+            None, :
+        ] * stride_cn_i64
         mask = ((rm + cur_rank * M_local)[:, None] < M) & (rn[None, :] < N)
 
         # Store locally first; the poster kernel pre-posts POLL+COPY packets

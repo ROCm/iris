@@ -14,7 +14,6 @@ or more rectangular transfers.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 
 
 def ceil_div(a: int, b: int) -> int:
@@ -230,8 +229,7 @@ def build_launch_wave_plan(
     transfers: list[LaunchWaveTransfer] = []
 
     launched_tile_ids = [
-        chiplet_transform_chunked(pid, launch_grid, num_xcds, chunk_size)
-        for pid in range(launch_grid)
+        chiplet_transform_chunked(pid, launch_grid, num_xcds, chunk_size) for pid in range(launch_grid)
     ]
 
     for wave_id in range(num_waves):

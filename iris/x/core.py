@@ -362,9 +362,8 @@ class TensorView:
         mask = (rm[:, None] < self.M) & (rn[None, :] < self.N)
 
         # Compute pointer offsets
-        offset = (
-            rm.to(tl.int64)[:, None] * self.stride_m.to(tl.int64)
-            + rn.to(tl.int64)[None, :] * self.stride_n.to(tl.int64)
+        offset = rm.to(tl.int64)[:, None] * self.stride_m.to(tl.int64) + rn.to(tl.int64)[None, :] * self.stride_n.to(
+            tl.int64
         )
         tile_ptr = self.ptr + offset
         tile_ptr = tl.multiple_of(tile_ptr, (block_m, block_n))

@@ -104,7 +104,10 @@ def _sort_rows(rows: list[dict], sort_by: str, descending: bool) -> list[dict]:
     elif sort_by == "label":
         key_fn = lambda row: row["label"]
     elif sort_by == "speedup":
-        key_fn = lambda row: (row["speedup"] is not None, row["speedup"] if row["speedup"] is not None else float("-inf"))
+        key_fn = lambda row: (
+            row["speedup"] is not None,
+            row["speedup"] if row["speedup"] is not None else float("-inf"),
+        )
     else:
         key_fn = lambda row: row["tflops"]
 
