@@ -67,7 +67,11 @@ import logging
 from .logging import logger
 
 # Import tracing functionality
-from .tracing import Tracing, TraceEvent, DeviceTracing  # noqa: F401  re-export for iris.TraceEvent
+from .tracing import (
+    Tracing,
+    TraceEvent,
+    DeviceTracing,
+)  # noqa: F401  re-export for iris.TraceEvent
 
 # Import shared tensor-creation helpers
 from . import tensor_creation
@@ -113,6 +117,10 @@ class Iris:
         self.device = f"cuda:{gpu_id}"
         self.heap_bases = self.heap.get_heap_bases()
 
+        # Pre-fetch heap_bases to CPU for host-side address translation
+        # This avoids needing to copy from GPU during SDMA operations
+        self.heap_bases_cpu = self.heap_bases.cpu().numpy()
+
         if is_simulation_env():
             import json
 
@@ -136,31 +144,34 @@ class Iris:
         self.copy_engines = anvil.AnvilLib.get_instance()
         self.copy_engines.init()
 
-        # connect to all peers
+        # connect to all peers (including local)
         # TODO only connect local ranks
         # TODO get size
         context_size = 6
         self.copy_engines_device_ctx = torch.zeros((num_ranks, context_size), dtype=torch.uint64, device=self.device)
 
         for rank in range(num_ranks):
-            if rank != cur_rank:
-                self.copy_engines.connect(cur_rank, rank, 1)
-                queue = self.copy_engines.get_sdma_queue(cur_rank, rank, 0)
-                handle = queue.device_ctx()
-                self.info(f"---- Queue {rank} ------------")
-                self.info(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
-                self.info(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
-                self.info(f"wptr {handle.wptr:#x} at {id(handle.wptr):#x}")
-                self.info(f"doorbell {handle.doorbell:#x} at {id(handle.doorbell):#x}")
-                self.info(f"cached_write_ptr {handle.cached_wptr:#x} at {id(handle.cached_wptr):#x}")
-                self.info(f"committed_write_ptr {handle.committed_wptr:#x} at {id(handle.committed_wptr):#x}")
+            # Device-initiated queues
+            self.copy_engines.connect(cur_rank, rank, 1, allocate_on_host=False)
+            # Host-initiated queues
+            self.copy_engines.connect(cur_rank, rank, 1, allocate_on_host=True)
 
-                self.copy_engines_device_ctx[rank][0] = handle.queue_buf
-                self.copy_engines_device_ctx[rank][1] = handle.rptr
-                self.copy_engines_device_ctx[rank][2] = handle.wptr
-                self.copy_engines_device_ctx[rank][3] = handle.doorbell
-                self.copy_engines_device_ctx[rank][4] = handle.cached_wptr
-                self.copy_engines_device_ctx[rank][5] = handle.committed_wptr
+            queue = self.copy_engines.get_sdma_queue(cur_rank, rank, 0)
+            handle = queue.device_ctx()
+            self.info(f"---- Queue {rank} ------------")
+            self.info(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
+            self.info(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
+            self.info(f"wptr {handle.wptr:#x} at {id(handle.wptr):#x}")
+            self.info(f"doorbell {handle.doorbell:#x} at {id(handle.doorbell):#x}")
+            self.info(f"cached_write_ptr {handle.cached_wptr:#x} at {id(handle.cached_wptr):#x}")
+            self.info(f"committed_write_ptr {handle.committed_wptr:#x} at {id(handle.committed_wptr):#x}")
+
+            self.copy_engines_device_ctx[rank][0] = handle.queue_buf
+            self.copy_engines_device_ctx[rank][1] = handle.rptr
+            self.copy_engines_device_ctx[rank][2] = handle.wptr
+            self.copy_engines_device_ctx[rank][3] = handle.doorbell
+            self.copy_engines_device_ctx[rank][4] = handle.cached_wptr
+            self.copy_engines_device_ctx[rank][5] = handle.committed_wptr
         # Initialize CCL interface
         self.ccl = self.CCL(self)
 
@@ -189,7 +200,13 @@ class Iris:
         """Helper method to log with rank information injected into the record."""
         if logger.isEnabledFor(level):
             record = logging.LogRecord(
-                name=logger.name, level=level, pathname="", lineno=0, msg=message, args=(), exc_info=None
+                name=logger.name,
+                level=level,
+                pathname="",
+                lineno=0,
+                msg=message,
+                args=(),
+                exc_info=None,
             )
             # Inject rank information into the record
             record.iris_rank = self.cur_rank
@@ -359,7 +376,14 @@ class Iris:
             return distributed_broadcast_scalar(value, source_rank)
 
     def zeros_like(
-        self, input, *, dtype=None, layout=None, device=None, requires_grad=False, memory_format=torch.preserve_format
+        self,
+        input,
+        *,
+        dtype=None,
+        layout=None,
+        device=None,
+        requires_grad=False,
+        memory_format=torch.preserve_format,
     ):
         """
         Returns a tensor filled with the scalar value 0, with the same size as input, allocated on the Iris symmetric heap.
@@ -397,7 +421,16 @@ class Iris:
         )
 
     def arange(
-        self, start=0, end=None, step=1, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False
+        self,
+        start=0,
+        end=None,
+        step=1,
+        *,
+        out=None,
+        dtype=None,
+        layout=torch.strided,
+        device=None,
+        requires_grad=False,
     ):
         """
         Returns a 1-D tensor of size ⌈(end - start) / step⌉ with values from the interval [start, end)
@@ -451,7 +484,15 @@ class Iris:
             requires_grad=requires_grad,
         )
 
-    def zeros(self, *size, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+    def zeros(
+        self,
+        *size,
+        out=None,
+        dtype=None,
+        layout=torch.strided,
+        device=None,
+        requires_grad=False,
+    ):
         """
         Returns a tensor filled with the scalar value 0, with the shape defined by the variable argument size.
         The tensor is allocated on the Iris symmetric heap.
@@ -557,7 +598,15 @@ class Iris:
             requires_grad=requires_grad,
         )
 
-    def ones(self, *size, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+    def ones(
+        self,
+        *size,
+        out=None,
+        dtype=None,
+        layout=torch.strided,
+        device=None,
+        requires_grad=False,
+    ):
         """
         Returns a tensor filled with the scalar value 1, with the shape defined by the variable argument size.
         The tensor is allocated on the Iris symmetric heap.
@@ -660,7 +709,17 @@ class Iris:
         """
         return self.heap.is_symmetric(tensor)
 
-    def full(self, size, fill_value, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+    def full(
+        self,
+        size,
+        fill_value,
+        *,
+        out=None,
+        dtype=None,
+        layout=torch.strided,
+        device=None,
+        requires_grad=False,
+    ):
         """
         Creates a tensor of size size filled with fill_value. The tensor's dtype is inferred from fill_value.
         The tensor is allocated on the Iris symmetric heap.
@@ -776,7 +835,14 @@ class Iris:
         )
 
     def randint(
-        self, *args, generator=None, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False
+        self,
+        *args,
+        generator=None,
+        out=None,
+        dtype=None,
+        layout=torch.strided,
+        device=None,
+        requires_grad=False,
     ):
         """
         Returns a tensor filled with random integers generated uniformly between low (inclusive) and high (exclusive).
@@ -827,7 +893,17 @@ class Iris:
             requires_grad=requires_grad,
         )
 
-    def linspace(self, start, end, steps, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+    def linspace(
+        self,
+        start,
+        end,
+        steps,
+        out=None,
+        dtype=None,
+        layout=torch.strided,
+        device=None,
+        requires_grad=False,
+    ):
         """
         Creates a one-dimensional tensor of size steps whose values are evenly spaced from start to end, inclusive.
         The tensor is allocated on the Iris symmetric heap.
@@ -962,11 +1038,311 @@ class Iris:
             >>> remote_addr = ctx.translate(buffer.data_ptr(), 0, 1)
             >>> ctx.copy_engines.host_put(0, 1, 0, src_ptr, remote_addr, size)
         """
-        heap_bases = self.heap_bases.cpu()
-        from_base = int(heap_bases[from_rank])
-        to_base = int(heap_bases[to_rank])
+        # Use pre-cached CPU copy to avoid GPU->CPU transfer on every call
+        from_base = int(self.heap_bases_cpu[from_rank])
+        to_base = int(self.heap_bases_cpu[to_rank])
         offset = ptr - from_base
         return to_base + offset
+
+    def put(
+        self,
+        src_tensor: torch.Tensor,
+        dst_rank: int,
+        dst_tensor: torch.Tensor = None,
+        wait_flag: torch.Tensor = None,
+        wait_value: int = None,
+        signal_flag: torch.Tensor = None,
+        signal_value: int = 1,
+        async_op: bool = False,
+        channel: int = 0,
+    ):
+        """
+        One-sided put operation with optional wait (POLL) and signal (ATOMIC).
+
+        Supports:
+        - Simple copy: put(src, dst_rank)
+        - Copy + signal: put(src, dst_rank, signal_flag=flag)
+        - Wait + copy: put(src, dst_rank, wait_flag=flag, wait_value=N)
+        - Wait + copy + signal: put(src, dst_rank, wait_flag=..., signal_flag=...)
+
+        Args:
+            src_tensor: Source tensor (local, must be symmetric)
+            dst_rank: Destination rank
+            dst_tensor: Destination tensor (symmetric). If None, uses src_tensor.
+            wait_flag: Optional LOCAL flag tensor to poll before transfer (POLL packet)
+            wait_value: Expected value for wait_flag
+            signal_flag: Optional flag tensor to atomic-add on REMOTE rank after transfer (will be translated)
+            signal_value: Value to add to signal_flag (default 1)
+            async_op: If True, don't wait for completion
+            channel: SDMA channel to use
+
+        Examples:
+            >>> # Simple copy
+            >>> shmem.put(data, dst_rank=1)
+
+            >>> # Copy with completion signal
+            >>> shmem.put(data, dst_rank=1, signal_flag=completion_flag)
+
+            >>> # Wait for ready signal, then copy
+            >>> shmem.put(data, dst_rank=1, wait_flag=ready_flag, wait_value=1)
+
+            >>> # Full pipeline: wait, copy, signal
+            >>> shmem.put(data, dst_rank=1,
+            ...          wait_flag=batch_ready, wait_value=256,
+            ...          signal_flag=transfer_done, signal_value=1)
+        """
+        if dst_tensor is None:
+            dst_tensor = src_tensor
+
+        src_rank = self.get_rank()
+        src_ptr = src_tensor.data_ptr()
+        dst_ptr = self.translate(dst_tensor.data_ptr(), src_rank, dst_rank)
+        size = src_tensor.numel() * src_tensor.element_size()
+
+        # Determine which SDMA packet combination to use
+        has_wait = wait_flag is not None
+        has_signal = signal_flag is not None
+
+        if has_wait and has_signal:
+            # POLL + COPY + ATOMIC (two submissions)
+            wait_ptr = wait_flag.data_ptr()
+            signal_ptr = self.translate(signal_flag.data_ptr(), src_rank, dst_rank)
+
+            # First: POLL + COPY
+            self.copy_engines.host_wait_flag_then_put(
+                src_rank,
+                dst_rank,
+                channel,
+                wait_ptr,
+                wait_value,
+                src_ptr,
+                dst_ptr,
+                size,
+            )
+            # Then: ATOMIC
+            self.copy_engines.host_atomic_add(src_rank, dst_rank, channel, signal_ptr, signal_value)
+
+        elif has_wait:
+            # POLL + COPY
+            wait_ptr = wait_flag.data_ptr()
+            self.copy_engines.host_wait_flag_then_put(
+                src_rank,
+                dst_rank,
+                channel,
+                wait_ptr,
+                wait_value,
+                src_ptr,
+                dst_ptr,
+                size,
+            )
+
+        elif has_signal:
+            # COPY + ATOMIC (combined in one submission)
+            signal_ptr = self.translate(signal_flag.data_ptr(), src_rank, dst_rank)
+            self.copy_engines.host_put_signal(
+                src_rank,
+                dst_rank,
+                channel,
+                src_ptr,
+                dst_ptr,
+                size,
+                signal_ptr,
+                signal_value,
+            )
+
+        else:
+            # Simple COPY
+            self.copy_engines.host_put(src_rank, dst_rank, channel, src_ptr, dst_ptr, size)
+
+        if not async_op:
+            self.copy_engines.host_quiet(src_rank, dst_rank, channel)
+
+    def put_tile(
+        self,
+        tile,
+        dst_rank: int,
+        dst_ptr: int,
+        dst_stride: int,
+        wait_flag: int = None,
+        wait_value: int = None,
+        signal_flag: int = None,
+        signal_value: int = 1,
+        async_op: bool = False,
+        channel: int = 0,
+    ):
+        """
+        2D tile transfer with optional wait/signal (sub-window copy).
+
+        Low-level API - caller provides pre-translated pointers for performance.
+
+        Args:
+            tile: Pre-configured anvil.Tile object with data pointer and dimensions set
+            dst_rank: Destination rank
+            dst_ptr: Destination pointer (already translated to remote address space)
+            dst_stride: Destination row stride in bytes
+            wait_flag: Optional LOCAL flag pointer to poll before transfer
+            wait_value: Expected value for wait_flag
+            signal_flag: Optional REMOTE flag pointer to atomic-add after transfer (already translated)
+            signal_value: Value to add to signal_flag
+            async_op: If True, don't wait for completion
+            channel: SDMA channel to use
+
+        Examples:
+            >>> import anvil
+            >>> tile = anvil.Tile()
+            >>> tile.pid_m = 0
+            >>> tile.pid_n = 0
+            >>> tile.block_m = 256
+            >>> tile.block_n = 256
+            >>> tile.elem_size = A.element_size()
+            >>> tile.src_stride = A.stride(0) * tile.elem_size
+            >>> tile.data = A.data_ptr()
+            >>> dst_ptr = shmem.translate(A.data_ptr(), src_rank, dst_rank)
+            >>> dst_stride = A.stride(0) * tile.elem_size
+            >>> wait_ptr = flag.data_ptr()
+            >>> signal_ptr = shmem.translate(flag.data_ptr(), src_rank, dst_rank)
+            >>> shmem.put_tile(tile, dst_rank=1, dst_ptr=dst_ptr, dst_stride=dst_stride,
+            ...               wait_flag=wait_ptr, wait_value=256, signal_flag=signal_ptr)
+        """
+        src_rank = self.get_rank()
+
+        has_wait = wait_flag is not None
+        has_signal = signal_flag is not None
+
+        if has_wait and has_signal:
+            # POLL + SUB_WINDOW_COPY + ATOMIC (two submissions)
+            self.copy_engines.host_wait_flag_then_put_tile(
+                src_rank,
+                dst_rank,
+                channel,
+                wait_flag,
+                wait_value,
+                tile,
+                dst_ptr,
+                dst_stride,
+            )
+            self.copy_engines.host_atomic_add_32(src_rank, dst_rank, channel, signal_flag, signal_value)
+
+        elif has_wait:
+            # POLL + SUB_WINDOW_COPY
+            self.copy_engines.host_wait_flag_then_put_tile(
+                src_rank,
+                dst_rank,
+                channel,
+                wait_flag,
+                wait_value,
+                tile,
+                dst_ptr,
+                dst_stride,
+            )
+
+        elif has_signal:
+            # SUB_WINDOW_COPY + ATOMIC
+            self.copy_engines.host_put_tile_signal(
+                src_rank,
+                dst_rank,
+                channel,
+                tile,
+                dst_ptr,
+                dst_stride,
+                signal_flag,
+                signal_value,
+            )
+
+        else:
+            # Simple SUB_WINDOW_COPY
+            self.copy_engines.host_put_tile(src_rank, dst_rank, channel, tile, dst_ptr, dst_stride)
+
+        if not async_op:
+            self.copy_engines.host_quiet(src_rank, dst_rank, channel)
+
+    def put_tiles(
+        self,
+        tiles,
+        dst_rank: int,
+        dst_ptrs,
+        dst_strides,
+        wait_flag: int = None,
+        wait_value: int = None,
+        signal_flag: int = None,
+        signal_value: int = 1,
+        async_op: bool = False,
+        channel: int = 0,
+    ):
+        """
+        Batched 2D tile transfer with optional shared wait/signal.
+
+        Args:
+            tiles: Sequence of pre-configured anvil.Tile objects
+            dst_rank: Destination rank
+            dst_ptrs: Sequence of translated destination pointers
+            dst_strides: Sequence of destination row strides in bytes
+            wait_flag: Optional LOCAL flag pointer to poll before all transfers
+            wait_value: Expected value for wait_flag
+            signal_flag: Optional REMOTE flag pointer to atomic-add after all transfers
+            signal_value: Value to add to signal_flag
+            async_op: If True, don't wait for completion
+            channel: SDMA channel to use
+        """
+        src_rank = self.get_rank()
+
+        if len(tiles) != len(dst_ptrs) or len(tiles) != len(dst_strides):
+            raise ValueError("tiles, dst_ptrs, and dst_strides must have the same length")
+
+        has_wait = wait_flag is not None
+        has_signal = signal_flag is not None
+
+        if has_wait:
+            self.copy_engines.host_wait_flag_then_put_tiles(
+                src_rank,
+                dst_rank,
+                channel,
+                wait_flag,
+                wait_value,
+                tiles,
+                dst_ptrs,
+                dst_strides,
+            )
+            if has_signal:
+                self.copy_engines.host_atomic_add_32(src_rank, dst_rank, channel, signal_flag, signal_value)
+        else:
+            for tile, dst_ptr, dst_stride in zip(tiles, dst_ptrs, dst_strides):
+                self.put_tile(
+                    tile,
+                    dst_rank=dst_rank,
+                    dst_ptr=dst_ptr,
+                    dst_stride=dst_stride,
+                    signal_flag=None,
+                    async_op=True,
+                    channel=channel,
+                )
+            if has_signal:
+                self.copy_engines.host_atomic_add_32(src_rank, dst_rank, channel, signal_flag, signal_value)
+
+        if not async_op:
+            self.copy_engines.host_quiet(src_rank, dst_rank, channel)
+
+    def quiet(self, dst_rank: int = None, channel: int = 0):
+        """
+        Wait for all outstanding SDMA operations to complete.
+
+        Args:
+            dst_rank: If specified, wait only for ops to this rank.
+                     If None, wait for ops to all ranks.
+            channel: SDMA channel
+
+        Example:
+            >>> shmem.put(tensor, dst_rank=1, async_op=True)
+            >>> shmem.quiet(dst_rank=1)  # Wait for completion
+            >>> shmem.quiet()  # Wait for all ranks
+        """
+        src_rank = self.get_rank()
+        if dst_rank is not None:
+            self.copy_engines.host_quiet(src_rank, dst_rank, channel)
+        else:
+            # Quiet to all ranks
+            for rank in range(self.get_num_ranks()):
+                self.copy_engines.host_quiet(src_rank, rank, channel)
 
     def _build_device_context(self):
         """
@@ -1219,7 +1595,14 @@ class Iris:
             """
             from iris.ccl.all_to_all import all_to_all as _all_to_all
 
-            _all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
+            _all_to_all(
+                output_tensor,
+                input_tensor,
+                self._iris,
+                group=group,
+                async_op=async_op,
+                config=config,
+            )
 
         def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
@@ -1254,7 +1637,14 @@ class Iris:
             """
             from iris.ccl.all_gather import all_gather as _all_gather
 
-            _all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
+            _all_gather(
+                output_tensor,
+                input_tensor,
+                self._iris,
+                group=group,
+                async_op=async_op,
+                config=config,
+            )
 
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
@@ -1280,7 +1670,14 @@ class Iris:
             )
 
         def all_reduce(
-            self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None, workspace=None
+            self,
+            output_tensor,
+            input_tensor,
+            op=None,
+            group=None,
+            async_op=False,
+            config=None,
+            workspace=None,
         ):
             """
             All-reduce collective operation.
@@ -1337,7 +1734,15 @@ class Iris:
                 workspace=workspace,
             )
 
-        def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
+        def reduce_scatter(
+            self,
+            output_tensor,
+            input_tensor,
+            op=None,
+            group=None,
+            async_op=False,
+            config=None,
+        ):
             """
             Reduce-scatter collective operation.
 
@@ -1375,7 +1780,13 @@ class Iris:
                 op = ReduceOp.SUM
 
             _reduce_scatter(
-                output_tensor, input_tensor, self._iris, op=op, group=group, async_op=async_op, config=config
+                output_tensor,
+                input_tensor,
+                self._iris,
+                op=op,
+                group=group,
+                async_op=async_op,
+                config=config,
             )
 
 
@@ -1625,11 +2036,25 @@ class DeviceContext:
             >>> data = ctx.load(buffer + offsets, from_rank=1, mask=mask)
         """
         translated_ptr = self._translate(pointer, self.rank, from_rank, hint)
-        result = tl.load(translated_ptr, mask=mask, other=other, cache_modifier=cache_modifier, volatile=volatile)
+        result = tl.load(
+            translated_ptr,
+            mask=mask,
+            other=other,
+            cache_modifier=cache_modifier,
+            volatile=volatile,
+        )
         return result
 
     @triton.jit
-    def store(self, pointer, value, to_rank, mask=None, cache_modifier=None, hint: tl.constexpr = None):
+    def store(
+        self,
+        pointer,
+        value,
+        to_rank,
+        mask=None,
+        cache_modifier=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Writes data to the specified rank's memory location.
 
@@ -1706,7 +2131,12 @@ class DeviceContext:
             >>> ctx.get(remote_ptr + offsets, local_ptr + offsets, from_rank=1, mask=mask)
         """
         translated_from_ptr = self._translate(from_ptr, self.rank, from_rank, hint)
-        data = tl.load(translated_from_ptr, mask=mask, other=other, cache_modifier=load_cache_modifier)
+        data = tl.load(
+            translated_from_ptr,
+            mask=mask,
+            other=other,
+            cache_modifier=load_cache_modifier,
+        )
         tl.store(to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
 
     @triton.jit
@@ -1831,7 +2261,16 @@ class DeviceContext:
         tl.store(translated_dst, data, mask=mask, cache_modifier=store_cache_modifier)
 
     @triton.jit
-    def atomic_add(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+    def atomic_add(
+        self,
+        pointer,
+        val,
+        to_rank,
+        mask=None,
+        sem=None,
+        scope=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Performs an atomic add at the specified rank's memory location.
 
@@ -1858,7 +2297,16 @@ class DeviceContext:
         return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_sub(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+    def atomic_sub(
+        self,
+        pointer,
+        val,
+        to_rank,
+        mask=None,
+        sem=None,
+        scope=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Atomically subtracts data from the specified rank's memory location.
 
@@ -1882,7 +2330,16 @@ class DeviceContext:
         return tl.atomic_sub(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_cas(self, pointer, cmp, val, to_rank, sem=None, scope=None, hint: tl.constexpr = None):
+    def atomic_cas(
+        self,
+        pointer,
+        cmp,
+        val,
+        to_rank,
+        sem=None,
+        scope=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Performs an atomic compare-and-swap at the specified rank's memory location.
 
@@ -1907,7 +2364,16 @@ class DeviceContext:
         return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_xchg(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+    def atomic_xchg(
+        self,
+        pointer,
+        val,
+        to_rank,
+        mask=None,
+        sem=None,
+        scope=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Performs an atomic exchange at the specified rank's memory location.
 
@@ -1931,7 +2397,16 @@ class DeviceContext:
         return tl.atomic_xchg(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_xor(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+    def atomic_xor(
+        self,
+        pointer,
+        val,
+        to_rank,
+        mask=None,
+        sem=None,
+        scope=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Performs an atomic XOR at the specified rank's memory location.
 
@@ -1955,7 +2430,16 @@ class DeviceContext:
         return tl.atomic_xor(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_and(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+    def atomic_and(
+        self,
+        pointer,
+        val,
+        to_rank,
+        mask=None,
+        sem=None,
+        scope=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Performs an atomic AND at the specified rank's memory location.
 
@@ -1979,7 +2463,16 @@ class DeviceContext:
         return tl.atomic_and(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_or(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+    def atomic_or(
+        self,
+        pointer,
+        val,
+        to_rank,
+        mask=None,
+        sem=None,
+        scope=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Performs an atomic OR at the specified rank's memory location.
 
@@ -2003,7 +2496,16 @@ class DeviceContext:
         return tl.atomic_or(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_min(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+    def atomic_min(
+        self,
+        pointer,
+        val,
+        to_rank,
+        mask=None,
+        sem=None,
+        scope=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Performs an atomic minimum at the specified rank's memory location.
 
@@ -2027,7 +2529,16 @@ class DeviceContext:
         return tl.atomic_min(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
     @triton.jit
-    def atomic_max(self, pointer, val, to_rank, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+    def atomic_max(
+        self,
+        pointer,
+        val,
+        to_rank,
+        mask=None,
+        sem=None,
+        scope=None,
+        hint: tl.constexpr = None,
+    ):
         """
         Performs an atomic maximum at the specified rank's memory location.
 
@@ -2109,7 +2620,13 @@ def load(
         >>>     return data
     """
     translated_ptr = __translate(pointer, to_rank, from_rank, heap_bases, hint)
-    result = tl.load(translated_ptr, mask=mask, other=other, cache_modifier=cache_modifier, volatile=volatile)
+    result = tl.load(
+        translated_ptr,
+        mask=mask,
+        other=other,
+        cache_modifier=cache_modifier,
+        volatile=volatile,
+    )
     return result
 
 
@@ -2457,7 +2974,13 @@ def put(
 
         # Acquire space in the queue
         base, offset = anvil.acquire_fadd(
-            queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+            queue_ptr_u32,
+            read_ptr,
+            write_ptr,
+            doorbell_ptr,
+            cached_write_ptr,
+            committed_write_ptr,
+            command_in_bytes,
         )
 
         # Write padding NOPs if we wrapped around
@@ -2715,7 +3238,15 @@ def atomic_add(
 
 @triton.jit
 def atomic_sub(
-    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+    pointer,
+    val,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    sem=None,
+    scope=None,
+    hint: tl.constexpr = None,
 ):
     """
     Atomically subtracts data from the specified rank's memory location.
@@ -2753,7 +3284,17 @@ def atomic_sub(
 
 
 @triton.jit
-def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scope=None, hint: tl.constexpr = None):
+def atomic_cas(
+    pointer,
+    cmp,
+    val,
+    from_rank,
+    to_rank,
+    heap_bases,
+    sem=None,
+    scope=None,
+    hint: tl.constexpr = None,
+):
     """
     Atomically compares and exchanges the specified rank's memory location.
 
@@ -2792,7 +3333,15 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
 
 @triton.jit
 def atomic_xchg(
-    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+    pointer,
+    val,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    sem=None,
+    scope=None,
+    hint: tl.constexpr = None,
 ):
     """
     Performs an atomic exchange at the specified rank's memory location.
@@ -2831,7 +3380,15 @@ def atomic_xchg(
 
 @triton.jit
 def atomic_xor(
-    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+    pointer,
+    val,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    sem=None,
+    scope=None,
+    hint: tl.constexpr = None,
 ):
     """
     Performs an atomic xor at the specified rank's memory location.
@@ -2870,7 +3427,15 @@ def atomic_xor(
 
 @triton.jit
 def atomic_and(
-    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+    pointer,
+    val,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    sem=None,
+    scope=None,
+    hint: tl.constexpr = None,
 ):
     """
     Performs an atomic and at the specified rank's memory location.
@@ -2908,7 +3473,17 @@ def atomic_and(
 
 
 @triton.jit
-def atomic_or(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None):
+def atomic_or(
+    pointer,
+    val,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    sem=None,
+    scope=None,
+    hint: tl.constexpr = None,
+):
     """
     Performs an atomic or at the specified rank's memory location.
 
@@ -2946,7 +3521,15 @@ def atomic_or(pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None,
 
 @triton.jit
 def atomic_min(
-    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+    pointer,
+    val,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    sem=None,
+    scope=None,
+    hint: tl.constexpr = None,
 ):
     """
     Performs an atomic min at the specified rank's memory location.
@@ -2985,7 +3568,15 @@ def atomic_min(
 
 @triton.jit
 def atomic_max(
-    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+    pointer,
+    val,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    sem=None,
+    scope=None,
+    hint: tl.constexpr = None,
 ):
     """
     Performs an atomic max at the specified rank's memory location.
