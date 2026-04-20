@@ -1,18 +1,29 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Test suite for high-level matmul_all_gather API.
+Tests for matmul_all_gather_copy_engine.
 
-Note: This test requires tritonBLAS to be installed.
-Install with: pip install git+https://github.com/ROCm/tritonBLAS.git
+Each rank computes C_local = A_local @ B and the copy engine scatters the
+result tiles so every rank observes the gathered output C.
 """
 
 import pytest
 import torch
 import torch.distributed as dist
+
 import iris
 import os
+from iris.ops.config import FusedConfig
+from iris.ops.matmul_all_gather_host_copy_engine import (
+    matmul_all_gather_host_copy_engine,
+    matmul_all_gather_host_copy_engine_preamble,
+)
+from iris.ops.matmul_all_gather_copy_engine import (
+    matmul_all_gather_copy_engine,
+    matmul_all_gather_copy_engine_preamble,
+)
+from tritonblas.matmul import _make_matmul_selector
 
 
 def _param_shapes():
@@ -24,11 +35,14 @@ def _param_shapes():
                 int(os.environ["IRIS_TEST_K"]),
             )
         ]
-    return [
-        (64, 64, 32),
-        (512, 256, 512),
-        (1024, 2048, 1024),
-    ]
+    return [(1024, 256, 256)]
+
+
+def _copy_engine_modes():
+    mode = os.environ.get("IRIS_TEST_COPY_ENGINE_MODE")
+    if mode in {"host", "device"}:
+        return [mode]
+    return ["host", "device"]
 
 
 def _heap_size() -> int:
@@ -63,7 +77,7 @@ def _validation_cols_per_chunk(rows_per_chunk: int, n: int, dtype: torch.dtype) 
     return max(1, min(n, cols_per_chunk))
 
 
-def _assert_close_chunked(output_chunk, ref_chunk, atol, rtol, src_rank, row_start):
+def _assert_close_chunked(output_chunk, ref_chunk, atol, rtol, copy_engine_mode, src_rank, row_start):
     cols_per_chunk = _validation_cols_per_chunk(output_chunk.shape[0], output_chunk.shape[1], output_chunk.dtype)
 
     for col_start in range(0, output_chunk.shape[1], cols_per_chunk):
@@ -86,11 +100,11 @@ def _assert_close_chunked(output_chunk, ref_chunk, atol, rtol, src_rank, row_sta
             pytest.fail(
                 f"Mismatch in gathered rows from src_rank={src_rank} at row={global_row}, col={global_col}: "
                 f"output={output_val}, ref={ref_val}, max_diff={max_diff}, expected within atol={atol}, rtol={rtol}\n"
-                f"Rank validation failed for shmem.ops.matmul_all_gather"
+                f"Rank validation failed for matmul_all_gather_copy_engine (mode={copy_engine_mode})"
             )
 
 
-def _assert_gathered_rows_match_dense(output, local_ref, rank, world_size, atol, rtol):
+def _assert_gathered_rows_match_dense(output, local_ref, rank, world_size, atol, rtol, copy_engine_mode):
     recv_chunk = None
     rows_per_rank = local_ref.shape[0]
 
@@ -111,11 +125,11 @@ def _assert_gathered_rows_match_dense(output, local_ref, rank, world_size, atol,
             max_diff = torch.max(torch.abs(output_chunk - ref_chunk)).item()
             pytest.fail(
                 f"Max difference in gathered rows from src_rank={src_rank}: {max_diff}, expected < {atol}\n"
-                f"Rank {rank}: shmem.ops.matmul_all_gather output doesn't match reference"
+                f"Rank validation failed for matmul_all_gather_copy_engine (mode={copy_engine_mode})"
             )
 
 
-def _assert_gathered_rows_match_streamed(output, A_local, B, rank, world_size, atol, rtol):
+def _assert_gathered_rows_match_streamed(output, A_local, B, rank, world_size, atol, rtol, copy_engine_mode):
     rows_per_rank = A_local.shape[0]
     rows_per_chunk = _validation_rows_per_chunk(rows_per_rank, output.shape[1], output.dtype)
 
@@ -133,33 +147,52 @@ def _assert_gathered_rows_match_streamed(output, A_local, B, rank, world_size, a
             global_row_start = src_rank * rows_per_rank + local_row_start
             global_row_end = global_row_start + chunk_rows
             output_chunk = output[global_row_start:global_row_end]
-            _assert_close_chunked(output_chunk, ref_chunk, atol, rtol, src_rank, global_row_start)
+            _assert_close_chunked(
+                output_chunk,
+                ref_chunk,
+                atol,
+                rtol,
+                copy_engine_mode,
+                src_rank,
+                global_row_start,
+            )
 
 
-def _assert_gathered_rows_match(output, A_local, B, rank, world_size, atol, rtol):
+def _assert_gathered_rows_match(output, A_local, B, rank, world_size, atol, rtol, copy_engine_mode):
     if _should_stream_validation(A_local.shape[0], output.shape[1], output.dtype):
-        _assert_gathered_rows_match_streamed(output, A_local, B, rank, world_size, atol, rtol)
+        _assert_gathered_rows_match_streamed(output, A_local, B, rank, world_size, atol, rtol, copy_engine_mode)
         return
 
     local_ref = torch.matmul(A_local, B)
     torch.cuda.synchronize()
-    _assert_gathered_rows_match_dense(output, local_ref, rank, world_size, atol, rtol)
+    _assert_gathered_rows_match_dense(output, local_ref, rank, world_size, atol, rtol, copy_engine_mode)
 
 
-@pytest.mark.parametrize(
-    "dtype, atol, rtol",
-    [
-        (torch.float16, 0.5, 0.01),
-        # (torch.float32, 0.5, 0.01),  # disabled: Triton AMD backend LLVM unrealized_conversion_cast
-        (torch.bfloat16, 0.5, 0.01),
-    ],
-)
-@pytest.mark.parametrize(
-    "M, N, K",
-    _param_shapes(),
-)
-def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
-    """Test matmul_all_gather using shmem.ops API with proper config."""
+def _make_selector_config(M_local, N, K, dtype, device):
+    selector = _make_matmul_selector(
+        M_local,
+        N,
+        K,
+        dtype,
+        dtype,
+        dtype,
+        device,
+        streamk=False,
+    )
+    config = FusedConfig(
+        block_size_m=selector.block_m,
+        block_size_n=selector.block_n,
+        block_size_k=selector.block_k,
+        group_size_m=selector.group_m,
+        num_xcds=max(1, int(getattr(selector, "num_sms", 1))),
+    )
+    return selector, config
+
+
+@pytest.mark.parametrize("dtype, atol, rtol", [(torch.float16, 5e-2, 5e-2)])
+@pytest.mark.parametrize("copy_engine_mode", _copy_engine_modes())
+@pytest.mark.parametrize("M,N,K", _param_shapes())
+def test_matmul_all_gather_copy_engine(dtype, atol, rtol, copy_engine_mode, M, N, K):
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
@@ -167,64 +200,74 @@ def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
+    device = torch.device(f"cuda:{rank}")
 
-    # M must be divisible by world_size for row-wise sharding
     if M % world_size != 0:
         pytest.skip(f"M={M} not divisible by world_size={world_size}")
 
     M_local = M // world_size
+    selector, config = _make_selector_config(M_local, N, K, dtype, device)
 
-    # Skip if problem size is too small for world_size
-    # With default or custom configs, we need at least one tile per rank
-    min_block_size = 32  # Smallest block size we use
-    if M_local < min_block_size:
-        pytest.skip(f"M_local={M_local} too small for world_size={world_size} (need >= {min_block_size})")
-    if K < min_block_size:
-        pytest.skip(f"K={K} too small (need >= {min_block_size})")
-    if N < min_block_size:
-        pytest.skip(f"N={N} too small (need >= {min_block_size})")
+    if M_local % config.block_size_m != 0:
+        pytest.skip(f"M_local={M_local} must be divisible by block_size_m={config.block_size_m}")
+    if K % config.block_size_k != 0:
+        pytest.skip(f"K={K} must be divisible by block_size_k={config.block_size_k}")
 
-    # Create shmem tensors directly
     A_local = shmem.randn((M_local, K), dtype=dtype)
     B = shmem.randn((K, N), dtype=dtype)
     output = shmem.zeros((M, N), dtype=dtype)
 
+    m_tiles_per_batch = 1
+    if copy_engine_mode == "device":
+        workspace = matmul_all_gather_copy_engine_preamble(
+            shmem,
+            A_local,
+            B,
+            config=config,
+            m_tiles_per_batch=m_tiles_per_batch,
+        )
+        workspace.selector = selector
+    else:
+        workspace = matmul_all_gather_host_copy_engine_preamble(
+            shmem,
+            A_local,
+            B,
+            config=config,
+            m_tiles_per_batch=m_tiles_per_batch,
+            trace=False,
+            use_tritonblas=True,
+        )
+
     shmem.barrier()
 
-    # Use appropriate block sizes based on problem size
-    from iris.ops.config import FusedConfig
-
-    # Select config based on actual problem dimensions
-    # Ensure block sizes don't exceed actual dimensions
-    if M_local <= 64 or K <= 64 or N <= 64:
-        # Small problems - use 32x32x32 blocks
-        config = FusedConfig(block_size_m=32, block_size_n=32, block_size_k=32)
-    elif M_local <= 128 or K <= 128 or N <= 128:
-        # Medium problems - use 64x64x32 blocks
-        config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
-    elif dtype == torch.float32:
-        # Larger problems with fp32 - use 128x128x64 blocks
-        config = FusedConfig(block_size_m=128, block_size_n=128, block_size_k=64)
+    if copy_engine_mode == "device":
+        matmul_all_gather_copy_engine(
+            shmem,
+            output,
+            A_local,
+            B,
+            config=config,
+            workspace=workspace,
+            use_copy_engine=True,
+            m_tiles_per_batch=m_tiles_per_batch,
+        )
     else:
-        # Larger problems with fp16/bf16 - use 128x128x64 blocks
-        config = FusedConfig(block_size_m=128, block_size_n=128, block_size_k=64)
-
-    # Validate config against problem size
-    if config is not None:
-        assert M_local >= config.block_size_m, f"M_local ({M_local}) must be >= block_size_m ({config.block_size_m})"
-        assert K >= config.block_size_k, f"K ({K}) must be >= block_size_k ({config.block_size_k})"
-        assert N >= config.block_size_n, f"N ({N}) must be >= block_size_n ({config.block_size_n})"
-
-    # Use shmem.ops API with proper config
-    shmem.ops.matmul_all_gather(output, A_local, B, config=config)
+        matmul_all_gather_host_copy_engine(
+            shmem,
+            output,
+            A_local,
+            B,
+            config=config,
+            workspace=workspace,
+            m_tiles_per_batch=m_tiles_per_batch,
+            trace=False,
+            use_tritonblas=True,
+        )
 
     torch.cuda.synchronize()
     shmem.barrier()
 
-    _assert_gathered_rows_match(output, A_local, B, rank, world_size, atol, rtol)
-
-    if rank == 0:
-        print(f"✓ matmul_all_gather test passed: {dtype}, M={M}, N={N}, K={K}")
+    _assert_gathered_rows_match(output, A_local, B, rank, world_size, atol, rtol, copy_engine_mode)
 
     shmem.barrier()
     del output
@@ -235,3 +278,15 @@ def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
 
     gc.collect()
     torch.cuda.empty_cache()
+
+
+if __name__ == "__main__":
+    import sys
+
+    if not dist.is_initialized():
+        print("Run with: torchrun --nproc_per_node=2 tests/ops/test_matmul_all_gather_copy_engine.py")
+        sys.exit(1)
+
+    rank = dist.get_rank()
+    torch.cuda.set_device(rank)
+    print(f"[Rank {rank}] Tests in this file require pytest + torchrun. See tests/run_tests_distributed.py")
