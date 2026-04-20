@@ -13,6 +13,7 @@ import triton
 import triton.language as tl
 import torch
 import iris
+from iris.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
 
@@ -334,6 +335,7 @@ def persistent_all_reduce_spinlock(
                 dest_rank,
                 heap_bases,
                 mask=mask,
+                hint=(1, BLOCK_SIZE_N),
             )
 
             # Release lock for this tile at dest_rank
@@ -539,6 +541,7 @@ def persistent_all_reduce_ring(
                         next_rank,
                         heap_bases,
                         mask=mask,
+                        hint=(1, BLOCK_SIZE_N),
                     )
                     tl.debug_barrier()
                     iris.atomic_xchg(
@@ -668,7 +671,7 @@ def persistent_all_reduce_two_shot(
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
                 if remote_rank_idx != group_rank:
-                    iris.store(out_ptr, reduced, iris_rank, remote_rank, heap_bases)
+                    iris.store(out_ptr, reduced, iris_rank, remote_rank, heap_bases, hint=(1, BLOCK_SIZE_N))
 
         # Slow path: MASKED (only boundary tiles land here)
         # This path handles tiles at tensor boundaries where not all elements are valid.
@@ -691,7 +694,15 @@ def persistent_all_reduce_two_shot(
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
                 if remote_rank_idx != group_rank:
-                    iris.store(out_ptr, reduced, iris_rank, remote_rank, heap_bases, mask=mask)
+                    iris.store(
+                        out_ptr,
+                        reduced,
+                        iris_rank,
+                        remote_rank,
+                        heap_bases,
+                        mask=mask,
+                        hint=(1, BLOCK_SIZE_N),
+                    )
 
 
 def all_reduce(
@@ -801,7 +812,9 @@ def all_reduce(
     heap_bases = shmem.get_heap_bases()
 
     if variant == VARIANT_ATOMIC:
-        persistent_all_reduce_atomic[(config.comm_sms,)](
+        iris_launch(
+            persistent_all_reduce_atomic,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             M,
@@ -822,6 +835,9 @@ def all_reduce(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
 
     elif variant == VARIANT_SPINLOCK:
@@ -830,7 +846,18 @@ def all_reduce(
                 "Spinlock variant requires workspace preparation. Call all_reduce_preamble before all_reduce."
             )
 
-        persistent_all_reduce_spinlock[(config.comm_sms,)](
+        num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
+        num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
+        total_tiles = num_pid_m * num_pid_n
+        if workspace.locks.numel() < total_tiles:
+            raise ValueError(
+                f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
+                f"Pre-allocate workspace with the smallest block sizes you intend to use."
+            )
+
+        iris_launch(
+            persistent_all_reduce_spinlock,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             workspace.locks,
@@ -852,12 +879,25 @@ def all_reduce(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
 
     elif variant == VARIANT_RING:
         if workspace is None or workspace.ring_buffer is None or workspace.flags is None:
             raise RuntimeError(
                 "Ring variant requires workspace preparation. Call all_reduce_preamble before all_reduce."
+            )
+
+        num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
+        num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
+        total_tiles = num_pid_m * num_pid_n
+        total_flags = total_tiles * workspace.flags_per_tile
+        if workspace.flags.numel() < total_flags:
+            raise ValueError(
+                f"Flags array too small: have {workspace.flags.numel()} but need {total_flags}. "
+                f"Pre-allocate workspace with the smallest block sizes you intend to use."
             )
 
         # Calculate next rank in the ring for group support
@@ -873,7 +913,9 @@ def all_reduce(
             next_rank_in_group = (rank_in_group + 1) % world_size
             next_rank = group_ranks[next_rank_in_group]
 
-        persistent_all_reduce_ring[(config.comm_sms,)](
+        iris_launch(
+            persistent_all_reduce_ring,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             workspace.ring_buffer,
@@ -900,10 +942,15 @@ def all_reduce(
             config.all_reduce_num_rings,
             slice_n,
             workspace.flags_per_tile,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
 
     elif variant == VARIANT_TWO_SHOT:
-        persistent_all_reduce_two_shot[(config.comm_sms,)](
+        iris_launch(
+            persistent_all_reduce_two_shot,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             M,
@@ -928,9 +975,14 @@ def all_reduce(
             num_warps=8,
             num_stages=1,
             waves_per_eu=1,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
     elif variant == VARIANT_ONE_SHOT:
-        persistent_all_reduce_one_shot[(config.comm_sms,)](
+        iris_launch(
+            persistent_all_reduce_one_shot,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             M,
@@ -951,6 +1003,9 @@ def all_reduce(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
 
     if workspace is not None:

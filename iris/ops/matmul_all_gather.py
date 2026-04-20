@@ -16,6 +16,7 @@ import triton
 import triton.language as tl
 import iris
 import iris.x
+from iris.tracing.kernel_artifacts import iris_launch
 
 from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view
 
@@ -219,7 +220,9 @@ def matmul_all_gather(
 
     # Launch single fused kernel
     grid = (num_sms,)
-    _fused_matmul_all_gather_kernel[grid](
+    iris_launch(
+        _fused_matmul_all_gather_kernel,
+        grid,
         A,
         B,
         output_tensor,
@@ -247,6 +250,9 @@ def matmul_all_gather(
         use_bias,
         even_k,
         config.allow_tf32,
+        algorithm="matmul_all_gather",
+        rank=rank,
+        dtype=A.dtype,
     )
 
     if not async_op:

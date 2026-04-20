@@ -25,12 +25,15 @@ def device_context_tracing_1d_address_kernel(
     # 1D block of pointers: dummy_buffer + offsets
     offsets = tl.arange(0, BLOCK_SIZE)
     address_1d = dummy_buffer + offsets
+    # Create a simple mask (all True for this test)
+    mask = tl.full([BLOCK_SIZE], True, dtype=tl.int1)
     handle = ctx.tracing.record_event_start(
         event_id=TraceEvent().put,
         target_rank=(cur_rank + 1) % num_ranks,
         address=address_1d,
         pid_m=tl.program_id(0),
         pid_n=0,
+        mask=mask,
     )
     ctx.tracing.record_event_end(handle)
 

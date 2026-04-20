@@ -19,6 +19,7 @@ from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
 import iris.x
+from iris.tracing.kernel_artifacts import iris_launch
 
 
 @triton.jit()
@@ -132,7 +133,7 @@ def _fused_matmul_all_reduce_kernel(
         # Use atomic_xchg with release semantics to ensure memory ordering
         tile_id = pid_m * num_tiles_n + pid_n
         lock_ptr = locks + tile_id
-        tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
+        tl.atomic_xchg(lock_ptr, 1, sem="release", scope="sys")  # Release ensures prior stores visible to remote GPUs
 
         # Create source view only when needed (aux_buffer is not None)
         src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
@@ -300,11 +301,23 @@ def matmul_all_reduce(
     # Launch kernel
     num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    grid = (num_pid_m * num_pid_n,)
+    total_tiles = num_pid_m * num_pid_n
+    grid = (total_tiles,)
+
+    # Validate that the pre-allocated lock array is large enough for the current tile count.
+    # This can occur when the workspace was prepared with larger block sizes (fewer tiles)
+    # and is then reused with smaller block sizes (more tiles).
+    if workspace.locks is not None and workspace.locks.numel() < total_tiles:
+        raise ValueError(
+            f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
+            f"Pre-allocate workspace with the smallest block sizes you intend to use."
+        )
 
     even_k = K % config.block_size_k == 0
 
-    _fused_matmul_all_reduce_kernel[grid](
+    iris_launch(
+        _fused_matmul_all_reduce_kernel,
+        grid,
         A,
         B,
         C,
@@ -327,6 +340,9 @@ def matmul_all_reduce(
         config.block_size_k,
         even_k,
         config.all_reduce_variant,
+        algorithm="matmul_all_reduce",
+        rank=rank,
+        dtype=A.dtype,
     )
 
     # Mark workspace as used

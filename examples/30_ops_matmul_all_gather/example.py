@@ -40,7 +40,7 @@ def main():
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="gloo")
 
     ctx = iris.iris(heap_size=args["heap_size"])
     rank = ctx.get_rank()

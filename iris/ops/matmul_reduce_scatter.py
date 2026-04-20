@@ -19,6 +19,7 @@ from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
 import iris.x
+from iris.tracing.kernel_artifacts import iris_launch
 
 
 @triton.jit()
@@ -164,6 +165,12 @@ def matmul_reduce_scatter_preamble(
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
     total_tiles = num_pid_m * num_pid_n
 
+    if workspace.locks is not None and workspace.locks.numel() < total_tiles:
+        raise ValueError(
+            f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
+            f"Pre-allocate workspace with the smallest block sizes you intend to use."
+        )
+
     if workspace.locks is None or workspace.locks.numel() != total_tiles:
         workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
     else:
@@ -224,11 +231,21 @@ def matmul_reduce_scatter(
 
     num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    grid = (num_pid_m * num_pid_n,)
+    total_tiles = num_pid_m * num_pid_n
+
+    if workspace.locks is not None and workspace.locks.numel() < total_tiles:
+        raise ValueError(
+            f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
+            f"Pre-allocate workspace with the smallest block sizes you intend to use."
+        )
+
+    grid = (total_tiles,)
 
     even_k = K % config.block_size_k == 0
 
-    _fused_matmul_reduce_scatter_kernel[grid](
+    iris_launch(
+        _fused_matmul_reduce_scatter_kernel,
+        grid,
         A,
         B,
         C,
@@ -250,6 +267,9 @@ def matmul_reduce_scatter(
         config.block_size_n,
         config.block_size_k,
         even_k,
+        algorithm="matmul_reduce_scatter",
+        rank=rank,
+        dtype=A.dtype,
     )
 
     if not async_op:

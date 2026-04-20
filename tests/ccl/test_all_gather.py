@@ -21,14 +21,16 @@ from iris.ccl import Config
     ],
 )
 @pytest.mark.parametrize(
-    "M, N",
+    "M, N, block_size_m, block_size_n",
     [
-        (128, 64),  # Small
-        (1024, 256),  # Medium
-        (8192, 8192),  # Large
+        (128, 64, 32, 64),  # Small
+        (128, 128, 32, 32),  # BLOCK_N < N/world_size (partial-width, multi-block per rank)
+        (256, 128, 32, 16),  # Minimum BLOCK_N=16 (16-bit vectorization path)
+        (1024, 256, 32, 64),  # Medium
+        (8192, 8192, 32, 64),  # Large
     ],
 )
-def test_all_gather(dtype, M, N):
+def test_all_gather(dtype, M, N, block_size_m, block_size_n):
     """Test all-gather functionality by comparing against PyTorch's implementation."""
     # Ensure torch.distributed is initialized (should be done by test runner)
     if not dist.is_initialized():
@@ -62,7 +64,7 @@ def test_all_gather(dtype, M, N):
 
     # Run Iris all_gather
     shmem.barrier()
-    config = Config()
+    config = Config(block_size_m=block_size_m, block_size_n=block_size_n)
     shmem.ccl.all_gather(iris_output_tensor, iris_input_tensor, config=config)
     torch.cuda.synchronize()
 
@@ -97,14 +99,16 @@ def test_all_gather(dtype, M, N):
     ],
 )
 @pytest.mark.parametrize(
-    "M, N",
+    "M, N, block_size_m, block_size_n",
     [
-        (128, 64),  # Small
-        (1024, 256),  # Medium
-        (8192, 8192),  # Large
+        (128, 64, 32, 64),  # Small
+        (128, 128, 32, 32),  # BLOCK_N < N/world_size (partial-width, multi-block per rank)
+        (256, 128, 32, 16),  # Minimum BLOCK_N=16 (16-bit vectorization path)
+        (1024, 256, 32, 64),  # Medium
+        (8192, 8192, 32, 64),  # Large
     ],
 )
-def test_all_gather_partitioned(dtype, M, N):
+def test_all_gather_partitioned(dtype, M, N, block_size_m, block_size_n):
     """Test all-gather with partitioned variant by comparing against PyTorch's implementation."""
     # Ensure torch.distributed is initialized (should be done by test runner)
     if not dist.is_initialized():
@@ -140,7 +144,9 @@ def test_all_gather_partitioned(dtype, M, N):
     # COMM_SMS must be divisible by world_size for partitioned variant
     comm_sms = 64  # Assuming world_size divides 64 (e.g., 2, 4, 8)
     shmem.barrier()
-    config = Config(all_gather_variant="partitioned", comm_sms=comm_sms)
+    config = Config(
+        block_size_m=block_size_m, block_size_n=block_size_n, all_gather_variant="partitioned", comm_sms=comm_sms
+    )
     shmem.ccl.all_gather(iris_output_tensor, iris_input_tensor, config=config)
     torch.cuda.synchronize()
 

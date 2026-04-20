@@ -9,6 +9,7 @@ Supports both Triton and Gluon implementations based on config.
 import triton
 import triton.language as tl
 import iris
+from iris.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import chiplet_transform_chunked, extract_group_info
 
@@ -144,6 +145,7 @@ def persistent_all_to_all(
                         iris_rank,
                         target_rank,
                         heap_bases,
+                        hint=(1, BLOCK_SIZE_N),
                     )
 
         # Slow path: MASKED (only boundary tiles land here)
@@ -183,6 +185,7 @@ def persistent_all_to_all(
                         target_rank,
                         heap_bases,
                         mask=mask,
+                        hint=(1, BLOCK_SIZE_N),
                     )
 
 
@@ -377,7 +380,9 @@ def all_to_all(
 
         context_tensor = shmem.get_device_context()
 
-        persistent_all_to_all_gluon[(config.comm_sms,)](
+        iris_launch(
+            persistent_all_to_all_gluon,
+            (config.comm_sms,),
             IrisDeviceCtx,
             context_tensor,
             input_tensor,
@@ -399,13 +404,21 @@ def all_to_all(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            num_stages=config.num_stages,
+            num_warps=config.num_warps,
+            waves_per_eu=config.waves_per_eu,
+            algorithm="all_to_all",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
     else:
         # Use Triton implementation
         if config.use_gluon and not GLUON_AVAILABLE:
             raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False")
 
-        persistent_all_to_all[(config.comm_sms,)](
+        iris_launch(
+            persistent_all_to_all,
+            (config.comm_sms,),
             input_tensor,
             output_tensor,
             M,
@@ -426,6 +439,12 @@ def all_to_all(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            num_stages=config.num_stages,
+            num_warps=config.num_warps,
+            waves_per_eu=config.waves_per_eu,
+            algorithm="all_to_all",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
         )
 
     if not async_op:

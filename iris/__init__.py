@@ -63,6 +63,8 @@ from .iris import (
 
 from .util import (
     do_bench,
+    get_device_id_for_rank,
+    is_simulation_env,
 )
 
 from .tensor_utils import (
@@ -74,6 +76,8 @@ from . import hip
 from . import experimental
 from . import ops
 from . import tensor_creation
+from . import bench
+from .tracing import kernel_artifacts  # noqa: F401  # triggers _init() at import time
 from .logging import (
     set_logger_level,
     logger,
@@ -86,6 +90,7 @@ from .logging import (
 __all__ = [
     "Iris",
     "iris",
+    "get_device_id_for_rank",
     "DeviceContext",
     "TraceEvent",
     "load",
@@ -108,6 +113,7 @@ __all__ = [
     "experimental",
     "ops",
     "tensor_creation",
+    "bench",
     "set_logger_level",
     "logger",
     "DEBUG",
@@ -115,3 +121,19 @@ __all__ = [
     "WARNING",
     "ERROR",
 ]
+
+# Patch torch.cuda.set_device to automatically handle device ID wrapping in simulation mode
+# Only patch if in simulation mode
+if is_simulation_env():
+    import torch
+
+    _original_set_device = torch.cuda.set_device
+
+    def _patched_set_device(device):
+        """Patched version of torch.cuda.set_device that wraps device IDs in simulation mode."""
+        num_devices = torch.cuda.device_count()
+        if num_devices > 0 and isinstance(device, int) and device >= num_devices:
+            device = device % num_devices
+        return _original_set_device(device)
+
+    torch.cuda.set_device = _patched_set_device

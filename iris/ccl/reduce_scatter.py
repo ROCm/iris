@@ -9,6 +9,7 @@ Uses the two-shot approach: reduce assigned tiles and store only to own rank.
 import triton
 import triton.language as tl
 import iris
+from iris.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
 
@@ -106,11 +107,11 @@ def persistent_reduce_scatter_two_shot(
         if is_full:
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
 
@@ -124,11 +125,15 @@ def persistent_reduce_scatter_two_shot(
 
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask).to(acc_dtype)
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(
+                acc_dtype
+            )
             for i in tl.static_range(1, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(
+                    acc_dtype
+                )
 
             reduced = acc.to(output_ptr.type.element_ty)
 
@@ -225,7 +230,9 @@ def reduce_scatter(
     # Use all_reduce_distribution for tile distribution
     distribution = config.all_reduce_distribution
 
-    persistent_reduce_scatter_two_shot[(config.comm_sms,)](
+    iris_launch(
+        persistent_reduce_scatter_two_shot,
+        (config.comm_sms,),
         input_tensor,
         output_tensor,
         M,
@@ -247,6 +254,12 @@ def reduce_scatter(
         config.num_xcds,
         config.chunk_size,
         distribution,
+        num_stages=config.num_stages,
+        num_warps=config.num_warps,
+        waves_per_eu=config.waves_per_eu,
+        algorithm="reduce_scatter",
+        rank=rank_global,
+        dtype=input_tensor.dtype,
     )
 
     if not async_op:

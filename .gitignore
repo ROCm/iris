@@ -12,6 +12,7 @@ rocSHMEM/
 *.sif.checksum
 apptainer/images/
 .vscode/
+.idea/
 __pycache__/
 *.so
 *.json
@@ -49,8 +50,19 @@ __pycache__/
 *.pyzwz
 
 !.devcontainer/devcontainer.json
+!.github/scripts/examples_config.json
 
 
 resources/
 gpucore.*
 logs/
+*.cap
+hsakmt_counters.csv
+core
+
+docker/TheRock/
+docker/rocm-systems/
+
+# IntelliKit / Copilot agent artifacts
+.intellikit
+.github/agents/skills/
