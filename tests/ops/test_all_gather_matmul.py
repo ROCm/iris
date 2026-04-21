@@ -12,6 +12,7 @@ Covers both the baseline pull kernel and the HBM-buffered kernel.
 import pytest
 import torch
 import torch.distributed as dist
+import tritonblas
 
 import iris
 import os
@@ -115,6 +116,57 @@ def test_all_gather_matmul_baseline(dtype, atol, rtol, M, K_local, N):
     max_diff = (output - ref_output).abs().max().item()
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
         f"Rank {rank}: Max diff {max_diff}, expected < {atol}"
+    )
+
+
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float16, 1e-2, 1e-2),
+    ],
+)
+@pytest.mark.parametrize(
+    "M,K_local,N",
+    _param_shapes(),
+)
+def test_tritonblas_rccl_all_gather_matmul(dtype, atol, rtol, M, K_local, N):
+    """Test RCCL all_gather + tritonBLAS matmul against torch reference."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = _heap_size()
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
+    device = f"cuda:{rank}"
+
+    K = K_local * world_size
+    A_sharded, B, ref_output = _make_reference(rank, world_size, M, K_local, N, dtype)
+
+    A_gathered_parts = [torch.empty((M, K_local), dtype=dtype, device=device) for _ in range(world_size)]
+    A_gathered = torch.empty((M, K), dtype=dtype, device=device)
+    output = torch.zeros((M, N), dtype=dtype)
+    selector = tritonblas.OrigamiMatmulSelector(
+        M,
+        N,
+        K,
+        A_gathered.dtype,
+        B.dtype,
+        output.dtype,
+        A_gathered.device,
+    )
+    config = tritonblas.matmul_preamble(selector)
+
+    dist.all_gather(A_gathered_parts, A_sharded)
+    A_gathered = torch.cat(A_gathered_parts, dim=1)
+    tritonblas.matmul_lt(A_gathered, B, output, selector, config)
+
+    torch.cuda.synchronize()
+
+    max_diff = (output - ref_output).abs().max().item()
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
+        f"Rank {rank}: Max diff {max_diff}, expected < {atol} "
+        f"(tritonblas+rccl, M={M}, K_local={K_local}, N={N})"
     )
 
 

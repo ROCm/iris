@@ -65,6 +65,11 @@ BENCHMARK_CONFIGS = {
             "benchmark_filter": "^pytorch_matmul_all_gather$",
             "axes": {"m": "M_local", "n": "N", "k": "K"},
         },
+        "tritonblas_rcclbaseline": {
+            "script": "benchmark/ops/bench_matmul_all_gather.py",
+            "benchmark_filter": "^tritonblas_matmul_all_gather$",
+            "axes": {"m": "M_local", "n": "N", "k": "K"},
+        },
         "baseline": {
             "script": "benchmark/ops/bench_matmul_all_gather.py",
             "benchmark_filter": "^matmul_all_gather$",
@@ -95,6 +100,11 @@ BENCHMARK_CONFIGS = {
         "pytorchbaseline": {
             "script": "benchmark/ops/bench_all_gather_matmul.py",
             "benchmark_filter": "^rccl_all_gather_matmul$",
+            "axes": {"m": "M", "n": "N", "k": "K"},
+        },
+        "tritonblas_rcclbaseline": {
+            "script": "benchmark/ops/bench_all_gather_matmul.py",
+            "benchmark_filter": "^tritonblas_rccl_all_gather_matmul$",
             "axes": {"m": "M", "n": "N", "k": "K"},
         },
         "hbm_buffer": {

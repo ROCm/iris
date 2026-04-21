@@ -49,6 +49,7 @@ def _heap_size() -> int:
 
 
 def _make_reference(rank, world_size, M, K_local, N, dtype):
+    """Build a torch reference output for all_gather + matmul."""
     device = f"cuda:{rank}"
     K = K_local * world_size
 
@@ -58,9 +59,9 @@ def _make_reference(rank, world_size, M, K_local, N, dtype):
     torch.manual_seed(123)
     B = torch.randn(K, N, dtype=dtype, device=device)
 
-    gathered = [torch.zeros(M, K_local, dtype=dtype, device=device) for _ in range(world_size)]
-    dist.all_gather(gathered, A_sharded)
-    A_gathered_ref = torch.cat(gathered, dim=1)
+    A_gathered_list = [torch.zeros(M, K_local, dtype=dtype, device=device) for _ in range(world_size)]
+    dist.all_gather(A_gathered_list, A_sharded)
+    A_gathered_ref = torch.cat(A_gathered_list, dim=1)
     ref_output = torch.matmul(A_gathered_ref, B)
     torch.cuda.synchronize()
     return A_sharded, B, ref_output
@@ -91,6 +92,7 @@ def _make_selector_config(M, N, K, dtype, device):
 @pytest.mark.parametrize("device_initiated", _device_initiated_modes())
 @pytest.mark.parametrize("M,K_local,N", _param_shapes())
 def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, M, K_local, N):
+    """Test all_gather_matmul_copy_engine against torch all_gather + matmul."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
@@ -98,11 +100,10 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, M, K
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
-    device = torch.device(f"cuda:{rank}")
     K = K_local * world_size
 
     A_sharded, B, ref_output = _make_reference(rank, world_size, M, K_local, N, dtype)
-    selector, config = _make_selector_config(M, N, K, dtype, device)
+    selector, config = _make_selector_config(M, N, K, dtype, B.device)
 
     if M % config.block_size_m != 0:
         pytest.skip(f"M={M} must be divisible by block_size_m={config.block_size_m}")
