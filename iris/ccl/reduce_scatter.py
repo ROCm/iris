@@ -267,17 +267,18 @@ def persistent_reduce_scatter_inline(
             for i in tl.static_range(world_size):
                 peer_idx = (start_rank_idx + i) % world_size
                 peer_global = rank_start + peer_idx * rank_stride
+                peer_base = _select_peer_base(peer_idx, hoisted_bases, world_size)
 
                 if peer_global == iris_rank:
                     tile = tl.load(base_ptr)
                 else:
-                    tile = iris.load(
+                    translated_ptr = _translate_with_bases(
                         base_ptr,
-                        iris_rank,
-                        peer_global,
-                        heap_bases,
+                        my_base,
+                        peer_base,
                         hint=(1, BLOCK_SIZE_N),
                     )
+                    tile = tl.load(translated_ptr)
                 acc += tile.to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
@@ -289,18 +290,18 @@ def persistent_reduce_scatter_inline(
             for i in tl.static_range(world_size):
                 peer_idx = (start_rank_idx + i) % world_size
                 peer_global = rank_start + peer_idx * rank_stride
+                peer_base = _select_peer_base(peer_idx, hoisted_bases, world_size)
 
                 if peer_global == iris_rank:
                     tile = tl.load(base_ptr, mask=mask, other=0.0)
                 else:
-                    tile = iris.load(
+                    translated_ptr = _translate_with_bases(
                         base_ptr,
-                        iris_rank,
-                        peer_global,
-                        heap_bases,
-                        mask=mask,
+                        my_base,
+                        peer_base,
                         hint=(1, BLOCK_SIZE_N),
                     )
+                    tile = tl.load(translated_ptr, mask=mask, other=0.0)
                 acc += tile.to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)

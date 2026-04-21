@@ -1,44 +1,19 @@
 {
-    "name": "Iris",
-    // Use the existing Dockerfile
-    "build": {
-        "dockerfile": "../docker/Dockerfile",
-        "context": ".."
-    },
-    // Runs on the HOST before the container is created/started.
-    // Creates a stable agent socket at ~/.ssh/ssh-agent.sock and optionally loads ~/.ssh/id_rsa.
-    "initializeCommand": "bash -lc \"bash '${localWorkspaceFolder}/.devcontainer/ensure-ssh-agent.sh'\"",
-    "runArgs": [
-        "--name=${localEnv:USER}-${localWorkspaceFolderBasename}-dev",
-        "--network=host",
-        "--device=/dev/kfd",
-        "--device=/dev/dri",
-        "--cap-add=SYS_PTRACE",
-        "--group-add=video",
-        "--security-opt=seccomp=unconfined",
-        "--shm-size=16G",
-        "--ipc=host",
-        "--ulimit=memlock=-1",
-        "--ulimit=stack=67108864"
-    ],
-    "features": {
-        "ghcr.io/devcontainers/features/common-utils:2": {
-            "installZsh": true,
-            "installOhMyZsh": true,
-            "upgradePackages": false,
-            "username": "automatic",
-            "uid": "automatic",
-            "gid": "automatic",
-            "configureZshAsDefaultShell": false
-        }
-    },
-    "mounts": [
-        "source=${localEnv:HOME}/.ssh/ssh-agent.sock,target=/tmp/ssh-agent.sock,type=bind"
-    ],
-    "remoteEnv": {
-        "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock"
-    },
-    "remoteUser": "vscode",
-    "postStartCommand": "bash -lc 'set -e; HOST_RENDER_GID=$(stat -c \"%g\" /dev/kfd 2>/dev/null || stat -c \"%g\" /dev/dri/renderD128 2>/dev/null || echo \"\"); if [ -n \"$HOST_RENDER_GID\" ]; then if ! getent group $HOST_RENDER_GID >/dev/null; then sudo groupadd -g $HOST_RENDER_GID host-render || true; fi; sudo usermod -aG $HOST_RENDER_GID vscode || true; fi; if ! getent group video >/dev/null; then sudo groupadd -r video || true; fi; sudo usermod -aG video vscode || true; for rcfile in ~/.bashrc ~/.zshrc; do if [ -f \"$rcfile\" ] && ! grep -q \"exec sg host-render\" \"$rcfile\" 2>/dev/null; then echo \"if getent group host-render >/dev/null 2>&1 && ! groups | grep -q host-render; then exec sg host-render \\\"\\$SHELL\\\"; fi\" >> \"$rcfile\"; fi; done'",
-    "updateRemoteUserUID": true
+  "name": "iris-rocm",
+  "image": "gfx1250-ffm:latest",
+  "runArgs": [
+    "--network=host",
+    "--device=/dev/kfd",
+    "--device=/dev/dri",
+    "--group-add=video",
+    "--ipc=host",
+    "--cap-add=SYS_PTRACE",
+    "--security-opt=seccomp=unconfined"
+  ],
+  "workspaceMount": "type=bind,source=${localWorkspaceFolder},target=/workspace/iris",
+  "mounts": [
+    "type=bind,source=${localWorkspaceFolder}/..,target=/workspace/host"
+  ],
+  "workspaceFolder": "/workspace/iris",
+  "postCreateCommand": "bash -lc 'source /ffm/ffmlite_env.sh && git config --global --add safe.directory /workspace/iris && pip install -e . && grep -qxF \"source /ffm/roccap_env.sh\" ~/.bashrc || echo \"source /ffm/roccap_env.sh\" >> ~/.bashrc'"
 }
