@@ -10,12 +10,17 @@ gracefully if the environment isn't set up.
 """
 
 import json
+import builtins
+import logging
 import socket
+import sys
+import types
 
 import pytest
 import torch
 import torch.distributed as dist
 
+import iris.topology as topology
 from iris.topology import (
     FabricInfo,
     GPUInfo,
@@ -40,6 +45,127 @@ def get_rank():
 
 def get_world_size():
     return dist.get_world_size() if dist.is_initialized() else 1
+
+
+def _make_fake_pynvml():
+    module = types.ModuleType("pynvml")
+    module.init_calls = 0
+    module.shutdown_calls = 0
+    module.pci_by_handle = {
+        "gpu0": "0000:41:00.0",
+        "gpu1": "0000:42:00.0",
+    }
+    module.handle_by_pci = {pci: handle for handle, pci in module.pci_by_handle.items()}
+    module.handle_by_index = {0: "gpu0", 1: "gpu1"}
+    module.nvlink_remote = {
+        "gpu0": "0000:42:00.0",
+        "gpu1": "0000:41:00.0",
+    }
+
+    class NVMLError(Exception):
+        pass
+
+    class FakeFabricInfo:
+        def __init__(self):
+            self.state = 0
+            self.status = 0
+            self.clusterUuid = b""
+            self.cliqueId = 0
+
+    def nvmlInit():
+        module.init_calls += 1
+
+    def nvmlShutdown():
+        module.shutdown_calls += 1
+
+    def nvmlDeviceGetHandleByIndex(index):
+        return module.handle_by_index[index]
+
+    def nvmlDeviceGetHandleByPciBusId(bus_id):
+        key = bus_id.decode("utf-8") if isinstance(bus_id, bytes) else str(bus_id)
+        return module.handle_by_pci[key.lower()]
+
+    def nvmlDeviceGetPciInfo(handle):
+        return types.SimpleNamespace(busId=module.pci_by_handle[handle].encode("utf-8"))
+
+    def nvmlDeviceGetUUID(handle):
+        return f"uuid-{handle}".encode("utf-8")
+
+    def nvmlDeviceGetGpuFabricInfoV(handle, info_struct):
+        info_struct.state = 3
+        info_struct.status = 0
+        info_struct.clusterUuid = bytes.fromhex("01" * 16)
+        info_struct.cliqueId = 7
+
+    def nvmlDeviceGetNvLinkState(handle, link):
+        if link == 0:
+            return 1
+        raise NVMLError("no more links")
+
+    def nvmlDeviceGetNvLinkRemotePciInfo(handle, link):
+        if link == 0:
+            return types.SimpleNamespace(busId=module.nvlink_remote[handle].encode("utf-8"))
+        raise NVMLError("no remote link")
+
+    def nvmlDeviceGetTopologyCommonAncestor(handle_a, handle_b):
+        return 30
+
+    module.NVMLError = NVMLError
+    module.c_nvmlGpuFabricInfo_v2_t = FakeFabricInfo
+    module.nvmlInit = nvmlInit
+    module.nvmlShutdown = nvmlShutdown
+    module.nvmlDeviceGetHandleByIndex = nvmlDeviceGetHandleByIndex
+    module.nvmlDeviceGetHandleByPciBusId = nvmlDeviceGetHandleByPciBusId
+    module.nvmlDeviceGetPciInfo = nvmlDeviceGetPciInfo
+    module.nvmlDeviceGetUUID = nvmlDeviceGetUUID
+    module.nvmlDeviceGetGpuFabricInfoV = nvmlDeviceGetGpuFabricInfoV
+    module.nvmlDeviceGetNvLinkState = nvmlDeviceGetNvLinkState
+    module.nvmlDeviceGetNvLinkRemotePciInfo = nvmlDeviceGetNvLinkRemotePciInfo
+    module.nvmlDeviceGetTopologyCommonAncestor = nvmlDeviceGetTopologyCommonAncestor
+
+    return module
+
+
+def _make_fake_amdsmi():
+    module = types.ModuleType("amdsmi")
+    module.init_calls = 0
+    module.shutdown_calls = 0
+    module.handles = ["gpu0", "gpu1"]
+    module.bdf_by_handle = {
+        "gpu0": "0000:41:00.0",
+        "gpu1": "0000:42:00.0",
+    }
+
+    class AmdSmiLinkType:
+        AMDSMI_LINK_TYPE_XGMI = "xgmi"
+
+    def amdsmi_init():
+        module.init_calls += 1
+
+    def amdsmi_shut_down():
+        module.shutdown_calls += 1
+
+    def amdsmi_get_processor_handles():
+        return module.handles
+
+    def amdsmi_get_gpu_device_bdf(handle):
+        return module.bdf_by_handle[handle]
+
+    def amdsmi_get_gpu_device_uuid(handle):
+        return f"amd-{handle}"
+
+    def amdsmi_get_link_topology_nearest(handle, link_type):
+        return {"processor_list": []}
+
+    module.AmdSmiLinkType = AmdSmiLinkType
+    module.amdsmi_init = amdsmi_init
+    module.amdsmi_shut_down = amdsmi_shut_down
+    module.amdsmi_get_processor_handles = amdsmi_get_processor_handles
+    module.amdsmi_get_gpu_device_bdf = amdsmi_get_gpu_device_bdf
+    module.amdsmi_get_gpu_device_uuid = amdsmi_get_gpu_device_uuid
+    module.amdsmi_get_link_topology_nearest = amdsmi_get_link_topology_nearest
+
+    return module
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +311,197 @@ class TestNormalizePCIBusId:
     def test_no_match(self):
         result = _normalize_pci_bus_id("garbage")
         assert result == "garbage"
+
+
+class TestVendorLibraryLifecycle:
+    def test_nvml_query_helpers_do_not_manage_lifecycle(self, monkeypatch):
+        fake_pynvml = _make_fake_pynvml()
+        monkeypatch.setitem(sys.modules, "pynvml", fake_pynvml)
+
+        assert topology._get_pci_bus_id(0, "nvidia") == "0000:41:00.0"
+        assert topology._get_gpu_uuid(0, "nvidia", pci_bus_id="0000:41:00.0") == "uuid-gpu0"
+        assert topology._parse_nvidia_topo(["0000:41:00.0", "0000:42:00.0"]) == [
+            [IntraNodeLinkType.SELF, IntraNodeLinkType.NVLINK],
+            [IntraNodeLinkType.NVLINK, IntraNodeLinkType.SELF],
+        ]
+        assert fake_pynvml.init_calls == 0
+        assert fake_pynvml.shutdown_calls == 0
+
+    def test_amdsmi_query_helpers_do_not_manage_lifecycle(self, monkeypatch):
+        fake_amdsmi = _make_fake_amdsmi()
+        monkeypatch.setitem(sys.modules, "amdsmi", fake_amdsmi)
+
+        assert topology._get_pci_bus_id(1, "amd") == "0000:42:00.0"
+        assert topology._get_gpu_uuid(0, "amd", pci_bus_id="0000:41:00.0") == "amd-gpu0"
+        assert topology._parse_amd_topo(["0000:41:00.0", "0000:42:00.0"]) == [
+            [IntraNodeLinkType.SELF, IntraNodeLinkType.PCIE_SWITCH],
+            [IntraNodeLinkType.PCIE_SWITCH, IntraNodeLinkType.SELF],
+        ]
+        assert fake_amdsmi.init_calls == 0
+        assert fake_amdsmi.shutdown_calls == 0
+
+    def test_nvml_outer_helpers_initialize_and_shutdown(self, monkeypatch):
+        fake_pynvml = _make_fake_pynvml()
+        monkeypatch.setitem(sys.modules, "pynvml", fake_pynvml)
+
+        topology._outer_init_vendor_lib("nvidia")
+        topology._outer_shutdown_vendor_lib("nvidia")
+
+        assert fake_pynvml.init_calls == 1
+        assert fake_pynvml.shutdown_calls == 1
+
+    def test_amdsmi_outer_helpers_initialize_and_shutdown(self, monkeypatch):
+        fake_amdsmi = _make_fake_amdsmi()
+        monkeypatch.setitem(sys.modules, "amdsmi", fake_amdsmi)
+
+        topology._outer_init_vendor_lib("amd")
+        topology._outer_shutdown_vendor_lib("amd")
+
+        assert fake_amdsmi.init_calls == 1
+        assert fake_amdsmi.shutdown_calls == 1
+
+    def test_get_gpu_fabric_info_uses_existing_vendor_lifecycle(self, monkeypatch):
+        fake_pynvml = _make_fake_pynvml()
+        monkeypatch.setitem(sys.modules, "pynvml", fake_pynvml)
+
+        fabric = topology._get_gpu_fabric_info(0, "nvidia", pci_bus_id="0000:41:00.0")
+
+        assert fabric.domain_key == f"{'01' * 16}:7"
+        assert fake_pynvml.init_calls == 0
+        assert fake_pynvml.shutdown_calls == 0
+
+    def test_missing_library_fallbacks_preserve_logs(self, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG, logger="iris.topology")
+        real_import = builtins.__import__
+
+        def blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name in {"pynvml", "amdsmi"}:
+                raise ImportError(f"{name} unavailable")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", blocked_import)
+        assert topology._get_pci_bus_id(0, "nvidia") == "unknown"
+        assert any(record.message == "pynvml not available" for record in caplog.records)
+
+        caplog.clear()
+        assert topology._parse_amd_topo(["0000:41:00.0"]) is None
+        assert any(record.message == "amdsmi not available for topology query" for record in caplog.records)
+
+    def test_discover_uses_outer_vendor_lifecycle(self, monkeypatch):
+        lifecycle_calls = []
+
+        monkeypatch.setattr(topology, "_detect_vendor", lambda: "nvidia")
+        monkeypatch.setattr(socket, "gethostname", lambda: "test-host")
+        monkeypatch.setattr(torch.cuda, "get_device_name", lambda gpu_id: "Fake GPU")
+        monkeypatch.setattr(topology, "_get_total_memory_mb", lambda gpu_id: 81920)
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+        monkeypatch.setattr(topology, "_get_pci_bus_id", lambda gpu_id, vendor: f"0000:4{gpu_id + 1}:00.0")
+        monkeypatch.setattr(topology, "_get_gpu_uuid", lambda gpu_id, vendor, pci_bus_id="": f"uuid-{gpu_id}")
+        monkeypatch.setattr(topology, "_get_numa_node", lambda pci_bus_id: 0)
+        monkeypatch.setattr(topology, "_detect_infiniband", lambda: (False, []))
+        monkeypatch.setattr(topology, "_all_gather_strings", lambda payload, world_size: [payload])
+        monkeypatch.setattr(
+            topology,
+            "_detect_intra_node_topology",
+            lambda pci_bus_ids, vendor: (
+                [
+                    [IntraNodeLinkType.SELF, IntraNodeLinkType.NVLINK],
+                    [IntraNodeLinkType.NVLINK, IntraNodeLinkType.SELF],
+                ],
+                [[True, True], [True, True]],
+            ),
+        )
+        monkeypatch.setattr(
+            topology,
+            "_outer_init_vendor_lib",
+            lambda vendor: lifecycle_calls.append(("init", vendor)),
+        )
+        monkeypatch.setattr(
+            topology,
+            "_outer_shutdown_vendor_lib",
+            lambda vendor: lifecycle_calls.append(("shutdown", vendor)),
+        )
+        monkeypatch.setattr(
+            topology,
+            "_get_gpu_fabric_info",
+            lambda gpu_id, vendor, pci_bus_id="": FabricInfo(cluster_uuid="feedbeef", clique_id=3),
+        )
+
+        discovery = TopologyDiscovery.__new__(TopologyDiscovery)
+        discovery.rank = 0
+        discovery.world_size = 1
+        discovery.gpu_id = 0
+        discovery._topology = None
+
+        topo = discovery.discover()
+
+        assert lifecycle_calls == [("init", "nvidia"), ("shutdown", "nvidia")]
+        assert isinstance(topo, TopologyMap)
+        assert topo.gpu_info[0].pci_bus_id == "0000:41:00.0"
+        assert topo.gpu_info[0].uuid == "uuid-0"
+        assert topo.gpu_info[0].fabric_info.domain_key == "feedbeef:3"
+        assert topo.nodes["test-host"].link_types[0][1] == IntraNodeLinkType.NVLINK
+
+    def test_discover_shuts_down_outer_vendor_lifecycle_on_exception(self, monkeypatch):
+        lifecycle_calls = []
+
+        monkeypatch.setattr(topology, "_detect_vendor", lambda: "nvidia")
+        monkeypatch.setattr(socket, "gethostname", lambda: "test-host")
+        monkeypatch.setattr(
+            topology,
+            "_outer_init_vendor_lib",
+            lambda vendor: lifecycle_calls.append(("init", vendor)),
+        )
+        monkeypatch.setattr(
+            topology,
+            "_outer_shutdown_vendor_lib",
+            lambda vendor: lifecycle_calls.append(("shutdown", vendor)),
+        )
+        monkeypatch.setattr(torch.cuda, "get_device_name", lambda gpu_id: "Fake GPU")
+        monkeypatch.setattr(topology, "_get_total_memory_mb", lambda gpu_id: 81920)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(topology, "_get_pci_bus_id", boom)
+
+        discovery = TopologyDiscovery.__new__(TopologyDiscovery)
+        discovery.rank = 0
+        discovery.world_size = 1
+        discovery.gpu_id = 0
+        discovery._topology = None
+
+        with pytest.raises(RuntimeError, match="boom"):
+            discovery.discover()
+
+        assert lifecycle_calls == [("init", "nvidia"), ("shutdown", "nvidia")]
+
+    def test_discover_unknown_vendor_uses_noop_outer_lifecycle(self, monkeypatch):
+        monkeypatch.setattr(topology, "_detect_vendor", lambda: "unknown")
+        monkeypatch.setattr(socket, "gethostname", lambda: "test-host")
+        monkeypatch.setattr(torch.cuda, "get_device_name", lambda gpu_id: "CPU-only fallback")
+        monkeypatch.setattr(topology, "_get_total_memory_mb", lambda gpu_id: 0)
+        monkeypatch.setattr(topology, "_get_pci_bus_id", lambda gpu_id, vendor: "unknown")
+        monkeypatch.setattr(topology, "_get_gpu_uuid", lambda gpu_id, vendor, pci_bus_id="": "gpu-test-host-0")
+        monkeypatch.setattr(topology, "_get_numa_node", lambda pci_bus_id: -1)
+        monkeypatch.setattr(topology, "_get_gpu_fabric_info", lambda gpu_id, vendor, pci_bus_id="": FabricInfo())
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+        monkeypatch.setattr(topology, "_detect_infiniband", lambda: (False, []))
+        monkeypatch.setattr(topology, "_detect_intra_node_topology", lambda pci_bus_ids, vendor: (None, None))
+        monkeypatch.setattr(topology, "_all_gather_strings", lambda payload, world_size: [payload])
+
+        discovery = TopologyDiscovery.__new__(TopologyDiscovery)
+        discovery.rank = 0
+        discovery.world_size = 1
+        discovery.gpu_id = 0
+        discovery._topology = None
+
+        topo = discovery.discover()
+
+        assert isinstance(topo, TopologyMap)
+        assert topo.gpu_info[0].vendor == "unknown"
+        assert topo.gpu_info[0].fabric_info == FabricInfo()
+        assert topo.nodes["test-host"].num_gpus == 1
 
 
 class TestNodeInfo:

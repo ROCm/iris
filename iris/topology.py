@@ -168,18 +168,17 @@ def _get_nvml_handle_by_pci(pci_bus_id: str):
     This bypasses index-based lookup entirely and is immune to
     CUDA_VISIBLE_DEVICES remapping.  Returns None on failure.
     """
+    norm = _normalize_pci_bus_id(pci_bus_id)
     try:
         import pynvml
+
+        # nvmlDeviceGetHandleByPciBusId expects full domain:bus:dev.fn
+        if len(norm.split(":")) == 2:
+            norm = f"0000:{norm}"
+
+        return pynvml.nvmlDeviceGetHandleByPciBusId(norm.encode())
     except ImportError:
         return None
-
-    norm = _normalize_pci_bus_id(pci_bus_id)
-    # nvmlDeviceGetHandleByPciBusId expects full domain:bus:dev.fn
-    if len(norm.split(":")) == 2:
-        norm = f"0000:{norm}"
-
-    try:
-        return pynvml.nvmlDeviceGetHandleByPciBusId(norm.encode())
     except Exception as e:
         logger.debug("nvmlDeviceGetHandleByPciBusId(%s) failed: %s", norm, e)
         return None
@@ -197,22 +196,25 @@ def _get_amdsmi_handle_by_pci(pci_bus_id: str, all_handles=None):
     """
     try:
         import amdsmi
+
+        if all_handles is None:
+            all_handles = amdsmi.amdsmi_get_processor_handles()
+
+        norm = _normalize_pci_bus_id(pci_bus_id)
+
+        for handle in all_handles:
+            try:
+                bdf = amdsmi.amdsmi_get_gpu_device_bdf(handle)
+                if bdf and _normalize_pci_bus_id(str(bdf)) == norm:
+                    return handle
+            except Exception:
+                continue
+        return None
     except ImportError:
         return None
-
-    if all_handles is None:
-        all_handles = amdsmi.amdsmi_get_processor_handles()
-
-    norm = _normalize_pci_bus_id(pci_bus_id)
-
-    for handle in all_handles:
-        try:
-            bdf = amdsmi.amdsmi_get_gpu_device_bdf(handle)
-            if bdf and _normalize_pci_bus_id(str(bdf)) == norm:
-                return handle
-        except Exception:
-            continue
-    return None
+    except Exception as e:
+        logger.debug("amdsmi handle lookup by PCI bus ID (%s) failed: %s", pci_bus_id, e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -254,63 +256,58 @@ def _nvidia_get_gpu_fabric_info(gpu_id: int, pci_bus_id: str = "") -> FabricInfo
     try:
         import pynvml
 
-        pynvml.nvmlInit()
+        # --- Resolve handle: prefer PCI bus ID, fall back to physical index ---
+        handle = None
+        if pci_bus_id and pci_bus_id != "unknown":
+            handle = _get_nvml_handle_by_pci(pci_bus_id)
+
+        if handle is None:
+            physical_idx = _logical_to_physical_gpu_index(gpu_id, "nvidia")
+            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_idx)
+
+        fabric_info = None
         try:
-            # --- Resolve handle: prefer PCI bus ID, fall back to physical index ---
-            handle = None
-            if pci_bus_id and pci_bus_id != "unknown":
-                handle = _get_nvml_handle_by_pci(pci_bus_id)
+            info_struct = pynvml.c_nvmlGpuFabricInfo_v2_t()
+            pynvml.nvmlDeviceGetGpuFabricInfoV(handle, info_struct)
+            fabric_info = info_struct
+        except (AttributeError, TypeError, pynvml.NVMLError):
+            # GPU doesn't support fabric
+            return FabricInfo()
 
-            if handle is None:
-                physical_idx = _logical_to_physical_gpu_index(gpu_id, "nvidia")
-                handle = pynvml.nvmlDeviceGetHandleByIndex(physical_idx)
+        if fabric_info is None:
+            return FabricInfo()
 
-            fabric_info = None
-            try:
-                info_struct = pynvml.c_nvmlGpuFabricInfo_v2_t()
-                pynvml.nvmlDeviceGetGpuFabricInfoV(handle, info_struct)
-                fabric_info = info_struct
-            except (AttributeError, TypeError, pynvml.NVMLError):
-                # GPU doesn't support fabric
-                return FabricInfo()
+        # Check registration state — must be COMPLETED (value 3)
+        state = getattr(fabric_info, "state", None)
+        if state is not None and state != 3:
+            return FabricInfo()
 
-            if fabric_info is None:
-                return FabricInfo()
+        # Check status — must be SUCCESS (value 0)
+        status = getattr(fabric_info, "status", None)
+        if status is not None and status != 0:
+            return FabricInfo()
 
-            # Check registration state — must be COMPLETED (value 3)
-            state = getattr(fabric_info, "state", None)
-            if state is not None and state != 3:
-                return FabricInfo()
+        # Extract clusterUuid
+        cluster_uuid_raw = getattr(fabric_info, "clusterUuid", None)
+        if cluster_uuid_raw is None:
+            return FabricInfo()
 
-            # Check status — must be SUCCESS (value 0)
-            status = getattr(fabric_info, "status", None)
-            if status is not None and status != 0:
-                return FabricInfo()
+        if isinstance(cluster_uuid_raw, bytes):
+            cluster_uuid_hex = cluster_uuid_raw.hex()
+        elif isinstance(cluster_uuid_raw, (list, tuple)):
+            cluster_uuid_hex = bytes(cluster_uuid_raw).hex()
+        else:
+            cluster_uuid_hex = str(cluster_uuid_raw)
 
-            # Extract clusterUuid
-            cluster_uuid_raw = getattr(fabric_info, "clusterUuid", None)
-            if cluster_uuid_raw is None:
-                return FabricInfo()
+        if all(c == "0" for c in cluster_uuid_hex):
+            return FabricInfo()
 
-            if isinstance(cluster_uuid_raw, bytes):
-                cluster_uuid_hex = cluster_uuid_raw.hex()
-            elif isinstance(cluster_uuid_raw, (list, tuple)):
-                cluster_uuid_hex = bytes(cluster_uuid_raw).hex()
-            else:
-                cluster_uuid_hex = str(cluster_uuid_raw)
+        clique_id = getattr(fabric_info, "cliqueId", 0)
 
-            if all(c == "0" for c in cluster_uuid_hex):
-                return FabricInfo()
-
-            clique_id = getattr(fabric_info, "cliqueId", 0)
-
-            return FabricInfo(
-                cluster_uuid=cluster_uuid_hex,
-                clique_id=int(clique_id),
-            )
-        finally:
-            pynvml.nvmlShutdown()
-
+        return FabricInfo(
+            cluster_uuid=cluster_uuid_hex,
+            clique_id=int(clique_id),
+        )
     except ImportError:
         logger.debug("pynvml not available, skipping NVML fabric info")
     except Exception as e:
@@ -319,13 +316,16 @@ def _nvidia_get_gpu_fabric_info(gpu_id: int, pci_bus_id: str = "") -> FabricInfo
     return FabricInfo()
 
 
-def get_gpu_fabric_info(gpu_id: int, vendor: str, pci_bus_id: str = "") -> FabricInfo:
+def _get_gpu_fabric_info(gpu_id: int, vendor: str, pci_bus_id: str = "") -> FabricInfo:
     """
     Get GPU fabric domain info for the given device.
 
     Dispatches to the appropriate vendor-specific implementation:
         AMD:    amdsmi_get_gpu_fabric_info (ppod_id, vpod_id)
         NVIDIA: nvmlDeviceGetGpuFabricInfoV (clusterUuid, cliqueId)
+
+    Caller is responsible for wrapping the discovery scope in
+    _outer_init_vendor_lib() / _outer_shutdown_vendor_lib().
 
     Args:
         gpu_id: Local GPU device index.
@@ -335,12 +335,12 @@ def get_gpu_fabric_info(gpu_id: int, vendor: str, pci_bus_id: str = "") -> Fabri
     Returns:
         FabricInfo identifying the fabric domain this GPU belongs to.
     """
+    if vendor not in ("amd", "nvidia"):
+        return FabricInfo()
+
     if vendor == "amd":
         return _amd_get_gpu_fabric_info(gpu_id, pci_bus_id=pci_bus_id)
-    elif vendor == "nvidia":
-        return _nvidia_get_gpu_fabric_info(gpu_id, pci_bus_id=pci_bus_id)
-    else:
-        return FabricInfo()
+    return _nvidia_get_gpu_fabric_info(gpu_id, pci_bus_id=pci_bus_id)
 
 
 def _normalize_pci_bus_id(bus_id: str) -> str:
@@ -585,6 +585,57 @@ def _detect_vendor() -> str:
     return "unknown"
 
 
+def _outer_init_vendor_lib(vendor: str) -> None:
+    """
+    Initialize the vendor library for the duration of an outer scope
+    (for example, TopologyDiscovery.discover).
+
+    Failures are logged but not raised. This is defensive — if init fails,
+    the helpers called inside the scope will themselves raise and be caught
+    by their own except Exception clauses, falling back gracefully.
+    """
+    if vendor == "nvidia":
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug("nvmlInit() failed: %s", e)
+    elif vendor == "amd":
+        try:
+            import amdsmi
+
+            amdsmi.amdsmi_init()
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug("amdsmi_init() failed: %s", e)
+
+
+def _outer_shutdown_vendor_lib(vendor: str) -> None:
+    """Counterpart to _outer_init_vendor_lib. Safe to call unconditionally in a finally block."""
+    if vendor == "nvidia":
+        try:
+            import pynvml
+
+            pynvml.nvmlShutdown()
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug("nvmlShutdown() failed: %s", e)
+    elif vendor == "amd":
+        try:
+            import amdsmi
+
+            amdsmi.amdsmi_shut_down()
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug("amdsmi_shut_down() failed: %s", e)
+
+
 def _get_total_memory_mb(gpu_id: int) -> int:
     """
     Get total GPU memory in MB, compatible across PyTorch versions.
@@ -618,16 +669,12 @@ def _get_pci_bus_id(device_idx: int, vendor: str) -> str:
         try:
             import pynvml
 
-            pynvml.nvmlInit()
-            try:
-                handle = pynvml.nvmlDeviceGetHandleByIndex(physical_idx)
-                pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
-                bus_id = pci_info.busId
-                if isinstance(bus_id, bytes):
-                    bus_id = bus_id.decode("utf-8")
-                return _normalize_pci_bus_id(bus_id)
-            finally:
-                pynvml.nvmlShutdown()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_idx)
+            pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
+            bus_id = pci_info.busId
+            if isinstance(bus_id, bytes):
+                bus_id = bus_id.decode("utf-8")
+            return _normalize_pci_bus_id(bus_id)
         except ImportError:
             logger.debug("pynvml not available")
         except Exception as e:
@@ -642,21 +689,17 @@ def _get_pci_bus_id(device_idx: int, vendor: str) -> str:
         try:
             import amdsmi
 
-            amdsmi.amdsmi_init()
-            try:
-                handles = amdsmi.amdsmi_get_processor_handles()
-                if 0 <= physical_idx < len(handles):
-                    bus_id = amdsmi.amdsmi_get_gpu_device_bdf(handles[physical_idx])
-                    if bus_id:
-                        return _normalize_pci_bus_id(str(bus_id))
-                else:
-                    logger.debug(
-                        "physical_idx %d out of range (%d GPUs)",
-                        physical_idx,
-                        len(handles),
-                    )
-            finally:
-                amdsmi.amdsmi_shut_down()
+            handles = amdsmi.amdsmi_get_processor_handles()
+            if 0 <= physical_idx < len(handles):
+                bus_id = amdsmi.amdsmi_get_gpu_device_bdf(handles[physical_idx])
+                if bus_id:
+                    return _normalize_pci_bus_id(str(bus_id))
+            else:
+                logger.debug(
+                    "physical_idx %d out of range (%d GPUs)",
+                    physical_idx,
+                    len(handles),
+                )
         except ImportError:
             logger.debug("amdsmi not available")
         except Exception as e:
@@ -691,21 +734,17 @@ def _get_gpu_uuid(device_idx: int, vendor: str, pci_bus_id: str = "") -> str:
         try:
             import pynvml
 
-            pynvml.nvmlInit()
-            try:
-                # Prefer PCI-based resolution — immune to CUDA_VISIBLE_DEVICES
-                handle = None
-                if pci_bus_id and pci_bus_id != "unknown":
-                    handle = _get_nvml_handle_by_pci(pci_bus_id)
-                if handle is None:
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(physical_idx)
+            # Prefer PCI-based resolution — immune to CUDA_VISIBLE_DEVICES
+            handle = None
+            if pci_bus_id and pci_bus_id != "unknown":
+                handle = _get_nvml_handle_by_pci(pci_bus_id)
+            if handle is None:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(physical_idx)
 
-                uuid = pynvml.nvmlDeviceGetUUID(handle)
-                if isinstance(uuid, bytes):
-                    uuid = uuid.decode("utf-8")
-                return uuid
-            finally:
-                pynvml.nvmlShutdown()
+            uuid = pynvml.nvmlDeviceGetUUID(handle)
+            if isinstance(uuid, bytes):
+                uuid = uuid.decode("utf-8")
+            return uuid
         except ImportError:
             logger.debug("pynvml not available")
         except Exception as e:
@@ -720,28 +759,24 @@ def _get_gpu_uuid(device_idx: int, vendor: str, pci_bus_id: str = "") -> str:
         try:
             import amdsmi
 
-            amdsmi.amdsmi_init()
-            try:
-                # Prefer PCI-based resolution
-                handle = None
-                if pci_bus_id and pci_bus_id != "unknown":
-                    handle = _get_amdsmi_handle_by_pci(pci_bus_id)
-                if handle is None:
-                    handles = amdsmi.amdsmi_get_processor_handles()
-                    if 0 <= physical_idx < len(handles):
-                        handle = handles[physical_idx]
+            # Prefer PCI-based resolution
+            handle = None
+            if pci_bus_id and pci_bus_id != "unknown":
+                handle = _get_amdsmi_handle_by_pci(pci_bus_id)
+            if handle is None:
+                handles = amdsmi.amdsmi_get_processor_handles()
+                if 0 <= physical_idx < len(handles):
+                    handle = handles[physical_idx]
 
-                if handle is not None:
-                    uuid = amdsmi.amdsmi_get_gpu_device_uuid(handle)
-                    if uuid:
-                        return str(uuid)
-                else:
-                    logger.debug(
-                        "physical_idx %d out of range or PCI resolve failed",
-                        physical_idx,
-                    )
-            finally:
-                amdsmi.amdsmi_shut_down()
+            if handle is not None:
+                uuid = amdsmi.amdsmi_get_gpu_device_uuid(handle)
+                if uuid:
+                    return str(uuid)
+            else:
+                logger.debug(
+                    "physical_idx %d out of range or PCI resolve failed",
+                    physical_idx,
+                )
         except ImportError:
             logger.debug("amdsmi not available")
         except Exception as e:
@@ -902,47 +937,41 @@ def _parse_nvidia_topo(local_pci_bus_ids: List[str]) -> Optional[List[List[int]]
     try:
         import pynvml
 
-        pynvml.nvmlInit()
-        try:
-            # Resolve local PCI bus IDs directly to NVML handles
-            handles = []
-            for pci in local_pci_bus_ids:
-                norm = _normalize_pci_bus_id(pci)
-                if len(norm.split(":")) == 2:
-                    norm = f"0000:{norm}"
+        # Resolve local PCI bus IDs directly to NVML handles
+        handles = []
+        for pci in local_pci_bus_ids:
+            norm = _normalize_pci_bus_id(pci)
+            if len(norm.split(":")) == 2:
+                norm = f"0000:{norm}"
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByPciBusId(norm.encode())
+                handles.append(handle)
+            except pynvml.NVMLError as e:
+                logger.warning("Could not get NVML handle for PCI %s: %s", pci, e)
+                return None
+
+        # Build the matrix
+        matrix = [[IntraNodeLinkType.UNKNOWN] * num_local for _ in range(num_local)]
+        for i in range(num_local):
+            for j in range(num_local):
+                if i == j:
+                    matrix[i][j] = IntraNodeLinkType.SELF
+                    continue
+
+                # NVLink takes priority over PCIe topology level
+                if _nvml_check_nvlink(handles[i], handles[j], pynvml):
+                    matrix[i][j] = IntraNodeLinkType.NVLINK
+                    continue
+
                 try:
-                    handle = pynvml.nvmlDeviceGetHandleByPciBusId(norm.encode())
-                    handles.append(handle)
-                except pynvml.NVMLError as e:
-                    logger.warning("Could not get NVML handle for PCI %s: %s", pci, e)
-                    return None
+                    level = pynvml.nvmlDeviceGetTopologyCommonAncestor(handles[i], handles[j])
+                    matrix[i][j] = _NVML_TOPO_TO_LINK.get(level, IntraNodeLinkType.UNKNOWN)
+                except pynvml.NVMLError:
+                    matrix[i][j] = IntraNodeLinkType.UNKNOWN
 
-            # Build the matrix
-            matrix = [[IntraNodeLinkType.UNKNOWN] * num_local for _ in range(num_local)]
-            for i in range(num_local):
-                for j in range(num_local):
-                    if i == j:
-                        matrix[i][j] = IntraNodeLinkType.SELF
-                        continue
-
-                    # NVLink takes priority over PCIe topology level
-                    if _nvml_check_nvlink(handles[i], handles[j], pynvml):
-                        matrix[i][j] = IntraNodeLinkType.NVLINK
-                        continue
-
-                    try:
-                        level = pynvml.nvmlDeviceGetTopologyCommonAncestor(handles[i], handles[j])
-                        matrix[i][j] = _NVML_TOPO_TO_LINK.get(level, IntraNodeLinkType.UNKNOWN)
-                    except pynvml.NVMLError:
-                        matrix[i][j] = IntraNodeLinkType.UNKNOWN
-
-            return matrix
-        finally:
-            pynvml.nvmlShutdown()
-
+        return matrix
     except ImportError:
         logger.debug("pynvml not available for topology query")
-        return None
     except Exception as e:
         logger.debug("NVML topology query failed: %s", e)
         return None
@@ -963,79 +992,71 @@ def _parse_amd_topo(local_pci_bus_ids: List[str]) -> Optional[List[List[int]]]:
     try:
         import amdsmi
 
-        amdsmi.amdsmi_init()
-        try:
-            all_handles = amdsmi.amdsmi_get_processor_handles()
+        all_handles = amdsmi.amdsmi_get_processor_handles()
 
-            # Build BDF -> handle map for all physical GPUs
-            bdf_to_handle = {}
-            for handle in all_handles:
-                try:
-                    bdf = amdsmi.amdsmi_get_gpu_device_bdf(handle)
-                    if bdf:
-                        bdf_to_handle[_normalize_pci_bus_id(str(bdf))] = handle
-                except Exception:
+        # Build BDF -> handle map for all physical GPUs
+        bdf_to_handle = {}
+        for handle in all_handles:
+            try:
+                bdf = amdsmi.amdsmi_get_gpu_device_bdf(handle)
+                if bdf:
+                    bdf_to_handle[_normalize_pci_bus_id(str(bdf))] = handle
+            except Exception:
+                continue
+
+        # Resolve local PCI bus IDs to amdsmi handles
+        handles = []
+        for pci in local_pci_bus_ids:
+            norm = _normalize_pci_bus_id(pci)
+            handle = bdf_to_handle.get(norm)
+            if handle is None:
+                logger.warning(
+                    "Could not find amdsmi handle for PCI %s. Known BDFs: %s",
+                    pci,
+                    list(bdf_to_handle.keys()),
+                )
+                return None
+            handles.append(handle)
+
+        # Pre-compute XGMI neighbor sets for each local GPU.
+        # amdsmi_get_link_topology_nearest returns all GPUs reachable
+        # via a given link type from a source GPU.
+        xgmi_neighbors: List[Set[str]] = []
+        for handle in handles:
+            neighbors: Set[str] = set()
+            try:
+                result = amdsmi.amdsmi_get_link_topology_nearest(handle, amdsmi.AmdSmiLinkType.AMDSMI_LINK_TYPE_XGMI)
+                for peer in result.get("processor_list", []):
+                    try:
+                        peer_bdf = amdsmi.amdsmi_get_gpu_device_bdf(peer)
+                        if peer_bdf:
+                            neighbors.add(_normalize_pci_bus_id(str(peer_bdf)))
+                    except Exception:
+                        continue
+            except Exception:
+                pass  # No XGMI on this GPU (PCIe-only system)
+            xgmi_neighbors.append(neighbors)
+
+        # Normalized BDFs for each local device index
+        local_bdfs = [_normalize_pci_bus_id(pci) for pci in local_pci_bus_ids]
+
+        # Build the matrix
+        matrix = [[IntraNodeLinkType.UNKNOWN] * num_local for _ in range(num_local)]
+        for i in range(num_local):
+            for j in range(num_local):
+                if i == j:
+                    matrix[i][j] = IntraNodeLinkType.SELF
                     continue
 
-            # Resolve local PCI bus IDs to amdsmi handles
-            handles = []
-            for pci in local_pci_bus_ids:
-                norm = _normalize_pci_bus_id(pci)
-                handle = bdf_to_handle.get(norm)
-                if handle is None:
-                    logger.warning(
-                        "Could not find amdsmi handle for PCI %s. Known BDFs: %s",
-                        pci,
-                        list(bdf_to_handle.keys()),
-                    )
-                    return None
-                handles.append(handle)
+                # Check if GPU j's BDF is in GPU i's XGMI neighbor set
+                if local_bdfs[j] in xgmi_neighbors[i]:
+                    matrix[i][j] = IntraNodeLinkType.NVLINK  # XGMI maps to NVLINK enum
+                else:
+                    matrix[i][j] = IntraNodeLinkType.PCIE_SWITCH
 
-            # Pre-compute XGMI neighbor sets for each local GPU.
-            # amdsmi_get_link_topology_nearest returns all GPUs reachable
-            # via a given link type from a source GPU.
-            xgmi_neighbors: List[Set[str]] = []
-            for handle in handles:
-                neighbors: Set[str] = set()
-                try:
-                    result = amdsmi.amdsmi_get_link_topology_nearest(
-                        handle, amdsmi.AmdSmiLinkType.AMDSMI_LINK_TYPE_XGMI
-                    )
-                    for peer in result.get("processor_list", []):
-                        try:
-                            peer_bdf = amdsmi.amdsmi_get_gpu_device_bdf(peer)
-                            if peer_bdf:
-                                neighbors.add(_normalize_pci_bus_id(str(peer_bdf)))
-                        except Exception:
-                            continue
-                except Exception:
-                    pass  # No XGMI on this GPU (PCIe-only system)
-                xgmi_neighbors.append(neighbors)
-
-            # Normalized BDFs for each local device index
-            local_bdfs = [_normalize_pci_bus_id(pci) for pci in local_pci_bus_ids]
-
-            # Build the matrix
-            matrix = [[IntraNodeLinkType.UNKNOWN] * num_local for _ in range(num_local)]
-            for i in range(num_local):
-                for j in range(num_local):
-                    if i == j:
-                        matrix[i][j] = IntraNodeLinkType.SELF
-                        continue
-
-                    # Check if GPU j's BDF is in GPU i's XGMI neighbor set
-                    if local_bdfs[j] in xgmi_neighbors[i]:
-                        matrix[i][j] = IntraNodeLinkType.NVLINK  # XGMI maps to NVLINK enum
-                    else:
-                        matrix[i][j] = IntraNodeLinkType.PCIE_SWITCH
-
-            return matrix
-        finally:
-            amdsmi.amdsmi_shut_down()
-
+        return matrix
     except ImportError:
         logger.debug("amdsmi not available for topology query")
-        return None
     except Exception as e:
         logger.debug("amdsmi topology query failed: %s", e)
         return None
@@ -1143,53 +1164,55 @@ class TopologyDiscovery:
             f"[Rank {self.rank}] Starting topology discovery on {hostname}, GPU {self.gpu_id}, vendor={vendor}"
         )
 
-        # Probe local GPU info
-        device_name = torch.cuda.get_device_name(self.gpu_id)
-        total_memory_mb = _get_total_memory_mb(self.gpu_id)
-        pci_bus_id = _get_pci_bus_id(self.gpu_id, vendor)
-        # Pass PCI bus ID to UUID query for PCI-based handle resolution
-        gpu_uuid = _get_gpu_uuid(self.gpu_id, vendor, pci_bus_id=pci_bus_id)
-        # Pass PCI bus ID
-        numa_node = _get_numa_node(pci_bus_id)
+        _outer_init_vendor_lib(vendor)
+        try:
+            # Probe local GPU info
+            device_name = torch.cuda.get_device_name(self.gpu_id)
+            total_memory_mb = _get_total_memory_mb(self.gpu_id)
+            pci_bus_id = _get_pci_bus_id(self.gpu_id, vendor)
+            # Pass PCI bus ID to UUID query for PCI-based handle resolution
+            gpu_uuid = _get_gpu_uuid(self.gpu_id, vendor, pci_bus_id=pci_bus_id)
+            # Pass PCI bus ID
+            numa_node = _get_numa_node(pci_bus_id)
 
-        # Query fabric info — pass PCI bus ID for PCI-based handle resolution
-        fabric_info = get_gpu_fabric_info(self.gpu_id, vendor, pci_bus_id=pci_bus_id)
-        logger.debug(
-            f"[Rank {self.rank}] Fabric info: cluster_uuid={fabric_info.cluster_uuid}, "
-            f"clique_id={fabric_info.clique_id}, domain_key={fabric_info.domain_key}"
-        )
-
-        local_gpu_info = GPUInfo(
-            global_rank=self.rank,
-            local_rank=self.gpu_id,
-            hostname=hostname,
-            gpu_id=self.gpu_id,
-            pci_bus_id=pci_bus_id,
-            device_name=device_name,
-            total_memory_mb=total_memory_mb,
-            numa_node=numa_node,
-            vendor=vendor,
-            uuid=gpu_uuid,
-            fabric_info=fabric_info,
-        )
-
-        # Probe node-level info
-        # Gather PCI bus IDs for ALL visible GPUs on this node (not just this rank's).
-        # This is needed for correct CLI tool output remapping.
-        num_local_gpus = torch.cuda.device_count()
-        if num_local_gpus <= 1 and self.world_size > 1:
-            logger.warning(
-                f"[Rank {self.rank}] torch.cuda.device_count() = {num_local_gpus}. "
-                f"CUDA_VISIBLE_DEVICES may be restricting GPU visibility. "
-                f"Intra-node topology detection will be limited."
+            # Query fabric info — pass PCI bus ID for PCI-based handle resolution
+            fabric_info = _get_gpu_fabric_info(self.gpu_id, vendor, pci_bus_id=pci_bus_id)
+            logger.debug(
+                f"[Rank {self.rank}] Fabric info: cluster_uuid={fabric_info.cluster_uuid}, "
+                f"clique_id={fabric_info.clique_id}, domain_key={fabric_info.domain_key}"
             )
 
-        local_pci_bus_ids = []
-        for dev_idx in range(num_local_gpus):
-            local_pci_bus_ids.append(_get_pci_bus_id(dev_idx, vendor))
+            local_gpu_info = GPUInfo(
+                global_rank=self.rank,
+                local_rank=self.gpu_id,
+                hostname=hostname,
+                gpu_id=self.gpu_id,
+                pci_bus_id=pci_bus_id,
+                device_name=device_name,
+                total_memory_mb=total_memory_mb,
+                numa_node=numa_node,
+                vendor=vendor,
+                uuid=gpu_uuid,
+                fabric_info=fabric_info,
+            )
 
-        has_ib, ib_devices = _detect_infiniband()
-        link_types, p2p_access = _detect_intra_node_topology(local_pci_bus_ids, vendor)
+            # Probe node-level info
+            # Gather PCI bus IDs for ALL visible GPUs on this node (not just this rank's).
+            # This is needed for correct CLI tool output remapping.
+            num_local_gpus = torch.cuda.device_count()
+            if num_local_gpus <= 1 and self.world_size > 1:
+                logger.warning(
+                    f"[Rank {self.rank}] torch.cuda.device_count() = {num_local_gpus}. "
+                    f"CUDA_VISIBLE_DEVICES may be restricting GPU visibility. "
+                    f"Intra-node topology detection will be limited."
+                )
+
+            local_pci_bus_ids = [_get_pci_bus_id(i, vendor) for i in range(num_local_gpus)]
+
+            has_ib, ib_devices = _detect_infiniband()
+            link_types, p2p_access = _detect_intra_node_topology(local_pci_bus_ids, vendor)
+        finally:
+            _outer_shutdown_vendor_lib(vendor)
 
         # All-gather
         local_gpu_json = json.dumps(local_gpu_info.to_dict())
