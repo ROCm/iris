@@ -92,7 +92,7 @@ class Config:
     reduce_scatter_variant: str = "two_shot"
     num_stages: int = 1
     num_warps: int = 4
-    threads_per_warp: int = 64
+    threads_per_warp: int | None = None
     waves_per_eu: int = 0
 
     def __post_init__(self):
@@ -144,6 +144,10 @@ class Config:
         if self.reduce_scatter_variant != "two_shot":
             raise ValueError(f"reduce_scatter_variant must be 'two_shot', got '{self.reduce_scatter_variant}'")
 
+        if self.threads_per_warp is None:
+            from triton.runtime import driver
+
+            self.threads_per_warp = driver.active.get_current_target().warp_size
         if self.threads_per_warp not in (32, 64):
             raise ValueError(f"threads_per_warp must be 32 (NVIDIA) or 64 (AMD), got {self.threads_per_warp}")
         if self.num_warps <= 0:
