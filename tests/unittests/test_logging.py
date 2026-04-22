@@ -60,7 +60,7 @@ def test_iris_debug_logging():
 
     log_capture = io.StringIO()
     handler = logging.StreamHandler(log_capture)
-    from iris.logging import IrisFormatter
+    from iris.host.logging.logging import IrisFormatter
 
     handler.setFormatter(IrisFormatter())
 
@@ -92,7 +92,7 @@ def test_logger_api_usage():
 
     log_capture = io.StringIO()
     handler = logging.StreamHandler(log_capture)
-    from iris.logging import IrisFormatter
+    from iris.host.logging.logging import IrisFormatter
 
     handler.setFormatter(IrisFormatter())
 
@@ -119,7 +119,7 @@ def test_logger_api_usage():
 
 def test_iris_formatter():
     """Test the IrisFormatter behavior."""
-    from iris.logging import IrisFormatter
+    from iris.host.logging.logging import IrisFormatter
     import logging
 
     formatter = IrisFormatter()

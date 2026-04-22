@@ -12,7 +12,7 @@ import iris
 
 def test_dmabuf_import_with_offset():
     """Validate PyTorch tensor import with offset preservation (mechanism used by as_symmetric)."""
-    from iris.hip import (
+    from iris.host.platform.hip import (
         export_dmabuf_handle,
         get_address_range,
         import_dmabuf_handle,
@@ -83,7 +83,7 @@ def test_dmabuf_import_with_offset():
 
 def test_dmabuf_import_no_offset():
     """Import with no offset (tensor at start of allocation)."""
-    from iris.hip import (
+    from iris.host.platform.hip import (
         export_dmabuf_handle,
         get_address_range,
         import_dmabuf_handle,

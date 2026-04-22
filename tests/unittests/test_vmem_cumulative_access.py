@@ -12,7 +12,7 @@ See: https://github.com/ROCm/rocm-systems/issues/2667
 
 import torch
 import torch.distributed as dist
-from iris.hip import (
+from iris.host.platform.hip import (
     get_allocation_granularity,
     mem_address_reserve,
     mem_address_free,
@@ -225,7 +225,7 @@ def test_vmem_cumulative_access_with_import():
         external_tensor = torch.randn(16, dtype=torch.float32, device="cuda")
         external_tensor.fill_(999.0)
 
-        from iris.hip import get_address_range, export_dmabuf_handle, mem_import_from_shareable_handle
+        from iris.host.platform.hip import get_address_range, export_dmabuf_handle, mem_import_from_shareable_handle
 
         external_ptr = external_tensor.data_ptr()
         alloc_base, alloc_size = get_address_range(external_ptr)

@@ -38,6 +38,7 @@ from argparse import Namespace
 
 import torch
 import iris
+from iris.host.distributed.helpers import distributed_allgather_multidim
 
 project_root = Path(__file__).resolve()
 while not (project_root / "tests").is_dir() or not (project_root / "examples").is_dir():
@@ -169,7 +170,7 @@ def test_correctness_fused_full(kv_len, num_heads, num_seqs, head_dim):
         ].contiguous()
 
         block_tables_this_rank = torch.arange(NUM_BLOCKS_PER_RANK, dtype=torch.int32).repeat(num_seqs, 1)
-        all_block_tables_numpy = iris._distributed_helpers.distributed_allgather_multidim(
+        all_block_tables_numpy = distributed_allgather_multidim(
             block_tables_this_rank.cpu().numpy()
         )
         block_tables = torch.from_numpy(all_block_tables_numpy).view(args.num_ranks, num_seqs, -1)
