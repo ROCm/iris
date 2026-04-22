@@ -16,10 +16,12 @@ from iris.ccl.config import Config
 
 print("imports ok")
 ctx = ig.iris()
-print(f"ctx ok, rank={ctx.rank()}, world={ctx.world_size()}")
+print(f"ctx ok, rank={ctx.get_rank()}, world={ctx.get_num_ranks()}")
 
-t_in = torch.randn(64, 64, device="cuda", dtype=torch.float16)
-t_out = torch.zeros(64 * ctx.world_size(), 64, device="cuda", dtype=torch.float16)
+world_size = ctx.get_num_ranks()
+t_in = ctx.zeros((64, 64), dtype=torch.float16)
+t_in.fill_(float(ctx.get_rank() + 1))
+t_out = ctx.zeros((64 * world_size, 64), dtype=torch.float16)
 print("tensors ok, launching kernel...")
 
 ctx.ccl.all_gather(t_out, t_in, config=Config(use_gluon=True))
