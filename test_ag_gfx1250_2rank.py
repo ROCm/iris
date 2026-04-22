@@ -3,53 +3,73 @@ import os
 
 os.environ["IRIS_SIMULATION"] = "1"
 os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
-os.environ["MASTER_ADDR"] = "localhost"
-os.environ["MASTER_PORT"] = "29500"
 
 import torch
-import torch.distributed as dist
+import torch.multiprocessing as mp
 
-torch.cuda.set_device(0)
-dist.init_process_group(backend="gloo", rank=0, world_size=1)
 
-import iris.experimental.iris_gluon as ig
-from iris.ccl.config import Config
+def run_rank(rank, world_size):
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "29501"
+    os.environ["RANK"] = str(rank)
+    os.environ["LOCAL_RANK"] = "0"
+    os.environ["WORLD_SIZE"] = str(world_size)
 
-# Force 2 simulated ranks on the same GPU
-ctx = ig.iris(heap_size=1 << 28)
-rank = ctx.get_rank()
-world_size = ctx.get_num_ranks()
-print(f"rank={rank}, world_size={world_size}")
+    import torch.distributed as dist
 
-if world_size < 2:
-    print("world_size=1, cannot test remote stores. Need torchrun --nproc_per_node=2")
-    print("Testing local-only path instead...")
+    torch.cuda.set_device(0)
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
 
-M, N = 64, 64
-t_in = ctx.zeros((M, N), dtype=torch.float16)
-t_in.fill_(float(rank + 1))
-t_out = ctx.zeros((world_size * M, N), dtype=torch.float16)
+    import iris.experimental.iris_gluon as ig
+    from iris.ccl.config import Config
 
-config = Config(use_gluon=True, block_size_m=32, block_size_n=64, comm_sms=4)
-print(f"config: block_size={config.block_size_m * config.block_size_n}, "
-      f"threads_per_warp={config.threads_per_warp}, num_warps={config.num_warps}")
+    ctx = ig.iris(heap_size=1 << 28)
+    r = ctx.get_rank()
+    ws = ctx.get_num_ranks()
+    print(f"[rank {r}] initialized, world_size={ws}")
 
-ctx.barrier()
-ctx.ccl.all_gather(t_out, t_in, config=config)
-torch.cuda.synchronize()
+    M, N = 64, 64
+    t_in = ctx.zeros((M, N), dtype=torch.float16)
+    t_in.fill_(float(r + 1))
+    t_out = ctx.zeros((ws * M, N), dtype=torch.float16)
 
-# Validate
-passed = True
-for r in range(world_size):
-    expected = float(r + 1)
-    chunk = t_out[r * M : (r + 1) * M]
-    if not torch.allclose(chunk, torch.full_like(chunk, expected), atol=0.5):
-        print(f"FAIL: chunk {r} got {chunk[0, 0].item():.1f}, expected {expected:.1f}")
-        passed = False
+    config = Config(use_gluon=True, block_size_m=32, block_size_n=64, comm_sms=4)
 
-if passed:
-    print(f"PASS: out[0,0]={t_out[0, 0].item():.1f}")
-else:
-    print("FAIL")
+    ctx.barrier()
+    ctx.ccl.all_gather(t_out, t_in, config=config)
+    torch.cuda.synchronize()
 
-dist.destroy_process_group()
+    # Validate
+    passed = True
+    for i in range(ws):
+        expected = float(i + 1)
+        chunk = t_out[i * M : (i + 1) * M]
+        if not torch.allclose(chunk, torch.full_like(chunk, expected), atol=0.5):
+            print(f"[rank {r}] FAIL: chunk {i} got {chunk[0,0].item():.1f}, expected {expected:.1f}")
+            passed = False
+
+    if passed:
+        print(f"[rank {r}] PASS")
+    else:
+        print(f"[rank {r}] FAIL")
+
+    ctx.barrier()
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    world_size = 2
+    mp.set_start_method("spawn")
+    processes = []
+    for rank in range(world_size):
+        p = mp.Process(target=run_rank, args=(rank, world_size))
+        p.start()
+        processes.append(p)
+    for p in processes:
+        p.join()
+    exit_codes = [p.exitcode for p in processes]
+    print(f"Exit codes: {exit_codes}")
+    if all(c == 0 for c in exit_codes):
+        print("ALL PASSED")
+    else:
+        print("SOME FAILED")
