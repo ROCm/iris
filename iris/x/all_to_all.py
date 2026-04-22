@@ -10,7 +10,7 @@ Performs all-to-all communication where each rank sends and receives data to/fro
 import triton
 import triton.language as tl
 import iris
-from iris.iris import DeviceContext
+from iris.device.triton.context import DeviceContext
 from .core import Tile, TensorView
 
 

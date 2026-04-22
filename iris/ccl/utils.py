@@ -9,7 +9,7 @@ from enum import IntEnum
 from typing import Tuple
 import triton
 import triton.language as tl
-from iris._distributed_helpers import extract_group_info as _extract_group_info
+from iris.host.distributed.helpers import extract_group_info as _extract_group_info
 
 
 @triton.jit()

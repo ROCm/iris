@@ -13,7 +13,7 @@ import triton
 import triton.language as tl
 import torch
 import iris
-from iris.tracing.kernel_artifacts import iris_launch
+from iris.host.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
 

@@ -14,7 +14,7 @@ Use `gather` when you want to consume the tile immediately without materializing
 import triton
 import triton.language as tl
 import iris
-from iris.iris import DeviceContext
+from iris.device.triton.context import DeviceContext
 from .core import Tile, TensorView
 
 

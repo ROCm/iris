@@ -9,7 +9,7 @@ Supports both Triton and Gluon implementations based on config.
 import triton
 import triton.language as tl
 import iris
-from iris.tracing.kernel_artifacts import iris_launch
+from iris.host.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import chiplet_transform_chunked, extract_group_info
 
@@ -17,7 +17,7 @@ from .utils import chiplet_transform_chunked, extract_group_info
 try:
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
-    from iris.experimental.iris_gluon import IrisDeviceCtx
+    from iris.device.gluon.context import IrisDeviceCtx
 
     GLUON_AVAILABLE = True
 except ImportError:

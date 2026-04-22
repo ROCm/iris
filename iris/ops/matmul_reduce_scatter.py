@@ -19,7 +19,7 @@ from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
 import iris.x
-from iris.tracing.kernel_artifacts import iris_launch
+from iris.host.tracing.kernel_artifacts import iris_launch
 
 
 @triton.jit()

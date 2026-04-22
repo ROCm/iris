@@ -41,11 +41,10 @@ Quick Start (Gluon API - Experimental):
     >>>     ctx.load(buffer, 1)
 """
 
-from .iris import (
-    Iris,
-    iris,
-    DeviceContext,
-    TraceEvent,
+from iris.host.iris import Iris, iris
+from iris.device.triton.context import DeviceContext
+from iris.host.tracing.events import TraceEvent
+from iris.device.triton.ops import (
     load,
     store,
     copy,
@@ -61,24 +60,24 @@ from .iris import (
     atomic_max,
 )
 
-from .util import (
+from iris.host.platform.utils import (
     do_bench,
     get_device_id_for_rank,
     is_simulation_env,
 )
 
-from .tensor_utils import (
+from iris.host.memory.tensor_utils import (
     CUDAArrayInterface,
     tensor_from_ptr,
 )
 
-from . import hip
+from iris.host.platform import hip
 from . import experimental
 from . import ops
-from . import tensor_creation
+from iris.host.memory import tensors as tensor_creation
 from . import bench
-from .tracing import kernel_artifacts  # noqa: F401  # triggers _init() at import time
-from .logging import (
+from iris.host.tracing import kernel_artifacts  # noqa: F401  # triggers _init() at import time
+from iris.host.logging.logging import (
     set_logger_level,
     logger,
     DEBUG,
