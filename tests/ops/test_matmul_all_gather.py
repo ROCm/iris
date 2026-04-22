@@ -46,6 +46,10 @@ def _should_stream_validation(rows_per_rank: int, n: int, dtype: torch.dtype) ->
     return local_ref_bytes > _full_validation_threshold_bytes()
 
 
+def _use_heap_backed_output(rows_per_rank: int, n: int, dtype: torch.dtype) -> bool:
+    return not _should_stream_validation(rows_per_rank, n, dtype)
+
+
 def _validation_rows_per_chunk(rows_per_rank: int, n: int, dtype: torch.dtype) -> int:
     if "IRIS_TEST_VALIDATION_ROWS_PER_CHUNK" in os.environ:
         return max(1, min(rows_per_rank, int(os.environ["IRIS_TEST_VALIDATION_ROWS_PER_CHUNK"])))
@@ -185,10 +189,16 @@ def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
     if N < min_block_size:
         pytest.skip(f"N={N} too small (need >= {min_block_size})")
 
-    # Create shmem tensors directly
+    # TODO why??
+    # Keep the original fully heap-backed path for small/medium sizes.
+    # For very large validations, place the gathered output outside the
+    # symmetric heap to avoid exhausting the heap just for the destination.
     A_local = shmem.randn((M_local, K), dtype=dtype)
     B = shmem.randn((K, N), dtype=dtype)
-    output = shmem.zeros((M, N), dtype=dtype)
+    if _use_heap_backed_output(M_local, N, dtype):
+        output = shmem.zeros((M, N), dtype=dtype)
+    else:
+        output = torch.empty((M, N), device=f"cuda:{rank}", dtype=dtype)
 
     shmem.barrier()
 
@@ -272,11 +282,14 @@ def test_tritonblas_rccl_matmul_all_gather(dtype, atol, rtol, M, N, K):
         pytest.skip(f"N={N} too small (need >= {min_block_size})")
 
     torch.manual_seed(123 + rank)
-    A_local = torch.randn((M_local, K), device=f"cuda:{rank}", dtype=dtype)
+    A_local = shmem.randn((M_local, K), dtype=dtype)
     torch.manual_seed(456)
-    B = torch.randn((K, N), device=f"cuda:{rank}", dtype=dtype)
+    B = shmem.randn((K, N), dtype=dtype)
     C_local = shmem.zeros((M_local, N), dtype=dtype)
-    output = torch.empty((M, N), device=f"cuda:{rank}", dtype=dtype)
+    if _use_heap_backed_output(M_local, N, dtype):
+        output = shmem.zeros((M, N), dtype=dtype)
+    else:
+        output = torch.empty((M, N), device=f"cuda:{rank}", dtype=dtype)
     selector = tritonblas.OrigamiMatmulSelector(
         M_local,
         N,

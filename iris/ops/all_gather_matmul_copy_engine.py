@@ -787,8 +787,9 @@ def all_gather_matmul_copy_engine(
         # TODO not always faster
         # Prime batch 0 before GEMM launch so the first released tile-group can
         # start immediately instead of stalling on an empty wait queue.
-        first_batch_tiles = min(m_tiles_per_batch, num_m_tiles)
-        post_host_batch(0, 0, first_batch_tiles)
+        # TODO issue with time measurement
+        # first_batch_tiles = min(m_tiles_per_batch, num_m_tiles)
+        # post_host_batch(0, 0, first_batch_tiles)
 
         if verbose and rank == 0:
             shmem.info(f"[Rank {rank}] Launching GEMM kernel after pre-posting batch 0...")
@@ -803,8 +804,8 @@ def all_gather_matmul_copy_engine(
         )
 
         # Post the remaining batches while GEMM is already running.
-        batch_id = 1
-        for m_tile_start in range(m_tiles_per_batch, num_m_tiles, m_tiles_per_batch):
+        batch_id = 0
+        for m_tile_start in range(0, num_m_tiles, m_tiles_per_batch):
             m_tile_end = min(m_tile_start + m_tiles_per_batch, num_m_tiles)
             num_m_tiles_in_batch = m_tile_end - m_tile_start
             post_host_batch(batch_id, m_tile_start, num_m_tiles_in_batch)

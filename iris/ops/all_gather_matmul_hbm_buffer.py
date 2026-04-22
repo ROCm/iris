@@ -402,8 +402,8 @@ def _hbm_buffer_all_gather_matmul_kernel(
             acc = acc + bias_val[:, None]
 
         c = acc.to(C.type.element_ty)
-        stride_cm_i64 = (stride_cm + 0 * rm).to(tl.int64)
-        stride_cn_i64 = (stride_cn + 0 * rn).to(tl.int64)
+        stride_cm_i64 = tl.cast(stride_cm, tl.int64)
+        stride_cn_i64 = tl.cast(stride_cn, tl.int64)
         C_ptrs = C + rm.to(tl.int64)[:, None] * stride_cm_i64 + rn.to(tl.int64)[None, :] * stride_cn_i64
         c_mask = (rm[:, None] < M) & (rn[None, :] < N)
         tl.store(C_ptrs, c, mask=c_mask, cache_modifier=".wt")
