@@ -335,13 +335,17 @@ if GFX1250_ASYNC_AVAILABLE:
         elem_deltas[i] = (heap_bases[target_rank] - heap_bases[local_rank]) // elem_size,
         eliminating all heap_bases loads and runtime division from the kernel.
 
+        Hardcoded for 8 ranks. The chunk loop has ZERO global loads — all
+        elem_deltas are hoisted into SGPRs before the loop, and all 8 store
+        destinations are fully inlined (no tuple indexing, no dynamic dispatch).
+
         Data path per chunk:
             HBM → LDS  (gfx1250_async_copy.global_to_shared)
             LDS → HBM  (gfx1250_async_copy.shared_to_global, local write)
-            LDS → XGMI (gfx1250_async_copy.shared_to_global, remote writes)
+            LDS → XGMI (gfx1250_async_copy.shared_to_global, 7 remote writes)
 
         Args:
-            elem_deltas: int64 tensor of shape [world_size], precomputed on host.
+            elem_deltas: int64 tensor of shape [8], precomputed on host.
                          elem_deltas[group_rank] == 0 (local), others are the
                          element-space offset to translate local pointers to
                          remote address space.
@@ -358,18 +362,17 @@ if GFX1250_ASYNC_AVAILABLE:
         smem_layout: gl.constexpr = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[0])
         smem = gl.allocate_shared_memory(dtype, [BLOCK_SIZE], layout=smem_layout)
 
-        # Load ALL elem_deltas ONCE before the chunk loop.
-        # world_size is constexpr → this unrolls to N scalar s_load's into SGPRs.
-        # The chunk loop below has ZERO global loads — only async copy ops.
-        d0 = gl.load(elem_deltas + ((group_rank + 0) % world_size)) if world_size > 0 else 0
-        d1 = gl.load(elem_deltas + ((group_rank + 1) % world_size)) if world_size > 1 else 0
-        d2 = gl.load(elem_deltas + ((group_rank + 2) % world_size)) if world_size > 2 else 0
-        d3 = gl.load(elem_deltas + ((group_rank + 3) % world_size)) if world_size > 3 else 0
-        d4 = gl.load(elem_deltas + ((group_rank + 4) % world_size)) if world_size > 4 else 0
-        d5 = gl.load(elem_deltas + ((group_rank + 5) % world_size)) if world_size > 5 else 0
-        d6 = gl.load(elem_deltas + ((group_rank + 6) % world_size)) if world_size > 6 else 0
-        d7 = gl.load(elem_deltas + ((group_rank + 7) % world_size)) if world_size > 7 else 0
-        deltas = (d0, d1, d2, d3, d4, d5, d6, d7)
+        # Hoist ALL 8 elem_deltas into SGPRs before the chunk loop.
+        # Traffic-shaped order: rank_idx 0 = self (local), 1..7 = remote.
+        # Index into elem_deltas with staggered pattern for traffic shaping.
+        d0 = gl.load(elem_deltas + ((group_rank + 0) % 8))
+        d1 = gl.load(elem_deltas + ((group_rank + 1) % 8))
+        d2 = gl.load(elem_deltas + ((group_rank + 2) % 8))
+        d3 = gl.load(elem_deltas + ((group_rank + 3) % 8))
+        d4 = gl.load(elem_deltas + ((group_rank + 4) % 8))
+        d5 = gl.load(elem_deltas + ((group_rank + 5) % 8))
+        d6 = gl.load(elem_deltas + ((group_rank + 6) % 8))
+        d7 = gl.load(elem_deltas + ((group_rank + 7) % 8))
 
         for chunk_start in range(pid * BLOCK_SIZE, numel, COMM_SMS * BLOCK_SIZE):
             idx = gl.arange(0, BLOCK_SIZE, layout=layout)
@@ -386,19 +389,46 @@ if GFX1250_ASYNC_AVAILABLE:
             output_base_ptrs = output_ptr + out_offs
 
             # === ASYNC STORES: LDS → global/XGMI (register-free) ===
-            # Traffic-shaped: stagger write order per rank.
-            # ZERO loads inside this loop — all deltas preloaded above.
-            for rank_idx in range(world_size):
-                dest_idx = (group_rank + rank_idx) % world_size
+            # Fully inlined for 8 ranks. rank_idx=0 is always local (d0=0),
+            # rank_idx 1..7 are always remote. Traffic-shaped order.
 
-                if dest_idx == group_rank:
-                    # Local: LDS → HBM
-                    gfx1250_async_copy.shared_to_global(output_base_ptrs, smem, mask=mask)
-                else:
-                    # Remote: delta in SGPR from pre-loop load
-                    remote_ptrs = output_ptr + out_offs + deltas[rank_idx]
-                    remote_ptrs = tl.max_contiguous(tl.multiple_of(remote_ptrs, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
-                    gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask)
+            # rank_idx=0: local store (d0 == 0, dest is self)
+            gfx1250_async_copy.shared_to_global(output_base_ptrs, smem, mask=mask)
+
+            # rank_idx=1: remote
+            r1 = output_ptr + out_offs + d1
+            r1 = tl.max_contiguous(tl.multiple_of(r1, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
+            gfx1250_async_copy.shared_to_global(r1, smem, mask=mask)
+
+            # rank_idx=2: remote
+            r2 = output_ptr + out_offs + d2
+            r2 = tl.max_contiguous(tl.multiple_of(r2, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
+            gfx1250_async_copy.shared_to_global(r2, smem, mask=mask)
+
+            # rank_idx=3: remote
+            r3 = output_ptr + out_offs + d3
+            r3 = tl.max_contiguous(tl.multiple_of(r3, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
+            gfx1250_async_copy.shared_to_global(r3, smem, mask=mask)
+
+            # rank_idx=4: remote
+            r4 = output_ptr + out_offs + d4
+            r4 = tl.max_contiguous(tl.multiple_of(r4, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
+            gfx1250_async_copy.shared_to_global(r4, smem, mask=mask)
+
+            # rank_idx=5: remote
+            r5 = output_ptr + out_offs + d5
+            r5 = tl.max_contiguous(tl.multiple_of(r5, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
+            gfx1250_async_copy.shared_to_global(r5, smem, mask=mask)
+
+            # rank_idx=6: remote
+            r6 = output_ptr + out_offs + d6
+            r6 = tl.max_contiguous(tl.multiple_of(r6, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
+            gfx1250_async_copy.shared_to_global(r6, smem, mask=mask)
+
+            # rank_idx=7: remote
+            r7 = output_ptr + out_offs + d7
+            r7 = tl.max_contiguous(tl.multiple_of(r7, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
+            gfx1250_async_copy.shared_to_global(r7, smem, mask=mask)
 
             # Wait for all stores before reusing LDS on next chunk
             gfx1250_async_copy.commit_group()
