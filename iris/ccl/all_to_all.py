@@ -348,7 +348,7 @@ def all_to_all(
     Args:
         output_tensor: Output tensor of shape (M, N * world_size)
         input_tensor: Input tensor of shape (M, N * world_size)
-        shmem: Iris shmem context (regular Iris or Iris Gluon)
+        shmem: Iris context
         group: ProcessGroup or None. If None, uses all ranks in shmem context.
                Default: None.
         async_op: If False, performs a barrier at the end. If True, returns immediately.
@@ -374,10 +374,6 @@ def all_to_all(
 
     # Choose between Triton and Gluon implementation
     if config.use_gluon and GLUON_AVAILABLE:
-        # Check if shmem has get_device_context (required for Gluon kernels)
-        if not hasattr(shmem, "get_device_context"):
-            raise ValueError("use_gluon=True requires an Iris context with get_device_context(). Use iris.iris()")
-
         context_tensor = shmem.get_device_context()
 
         iris_launch(

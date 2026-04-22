@@ -497,10 +497,6 @@ def all_gather(
 
     # Choose between Triton and Gluon implementation
     if config.use_gluon and GLUON_AVAILABLE:
-        # Check if ctx has get_device_context (required for Gluon kernels)
-        if not hasattr(ctx, "get_device_context"):
-            raise ValueError("use_gluon=True requires an Iris context with get_device_context(). Use iris.iris()")
-
         # Gluon only supports the persistent variant
         if config.all_gather_variant != "persistent":
             raise ValueError(
