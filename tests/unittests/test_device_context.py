@@ -501,6 +501,6 @@ def test_device_context_initialize():
 def test_device_context_imports():
     """Test that DeviceContext is available from correct import paths."""
     from iris import DeviceContext as DC1
-    from iris.iris import DeviceContext as DC2
+    from iris.device.triton.context import DeviceContext as DC2
 
     assert DC1 is DC2
