@@ -309,46 +309,45 @@ def persistent_all_gather_partitioned(
 #
 # Key optimizations:
 #   - Register-free data movement: async copy HBM ↔ LDS
-#   - Hoisted pointer translation: local_base loaded once outside chunk loop
-#   - elem_delta remote addressing: avoids int_to_ptr alignment stripping
-#   - Vectorization hints: tl.max_contiguous / tl.multiple_of on remote ptrs
+#   - Host-precomputed elem_deltas: no heap_bases loads or division in kernel
 #   - Traffic shaping: staggered write order avoids memory controller contention
 if GFX1250_ASYNC_AVAILABLE:
 
     @gluon.jit
     def persistent_all_gather_gluon_gfx1250(
-        IrisDeviceCtx: gl.constexpr,
-        context_tensor,
         input_ptr,
         output_ptr,
+        elem_deltas,
         numel,
         output_offset,
         group_rank: gl.constexpr,
-        iris_rank: gl.constexpr,
         world_size: gl.constexpr,
-        rank_start: gl.constexpr,
-        rank_stride: gl.constexpr,
         BLOCK_SIZE: gl.constexpr,
         COMM_SMS: gl.constexpr,
         THREADS_PER_WARP: gl.constexpr,
         WARPS_PER_CTA: gl.constexpr,
-        TRACING: gl.constexpr = False,
     ):
         """
         Persistent all-gather using GFX1250 async copy through LDS.
 
-        Same linear 1D tiling as persistent_all_gather_gluon, but all data
-        movement goes through LDS via async copy — no VGPRs touch the data.
+        All data movement goes through LDS via async copy — no VGPRs touch
+        the data. Pointer translation is precomputed on the host as
+        elem_deltas[i] = (heap_bases[target_rank] - heap_bases[local_rank]) // elem_size,
+        eliminating all heap_bases loads and runtime division from the kernel.
 
         Data path per chunk:
             HBM → LDS  (gfx1250_async_copy.global_to_shared)
             LDS → HBM  (gfx1250_async_copy.shared_to_global, local write)
             LDS → XGMI (gfx1250_async_copy.shared_to_global, remote writes)
 
+        Args:
+            elem_deltas: int64 tensor of shape [world_size], precomputed on host.
+                         elem_deltas[group_rank] == 0 (local), others are the
+                         element-space offset to translate local pointers to
+                         remote address space.
+
         Hardware requirement: GFX1250 (RDNA4) with async_copy support.
         """
-        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=False)
-
         pid = gl.program_id(0)
 
         ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE // (THREADS_PER_WARP * WARPS_PER_CTA)
@@ -356,12 +355,8 @@ if GFX1250_ASYNC_AVAILABLE:
 
         # LDS buffer for one chunk — data never touches VGPRs
         dtype: gl.constexpr = input_ptr.dtype.element_ty
-        ELEM_SIZE_BYTES: gl.constexpr = dtype.primitive_bitwidth // 8
         smem_layout: gl.constexpr = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[0])
         smem = gl.allocate_shared_memory(dtype, [BLOCK_SIZE], layout=smem_layout)
-
-        # Hoist local heap base outside the chunk loop
-        local_base = gl.load(ctx.heap_bases + iris_rank)
 
         for chunk_start in range(pid * BLOCK_SIZE, numel, COMM_SMS * BLOCK_SIZE):
             idx = gl.arange(0, BLOCK_SIZE, layout=layout)
@@ -381,17 +376,13 @@ if GFX1250_ASYNC_AVAILABLE:
             # Traffic-shaped: stagger write order per rank
             for rank_idx in range(world_size):
                 dest_idx = (group_rank + rank_idx) % world_size
-                target_iris_rank = rank_start + dest_idx * rank_stride
 
                 if dest_idx == group_rank:
                     # Local: LDS → HBM
                     gfx1250_async_copy.shared_to_global(output_base_ptrs, smem, mask=mask)
                 else:
-                    # Remote: translate pointer via elem_delta, restore
-                    # vectorization hints lost by runtime division.
-                    target_base = gl.load(ctx.heap_bases + target_iris_rank)
-                    ptr_delta = target_base - local_base
-                    elem_delta = ptr_delta // ELEM_SIZE_BYTES
+                    # Remote: elem_delta precomputed on host, no division needed
+                    elem_delta = gl.load(elem_deltas + dest_idx)
                     remote_ptrs = output_ptr + out_offs + elem_delta
                     remote_ptrs = tl.max_contiguous(tl.multiple_of(remote_ptrs, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
                     gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask)
@@ -484,29 +475,32 @@ def all_gather(
         numel = M * N
         output_offset = rank_in_group * numel
 
-        context_tensor = ctx.get_device_context()
-        tracing = getattr(ctx, "tracing", None)
-        tracing_enabled = bool(tracing and getattr(tracing, "enabled", False))
+        # Precompute elem_deltas on the host — moves all heap_bases lookups
+        # and the ELEM_SIZE_BYTES division out of the kernel entirely.
+        import torch
+
+        heap_bases = ctx.get_heap_bases()
+        elem_size = input_tensor.element_size()
+        local_base = heap_bases[rank_global]
+        elem_deltas = torch.empty(world_size, dtype=torch.int64, device=input_tensor.device)
+        for i in range(world_size):
+            target_iris_rank = rank_start + i * rank_stride
+            elem_deltas[i] = (heap_bases[target_iris_rank] - local_base) // elem_size
 
         iris_launch(
             persistent_all_gather_gluon_gfx1250,
             (config.comm_sms,),
-            IrisDeviceCtx,
-            context_tensor,
             input_tensor,
             output_tensor,
+            elem_deltas,
             numel,
             output_offset,
             rank_in_group,
-            rank_global,
             world_size,
-            rank_start,
-            rank_stride,
             block_size,
             config.comm_sms,
             config.threads_per_warp,
             config.num_warps,
-            tracing_enabled,
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,
