@@ -1,14 +1,5 @@
-"""
-Device-side tracing support for Iris.
-
-Provides tracing functionality to capture and export device-side events
-for debugging and performance analysis.
-"""
-
-from .events import EVENT_NAMES, TraceEvent
-from .core import Tracing
-from .device import DeviceTracing
-
-from . import kernel_artifacts
-
-__all__ = ["EVENT_NAMES", "TraceEvent", "Tracing", "DeviceTracing", "kernel_artifacts"]
+"""Compatibility shim — canonical code lives in iris.host.tracing and iris.device.triton.tracing"""
+from iris.host.tracing.events import EVENT_NAMES, TraceEvent  # noqa: F401
+from iris.host.tracing.core import Tracing  # noqa: F401
+from iris.device.triton.tracing import DeviceTracing  # noqa: F401
+from iris.host.tracing import kernel_artifacts  # noqa: F401

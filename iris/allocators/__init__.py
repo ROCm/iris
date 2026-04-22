@@ -1,12 +1,5 @@
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-
-"""
-Allocator interfaces for Iris symmetric heap management.
-"""
-
-from .base import BaseAllocator
-from .torch_allocator import TorchAllocator
-from .vmem_allocator import VMemAllocator
-
-__all__ = ["BaseAllocator", "TorchAllocator", "VMemAllocator"]
+"""Compatibility shim — canonical code lives in iris.host.memory.allocators"""
+from iris.host.memory.allocators import *  # noqa: F401,F403
+from iris.host.memory.allocators.base import BaseAllocator  # noqa: F401
+from iris.host.memory.allocators.torch_allocator import TorchAllocator  # noqa: F401
+from iris.host.memory.allocators.vmem_allocator import VMemAllocator  # noqa: F401
