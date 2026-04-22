@@ -807,13 +807,12 @@ def all_gather_matmul_copy_engine(
 
         sdma_end_post_time = time.perf_counter()
 
-        # Ensure all SDMA operations complete
-        for dst_rank in range(world_size):
-            anvil_lib.host_quiet(rank, dst_rank, 0)
-
-        sdma_end_time = time.perf_counter()
-
         if verbose:
+            # Ensure all SDMA operations complete
+            for dst_rank in range(world_size):
+                anvil_lib.host_quiet(rank, dst_rank, 0)
+            sdma_end_time = time.perf_counter()
+
             post_ms = (sdma_end_post_time - sdma_start_time) * 1000.0
             quiet_ms = (sdma_end_time - sdma_end_post_time) * 1000.0
             total_ms = (sdma_end_time - sdma_start_time) * 1000.0
