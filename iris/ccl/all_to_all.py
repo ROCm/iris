@@ -374,9 +374,9 @@ def all_to_all(
 
     # Choose between Triton and Gluon implementation
     if config.use_gluon and GLUON_AVAILABLE:
-        # Check if shmem is Iris Gluon (has get_device_context method)
+        # Check if shmem has get_device_context (required for Gluon kernels)
         if not hasattr(shmem, "get_device_context"):
-            raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.iris()")
+            raise ValueError("use_gluon=True requires an Iris context with get_device_context(). Use iris.iris()")
 
         context_tensor = shmem.get_device_context()
 

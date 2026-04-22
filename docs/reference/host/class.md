@@ -13,7 +13,6 @@ Prefer using the convenience factory over calling the constructor directly:
 ```{eval-rst}
 .. automethod:: iris.host.iris.Iris.get_heap_bases
 .. automethod:: iris.host.iris.Iris.get_device_context
-.. automethod:: iris.host.iris.Iris.get_backend
 .. automethod:: iris.host.iris.Iris.barrier
 .. automethod:: iris.host.iris.Iris.get_device
 .. automethod:: iris.host.iris.Iris.get_cu_count
