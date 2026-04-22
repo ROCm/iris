@@ -499,7 +499,7 @@ def all_gather(
     if config.use_gluon and GLUON_AVAILABLE:
         # Check if ctx is Iris Gluon (has get_device_context method)
         if not hasattr(ctx, "get_device_context"):
-            raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
+            raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.iris()")
 
         # Gluon only supports the persistent variant
         if config.all_gather_variant != "persistent":

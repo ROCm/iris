@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 # Try to import Gluon, skip tests if not available
 try:
-    import iris.experimental.iris_gluon as iris_gluon
+    import iris
     from iris.ccl import Config
     from iris.ccl.all_to_all import all_to_all
 
@@ -44,7 +44,7 @@ def test_all_to_all_gluon(dtype, M, N):
         pytest.skip("torch.distributed not initialized")
 
     heap_size = 2**33  # 8GB
-    shmem = iris_gluon.iris(heap_size)
+    shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 

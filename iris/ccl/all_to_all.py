@@ -376,7 +376,7 @@ def all_to_all(
     if config.use_gluon and GLUON_AVAILABLE:
         # Check if shmem is Iris Gluon (has get_device_context method)
         if not hasattr(shmem, "get_device_context"):
-            raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
+            raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.iris()")
 
         context_tensor = shmem.get_device_context()
 

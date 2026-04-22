@@ -4,7 +4,7 @@
 import torch
 import numpy as np
 import pytest
-import iris.experimental.iris_gluon as iris_gl
+import iris
 
 
 @pytest.mark.parametrize(
@@ -20,7 +20,7 @@ import iris.experimental.iris_gluon as iris_gl
 )
 def test_broadcast_scalar(value, expected):
     """Test broadcasting scalar values (int, float, bool, string, dict)."""
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     try:
         rank = shmem.get_rank()
 
@@ -55,7 +55,7 @@ def test_broadcast_scalar(value, expected):
 )
 def test_broadcast_tensor_dtype(dtype):
     """Test broadcasting tensors with different dtypes."""
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     try:
         rank = shmem.get_rank()
 
@@ -87,7 +87,7 @@ def test_broadcast_tensor_dtype(dtype):
 )
 def test_broadcast_tensor_shape(shape):
     """Test broadcasting tensors with different shapes."""
-    shmem = iris_gl.iris(1 << 25)
+    shmem = iris.iris(1 << 25)
     try:
         rank = shmem.get_rank()
 

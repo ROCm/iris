@@ -9,8 +9,8 @@ output-tensor validation, layout and memory-format handling) and the core
 creation logic for ``zeros``, ``ones``, ``full``, and ``zeros_like``.
 
 Both the Triton :class:`~iris.iris.Iris` backend and the Gluon
-:class:`~iris.experimental.iris_gluon.IrisGluon` backend delegate to these
-functions so that the logic lives in exactly one place.
+:class:`~iris.host.iris.Iris` backend delegate to these functions so that
+the logic lives in exactly one place.
 """
 
 import math

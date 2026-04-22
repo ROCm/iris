@@ -4,18 +4,18 @@
 The Gluon API is **experimental** and may undergo breaking changes in future releases.
 ```
 
-APIs on `IrisGluon` that create and initialize tensors on the Iris symmetric heap.
+APIs on `Iris` that create and initialize tensors on the Iris symmetric heap.
 
 ```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.zeros
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.zeros_like
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.ones
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.full
+.. automethod:: iris.host.iris.Iris.zeros
+.. automethod:: iris.host.iris.Iris.zeros_like
+.. automethod:: iris.host.iris.Iris.ones
+.. automethod:: iris.host.iris.Iris.full
 ```
 
 ## Symmetric Heap Utilities
 
 ```{eval-rst}
-.. automethod:: iris.experimental.iris_gluon.IrisGluon.is_symmetric
+.. automethod:: iris.host.iris.Iris.is_symmetric
 ```
 
