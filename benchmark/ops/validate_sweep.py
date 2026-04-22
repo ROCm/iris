@@ -42,12 +42,12 @@ DIMENSION_CONFIGS = [
     {"m_local": 131072, "n": 2048, "k": 16384, "label": "M131072_N2048_K16384"},
     {"m_local": 131072, "n": 16384, "k": 16384, "label": "g2"},
     {"m_local": 147456, "n": 28672, "k": 4096, "label": "g14"},
-    {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"}, # run out of heap memory
+    {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"},  # run out of heap memory
     {"m_local": 229376, "n": 28672, "k": 4096, "label": "g16"},
     {"m_local": 8192, "n": 8192, "k": 262144, "label": "g5"},
     {"m_local": 262144, "n": 8192, "k": 8192, "label": "g6"},
     {"m_local": 16384, "n": 16384, "k": 131072, "label": "g1"},
-    {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"}, # run out of heap memory
+    {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"},  # run out of heap memory
     {"m_local": 196608, "n": 18432, "k": 16384, "label": "g9"},
     {"m_local": 4096, "n": 14336, "k": 4096, "label": "mixtral_gate"},
     {"m_local": 4096, "n": 11008, "k": 4096, "label": "llama7b_gate"},
