@@ -11,6 +11,7 @@ from triton.experimental.gluon import language as gl
 import triton.language as tl
 from iris.device.gluon.tracing import GluonDeviceTracing
 
+
 @aggregate
 class IrisDeviceCtx:
     """
@@ -578,4 +579,3 @@ class IrisDeviceCtx:
         """
         translated_ptr = self._translate(pointer, self.cur_rank, to_rank)
         return gl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-

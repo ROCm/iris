@@ -683,4 +683,3 @@ def atomic_max(
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-

@@ -1319,7 +1319,6 @@ class Iris:
             )
 
 
-
 def iris(heap_size=1 << 30, allocator_type="torch"):
     """
     Create and return an Iris instance with the specified heap size.

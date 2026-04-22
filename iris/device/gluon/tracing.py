@@ -11,6 +11,7 @@ from triton.experimental.gluon import language as gl
 import triton.language as tl
 from iris.device import utils as device_utils
 
+
 class _GluonDeviceTracingCls:
     """
     Gluon-native device-side tracing: records events into SoA buffers from inside Gluon kernels.

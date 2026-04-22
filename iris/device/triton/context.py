@@ -11,6 +11,7 @@ from triton.language.core import _aggregate as aggregate
 from iris.device.utils import get_xcc_id, get_cu_id, read_realtime  # noqa: F401 — used by DeviceTracing
 from iris.device.triton.tracing import DeviceTracing
 
+
 @triton.jit
 def __translate(ptr, from_rank, to_rank, heap_bases, hint: tl.constexpr = None):
     from_base = tl.load(heap_bases + from_rank)
@@ -681,5 +682,3 @@ class DeviceContext:
         """
         translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
-
-
