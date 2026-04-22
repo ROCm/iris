@@ -25,6 +25,7 @@ class BenchmarkType(Enum):
 
     IRIS_FUSED = "iris_fused"
     IRIS_OPTIMIZED = "iris_optimized"
+    TRITONBLAS_RCCL = "tritonblas_rccl"
     TRITON_DEVICE_SDMA = "triton_device_sdma"
     TRITON_HOST_SDMA = "triton_host_sdma"
     TRITON_GEMM_ONLY = "triton_gemm_only"
@@ -36,6 +37,8 @@ class BenchmarkType(Enum):
 BENCHMARK_NAME_MAP = {
     "baseline": BenchmarkType.IRIS_FUSED,
     "hbm_buffer": BenchmarkType.IRIS_OPTIMIZED,
+    "tritonblas_rccl": BenchmarkType.TRITONBLAS_RCCL,
+    "tritonblas_rcclbaseline": BenchmarkType.TRITONBLAS_RCCL,
     "device_copy_engine": BenchmarkType.TRITON_DEVICE_SDMA,
     "copy_engine_device": BenchmarkType.TRITON_DEVICE_SDMA,
     "copy_engine": BenchmarkType.TRITON_DEVICE_SDMA,
@@ -52,8 +55,9 @@ BENCHMARK_NAME_MAP = {
 
 # Display labels for each benchmark type
 BENCHMARK_LABELS = {
-    BenchmarkType.IRIS_FUSED: "Iris fused kernel",
+    BenchmarkType.IRIS_FUSED: "Iris baseline",
     BenchmarkType.IRIS_OPTIMIZED: "Iris optimized fused kernel",
+    BenchmarkType.TRITONBLAS_RCCL: "TritonBlas + RCCL",
     BenchmarkType.TRITON_DEVICE_SDMA: "TritonBlas + device-initiated SDMA",
     BenchmarkType.TRITON_HOST_SDMA: "TritonBlas + host-initiated SDMA",
     BenchmarkType.TRITON_GEMM_ONLY: "TritonBlas (GEMM only)",
@@ -65,6 +69,7 @@ BENCHMARK_LABELS = {
 BENCHMARK_COLORS = {
     BenchmarkType.IRIS_FUSED: "#2E7D32",  # Dark Green
     BenchmarkType.IRIS_OPTIMIZED: "#66BB6A",  # Light Green
+    BenchmarkType.TRITONBLAS_RCCL: "#26A69A",  # Teal
     BenchmarkType.TRITON_DEVICE_SDMA: "#82E8FF",  # Light Blue
     BenchmarkType.TRITON_HOST_SDMA: "#1976D2",  # Blue
     BenchmarkType.TRITON_GEMM_ONLY: "#7B1FA2",  # Purple
@@ -76,6 +81,7 @@ BENCHMARK_COLORS = {
 BENCHMARK_ORDER = [
     BenchmarkType.IRIS_FUSED,
     BenchmarkType.IRIS_OPTIMIZED,
+    BenchmarkType.TRITONBLAS_RCCL,
     BenchmarkType.TRITON_DEVICE_SDMA,
     BenchmarkType.TRITON_HOST_SDMA,
     BenchmarkType.TRITON_GEMM_ONLY,
@@ -105,6 +111,20 @@ def extract_tflops(benchmark_data, benchmark_name):
     return None
 
 
+def canonical_operation_name(operation_name):
+    """Map variant-specific operation names to the canonical sweep operation."""
+    if not operation_name:
+        return None
+
+    if "all_gather_matmul" in operation_name:
+        return "all_gather_matmul"
+
+    if "matmul_all_gather" in operation_name:
+        return "matmul_all_gather"
+
+    return operation_name
+
+
 def plot_sweep_results(input_file, output_file, device="MI300X"):
     """Create grouped bar chart from sweep results."""
 
@@ -116,13 +136,19 @@ def plot_sweep_results(input_file, output_file, device="MI300X"):
         print("No results found in input file")
         return
 
-    # Detect operation type from first result
+    # Detect operation type from the top-level row first, then fall back to
+    # benchmark-specific operation names for older result files.
     operation = "matmul_all_gather"  # default
     for result in results:
+        top_level_operation = canonical_operation_name(result.get("operation"))
+        if top_level_operation:
+            operation = top_level_operation
+            break
+
         if "benchmarks" in result:
             for bench_data in result["benchmarks"].values():
                 if "operation" in bench_data:
-                    operation = bench_data["operation"]
+                    operation = canonical_operation_name(bench_data["operation"])
                     break
             if operation != "matmul_all_gather":
                 break

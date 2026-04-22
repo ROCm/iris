@@ -97,6 +97,11 @@ BENCHMARK_CONFIGS = {
         },
     },
     "all_gather_matmul": {
+        "baseline": {
+            "script": "benchmark/ops/bench_all_gather_matmul.py",
+            "benchmark_filter": "^all_gather_matmul$",
+            "axes": {"m": "M", "n": "N", "k": "K"},
+        },
         "pytorchbaseline": {
             "script": "benchmark/ops/bench_all_gather_matmul.py",
             "benchmark_filter": "^rccl_all_gather_matmul$",

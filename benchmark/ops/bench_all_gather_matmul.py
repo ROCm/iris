@@ -16,6 +16,7 @@ import torch
 import torch.distributed as dist
 import tritonblas
 import iris.bench as bench
+from iris.ops import FusedConfig
 from iris.ops.all_gather_matmul_hbm_buffer import (
     all_gather_matmul_hbm_buffer as _hbm_buffer,
     all_gather_matmul_hbm_buffer_preamble,
@@ -23,6 +24,35 @@ from iris.ops.all_gather_matmul_hbm_buffer import (
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "all_gather_matmul"))
 from auto_config import select_ag_mm_config
+
+
+@bench.register
+@bench.axis("num_ranks", [2, 4, 8])
+@bench.axis("M", [1024, 4096, 16384])
+@bench.axis("N", [3584])
+@bench.axis("K", [8192])
+@bench.axis("dtype", [torch.float16])
+def all_gather_matmul(state, ctx):
+    """Iris fused all-gather + GEMM baseline."""
+    M, N, K = state["M"], state["N"], state["K"]
+    dtype = state["dtype"]
+    world_size = ctx.get_num_ranks()
+    rank = ctx.get_rank()
+    K_local = K // world_size
+
+    torch.manual_seed(123 + rank)
+    A_sharded = ctx.randn((M, K_local), dtype=dtype)
+    torch.manual_seed(456)
+    B = ctx.randn((K, N), dtype=dtype)
+    C = ctx.zeros((M, N), dtype=dtype)
+    config = FusedConfig()
+
+    state.set_flops(2 * M * N * K)
+    state.set_bytes((world_size - 1) * M * K_local * A_sharded.element_size())
+
+    state.exec(
+        lambda: ctx.ops.all_gather_matmul(C, A_sharded, B, config=config),
+    )
 
 
 @bench.register
