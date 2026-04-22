@@ -298,94 +298,21 @@ def persistent_all_gather_partitioned(
             )
 
 
-# Gluon all-gather kernel — linear 1D tiling
+# Gluon all-gather kernel — linear 1D tiling with async copy through LDS
 #
 # Treats input as a flat array of numel contiguous elements. Each CU
 # processes BLOCK_SIZE-element chunks with stride COMM_SMS * BLOCK_SIZE.
 # No 2D tiling, no swizzle groups, no div/mod.
 #
+# All data movement goes through LDS via gfx1250 async copy — no VGPRs
+# touch the data. Data path: HBM → LDS → HBM/XGMI.
+#
 # Key optimizations:
+#   - Register-free data movement: async copy HBM ↔ LDS
 #   - Hoisted pointer translation: local_base loaded once outside chunk loop
+#   - elem_delta remote addressing: avoids int_to_ptr alignment stripping
+#   - Vectorization hints: tl.max_contiguous / tl.multiple_of on remote ptrs
 #   - Traffic shaping: staggered write order avoids memory controller contention
-if GLUON_AVAILABLE:
-
-    @gluon.jit
-    def persistent_all_gather_gluon(
-        IrisDeviceCtx: gl.constexpr,
-        context_tensor,
-        input_ptr,
-        output_ptr,
-        numel,
-        output_offset,
-        group_rank: gl.constexpr,
-        iris_rank: gl.constexpr,
-        world_size: gl.constexpr,
-        rank_start: gl.constexpr,
-        rank_stride: gl.constexpr,
-        BLOCK_SIZE: gl.constexpr,
-        COMM_SMS: gl.constexpr,
-        THREADS_PER_WARP: gl.constexpr,
-        WARPS_PER_CTA: gl.constexpr,
-        TRACING: gl.constexpr = False,
-    ):
-        """
-        Persistent all-gather kernel using Gluon with linear 1D tiling.
-
-        Treats the input as a flat contiguous buffer of ``numel`` elements.
-        Each CU takes BLOCK_SIZE-element chunks with stride COMM_SMS.
-
-        Args:
-            IrisDeviceCtx: Gluon device context class for remote memory operations.
-            context_tensor: Opaque tensor holding IrisDeviceCtx state.
-            input_ptr: Pointer to local input tensor (contiguous, numel elements).
-            output_ptr: Pointer to output tensor (contiguous, world_size * numel elements).
-            numel: Total number of elements in input (M * N).
-            output_offset: Element offset into output for this rank's data (group_rank * numel).
-            group_rank: This rank's index within the ProcessGroup (0..world_size-1).
-            iris_rank: This rank's global index in the iris context (for RMA addressing).
-            world_size: Total number of ranks in the group.
-            rank_start: First iris rank in the group (for RMA target computation).
-            rank_stride: Stride between consecutive iris ranks in the group.
-            BLOCK_SIZE: Elements per chunk. Must be a multiple of THREADS_PER_WARP * WARPS_PER_CTA.
-            COMM_SMS: Number of CUs used for persistent scheduling.
-            THREADS_PER_WARP: Threads per warp/wavefront (64 for AMD, 32 for NVIDIA).
-            WARPS_PER_CTA: Number of warps per workgroup. Must match num_warps.
-        """
-        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)
-
-        pid = gl.program_id(0)
-
-        ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE // (THREADS_PER_WARP * WARPS_PER_CTA)
-        layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
-
-        local_base = gl.load(ctx.heap_bases + iris_rank)
-
-        for chunk_start in range(pid * BLOCK_SIZE, numel, COMM_SMS * BLOCK_SIZE):
-            idx = gl.arange(0, BLOCK_SIZE, layout=layout)
-            offs = chunk_start + idx
-            mask = offs < numel
-
-            data = gl.load(input_ptr + offs, mask=mask, other=0.0)
-
-            out_offs = output_offset + offs
-
-            # Traffic-shaped stores: stagger write order per rank
-            for rank_idx in range(world_size):
-                dest_idx = (group_rank + rank_idx) % world_size
-                target_iris_rank = rank_start + dest_idx * rank_stride
-                output_ptrs = output_ptr + out_offs
-
-                if dest_idx == group_rank:
-                    gl.store(output_ptrs, data, mask=mask, cache_modifier=".wt")
-                else:
-                    target_base = gl.load(ctx.heap_bases + target_iris_rank)
-                    ptr_delta = target_base - local_base
-                    output_ptrs_int = tl.cast(output_ptrs, gl.uint64)
-                    remote_ptrs_int = output_ptrs_int + ptr_delta
-                    remote_ptrs = tl.cast(remote_ptrs_int, output_ptrs.dtype)
-                    gl.store(remote_ptrs, data, mask=mask)
-
-
 if GFX1250_ASYNC_AVAILABLE:
 
     @gluon.jit
@@ -527,7 +454,7 @@ def all_gather(
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
     # Choose between Triton and Gluon implementation
-    if config.use_gluon and GLUON_AVAILABLE:
+    if config.use_gluon and GFX1250_ASYNC_AVAILABLE:
         # Check if ctx is Iris Gluon (has get_device_context method)
         if not hasattr(ctx, "get_device_context"):
             raise ValueError("use_gluon=True requires Iris Gluon context. Use iris.experimental.iris_gluon.iris()")
@@ -561,21 +488,8 @@ def all_gather(
         tracing = getattr(ctx, "tracing", None)
         tracing_enabled = bool(tracing and getattr(tracing, "enabled", False))
 
-        # Detect GFX1250 for register-free async copy path
-        import torch
-
-        use_gfx1250_async = False
-        if GFX1250_ASYNC_AVAILABLE:
-            try:
-                arch = torch.cuda.get_device_properties(input_tensor.device).gcnArchName
-                use_gfx1250_async = "gfx1250" in arch
-            except Exception:
-                pass
-
-        gluon_kernel = persistent_all_gather_gluon_gfx1250 if use_gfx1250_async else persistent_all_gather_gluon
-
         iris_launch(
-            gluon_kernel,
+            persistent_all_gather_gluon_gfx1250,
             (config.comm_sms,),
             IrisDeviceCtx,
             context_tensor,
@@ -601,8 +515,8 @@ def all_gather(
             dtype=input_tensor.dtype,
         )
     else:
-        if config.use_gluon and not GLUON_AVAILABLE:
-            raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False")
+        if config.use_gluon and not GFX1250_ASYNC_AVAILABLE:
+            raise ValueError("Gluon all-gather requires GFX1250 async copy support (gfx1250 + Triton with Gluon)")
 
         # Validate COMM_SMS divisibility for partitioned variant
         if config.all_gather_variant == "partitioned" and config.comm_sms % world_size != 0:
