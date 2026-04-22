@@ -120,6 +120,7 @@ sys.modules["triton.language.core"] = MagicMock()
 sys.modules["triton.language.core"]._aggregate = lambda cls: cls  # Preserve class
 sys.modules["triton.language.extra"] = MagicMock()
 sys.modules["triton.language.extra.hip"] = MagicMock()
+sys.modules["triton.language.target_info"] = MagicMock()
 
 
 # Mock triton modules with docstring-preserving jit decorator
