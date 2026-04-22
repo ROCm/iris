@@ -160,8 +160,8 @@ def persistent_gemm_all_scatter(
                         stride_fm=stride_cm_global,
                         stride_fn=stride_cn_global,
                         mask=sub_mask,
+                        hint=(1, BLOCK_SIZE_N),
                         USE_COPY_ENGINE=True,
-                        IS_2D_COPY=True,
                         from_base_ptr=c_global,
                         to_base_ptr=c_global,
                     )

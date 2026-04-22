@@ -152,12 +152,11 @@ class Iris:
 
         for rank in range(num_ranks):
             # Device-initiated queues
-            self.copy_engines.connect(cur_rank, rank, 1, allocate_on_host=False)
+            self.copy_engines.connect(cur_rank, rank, allocate_on_host=False)
             # Host-initiated queues
-            self.copy_engines.connect(cur_rank, rank, 1, allocate_on_host=True)
+            self.copy_engines.connect(cur_rank, rank, allocate_on_host=True)
 
-            queue = self.copy_engines.get_sdma_queue(cur_rank, rank, 0)
-            handle = queue.device_ctx()
+            handle = self.copy_engines.get_queue_device_ctx(cur_rank, rank)
             self.info(f"---- Queue {rank} ------------")
             self.info(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
             self.info(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
@@ -3045,111 +3044,6 @@ def put(
 
 
 @triton.jit
-def nontemporal_store(addr, value):
-    tl.inline_asm_elementwise(
-        asm="""flat_store_dwordx2 $1 $2 sc0 nt; s_waitcnt vmcnt(0)""",
-        constraints=("=r,v,v"),  # =r used for dummy return to satisfy compiler requirement
-        args=[addr, value],
-        dtype=tl.int32,  # return not used
-        is_pure=False,
-        pack=1,
-    )
-
-
-# TODO rename or add nt
-@triton.jit
-def nontemporal_load(addr):
-    val = tl.inline_asm_elementwise(
-        asm="""flat_load_dwordx2 $0 $1 sc0 sc1; s_waitcnt vmcnt(0)""",
-        constraints=("=v,v"),
-        args=[addr],
-        dtype=tl.uint64,
-        is_pure=False,
-        pack=1,
-    )
-    return val
-
-
-@triton.jit
-def nontemporal_atomic_add(addr, value):
-    old = tl.inline_asm_elementwise(
-        asm="""flat_atomic_add_x2 $0 $1 sc0 sc1; s_waitcnt vmcnt(0)""",
-        constraints=("=v,v,v"),
-        args=[addr, value],
-        dtype=tl.uint64,
-        is_pure=False,
-        pack=1,
-    )
-    return old
-
-
-# @triton.jit
-# def nontemporal_compare_exchange(addr, cmp_low, cmp_high, val_low, val_high):
-#     # data_128bit = tl.cat([cmp_low, cmp_high, val_low, val_high])
-#     data_128bit = tl.make_vector([cmp_low, cmp_high, val_low, val_high], type=tl.uint32)
-#     old = tl.inline_asm_elementwise(
-#         asm="""flat_atomic_cmpswap_x2 $0 $1 $2 sc0 nt; s_waitcnt vmcnt(0)""",
-#         constraints=("=v,v,v"),
-#         args=[addr, data_128bit],
-#         dtype=tl.uint64,
-#         is_pure=False,
-#         pack=1,
-#     )
-#     return True # TODO if old == cmp else False
-
-
-# @triton.jit
-# def signal_ce(to_ptr, from_rank, to_rank, heap_bases, ce_handle, mask=None):
-#     """
-#     Copies data from the current rank's local memory to the specified rank's memory.
-#     This function performs a memory write operation by loading data from the current
-#     rank's `from_ptr`, translating the `to_ptr` from the current rank's address
-#     space to the `to_rank`'s address space, and storing the data to the `to_rank` memory location.
-#     If the `to_rank` is the same as the current rank, this function performs a local copy operation.
-
-#     Args:
-#         from_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's local memory from which to read data.
-#         to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `to_rank`'s address space. Must be the current rank where the pointer is local.
-#         from_rank (int): The current rank ID from which to read the data.
-#         to_rank (int): The `to_rank` ID to which the data will be written.
-#         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
-#         mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
-
-#     Returns:
-#         None
-
-#     Example:
-#         >>> @triton.jit
-#         >>> def kernel(local_ptr, remote_ptr, heap_bases):
-#         >>>     from_rank = 0
-#         >>>     to_rank = 1
-#         >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases)
-#     """
-
-#     handle = ce_handle  # iris.get_copy_engine_handle(to_rank)
-#     queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
-#     read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
-#     write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
-#     doorbell_ptr = tl.load(handle + 3).to(tl.pointer_type(tl.uint64))
-#     cached_write_ptr = tl.load(handle + 4).to(tl.pointer_type(tl.uint64))
-#     committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
-
-#     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases)
-#     dst_ptr_val = translated_to_ptr.to(tl.uint64)
-
-#     command_in_bytes = 32
-#     # Acquire space
-#     base = anvil.acquire(queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes)
-
-#     # Place command packet
-#     slot_ptr_u32  = queue_ptr_u32 + (base // 4)
-#     anvil.place_atomic_packet(slot_ptr_u32, dst_ptr_val)
-
-#     # Submit command
-#     anvil.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, command_in_bytes)
-
-
-@triton.jit
 def atomic_add(
     pointer,
     val,
@@ -3229,7 +3123,7 @@ def atomic_add(
         packet_offset_bytes = base + offset
 
         # Place command packet
-        anvil.place_atomic_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val)
+        anvil.place_atomic_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, val)
 
         # Submit command
         pending_wptr = base + offset + command_in_bytes

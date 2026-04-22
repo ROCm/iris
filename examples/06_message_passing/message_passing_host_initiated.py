@@ -106,6 +106,61 @@ def parse_args():
     return vars(parser.parse_args())
 
 
+def host_initiated_producer(shmem, source_buffer, destination_buffer, flags, consumer_rank, block_size, verbose=True):
+    """
+    Producer rank logic for host-initiated SDMA transfers.
+
+    Args:
+        shmem: Iris instance
+        source_buffer: Source buffer (symmetric)
+        destination_buffer: Destination buffer (symmetric)
+        flags: Flag buffer for synchronization (symmetric)
+        consumer_rank: Destination rank
+        block_size: Block size for chunking
+        verbose: Whether to print timing information
+    """
+    n_elements = source_buffer.numel()
+    num_blocks = triton.cdiv(n_elements, block_size)
+
+    if verbose:
+        shmem.info(f"Rank {shmem.get_rank()} (HOST) is sending data to rank {consumer_rank}.")
+
+    # Initialize CUDA context even though we're doing host-side operations
+    # This is needed for the barrier to work
+    torch.cuda.current_device()
+
+    if verbose:
+        import time
+        start_time = time.time()
+
+    for block_id in range(num_blocks):
+        block_start = block_id * block_size
+        block_end = min(block_start + block_size, n_elements)
+        block_slice = slice(block_start, block_end)
+
+        # Views remain symmetric, so Iris can translate remote pointers automatically
+        src_chunk = source_buffer[block_slice]
+        dst_chunk = destination_buffer[block_slice]
+        flag_view = flags[block_id : block_id + 1]
+
+        shmem.put(
+            src_chunk,
+            dst_rank=consumer_rank,
+            dst_tensor=dst_chunk,
+            signal_flag=flag_view,
+            async_op=True,
+        )
+
+    shmem.quiet(dst_rank=consumer_rank)
+
+    if verbose:
+        end_time = time.time()
+        elapsed_ms = (end_time - start_time) * 1000
+        shmem.info(
+            f"Host SDMA loop took {elapsed_ms:.2f} ms for {num_blocks} blocks ({elapsed_ms / num_blocks:.2f} ms/block)"
+        )
+
+
 def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     """Worker function for PyTorch distributed execution."""
     backend = "nccl" if torch.cuda.is_available() else "gloo"
@@ -138,7 +193,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     consumer_rank = 1
 
     n_elements = source_buffer.numel()
-    # Use fixed block size for both producer and consumer
     BLOCK_SIZE = args["block_size"]
     num_blocks = triton.cdiv(n_elements, BLOCK_SIZE)
     grid = (num_blocks,)
@@ -147,62 +201,13 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     flags = shmem.zeros((num_blocks,), device="cuda", dtype=torch.int32)
 
     if cur_rank == producer_rank:
-        shmem.info(f"Rank {cur_rank} (HOST) is sending data to rank {consumer_rank}.")
-        # Initialize CUDA context even though we're doing host-side operations
-        # This is needed for the barrier to work
-        torch.cuda.current_device()
-
-        # Create host-initiated SDMA connection separate from iris's device connection
-        # This allows the host to orchestrate transfers without kernel launches
-        anvil_lib = shmem.copy_engines  # Reuse iris's anvil instance
-        anvil_lib.connect(producer_rank, consumer_rank, num_channels=1, allocate_on_host=True)
-
-        # Host-initiated transfer: send data block by block
-        elem_size = source_buffer.element_size()
-
-        import time
-
-        start_time = time.time()
-
-        for block_id in range(num_blocks):
-            block_start = block_id * BLOCK_SIZE
-            block_end = min(block_start + BLOCK_SIZE, n_elements)
-            block_len = block_end - block_start
-
-            # Calculate byte offsets
-            src_offset = block_start * elem_size
-            dst_offset = block_start * elem_size
-            size_bytes = block_len * elem_size
-
-            # Translate destination buffer address from producer to consumer address space
-            dst_local_addr = destination_buffer.data_ptr() + dst_offset
-            dst_remote_addr = shmem.translate(dst_local_addr, producer_rank, consumer_rank)
-
-            # Transfer data block using SDMA
-            anvil_lib.host_put(
-                producer_rank, consumer_rank, 0, source_buffer.data_ptr() + src_offset, dst_remote_addr, size_bytes
-            )
-
-            # Signal completion with atomic add - translate flag address
-            flag_local_addr = flags.data_ptr() + block_id * 4  # 4 bytes for int32
-            flag_remote_addr = shmem.translate(flag_local_addr, producer_rank, consumer_rank)
-
-            anvil_lib.host_atomic_add_32(producer_rank, consumer_rank, 0, flag_remote_addr, 1)
-
-        end_time = time.time()
-        elapsed_ms = (end_time - start_time) * 1000
-        shmem.info(
-            f"Host SDMA loop took {elapsed_ms:.2f} ms for {num_blocks} blocks ({elapsed_ms / num_blocks:.2f} ms/block)"
-        )
-
-        # Synchronize to ensure all transfers complete
-        # TODO use quiet()
-
+        host_initiated_producer(shmem, source_buffer, destination_buffer, flags, consumer_rank, BLOCK_SIZE, verbose=True)
     else:
         shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank}.")
         kk = consumer_kernel[grid](
             destination_buffer, flags, n_elements, consumer_rank, BLOCK_SIZE, shmem.get_heap_bases()
         )
+
     shmem.barrier()
     shmem.info(f"Rank {cur_rank} has finished sending/receiving data.")
     shmem.info("Validating output...")
