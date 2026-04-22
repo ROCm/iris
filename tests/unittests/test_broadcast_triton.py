@@ -25,7 +25,7 @@ def test_broadcast_scalar(value, expected):
         rank = shmem.get_rank()
 
         val = value if rank == 0 else None
-        result = shmem.broadcast(val, source_rank=0)
+        result = shmem.broadcast(val, src=0)
 
         if isinstance(expected, float):
             assert abs(result - expected) < 1e-6
@@ -60,7 +60,7 @@ def test_broadcast_tensor_dtype(dtype):
         rank = shmem.get_rank()
 
         value = torch.arange(10, dtype=dtype) if rank == 0 else None
-        result = shmem.broadcast(value, source_rank=0)
+        result = shmem.broadcast(value, src=0)
 
         assert isinstance(result, np.ndarray)
         np.testing.assert_array_equal(result, np.arange(10))
@@ -92,7 +92,7 @@ def test_broadcast_tensor_shape(shape):
         rank = shmem.get_rank()
 
         value = torch.randn(shape) if rank == 0 else None
-        result = shmem.broadcast(value, source_rank=0)
+        result = shmem.broadcast(value, src=0)
 
         assert isinstance(result, np.ndarray)
         assert result.shape == shape

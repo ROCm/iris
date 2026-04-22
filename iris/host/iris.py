@@ -255,7 +255,7 @@ class Iris:
             self._ops = OpsNamespace(self)
         return self._ops
 
-    def broadcast(self, value, source_rank=0):
+    def broadcast(self, value, src=0):
         """
         Broadcast a value from one rank to all ranks.
 
@@ -264,11 +264,13 @@ class Iris:
         - For tensors and arrays: uses efficient PyTorch distributed tensor collectives
         - For scalars and other objects: uses object broadcast
 
+        Matches ``torch.distributed.broadcast`` parameter naming.
+
         Args:
             value (Any): The value to broadcast. Can be a scalar, tensor, numpy array,
-                or any picklable object. Only the ``source_rank`` value is used;
+                or any picklable object. Only the ``src`` rank's value is used;
                 other ranks should pass a placeholder (e.g., ``None``).
-            source_rank (int): Rank id that holds the authoritative value.
+            src (int): Source rank that holds the authoritative value.
 
         Returns:
             Any: The value broadcast to all ranks. Tensors and arrays are returned as
@@ -278,17 +280,17 @@ class Iris:
             >>> ctx = iris.iris()
             >>> # Broadcasting a scalar
             >>> value = 42 if ctx.cur_rank == 0 else None
-            >>> value = ctx.broadcast(value, source_rank=0)  # All ranks get 42
+            >>> value = ctx.broadcast(value, src=0)  # All ranks get 42
             >>>
             >>> # Broadcasting a tensor
             >>> if ctx.cur_rank == 0:
             >>>     data = torch.randn(10, 10)
             >>> else:
             >>>     data = None
-            >>> data = ctx.broadcast(data, source_rank=0)  # All ranks get the same array
+            >>> data = ctx.broadcast(data, src=0)  # All ranks get the same array
         """
-        # Check if the value on source_rank is a tensor or array-like
-        if self.cur_rank == source_rank and value is not None:
+        # Check if the value on src rank is a tensor or array-like
+        if self.cur_rank == src and value is not None:
             # Explicitly exclude strings and non-numeric types
             if isinstance(value, (str, dict, bool)):
                 is_tensor = False
@@ -319,12 +321,12 @@ class Iris:
             is_tensor = False
 
         # Broadcast the type decision to all ranks
-        is_tensor = distributed_broadcast_scalar(is_tensor, source_rank)
+        is_tensor = distributed_broadcast_scalar(is_tensor, src)
 
         if is_tensor:
-            return distributed_broadcast_tensor(value, root=source_rank)
+            return distributed_broadcast_tensor(value, root=src)
         else:
-            return distributed_broadcast_scalar(value, source_rank)
+            return distributed_broadcast_scalar(value, src)
 
     def zeros_like(
         self, input, *, dtype=None, layout=None, device=None, requires_grad=False, memory_format=torch.preserve_format
