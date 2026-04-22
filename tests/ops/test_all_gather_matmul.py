@@ -12,13 +12,34 @@ Covers both the baseline pull kernel and the HBM-buffered kernel.
 import pytest
 import torch
 import torch.distributed as dist
+import tritonblas
 
 import iris
+import os
 from iris.ops.all_gather_matmul_hbm_buffer import (
     all_gather_matmul_hbm_buffer,
     all_gather_matmul_hbm_buffer_preamble,
 )
 from iris.ops.config import FusedConfig
+
+
+def _param_shapes():
+    if "IRIS_TEST_M" in os.environ:
+        return [
+            (
+                int(os.environ["IRIS_TEST_M"]),
+                int(os.environ["IRIS_TEST_K_LOCAL"]),
+                int(os.environ["IRIS_TEST_N"]),
+            )
+        ]
+    return [
+        (128, 32, 64),
+        (256, 64, 128),
+    ]
+
+
+def _heap_size() -> int:
+    return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 1 << 34))
 
 
 def _make_reference(rank, world_size, M, K_local, N, dtype):
@@ -48,17 +69,14 @@ def _make_reference(rank, world_size, M, K_local, N, dtype):
 )
 @pytest.mark.parametrize(
     "M,K_local,N",
-    [
-        (128, 32, 64),
-        (256, 64, 128),
-    ],
+    _param_shapes(),
 )
 def test_all_gather_matmul_baseline(dtype, atol, rtol, M, K_local, N):
     """Test baseline all_gather_matmul against torch all_gather + matmul."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33
+    heap_size = _heap_size()
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
@@ -109,10 +127,57 @@ def test_all_gather_matmul_baseline(dtype, atol, rtol, M, K_local, N):
 )
 @pytest.mark.parametrize(
     "M,K_local,N",
+    _param_shapes(),
+)
+def test_tritonblas_rccl_all_gather_matmul(dtype, atol, rtol, M, K_local, N):
+    """Test RCCL all_gather + tritonBLAS matmul against torch reference."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = _heap_size()
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
+    device = f"cuda:{rank}"
+
+    K = K_local * world_size
+    A_sharded, B, ref_output = _make_reference(rank, world_size, M, K_local, N, dtype)
+
+    A_gathered_parts = [torch.empty((M, K_local), dtype=dtype, device=device) for _ in range(world_size)]
+    A_gathered = torch.empty((M, K), dtype=dtype, device=device)
+    output = ctx.zeros((M, N), dtype=dtype)
+    selector = tritonblas.OrigamiMatmulSelector(
+        M,
+        N,
+        K,
+        A_gathered.dtype,
+        B.dtype,
+        output.dtype,
+        A_gathered.device,
+    )
+    config = tritonblas.matmul_preamble(selector)
+
+    dist.all_gather(A_gathered_parts, A_sharded)
+    A_gathered = torch.cat(A_gathered_parts, dim=1)
+    tritonblas.matmul_lt(A_gathered, B, output, selector, config)
+
+    torch.cuda.synchronize()
+
+    max_diff = (output - ref_output).abs().max().item()
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
+        f"Rank {rank}: Max diff {max_diff}, expected < {atol} (tritonblas+rccl, M={M}, K_local={K_local}, N={N})"
+    )
+
+
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
     [
-        (128, 32, 64),
-        (256, 64, 128),
+        (torch.float16, 1e-2, 1e-2),
     ],
+)
+@pytest.mark.parametrize(
+    "M,K_local,N",
+    _param_shapes(),
 )
 @pytest.mark.parametrize(
     "staged_a_layout",
@@ -126,7 +191,7 @@ def test_all_gather_matmul_hbm_buffer(dtype, atol, rtol, M, K_local, N, staged_a
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33
+    heap_size = _heap_size()
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
@@ -178,16 +243,14 @@ def test_all_gather_matmul_hbm_buffer(dtype, atol, rtol, M, K_local, N, staged_a
 )
 @pytest.mark.parametrize(
     "M,K_local,N",
-    [
-        (128, 32, 64),
-    ],
+    _param_shapes(),
 )
 def test_all_gather_matmul_hbm_buffer_with_bias(dtype, atol, rtol, M, K_local, N):
     """Test all_gather_matmul_hbm_buffer with a bias vector."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33
+    heap_size = _heap_size()
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()

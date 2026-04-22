@@ -67,6 +67,9 @@ def parse_args():
     )
     parser.add_argument("--num_stages", type=int, default=2, help="Number of stages")
     parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
+    parser.add_argument(
+        "-c", "--use_copy_engine", action="store_true", help="Use copy engine for device-to-device copies"
+    )
 
     return vars(parser.parse_args())
 
@@ -134,7 +137,12 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
     total_tiles = total_blocks_M * total_blocks_N
 
-    locks = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int32)
+    locks = shmem.zeros((total_tiles,), device="cuda", dtype=torch.int8)
+    comm_sms = args["num_sms"] - args["gemm_sms"]
+    flags = shmem.zeros((comm_sms, world_size), device="cuda", dtype=torch.uint32)
+
+    # Get copy engine context
+    copy_engine_ctx = shmem.get_copy_engine_ctx()
 
     bias = None
 
@@ -182,6 +190,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                 global_C,
                 bias,
                 locks,
+                flags,
                 rank,
                 world_size,
                 args["gemm_sms"],
@@ -194,6 +203,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                 shmem.get_heap_bases(),
                 "gfx942",
                 args["trace_tiles"],
+                args["use_copy_engine"],
+                copy_engine_ctx,
                 timestamps.mm_begin_timestamp,
                 timestamps.mm_end_timestamp,
             )
@@ -241,7 +252,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 
         # Wait for all to finish validation
         shmem.barrier()
-        shmem.info("Validating local C...")
 
         json_writer.add_field("success", success)
 

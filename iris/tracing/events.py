@@ -95,6 +95,11 @@ class TraceEvent:
     atomic_min: tl.constexpr
     atomic_max: tl.constexpr
 
+    # Workgroup-level profiling events
+    wg_fetch: tl.constexpr
+    wg_gemm: tl.constexpr
+    wg_gemm_wait: tl.constexpr
+    wg_sdma: tl.constexpr
     # User data movement (1024–2047)
     fetch: tl.constexpr
 
@@ -124,6 +129,11 @@ class TraceEvent:
         self.atomic_min = tl.constexpr(12)
         self.atomic_max = tl.constexpr(13)
 
+        # Workgroup-level profiling
+        self.wg_fetch = tl.constexpr(14)
+        self.wg_gemm = tl.constexpr(15)
+        self.wg_gemm_wait = tl.constexpr(16)
+        self.wg_sdma = tl.constexpr(17)
         # User data movement (1024–2047)
         self.fetch = tl.constexpr(1024)
 

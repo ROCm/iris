@@ -153,7 +153,7 @@ def _fused_all_gather_matmul_kernel(
 
         # Store result using tritonblas Tile
         rm, rn = out_tile.indices()
-        C_ptr = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+        C_ptr = C + rm.to(tl.int64)[:, None] * stride_cm + rn.to(tl.int64)[None, :] * stride_cn
         mask = (rm[:, None] < M) & (rn[None, :] < N)
         tl.store(C_ptr, c, mask=mask)
 

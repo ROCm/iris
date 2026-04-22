@@ -9,6 +9,11 @@ from iris.device_utils import read_realtime
 import iris
 
 
+@triton.jit
+def wait_cnt():
+    tl.inline_asm_elementwise("s_waitcnt vmcnt(0)", "=r", [], dtype=tl.int32, is_pure=False, pack=1)
+
+
 @triton.jit()
 def persistent_gemm_all_scatter(
     A,
@@ -16,6 +21,7 @@ def persistent_gemm_all_scatter(
     C,
     c_global,
     bias_ptr,
+    flags,
     M,
     N,
     K,
@@ -40,13 +46,15 @@ def persistent_gemm_all_scatter(
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     COLLECT_TIMESTAMPS: tl.constexpr = False,
+    USE_COPY_ENGINE: tl.constexpr = False,
+    copy_engine_ctx: tl.tensor = None,
     mm_begin_timestamp_ptr: tl.tensor = None,
     mm_end_timestamp_ptr: tl.tensor = None,
 ):
     pid = tl.program_id(0)
 
-    if NUM_XCDS != 1:
-        pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+    # if NUM_XCDS != 1:
+    #     pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
@@ -60,6 +68,7 @@ def persistent_gemm_all_scatter(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
+    # Process all tiles for this SM
     for tile_id in range(pid, total_tiles, NUM_SMS):
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
@@ -132,17 +141,66 @@ def persistent_gemm_all_scatter(
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
-        # Store data to the global result using puts
-        for remote_rank in range(world_size):
-            if remote_rank == cur_rank:
-                # For the current rank, we can use store
-                tl.store(c_global + global_offset, c, mask=sub_mask)
-            else:
-                iris.store(
-                    c_global + global_offset,
-                    c,
-                    cur_rank,
-                    remote_rank,
-                    heap_bases,
-                    mask=sub_mask,
-                )
+        if USE_COPY_ENGINE:
+            # Store locally first
+            tl.store(c_global + global_offset, c, mask=sub_mask, cache_modifier=".wt")
+            wait_cnt()
+            tl.debug_barrier()
+            for remote_rank in range(world_size):
+                if remote_rank != cur_rank:
+                    iris.put(
+                        c_global + global_offset,
+                        c_global + global_offset,
+                        cur_rank,
+                        remote_rank,
+                        heap_bases,
+                        copy_engine_ctx,
+                        stride_tm=stride_cm_global,
+                        stride_tn=stride_cn_global,
+                        stride_fm=stride_cm_global,
+                        stride_fn=stride_cn_global,
+                        mask=sub_mask,
+                        USE_COPY_ENGINE=True,
+                        IS_2D_COPY=True,
+                        from_base_ptr=c_global,
+                        to_base_ptr=c_global,
+                    )
+
+        else:
+            # Store data to the global result using puts
+            for remote_rank in range(world_size):
+                if remote_rank == cur_rank:
+                    # For the current rank, we can use store
+                    tl.store(c_global + global_offset, c, mask=sub_mask)
+                else:
+                    iris.store(
+                        c_global + global_offset,
+                        c,
+                        cur_rank,
+                        remote_rank,
+                        heap_bases,
+                        mask=sub_mask,
+                    )
+
+    # After all tiles are processed, signal and wait once per SM
+    tl.debug_barrier()
+    # Signal other ranks that all our puts/stores are complete
+    for remote_rank in range(world_size):
+        if remote_rank != cur_rank:
+            iris.atomic_add(
+                flags + (pid * world_size) + cur_rank,
+                1,
+                cur_rank,
+                remote_rank,
+                heap_bases,
+                sem="release",
+                scope="sys",
+                copy_engine_ctx=copy_engine_ctx,
+                USE_COPY_ENGINE=USE_COPY_ENGINE,
+            )
+
+    # Wait for other ranks to signal us
+    for remote_rank in range(world_size):
+        if remote_rank != cur_rank:
+            while tl.load(flags + (pid * world_size) + remote_rank, cache_modifier=".cv", volatile=True) != 1:
+                pass

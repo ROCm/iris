@@ -14,6 +14,7 @@ import os
 
 import torch
 import torch.distributed as dist
+import tritonblas
 import iris.bench as bench
 from iris.ops.all_gather_matmul_hbm_buffer import (
     all_gather_matmul_hbm_buffer as _hbm_buffer,
@@ -31,24 +32,73 @@ from auto_config import select_ag_mm_config
 @bench.axis("K", [8192])
 @bench.axis("dtype", [torch.float16])
 def rccl_all_gather_matmul(state, ctx):
-    """PyTorch/RCCL baseline: all_gather_into_tensor + torch.mm"""
+    """PyTorch/RCCL baseline: all_gather + torch.cat + torch.mm."""
     M, N, K = state["M"], state["N"], state["K"]
     dtype = state["dtype"]
     world_size = dist.get_world_size()
+    rank = ctx.get_rank()
     K_local = K // world_size
 
-    A_sharded = torch.ones((M, K_local), device="cuda", dtype=dtype)
-    B = torch.randn((K, N), device="cuda", dtype=dtype)
-    A_gathered = torch.empty((M, K), device="cuda", dtype=dtype)
-    C = torch.empty((M, N), device="cuda", dtype=dtype)
+    torch.manual_seed(123 + rank)
+    A_sharded = ctx.randn((M, K_local), dtype=dtype)
+    torch.manual_seed(456)
+    B = ctx.randn((K, N), dtype=dtype)
+    A_gathered_parts = [ctx.zeros((M, K_local), dtype=dtype) for _ in range(world_size)]
+    A_gathered = ctx.zeros((M, K), dtype=dtype)
+    C = ctx.zeros((M, N), dtype=dtype)
 
     state.set_flops(2 * M * N * K)
     state.set_bytes((world_size - 1) * M * K_local * A_sharded.element_size())
 
     state.exec(
         lambda: (
-            dist.all_gather_into_tensor(A_gathered, A_sharded),
+            dist.all_gather(A_gathered_parts, A_sharded),
+            A_gathered.copy_(torch.cat(A_gathered_parts, dim=1)),
             torch.mm(A_gathered, B, out=C),
+        ),
+    )
+
+
+@bench.register
+@bench.axis("num_ranks", [2, 4, 8])
+@bench.axis("M", [1024, 4096, 16384])
+@bench.axis("N", [3584])
+@bench.axis("K", [8192])
+@bench.axis("dtype", [torch.float16])
+def tritonblas_rccl_all_gather_matmul(state, ctx):
+    """RCCL all_gather + tritonBLAS matmul baseline."""
+    M, N, K = state["M"], state["N"], state["K"]
+    dtype = state["dtype"]
+    world_size = dist.get_world_size()
+    rank = ctx.get_rank()
+    K_local = K // world_size
+
+    torch.manual_seed(123 + rank)
+    A_sharded = ctx.randn((M, K_local), dtype=dtype)
+    torch.manual_seed(456)
+    B = ctx.randn((K, N), dtype=dtype)
+    A_gathered_parts = [ctx.zeros((M, K_local), dtype=dtype) for _ in range(world_size)]
+    A_gathered = ctx.zeros((M, K), dtype=dtype)
+    C = ctx.zeros((M, N), dtype=dtype)
+    selector = tritonblas.OrigamiMatmulSelector(
+        M,
+        N,
+        K,
+        A_gathered.dtype,
+        B.dtype,
+        C.dtype,
+        A_gathered.device,
+    )
+    config = tritonblas.matmul_preamble(selector)
+
+    state.set_flops(2 * M * N * K)
+    state.set_bytes((world_size - 1) * M * K_local * A_sharded.element_size())
+
+    state.exec(
+        lambda: (
+            dist.all_gather(A_gathered_parts, A_sharded),
+            A_gathered.copy_(torch.cat(A_gathered_parts, dim=1)),
+            tritonblas.matmul_lt(A_gathered, B, C, selector, config),
         ),
     )
 
@@ -64,15 +114,17 @@ def all_gather_matmul_hbm_buffer(state, ctx):
     M, N, K = state["M"], state["N"], state["K"]
     dtype = state["dtype"]
     world_size = ctx.get_num_ranks()
+    rank = ctx.get_rank()
     K_local = K // world_size
 
     result = select_ag_mm_config(M, N, K, world_size=world_size)
     config = result.to_fused_config()
     hbm = result.hbm_buffer_params
 
-    A_sharded = ctx.zeros((M, K_local), dtype=dtype)
-    A_sharded.fill_(1.0)
-    B = torch.randn((K, N), device="cuda", dtype=dtype)
+    torch.manual_seed(123 + rank)
+    A_sharded = ctx.randn((M, K_local), dtype=dtype)
+    torch.manual_seed(456)
+    B = ctx.randn((K, N), dtype=dtype)
     C = ctx.zeros((M, N), dtype=dtype)
 
     workspace = all_gather_matmul_hbm_buffer_preamble(
@@ -103,6 +155,7 @@ def all_gather_matmul_hbm_buffer(state, ctx):
             num_fetch_stages=hbm.get("num_fetch_stages"),
             first_stage_fetch_sms=hbm.get("first_stage_fetch_sms"),
         ),
+        # TODO get ride of preamble
         preamble_fn=lambda: (C.zero_(), workspace.locks.zero_()),
     )
 
