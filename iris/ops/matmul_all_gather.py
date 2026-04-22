@@ -17,7 +17,6 @@ import triton.language as tl
 import iris
 import iris.x
 
-from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
@@ -90,7 +89,6 @@ def _fused_matmul_all_gather_kernel(
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
 
         for k_block_idx in range(NUM_K_BLOCKS):
-
             # Load A from selected buffer
             rk = k_block_idx * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
             rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
@@ -106,7 +104,6 @@ def _fused_matmul_all_gather_kernel(
                 acc = tl.dot(a, b, acc, allow_tf32=True)
             else:
                 acc += tl.dot(a, b, allow_tf32=False)
-
 
         # ==================================================================
         # Write output
@@ -242,11 +239,10 @@ def matmul_all_gather(
     even_k = K % config.block_size_k == 0
 
     # Calculate number of tiles
-    num_k_blocks = (K + config.block_size_k -1) // config.block_size_k
+    num_k_blocks = (K + config.block_size_k - 1) // config.block_size_k
     num_tiles_m = (M_local + config.block_size_m - 1) // config.block_size_m
     num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
     num_tiles = num_tiles_m * num_tiles_n
-
 
     # Launch single fused kernel
     grid = (num_sms,)

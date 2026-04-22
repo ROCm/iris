@@ -108,10 +108,7 @@ def _batch_poster_kernel(
         dst_k_offset_i64 = (dst_k_offset + 0 * stride_sa_k).to(tl.int64)
         stride_sa_m_i64 = (stride_sa_m + 0 * dst_m_offset).to(tl.int64)
         stride_sa_k_i64 = (stride_sa_k + 0 * dst_m_offset).to(tl.int64)
-        dst_ptr = staged_a + (
-            dst_m_offset_i64 * stride_sa_m_i64
-            + dst_k_offset_i64 * stride_sa_k_i64
-        )
+        dst_ptr = staged_a + (dst_m_offset_i64 * stride_sa_m_i64 + dst_k_offset_i64 * stride_sa_k_i64)
 
         tile_width_bytes = K_local * elem_size
         src_pitch_bytes = stride_am * elem_size
@@ -253,10 +250,7 @@ def _nonpersistent_xcd_comm_gemm_kernel(
             dst_k_offset_i64 = (dst_k_offset + 0 * stride_sa_k).to(tl.int64)
             stride_sa_m_i64 = (stride_sa_m + 0 * dst_m_offset).to(tl.int64)
             stride_sa_k_i64 = (stride_sa_k + 0 * dst_m_offset).to(tl.int64)
-            dst_ptr = staged_a + (
-                dst_m_offset_i64 * stride_sa_m_i64
-                + dst_k_offset_i64 * stride_sa_k_i64
-            )
+            dst_ptr = staged_a + (dst_m_offset_i64 * stride_sa_m_i64 + dst_k_offset_i64 * stride_sa_k_i64)
 
             tile_width_bytes = K_local * elem_size
             src_pitch_bytes = stride_am * elem_size

@@ -170,7 +170,9 @@ def _selector_metadata(m_local: int, n: int, k: int, dtype: torch.dtype):
     }
 
 
-def _candidate_values(num_tiles_m: int, group_size_m: int, groups_per_wave: int, m_tiles_per_wave: int, sweep_all: bool):
+def _candidate_values(
+    num_tiles_m: int, group_size_m: int, groups_per_wave: int, m_tiles_per_wave: int, sweep_all: bool
+):
     if sweep_all:
         return list(range(1, num_tiles_m + 1))
 
@@ -545,8 +547,12 @@ def main():
             print(f"  bottleneck                 : {best_json['bottleneck']}")
 
         print("\nSpread")
-        print(f"  best                       : {best['iris_tflops']:.2f} TFLOPS @ m_tiles_per_batch={best['m_tiles_per_batch']}")
-        print(f"  worst                      : {worst['iris_tflops']:.2f} TFLOPS @ m_tiles_per_batch={worst['m_tiles_per_batch']}")
+        print(
+            f"  best                       : {best['iris_tflops']:.2f} TFLOPS @ m_tiles_per_batch={best['m_tiles_per_batch']}"
+        )
+        print(
+            f"  worst                      : {worst['iris_tflops']:.2f} TFLOPS @ m_tiles_per_batch={worst['m_tiles_per_batch']}"
+        )
         if worst["iris_tflops"] and best["iris_tflops"]:
             print(f"  best / worst               : {best['iris_tflops'] / worst['iris_tflops']:.2f}x")
 
@@ -555,9 +561,7 @@ def main():
         json.dump(
             {
                 "meta": {
-                    "dimension_configs": [
-                        {"m_local": m_local, "n": n, "k": k} for m_local, n, k in dimension_configs
-                    ],
+                    "dimension_configs": [{"m_local": m_local, "n": n, "k": k} for m_local, n, k in dimension_configs],
                     "use_sweep_dimensions": args.use_sweep_dimensions,
                     "benchmark": args.benchmark,
                     "benchmark_script": BENCHMARK_TARGETS[args.benchmark]["script"],
