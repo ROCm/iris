@@ -358,6 +358,19 @@ if GFX1250_ASYNC_AVAILABLE:
         smem_layout: gl.constexpr = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[0])
         smem = gl.allocate_shared_memory(dtype, [BLOCK_SIZE], layout=smem_layout)
 
+        # Load ALL elem_deltas ONCE before the chunk loop.
+        # world_size is constexpr → this unrolls to N scalar s_load's into SGPRs.
+        # The chunk loop below has ZERO global loads — only async copy ops.
+        d0 = gl.load(elem_deltas + ((group_rank + 0) % world_size)) if world_size > 0 else 0
+        d1 = gl.load(elem_deltas + ((group_rank + 1) % world_size)) if world_size > 1 else 0
+        d2 = gl.load(elem_deltas + ((group_rank + 2) % world_size)) if world_size > 2 else 0
+        d3 = gl.load(elem_deltas + ((group_rank + 3) % world_size)) if world_size > 3 else 0
+        d4 = gl.load(elem_deltas + ((group_rank + 4) % world_size)) if world_size > 4 else 0
+        d5 = gl.load(elem_deltas + ((group_rank + 5) % world_size)) if world_size > 5 else 0
+        d6 = gl.load(elem_deltas + ((group_rank + 6) % world_size)) if world_size > 6 else 0
+        d7 = gl.load(elem_deltas + ((group_rank + 7) % world_size)) if world_size > 7 else 0
+        deltas = (d0, d1, d2, d3, d4, d5, d6, d7)
+
         for chunk_start in range(pid * BLOCK_SIZE, numel, COMM_SMS * BLOCK_SIZE):
             idx = gl.arange(0, BLOCK_SIZE, layout=layout)
             offs = chunk_start + idx
@@ -373,7 +386,8 @@ if GFX1250_ASYNC_AVAILABLE:
             output_base_ptrs = output_ptr + out_offs
 
             # === ASYNC STORES: LDS → global/XGMI (register-free) ===
-            # Traffic-shaped: stagger write order per rank
+            # Traffic-shaped: stagger write order per rank.
+            # ZERO loads inside this loop — all deltas preloaded above.
             for rank_idx in range(world_size):
                 dest_idx = (group_rank + rank_idx) % world_size
 
@@ -381,9 +395,8 @@ if GFX1250_ASYNC_AVAILABLE:
                     # Local: LDS → HBM
                     gfx1250_async_copy.shared_to_global(output_base_ptrs, smem, mask=mask)
                 else:
-                    # Remote: elem_delta precomputed on host, no division needed
-                    elem_delta = gl.load(elem_deltas + dest_idx)
-                    remote_ptrs = output_ptr + out_offs + elem_delta
+                    # Remote: delta in SGPR from pre-loop load
+                    remote_ptrs = output_ptr + out_offs + deltas[rank_idx]
                     remote_ptrs = tl.max_contiguous(tl.multiple_of(remote_ptrs, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
                     gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask)
 
