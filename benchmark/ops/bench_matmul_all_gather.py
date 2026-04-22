@@ -6,6 +6,7 @@
 
 import torch
 import torch.distributed as dist
+import tritonblas
 import iris.bench as bench
 
 from iris.ops import FusedConfig
@@ -18,12 +19,10 @@ def _register_fused_matmul_all_gather(state, ctx) -> None:
     rank = ctx.get_rank()
     M = M_local * world_size
 
-    A = ctx.zeros((M_local, K), dtype=dtype)
     torch.manual_seed(123 + rank)
-    A_data = torch.randn((M_local, K), device="cuda", dtype=dtype)
-    A.copy_(A_data)
+    A = ctx.randn((M_local, K), dtype=dtype)
     torch.manual_seed(456)
-    B = torch.randn((K, N), device="cuda", dtype=dtype)
+    B = ctx.randn((K, N), dtype=dtype)
     C = ctx.zeros((M, N), dtype=dtype)
     config = FusedConfig()
 
@@ -32,7 +31,6 @@ def _register_fused_matmul_all_gather(state, ctx) -> None:
 
     state.exec(
         lambda: ctx.ops.matmul_all_gather(C, A, B, config=config),
-        preamble_fn=lambda: C.zero_(),
     )
 
 
@@ -44,11 +42,11 @@ def _register_pytorch_matmul_all_gather(state, ctx) -> None:
     M = M_local * world_size
 
     torch.manual_seed(123 + rank)
-    A = torch.randn((M_local, K), device="cuda", dtype=dtype)
+    A = ctx.randn((M_local, K), dtype=dtype)
     torch.manual_seed(456)
-    B = torch.randn((K, N), device="cuda", dtype=dtype)
-    C_local = torch.empty((M_local, N), device="cuda", dtype=dtype)
-    C = torch.empty((M, N), device="cuda", dtype=dtype)
+    B = ctx.randn((K, N), dtype=dtype)
+    C_local = ctx.zeros((M_local, N), dtype=dtype)
+    C = ctx.zeros((M, N), dtype=dtype)
 
     state.set_flops(2 * M_local * N * K)
     state.set_bytes((world_size - 1) * M_local * N * A.element_size())
@@ -56,6 +54,43 @@ def _register_pytorch_matmul_all_gather(state, ctx) -> None:
     state.exec(
         lambda: (
             torch.mm(A, B, out=C_local),
+            dist.all_gather_into_tensor(C, C_local),
+        ),
+    )
+
+
+def _register_tritonblas_matmul_all_gather(state, ctx) -> None:
+    M_local, N, K = state["M_local"], state["N"], state["K"]
+    dtype = state["dtype"]
+    world_size = ctx.get_num_ranks()
+    rank = ctx.get_rank()
+    M = M_local * world_size
+
+    torch.manual_seed(123 + rank)
+    A = ctx.randn((M_local, K), dtype=dtype)
+
+    torch.manual_seed(456)
+    B = ctx.randn((K, N), dtype=dtype)
+
+    C_local = ctx.zeros((M_local, N), dtype=dtype)
+    C = ctx.zeros((M, N), dtype=dtype)
+    selector = tritonblas.OrigamiMatmulSelector(
+        M_local,
+        N,
+        K,
+        A.dtype,
+        B.dtype,
+        C_local.dtype,
+        A.device,
+    )
+    config = tritonblas.matmul_preamble(selector)
+
+    state.set_flops(2 * M_local * N * K)
+    state.set_bytes((world_size - 1) * M_local * N * A.element_size())
+
+    state.exec(
+        lambda: (
+            tritonblas.matmul_lt(A, B, C_local, selector, config),
             dist.all_gather_into_tensor(C, C_local),
         ),
     )
@@ -67,6 +102,16 @@ def _register_pytorch_matmul_all_gather(state, ctx) -> None:
 @bench.axis("dtype", [torch.float16])
 def pytorch_matmul_all_gather(state, ctx):
     _register_pytorch_matmul_all_gather(state, ctx)
+
+
+@bench.register
+@bench.axis("num_ranks", [2, 4, 8])
+@bench.axis("M_local", [1024, 4096, 16384])
+@bench.axis("N", [3584])
+@bench.axis("K", [8192])
+@bench.axis("dtype", [torch.float16])
+def tritonblas_matmul_all_gather(state, ctx):
+    _register_tritonblas_matmul_all_gather(state, ctx)
 
 
 @bench.register

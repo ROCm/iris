@@ -67,12 +67,10 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool) -> None:
     if K % config.block_size_k != 0:
         state.skip(f"K={K} must be divisible by block_size_k={config.block_size_k}")
 
-    A = ctx.zeros((M_local, K), dtype=dtype)
     torch.manual_seed(123 + rank)
-    A_data = torch.randn((M_local, K), device="cuda", dtype=dtype)
-    A.copy_(A_data)
+    A = ctx.randn((M_local, K), dtype=dtype)
     torch.manual_seed(456)
-    B = torch.randn((K, N), device="cuda", dtype=dtype)
+    B = ctx.randn((K, N), dtype=dtype)
     C = ctx.zeros((M, N), dtype=dtype)
 
     flag_iteration = [0]
@@ -135,7 +133,7 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool) -> None:
     state.add_counter("m_tiles_per_batch", float(m_tiles_per_batch))
     state.add_counter("device_initiated", 1.0 if device_initiated else 0.0)
 
-    state.exec(_run, preamble_fn=lambda: C.zero_())
+    state.exec(_run)
 
 
 @bench.register

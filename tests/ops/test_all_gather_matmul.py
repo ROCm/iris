@@ -145,7 +145,7 @@ def test_tritonblas_rccl_all_gather_matmul(dtype, atol, rtol, M, K_local, N):
 
     A_gathered_parts = [torch.empty((M, K_local), dtype=dtype, device=device) for _ in range(world_size)]
     A_gathered = torch.empty((M, K), dtype=dtype, device=device)
-    output = torch.zeros((M, N), dtype=dtype)
+    output = ctx.zeros((M, N), dtype=dtype)
     selector = tritonblas.OrigamiMatmulSelector(
         M,
         N,

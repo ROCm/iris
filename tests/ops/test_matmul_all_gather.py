@@ -11,6 +11,7 @@ Install with: pip install git+https://github.com/ROCm/tritonBLAS.git
 import pytest
 import torch
 import torch.distributed as dist
+import tritonblas
 import iris
 import os
 
@@ -235,3 +236,63 @@ def test_matmul_all_gather(dtype, atol, rtol, M, N, K):
 
     gc.collect()
     torch.cuda.empty_cache()
+
+
+@pytest.mark.parametrize(
+    "dtype, atol, rtol",
+    [
+        (torch.float16, 0.5, 0.01),
+        (torch.bfloat16, 0.5, 0.01),
+    ],
+)
+@pytest.mark.parametrize(
+    "M, N, K",
+    _param_shapes(),
+)
+def test_tritonblas_rccl_matmul_all_gather(dtype, atol, rtol, M, N, K):
+    """Test tritonBLAS matmul + RCCL all_gather against a dense local reference."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = _heap_size()
+    shmem = iris.iris(heap_size)
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+
+    if M % world_size != 0:
+        pytest.skip(f"M={M} not divisible by world_size={world_size}")
+
+    M_local = M // world_size
+    min_block_size = 32
+    if M_local < min_block_size:
+        pytest.skip(f"M_local={M_local} too small for world_size={world_size} (need >= {min_block_size})")
+    if K < min_block_size:
+        pytest.skip(f"K={K} too small (need >= {min_block_size})")
+    if N < min_block_size:
+        pytest.skip(f"N={N} too small (need >= {min_block_size})")
+
+    torch.manual_seed(123 + rank)
+    A_local = torch.randn((M_local, K), device=f"cuda:{rank}", dtype=dtype)
+    torch.manual_seed(456)
+    B = torch.randn((K, N), device=f"cuda:{rank}", dtype=dtype)
+    C_local = shmem.zeros((M_local, N), dtype=dtype)
+    output = torch.empty((M, N), device=f"cuda:{rank}", dtype=dtype)
+    selector = tritonblas.OrigamiMatmulSelector(
+        M_local,
+        N,
+        K,
+        A_local.dtype,
+        B.dtype,
+        C_local.dtype,
+        A_local.device,
+    )
+    config = tritonblas.matmul_preamble(selector)
+
+    shmem.barrier()
+    tritonblas.matmul_lt(A_local, B, C_local, selector, config)
+    dist.all_gather_into_tensor(output, C_local)
+
+    torch.cuda.synchronize()
+    shmem.barrier()
+
+    _assert_gathered_rows_match(output, A_local, B, rank, world_size, atol, rtol)
