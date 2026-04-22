@@ -20,8 +20,16 @@ try:
     from iris.experimental.iris_gluon import IrisDeviceCtx
 
     GLUON_AVAILABLE = True
+
+    try:
+        from triton.experimental.gluon.language.amd.gfx1250 import async_copy as gfx1250_async_copy
+
+        GFX1250_ASYNC_AVAILABLE = True
+    except ImportError:
+        GFX1250_ASYNC_AVAILABLE = False
 except ImportError:
     GLUON_AVAILABLE = False
+    GFX1250_ASYNC_AVAILABLE = False
 
 
 @triton.jit()
@@ -378,6 +386,94 @@ if GLUON_AVAILABLE:
                     gl.store(remote_ptrs, data, mask=mask)
 
 
+if GFX1250_ASYNC_AVAILABLE:
+
+    @gluon.jit
+    def persistent_all_gather_gluon_gfx1250(
+        IrisDeviceCtx: gl.constexpr,
+        context_tensor,
+        input_ptr,
+        output_ptr,
+        numel,
+        output_offset,
+        group_rank: gl.constexpr,
+        iris_rank: gl.constexpr,
+        world_size: gl.constexpr,
+        rank_start: gl.constexpr,
+        rank_stride: gl.constexpr,
+        BLOCK_SIZE: gl.constexpr,
+        COMM_SMS: gl.constexpr,
+        THREADS_PER_WARP: gl.constexpr,
+        WARPS_PER_CTA: gl.constexpr,
+        TRACING: gl.constexpr = False,
+    ):
+        """
+        Persistent all-gather using GFX1250 async copy through LDS.
+
+        Same linear 1D tiling as persistent_all_gather_gluon, but all data
+        movement goes through LDS via async copy — no VGPRs touch the data.
+
+        Data path per chunk:
+            HBM → LDS  (gfx1250_async_copy.global_to_shared)
+            LDS → HBM  (gfx1250_async_copy.shared_to_global, local write)
+            LDS → XGMI (gfx1250_async_copy.shared_to_global, remote writes)
+
+        Hardware requirement: GFX1250 (RDNA4) with async_copy support.
+        """
+        ctx = IrisDeviceCtx.initialize(context_tensor, tracing=False)
+
+        pid = gl.program_id(0)
+
+        ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE // (THREADS_PER_WARP * WARPS_PER_CTA)
+        layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
+
+        # LDS buffer for one chunk — data never touches VGPRs
+        dtype: gl.constexpr = input_ptr.dtype.element_ty
+        ELEM_SIZE_BYTES: gl.constexpr = dtype.primitive_bitwidth // 8
+        smem_layout: gl.constexpr = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[0])
+        smem = gl.allocate_shared_memory(dtype, [BLOCK_SIZE], layout=smem_layout)
+
+        # Hoist local heap base outside the chunk loop
+        local_base = gl.load(ctx.heap_bases + iris_rank)
+
+        for chunk_start in range(pid * BLOCK_SIZE, numel, COMM_SMS * BLOCK_SIZE):
+            idx = gl.arange(0, BLOCK_SIZE, layout=layout)
+            offs = chunk_start + idx
+            mask = offs < numel
+
+            # === ASYNC LOAD: HBM → LDS (register-free) ===
+            input_ptrs = input_ptr + offs
+            gfx1250_async_copy.global_to_shared(smem, input_ptrs, mask=mask, other=0.0)
+            gfx1250_async_copy.commit_group()
+            gfx1250_async_copy.wait_group(0)
+
+            out_offs = output_offset + offs
+            output_base_ptrs = output_ptr + out_offs
+
+            # === ASYNC STORES: LDS → global/XGMI (register-free) ===
+            # Traffic-shaped: stagger write order per rank
+            for rank_idx in range(world_size):
+                dest_idx = (group_rank + rank_idx) % world_size
+                target_iris_rank = rank_start + dest_idx * rank_stride
+
+                if dest_idx == group_rank:
+                    # Local: LDS → HBM
+                    gfx1250_async_copy.shared_to_global(output_base_ptrs, smem, mask=mask)
+                else:
+                    # Remote: translate pointer via elem_delta, restore
+                    # vectorization hints lost by runtime division.
+                    target_base = gl.load(ctx.heap_bases + target_iris_rank)
+                    ptr_delta = target_base - local_base
+                    elem_delta = ptr_delta // ELEM_SIZE_BYTES
+                    remote_ptrs = output_ptr + out_offs + elem_delta
+                    remote_ptrs = tl.max_contiguous(tl.multiple_of(remote_ptrs, ELEMS_PER_THREAD), ELEMS_PER_THREAD)
+                    gfx1250_async_copy.shared_to_global(remote_ptrs, smem, mask=mask)
+
+            # Wait for all stores before reusing LDS on next chunk
+            gfx1250_async_copy.commit_group()
+            gfx1250_async_copy.wait_group(0)
+
+
 def all_gather(
     output_tensor,
     input_tensor,
@@ -465,8 +561,21 @@ def all_gather(
         tracing = getattr(ctx, "tracing", None)
         tracing_enabled = bool(tracing and getattr(tracing, "enabled", False))
 
+        # Detect GFX1250 for register-free async copy path
+        import torch
+
+        use_gfx1250_async = False
+        if GFX1250_ASYNC_AVAILABLE:
+            try:
+                arch = torch.cuda.get_device_properties(input_tensor.device).gcnArchName
+                use_gfx1250_async = "gfx1250" in arch
+            except Exception:
+                pass
+
+        gluon_kernel = persistent_all_gather_gluon_gfx1250 if use_gfx1250_async else persistent_all_gather_gluon
+
         iris_launch(
-            persistent_all_gather_gluon,
+            gluon_kernel,
             (config.comm_sms,),
             IrisDeviceCtx,
             context_tensor,
