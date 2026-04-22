@@ -20,7 +20,7 @@ from triton.experimental.gluon import language as gl
 import triton
 
 import iris
-from iris.device.gluon.context import IrisDeviceCtx
+from iris.gluon import IrisDeviceCtx
 
 
 @gluon.jit

@@ -86,15 +86,15 @@ autodoc_default_options = {
 autodoc_typehints = "description"
 autodoc_typehints_format = "short"
 
-# Render objects without full module path (e.g., show "Iris" instead of "iris.iris.Iris")
+# Render objects without full module path (e.g., show "Iris" instead of "iris.host.iris.Iris")
 add_module_names = False
 
 # Mock heavy/runtime-only dependencies when building docs
 autodoc_mock_imports = [
     "torch",
     "numpy",
-    "iris._distributed_helpers",
-    "iris.hip",
+    "iris.host.distributed.helpers",
+    "iris.host.platform.hip",
     "tritonblas",
 ]
 

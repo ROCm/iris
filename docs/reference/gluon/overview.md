@@ -27,7 +27,7 @@ The Gluon API provides a Triton Gluon-based implementation of Iris that uses the
 
 ```python
 import iris
-from iris.device.gluon.context import IrisDeviceCtx
+from iris.gluon import IrisDeviceCtx
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
@@ -66,7 +66,7 @@ import torch.multiprocessing as mp
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 import iris
-from iris.device.gluon.context import IrisDeviceCtx
+from iris.gluon import IrisDeviceCtx
 
 @gluon.jit
 def producer_kernel(

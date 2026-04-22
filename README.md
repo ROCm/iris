@@ -132,7 +132,7 @@ import torch.multiprocessing as mp
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 import iris
-from iris.device.gluon.context import IrisDeviceCtx
+from iris.gluon import IrisDeviceCtx
 
 # Device-side APIs - context encapsulates heap_bases
 @gluon.jit

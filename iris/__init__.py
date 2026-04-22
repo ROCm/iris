@@ -28,7 +28,7 @@ Quick Start (Traditional API):
 
 Quick Start (Gluon API - Experimental):
     >>> import iris
-    >>> from iris.device.gluon.context import IrisDeviceCtx
+    >>> from iris.gluon import IrisDeviceCtx
     >>> from triton.experimental import gluon
     >>> from triton.experimental.gluon import language as gl
     >>>

@@ -5,7 +5,7 @@ import torch
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 import iris
-from iris.device.gluon.context import IrisDeviceCtx
+from iris.gluon import IrisDeviceCtx
 from iris.host.tracing.events import TraceEvent
 
 
