@@ -197,7 +197,7 @@ def test_vmem_allocator_uses_cumulative_access():
     """
     import torch.distributed as dist
 
-    from iris.allocators.vmem_allocator import VMemAllocator
+    from iris.host.memory.allocators.vmem_allocator import VMemAllocator
 
     rank = dist.get_rank()
     world_size = dist.get_world_size()
