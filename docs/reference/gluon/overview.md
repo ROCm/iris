@@ -50,10 +50,10 @@ def kernel(IrisDeviceCtx: gl.constexpr, context_tensor, buffer):
 
 Explore the API by section:
 
-- [Iris Class](class.md)
-- [Tensor Creation](tensor-creation.md)
+- [Iris Class](../host/class.md)
+- [Tensor Creation](../host/tensor-creation.md)
 - [Device Functions](device-functions.md)
-- [Collective Communication (CCL)](ccl.md)
+- [Collective Communication (CCL)](../host/ccl.md)
 
 ## Complete Example: Producer-Consumer Pattern
 
