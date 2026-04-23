@@ -19,7 +19,6 @@ from iris.ops.all_gather_matmul_copy_engine import (
     all_gather_matmul_copy_engine,
     all_gather_matmul_copy_engine_preamble,
 )
-from iris.ops.config import FusedConfig
 from tritonblas.matmul import _make_matmul_selector
 
 
@@ -42,6 +41,13 @@ def _device_initiated_modes():
     if mode == "device":
         return [True]
     return [False, True]
+
+
+def _host_transfer_backends():
+    backend = os.environ.get("IRIS_TEST_HOST_TRANSFER_BACKEND")
+    if backend:
+        return [backend]
+    return ["anvil"]
 
 
 def _heap_size() -> int:
@@ -67,8 +73,8 @@ def _make_reference(rank, world_size, M, K_local, N, dtype):
     return A_sharded, B, ref_output
 
 
-def _make_selector_config(M, N, K, dtype, device):
-    selector = _make_matmul_selector(
+def _make_selector(M, N, K, dtype, device):
+    return _make_matmul_selector(
         M,
         N,
         K,
@@ -78,20 +84,13 @@ def _make_selector_config(M, N, K, dtype, device):
         device,
         streamk=False,
     )
-    config = FusedConfig(
-        block_size_m=selector.block_m,
-        block_size_n=selector.block_n,
-        block_size_k=selector.block_k,
-        group_size_m=selector.group_m,
-        num_xcds=max(1, int(getattr(selector, "num_sms", 1))),
-    )
-    return selector, config
 
 
 @pytest.mark.parametrize("dtype, atol, rtol", [(torch.float16, 5e-2, 5e-2)])
 @pytest.mark.parametrize("device_initiated", _device_initiated_modes())
+@pytest.mark.parametrize("host_transfer_backend", _host_transfer_backends())
 @pytest.mark.parametrize("M,K_local,N", _param_shapes())
-def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, M, K_local, N):
+def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, host_transfer_backend, M, K_local, N):
     """Test all_gather_matmul_copy_engine against torch all_gather + matmul."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -103,14 +102,14 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, M, K
     K = K_local * world_size
 
     A_sharded, B, ref_output = _make_reference(rank, world_size, M, K_local, N, dtype)
-    selector, config = _make_selector_config(M, N, K, dtype, B.device)
+    selector = _make_selector(M, N, K, dtype, B.device)
 
-    if M % config.block_size_m != 0:
-        pytest.skip(f"M={M} must be divisible by block_size_m={config.block_size_m}")
-    if K % config.block_size_k != 0:
-        pytest.skip(f"K={K} must be divisible by block_size_k={config.block_size_k}")
-    if K_local % config.block_size_k != 0:
-        pytest.skip(f"K_local={K_local} must be divisible by block_size_k={config.block_size_k}")
+    if M % selector.block_m != 0:
+        pytest.skip(f"M={M} must be divisible by block_m={selector.block_m}")
+    if K % selector.block_k != 0:
+        pytest.skip(f"K={K} must be divisible by block_k={selector.block_k}")
+    if K_local % selector.block_k != 0:
+        pytest.skip(f"K_local={K_local} must be divisible by block_k={selector.block_k}")
 
     A_sharded_shmem = ctx.zeros((M, K_local), dtype=dtype)
     A_sharded_shmem.copy_(A_sharded)
@@ -118,16 +117,13 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, M, K
     B_shmem.copy_(B)
     output = ctx.zeros((M, N), dtype=dtype)
 
-    m_tiles_per_batch = 1
     workspace = all_gather_matmul_copy_engine_preamble(
         ctx,
         A_sharded_shmem,
         B_shmem,
-        config=config,
+        selector=selector,
         k_per_flag=4,
-        m_tiles_per_batch=m_tiles_per_batch,
     )
-    workspace.selector = selector
 
     ctx.barrier()
 
@@ -136,11 +132,10 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, M, K
         output,
         A_sharded_shmem,
         B_shmem,
-        config=config,
         workspace=workspace,
         k_per_flag=4,
-        m_tiles_per_batch=m_tiles_per_batch,
         device_initiated=device_initiated,
+        host_transfer_backend=host_transfer_backend,
         trace=False,
     )
 
@@ -150,7 +145,8 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, M, K
     max_diff = (output - ref_output).abs().max().item()
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
         f"Rank {rank}: Max diff {max_diff}, expected < {atol} "
-        f"(device_initiated={device_initiated}, M={M}, K_local={K_local}, N={N})"
+        f"(device_initiated={device_initiated}, host_transfer_backend={host_transfer_backend}, "
+        f"M={M}, K_local={K_local}, N={N})"
     )
 
 

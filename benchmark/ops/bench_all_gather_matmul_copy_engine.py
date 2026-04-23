@@ -4,6 +4,8 @@
 
 """Benchmarks for all-gather + GEMM copy-engine variants."""
 
+import os
+
 import torch
 import iris.bench as bench
 
@@ -36,7 +38,7 @@ def _selector_and_config(M: int, N: int, K: int, dtype: torch.dtype, device: tor
     return selector, config
 
 
-def _register_copy_engine(state, ctx, *, device_initiated: bool) -> None:
+def _register_copy_engine(state, ctx, *, device_initiated: bool, host_transfer_backend: str = "anvil") -> None:
     M, N, K = state["M"], state["N"], state["K"]
     dtype = state["dtype"]
     rank = ctx.get_rank()
@@ -57,6 +59,7 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool) -> None:
 
     m_tiles_per_batch = config.group_size_m
     k_per_flag = 4
+    host_transfer_backend = os.environ.get("IRIS_BENCH_HOST_TRANSFER_BACKEND", host_transfer_backend)
 
     A_sharded = ctx.zeros((M, K_local), dtype=dtype)
     torch.manual_seed(123 + rank)
@@ -91,6 +94,7 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool) -> None:
             k_per_flag=k_per_flag,
             m_tiles_per_batch=m_tiles_per_batch,
             device_initiated=device_initiated,
+            host_transfer_backend=host_transfer_backend,
         )
         flag_iteration[0] += 1
 
@@ -99,6 +103,7 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool) -> None:
     state.add_counter("group_size_m", float(config.group_size_m))
     state.add_counter("m_tiles_per_batch", float(m_tiles_per_batch))
     state.add_counter("device_initiated", 1.0 if device_initiated else 0.0)
+    state.add_counter("host_transfer_backend_hip_memcpy", 1.0 if host_transfer_backend == "hip_memcpy" else 0.0)
 
     state.exec(_run, preamble_fn=lambda: C.zero_())
 
@@ -111,6 +116,16 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool) -> None:
 @bench.axis("dtype", [torch.float16])
 def all_gather_matmul_copy_engine_host(state, ctx):
     _register_copy_engine(state, ctx, device_initiated=False)
+
+
+@bench.register
+@bench.axis("num_ranks", [8])
+@bench.axis("M", [1024, 4096, 16384])
+@bench.axis("N", [3584])
+@bench.axis("K", [8192])
+@bench.axis("dtype", [torch.float16])
+def all_gather_matmul_copy_engine_host_hip_memcpy(state, ctx):
+    _register_copy_engine(state, ctx, device_initiated=False, host_transfer_backend="hip_memcpy")
 
 
 @bench.register

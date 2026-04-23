@@ -17,6 +17,7 @@ import torch.distributed as dist
 import triton
 import triton.language as tl
 import iris
+import iris.hip as hip
 import iris.x
 from tritonblas.matmul import persistent_matmul_lt, create_wait_config
 from tritonblas.kernels.stages import (
@@ -31,7 +32,6 @@ from tritonblas.kernels.stages import (
 
 
 from iris.tracing.events import TraceEvent
-from .config import FusedConfig
 from .workspace import FusedWorkspace
 
 # Import Tile class from anvil module
@@ -349,9 +349,9 @@ def all_gather_matmul_copy_engine_preamble(
     shmem,
     A_sharded: torch.Tensor,
     B: torch.Tensor,
-    config: Optional[FusedConfig] = None,
+    selector=None,
     k_per_flag: int = 4,
-    m_tiles_per_batch: int = 1,
+    m_tiles_per_batch: Optional[int] = None,
     staged_a_layout: str = "k_contiguous",
 ) -> FusedWorkspace:
     """
@@ -361,21 +361,35 @@ def all_gather_matmul_copy_engine_preamble(
         staged_a_layout: "k_contiguous" (default, row-major (M,K)) or
                          "m_contiguous" (col-major, stored as (K,M) transposed).
     """
-    if config is None:
-        config = FusedConfig()
+    from tritonblas.matmul import _make_matmul_selector
 
     M, K_local = A_sharded.shape
     K, N = B.shape
     world_size = shmem.get_num_ranks()
 
     assert world_size * K_local == K
-    assert K_local % config.block_size_k == 0
-    assert K % config.block_size_k == 0
-    assert M % config.block_size_m == 0
 
-    num_m_tiles = M // config.block_size_m
-    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
+    if selector is None:
+        selector = _make_matmul_selector(
+            M, N, K, A_sharded.dtype, B.dtype, A_sharded.dtype, A_sharded.device, streamk=False
+        )
+
+    assert K_local % selector.block_k == 0
+    assert K % selector.block_k == 0
+    assert M % selector.block_m == 0
+
+    num_m_tiles = M // selector.block_m
+    num_tiles_n = (N + selector.block_n - 1) // selector.block_n
     total_tiles = num_m_tiles * num_tiles_n
+
+    if m_tiles_per_batch is None:
+        # Auto-calculate optimal m_tiles_per_batch
+        active_cus = getattr(selector, "_ACTIVE_CU", None)
+        if active_cus is None or active_cus <= 0:
+            active_cus = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+        tiles_per_group = max(1, selector.group_m * num_tiles_n)
+        groups_per_wave = max(1, int(active_cus) // tiles_per_group)
+        m_tiles_per_batch = max(1, min(num_m_tiles, groups_per_wave * selector.group_m))
 
     num_batches = (num_m_tiles + m_tiles_per_batch - 1) // m_tiles_per_batch
     num_flags = num_batches
@@ -400,9 +414,15 @@ def all_gather_matmul_copy_engine_preamble(
     ws.locks = shmem.zeros((num_flags,), dtype=torch.int32)
     ws.wait_expected = shmem.zeros((total_tiles,), dtype=torch.int32)
 
+    # Store metadata
+    ws.selector = selector
+    ws.m_tiles_per_batch = m_tiles_per_batch
+    ws.num_m_tiles = num_m_tiles
+    ws.num_batches = num_batches
+
     shmem.info(
         f"Allocated {num_flags} per-batch flags "
-        f"(config tiles={num_m_tiles}, "
+        f"(tiles={num_m_tiles}, "
         f"{m_tiles_per_batch} M-tiles per batch) "
         f"flags buffer at 0x{ws.locks.data_ptr():x}"
     )
@@ -515,17 +535,16 @@ def all_gather_matmul_copy_engine(
     B: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
     async_op: bool = False,
-    config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
     flag_iteration: int = 0,
     k_per_flag: int = 4,
-    m_tiles_per_batch: int = 1,
     staged_a_layout: str = "k_contiguous",
     num_warps: Optional[int] = None,
     num_stages: Optional[int] = None,
     trace: bool = False,
     verbose: bool = False,
     device_initiated: bool = False,
+    host_transfer_backend: str = "anvil",
 ) -> FusedWorkspace:
     """
     All-gather + matmul with copy engine orchestrating remote tile transfers.
@@ -540,11 +559,11 @@ def all_gather_matmul_copy_engine(
             "k_contiguous" — (M,K) row-major, K is fast dim.
             "m_contiguous" — (M,K) with M as fast dim.
         device_initiated: If True, use device-side WGs to initiate SDMA transfers instead of host.
+        host_transfer_backend: Host-side transfer backend when device_initiated=False.
+            "anvil" uses host SDMA queue submission.
+            "hip_memcpy" uses hipMemcpy2DAsync followed by a remote flag signal.
         k_per_flag: Retained for call compatibility; ignored by the current per-batch design.
     """
-    if config is None:
-        config = FusedConfig()
-
     M, K_local = A_sharded.shape
     K, N = B.shape
     world_size = shmem.get_num_ranks()
@@ -552,18 +571,29 @@ def all_gather_matmul_copy_engine(
 
     assert world_size * K_local == K
     assert output_tensor.shape == (M, N)
-    assert M % config.block_size_m == 0
-    assert K % config.block_size_k == 0
-    assert K_local % config.block_size_k == 0
 
-    num_k_blocks_local = K_local // config.block_size_k
-    num_m_tiles = M // config.block_size_m
-    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
+    if host_transfer_backend not in {"anvil", "hip_memcpy"}:
+        raise ValueError(
+            f"Unsupported host_transfer_backend={host_transfer_backend!r}; expected 'anvil' or 'hip_memcpy'"
+        )
+    if host_transfer_backend == "hip_memcpy" and staged_a_layout != "k_contiguous":
+        raise NotImplementedError("host_transfer_backend='hip_memcpy' currently requires staged_a_layout='k_contiguous'")
 
     if workspace is None:
         workspace = all_gather_matmul_copy_engine_preamble(
-            shmem, A_sharded, B, config, k_per_flag, m_tiles_per_batch, staged_a_layout
+            shmem, A_sharded, B, k_per_flag=k_per_flag, staged_a_layout=staged_a_layout
         )
+
+    selector = workspace.selector
+    m_tiles_per_batch = workspace.m_tiles_per_batch
+
+    assert M % selector.block_m == 0
+    assert K % selector.block_k == 0
+    assert K_local % selector.block_k == 0
+
+    num_k_blocks_local = K_local // selector.block_k
+    num_m_tiles = M // selector.block_m
+    num_tiles_n = (N + selector.block_n - 1) // selector.block_n
 
     # Local K-blocks will be copied via SDMA (host or device initiated)
     stride_am, stride_ak = A_sharded.stride()
@@ -592,31 +622,6 @@ def all_gather_matmul_copy_engine(
     #     trace = False
 
     # Auto-detect num_sms from device if not specified
-    num_sms = config.num_sms
-    if num_sms is None:
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        num_sms = props.multi_processor_count
-
-    selector = workspace.selector
-    selector_shape = (
-        selector.block_m,
-        selector.block_n,
-        selector.block_k,
-        selector.group_m,
-    )
-    config_shape = (
-        config.block_size_m,
-        config.block_size_n,
-        config.block_size_k,
-        config.group_size_m,
-    )
-    if selector_shape != config_shape:
-        raise ValueError(
-            "all_gather_matmul_copy_engine requires selector/config geometry to match: "
-            f"selector(M,N,K,G)=({selector.block_m},{selector.block_n},{selector.block_k},{selector.group_m}) "
-            f"!= config(M,N,K,G)=({config.block_size_m},{config.block_size_n},{config.block_size_k},{config.group_size_m})"
-        )
-
     num_comm_wgs = selector._hardware.NUM_XCD if device_initiated else 0
     gemm_tiles = total_tiles
 
@@ -642,7 +647,7 @@ def all_gather_matmul_copy_engine(
         shmem.info(
             f"Kernel params: num_m_tiles={num_m_tiles}, "
             f"num_tiles_n={num_tiles_n}, num_k_blocks_local={num_k_blocks_local}, "
-            f"group_size_m={config.group_size_m}, m_tiles_per_batch={m_tiles_per_batch}"
+            f"group_size_m={selector.group_m}, m_tiles_per_batch={m_tiles_per_batch}"
         )
         shmem.info(
             f"Pointers: A_sharded=0x{A_sharded.data_ptr():x}, "
@@ -654,7 +659,9 @@ def all_gather_matmul_copy_engine(
 
     if verbose and rank == 0:
         shmem.info(
-            f"Launching kernel: gemm_tiles={gemm_tiles}, device_initiated={device_initiated}, sdma_wgs={num_comm_wgs}"
+            "Launching kernel: "
+            f"gemm_tiles={gemm_tiles}, device_initiated={device_initiated}, "
+            f"host_transfer_backend={host_transfer_backend}, sdma_wgs={num_comm_wgs}"
         )
 
     tb_block_m = selector.block_m
@@ -703,7 +710,7 @@ def all_gather_matmul_copy_engine(
             shmem.get_copy_engine_ctx(),
             rank,
             world_size,
-            config.block_size_m,
+            selector.block_m,
             num_m_tiles,
             m_tiles_per_batch,
             False,
@@ -717,13 +724,21 @@ def all_gather_matmul_copy_engine(
             wait_config=wait_config,
         )
     else:
-        # Host-initiated: pre-post the first batch across all remote ranks,
-        # then launch GEMM so it can begin consuming batch 0 while later
-        # batches are still being enqueued.
+        # Host-initiated:
+        # - anvil backend: launch GEMM first, then post batches to overlap SDMA
+        # - hip_memcpy backend: pre-post all batches before GEMM launch to avoid
+        #   potential deadlock if HIP peer copies do not make forward progress
+        #   while the persistent GEMM is monopolizing the device.
         elem_size = A_sharded.element_size()
         staged_a_base_addr = workspace.aux_buffer.data_ptr()
         flags_base_addr = workspace.locks.data_ptr()
         tile_transfer_count = 0
+        hip_copy_stream = None
+        if host_transfer_backend == "hip_memcpy":
+            hip_copy_stream = getattr(workspace, "host_copy_stream", None)
+            if hip_copy_stream is None:
+                hip_copy_stream = hip.create_stream(non_blocking=True)
+                workspace.host_copy_stream = hip_copy_stream
 
         def post_host_batch(batch_id: int, m_tile_start: int, num_m_tiles_in_batch: int) -> None:
             nonlocal tile_transfer_count
@@ -736,31 +751,46 @@ def all_gather_matmul_copy_engine(
                 tile = Tile()
                 tile.pid_m = 0
                 tile.pid_n = 0
-                tile.block_m = num_m_tiles_in_batch * config.block_size_m
+                tile.block_m = num_m_tiles_in_batch * selector.block_m
                 tile.block_n = K_local
                 tile.elem_size = elem_size
                 tile.src_stride = stride_am * elem_size
                 # Source is the local shard, so batches only advance in M.
-                src_offset_bytes = (m_tile_start * config.block_size_m * stride_am) * elem_size
+                src_offset_bytes = (m_tile_start * selector.block_m * stride_am) * elem_size
                 tile.data = A_sharded.data_ptr() + src_offset_bytes
 
                 # Destination is this rank's global-K slot inside staged_a.
                 dst_offset_bytes = (
-                    m_tile_start * config.block_size_m * stride_sa_m + rank * K_local * stride_sa_k
+                    m_tile_start * selector.block_m * stride_sa_m + rank * K_local * stride_sa_k
                 ) * elem_size
                 dst_ptr_local = staged_a_base_addr + dst_offset_bytes
                 dst_ptr_remote = shmem.translate(dst_ptr_local, rank, dst_rank)
 
-                anvil_lib.host_put_tile_signal(
-                    rank,
-                    dst_rank,
-                    0,
-                    tile,
-                    dst_ptr_remote,
-                    stride_sa_m * elem_size,
-                    flag_addr_remote,
-                    1,
-                )
+                if host_transfer_backend == "hip_memcpy":
+                    hip.memcpy_2d_async(
+                        dst_ptr_remote,
+                        stride_sa_m * elem_size,
+                        tile.data,
+                        tile.src_stride,
+                        K_local * elem_size,
+                        num_m_tiles_in_batch * selector.block_m,
+                        stream=hip_copy_stream,
+                    )
+                    # Preserve the existing readiness semantics: only signal the
+                    # batch once the copy for this destination rank has completed.
+                    hip.stream_synchronize(hip_copy_stream)
+                    anvil_lib.host_atomic_add_32(rank, dst_rank, 0, flag_addr_remote, 1)
+                else:
+                    anvil_lib.host_put_tile_signal(
+                        rank,
+                        dst_rank,
+                        0,
+                        tile,
+                        dst_ptr_remote,
+                        stride_sa_m * elem_size,
+                        flag_addr_remote,
+                        1,
+                    )
                 tile_transfer_count += 1
 
                 if verbose and batch_id == 0 and dst_rank == (rank + 1) % world_size:
@@ -785,25 +815,47 @@ def all_gather_matmul_copy_engine(
         # first_batch_tiles = min(m_tiles_per_batch, num_m_tiles)
         # post_host_batch(0, 0, first_batch_tiles)
 
-        if verbose and rank == 0:
-            shmem.info(f"[Rank {rank}] Launching GEMM kernel after pre-posting batch 0...")
+        if host_transfer_backend == "hip_memcpy":
+            # Conservative ordering for HIP peer memcpy: make the gathered A
+            # fully ready before the persistent GEMM begins waiting on flags.
+            batch_id = 0
+            for m_tile_start in range(0, num_m_tiles, m_tiles_per_batch):
+                m_tile_end = min(m_tile_start + m_tiles_per_batch, num_m_tiles)
+                num_m_tiles_in_batch = m_tile_end - m_tile_start
+                post_host_batch(batch_id, m_tile_start, num_m_tiles_in_batch)
+                batch_id += 1
 
-        persistent_matmul_lt(
-            workspace.aux_buffer,
-            B,
-            output_tensor,
-            selector,
-            bias=None,
-            wait_config=wait_config,
-        )
+            if verbose and rank == 0:
+                shmem.info(f"[Rank {rank}] Launching GEMM kernel after pre-posting all HIP memcpy batches...")
 
-        # Post the remaining batches while GEMM is already running.
-        batch_id = 0
-        for m_tile_start in range(0, num_m_tiles, m_tiles_per_batch):
-            m_tile_end = min(m_tile_start + m_tiles_per_batch, num_m_tiles)
-            num_m_tiles_in_batch = m_tile_end - m_tile_start
-            post_host_batch(batch_id, m_tile_start, num_m_tiles_in_batch)
-            batch_id += 1
+            persistent_matmul_lt(
+                workspace.aux_buffer,
+                B,
+                output_tensor,
+                selector,
+                bias=None,
+                wait_config=wait_config,
+            )
+        else:
+            if verbose and rank == 0:
+                shmem.info(f"[Rank {rank}] Launching GEMM kernel after pre-posting batch 0...")
+
+            persistent_matmul_lt(
+                workspace.aux_buffer,
+                B,
+                output_tensor,
+                selector,
+                bias=None,
+                wait_config=wait_config,
+            )
+
+            # Post the remaining batches while GEMM is already running.
+            batch_id = 0
+            for m_tile_start in range(0, num_m_tiles, m_tiles_per_batch):
+                m_tile_end = min(m_tile_start + m_tiles_per_batch, num_m_tiles)
+                num_m_tiles_in_batch = m_tile_end - m_tile_start
+                post_host_batch(batch_id, m_tile_start, num_m_tiles_in_batch)
+                batch_id += 1
 
         sdma_end_post_time = time.perf_counter()
 

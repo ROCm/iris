@@ -256,6 +256,119 @@ def hip_free(ptr):
         gpu_try(gpu_runtime.cudaFree(ptr))
 
 
+def create_stream(non_blocking: bool = True):
+    """Create a HIP/CUDA stream and return the opaque stream handle as an int."""
+    stream = ctypes.c_void_p()
+    flags = 1 if non_blocking else 0
+
+    if _is_amd_backend:
+        gpu_runtime.hipStreamCreateWithFlags.argtypes = [
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_uint,
+        ]
+        gpu_runtime.hipStreamCreateWithFlags.restype = ctypes.c_int
+        gpu_try(gpu_runtime.hipStreamCreateWithFlags(ctypes.byref(stream), flags))
+    else:
+        gpu_runtime.cudaStreamCreateWithFlags.argtypes = [
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_uint,
+        ]
+        gpu_runtime.cudaStreamCreateWithFlags.restype = ctypes.c_int
+        gpu_try(gpu_runtime.cudaStreamCreateWithFlags(ctypes.byref(stream), flags))
+
+    return stream.value
+
+
+def destroy_stream(stream):
+    """Destroy a HIP/CUDA stream created by create_stream()."""
+    stream_arg = ctypes.c_void_p(stream)
+    if _is_amd_backend:
+        gpu_runtime.hipStreamDestroy.argtypes = [ctypes.c_void_p]
+        gpu_runtime.hipStreamDestroy.restype = ctypes.c_int
+        gpu_try(gpu_runtime.hipStreamDestroy(stream_arg))
+    else:
+        gpu_runtime.cudaStreamDestroy.argtypes = [ctypes.c_void_p]
+        gpu_runtime.cudaStreamDestroy.restype = ctypes.c_int
+        gpu_try(gpu_runtime.cudaStreamDestroy(stream_arg))
+
+
+def stream_synchronize(stream):
+    """Synchronize a HIP/CUDA stream handle."""
+    stream_arg = ctypes.c_void_p(stream)
+    if _is_amd_backend:
+        gpu_runtime.hipStreamSynchronize.argtypes = [ctypes.c_void_p]
+        gpu_runtime.hipStreamSynchronize.restype = ctypes.c_int
+        gpu_try(gpu_runtime.hipStreamSynchronize(stream_arg))
+    else:
+        gpu_runtime.cudaStreamSynchronize.argtypes = [ctypes.c_void_p]
+        gpu_runtime.cudaStreamSynchronize.restype = ctypes.c_int
+        gpu_try(gpu_runtime.cudaStreamSynchronize(stream_arg))
+
+
+def memcpy_2d_async(
+    dst_ptr: int,
+    dst_pitch: int,
+    src_ptr: int,
+    src_pitch: int,
+    width_bytes: int,
+    height: int,
+    *,
+    stream=None,
+):
+    """Launch an async device-to-device 2D memcpy on a HIP/CUDA stream."""
+    memcpy_device_to_device = 3
+    stream_arg = ctypes.c_void_p(0 if stream is None else stream)
+
+    if _is_amd_backend:
+        gpu_runtime.hipMemcpy2DAsync.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        gpu_runtime.hipMemcpy2DAsync.restype = ctypes.c_int
+        gpu_try(
+            gpu_runtime.hipMemcpy2DAsync(
+                ctypes.c_void_p(dst_ptr),
+                dst_pitch,
+                ctypes.c_void_p(src_ptr),
+                src_pitch,
+                width_bytes,
+                height,
+                memcpy_device_to_device,
+                stream_arg,
+            )
+        )
+    else:
+        gpu_runtime.cudaMemcpy2DAsync.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.c_size_t,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        gpu_runtime.cudaMemcpy2DAsync.restype = ctypes.c_int
+        gpu_try(
+            gpu_runtime.cudaMemcpy2DAsync(
+                ctypes.c_void_p(dst_ptr),
+                dst_pitch,
+                ctypes.c_void_p(src_ptr),
+                src_pitch,
+                width_bytes,
+                height,
+                memcpy_device_to_device,
+                stream_arg,
+            )
+        )
+
+
 def export_dmabuf_handle(ptr, size):
     """
     Export a DMA-BUF file descriptor for a memory range.
