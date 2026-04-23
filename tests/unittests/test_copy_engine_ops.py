@@ -163,6 +163,62 @@ def test_copy_engine_atomic_add():
 
 
 # ============================================================================
+# Copy Engine Atomic CAS Tests
+# ============================================================================
+
+
+@triton.jit
+def _copy_engine_atomic_cas_kernel(
+    flag,
+    from_rank: tl.constexpr,
+    to_rank: tl.constexpr,
+    heap_bases,
+    copy_engine_ctx,
+    compare: tl.constexpr,
+    value: tl.constexpr,
+):
+    iris.atomic_cas(
+        flag,
+        compare,
+        value,
+        from_rank,
+        to_rank,
+        heap_bases,
+        copy_engine_ctx=copy_engine_ctx,
+        USE_COPY_ENGINE=True,
+    )
+
+
+def test_copy_engine_atomic_cas():
+    shmem = iris.iris(1 << 20)
+    _require_two_ranks(shmem)
+
+    rank = shmem.get_rank()
+    remote_rank = 1 - rank
+
+    flag = shmem.zeros((1,), device="cuda", dtype=torch.int32)
+
+    if rank == 0:
+        _copy_engine_atomic_cas_kernel[(1,)](
+            flag,
+            rank,
+            remote_rank,
+            shmem.get_heap_bases(),
+            shmem.get_copy_engine_ctx(),
+            compare=0,
+            value=1,
+        )
+
+    shmem.barrier()
+
+    if rank == 1:
+        assert flag.item() == 1
+
+    shmem.barrier()
+    del shmem
+
+
+# ============================================================================
 # 2D/Tiled Copy Tests
 # ============================================================================
 

@@ -70,6 +70,7 @@ from .logging import logger
 from .tracing import (
     Tracing,
     DeviceTracing,
+    TraceEvent,
 )  # noqa: F401  re-export for iris.TraceEvent
 
 # Import shared tensor-creation helpers
@@ -156,6 +157,7 @@ class Iris:
             self.copy_engines.connect(cur_rank, rank, allocate_on_host=True)
 
             handle = self.copy_engines.get_queue_device_ctx(cur_rank, rank)
+            # TODO only print on verbose
             self.info(f"---- Queue {rank} ------------")
             self.info(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
             self.info(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
@@ -3122,7 +3124,7 @@ def atomic_add(
         packet_offset_bytes = base + offset
 
         # Place command packet
-        anvil.place_atomic_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, val)
+        anvil.place_atomic_add_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, val)
 
         # Submit command
         pending_wptr = base + offset + command_in_bytes
@@ -3187,6 +3189,8 @@ def atomic_cas(
     sem=None,
     scope=None,
     hint: tl.constexpr = None,
+    copy_engine_ctx=None,
+    USE_COPY_ENGINE: tl.constexpr = False,
 ):
     """
     Atomically compares and exchanges the specified rank's memory location.
@@ -3206,6 +3210,8 @@ def atomic_cas(
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". Defaults to "acq_rel".
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
+        copy_engine_ctx (tl.tensor, optional): Copy engine context used when issuing SDMA-backed atomics. Required when ``USE_COPY_ENGINE`` is True.
+        USE_COPY_ENGINE (tl.constexpr, optional): Whether to route the CAS through the SDMA copy engine. Defaults to False.
 
     Returns:
         Block: The value contained at the memory location before the atomic operation attempt.
@@ -3219,9 +3225,52 @@ def atomic_cas(
         >>>     expected = 0
         >>>     new_val = 42
         >>>     old_val = iris.atomic_cas(ptr, expected, new_val, cur_rank, remote_rank, heap_bases)
+
+    Note:
+        The SDMA implementation used when ``USE_COPY_ENGINE`` is True does not
+        provide the previous value stored at ``pointer``. In that case this
+        function returns the compare operand ``cmp``.
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
-    return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
+    if not USE_COPY_ENGINE:
+        return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
+    else:
+        handle = copy_engine_ctx + (6 * to_rank)
+        queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
+        read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
+        write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
+        doorbell_ptr = tl.load(handle + 3).to(tl.pointer_type(tl.uint64))
+        cached_write_ptr = tl.load(handle + 4).to(tl.pointer_type(tl.uint64))
+        committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
+
+        dst_ptr_val = translated_ptr.to(tl.uint64)
+
+        command_in_bytes = 32
+        # Acquire space (returns base index and wraparound offset)
+        base, offset = anvil.acquire_fadd(
+            queue_ptr_u32,
+            read_ptr,
+            write_ptr,
+            doorbell_ptr,
+            cached_write_ptr,
+            committed_write_ptr,
+            command_in_bytes,
+        )
+        # Write padding NOPs if we wrapped around
+        anvil.place_nop_packet(queue_ptr_u32, base, offset)
+        # Calculate packet position (base + offset for wraparound)
+        packet_offset_bytes = base + offset
+        # Place command packet
+        anvil.place_atomic_cas_packet(
+            queue_ptr_u32,
+            packet_offset_bytes,
+            dst_ptr_val,
+            cmp,
+            val,
+        )
+        # Submit command
+        pending_wptr = base + offset + command_in_bytes
+        anvil.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
 
 @triton.jit
