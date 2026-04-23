@@ -355,7 +355,7 @@ if GFX1250_ASYNC_AVAILABLE:
         pid = gl.program_id(0)
 
         ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE // (THREADS_PER_WARP * WARPS_PER_CTA)
-        layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
+        layout: gl.constexpr = gl.BlockedLayout([8], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
 
         # LDS buffer for one chunk — data never touches VGPRs
         dtype: gl.constexpr = input_ptr.dtype.element_ty
