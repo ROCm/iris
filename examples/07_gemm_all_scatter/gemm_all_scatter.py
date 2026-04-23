@@ -9,11 +9,6 @@ from iris.device_utils import read_realtime
 import iris
 
 
-@triton.jit
-def wait_cnt():
-    tl.inline_asm_elementwise("s_waitcnt vmcnt(0)", "=r", [], dtype=tl.int32, is_pure=False, pack=1)
-
-
 @triton.jit()
 def persistent_gemm_all_scatter(
     A,
@@ -53,8 +48,8 @@ def persistent_gemm_all_scatter(
 ):
     pid = tl.program_id(0)
 
-    # if NUM_XCDS != 1:
-    #     pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
+    if NUM_XCDS != 1:
+        pid = (pid % NUM_XCDS) * (NUM_SMS // NUM_XCDS) + (pid // NUM_XCDS)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
@@ -68,7 +63,6 @@ def persistent_gemm_all_scatter(
 
     acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
 
-    # Process all tiles for this SM
     for tile_id in range(pid, total_tiles, NUM_SMS):
         if COLLECT_TIMESTAMPS:
             timestamp = read_realtime()
@@ -144,7 +138,6 @@ def persistent_gemm_all_scatter(
         if USE_COPY_ENGINE:
             # Store locally first
             tl.store(c_global + global_offset, c, mask=sub_mask, cache_modifier=".wt")
-            wait_cnt()
             tl.debug_barrier()
             for remote_rank in range(world_size):
                 if remote_rank != cur_rank:

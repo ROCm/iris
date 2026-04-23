@@ -48,17 +48,17 @@ def producer_kernel(
     )
 
     # Set flag to signal completion
-    # iris.atomic_cas(flag + pid, 0, 1, producer_rank, consumer_rank, heap_bases_ptr, copy_engine_handle_ptr, sem="release", scope="sys")
-    iris.atomic_add(
+    iris.atomic_cas(
         flag + pid,
+        0,
         1,
         producer_rank,
         consumer_rank,
         heap_bases_ptr,
         sem="release",
         scope="sys",
-        copy_engine_ctx=copy_engine_handle_ptr,
         USE_COPY_ENGINE=USE_COPY_ENGINE,
+        copy_engine_ctx=copy_engine_handle_ptr,
     )
 
 
