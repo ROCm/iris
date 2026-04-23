@@ -73,9 +73,7 @@ def run_message_passing_kernels(module, args, *, use_copy_engine: bool = False):
         producer_params = (
             producer_fn.__code__.co_varnames if producer_fn and hasattr(producer_fn, "__code__") else tuple()
         )
-        needs_copy_engine_arg = any(
-            param in producer_params for param in ("copy_engine_handle_ptr", "copy_engine_ctx")
-        )
+        needs_copy_engine_arg = any(param in producer_params for param in ("copy_engine_handle_ptr", "copy_engine_ctx"))
         has_use_copy_engine = "USE_COPY_ENGINE" in producer_params
 
         if cur_rank == producer_rank:

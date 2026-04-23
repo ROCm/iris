@@ -131,6 +131,7 @@ def host_initiated_producer(shmem, source_buffer, destination_buffer, flags, con
 
     if verbose:
         import time
+
         start_time = time.time()
 
     for block_id in range(num_blocks):
@@ -201,7 +202,9 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     flags = shmem.zeros((num_blocks,), device="cuda", dtype=torch.int32)
 
     if cur_rank == producer_rank:
-        host_initiated_producer(shmem, source_buffer, destination_buffer, flags, consumer_rank, BLOCK_SIZE, verbose=True)
+        host_initiated_producer(
+            shmem, source_buffer, destination_buffer, flags, consumer_rank, BLOCK_SIZE, verbose=True
+        )
     else:
         shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank}.")
         kk = consumer_kernel[grid](
