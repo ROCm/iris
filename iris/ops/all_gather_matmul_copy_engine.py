@@ -577,7 +577,9 @@ def all_gather_matmul_copy_engine(
             f"Unsupported host_transfer_backend={host_transfer_backend!r}; expected 'anvil' or 'hip_memcpy'"
         )
     if host_transfer_backend == "hip_memcpy" and staged_a_layout != "k_contiguous":
-        raise NotImplementedError("host_transfer_backend='hip_memcpy' currently requires staged_a_layout='k_contiguous'")
+        raise NotImplementedError(
+            "host_transfer_backend='hip_memcpy' currently requires staged_a_layout='k_contiguous'"
+        )
 
     if workspace is None:
         workspace = all_gather_matmul_copy_engine_preamble(
