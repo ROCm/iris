@@ -165,8 +165,7 @@ def test_tritonblas_rccl_all_gather_matmul(dtype, atol, rtol, M, K_local, N):
 
     max_diff = (output - ref_output).abs().max().item()
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
-        f"Rank {rank}: Max diff {max_diff}, expected < {atol} "
-        f"(tritonblas+rccl, M={M}, K_local={K_local}, N={N})"
+        f"Rank {rank}: Max diff {max_diff}, expected < {atol} (tritonblas+rccl, M={M}, K_local={K_local}, N={N})"
     )
 
 

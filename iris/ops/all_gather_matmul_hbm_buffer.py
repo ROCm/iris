@@ -308,9 +308,7 @@ def _hbm_buffer_all_gather_matmul_kernel(
                         rk = k_block_global * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
                         rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
                         staged_ptrs = (
-                            staged_a
-                            + rm.to(tl.int64)[:, None] * stride_sa_m
-                            + rk.to(tl.int64)[None, :] * stride_sa_k
+                            staged_a + rm.to(tl.int64)[:, None] * stride_sa_m + rk.to(tl.int64)[None, :] * stride_sa_k
                         )
 
                         for compile_rank in range(world_size):
@@ -382,11 +380,7 @@ def _hbm_buffer_all_gather_matmul_kernel(
                 rk = k_block * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
                 rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
 
-                a_ptrs = (
-                    staged_a
-                    + rm.to(tl.int64)[:, None] * stride_sa_m
-                    + rk.to(tl.int64)[None, :] * stride_sa_k
-                )
+                a_ptrs = staged_a + rm.to(tl.int64)[:, None] * stride_sa_m + rk.to(tl.int64)[None, :] * stride_sa_k
                 a = tl.load(a_ptrs)
 
                 B_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
