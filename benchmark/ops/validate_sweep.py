@@ -42,12 +42,12 @@ DIMENSION_CONFIGS = [
     {"m_local": 131072, "n": 2048, "k": 16384, "label": "M131072_N2048_K16384"},
     {"m_local": 131072, "n": 16384, "k": 16384, "label": "g2"},
     {"m_local": 147456, "n": 28672, "k": 4096, "label": "g14"},
-    {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"}, # run out of heap memory
+    {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"},
     {"m_local": 229376, "n": 28672, "k": 4096, "label": "g16"},
     {"m_local": 8192, "n": 8192, "k": 262144, "label": "g5"},
     {"m_local": 262144, "n": 8192, "k": 8192, "label": "g6"},
     {"m_local": 16384, "n": 16384, "k": 131072, "label": "g1"},
-    {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"}, # run out of heap memory
+    {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"},
     {"m_local": 196608, "n": 18432, "k": 16384, "label": "g9"},
     {"m_local": 4096, "n": 14336, "k": 4096, "label": "mixtral_gate"},
     {"m_local": 4096, "n": 11008, "k": 4096, "label": "llama7b_gate"},
@@ -63,7 +63,7 @@ VALIDATION_TESTS = {
         {
             "name": "baseline",
             "path": "tests/ops/test_matmul_all_gather.py",
-            "pytest_k": "test_matmul_all_gather",
+            "pytest_k": "test_matmul_all_gather and not test_tritonblas",
         },
         {
             "name": "tritonblas_rcclbaseline",
@@ -106,6 +106,15 @@ VALIDATION_TESTS = {
             "env": {"IRIS_TEST_COPY_ENGINE_MODE": "host"},
         },
         {
+            "name": "copy_engine_host_hip_memcpy",
+            "path": "tests/ops/test_all_gather_matmul_copy_engine.py",
+            "pytest_k": "test_all_gather_matmul_copy_engine",
+            "env": {
+                "IRIS_TEST_COPY_ENGINE_MODE": "host",
+                "IRIS_TEST_HOST_TRANSFER_BACKEND": "hip_memcpy",
+            },
+        },
+        {
             "name": "device_copy_engine",
             "path": "tests/ops/test_all_gather_matmul_copy_engine.py",
             "pytest_k": "test_all_gather_matmul_copy_engine",
@@ -136,6 +145,7 @@ def _format_repro_command(cmd: list[str], env: dict[str, str]) -> str:
         "IRIS_TEST_K_LOCAL",
         "IRIS_TEST_HEAP_SIZE",
         "IRIS_TEST_COPY_ENGINE_MODE",
+        "IRIS_TEST_HOST_TRANSFER_BACKEND",
     ]
     env_prefix = " ".join(shlex.quote(f"{key}={env[key]}") for key in env_keys if key in env)
     cmd_str = shlex.join(cmd)
@@ -174,7 +184,12 @@ def _estimate_heap_bytes(operation: str, test_name: str, shape_cfg: dict[str, An
         m_total = m_local * NUM_GPUS
         # Matches the test allocations:
         # A_local (M_local, K), B (K, N), output (M_total, N)
-        return (m_local * k + k * n + m_total * n) * elem
+        # Output is ALWAYS allocated from heap via shmem.zeros()
+        total = (m_local * k + k * n + m_total * n) * elem
+        if test_name == "tritonblas_rcclbaseline":
+            # The direct tritonBLAS+RCCL path also materializes local C_local (M_local, N).
+            total += (m_local * n) * elem
+        return total
 
     if operation == "all_gather_matmul":
         if k % NUM_GPUS != 0:
@@ -185,7 +200,7 @@ def _estimate_heap_bytes(operation: str, test_name: str, shape_cfg: dict[str, An
         # A_sharded (M, K_local), B (K, N), output (M, N)
         total = (m_local * k_local + k * n + m_local * n) * elem
 
-        if test_name in {"hbm_buffer", "host_copy_engine", "device_copy_engine"}:
+        if test_name in {"hbm_buffer", "host_copy_engine", "copy_engine_host_hip_memcpy", "device_copy_engine"}:
             # Both HBM-buffer and copy-engine variants allocate staged_a as (M, K).
             total += (m_local * k) * elem
 
@@ -197,7 +212,7 @@ def _estimate_heap_bytes(operation: str, test_name: str, shape_cfg: dict[str, An
             num_k_blocks_local = k_local // block_k
             num_flag_groups_k = (num_k_blocks_local + k_per_flag - 1) // k_per_flag
             total += num_m_tiles * num_flag_groups_k * 4
-        elif test_name in {"host_copy_engine", "device_copy_engine"}:
+        elif test_name in {"host_copy_engine", "copy_engine_host_hip_memcpy", "device_copy_engine"}:
             block_m = 64
             block_n = 64
             num_m_tiles = (m_local + block_m - 1) // block_m
@@ -333,7 +348,7 @@ def main() -> None:
     output_file = (
         Path(args.output)
         if args.output
-        else PROJECT_ROOT / f"benchmark/ops/{args.operation}/validation_sweep_results.json"
+        else PROJECT_ROOT / f"benchmark/ops/validation_sweep_results_{args.operation}.json"
     )
 
     tests = VALIDATION_TESTS[args.operation]

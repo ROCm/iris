@@ -14,7 +14,6 @@ import torch.distributed as dist
 
 import iris
 import os
-from iris.ops.config import FusedConfig
 from iris.ops.matmul_all_gather_host_copy_engine import (
     matmul_all_gather_host_copy_engine,
     matmul_all_gather_host_copy_engine_preamble,
@@ -168,8 +167,8 @@ def _assert_gathered_rows_match(output, A_local, B, rank, world_size, atol, rtol
     _assert_gathered_rows_match_dense(output, local_ref, rank, world_size, atol, rtol, copy_engine_mode)
 
 
-def _make_selector_config(M_local, N, K, dtype, device):
-    selector = _make_matmul_selector(
+def _make_selector(M_local, N, K, dtype, device):
+    return _make_matmul_selector(
         M_local,
         N,
         K,
@@ -179,14 +178,6 @@ def _make_selector_config(M_local, N, K, dtype, device):
         device,
         streamk=False,
     )
-    config = FusedConfig(
-        block_size_m=selector.block_m,
-        block_size_n=selector.block_n,
-        block_size_k=selector.block_k,
-        group_size_m=selector.group_m,
-        num_xcds=max(1, int(getattr(selector, "num_sms", 1))),
-    )
-    return selector, config
 
 
 @pytest.mark.parametrize("dtype, atol, rtol", [(torch.float16, 5e-2, 5e-2)])
@@ -206,36 +197,31 @@ def test_matmul_all_gather_copy_engine(dtype, atol, rtol, copy_engine_mode, M, N
         pytest.skip(f"M={M} not divisible by world_size={world_size}")
 
     M_local = M // world_size
-    selector, config = _make_selector_config(M_local, N, K, dtype, device)
+    selector = _make_selector(M_local, N, K, dtype, device)
 
-    if M_local % config.block_size_m != 0:
-        pytest.skip(f"M_local={M_local} must be divisible by block_size_m={config.block_size_m}")
-    if K % config.block_size_k != 0:
-        pytest.skip(f"K={K} must be divisible by block_size_k={config.block_size_k}")
+    if M_local % selector.block_m != 0:
+        pytest.skip(f"M_local={M_local} must be divisible by block_size_m={selector.block_m}")
+    if K % selector.block_k != 0:
+        pytest.skip(f"K={K} must be divisible by block_size_k={selector.block_k}")
 
     A_local = shmem.randn((M_local, K), dtype=dtype)
     B = shmem.randn((K, N), dtype=dtype)
     output = shmem.zeros((M, N), dtype=dtype)
 
-    m_tiles_per_batch = 1
     if copy_engine_mode == "device":
         workspace = matmul_all_gather_copy_engine_preamble(
             shmem,
             A_local,
             B,
-            config=config,
-            m_tiles_per_batch=m_tiles_per_batch,
+            selector=selector,
         )
-        workspace.selector = selector
     else:
         workspace = matmul_all_gather_host_copy_engine_preamble(
             shmem,
             A_local,
             B,
-            config=config,
-            m_tiles_per_batch=m_tiles_per_batch,
             trace=False,
-            use_tritonblas=True,
+            selector=selector,
         )
 
     shmem.barrier()
@@ -246,10 +232,7 @@ def test_matmul_all_gather_copy_engine(dtype, atol, rtol, copy_engine_mode, M, N
             output,
             A_local,
             B,
-            config=config,
             workspace=workspace,
-            use_copy_engine=True,
-            m_tiles_per_batch=m_tiles_per_batch,
         )
     else:
         matmul_all_gather_host_copy_engine(
@@ -257,11 +240,8 @@ def test_matmul_all_gather_copy_engine(dtype, atol, rtol, copy_engine_mode, M, N
             output,
             A_local,
             B,
-            config=config,
             workspace=workspace,
-            m_tiles_per_batch=m_tiles_per_batch,
             trace=False,
-            use_tritonblas=True,
         )
 
     torch.cuda.synchronize()
