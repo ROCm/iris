@@ -183,7 +183,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     flags = shmem.zeros((num_blocks,), device="cuda", dtype=torch.int32)
 
     # Get copy engine context
-    # copy_engine_ctx = shmem.get_copy_engine_handle(consumer_rank) if args["use_copy_engine"] and cur_rank == producer_rank else None
     copy_engine_ctx = shmem.get_copy_engine_ctx()
 
     if cur_rank == producer_rank:

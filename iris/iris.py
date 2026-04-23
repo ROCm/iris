@@ -144,34 +144,33 @@ class Iris:
         self.copy_engines = anvil.AnvilLib.get_instance()
         self.copy_engines.init()
 
-        # connect to all peers (including local)
-        # TODO only connect local ranks
-        # TODO get size
-        context_size = 6
+        context_size = anvil.QUEUE_DEVICE_CTX_SIZE
         self.copy_engines_device_ctx = torch.zeros((num_ranks, context_size), dtype=torch.uint64, device=self.device)
 
-        for rank in range(num_ranks):
+        num_local_ranks = min(num_gpus, num_ranks)
+        cur_local_rank = cur_rank % num_local_ranks
+
+        for local_rank in range(num_local_ranks):
             # Device-initiated queues
-            self.copy_engines.connect(cur_rank, rank, allocate_on_host=False)
+            self.copy_engines.connect(cur_local_rank, local_rank, allocate_on_host=False)
             # Host-initiated queues
-            self.copy_engines.connect(cur_rank, rank, allocate_on_host=True)
+            self.copy_engines.connect(cur_local_rank, local_rank, allocate_on_host=True)
 
-            handle = self.copy_engines.get_queue_device_ctx(cur_rank, rank)
-            # TODO only print on verbose
-            self.info(f"---- Queue {rank} ------------")
-            self.info(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
-            self.info(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
-            self.info(f"wptr {handle.wptr:#x} at {id(handle.wptr):#x}")
-            self.info(f"doorbell {handle.doorbell:#x} at {id(handle.doorbell):#x}")
-            self.info(f"cached_write_ptr {handle.cached_wptr:#x} at {id(handle.cached_wptr):#x}")
-            self.info(f"committed_write_ptr {handle.committed_wptr:#x} at {id(handle.committed_wptr):#x}")
+            handle = self.copy_engines.get_queue_device_ctx(cur_local_rank, local_rank)
+            self.debug(f"---- Queue {local_rank} ------------")
+            self.debug(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
+            self.debug(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
+            self.debug(f"wptr {handle.wptr:#x} at {id(handle.wptr):#x}")
+            self.debug(f"doorbell {handle.doorbell:#x} at {id(handle.doorbell):#x}")
+            self.debug(f"cached_write_ptr {handle.cached_wptr:#x} at {id(handle.cached_wptr):#x}")
+            self.debug(f"committed_write_ptr {handle.committed_wptr:#x} at {id(handle.committed_wptr):#x}")
 
-            self.copy_engines_device_ctx[rank][0] = handle.queue_buf
-            self.copy_engines_device_ctx[rank][1] = handle.rptr
-            self.copy_engines_device_ctx[rank][2] = handle.wptr
-            self.copy_engines_device_ctx[rank][3] = handle.doorbell
-            self.copy_engines_device_ctx[rank][4] = handle.cached_wptr
-            self.copy_engines_device_ctx[rank][5] = handle.committed_wptr
+            self.copy_engines_device_ctx[local_rank][0] = handle.queue_buf
+            self.copy_engines_device_ctx[local_rank][1] = handle.rptr
+            self.copy_engines_device_ctx[local_rank][2] = handle.wptr
+            self.copy_engines_device_ctx[local_rank][3] = handle.doorbell
+            self.copy_engines_device_ctx[local_rank][4] = handle.cached_wptr
+            self.copy_engines_device_ctx[local_rank][5] = handle.committed_wptr
         # Initialize CCL interface
         self.ccl = self.CCL(self)
 
@@ -2927,7 +2926,7 @@ def put(
 
         tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
     else:
-        ctx = copy_engine_ctx + (6 * to_rank)
+        ctx = copy_engine_ctx + (anvil.QUEUE_DEVICE_CTX_SIZE * to_rank)
         queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
@@ -2935,13 +2934,10 @@ def put(
         cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
         committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
 
-        # dst_ptr_val = tl.min(translated_to_ptr.to(tl.uint64), axis=-1)
-        dst_ptr_val0 = tl.min(translated_to_ptr.to(tl.uint64))
+        dst_ptr_val = tl.min(translated_to_ptr.to(tl.uint64))
         # Extract source address (min of pointer block where data is stored)
         src_ptr_u64 = from_ptr.to(tl.uint64)
-        # src_ptr_val = tl.min(src_ptr_u64, axis=-1)
-        src_ptr_val0 = tl.min(src_ptr_u64)
-        # max_src_ptr = tl.max(src_ptr_u64, axis=0)
+        src_ptr_val = tl.min(src_ptr_u64)
 
         # Infer element size from pointer type
         # src_ptr is a block of pointers with a specific element type (e.g., pointer<float32>)
@@ -2969,8 +2965,7 @@ def put(
         # Linear copy packet: 32 bytes for 1D, Sub-window copy packet: 80 bytes for 2D
         # IS_2D_COPY is a compile-time constant for proper branch elimination
         mask_int = mask.to(tl.int32)
-        command_in_bytes_u32 = 80 if IS_2D_COPY else 32
-        command_in_bytes = command_in_bytes_u32.to(tl.uint64)
+        command_in_bytes = anvil.SDMA_PKT_LINEAR_SUB_WINDOW_BYTES if IS_2D_COPY else anvil.SDMA_PKT_COPY_LINEAR_BYTES
 
         # Acquire space in the queue
         base, offset = anvil.acquire_fadd(
@@ -2999,8 +2994,8 @@ def put(
                 queue_ptr_u32,
                 packet_offset_bytes,
                 size_bytes,
-                src_ptr_val0,
-                dst_ptr_val0,
+                src_ptr_val,
+                dst_ptr_val,
             )
         else:
             # For 2D copies, mask is 2D [M, N], use axis operations
@@ -3016,11 +3011,11 @@ def put(
             dst_base = __translate(to_base_ptr, from_rank, to_rank, heap_bases).to(tl.uint64)
 
             # Calculate tile offset from base
-            tile_offset_bytes = src_ptr_val0 - src_base
+            tile_offset_bytes = src_ptr_val - src_base
             src_y_val = (tile_offset_bytes // src_stride).to(tl.uint32)
             src_x_val = (tile_offset_bytes % src_stride).to(tl.uint32)
 
-            tile_offset_bytes_dst = dst_ptr_val0 - dst_base
+            tile_offset_bytes_dst = dst_ptr_val - dst_base
             dst_y_val = (tile_offset_bytes_dst // dst_stride).to(tl.uint32)
             dst_x_val = (tile_offset_bytes_dst % dst_stride).to(tl.uint32)
 
@@ -3093,7 +3088,7 @@ def atomic_add(
     if not USE_COPY_ENGINE:
         return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
     else:
-        handle = copy_engine_ctx + (6 * to_rank)
+        handle = copy_engine_ctx + (anvil.QUEUE_DEVICE_CTX_SIZE * to_rank)
         queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
@@ -3103,7 +3098,7 @@ def atomic_add(
 
         dst_ptr_val = translated_ptr.to(tl.uint64)
 
-        command_in_bytes = 32
+        command_in_bytes = anvil.SDMA_PKT_ATOMIC_BYTES
         # Acquire space (returns base index and wraparound offset)
         base, offset = anvil.acquire_fadd(
             # base = anvil.acquire(
@@ -3115,8 +3110,6 @@ def atomic_add(
             committed_write_ptr,
             command_in_bytes,
         )
-        # tl.device_print("offset ", offset)
-
         # Write padding NOPs if we wrapped around
         anvil.place_nop_packet(queue_ptr_u32, base, offset)
 
@@ -3235,7 +3228,7 @@ def atomic_cas(
     if not USE_COPY_ENGINE:
         return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
     else:
-        handle = copy_engine_ctx + (6 * to_rank)
+        handle = copy_engine_ctx + (anvil.QUEUE_DEVICE_CTX_SIZE * to_rank)
         queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
@@ -3245,7 +3238,7 @@ def atomic_cas(
 
         dst_ptr_val = translated_ptr.to(tl.uint64)
 
-        command_in_bytes = 32
+        command_in_bytes = anvil.SDMA_PKT_ATOMIC_BYTES
         # Acquire space (returns base index and wraparound offset)
         base, offset = anvil.acquire_fadd(
             queue_ptr_u32,
