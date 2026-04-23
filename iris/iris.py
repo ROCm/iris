@@ -70,7 +70,6 @@ from .logging import logger
 from .tracing import (
     Tracing,
     DeviceTracing,
-    TraceEvent,
 )  # noqa: F401  re-export for iris.TraceEvent
 
 # Import shared tensor-creation helpers
