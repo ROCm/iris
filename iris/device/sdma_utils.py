@@ -11,34 +11,7 @@ and submission operations.
 
 import triton
 import triton.language as tl
-
-SDMA_QUEUE_SIZE = tl.constexpr(8 * 1024 * 1024)
-
-
-# TODO rename or add nt
-@triton.jit
-def my_load(addr):
-    val = tl.inline_asm_elementwise(
-        asm="""flat_load_dwordx2 $0 $1 sc1; s_waitcnt vmcnt(0)""",
-        constraints=("=v,v"),
-        args=[addr],
-        dtype=tl.uint64,
-        is_pure=False,
-        pack=1,
-    )
-    return val
-
-
-@triton.jit
-def nontemporal_store(addr, value: tl.uint64):
-    tl.inline_asm_elementwise(
-        asm="""flat_store_dwordx2 $1 $2 sc0 nt""",
-        constraints=("=r,v,v"),  # =r used for dummy return to satisfy compiler requirement
-        args=[addr, value],
-        dtype=tl.int32,  # return not used
-        is_pure=False,
-        pack=1,
-    )
+from xio import sdma_ep
 
 
 @triton.jit
@@ -47,29 +20,17 @@ def wait_cnt():
 
 
 @triton.jit
-def sleep():
-    tl.inline_asm_elementwise(
-        asm="s_sleep 1",
-        constraints=("=r"),
-        args=[],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
-
-
-@triton.jit
 def wrap_into_ring(index: tl.uint64):
-    queue_size_u32 = SDMA_QUEUE_SIZE
+    queue_size_u32 = sdma_ep.SDMA_QUEUE_SIZE
     queue_size = queue_size_u32.to(tl.uint64)
     return index.to(tl.uint64) % queue_size
 
 
 @triton.jit
 def can_write_up_to(rptr, up_to_index: tl.uint64):
-    # TODO this is in device memory
+    """Check if there's space to write up to the given index in the ring buffer."""
     hw_read_ptr = tl.load(rptr, cache_modifier=".cv", volatile=True)
-    return (up_to_index - hw_read_ptr) < SDMA_QUEUE_SIZE
+    return (up_to_index - hw_read_ptr) < sdma_ep.SDMA_QUEUE_SIZE
 
 
 @triton.jit
@@ -90,7 +51,7 @@ def acquire(
 
     Based on ReserveQueueSpace from anvil_device.hpp.
     """
-    queue_size_u32 = SDMA_QUEUE_SIZE
+    queue_size_u32 = sdma_ep.SDMA_QUEUE_SIZE
     queue_size_in_bytes = queue_size_u32.to(tl.uint64)
 
     base_u32 = 0
@@ -100,11 +61,7 @@ def acquire(
 
     stop_loop = False
     while not stop_loop:
-        # Adding cache_modifier=".cv" hangs or causes invalid memory access
         cur_index = tl.load(cached_write_ptr, volatile=True)
-        # load corresponding to __hip_atomic_load(RELAXED, SCOPE_AGENT)
-        # Also hangs
-        # cur_index = my_load(cached_write_ptr)
         offset = (offset_u32).to(tl.uint64)
 
         # Calculate current position in ring buffer
@@ -146,7 +103,7 @@ def acquire_fadd(
     is detected, places padding NOP packet, submits it, and tries again.
     Always returns a non-wrapping allocation.
     """
-    queue_size_u32 = SDMA_QUEUE_SIZE
+    queue_size_u32 = sdma_ep.SDMA_QUEUE_SIZE
     queue_size_in_bytes = queue_size_u32.to(tl.uint64)
 
     stop_loop = False
@@ -192,36 +149,33 @@ def acquire_fadd(
 
 @triton.jit
 def submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr):
+    """
+    Submit SDMA commands to the hardware by updating write pointer and ringing the doorbell.
+
+    Waits for previous threads to commit, then updates write pointer, rings doorbell,
+    and updates committed pointer to allow subsequent threads to proceed.
+    """
     while tl.load(committed_write_ptr, cache_modifier=".cv", volatile=True) != base:
         pass
 
-    # TODO requires wt on the packet writes
     wait_cnt()
     tl.debug_barrier()
 
-    # Allocated in device memory
-    # Use release semantincs to ensure commands in queue are visible
     tl.store(write_ptr, pending_wptr, cache_modifier=".wt")
-    # tl.atomic_xchg(write_ptr, pending_wptr, sem="release", scope="gpu")
-
     wait_cnt()
     tl.debug_barrier()
 
     # Ring doorbell
-    # Using atomic_xchg slows this down significantly
-    # It seem like atomic_xchg is not working on the doorbell
     tl.store(doorbell_ptr, pending_wptr, cache_modifier=".wt")
-    # tl.atomic_xchg(doorbell_ptr, pending_wptr, sem="relaxed", scope="sys")
     wait_cnt()
     tl.debug_barrier()
 
-    # Allocated in uncached memory
     tl.store(committed_write_ptr, pending_wptr, cache_modifier=".wt")
-    # tl.atomic_xchg(committed_write_ptr, pending_wptr, sem="relaxed", scope="gpu")
 
 
 @triton.jit
 def place_nop_packet(queue_ptr_u32, offset_bytes: tl.uint64, padding_bytes):
+    """Place a NOP (no operation) packet for ring buffer padding."""
     num_padding_dwords = (padding_bytes // 4).to(tl.int32)
     offset_ring_pos = wrap_into_ring(offset_bytes)
     offset_in_dwords = (offset_ring_pos // 4).to(tl.int32)
@@ -234,6 +188,7 @@ def place_nop_packet(queue_ptr_u32, offset_bytes: tl.uint64, padding_bytes):
 
 @triton.jit
 def place_copy_packet(queue_ptr_u32, offset_bytes: tl.uint64, size_bytes: tl.uint32, src_ptr_val, dst_ptr_val):
+    """Place a SDMA_PKT_COPY_LINEAR packet for 1D linear memory copy."""
     slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
     # offset 0: op + sub_op
     tl.store(slot_ptr_u32 + 0, 1, cache_modifier=".wt")
@@ -271,9 +226,15 @@ def place_atomic_packet(
     RETURN: tl.constexpr = False,
     IS_64_BIT: tl.constexpr = False,
 ):
+    """
+    Place a SDMA_PKT_ATOMIC packet for atomic memory operations.
+
+    OP codes:
+        15: atomic add (32/64-bit with/without return)
+        8: atomic compare-and-swap (32/64-bit with/without return)
+    Flags are encoded via IS_64_BIT (bit 4) and RETURN (bit 5).
+    """
     slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
-    # IS_64_BIT = dst_ptr_val.dtype.element_ty is not None and (dst_ptr_val.dtype.element_ty == tl.int64 or dst_ptr_val.dtype.element_ty == tl.uint64)
-    # offset 0: op + sub_op
     if IS_64_BIT:
         OP = OP | (0x1 << 4)
     if not RETURN:
@@ -303,6 +264,7 @@ def place_atomic_packet(
 
 @triton.jit
 def place_atomic_add_packet(queue_ptr_u32, offset_bytes: tl.uint64, dst_ptr_val, val):
+    """Place an atomic add packet (OP=15, with return)."""
     place_atomic_packet(queue_ptr_u32, offset_bytes, dst_ptr_val, val, 0, 15, True)
 
 
@@ -314,6 +276,7 @@ def place_atomic_cas_packet(
     compare_val,
     swap_val,
 ):
+    """Place an atomic compare-and-swap packet (OP=8, with return)."""
     place_atomic_packet(queue_ptr_u32, offset_bytes, dst_ptr_val, swap_val, compare_val, 8, True)
 
 
@@ -327,10 +290,9 @@ def place_poll_regmem_packet(
     retry_count: tl.constexpr = 0xFFF,
 ):
     """
-    Place an SDMA POLL_REGMEM packet in the queue.
+    Place a SDMA_PKT_POLL_REGMEM packet for memory polling.
 
-    Encodes a memory poll using the same >= expected semantics as the host-side
-    wait_flag_then_put helpers.
+    Polls memory location until (value >= expected_value).
     """
     slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
     header = ((1 & 0x1) << 31) | ((5 & 0x7) << 28) | (8 & 0xFF)
@@ -360,11 +322,10 @@ def place_sub_window_copy_packet(
     dst_y: tl.uint32,
 ):
     """
-    Place a SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY packet in the queue.
+    Place a SDMA_PKT_LINEAR_LARGE_SUB_WINDOW_COPY packet for 2D tile transfer.
 
-    This command copies a 2D rectangular tile from source to destination with arbitrary offsets.
-    Note: pitch, slice_pitch, and rect fields are 1-based (subtract 1 before writing).
-
+    Copies a rectangular tile with arbitrary source/destination offsets.
+    Note: pitch, slice_pitch and rect fields are 1-based (subtract 1 before writing).
     Args:
         queue_ptr_u32: Pointer to the SDMA queue buffer (as uint32 array)
         offset_bytes: Byte offset in the queue where to place the packet
