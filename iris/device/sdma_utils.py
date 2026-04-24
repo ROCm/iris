@@ -14,6 +14,7 @@ import triton.language as tl
 
 SDMA_QUEUE_SIZE = tl.constexpr(8 * 1024 * 1024)
 
+
 # TODO rename or add nt
 @triton.jit
 def my_load(addr):
