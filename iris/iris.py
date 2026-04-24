@@ -71,7 +71,6 @@ from .logging import logger
 from .tracing import (
     Tracing,
     DeviceTracing,
-    TraceEvent,
 )  # noqa: F401  re-export for iris.TraceEvent
 
 # Import shared tensor-creation helpers
@@ -2935,7 +2934,9 @@ def put(
         # Linear copy packet: 32 bytes for 1D, Sub-window copy packet: 80 bytes for 2D
         # IS_2D_COPY is a compile-time constant for proper branch elimination
         mask_int = mask.to(tl.int32)
-        command_in_bytes = sdma_ep.SDMA_PKT_LINEAR_SUB_WINDOW_BYTES if IS_2D_COPY else sdma_ep.SDMA_PKT_COPY_LINEAR_BYTES
+        command_in_bytes = (
+            sdma_ep.SDMA_PKT_LINEAR_SUB_WINDOW_BYTES if IS_2D_COPY else sdma_ep.SDMA_PKT_COPY_LINEAR_BYTES
+        )
 
         # Acquire space in the queue
         base, offset = sdma_utils.acquire_fadd(
