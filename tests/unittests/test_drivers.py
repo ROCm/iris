@@ -28,7 +28,7 @@ from iris.drivers.fabric.nvidia import (
     _normalize_fabric_handle_bytes,
     _round_up,
 )
-from iris.topology import InterconnectLevel
+from iris.host.distributed.topology import InterconnectLevel
 
 
 class TestExceptions:

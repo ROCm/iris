@@ -20,7 +20,7 @@ from iris.drivers.base import (
     LocalAllocation,
     PeerMapping,
 )
-from iris.topology import InterconnectLevel
+from iris.host.distributed.topology import InterconnectLevel
 
 logger = logging.getLogger("iris.drivers.fabric")
 

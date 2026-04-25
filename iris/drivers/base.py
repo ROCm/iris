@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from iris.topology import InterconnectLevel
+from iris.host.distributed.topology import InterconnectLevel
 
 __all__ = [
     "PeerMapping",
