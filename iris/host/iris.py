@@ -64,7 +64,7 @@ from iris.host.logging.logging import logger
 # Import tracing functionality
 from iris.host.tracing.core import Tracing  # noqa: F401
 from iris.host.tracing.events import TraceEvent  # noqa: F401  re-export for iris.TraceEvent
-from iris.device.triton.tracing import DeviceTracing  # noqa: F401
+from iris.mem.triton.tracing import Tracing as DeviceTracing  # noqa: F401
 
 # Import shared tensor-creation helpers
 from iris.host.memory import tensors as tensor_creation

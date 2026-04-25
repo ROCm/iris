@@ -10,7 +10,7 @@ Gathers tiles from all ranks and concatenates them along the output dimension.
 import triton
 import triton.language as tl
 import iris
-from iris.device.triton.context import DeviceContext
+from iris.mem.triton.context import Context as DeviceContext
 from .core import Tile, TensorView
 
 

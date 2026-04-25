@@ -9,5 +9,5 @@ Usage::
     from iris.gluon import IrisDeviceCtx, GluonDeviceTracing
 """
 
-from iris.device.gluon.context import IrisDeviceCtx  # noqa: F401
-from iris.device.gluon.tracing import GluonDeviceTracing  # noqa: F401
+from iris.mem.gluon.context import Context as IrisDeviceCtx  # noqa: F401
+from iris.mem.gluon.tracing import Tracing as GluonDeviceTracing  # noqa: F401

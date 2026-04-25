@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
-"""Triton device-side context and RMA operations."""
+"""Backward compat shim — canonical code moved to iris.mem.triton."""
 
-from .context import DeviceContext  # noqa: F401
-from .ops import (  # noqa: F401
-    load,
-    store,
-    copy,
-    get,
-    put,
-    atomic_add,
-    atomic_sub,
-    atomic_cas,
-    atomic_xchg,
-    atomic_xor,
-    atomic_and,
-    atomic_or,
-    atomic_min,
-    atomic_max,
-)
+from iris.mem.triton import *  # noqa: F401,F403

@@ -11,7 +11,7 @@ Users manage tile iteration themselves and call these functions from their own k
 import triton
 import triton.language as tl
 import iris
-from iris.device.triton.context import DeviceContext
+from iris.mem.triton.context import Context as DeviceContext
 from .core import Tile, TensorView
 
 

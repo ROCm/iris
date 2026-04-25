@@ -27,6 +27,6 @@ Usage:
     >>>     ctx.load(buffer, 1)
 """
 
-from iris.device.gluon import context as gluon_context  # noqa: F401
+from iris.mem.gluon import context as gluon_context  # noqa: F401
 
 __all__ = ["gluon_context"]

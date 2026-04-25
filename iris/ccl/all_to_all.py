@@ -17,7 +17,7 @@ from .utils import chiplet_transform_chunked, extract_group_info
 try:
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
-    from iris.device.gluon.context import IrisDeviceCtx
+    from iris.mem.gluon.context import Context as IrisDeviceCtx
 
     GLUON_AVAILABLE = True
 except ImportError:
