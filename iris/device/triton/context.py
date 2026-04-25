@@ -454,7 +454,7 @@ class DeviceContext:
         to_base_byte = tl.cast(to_base, tl.pointer_type(tl.int8))
 
         translated_src = tl.cast(from_base_byte + src_offset, src_ptr.dtype)
-        translated_dst = tl.cast(to_base_byte + dst_offset, src_ptr.dtype)
+        translated_dst = tl.cast(to_base_byte + dst_offset, dst_ptr.dtype)
 
         if hint is not None:
             translated_src = tl.max_contiguous(tl.multiple_of(translated_src, hint), hint)
