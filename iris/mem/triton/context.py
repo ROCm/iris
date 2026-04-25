@@ -683,4 +683,5 @@ class Context:
         translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
+
 DeviceContext = Context  # backward compat
