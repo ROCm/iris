@@ -11,25 +11,61 @@ architecture-aware APIs (``tl.extra.hip``) where available.
 
 import triton
 import triton.language as tl
-from triton.language.extra.hip import memrealtime, smid
 from triton.language.target_info import is_hip_cdna3, is_hip_cdna4
 
+try:
+    from triton.language.extra.hip import memrealtime as _memrealtime
+    from triton.language.extra.hip import smid as _smid
 
-@triton.jit
-def read_realtime():
-    """
-    Read GPU wall clock timestamp.
+    _HAS_HIP_INTRINSICS = True
+except ImportError:
+    _HAS_HIP_INTRINSICS = False
 
-    Returns a 64-bit value from the GPU's constant-frequency real-time
-    counter (100 MHz, unaffected by power states or clock gating).
 
-    Delegates to ``tl.extra.hip.memrealtime()`` which emits the correct
-    instruction for each architecture family.
+if _HAS_HIP_INTRINSICS:
 
-    Returns:
-        int64: Current timestamp in cycles (100 MHz constant clock)
-    """
-    return memrealtime()
+    @triton.jit
+    def read_realtime():
+        """
+        Read GPU wall clock timestamp.
+
+        Returns a 64-bit value from the GPU's constant-frequency real-time
+        counter (100 MHz, unaffected by power states or clock gating).
+
+        Delegates to ``tl.extra.hip.memrealtime()`` which emits the correct
+        instruction for each architecture family.
+
+        Returns:
+            int64: Current timestamp in cycles (100 MHz constant clock)
+        """
+        return _memrealtime()
+
+    @triton.jit
+    def get_cu_id():
+        """
+        Get compute-unit / workgroup-processor ID for the current wave.
+
+        Delegates to ``tl.extra.hip.smid()`` which reads the appropriate
+        hardware register for each architecture family (CU_ID on CDNA,
+        WGP_ID on RDNA).
+
+        Returns:
+            int32: CU / WGP ID for the current execution
+        """
+        return _smid()
+else:
+
+    @triton.jit
+    def read_realtime():
+        """Fallback stub when HIP intrinsics are missing."""
+        tl.static_assert(False, "memrealtime is unavailable in this Triton build")
+        return tl.cast(0, tl.int64)
+
+    @triton.jit
+    def get_cu_id():
+        """Fallback stub when HIP intrinsics are missing."""
+        tl.static_assert(False, "smid is unavailable in this Triton build")
+        return tl.cast(0, tl.int32)
 
 
 @triton.jit
@@ -54,18 +90,3 @@ def get_xcc_id():
         )
     else:
         return tl.cast(0, tl.int32)
-
-
-@triton.jit
-def get_cu_id():
-    """
-    Get compute-unit / workgroup-processor ID for the current wave.
-
-    Delegates to ``tl.extra.hip.smid()`` which reads the appropriate
-    hardware register for each architecture family (CU_ID on CDNA,
-    WGP_ID on RDNA).
-
-    Returns:
-        int32: CU / WGP ID for the current execution
-    """
-    return smid()
