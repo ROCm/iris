@@ -15,7 +15,7 @@ This package provides:
 - Utility functions: do_bench
 - HIP integration for AMD GPU support
 - Logging utilities with rank information
-- Gluon backend: @aggregate-based implementation via iris.device.gluon
+- Gluon backend: @aggregate-based implementation via iris.mem.gluon
 
 Quick Start (Traditional API):
     >>> import iris

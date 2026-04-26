@@ -6,70 +6,70 @@ Device-side functions provided by Iris for remote memory operations and atomics.
 
 ### load
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.load
+.. autofunction:: iris.mem.triton.ops.load
    :noindex:
 ```
 
 ### store
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.store
+.. autofunction:: iris.mem.triton.ops.store
 ```
 
 ### copy
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.copy
+.. autofunction:: iris.mem.triton.ops.copy
 ```
 
 ### get
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.get
+.. autofunction:: iris.mem.triton.ops.get
 ```
 
 ### put
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.put
+.. autofunction:: iris.mem.triton.ops.put
 ```
 
 ## Atomic operations
 
 ### atomic_add
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.atomic_add
+.. autofunction:: iris.mem.triton.ops.atomic_add
 ```
 
 ### atomic_cas
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.atomic_cas
+.. autofunction:: iris.mem.triton.ops.atomic_cas
 ```
 
 ### atomic_xchg
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.atomic_xchg
+.. autofunction:: iris.mem.triton.ops.atomic_xchg
 ```
 
 ### atomic_xor
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.atomic_xor
+.. autofunction:: iris.mem.triton.ops.atomic_xor
 ```
 
 ### atomic_or
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.atomic_or
+.. autofunction:: iris.mem.triton.ops.atomic_or
 ```
 
 ### atomic_and
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.atomic_and
+.. autofunction:: iris.mem.triton.ops.atomic_and
 ```
 
 ### atomic_min
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.atomic_min
+.. autofunction:: iris.mem.triton.ops.atomic_min
 ```
 
 ### atomic_max
 ```{eval-rst}
-.. autofunction:: iris.device.triton.ops.atomic_max
+.. autofunction:: iris.mem.triton.ops.atomic_max
 ```
 
 
