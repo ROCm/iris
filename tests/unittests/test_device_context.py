@@ -504,3 +504,8 @@ def test_device_context_imports():
     from iris.mem.triton.context import Context as DC2
 
     assert DC1 is DC2
+
+    # Backward-compat shim: iris.device.triton.context.DeviceContext must resolve to the same object
+    from iris.device.triton.context import DeviceContext as DC3
+
+    assert DC1 is DC3
