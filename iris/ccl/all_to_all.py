@@ -51,11 +51,10 @@ def all_to_all(
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
 
     if config.use_gluon:
-        from .gluon import GLUON_AVAILABLE
-
-        if not GLUON_AVAILABLE:
+        try:
+            from .gluon.all_to_all import dispatch_gluon
+        except ImportError:
             raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False")
-        from .gluon.all_to_all import dispatch_gluon
 
         dispatch_gluon(
             input_tensor,

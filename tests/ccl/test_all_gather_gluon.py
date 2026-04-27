@@ -16,7 +16,9 @@ try:
     import iris
     from iris.ccl import Config
     from iris.ccl.all_gather import all_gather
-    from iris.ccl.gluon import GLUON_AVAILABLE
+    from triton.experimental import gluon  # noqa: F401
+
+    GLUON_AVAILABLE = True
 except ImportError:
     GLUON_AVAILABLE = False
 

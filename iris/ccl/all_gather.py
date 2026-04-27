@@ -60,11 +60,10 @@ def all_gather(
         )
 
     if config.use_gluon:
-        from .gluon import GLUON_AVAILABLE
-
-        if not GLUON_AVAILABLE:
+        try:
+            from .gluon.all_gather import dispatch_gluon
+        except ImportError:
             raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False")
-        from .gluon.all_gather import dispatch_gluon
 
         dispatch_gluon(
             input_tensor,
