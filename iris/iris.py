@@ -71,7 +71,8 @@ from .logging import logger
 from .tracing import (
     Tracing,
     DeviceTracing,
-)  # noqa: F401  re-export for iris.TraceEvent
+    TraceEvent,
+)  # noqa: F401
 
 # Import shared tensor-creation helpers
 from . import tensor_creation
@@ -1136,23 +1137,41 @@ class Iris:
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag)
         signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, translate=True, dst_rank=dst_rank)
 
-        wait_val = 0 if wait_ptr == 0 else int(wait_value if wait_value is not None else 0)
-        signal_val = 0 if signal_ptr == 0 else int(signal_value)
+        has_wait = wait_ptr != 0
+        has_signal = signal_ptr != 0
 
-        self.copy_engines.put(
-            src_rank,
-            dst_rank,
-            channel,
-            src_ptr,
-            dst_ptr,
-            size,
-            wait_ptr,
-            wait_bits,
-            wait_val,
-            signal_ptr,
-            signal_bits,
-            signal_val,
-        )
+        if has_wait and has_signal:
+            # Wait + copy + signal (two calls)
+            wait_val = int(wait_value if wait_value is not None else 0)
+            signal_val = int(signal_value)
+            self.copy_engines.wait_flag_then_put(
+                src_rank, dst_rank, channel,
+                wait_ptr, wait_val, src_ptr, dst_ptr, size, wait_bits
+            )
+            self.copy_engines.signal(
+                src_rank, dst_rank, channel,
+                signal_ptr, signal_val, signal_bits
+            )
+        elif has_wait:
+            # Wait + copy
+            wait_val = int(wait_value if wait_value is not None else 0)
+            self.copy_engines.wait_flag_then_put(
+                src_rank, dst_rank, channel,
+                wait_ptr, wait_val, src_ptr, dst_ptr, size, wait_bits
+            )
+        elif has_signal:
+            # Copy + signal
+            signal_val = int(signal_value)
+            self.copy_engines.put_signal(
+                src_rank, dst_rank, channel,
+                src_ptr, dst_ptr, size, signal_ptr, signal_val, signal_bits
+            )
+        else:
+            # Simple copy
+            self.copy_engines.put(
+                src_rank, dst_rank, channel,
+                src_ptr, dst_ptr, size
+            )
 
         if not async_op:
             self.copy_engines.quiet(src_rank, dst_rank, channel)
@@ -1209,23 +1228,41 @@ class Iris:
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
         signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, default_bits=32)
 
-        wait_val = 0 if wait_ptr == 0 else int(wait_value if wait_value is not None else 0)
-        signal_val = 0 if signal_ptr == 0 else int(signal_value)
+        has_wait = wait_ptr != 0
+        has_signal = signal_ptr != 0
 
-        self.copy_engines.put_tile(
-            src_rank,
-            dst_rank,
-            channel,
-            tile,
-            int(dst_ptr),
-            int(dst_stride),
-            wait_ptr,
-            wait_bits,
-            wait_val,
-            signal_ptr,
-            signal_bits,
-            signal_val,
-        )
+        if has_wait and has_signal:
+            # Wait + tile copy + signal (two calls)
+            wait_val = int(wait_value if wait_value is not None else 0)
+            signal_val = int(signal_value)
+            self.copy_engines.wait_flag_then_put_tile(
+                src_rank, dst_rank, channel,
+                wait_ptr, wait_val, tile, int(dst_ptr), int(dst_stride), wait_bits
+            )
+            self.copy_engines.signal(
+                src_rank, dst_rank, channel,
+                signal_ptr, signal_val, signal_bits
+            )
+        elif has_wait:
+            # Wait + tile copy
+            wait_val = int(wait_value if wait_value is not None else 0)
+            self.copy_engines.wait_flag_then_put_tile(
+                src_rank, dst_rank, channel,
+                wait_ptr, wait_val, tile, int(dst_ptr), int(dst_stride), wait_bits
+            )
+        elif has_signal:
+            # Tile copy + signal
+            signal_val = int(signal_value)
+            self.copy_engines.put_tile_signal(
+                src_rank, dst_rank, channel,
+                tile, int(dst_ptr), int(dst_stride), signal_ptr, signal_val, signal_bits
+            )
+        else:
+            # Simple tile copy
+            self.copy_engines.put_tile(
+                src_rank, dst_rank, channel,
+                tile, int(dst_ptr), int(dst_stride)
+            )
 
         if not async_op:
             self.copy_engines.quiet(src_rank, dst_rank, channel)
@@ -1266,26 +1303,48 @@ class Iris:
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
         signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, default_bits=32)
 
-        wait_val = 0 if wait_ptr == 0 else int(wait_value if wait_value is not None else 0)
-        signal_val = 0 if signal_ptr == 0 else int(signal_value)
+        has_wait = wait_ptr != 0
+        has_signal = signal_ptr != 0
 
         dst_ptr_list = [int(p) for p in dst_ptrs]
         dst_stride_list = [int(s) for s in dst_strides]
 
-        self.copy_engines.put_tiles(
-            src_rank,
-            dst_rank,
-            channel,
-            list(tiles),
-            dst_ptr_list,
-            dst_stride_list,
-            wait_ptr,
-            wait_bits,
-            wait_val,
-            signal_ptr,
-            signal_bits,
-            signal_val,
-        )
+        if has_wait and has_signal:
+            # Wait + tiles copy + signal (two calls)
+            wait_val = int(wait_value if wait_value is not None else 0)
+            signal_val = int(signal_value)
+            self.copy_engines.wait_flag_then_put_tiles(
+                src_rank, dst_rank, channel,
+                wait_ptr, wait_val, list(tiles), dst_ptr_list, dst_stride_list, wait_bits
+            )
+            self.copy_engines.signal(
+                src_rank, dst_rank, channel,
+                signal_ptr, signal_val, signal_bits
+            )
+        elif has_wait:
+            # Wait + tiles copy
+            wait_val = int(wait_value if wait_value is not None else 0)
+            self.copy_engines.wait_flag_then_put_tiles(
+                src_rank, dst_rank, channel,
+                wait_ptr, wait_val, list(tiles), dst_ptr_list, dst_stride_list, wait_bits
+            )
+        elif has_signal:
+            # Tiles copy + signal (loop + signal)
+            signal_val = int(signal_value)
+            self.copy_engines.put_tiles(
+                src_rank, dst_rank, channel,
+                list(tiles), dst_ptr_list, dst_stride_list
+            )
+            self.copy_engines.signal(
+                src_rank, dst_rank, channel,
+                signal_ptr, signal_val, signal_bits
+            )
+        else:
+            # Simple tiles copy
+            self.copy_engines.put_tiles(
+                src_rank, dst_rank, channel,
+                list(tiles), dst_ptr_list, dst_stride_list
+            )
 
         if not async_op:
             self.copy_engines.quiet(src_rank, dst_rank, channel)

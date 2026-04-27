@@ -125,6 +125,8 @@ def run_message_passing_kernels(module, args, *, use_copy_engine: bool = False):
             import gc
 
             gc.collect()
+            # Clear CUDA cache to free GPU memory between tests
+            torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize(
