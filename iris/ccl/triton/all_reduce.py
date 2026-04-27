@@ -706,7 +706,7 @@ def persistent_all_reduce_two_shot(
                     )
 
 
-def dispatch_triton(
+def dispatch(
     output_tensor,
     input_tensor,
     shmem,

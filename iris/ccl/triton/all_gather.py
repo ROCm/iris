@@ -277,7 +277,7 @@ def persistent_all_gather_partitioned(
             )
 
 
-def dispatch_triton(
+def dispatch(
     input_tensor,
     output_tensor,
     ctx,
@@ -288,7 +288,23 @@ def dispatch_triton(
     rank_stride,
     config,
 ):
-    """Dispatch to the appropriate Triton all-gather kernel."""
+    """Dispatch to the appropriate all-gather kernel (Triton or Gluon)."""
+    if config.use_gluon:
+        try:
+            from iris.ccl.gluon.all_gather import dispatch_gluon
+        except ImportError:
+            raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False")
+        return dispatch_gluon(
+            input_tensor,
+            output_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config,
+        )
     M, N = input_tensor.shape[:2]
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)

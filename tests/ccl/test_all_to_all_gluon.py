@@ -13,7 +13,6 @@ import torch.distributed as dist
 try:
     import iris
     from iris.ccl import Config
-    from iris.ccl.all_to_all import all_to_all
     from triton.experimental import gluon  # noqa: F401
 
     GLUON_AVAILABLE = True
@@ -85,7 +84,7 @@ def test_all_to_all_gluon(dtype, M, N):
     # Run Iris Gluon all_to_all with traffic shaping enabled
     shmem.barrier()
     config = Config(use_gluon=True)  # Enable Gluon with traffic shaping
-    all_to_all(iris_output_concat, iris_input_concat, shmem, config=config)
+    shmem.ccl.all_to_all(iris_output_concat, iris_input_concat, config=config)
     torch.cuda.synchronize()
 
     # Compare results

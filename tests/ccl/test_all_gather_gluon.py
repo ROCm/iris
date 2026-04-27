@@ -15,7 +15,6 @@ import torch.distributed as dist
 try:
     import iris
     from iris.ccl import Config
-    from iris.ccl.all_gather import all_gather
     from triton.experimental import gluon  # noqa: F401
 
     GLUON_AVAILABLE = True
@@ -81,7 +80,7 @@ def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n):
     # Run Iris Gluon all_gather
     shmem.barrier()
     config = Config(use_gluon=True, block_size_m=block_size_m, block_size_n=block_size_n)
-    all_gather(iris_output_tensor, iris_input_tensor, shmem, config=config)
+    shmem.ccl.all_gather(iris_output_tensor, iris_input_tensor, config=config)
     torch.cuda.synchronize()
 
     # Compare results

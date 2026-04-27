@@ -140,7 +140,7 @@ def persistent_reduce_scatter_two_shot(
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
 
 
-def dispatch_triton(
+def dispatch(
     output_tensor,
     input_tensor,
     shmem,
