@@ -156,6 +156,18 @@ def setup_fd_infrastructure(cur_rank: int, num_ranks: int):
     if num_ranks <= 1:
         return None
 
+    import logging
+    from iris.host.logging.logging import _log_rank
+
+    _log_rank(
+        logging.DEBUG,
+        "setup_fd_infrastructure: rank=%d num_ranks=%d",
+        cur_rank,
+        num_ranks,
+        rank=cur_rank,
+        num_ranks=num_ranks,
+    )
+
     import torch.distributed as dist
     from iris.host.distributed.helpers import distributed_barrier
 

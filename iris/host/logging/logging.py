@@ -6,6 +6,7 @@ Iris logging module - provides logging functionality.
 """
 
 import logging
+import os
 
 # Logging constants (compatible with Python logging levels)
 DEBUG = logging.DEBUG
@@ -15,20 +16,18 @@ ERROR = logging.ERROR
 
 
 class IrisFormatter(logging.Formatter):
-    """Custom formatter that automatically includes rank information when available."""
+    """Custom formatter that includes timestamp, level, rank, and module information."""
 
     def __init__(self):
         super().__init__()
 
     def format(self, record):
-        # Check if rank information is available in the record
-        if hasattr(record, "iris_rank") and hasattr(record, "iris_num_ranks"):
-            prefix = f"[Iris] [{record.iris_rank}/{record.iris_num_ranks}]"
-        else:
-            prefix = "[Iris]"
-
-        # Format the message with the appropriate prefix
-        return f"{prefix} {record.getMessage()}"
+        rank = getattr(record, "iris_rank", "?")
+        num_ranks = getattr(record, "iris_num_ranks", "?")
+        ts = self.formatTime(record, "%H:%M:%S")
+        level = record.levelname
+        module = record.module or "?"
+        return f"{ts} {level:<5s} [Iris] [{rank}/{num_ranks}] [{module}] {record.getMessage()}"
 
 
 # Logger instance that can be accessed as iris.logger
@@ -37,12 +36,35 @@ logger = logging.getLogger("iris")
 # Set up iris logger
 logger.setLevel(logging.INFO)  # Default level
 
+# Override from environment
+_env_level = os.environ.get("IRIS_LOG_LEVEL", "").upper()
+if _env_level in ("DEBUG", "INFO", "WARNING", "ERROR"):
+    logger.setLevel(getattr(logging, _env_level))
+
 # Add a console handler if none exists
 if not logger.handlers:
     _console_handler = logging.StreamHandler()
     _formatter = IrisFormatter()
     _console_handler.setFormatter(_formatter)
     logger.addHandler(_console_handler)
+
+
+def _log_rank(level, msg, *args, rank=None, num_ranks=None):
+    """Log with optional rank injection. Lazy -- no formatting if level disabled."""
+    if logger.isEnabledFor(level):
+        record = logging.LogRecord(
+            name=logger.name,
+            level=level,
+            pathname="",
+            lineno=0,
+            msg=msg,
+            args=args,
+            exc_info=None,
+        )
+        if rank is not None:
+            record.iris_rank = rank
+            record.iris_num_ranks = num_ranks
+        logger.handle(record)
 
 
 def set_logger_level(level):

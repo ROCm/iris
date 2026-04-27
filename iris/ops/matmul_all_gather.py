@@ -10,6 +10,7 @@ Then scatters C_local tiles to form the full C (M x N) where M = world_size * M_
 This is useful for tensor-parallel workloads where outputs need to be gathered.
 """
 
+import logging
 from typing import Optional
 import torch
 import triton
@@ -173,6 +174,21 @@ def matmul_all_gather(
     K2, N = B.shape
     world_size = shmem.get_num_ranks()
     rank = shmem.get_rank()
+
+    from iris.host.logging.logging import _log_rank
+
+    _log_rank(
+        logging.DEBUG,
+        "matmul_all_gather: shape=(%d,%d,%d) dtype=%s rank=%d/%d",
+        M_local * world_size,
+        N,
+        K,
+        A.dtype,
+        rank,
+        world_size,
+        rank=rank,
+        num_ranks=world_size,
+    )
 
     assert K == K2, f"Inner dimensions must match: A has K={K}, B has K={K2}"
 

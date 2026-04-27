@@ -9,6 +9,7 @@ This operation computes C = all_gather(A_sharded) @ B by pulling
 tiles from remote ranks on-demand during GEMM computation.
 """
 
+import logging
 from typing import Optional
 import torch
 import triton
@@ -202,6 +203,21 @@ def all_gather_matmul(
     K, N = B.shape
     world_size = shmem.get_num_ranks()
     rank = shmem.get_rank()
+
+    from iris.host.logging.logging import _log_rank
+
+    _log_rank(
+        logging.DEBUG,
+        "all_gather_matmul: shape=(%d,%d,%d) dtype=%s rank=%d/%d",
+        M,
+        N,
+        K,
+        A_sharded.dtype,
+        rank,
+        world_size,
+        rank=rank,
+        num_ranks=world_size,
+    )
 
     expected_K = world_size * K_local
     assert K == expected_K, f"K ({K}) must equal world_size ({world_size}) * K_local ({K_local})"

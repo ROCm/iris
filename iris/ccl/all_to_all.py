@@ -6,9 +6,12 @@ All-to-all collective communication primitive for Iris.
 Supports both Triton and Gluon implementations based on config.
 """
 
+import logging
+
 import triton
 import triton.language as tl
 import iris
+from iris.host.logging.logging import _log_rank
 from iris.host.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import chiplet_transform_chunked, extract_group_info
@@ -368,6 +371,19 @@ def all_to_all(
 
     M, total_N = input_tensor.shape[:2]
     N = total_N // world_size
+    _log_rank(
+        logging.DEBUG,
+        "all_to_all: shape=(%d,%d) N_per_rank=%d dtype=%s rank=%d/%d async_op=%s",
+        M,
+        total_N,
+        N,
+        input_tensor.dtype,
+        rank_global,
+        world_size,
+        async_op,
+        rank=rank_global,
+        num_ranks=world_size,
+    )
 
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)

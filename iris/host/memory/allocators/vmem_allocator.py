@@ -8,12 +8,14 @@ This allocator provides fine-grained control over virtual and physical memory,
 enabling features like memory oversubscription and on-demand paging.
 """
 
+import logging
 import torch
 import os
 from typing import Dict
 from threading import Lock
 
 from .base import BaseAllocator
+from iris.host.logging.logging import _log_rank
 from iris.host.platform.hip import (
     get_allocation_granularity,
     get_address_range,
@@ -59,6 +61,14 @@ class VMemAllocator(BaseAllocator):
         va_multiplier: float = 1.0,
     ):
         super().__init__(heap_size, device_id, rank, world_size)
+        _log_rank(
+            logging.INFO,
+            "VMemAllocator: init heap_size=%.1fGB device=%d",
+            heap_size / (1 << 30),
+            device_id,
+            rank=rank,
+            num_ranks=world_size,
+        )
         self.va_multiplier = va_multiplier
         self.device = torch.device(f"cuda:{device_id}")
         self.lock = Lock()
@@ -142,6 +152,17 @@ class VMemAllocator(BaseAllocator):
             actual_size_bytes = max(size_bytes, self.get_minimum_allocation_size())
             aligned_size = (actual_size_bytes + self.granularity - 1) & ~(self.granularity - 1)
             aligned_offset = (self.current_offset + alignment - 1) & ~(alignment - 1)
+
+            _log_rank(
+                logging.DEBUG,
+                "VMemAllocator.allocate: num_elements=%d dtype=%s size_bytes=%d offset=%d",
+                num_elements,
+                dtype,
+                size_bytes,
+                aligned_offset,
+                rank=self.cur_rank,
+                num_ranks=self.num_ranks,
+            )
 
             if aligned_offset + aligned_size > self.aligned_heap_size:
                 raise RuntimeError(

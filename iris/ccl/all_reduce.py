@@ -6,6 +6,7 @@ All-reduce collective communication primitive for Iris.
 Supports multiple variants: atomic, spinlock, ring, two-shot, and one-shot.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -13,6 +14,7 @@ import triton
 import triton.language as tl
 import torch
 import iris
+from iris.host.logging.logging import _log_rank
 from iris.host.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
@@ -75,6 +77,16 @@ def all_reduce_preamble(
 
     M, N = input_tensor.shape[:2]
     dtype = input_tensor.dtype
+    _log_rank(
+        logging.DEBUG,
+        "all_reduce_preamble: variant=%s shape=(%d,%d) dtype=%s",
+        variant,
+        M,
+        N,
+        dtype,
+        rank=shmem.cur_rank,
+        num_ranks=shmem.num_ranks,
+    )
 
     if workspace is None:
         workspace = AllReduceWorkspace()
@@ -767,6 +779,19 @@ def all_reduce(
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
     variant = config.all_reduce_variant.lower()
+    _log_rank(
+        logging.DEBUG,
+        "all_reduce: variant=%s shape=(%d,%d) dtype=%s rank=%d/%d async_op=%s",
+        variant,
+        M,
+        N,
+        input_tensor.dtype,
+        rank_global,
+        world_size,
+        async_op,
+        rank=rank_global,
+        num_ranks=world_size,
+    )
     if variant not in [
         VARIANT_ATOMIC,
         VARIANT_SPINLOCK,

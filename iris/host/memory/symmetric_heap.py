@@ -8,10 +8,13 @@ Provides a high-level interface for distributed symmetric memory management,
 hiding the details of allocators and inter-process memory sharing.
 """
 
+import logging
+
 import numpy as np
 import torch
 import os
 
+from iris.host.logging.logging import _log_rank
 from iris.host.memory.allocators import TorchAllocator, VMemAllocator
 from iris.host.distributed.fd_passing import setup_fd_infrastructure
 from iris.host.distributed.helpers import distributed_allgather
@@ -54,6 +57,15 @@ class SymmetricHeap:
         self.cur_rank = cur_rank
         self.num_ranks = num_ranks
         allocator_type = os.environ.get("IRIS_ALLOCATOR", allocator_type).lower()
+        _log_rank(
+            logging.INFO,
+            "SymmetricHeap: init heap_size=%.1fGB device=%d allocator=%s",
+            heap_size / (1 << 30),
+            device_id,
+            allocator_type,
+            rank=cur_rank,
+            num_ranks=num_ranks,
+        )
 
         if is_simulation_env():
             allocator_type = "torch"
@@ -100,6 +112,14 @@ class SymmetricHeap:
             This should be called collectively across all ranks to maintain
             symmetric heap consistency. After allocation, peer access is refreshed.
         """
+        _log_rank(
+            logging.DEBUG,
+            "SymmetricHeap.allocate: num_elements=%d dtype=%s",
+            num_elements,
+            dtype,
+            rank=self.cur_rank,
+            num_ranks=self.num_ranks,
+        )
         min_bytes = self.allocator.get_minimum_allocation_size()
         element_size = torch.tensor([], dtype=dtype).element_size()
         min_elements = max(1, (min_bytes + element_size - 1) // element_size)
@@ -169,6 +189,15 @@ class SymmetricHeap:
             hipMemAccessFlagsProtReadWrite,
         )
 
+        _log_rank(
+            logging.INFO,
+            "refresh_peer_access: start rank=%d num_ranks=%d",
+            self.cur_rank,
+            self.num_ranks,
+            rank=self.cur_rank,
+            num_ranks=self.num_ranks,
+        )
+
         if dist.is_initialized():
             dist.barrier()
 
@@ -211,6 +240,14 @@ class SymmetricHeap:
         for peer, sock in self.fd_conns.items():
             if peer == self.cur_rank:
                 continue
+            _log_rank(
+                logging.DEBUG,
+                "refresh_peer_access: peer=%d segments=%d",
+                peer,
+                len(my_exported_fds),
+                rank=self.cur_rank,
+                num_ranks=self.num_ranks,
+            )
 
             if not hasattr(self, "_peer_va_ranges"):
                 self._peer_va_ranges = {}
@@ -271,6 +308,14 @@ class SymmetricHeap:
             import os
 
             os.close(fd)
+
+        _log_rank(
+            logging.INFO,
+            "refresh_peer_access: done heap_bases=[%s]",
+            ", ".join(f"0x{int(self.heap_bases[r].item()):x}" for r in range(min(3, self.num_ranks))),
+            rank=self.cur_rank,
+            num_ranks=self.num_ranks,
+        )
 
         if dist.is_initialized():
             dist.barrier()

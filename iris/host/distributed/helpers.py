@@ -2,11 +2,14 @@
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 
+import logging
+
 import torch
 import torch.distributed as dist
 import numpy as np
 import triton
 import triton.language as tl
+from iris.host.logging.logging import _log_rank
 from iris.host.tracing.kernel_artifacts import iris_launch
 
 
@@ -58,6 +61,9 @@ def distributed_allgather(data):
     world_size = dist.get_world_size()
     device = _infer_device()
     backend = str(dist.get_backend()).lower()
+    _log_rank(
+        logging.DEBUG, "distributed_allgather: shape=%s backend=%s world_size=%d", data.shape, backend, world_size
+    )
 
     # Fast path: tensor all_gather if dtype is NCCL-supported or backend != nccl
     data_tensor = torch.from_numpy(data)
@@ -180,6 +186,7 @@ def distributed_broadcast_tensor(value_to_broadcast=None, root=0):
     rank = dist.get_rank()
     device = _infer_device()
     backend = str(dist.get_backend()).lower()
+    _log_rank(logging.DEBUG, "distributed_broadcast_tensor: src=%d rank=%d", root, rank, rank=rank)
 
     if rank == root:
         if value_to_broadcast is None:
@@ -291,6 +298,7 @@ def distributed_barrier(group=None):
     """
     if not dist.is_initialized():
         raise RuntimeError("PyTorch distributed is not initialized")
+    _log_rank(logging.DEBUG, "distributed_barrier: group=%s", group)
     dist.barrier(group=group)
 
 

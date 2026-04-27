@@ -2,10 +2,13 @@
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 import ctypes
+import logging
 import numpy as np
 import torch
 import subprocess
 import os
+
+from iris.host.logging.logging import _log_rank
 
 # Auto-detect backend
 _is_amd_backend = True
@@ -27,10 +30,12 @@ def gpu_try(err):
         if _is_amd_backend:
             gpu_runtime.hipGetErrorString.restype = ctypes.c_char_p
             error_string = gpu_runtime.hipGetErrorString(ctypes.c_int(err)).decode("utf-8")
+            _log_rank(logging.ERROR, "HIP error code %d: %s", err, error_string)
             raise RuntimeError(f"HIP error code {err}: {error_string}")
         else:
             gpu_runtime.cudaGetErrorString.restype = ctypes.c_char_p
             error_string = gpu_runtime.cudaGetErrorString(ctypes.c_int(err)).decode("utf-8")
+            _log_rank(logging.ERROR, "CUDA error code %d: %s", err, error_string)
             raise RuntimeError(f"CUDA error code {err}: {error_string}")
 
 
@@ -279,6 +284,8 @@ def export_dmabuf_handle(ptr, size):
     """
     if not _is_amd_backend:
         raise RuntimeError("DMA-BUF export only supported on AMD/HIP backend")
+
+    _log_rank(logging.DEBUG, "export_dmabuf_handle: ptr=0x%x size=%d", ptr if isinstance(ptr, int) else ptr.value, size)
 
     ptr_int = ptr if isinstance(ptr, int) else ptr.value
     ptr_arg = ctypes.c_void_p(ptr_int)

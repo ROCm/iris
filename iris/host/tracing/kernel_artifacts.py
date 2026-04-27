@@ -27,10 +27,13 @@ Directory layout:
 
 import hashlib
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from iris.host.logging.logging import _log_rank
 
 _artifacts_dir: Optional[Path] = None
 _enabled: bool = False
@@ -64,6 +67,15 @@ def iris_launch(kernel_fn, grid, *args, algorithm: str, rank: int, dtype=None, *
         dtype: Optional tensor dtype for the spec directory name.
         **kwargs: Keyword arguments forwarded to the kernel (num_warps, etc.).
     """
+    _log_rank(
+        logging.DEBUG,
+        "iris_launch: algorithm=%s kernel=%s grid=%s rank=%d",
+        algorithm,
+        _get_kernel_name(kernel_fn),
+        grid,
+        rank,
+        rank=rank,
+    )
     compiled = kernel_fn[grid](*args, **kwargs)
     if _enabled and compiled is not None:
         kernel_name = _get_kernel_name(kernel_fn)

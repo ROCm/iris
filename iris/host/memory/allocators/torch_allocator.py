@@ -8,6 +8,7 @@ Uses torch.empty() to allocate a large memory pool and manages
 sub-allocations within it using bump allocation.
 """
 
+import logging
 import math
 import numpy as np
 import torch
@@ -15,6 +16,7 @@ from typing import Optional, Dict
 import struct
 
 from .base import BaseAllocator
+from iris.host.logging.logging import _log_rank
 from iris.host.platform.hip import export_dmabuf_handle, import_dmabuf_handle, destroy_external_memory
 from iris.host.distributed.fd_passing import send_fd, recv_fd, managed_fd
 from iris.host.platform.utils import is_simulation_env
@@ -41,6 +43,14 @@ class TorchAllocator(BaseAllocator):
         super().__init__(heap_size, device_id, cur_rank, num_ranks)
 
         self.device = f"cuda:{device_id}"
+        _log_rank(
+            logging.INFO,
+            "TorchAllocator: init heap_size=%.1fGB device=%d",
+            heap_size / (1 << 30),
+            device_id,
+            rank=cur_rank,
+            num_ranks=num_ranks,
+        )
         if is_simulation_env():
             import json
 
@@ -93,7 +103,26 @@ class TorchAllocator(BaseAllocator):
         size_in_bytes = num_elements * element_size
         aligned_size = math.ceil(size_in_bytes / alignment) * alignment
 
+        _log_rank(
+            logging.DEBUG,
+            "TorchAllocator.allocate: num_elements=%d dtype=%s size_bytes=%d offset=%d",
+            num_elements,
+            dtype,
+            size_in_bytes,
+            self.heap_offset,
+            rank=self.cur_rank,
+            num_ranks=self.num_ranks,
+        )
+
         if self.heap_offset + aligned_size > self.heap_size:
+            _log_rank(
+                logging.ERROR,
+                "TorchAllocator: OOM requested=%d available=%d",
+                aligned_size,
+                self.heap_size - self.heap_offset,
+                rank=self.cur_rank,
+                num_ranks=self.num_ranks,
+            )
             raise MemoryError("Heap out of memory")
 
         start = self.heap_offset

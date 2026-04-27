@@ -8,6 +8,7 @@ This module provides a torch-like interface for GEMM+All-Reduce operations,
 automatically inferring dimensions, strides, and hardware parameters.
 """
 
+import logging
 from typing import Optional
 import torch
 import triton
@@ -285,6 +286,22 @@ def matmul_all_reduce(
     # Get rank info
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
+
+    from iris.host.logging.logging import _log_rank
+
+    _log_rank(
+        logging.DEBUG,
+        "matmul_all_reduce: shape=(%d,%d,%d) dtype=%s variant=%s rank=%d/%d",
+        M,
+        N,
+        K,
+        A.dtype,
+        config.all_reduce_variant,
+        rank,
+        world_size,
+        rank=rank,
+        num_ranks=world_size,
+    )
 
     # Prepare workspace if needed
     needs_prepare = workspace is None or not workspace.matches(

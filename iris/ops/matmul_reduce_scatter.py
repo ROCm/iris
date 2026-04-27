@@ -8,6 +8,7 @@ This module provides a torch-like interface for GEMM+Reduce-Scatter operations,
 automatically inferring dimensions, strides, and hardware parameters.
 """
 
+import logging
 from typing import Optional
 import torch
 import triton
@@ -227,6 +228,21 @@ def matmul_reduce_scatter(
     N = B.shape[1]
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
+
+    from iris.host.logging.logging import _log_rank
+
+    _log_rank(
+        logging.DEBUG,
+        "matmul_reduce_scatter: shape=(%d,%d,%d) dtype=%s rank=%d/%d",
+        M,
+        N,
+        K,
+        A.dtype,
+        rank,
+        world_size,
+        rank=rank,
+        num_ranks=world_size,
+    )
 
     num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n

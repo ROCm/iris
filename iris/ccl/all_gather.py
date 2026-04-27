@@ -6,9 +6,12 @@ All-gather collective communication primitive for Iris.
 Gathers tensors from all ranks and concatenates them along the last dimension.
 """
 
+import logging
+
 import triton
 import triton.language as tl
 import iris
+from iris.host.logging.logging import _log_rank
 from iris.host.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import extract_group_info
@@ -484,6 +487,18 @@ def all_gather(
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
     M, N = input_tensor.shape[:2]
+    _log_rank(
+        logging.DEBUG,
+        "all_gather: shape=(%d,%d) dtype=%s rank=%d/%d async_op=%s",
+        M,
+        N,
+        input_tensor.dtype,
+        rank_global,
+        world_size,
+        async_op,
+        rank=rank_global,
+        num_ranks=world_size,
+    )
     expected_output_shape = (world_size * M, N)
 
     if output_tensor.shape[:2] != expected_output_shape:

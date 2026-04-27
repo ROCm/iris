@@ -6,9 +6,12 @@ Reduce-scatter collective communication primitive for Iris.
 Uses the two-shot approach: reduce assigned tiles and store only to own rank.
 """
 
+import logging
+
 import triton
 import triton.language as tl
 import iris
+from iris.host.logging.logging import _log_rank
 from iris.host.tracing.kernel_artifacts import iris_launch
 from .config import Config
 from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
@@ -214,6 +217,18 @@ def reduce_scatter(
     # rank_global: global rank in iris context - passed as iris_rank to kernel for RMA operations
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, shmem)
     M, N = input_tensor.shape[:2]
+    _log_rank(
+        logging.DEBUG,
+        "reduce_scatter: shape=(%d,%d) dtype=%s rank=%d/%d async_op=%s",
+        M,
+        N,
+        input_tensor.dtype,
+        rank_global,
+        world_size,
+        async_op,
+        rank=rank_global,
+        num_ranks=world_size,
+    )
 
     # Validate output shape matches input shape
     if output_tensor.shape[:2] != (M, N):
