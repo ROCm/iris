@@ -134,7 +134,7 @@ def test_all_to_all(dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N):
     try:
         assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
             f"Max difference: {max_diff}, expected < {atol}\n"
-            f"Rank {rank}: Iris x.all_to_all output doesn't match PyTorch's all_to_all"
+            f"Rank {rank}: Iris all_to_all output doesn't match PyTorch's all_to_all"
         )
 
         # Verify each rank's received chunks contain correct data

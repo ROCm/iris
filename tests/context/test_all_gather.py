@@ -163,7 +163,7 @@ def test_all_gather(gather_dim, dtype, atol, rtol, M, N, BLOCK_SIZE_M, BLOCK_SIZ
     try:
         assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol, rtol=rtol), (
             f"Max difference: {max_diff}, expected < {atol}\n"
-            f"Rank {rank}: Iris x.all_gather output doesn't match PyTorch's all_gather"
+            f"Rank {rank}: Iris all_gather output doesn't match PyTorch's all_gather"
         )
 
         # Verify each rank's data is in the correct location
