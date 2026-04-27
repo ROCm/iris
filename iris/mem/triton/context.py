@@ -10,7 +10,7 @@ import triton.language as tl
 from triton.language.core import _aggregate as aggregate
 from iris.mem.utils import get_xcc_id, get_cu_id, read_realtime  # noqa: F401 — used by Tracing
 from iris.mem.triton.tracing import Tracing
-from iris.mem.triton.types import Tile, TensorView
+from iris.mem.triton.types import Tile, TileView, TensorView
 
 
 @triton.jit
@@ -855,16 +855,16 @@ class Context:
         else:
             N_local = dst_view.N // self.world_size
 
-        for dest_rank in range(self.world_size):
-            if dim == 0:
-                dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_m=self.rank * M_local, src_mask=None)
-            else:
-                dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_n=self.rank * N_local, src_mask=None)
+        if dim == 0:
+            dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_m=self.rank * M_local, src_mask=None)
+        else:
+            dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_n=self.rank * N_local, src_mask=None)
 
+        for dest_rank in range(self.world_size):
             self.store(dst_ptr, tile.data, to_rank=dest_rank, mask=combined_mask, hint=(1, tile.block_n))
 
     @triton.jit
-    def gather(self, tile: Tile, src_view: TensorView, source_rank: tl.constexpr):
+    def gather(self, tile: TileView, src_view: TensorView, source_rank: tl.constexpr):
         """
         Tile-level gather from a specific rank.
 
@@ -888,7 +888,7 @@ class Context:
         return tile_data
 
     @triton.jit
-    def all_to_all(self, tile: Tile, src_view: TensorView, dst_view: TensorView, N_per_rank: tl.constexpr):
+    def all_to_all(self, tile: TileView, src_view: TensorView, dst_view: TensorView, N_per_rank: tl.constexpr):
         """
         Tile-level all-to-all communication.
 
