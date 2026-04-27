@@ -7,6 +7,7 @@ Iris logging module - provides logging functionality.
 
 import logging
 import os
+import sys
 
 # Logging constants (compatible with Python logging levels)
 DEBUG = logging.DEBUG
@@ -26,8 +27,10 @@ class IrisFormatter(logging.Formatter):
         num_ranks = getattr(record, "iris_num_ranks", "?")
         ts = self.formatTime(record, "%H:%M:%S")
         level = record.levelname
-        module = record.module or "?"
-        return f"{ts} {level:<5s} [Iris] [{rank}/{num_ranks}] [{module}] {record.getMessage()}"
+        module = record.module
+        if module:
+            return f"{ts} {level:<5s} [Iris] [{rank}/{num_ranks}] [{module}] {record.getMessage()}"
+        return f"{ts} {level:<5s} [Iris] [{rank}/{num_ranks}] {record.getMessage()}"
 
 
 # Logger instance that can be accessed as iris.logger
@@ -50,13 +53,15 @@ if not logger.handlers:
 
 
 def _log_rank(level, msg, *args, rank=None, num_ranks=None):
-    """Log with optional rank injection. Lazy -- no formatting if level disabled."""
+    """Log with optional rank injection. Captures caller's module automatically."""
     if logger.isEnabledFor(level):
+        # Capture caller's file/line so the formatter can show [module]
+        frame = sys._getframe(1)
         record = logging.LogRecord(
             name=logger.name,
             level=level,
-            pathname="",
-            lineno=0,
+            pathname=frame.f_code.co_filename,
+            lineno=frame.f_lineno,
             msg=msg,
             args=args,
             exc_info=None,
