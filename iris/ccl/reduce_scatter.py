@@ -12,16 +12,9 @@ for remote reads to stay compatible with simulation/capture flows.
 import triton
 import triton.language as tl
 import iris
+from iris.util import is_simulation_env
 from .config import Config
 from .utils import chiplet_transform_chunked, ReduceOp, extract_group_info
-
-
-@triton.jit
-def _select_peer_rank(peer_idx, ranks, world_size: tl.constexpr):
-    indices = tl.arange(0, world_size)
-    ranks_i64 = tl.cast(ranks, tl.int64)
-    selected_i64 = tl.sum(tl.where(indices == peer_idx, ranks_i64, 0))
-    return tl.cast(selected_i64, ranks.dtype)
 
 
 @triton.jit
@@ -37,11 +30,35 @@ def _translate_with_bases(ptr, from_base, to_base, hint: tl.constexpr = None):
 
 
 @triton.jit
-def _select_peer_base(peer_idx, hoisted_bases, world_size: tl.constexpr):
-    indices = tl.arange(0, world_size)
-    bases_u64 = tl.cast(hoisted_bases, tl.uint64)
-    selected_u64 = tl.sum(tl.where(indices == peer_idx, bases_u64, 0))
-    return tl.cast(selected_u64, hoisted_bases.dtype)
+def _pick_hoisted_base(
+    peer_idx,
+    base0,
+    base1,
+    base2,
+    base3,
+    base4,
+    base5,
+    base6,
+    base7,
+    world_size: tl.constexpr,
+):
+    if peer_idx == 0:
+        return base0
+    if world_size > 1 and peer_idx == 1:
+        return base1
+    if world_size > 2 and peer_idx == 2:
+        return base2
+    if world_size > 3 and peer_idx == 3:
+        return base3
+    if world_size > 4 and peer_idx == 4:
+        return base4
+    if world_size > 5 and peer_idx == 5:
+        return base5
+    if world_size > 6 and peer_idx == 6:
+        return base6
+    if world_size > 7 and peer_idx == 7:
+        return base7
+    return base0
 
 
 @triton.jit()
@@ -102,6 +119,7 @@ def persistent_reduce_scatter_two_shot(
         remaining = total_tiles - start_tile
         remaining = tl.maximum(remaining, 0)
         max_tile_offset = tl.minimum(tiles_per_rank, remaining)
+
     for tile_offset in range(pid, max_tile_offset, COMM_SMS):
         tile_id = start_tile + tile_offset * stride
 
@@ -197,6 +215,7 @@ def persistent_reduce_scatter_inline(
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     DISTRIBUTION: tl.constexpr,
+    simulation_flag: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
@@ -204,8 +223,32 @@ def persistent_reduce_scatter_inline(
         pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
     my_base = tl.load(heap_bases + iris_rank)
-    iris_ranks_line = rank_start + tl.arange(0, world_size) * rank_stride
-    hoisted_bases = tl.load(heap_bases + iris_ranks_line)
+
+    tl.static_assert(world_size <= 8, "persistent_reduce_scatter_inline supports up to 8 ranks")
+
+    base0 = tl.load(heap_bases + rank_start)
+    base1 = base0
+    base2 = base0
+    base3 = base0
+    base4 = base0
+    base5 = base0
+    base6 = base0
+    base7 = base0
+
+    if world_size > 1:
+        base1 = tl.load(heap_bases + rank_start + rank_stride)
+    if world_size > 2:
+        base2 = tl.load(heap_bases + rank_start + 2 * rank_stride)
+    if world_size > 3:
+        base3 = tl.load(heap_bases + rank_start + 3 * rank_stride)
+    if world_size > 4:
+        base4 = tl.load(heap_bases + rank_start + 4 * rank_stride)
+    if world_size > 5:
+        base5 = tl.load(heap_bases + rank_start + 5 * rank_stride)
+    if world_size > 6:
+        base6 = tl.load(heap_bases + rank_start + 6 * rank_stride)
+    if world_size > 7:
+        base7 = tl.load(heap_bases + rank_start + 7 * rank_stride)
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -227,6 +270,8 @@ def persistent_reduce_scatter_inline(
         remaining = tl.maximum(remaining, 0)
         max_tile_offset = tl.minimum(tiles_per_rank, remaining)
 
+    local_index = (iris_rank - rank_start) // rank_stride
+
     for tile_offset in range(pid, max_tile_offset, COMM_SMS):
         tile_id = start_tile + tile_offset * stride
 
@@ -243,8 +288,6 @@ def persistent_reduce_scatter_inline(
         rm_base = pid_m * BLOCK_SIZE_M
         rn_base = pid_n * BLOCK_SIZE_N
 
-        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
-
         rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
 
@@ -257,56 +300,98 @@ def persistent_reduce_scatter_inline(
         base_ptr = input_ptr + input_offset
         base_ptr = tl.multiple_of(base_ptr, (BLOCK_SIZE_M, BLOCK_SIZE_N))
         out_ptr = output_ptr + output_offset
-        out_ptr = tl.multiple_of(out_ptr, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
         start_rank_idx = pid % world_size
 
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+
         if is_full:
-            acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-
-            for i in tl.static_range(world_size):
-                peer_idx = (start_rank_idx + i) % world_size
-                peer_global = rank_start + peer_idx * rank_stride
-                peer_base = _select_peer_base(peer_idx, hoisted_bases, world_size)
-
-                if peer_global == iris_rank:
-                    tile = tl.load(base_ptr)
-                else:
-                    translated_ptr = _translate_with_bases(
+            if simulation_flag:
+                acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+                for i in tl.static_range(0, world_size):
+                    rank_idx = (start_rank_idx + i) % world_size
+                    remote_global = rank_start + rank_idx * rank_stride
+                    acc += iris.load(
                         base_ptr,
-                        my_base,
-                        peer_base,
+                        iris_rank,
+                        remote_global,
+                        heap_bases,
                         hint=(1, BLOCK_SIZE_N),
-                    )
-                    tile = tl.load(translated_ptr)
-                acc += tile.to(acc_dtype)
+                    ).to(acc_dtype)
+            else:
+                local_tile = tl.load(base_ptr).to(acc_dtype)
+                acc = local_tile
+                for step in tl.static_range(0, 8):
+                    if step < world_size:
+                        peer_idx = (start_rank_idx + step) % world_size
+                        if peer_idx != local_index:
+                            peer_base = _pick_hoisted_base(
+                                peer_idx,
+                                base0,
+                                base1,
+                                base2,
+                                base3,
+                                base4,
+                                base5,
+                                base6,
+                                base7,
+                                world_size,
+                            )
+                            peer_ptr = _translate_with_bases(
+                                base_ptr,
+                                my_base,
+                                peer_base,
+                                hint=(1, BLOCK_SIZE_N),
+                            )
+                            acc += tl.load(peer_ptr).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
             tl.store(out_ptr, reduced, cache_modifier=".wt")
+
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
-            acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-
-            for i in tl.static_range(world_size):
-                peer_idx = (start_rank_idx + i) % world_size
-                peer_global = rank_start + peer_idx * rank_stride
-                peer_base = _select_peer_base(peer_idx, hoisted_bases, world_size)
-
-                if peer_global == iris_rank:
-                    tile = tl.load(base_ptr, mask=mask, other=0.0)
-                else:
-                    translated_ptr = _translate_with_bases(
+            if simulation_flag:
+                acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+                for i in tl.static_range(0, world_size):
+                    rank_idx = (start_rank_idx + i) % world_size
+                    remote_global = rank_start + rank_idx * rank_stride
+                    acc += iris.load(
                         base_ptr,
-                        my_base,
-                        peer_base,
+                        iris_rank,
+                        remote_global,
+                        heap_bases,
+                        mask=mask,
                         hint=(1, BLOCK_SIZE_N),
-                    )
-                    tile = tl.load(translated_ptr, mask=mask, other=0.0)
-                acc += tile.to(acc_dtype)
+                    ).to(acc_dtype)
+            else:
+                local_tile = tl.load(base_ptr, mask=mask, other=0).to(acc_dtype)
+                acc = local_tile
+                for step in tl.static_range(0, 8):
+                    if step < world_size:
+                        peer_idx = (start_rank_idx + step) % world_size
+                        if peer_idx != local_index:
+                            peer_base = _pick_hoisted_base(
+                                peer_idx,
+                                base0,
+                                base1,
+                                base2,
+                                base3,
+                                base4,
+                                base5,
+                                base6,
+                                base7,
+                                world_size,
+                            )
+                            peer_ptr = _translate_with_bases(
+                                base_ptr,
+                                my_base,
+                                peer_base,
+                                hint=(1, BLOCK_SIZE_N),
+                            )
+                            acc += tl.load(peer_ptr, mask=mask, other=0).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
-
 
 def reduce_scatter(
     output_tensor,
@@ -315,7 +400,7 @@ def reduce_scatter(
     op=ReduceOp.SUM,
     group=None,
     async_op=False,
-    config=None,
+    config=None
 ):
     """
     Internal reduce-scatter collective operation implementation.
@@ -396,6 +481,14 @@ def reduce_scatter(
     # Use all_reduce_distribution for tile distribution
     distribution = config.all_reduce_distribution
 
+    if variant == "two_shot_inline":
+        hb_cpu = heap_bases.detach().cpu()
+        hb_hex = ", ".join(hex(int(x)) for x in hb_cpu.tolist())
+        print(
+            f"[reduce_scatter debug] rank_global={rank_global} world_size={world_size} "
+            f"rank_start={rank_start} rank_stride={rank_stride} heap_bases=[{hb_hex}]"
+        )
+
     kernel_args = (
         input_tensor,
         output_tensor,
@@ -423,8 +516,14 @@ def reduce_scatter(
     grid = (config.comm_sms,)
     launch_kwargs = dict(num_stages=config.num_stages, num_warps=config.num_warps, waves_per_eu=config.waves_per_eu)
 
+    simulation_flag = int(is_simulation_env())
+
     if variant == "two_shot_inline":
-        persistent_reduce_scatter_inline[grid](*kernel_args, **launch_kwargs)
+        persistent_reduce_scatter_inline[grid](
+            *kernel_args,
+            simulation_flag=simulation_flag,
+            **launch_kwargs,
+        )
     else:
         persistent_reduce_scatter_two_shot[grid](*kernel_args, **launch_kwargs)
 
