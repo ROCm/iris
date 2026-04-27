@@ -14,8 +14,7 @@ try:
     import iris
     from iris.ccl import Config
     from iris.ccl.all_to_all import all_to_all
-
-    GLUON_AVAILABLE = True
+    from iris.ccl.gluon import GLUON_AVAILABLE
 except ImportError:
     GLUON_AVAILABLE = False
 

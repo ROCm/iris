@@ -15,7 +15,8 @@ import torch.distributed as dist
 try:
     import iris
     from iris.ccl import Config
-    from iris.ccl.all_gather import all_gather, GLUON_AVAILABLE
+    from iris.ccl.all_gather import all_gather
+    from iris.ccl.gluon import GLUON_AVAILABLE
 except ImportError:
     GLUON_AVAILABLE = False
 
