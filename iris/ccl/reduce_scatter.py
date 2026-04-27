@@ -393,15 +393,8 @@ def persistent_reduce_scatter_inline(
             reduced = acc.to(output_ptr.type.element_ty)
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
 
-def reduce_scatter(
-    output_tensor,
-    input_tensor,
-    shmem,
-    op=ReduceOp.SUM,
-    group=None,
-    async_op=False,
-    config=None
-):
+
+def reduce_scatter(output_tensor, input_tensor, shmem, op=ReduceOp.SUM, group=None, async_op=False, config=None):
     """
     Internal reduce-scatter collective operation implementation.
 
@@ -456,9 +449,7 @@ def reduce_scatter(
     # Validate supported variants
     variant = getattr(config, "reduce_scatter_variant", "two_shot")
     if variant not in ("two_shot", "two_shot_inline"):
-        raise ValueError(
-            f"reduce_scatter_variant must be 'two_shot' or 'two_shot_inline', got '{variant}'."
-        )
+        raise ValueError(f"reduce_scatter_variant must be 'two_shot' or 'two_shot_inline', got '{variant}'.")
 
     # Extract group information
     # rank_in_group: position within the group (0, 1, 2, ...) - used for tile assignment
