@@ -11,7 +11,6 @@ import torch.distributed as dist
 import triton
 import triton.language as tl
 import iris
-import iris.x
 
 
 @triton.jit
@@ -50,8 +49,8 @@ def x_all_gather_kernel(
         local_data = tl.load(src_ptr, mask=mask, other=0.0)
 
         # Create Tile with loaded data and views
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        dst_view = iris.x.make_tensor_view(
+        tile = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
+        dst_view = iris.make_tensor_view(
             output_ptr,
             M * world_size if gather_dim == 0 else M,
             N if gather_dim == 0 else N * world_size,
@@ -60,7 +59,7 @@ def x_all_gather_kernel(
         )
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
-        iris.x.all_gather(tile, dst_view, gather_dim, ctx)
+        ctx.all_gather(tile, dst_view, gather_dim)
 
 
 @pytest.mark.parametrize(
@@ -238,8 +237,8 @@ def x_all_gather_ctx_api_kernel(
         local_data = tl.load(src_ptr, mask=mask, other=0.0)
 
         # Create Tile with loaded data and views
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        dst_view = iris.x.make_tensor_view(
+        tile = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
+        dst_view = iris.make_tensor_view(
             output_ptr,
             M * world_size if gather_dim == 0 else M,
             N if gather_dim == 0 else N * world_size,
@@ -249,7 +248,7 @@ def x_all_gather_ctx_api_kernel(
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         # Call primitive directly (ctx methods don't work due to Triton import restrictions)
-        iris.x.all_gather(tile, dst_view, gather_dim, ctx)
+        ctx.all_gather(tile, dst_view, gather_dim)
 
 
 @pytest.mark.parametrize("gather_dim", [0, 1])

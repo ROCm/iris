@@ -18,7 +18,6 @@ from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
-import iris.x
 from iris.host.tracing.kernel_artifacts import iris_launch
 
 
@@ -108,14 +107,14 @@ def _fused_matmul_reduce_scatter_kernel(
     tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")
 
     # Create tile object and context
-    tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+    tile_obj = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
     # Create tensor views for source and destination
-    src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
-    dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
+    src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
+    dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
-    iris.x.reduce_scatter(tile_obj, src_view, dst_view, locks, ctx)
+    ctx.reduce_scatter(tile_obj, src_view, dst_view, locks)
 
 
 def matmul_reduce_scatter_preamble(

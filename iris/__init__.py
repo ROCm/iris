@@ -45,6 +45,13 @@ Quick Start (Gluon API - Experimental):
 from iris.host.iris import Iris, iris
 from iris.mem.triton.context import Context, Context as DeviceContext
 from iris.host.tracing.events import TraceEvent
+from iris.mem.triton.types import (
+    Tile,
+    TileView,
+    TensorView,
+    AllReduceConfig,
+    make_tensor_view,
+)
 from iris.mem.triton.ops import (
     load,
     store,
@@ -94,6 +101,11 @@ __all__ = [
     "Context",
     "DeviceContext",
     "TraceEvent",
+    "Tile",
+    "TileView",
+    "TensorView",
+    "AllReduceConfig",
+    "make_tensor_view",
     "load",
     "store",
     "copy",

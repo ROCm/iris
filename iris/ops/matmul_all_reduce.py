@@ -18,7 +18,6 @@ from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
-import iris.x
 from iris.host.tracing.kernel_artifacts import iris_launch
 
 
@@ -112,16 +111,16 @@ def _fused_matmul_all_reduce_kernel(
 
     # Create views and context
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
-    dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
+    dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
     # Create tile object once for all variants
-    tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+    tile_obj = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
 
     # Dispatch to appropriate all-reduce variant
     if VARIANT == "atomic":
-        iris.x.all_reduce_atomic(tile_obj, dst_view, ctx)
+        ctx.all_reduce_atomic(tile_obj, dst_view)
     elif VARIANT == "spinlock":
-        iris.x.all_reduce_spinlock(tile_obj, dst_view, locks, ctx)
+        ctx.all_reduce_spinlock(tile_obj, dst_view, locks)
     elif VARIANT == "one_shot" or VARIANT == "two_shot":
         # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock
         # Store GEMM result to aux_buffer (avoid race condition with final output)
@@ -136,12 +135,12 @@ def _fused_matmul_all_reduce_kernel(
         tl.atomic_xchg(lock_ptr, 1, sem="release", scope="sys")  # Release ensures prior stores visible to remote GPUs
 
         # Create source view only when needed (aux_buffer is not None)
-        src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
+        src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
 
         if VARIANT == "one_shot":
-            iris.x.all_reduce_one_shot(tile_obj, src_view, dst_view, locks, ctx)
+            ctx.all_reduce_one_shot(tile_obj, src_view, dst_view, locks)
         elif VARIANT == "two_shot":
-            iris.x.all_reduce_two_shot(tile_obj, src_view, dst_view, locks, ctx)
+            ctx.all_reduce_two_shot(tile_obj, src_view, dst_view, locks)
 
 
 def matmul_all_reduce_preamble(

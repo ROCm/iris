@@ -48,13 +48,13 @@ jobs:
             num_ranks: 4
           - test_dir: ccl
             num_ranks: 8
-          - test_dir: x
+          - test_dir: context
             num_ranks: 1
-          - test_dir: x
+          - test_dir: context
             num_ranks: 2
-          - test_dir: x
+          - test_dir: context
             num_ranks: 4
-          - test_dir: x
+          - test_dir: context
             num_ranks: 8
           - test_dir: ops
             num_ranks: 1
@@ -124,7 +124,7 @@ jobs:
             num_ranks: 2
           - test_dir: ccl
             num_ranks: 2
-          - test_dir: x
+          - test_dir: context
             num_ranks: 2
           - test_dir: ops
             num_ranks: 2
@@ -185,7 +185,7 @@ jobs:
             num_ranks: 2
           - test_dir: ccl
             num_ranks: 2
-          - test_dir: x
+          - test_dir: context
             num_ranks: 2
           - test_dir: ops
             num_ranks: 2

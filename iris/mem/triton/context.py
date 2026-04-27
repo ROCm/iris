@@ -10,6 +10,7 @@ import triton.language as tl
 from triton.language.core import _aggregate as aggregate
 from iris.mem.utils import get_xcc_id, get_cu_id, read_realtime  # noqa: F401 — used by Tracing
 from iris.mem.triton.tracing import Tracing
+from iris.mem.triton.types import Tile, TensorView
 
 
 @triton.jit
@@ -682,6 +683,318 @@ class Context:
         """
         translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+    # === Tile-level collective methods ===
+
+    @triton.jit
+    def all_reduce_atomic(self, tile: Tile, dst_view: TensorView):
+        """
+        Tile-level all-reduce using atomic operations.
+
+        Atomically adds tile.data to the destination on all ranks.
+
+        Args:
+            tile: Tile with position, dimensions, and data to reduce.
+            dst_view: TensorView for output tensor.
+        """
+        dst_tile_ptr, mask = dst_view.tile_ptr(tile)
+        for dest_rank in range(self.world_size):
+            self.atomic_add(dst_tile_ptr, tile.data, to_rank=dest_rank, mask=mask)
+
+    @triton.jit
+    def all_reduce_spinlock(self, tile: Tile, dst_view: TensorView, locks):
+        """
+        Tile-level all-reduce using spinlock synchronization.
+
+        For each rank's tile, acquires a lock, reads current value,
+        adds local contribution, writes back, and releases the lock.
+
+        Args:
+            tile: Tile with position, dimensions, and local data.
+            dst_view: TensorView for output tensor.
+            locks: Pointer to locks array (one lock per tile).
+        """
+        num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)
+        tile_id = tile.pid_m * num_tiles_n + tile.pid_n
+        dst_tile_ptr, mask = dst_view.tile_ptr(tile)
+
+        for dest_rank in range(self.world_size):
+            while self.atomic_cas(locks + tile_id, 0, 1, to_rank=dest_rank, sem="acquire", scope="sys") != 0:
+                pass
+
+            current_value = self.load(dst_tile_ptr, from_rank=dest_rank, mask=mask)
+            acc_dtype = tl.float32 if tile.data.dtype == tl.float16 else tile.data.dtype
+            acc = current_value.to(acc_dtype) + tile.data.to(acc_dtype)
+            result = acc.to(tile.data.dtype)
+            self.store(dst_tile_ptr, result, to_rank=dest_rank, mask=mask)
+            tl.debug_barrier()
+            self.atomic_xchg(locks + tile_id, 0, to_rank=dest_rank, sem="release", scope="sys")
+
+    @triton.jit
+    def all_reduce_one_shot(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks):
+        """
+        Tile-level all-reduce using one-shot algorithm.
+
+        Each rank reads from all ranks and computes the reduction locally.
+        Uses locks as ready flags (producer-consumer).
+
+        Args:
+            tile: Tile with position, dimensions, and local data.
+            src_view: TensorView for source tensor (to load remote data).
+            dst_view: TensorView for output tensor.
+            locks: Pointer to lock array used as ready flags.
+        """
+        src_tile_ptr, mask = src_view.tile_ptr(tile)
+        dst_tile_ptr, _ = dst_view.tile_ptr(tile)
+        num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)
+        tile_id = tile.pid_m * num_tiles_n + tile.pid_n
+
+        acc_dtype = tl.float32 if tile.data.dtype == tl.float16 else tile.data.dtype
+        acc = tile.data.to(acc_dtype)
+
+        for remote_rank in range(self.world_size):
+            if remote_rank != self.rank:
+                lock_ptr = locks + tile_id
+                while self.atomic_add(lock_ptr, 0, to_rank=remote_rank, sem="acquire", scope="sys") != 1:
+                    pass
+                partial = self.load(src_tile_ptr, from_rank=remote_rank, mask=mask)
+                acc += partial.to(acc_dtype)
+
+        result = acc.to(tile.data.dtype)
+        tl.store(dst_tile_ptr, result, mask=mask)
+
+    @triton.jit
+    def all_reduce_ring(self, tile: Tile, src_view: TensorView, dst_view: TensorView):
+        """
+        Tile-level all-reduce using ring algorithm.
+
+        Args:
+            tile: Tile with position and dimensions.
+            src_view: TensorView for input tensor.
+            dst_view: TensorView for output tensor.
+        """
+        src_tile_ptr, mask = src_view.tile_ptr(tile)
+        dst_tile_ptr, _ = dst_view.tile_ptr(tile)
+
+        local_tile = tl.load(src_tile_ptr, mask=mask, other=0.0)
+        acc_dtype = tl.float32 if local_tile.dtype == tl.float16 else local_tile.dtype
+        acc = tl.zeros((tile.block_m, tile.block_n), dtype=acc_dtype)
+        acc += local_tile.to(acc_dtype)
+
+        # Ring reduce-scatter phase
+        for step in range(self.world_size - 1):
+            recv_rank = (self.rank - step - 1) % self.world_size
+            if recv_rank != self.rank:
+                remote_tile = self.load(src_tile_ptr, from_rank=recv_rank, mask=mask)
+                acc += remote_tile.to(acc_dtype)
+
+        # Ring all-gather phase
+        result = acc.to(local_tile.dtype)
+        tl.store(dst_tile_ptr, result, mask=mask)
+
+        for step in range(self.world_size - 1):
+            recv_rank = (self.rank + step + 1) % self.world_size
+            if recv_rank != self.rank:
+                remote_result = self.load(dst_tile_ptr, from_rank=recv_rank, mask=mask)
+                tl.store(dst_tile_ptr, remote_result, mask=mask)
+
+    @triton.jit
+    def all_reduce_two_shot(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks):
+        """
+        Tile-level all-reduce using two-shot algorithm with work distribution.
+
+        Each rank reduces only its assigned tiles, then scatters the result.
+        Uses interleaved distribution: rank handles tiles where tile_id % world_size == rank.
+
+        Args:
+            tile: Tile with position, dimensions, and local data.
+            src_view: TensorView for source tensor.
+            dst_view: TensorView for output tensor.
+            locks: Pointer to lock array used as ready flags.
+        """
+        num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)
+        tile_id = tile.pid_m * num_tiles_n + tile.pid_n
+        is_responsible = (tile_id % self.world_size) == self.rank
+
+        if is_responsible:
+            src_tile_ptr, mask = src_view.tile_ptr(tile)
+            dst_tile_ptr, _ = dst_view.tile_ptr(tile)
+
+            acc_dtype = tl.float32 if tile.data.dtype == tl.float16 else tile.data.dtype
+            acc = tile.data.to(acc_dtype)
+
+            for remote_rank in range(self.world_size):
+                if remote_rank != self.rank:
+                    lock_ptr = locks + tile_id
+                    while self.atomic_add(lock_ptr, 0, to_rank=remote_rank, sem="acquire", scope="sys") != 1:
+                        pass
+                    partial = self.load(src_tile_ptr, from_rank=remote_rank, mask=mask)
+                    acc += partial.to(acc_dtype)
+
+            result = acc.to(tile.data.dtype)
+            tl.store(dst_tile_ptr, result, mask=mask)
+
+            for dest_rank in range(self.world_size):
+                if dest_rank != self.rank:
+                    self.store(dst_tile_ptr, result, to_rank=dest_rank, mask=mask, hint=(1, tile.block_n))
+
+    @triton.jit
+    def all_gather(self, tile: Tile, dst_view: TensorView, dim: tl.constexpr):
+        """
+        Tile-level all-gather operation.
+
+        Scatters a pre-computed tile to all ranks at correct offsets.
+
+        Args:
+            tile: Tile with position, dimensions, and computed data.
+            dst_view: TensorView for destination (full gathered size).
+            dim: Dimension to gather along (0 for rows, 1 for columns).
+        """
+        if dim == 0:
+            M_local = dst_view.M // self.world_size
+        else:
+            N_local = dst_view.N // self.world_size
+
+        for dest_rank in range(self.world_size):
+            if dim == 0:
+                dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_m=self.rank * M_local, src_mask=None)
+            else:
+                dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_n=self.rank * N_local, src_mask=None)
+
+            self.store(dst_ptr, tile.data, to_rank=dest_rank, mask=combined_mask, hint=(1, tile.block_n))
+
+    @triton.jit
+    def gather(self, tile: Tile, src_view: TensorView, source_rank: tl.constexpr):
+        """
+        Tile-level gather from a specific rank.
+
+        Loads a tile from source_rank's memory and returns it directly.
+
+        Args:
+            tile: Tile with position and dimensions.
+            src_view: TensorView for source tensor on source_rank.
+            source_rank: Specific rank to load from (constexpr).
+
+        Returns:
+            Loaded tile data as a tensor.
+        """
+        src_tile_ptr, mask = src_view.tile_ptr(tile)
+
+        if source_rank == self.rank:
+            tile_data = tl.load(src_tile_ptr, mask=mask, other=0.0)
+        else:
+            tile_data = self.load(src_tile_ptr, from_rank=source_rank, mask=mask)
+
+        return tile_data
+
+    @triton.jit
+    def all_to_all(self, tile: Tile, src_view: TensorView, dst_view: TensorView, N_per_rank: tl.constexpr):
+        """
+        Tile-level all-to-all communication.
+
+        Each rank sends portions of its data to every other rank and receives
+        data from every other rank, organized by columns (N dimension).
+
+        Args:
+            tile: Tile with position and dimensions.
+            src_view: TensorView for input tensor.
+            dst_view: TensorView for output tensor.
+            N_per_rank: Number of columns each rank sends/receives per rank.
+        """
+        output_col_start = tile.pid_n * tile.block_n
+        output_col_end = output_col_start + tile.block_n
+
+        first_src_rank = output_col_start // N_per_rank
+        last_src_rank = tl.minimum((output_col_end - 1) // N_per_rank, self.world_size - 1)
+
+        for src_rank in range(first_src_rank, last_src_rank + 1):
+            src_chunk_out_start = src_rank * N_per_rank
+            src_chunk_out_end = (src_rank + 1) * N_per_rank
+
+            tile_src_start = tl.maximum(output_col_start, src_chunk_out_start)
+            tile_src_end = tl.minimum(output_col_end, src_chunk_out_end)
+
+            offset_in_tile = tile_src_start - output_col_start
+            num_cols = tile_src_end - tile_src_start
+            offset_in_src_chunk = tile_src_start - src_chunk_out_start
+            src_col_offset = self.rank * N_per_rank + offset_in_src_chunk
+
+            src_indices_m = tile.pid_m * tile.block_m + tl.arange(0, tile.block_m)
+            src_col_base = src_col_offset - offset_in_tile
+            src_indices_n = src_col_base + tl.arange(0, tile.block_n)
+
+            mask_m = src_indices_m < src_view.M
+            col_in_range = (src_indices_n >= src_col_offset) & (src_indices_n < src_col_offset + num_cols)
+            mask_n = (src_indices_n < src_view.N) & (src_indices_n >= 0) & col_in_range
+            mask = mask_m[:, None] & mask_n[None, :]
+
+            src_offsets = src_indices_m[:, None] * src_view.stride_m + src_indices_n[None, :] * src_view.stride_n
+
+            dst_indices_m = tile.pid_m * tile.block_m + tl.arange(0, tile.block_m)
+            dst_indices_n = output_col_start + tl.arange(0, tile.block_n)
+            dst_offsets = dst_indices_m[:, None] * dst_view.stride_m + dst_indices_n[None, :] * dst_view.stride_n
+
+            dst_mask_m = dst_indices_m < dst_view.M
+            dst_mask_n = (
+                (dst_indices_n >= output_col_start + offset_in_tile)
+                & (dst_indices_n < output_col_start + offset_in_tile + num_cols)
+                & (dst_indices_n < dst_view.N)
+            )
+            dst_mask = dst_mask_m[:, None] & dst_mask_n[None, :]
+            combined_mask = mask & dst_mask
+
+            if src_rank == self.rank:
+                data = tl.load(src_view.ptr + src_offsets, mask=combined_mask, other=0.0)
+                tl.store(dst_view.ptr + dst_offsets, data, mask=combined_mask)
+            else:
+                data = self.load(src_view.ptr + src_offsets, from_rank=src_rank, mask=combined_mask)
+                tl.store(dst_view.ptr + dst_offsets, data, mask=combined_mask)
+
+    @triton.jit
+    def reduce_scatter(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks):
+        """
+        Tile-level reduce-scatter using contiguous work distribution.
+
+        Each rank reduces only its assigned contiguous block of tiles,
+        then stores the result locally.
+
+        Args:
+            tile: Tile with position, dimensions, and local data.
+            src_view: TensorView for source tensor.
+            dst_view: TensorView for output tensor.
+            locks: Pointer to lock array used as ready flags.
+        """
+        num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)
+        num_tiles_m = tl.cdiv(dst_view.M, tile.block_m)
+        total_tiles = num_tiles_m * num_tiles_n
+        tile_id = tile.pid_m * num_tiles_n + tile.pid_n
+
+        tiles_per_rank = total_tiles // self.world_size
+        start_tile = self.rank * tiles_per_rank
+        end_tile = start_tile + tiles_per_rank
+
+        if self.rank == self.world_size - 1:
+            end_tile = total_tiles
+
+        is_responsible = (tile_id >= start_tile) and (tile_id < end_tile)
+
+        if is_responsible:
+            src_tile_ptr, mask = src_view.tile_ptr(tile)
+            dst_tile_ptr, _ = dst_view.tile_ptr(tile)
+
+            acc_dtype = tl.float32 if tile.data.dtype == tl.float16 else tile.data.dtype
+            acc = tile.data.to(acc_dtype)
+
+            for remote_rank in range(self.world_size):
+                if remote_rank != self.rank:
+                    lock_ptr = locks + tile_id
+                    while self.atomic_add(lock_ptr, 0, to_rank=remote_rank, sem="acquire", scope="gpu") != 1:
+                        pass
+                    partial = self.load(src_tile_ptr, from_rank=remote_rank, mask=mask)
+                    acc += partial.to(acc_dtype)
+
+            result = acc.to(tile.data.dtype)
+            tl.store(dst_tile_ptr, result, mask=mask)
 
 
 DeviceContext = Context  # backward compat

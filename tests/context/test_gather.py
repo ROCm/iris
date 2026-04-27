@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
-"""Tests for iris.x.gather primitive (single-rank gather)."""
+"""Tests for Context.gather primitive (single-rank gather)."""
 
 import pytest
 import torch
@@ -10,7 +10,6 @@ import torch.distributed as dist
 import triton
 import triton.language as tl
 import iris
-import iris.x
 
 
 @triton.jit
@@ -42,12 +41,12 @@ def gather_kernel(
         pid_n = tile_id % num_pid_n
 
         # Create tile and views
-        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.make_tensor_view(input_ptr, M, N, stride_in_m, stride_in_n)
+        tile = iris.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        src_view = iris.make_tensor_view(input_ptr, M, N, stride_in_m, stride_in_n)
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         # Use gather to pull tile from source_rank
-        data = iris.x.gather(tile, src_view, source_rank, ctx)
+        data = ctx.gather(tile, src_view, source_rank)
 
         # Store to output
         rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -152,14 +151,14 @@ def gather_accumulate_kernel(
         pid_m = tile_id // num_pid_n
         pid_n = tile_id % num_pid_n
 
-        tile = iris.x.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-        src_view = iris.x.make_tensor_view(input_ptr, M, N, stride_in_m, stride_in_n)
+        tile = iris.TileView(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        src_view = iris.make_tensor_view(input_ptr, M, N, stride_in_m, stride_in_n)
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
         # Accumulate data from all ranks
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
         for source_rank in range(world_size):
-            data = iris.x.gather(tile, src_view, source_rank, ctx)
+            data = ctx.gather(tile, src_view, source_rank)
             acc += data
 
         # Store accumulated result

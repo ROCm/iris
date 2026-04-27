@@ -11,7 +11,6 @@ import torch.distributed as dist
 import triton
 import triton.language as tl
 import iris
-import iris.x
 
 
 @triton.jit
@@ -49,11 +48,11 @@ def x_all_reduce_atomic_kernel(
         local_data = tl.load(src_ptr, mask=mask, other=0.0)
 
         # Create Tile with loaded data and views
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_out_m, stride_out_n)
+        tile = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
+        dst_view = iris.make_tensor_view(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
-        iris.x.all_reduce_atomic(tile, dst_view, ctx)
+        ctx.all_reduce_atomic(tile, dst_view)
 
 
 @triton.jit
@@ -99,12 +98,12 @@ def x_all_reduce_one_shot_kernel(
         tl.atomic_xchg(locks + tile_id, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
 
         # Create Tile with data and views
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        src_view = iris.x.make_tensor_view(temp_buffer, M, N, stride_in_m, stride_in_n)
-        dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_out_m, stride_out_n)
+        tile = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
+        src_view = iris.make_tensor_view(temp_buffer, M, N, stride_in_m, stride_in_n)
+        dst_view = iris.make_tensor_view(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
-        iris.x.all_reduce_one_shot(tile, src_view, dst_view, locks, ctx)
+        ctx.all_reduce_one_shot(tile, src_view, dst_view, locks)
 
 
 @triton.jit
@@ -150,12 +149,12 @@ def x_all_reduce_two_shot_kernel(
         tl.atomic_xchg(locks + tile_id, 1, sem="release", scope="gpu")  # Release ensures prior stores visible
 
         # Create Tile with data and views
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        src_view = iris.x.make_tensor_view(temp_buffer, M, N, stride_in_m, stride_in_n)
-        dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_out_m, stride_out_n)
+        tile = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
+        src_view = iris.make_tensor_view(temp_buffer, M, N, stride_in_m, stride_in_n)
+        dst_view = iris.make_tensor_view(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
-        iris.x.all_reduce_two_shot(tile, src_view, dst_view, locks, ctx)
+        ctx.all_reduce_two_shot(tile, src_view, dst_view, locks)
 
 
 @triton.jit
@@ -194,11 +193,11 @@ def x_all_reduce_spinlock_kernel(
         local_data = tl.load(src_ptr, mask=mask, other=0.0)
 
         # Create Tile with loaded data and views
-        tile = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
-        dst_view = iris.x.make_tensor_view(output_ptr, M, N, stride_out_m, stride_out_n)
+        tile = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, local_data)
+        dst_view = iris.make_tensor_view(output_ptr, M, N, stride_out_m, stride_out_n)
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
-        iris.x.all_reduce_spinlock(tile, dst_view, locks_ptr, ctx)
+        ctx.all_reduce_spinlock(tile, dst_view, locks_ptr)
 
 
 @pytest.mark.parametrize(
