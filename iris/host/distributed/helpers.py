@@ -62,7 +62,13 @@ def distributed_allgather(data):
     device = _infer_device()
     backend = str(dist.get_backend()).lower()
     _log_rank(
-        logging.DEBUG, "distributed_allgather: shape=%s backend=%s world_size=%d", data.shape, backend, world_size
+        logging.DEBUG,
+        "distributed_allgather: shape=%s backend=%s world_size=%d",
+        data.shape,
+        backend,
+        world_size,
+        rank=dist.get_rank(),
+        num_ranks=world_size,
     )
 
     # Fast path: tensor all_gather if dtype is NCCL-supported or backend != nccl
@@ -186,7 +192,14 @@ def distributed_broadcast_tensor(value_to_broadcast=None, root=0):
     rank = dist.get_rank()
     device = _infer_device()
     backend = str(dist.get_backend()).lower()
-    _log_rank(logging.DEBUG, "distributed_broadcast_tensor: src=%d rank=%d", root, rank, rank=rank)
+    _log_rank(
+        logging.DEBUG,
+        "distributed_broadcast_tensor: src=%d rank=%d",
+        root,
+        rank,
+        rank=rank,
+        num_ranks=dist.get_world_size(),
+    )
 
     if rank == root:
         if value_to_broadcast is None:
@@ -298,7 +311,13 @@ def distributed_barrier(group=None):
     """
     if not dist.is_initialized():
         raise RuntimeError("PyTorch distributed is not initialized")
-    _log_rank(logging.DEBUG, "distributed_barrier: group=%s", group)
+    _log_rank(
+        logging.DEBUG,
+        "distributed_barrier: group=%s",
+        group,
+        rank=dist.get_rank(),
+        num_ranks=dist.get_world_size(),
+    )
     dist.barrier(group=group)
 
 
