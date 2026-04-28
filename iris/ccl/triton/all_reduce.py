@@ -53,7 +53,7 @@ class AllReduceWorkspace:
 def all_reduce_preamble(
     output_tensor,
     input_tensor,
-    shmem,
+    ctx,
     config=None,
     workspace=None,
 ):
@@ -88,7 +88,7 @@ def all_reduce_preamble(
 
     if variant in (VARIANT_ATOMIC, VARIANT_SPINLOCK, VARIANT_ONE_SHOT):
         output_tensor.zero_()
-        shmem.barrier()
+        ctx.barrier()
 
     elif variant == VARIANT_RING:
         num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
@@ -101,17 +101,17 @@ def all_reduce_preamble(
             or workspace.ring_buffer.shape != (M, N)
             or workspace.ring_buffer.dtype != dtype
         ):
-            workspace.ring_buffer = shmem.zeros((M, N), dtype=dtype)
+            workspace.ring_buffer = ctx.zeros((M, N), dtype=dtype)
         else:
             workspace.ring_buffer.zero_()
 
         if workspace.flags is None or workspace.flags.numel() != total_flags:
-            workspace.flags = shmem.zeros((total_flags,), dtype=torch.int32)
+            workspace.flags = ctx.zeros((total_flags,), dtype=torch.int32)
         else:
             workspace.flags.zero_()
 
         output_tensor.zero_()
-        shmem.barrier()
+        ctx.barrier()
 
     elif variant == VARIANT_TWO_SHOT:
         pass
@@ -121,7 +121,7 @@ def all_reduce_preamble(
         num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
         total_tiles = num_pid_m * num_pid_n
         if workspace.locks is None or workspace.locks.numel() != total_tiles:
-            workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
+            workspace.locks = ctx.zeros((total_tiles,), dtype=torch.int32)
         else:
             workspace.locks.zero_()
 
@@ -709,7 +709,7 @@ def persistent_all_reduce_two_shot(
 def launch(
     output_tensor,
     input_tensor,
-    shmem,
+    ctx,
     rank_in_group,
     rank_global,
     world_size,
@@ -752,12 +752,12 @@ def launch(
         workspace = all_reduce_preamble(
             output_tensor,
             input_tensor,
-            shmem,
+            ctx,
             config=config,
             workspace=workspace,
         )
 
-    heap_bases = shmem.get_heap_bases()
+    heap_bases = ctx.get_heap_bases()
 
     if variant == VARIANT_ATOMIC:
         iris_launch(

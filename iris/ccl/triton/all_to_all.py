@@ -180,7 +180,7 @@ def persistent_all_to_all(
 def launch(
     input_tensor,
     output_tensor,
-    shmem,
+    ctx,
     rank_in_group,
     rank_global,
     world_size,
@@ -206,7 +206,7 @@ def launch(
         stride_in_n,
         stride_out_m,
         stride_out_n,
-        shmem.get_heap_bases(),
+        ctx.get_heap_bases(),
         rank_in_group,
         rank_global,
         world_size,

@@ -11,11 +11,11 @@ If gluon is not installed, the import itself raises ValueError.
 try:
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
-except ImportError:
+except ImportError as e:
     raise ValueError(
         "Gluon is not available. Install Triton with Gluon support "
         "or set use_gluon=False."
-    )
+    ) from e
 
 from iris.mem.gluon.context import Context as IrisDeviceCtx
 from iris.host.tracing.kernel_artifacts import iris_launch
@@ -157,7 +157,7 @@ def persistent_all_to_all_gluon(
 def launch(
     input_tensor,
     output_tensor,
-    shmem,
+    ctx,
     rank_in_group,
     rank_global,
     world_size,
@@ -172,7 +172,7 @@ def launch(
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
-    context_tensor = shmem.get_device_context()
+    context_tensor = ctx.get_device_context()
 
     iris_launch(
         persistent_all_to_all_gluon,

@@ -143,7 +143,7 @@ def persistent_reduce_scatter_two_shot(
 def launch(
     output_tensor,
     input_tensor,
-    shmem,
+    ctx,
     rank_in_group,
     rank_global,
     world_size,
@@ -156,7 +156,7 @@ def launch(
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
-    heap_bases = shmem.get_heap_bases()
+    heap_bases = ctx.get_heap_bases()
     distribution = config.all_reduce_distribution
 
     iris_launch(
