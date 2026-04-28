@@ -3,10 +3,20 @@
 
 """
 Gluon kernel for all-to-all collective communication with traffic shaping.
+
+This module is lazily imported only when config.use_gluon=True.
+If gluon is not installed, the import itself raises ValueError.
 """
 
-from triton.experimental import gluon
-from triton.experimental.gluon import language as gl
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+except ImportError:
+    raise ValueError(
+        "Gluon is not available. Install Triton with Gluon support "
+        "or set use_gluon=False."
+    )
+
 from iris.mem.gluon.context import Context as IrisDeviceCtx
 from iris.host.tracing.kernel_artifacts import iris_launch
 
@@ -144,7 +154,7 @@ def persistent_all_to_all_gluon(
                         ctx.store(output_ptr_remote, remote_data, target_rank, mask=col_mask)
 
 
-def dispatch_gluon(
+def launch(
     input_tensor,
     output_tensor,
     shmem,
@@ -155,7 +165,7 @@ def dispatch_gluon(
     rank_stride,
     config,
 ):
-    """Dispatch to the Gluon all-to-all kernel."""
+    """Launch the Gluon all-to-all kernel."""
     M, total_N = input_tensor.shape[:2]
     N = total_N // world_size
 

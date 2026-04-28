@@ -706,7 +706,7 @@ def persistent_all_reduce_two_shot(
                     )
 
 
-def dispatch(
+def launch(
     output_tensor,
     input_tensor,
     shmem,
@@ -719,7 +719,7 @@ def dispatch(
     workspace,
     group=None,
 ):
-    """Dispatch to the appropriate Triton all-reduce kernel variant."""
+    """Launch the appropriate Triton all-reduce kernel variant."""
     M, N = input_tensor.shape[:2]
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)

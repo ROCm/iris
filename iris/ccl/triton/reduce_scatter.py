@@ -140,7 +140,7 @@ def persistent_reduce_scatter_two_shot(
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
 
 
-def dispatch(
+def launch(
     output_tensor,
     input_tensor,
     shmem,
@@ -151,7 +151,7 @@ def dispatch(
     rank_stride,
     config,
 ):
-    """Dispatch to the Triton reduce-scatter kernel."""
+    """Launch the Triton reduce-scatter kernel."""
     M, N = input_tensor.shape[:2]
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)

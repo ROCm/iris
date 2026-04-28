@@ -1166,30 +1166,9 @@ class Iris:
                 >>> # Async operation (no barrier)
                 >>> ctx.ccl.all_to_all(output_tensor, input_tensor, async_op=True)
             """
-            from iris.ccl.config import Config
-            from iris.ccl.utils import extract_group_info
+            from iris.ccl.all_to_all import all_to_all
 
-            if config is None:
-                config = Config(block_size_m=32, block_size_n=128)
-
-            rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, self._iris)
-
-            from iris.ccl.triton.all_to_all import dispatch
-
-            dispatch(
-                input_tensor,
-                output_tensor,
-                self._iris,
-                rank_in_group,
-                rank_global,
-                world_size,
-                rank_start,
-                rank_stride,
-                config,
-            )
-
-            if not async_op:
-                self._iris.barrier()
+            all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
         def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
@@ -1222,38 +1201,9 @@ class Iris:
                 >>> # Async operation (no barrier)
                 >>> ctx.ccl.all_gather(output_tensor, input_tensor, async_op=True)
             """
-            from iris.ccl.config import Config
-            from iris.ccl.utils import extract_group_info
+            from iris.ccl.all_gather import all_gather
 
-            if config is None:
-                config = Config(block_size_m=32, block_size_n=64)
-
-            rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, self._iris)
-
-            M, N = input_tensor.shape[:2]
-            expected_output_shape = (world_size * M, N)
-            if output_tensor.shape[:2] != expected_output_shape:
-                raise ValueError(
-                    f"Output tensor shape {output_tensor.shape[:2]} does not match expected shape "
-                    f"{expected_output_shape}. Expected (world_size * M, N) = ({world_size * M}, {N})"
-                )
-
-            from iris.ccl.triton.all_gather import dispatch
-
-            dispatch(
-                input_tensor,
-                output_tensor,
-                self._iris,
-                rank_in_group,
-                rank_global,
-                world_size,
-                rank_start,
-                rank_stride,
-                config,
-            )
-
-            if not async_op:
-                self._iris.barrier()
+            all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
@@ -1268,15 +1218,9 @@ class Iris:
             Returns:
                 Workspace object that can be passed to ``all_reduce``.
             """
-            from iris.ccl.triton.all_reduce import all_reduce_preamble as _all_reduce_preamble
+            from iris.ccl.all_reduce import all_reduce_preamble
 
-            return _all_reduce_preamble(
-                output_tensor,
-                input_tensor,
-                self._iris,
-                config=config,
-                workspace=workspace,
-            )
+            return all_reduce_preamble(output_tensor, input_tensor, self._iris, config=config, workspace=workspace)
 
         def all_reduce(
             self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None, workspace=None
@@ -1318,55 +1262,12 @@ class Iris:
                 >>> # Async operation (no barrier)
                 >>> ctx.ccl.all_reduce(output_tensor, input_tensor, async_op=True)
             """
-            from iris.ccl.config import Config
-            from iris.ccl.utils import ReduceOp, extract_group_info
+            from iris.ccl.all_reduce import all_reduce
 
-            if op is None:
-                op = ReduceOp.SUM
-            if op != ReduceOp.SUM:
-                raise ValueError(
-                    f"Only ReduceOp.SUM is currently supported, got {op}. "
-                    "Support for other operations will be added in a future release."
-                )
-            if config is None:
-                config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
-            if config.use_gluon:
-                raise ValueError(
-                    "all_reduce does not support use_gluon=True. "
-                    "Gluon implementation is not available for all_reduce. "
-                    "Use default config (use_gluon=False)."
-                )
-
-            variant = config.all_reduce_variant.lower()
-            valid_variants = ["atomic", "spinlock", "ring", "two_shot", "one_shot"]
-            if variant not in valid_variants:
-                raise ValueError(f"Invalid all_reduce_variant: {variant}. Must be one of: {', '.join(valid_variants)}")
-
-            rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, self._iris)
-
-            from iris.ccl.triton.all_reduce import dispatch
-
-            workspace = dispatch(
-                output_tensor,
-                input_tensor,
-                self._iris,
-                rank_in_group,
-                rank_global,
-                world_size,
-                rank_start,
-                rank_stride,
-                config,
-                workspace,
-                group=group,
+            return all_reduce(
+                output_tensor, input_tensor, self._iris,
+                op=op, group=group, async_op=async_op, config=config, workspace=workspace,
             )
-
-            if workspace is not None:
-                workspace.prepared = False
-
-            if not async_op:
-                self._iris.barrier()
-
-            return workspace
 
         def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
             """
@@ -1398,54 +1299,12 @@ class Iris:
                 >>> config = Config(reduce_scatter_variant="two_shot", all_reduce_distribution=1)
                 >>> ctx.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
             """
-            from iris.ccl.config import Config
-            from iris.ccl.utils import ReduceOp, extract_group_info
+            from iris.ccl.reduce_scatter import reduce_scatter
 
-            if op is None:
-                op = ReduceOp.SUM
-            if op != ReduceOp.SUM:
-                raise ValueError(
-                    f"Only ReduceOp.SUM is currently supported, got {op}. "
-                    "Support for other operations will be added in a future release."
-                )
-            if config is None:
-                config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
-            if config.use_gluon:
-                raise ValueError(
-                    "reduce_scatter does not support use_gluon=True. "
-                    "Gluon implementation is not available for reduce_scatter. "
-                    "Use default config (use_gluon=False)."
-                )
-
-            variant = getattr(config, "reduce_scatter_variant", "two_shot")
-            if variant != "two_shot":
-                raise ValueError(f"reduce_scatter only supports variant='two_shot', got '{variant}'.")
-
-            rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, self._iris)
-            M, N = input_tensor.shape[:2]
-
-            if output_tensor.shape[:2] != (M, N):
-                raise ValueError(
-                    f"Output tensor shape {output_tensor.shape[:2]} does not match input shape {(M, N)}. "
-                    f"For reduce-scatter, output should have the same shape as input."
-                )
-
-            from iris.ccl.triton.reduce_scatter import dispatch
-
-            dispatch(
-                output_tensor,
-                input_tensor,
-                self._iris,
-                rank_in_group,
-                rank_global,
-                world_size,
-                rank_start,
-                rank_stride,
-                config,
+            reduce_scatter(
+                output_tensor, input_tensor, self._iris,
+                op=op, group=group, async_op=async_op, config=config,
             )
-
-            if not async_op:
-                self._iris.barrier()
 
 
 def iris(heap_size=1 << 30, allocator_type="torch"):

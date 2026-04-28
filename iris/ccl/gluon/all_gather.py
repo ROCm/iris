@@ -4,14 +4,24 @@
 """
 Gluon kernel for all-gather collective communication.
 
+This module is lazily imported only when config.use_gluon=True.
+If gluon is not installed, the import itself raises ValueError.
+
 Uses flat-2D tiling: a single 1D arange over BLOCK_SIZE_M * BLOCK_SIZE_N elements
 with div/mod to compute 2D row/col indices. This gives one load + world_size stores
 per tile while staying within gluon's 1D BlockedLayout framework.
 """
 
-import triton.language as tl
-from triton.experimental import gluon
-from triton.experimental.gluon import language as gl
+try:
+    import triton.language as tl
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+except ImportError:
+    raise ValueError(
+        "Gluon is not available. Install Triton with Gluon support "
+        "or set use_gluon=False."
+    )
+
 from iris.mem.gluon.context import Context as IrisDeviceCtx
 from iris.host.tracing.kernel_artifacts import iris_launch
 
@@ -156,7 +166,7 @@ def persistent_all_gather_gluon(
                 gl.store(remote_ptrs, data, mask=mask)
 
 
-def dispatch_gluon(
+def launch(
     input_tensor,
     output_tensor,
     ctx,
@@ -167,7 +177,7 @@ def dispatch_gluon(
     rank_stride,
     config,
 ):
-    """Dispatch to the Gluon all-gather kernel."""
+    """Launch the Gluon all-gather kernel."""
     M, N = input_tensor.shape[:2]
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
