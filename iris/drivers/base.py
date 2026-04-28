@@ -40,6 +40,7 @@ class LocalAllocation:
     va: int
     size: int
     handle: Any
+    _va_owned: bool = True
 
 
 class DriverError(RuntimeError):
@@ -76,3 +77,27 @@ class BaseDriver(ABC):
     @abstractmethod
     def cleanup_local(self, allocation: LocalAllocation) -> None:
         """Release a locally-exported allocation."""
+
+    @abstractmethod
+    def get_minimum_granularity(self) -> int:
+        """Minimum allocation granularity in bytes for this driver+device."""
+
+    @abstractmethod
+    def reserve_va(self, size: int, alignment: int = 0) -> int:
+        """Reserve a virtual address range without backing physical memory."""
+
+    @abstractmethod
+    def free_va(self, va: int, size: int) -> None:
+        """Free a VA range previously returned by reserve_va."""
+
+    def get_address_range(self, ptr: int) -> tuple[int, int]:
+        """Return the base VA and size of the allocation containing ptr."""
+        raise DriverNotSupported(
+            f"{type(self).__name__} does not support get_address_range"
+        )
+
+    def export_pointer_handle(self, ptr: int, size: int) -> bytes:
+        """Export a peer handle for an arbitrary device pointer."""
+        raise DriverNotSupported(
+            f"{type(self).__name__} does not support export_pointer_handle"
+        )

@@ -41,3 +41,12 @@ class AmdFabricDriver(BaseDriver):
 
     def cleanup_local(self, allocation: LocalAllocation) -> None:
         raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
+
+    def get_minimum_granularity(self) -> int:
+        raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
+
+    def reserve_va(self, size: int, alignment: int = 0) -> int:
+        raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
+
+    def free_va(self, va: int, size: int) -> None:
+        raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
