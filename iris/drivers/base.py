@@ -58,9 +58,7 @@ class BaseDriver(ABC):
         """Prepare the driver for a specific local GPU."""
 
     @abstractmethod
-    def allocate_exportable(
-        self, size: int, va: Optional[int] = None
-    ) -> LocalAllocation:
+    def allocate_exportable(self, size: int, va: Optional[int] = None) -> LocalAllocation:
         """Allocate exportable memory, optionally mapping it at a caller-reserved VA."""
 
     @abstractmethod
@@ -68,9 +66,7 @@ class BaseDriver(ABC):
         """Export a transport-specific handle for a local allocation."""
 
     @abstractmethod
-    def import_and_map(
-        self, peer_rank: int, handle_bytes: bytes, size: int, va: Optional[int] = None
-    ) -> PeerMapping:
+    def import_and_map(self, peer_rank: int, handle_bytes: bytes, size: int, va: Optional[int] = None) -> PeerMapping:
         """Import a peer handle and map it into the local virtual address space."""
 
     @abstractmethod
