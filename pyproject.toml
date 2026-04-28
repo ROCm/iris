@@ -40,6 +40,7 @@ amd = [
 ]
 dev = [
     "pytest",
+    "pytest-rerunfailures",
     "black",
     "mypy",
 ]

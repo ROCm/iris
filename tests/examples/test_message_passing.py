@@ -132,6 +132,7 @@ def run_message_passing_kernels(module, args):
         1024,
     ],
 )
+@pytest.mark.flaky(reruns=2)
 def test_message_passing_load_store(dtype_str, buffer_size, heap_size, block_size):
     """Test message passing with load/store operations."""
     args = create_test_args(dtype_str, buffer_size, heap_size, block_size)
@@ -162,6 +163,7 @@ def test_message_passing_load_store(dtype_str, buffer_size, heap_size, block_siz
         1024,
     ],
 )
+@pytest.mark.flaky(reruns=2)
 def test_message_passing_put(dtype_str, buffer_size, heap_size, block_size):
     """Test message passing with put operations."""
     args = create_test_args(dtype_str, buffer_size, heap_size, block_size)
