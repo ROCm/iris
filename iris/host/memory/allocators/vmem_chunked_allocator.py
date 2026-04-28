@@ -32,7 +32,7 @@ from threading import Lock
 import torch
 
 from .base import BaseAllocator
-from ..hip import (
+from iris.host.platform.hip import (
     get_allocation_granularity,
     get_address_range,
     export_dmabuf_handle,
