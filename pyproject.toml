@@ -57,6 +57,11 @@ version_scheme = "post-release"   # .postN after last tag
 local_scheme = "node-and-date"    # add commit hash (e.g. +gabc1234) and date (e.g. +20250914)
 fallback_version = "0.0.0"        # used if git metadata unavailable
 
+[tool.pytest.ini_options]
+markers = [
+    "flaky: mark test as flaky with auto-retry (deselect with '-m \"not flaky\"')",
+]
+
 [tool.ruff]
 line-length = 120
 exclude = [

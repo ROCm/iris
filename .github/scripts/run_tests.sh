@@ -77,6 +77,7 @@ EXIT_CODE=0
     
     echo \"Installing iris using method: $INSTALL_METHOD\"
     $INSTALL_CMD
+    pip install pytest-rerunfailures
     
     # Run tests in the specified directory
     for test_file in tests/$TEST_DIR/test_*.py; do
