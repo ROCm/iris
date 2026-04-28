@@ -109,8 +109,8 @@ def test_logger_api_usage():
     iris.logger.debug("Test debug message (should be visible)")
 
     output = log_capture.getvalue()
-    assert "[Iris] Test info message" in output
-    assert "[Iris] Test debug message (should be visible)" in output
+    assert "[Iris]" in output and "Test info message" in output
+    assert "[Iris]" in output and "Test debug message (should be visible)" in output
     # The hidden debug message should not appear
     lines = output.split("\n")
     hidden_debug_count = sum(1 for line in lines if "should be hidden" in line)
@@ -130,7 +130,8 @@ def test_iris_formatter():
     )
 
     formatted_no_rank = formatter.format(record_no_rank)
-    assert formatted_no_rank == "[Iris] Test message without rank"
+    # Format: "HH:MM:SS LEVEL [Iris] [?/?] message"
+    assert "[Iris] [?/?] Test message without rank" in formatted_no_rank
 
     # Test record with rank information
     record_with_rank = logging.LogRecord(
@@ -140,7 +141,19 @@ def test_iris_formatter():
     record_with_rank.iris_num_ranks = 4
 
     formatted_with_rank = formatter.format(record_with_rank)
-    assert formatted_with_rank == "[Iris] [2/4] Test message with rank"
+    assert "[Iris] [2/4] Test message with rank" in formatted_with_rank
+
+    # Test internal record shows [module]
+    record_internal = logging.LogRecord(
+        name="iris", level=logging.INFO, pathname="all_gather.py", lineno=0, msg="Internal log", args=(), exc_info=None
+    )
+    record_internal.iris_internal = True
+    record_internal.iris_rank = 0
+    record_internal.iris_num_ranks = 4
+
+    formatted_internal = formatter.format(record_internal)
+    assert "[all_gather]" in formatted_internal
+    assert "[Iris] [0/4]" in formatted_internal
 
 
 def test_api_import():

@@ -27,8 +27,11 @@ class IrisFormatter(logging.Formatter):
         num_ranks = getattr(record, "iris_num_ranks", "?")
         ts = self.formatTime(record, "%H:%M:%S")
         level = record.levelname
-        module = record.module
-        if module:
+        # Only show [module] for internal iris logs (set by _log_rank),
+        # not for user-facing ctx.info()/ctx.debug() etc.
+        iris_internal = getattr(record, "iris_internal", False)
+        if iris_internal:
+            module = record.module
             return f"{ts} {level:<5s} [Iris] [{rank}/{num_ranks}] [{module}] {record.getMessage()}"
         return f"{ts} {level:<5s} [Iris] [{rank}/{num_ranks}] {record.getMessage()}"
 
@@ -66,8 +69,10 @@ def _log_rank(level, msg, *args, rank=None, num_ranks=None):
             args=args,
             exc_info=None,
         )
+        record.iris_internal = True
         if rank is not None:
             record.iris_rank = rank
+        if num_ranks is not None:
             record.iris_num_ranks = num_ranks
         logger.handle(record)
 

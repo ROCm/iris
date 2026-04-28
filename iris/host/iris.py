@@ -105,10 +105,11 @@ class Iris:
         self.gpu_id = gpu_id
         self.heap_size = heap_size
 
-        self._log_with_rank(
-            logging.INFO,
-            f"init: heap_size={heap_size / (1 << 30):.1f}GB rank={cur_rank}/{num_ranks} allocator={allocator_type}",
-        )
+        if logger.isEnabledFor(logging.INFO):
+            self._log_with_rank(
+                logging.INFO,
+                f"init: heap_size={heap_size / (1 << 30):.1f}GB rank={cur_rank}/{num_ranks} allocator={allocator_type}",
+            )
 
         # Initialize symmetric heap with specified allocator
         self.heap = SymmetricHeap(heap_size, gpu_id, cur_rank, num_ranks, allocator_type)

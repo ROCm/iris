@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import os
 
-from iris.host.logging.logging import _log_rank
+from iris.host.logging.logging import _log_rank, logger
 from iris.host.memory.allocators import TorchAllocator, VMemAllocator
 from iris.host.distributed.fd_passing import setup_fd_infrastructure
 from iris.host.distributed.helpers import distributed_allgather
@@ -190,7 +190,7 @@ class SymmetricHeap:
         )
 
         _log_rank(
-            logging.INFO,
+            logging.DEBUG,
             "refresh_peer_access: start rank=%d num_ranks=%d",
             self.cur_rank,
             self.num_ranks,
@@ -309,13 +309,14 @@ class SymmetricHeap:
 
             os.close(fd)
 
-        _log_rank(
-            logging.INFO,
-            "refresh_peer_access: done heap_bases=[%s]",
-            ", ".join(f"0x{int(self.heap_bases[r].item()):x}" for r in range(min(3, self.num_ranks))),
-            rank=self.cur_rank,
-            num_ranks=self.num_ranks,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            _log_rank(
+                logging.DEBUG,
+                "refresh_peer_access: done heap_bases=[%s]",
+                ", ".join(f"0x{int(self.heap_bases[r].item()):x}" for r in range(min(3, self.num_ranks))),
+                rank=self.cur_rank,
+                num_ranks=self.num_ranks,
+            )
 
         if dist.is_initialized():
             dist.barrier()
