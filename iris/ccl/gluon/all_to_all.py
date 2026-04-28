@@ -12,10 +12,7 @@ try:
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
 except ImportError as e:
-    raise ValueError(
-        "Gluon is not available. Install Triton with Gluon support "
-        "or set use_gluon=False."
-    ) from e
+    raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False.") from e
 
 from iris.mem.gluon.context import Context as IrisDeviceCtx
 from iris.host.tracing.kernel_artifacts import iris_launch

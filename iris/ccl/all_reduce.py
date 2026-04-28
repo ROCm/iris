@@ -17,9 +17,7 @@ def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace
     return _preamble(output_tensor, input_tensor, ctx, config=config, workspace=workspace)
 
 
-def all_reduce(
-    output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None, workspace=None
-):
+def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None, workspace=None):
     """
     All-reduce: sum inputs across all ranks, result on every rank.
 

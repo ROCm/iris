@@ -1265,8 +1265,14 @@ class Iris:
             from iris.ccl.all_reduce import all_reduce
 
             return all_reduce(
-                output_tensor, input_tensor, self._iris,
-                op=op, group=group, async_op=async_op, config=config, workspace=workspace,
+                output_tensor,
+                input_tensor,
+                self._iris,
+                op=op,
+                group=group,
+                async_op=async_op,
+                config=config,
+                workspace=workspace,
             )
 
         def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
@@ -1302,8 +1308,13 @@ class Iris:
             from iris.ccl.reduce_scatter import reduce_scatter
 
             reduce_scatter(
-                output_tensor, input_tensor, self._iris,
-                op=op, group=group, async_op=async_op, config=config,
+                output_tensor,
+                input_tensor,
+                self._iris,
+                op=op,
+                group=group,
+                async_op=async_op,
+                config=config,
             )
 
 
