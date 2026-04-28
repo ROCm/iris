@@ -142,8 +142,7 @@ class Iris:
         distributed_barrier()
 
         # initialize copy engines
-        self.copy_engines = sdma_ep.AnvilLib.get_instance()
-        self.copy_engines.init()
+        sdma_ep.init()
 
         context_size = sdma_ep.QUEUE_DEVICE_CTX_SIZE
         self.copy_engines_device_ctx = torch.zeros((num_ranks, context_size), dtype=torch.uint64, device=self.device)
@@ -153,11 +152,11 @@ class Iris:
 
         for local_rank in range(num_local_ranks):
             # Device-initiated queues
-            self.copy_engines.connect(cur_local_rank, local_rank, allocate_on_host=False)
+            sdma_ep.create_queue(cur_local_rank, local_rank)
             # Host-initiated queues
-            self.copy_engines.connect(cur_local_rank, local_rank, allocate_on_host=True)
+            sdma_ep.create_host_queue(cur_local_rank, local_rank)
 
-            handle = self.copy_engines.get_queue_device_ctx(cur_local_rank, local_rank)
+            handle = sdma_ep.get_queue_device_ctx(cur_local_rank, local_rank)
             self.debug(f"---- Queue {local_rank} ------------")
             self.debug(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
             self.debug(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
@@ -1144,37 +1143,37 @@ class Iris:
             # Wait + copy + signal (two calls)
             wait_val = int(wait_value if wait_value is not None else 0)
             signal_val = int(signal_value)
-            self.copy_engines.wait_flag_then_put(
+            sdma_ep.wait_flag_then_put(
                 src_rank, dst_rank, channel,
                 wait_ptr, wait_val, src_ptr, dst_ptr, size, wait_bits
             )
-            self.copy_engines.signal(
+            sdma_ep.signal(
                 src_rank, dst_rank, channel,
                 signal_ptr, signal_val, signal_bits
             )
         elif has_wait:
             # Wait + copy
             wait_val = int(wait_value if wait_value is not None else 0)
-            self.copy_engines.wait_flag_then_put(
+            sdma_ep.wait_flag_then_put(
                 src_rank, dst_rank, channel,
                 wait_ptr, wait_val, src_ptr, dst_ptr, size, wait_bits
             )
         elif has_signal:
             # Copy + signal
             signal_val = int(signal_value)
-            self.copy_engines.put_signal(
+            sdma_ep.put_signal(
                 src_rank, dst_rank, channel,
                 src_ptr, dst_ptr, size, signal_ptr, signal_val, signal_bits
             )
         else:
             # Simple copy
-            self.copy_engines.put(
+            sdma_ep.put(
                 src_rank, dst_rank, channel,
                 src_ptr, dst_ptr, size
             )
 
         if not async_op:
-            self.copy_engines.quiet(src_rank, dst_rank, channel)
+            sdma_ep.quiet(src_rank, dst_rank, channel)
 
     def put_tile(
         self,
@@ -1235,37 +1234,37 @@ class Iris:
             # Wait + tile copy + signal (two calls)
             wait_val = int(wait_value if wait_value is not None else 0)
             signal_val = int(signal_value)
-            self.copy_engines.wait_flag_then_put_tile(
+            sdma_ep.wait_flag_then_put_tile(
                 src_rank, dst_rank, channel,
                 wait_ptr, wait_val, tile, int(dst_ptr), int(dst_stride), wait_bits
             )
-            self.copy_engines.signal(
+            sdma_ep.signal(
                 src_rank, dst_rank, channel,
                 signal_ptr, signal_val, signal_bits
             )
         elif has_wait:
             # Wait + tile copy
             wait_val = int(wait_value if wait_value is not None else 0)
-            self.copy_engines.wait_flag_then_put_tile(
+            sdma_ep.wait_flag_then_put_tile(
                 src_rank, dst_rank, channel,
                 wait_ptr, wait_val, tile, int(dst_ptr), int(dst_stride), wait_bits
             )
         elif has_signal:
             # Tile copy + signal
             signal_val = int(signal_value)
-            self.copy_engines.put_tile_signal(
+            sdma_ep.put_tile_signal(
                 src_rank, dst_rank, channel,
                 tile, int(dst_ptr), int(dst_stride), signal_ptr, signal_val, signal_bits
             )
         else:
             # Simple tile copy
-            self.copy_engines.put_tile(
+            sdma_ep.put_tile(
                 src_rank, dst_rank, channel,
                 tile, int(dst_ptr), int(dst_stride)
             )
 
         if not async_op:
-            self.copy_engines.quiet(src_rank, dst_rank, channel)
+            sdma_ep.quiet(src_rank, dst_rank, channel)
 
     def put_tiles(
         self,
@@ -1313,41 +1312,41 @@ class Iris:
             # Wait + tiles copy + signal (two calls)
             wait_val = int(wait_value if wait_value is not None else 0)
             signal_val = int(signal_value)
-            self.copy_engines.wait_flag_then_put_tiles(
+            sdma_ep.wait_flag_then_put_tiles(
                 src_rank, dst_rank, channel,
                 wait_ptr, wait_val, list(tiles), dst_ptr_list, dst_stride_list, wait_bits
             )
-            self.copy_engines.signal(
+            sdma_ep.signal(
                 src_rank, dst_rank, channel,
                 signal_ptr, signal_val, signal_bits
             )
         elif has_wait:
             # Wait + tiles copy
             wait_val = int(wait_value if wait_value is not None else 0)
-            self.copy_engines.wait_flag_then_put_tiles(
+            sdma_ep.wait_flag_then_put_tiles(
                 src_rank, dst_rank, channel,
                 wait_ptr, wait_val, list(tiles), dst_ptr_list, dst_stride_list, wait_bits
             )
         elif has_signal:
             # Tiles copy + signal (loop + signal)
             signal_val = int(signal_value)
-            self.copy_engines.put_tiles(
+            sdma_ep.put_tiles(
                 src_rank, dst_rank, channel,
                 list(tiles), dst_ptr_list, dst_stride_list
             )
-            self.copy_engines.signal(
+            sdma_ep.signal(
                 src_rank, dst_rank, channel,
                 signal_ptr, signal_val, signal_bits
             )
         else:
             # Simple tiles copy
-            self.copy_engines.put_tiles(
+            sdma_ep.put_tiles(
                 src_rank, dst_rank, channel,
                 list(tiles), dst_ptr_list, dst_stride_list
             )
 
         if not async_op:
-            self.copy_engines.quiet(src_rank, dst_rank, channel)
+            sdma_ep.quiet(src_rank, dst_rank, channel)
 
     def quiet(self, dst_rank: int = None, channel: int = 0):
         """
@@ -1365,11 +1364,11 @@ class Iris:
         """
         src_rank = self.get_rank()
         if dst_rank is not None:
-            self.copy_engines.quiet(src_rank, dst_rank, channel)
+            sdma_ep.quiet(src_rank, dst_rank, channel)
         else:
             # Quiet to all ranks
             for rank in range(self.get_num_ranks()):
-                self.copy_engines.quiet(src_rank, rank, channel)
+                sdma_ep.quiet(src_rank, rank, channel)
 
     def _build_device_context(self):
         """
@@ -2994,7 +2993,7 @@ def put(
         # IS_2D_COPY is a compile-time constant for proper branch elimination
         mask_int = mask.to(tl.int32)
         command_in_bytes = (
-            sdma_ep.SDMA_PKT_LINEAR_SUB_WINDOW_BYTES if IS_2D_COPY else sdma_ep.SDMA_PKT_COPY_LINEAR_BYTES
+            sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES if IS_2D_COPY else sdma_ep.COPY_LINEAR_COMMAND_BYTES
         )
 
         # Acquire space in the queue
@@ -3128,7 +3127,7 @@ def atomic_add(
 
         dst_ptr_val = translated_ptr.to(tl.uint64)
 
-        command_in_bytes = sdma_ep.SDMA_PKT_ATOMIC_BYTES
+        command_in_bytes = sdma_ep.ATOMIC_COMMAND_BYTES
         # Acquire space (returns base index and wraparound offset)
         base, offset = sdma_utils.acquire_fadd(
             # base = sdma_utils.acquire(
@@ -3268,7 +3267,7 @@ def atomic_cas(
 
         dst_ptr_val = translated_ptr.to(tl.uint64)
 
-        command_in_bytes = sdma_ep.SDMA_PKT_ATOMIC_BYTES
+        command_in_bytes = sdma_ep.ATOMIC_COMMAND_BYTES
         # Acquire space (returns base index and wraparound offset)
         base, offset = sdma_utils.acquire_fadd(
             queue_ptr_u32,
