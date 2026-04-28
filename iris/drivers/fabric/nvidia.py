@@ -14,7 +14,7 @@ from typing import Any, Optional
 import torch
 
 from iris.drivers.base import (
-    BaseFabricDriver,
+    BaseDriver,
     DriverError,
     DriverNotSupported,
     LocalAllocation,
@@ -68,7 +68,10 @@ def _cuda_try(err: int, op_name: str = "CUDA operation") -> None:
     error_name = str(err)
     if _cuda_driver is not None and hasattr(_cuda_driver, "cuGetErrorName"):
         ptr = ctypes.c_char_p()
-        if _cuda_driver.cuGetErrorName(err, ctypes.byref(ptr)) == CUDA_SUCCESS and ptr.value:
+        if (
+            _cuda_driver.cuGetErrorName(err, ctypes.byref(ptr)) == CUDA_SUCCESS
+            and ptr.value
+        ):
             error_name = ptr.value.decode("utf-8")
     message = f"{op_name} failed with {error_name} ({err})"
     if err == CUDA_ERROR_NOT_SUPPORTED:
@@ -94,12 +97,18 @@ def _normalize_fabric_handle_bytes(raw_handle: Any) -> bytes:
             data = bytes(raw_handle)
         except Exception:
             try:
-                data = ctypes.string_at(ctypes.addressof(raw_handle), FABRIC_HANDLE_BYTES)
+                data = ctypes.string_at(
+                    ctypes.addressof(raw_handle), FABRIC_HANDLE_BYTES
+                )
             except Exception as exc:
-                raise CudaFabricError("Unable to convert fabric handle object to bytes") from exc
+                raise CudaFabricError(
+                    "Unable to convert fabric handle object to bytes"
+                ) from exc
 
     if len(data) != FABRIC_HANDLE_BYTES:
-        raise CudaFabricError(f"Fabric handle serialization expected {FABRIC_HANDLE_BYTES} bytes, got {len(data)}")
+        raise CudaFabricError(
+            f"Fabric handle serialization expected {FABRIC_HANDLE_BYTES} bytes, got {len(data)}"
+        )
     return data
 
 
@@ -162,7 +171,9 @@ def _configure_cuda_signatures() -> None:
     cu_device_get = _get_required_cuda_symbol("cuDeviceGet")
     cu_device_primary_ctx_retain = _get_required_cuda_symbol("cuDevicePrimaryCtxRetain")
     cu_ctx_set_current = _get_required_cuda_symbol("cuCtxSetCurrent")
-    cu_mem_get_allocation_granularity = _get_required_cuda_symbol("cuMemGetAllocationGranularity")
+    cu_mem_get_allocation_granularity = _get_required_cuda_symbol(
+        "cuMemGetAllocationGranularity"
+    )
     cu_mem_address_reserve = _get_required_cuda_symbol("cuMemAddressReserve")
     cu_mem_address_free = _get_required_cuda_symbol("cuMemAddressFree")
     cu_mem_create = _get_required_cuda_symbol("cuMemCreate")
@@ -170,8 +181,12 @@ def _configure_cuda_signatures() -> None:
     cu_mem_map = _get_required_cuda_symbol("cuMemMap")
     cu_mem_unmap = _get_required_cuda_symbol("cuMemUnmap")
     cu_mem_set_access = _get_required_cuda_symbol("cuMemSetAccess")
-    cu_mem_export_to_shareable_handle = _get_required_cuda_symbol("cuMemExportToShareableHandle")
-    cu_mem_import_from_shareable_handle = _get_required_cuda_symbol("cuMemImportFromShareableHandle")
+    cu_mem_export_to_shareable_handle = _get_required_cuda_symbol(
+        "cuMemExportToShareableHandle"
+    )
+    cu_mem_import_from_shareable_handle = _get_required_cuda_symbol(
+        "cuMemImportFromShareableHandle"
+    )
 
     cu_init.argtypes = [ctypes.c_uint]
     cu_init.restype = ctypes.c_int
@@ -262,7 +277,7 @@ def _configure_cuda_signatures() -> None:
         cu_get_error_name.restype = ctypes.c_int
 
 
-class NvidiaFabricDriver(BaseFabricDriver):
+class NvidiaFabricDriver(BaseDriver):
     """
     NVIDIA CUDA VMM fabric driver.
 
@@ -305,7 +320,10 @@ class NvidiaFabricDriver(BaseFabricDriver):
         desc.location.type = _CU_MEM_LOCATION_TYPE_DEVICE
         desc.location.id = self._device_ordinal
         desc.flags = _CU_MEM_ACCESS_FLAGS_PROT_READWRITE
-        _cuda_try(_cuda_driver.cuMemSetAccess(va, size, ctypes.byref(desc), 1), "cuMemSetAccess")
+        _cuda_try(
+            _cuda_driver.cuMemSetAccess(va, size, ctypes.byref(desc), 1),
+            "cuMemSetAccess",
+        )
 
     def initialize(self, device_ordinal: int) -> None:
         if _cuda_driver is None:
@@ -314,9 +332,14 @@ class NvidiaFabricDriver(BaseFabricDriver):
         _configure_cuda_signatures()
         _cuda_try(_cuda_driver.cuInit(0), "cuInit")
         dev = ctypes.c_int()
-        _cuda_try(_cuda_driver.cuDeviceGet(ctypes.byref(dev), device_ordinal), "cuDeviceGet")
+        _cuda_try(
+            _cuda_driver.cuDeviceGet(ctypes.byref(dev), device_ordinal), "cuDeviceGet"
+        )
         ctx = ctypes.c_void_p()
-        _cuda_try(_cuda_driver.cuDevicePrimaryCtxRetain(ctypes.byref(ctx), dev.value), "cuDevicePrimaryCtxRetain")
+        _cuda_try(
+            _cuda_driver.cuDevicePrimaryCtxRetain(ctypes.byref(ctx), dev.value),
+            "cuDevicePrimaryCtxRetain",
+        )
         _cuda_try(_cuda_driver.cuCtxSetCurrent(ctx), "cuCtxSetCurrent")
         self._device_ordinal = device_ordinal
         self._granularity = None
@@ -325,35 +348,54 @@ class NvidiaFabricDriver(BaseFabricDriver):
 
     def _check_initialized(self) -> None:
         if not self._initialized:
-            raise CudaFabricError("NvidiaFabricDriver not initialized — call initialize() first")
+            raise CudaFabricError(
+                "NvidiaFabricDriver not initialized — call initialize() first"
+            )
 
-    def allocate_exportable(self, size: int) -> LocalAllocation:
+    def allocate_exportable(
+        self, size: int, va: Optional[int] = None
+    ) -> LocalAllocation:
         self._check_initialized()
         props = self._make_alloc_props()
         granularity = self._get_granularity()
         alloc_size = _round_up(size, granularity)
 
-        va = ctypes.c_uint64()
+        reserved_va = va is None
+        mapped_va = int(va) if va is not None else 0
         handle = ctypes.c_uint64()
         mapped = False
 
         try:
+            if reserved_va:
+                reserved = ctypes.c_uint64()
+                _cuda_try(
+                    _cuda_driver.cuMemAddressReserve(
+                        ctypes.byref(reserved), alloc_size, granularity, 0, 0
+                    ),
+                    "cuMemAddressReserve",
+                )
+                mapped_va = int(reserved.value)
             _cuda_try(
-                _cuda_driver.cuMemAddressReserve(ctypes.byref(va), alloc_size, granularity, 0, 0),
-                "cuMemAddressReserve",
-            )
-            _cuda_try(
-                _cuda_driver.cuMemCreate(ctypes.byref(handle), alloc_size, ctypes.byref(props), 0),
+                _cuda_driver.cuMemCreate(
+                    ctypes.byref(handle), alloc_size, ctypes.byref(props), 0
+                ),
                 "cuMemCreate",
             )
-            _cuda_try(_cuda_driver.cuMemMap(va.value, alloc_size, 0, handle.value, 0), "cuMemMap")
+            _cuda_try(
+                _cuda_driver.cuMemMap(mapped_va, alloc_size, 0, handle.value, 0),
+                "cuMemMap",
+            )
             mapped = True
-            self._mem_set_access(int(va.value), alloc_size)
-            return LocalAllocation(va=int(va.value), size=alloc_size, handle=int(handle.value))
+            self._mem_set_access(mapped_va, alloc_size)
+            return LocalAllocation(
+                va=mapped_va, size=alloc_size, handle=int(handle.value)
+            )
         except Exception:
             if mapped:
                 try:
-                    _cuda_try(_cuda_driver.cuMemUnmap(va.value, alloc_size), "cuMemUnmap")
+                    _cuda_try(
+                        _cuda_driver.cuMemUnmap(mapped_va, alloc_size), "cuMemUnmap"
+                    )
                 except Exception:
                     pass
             if handle.value:
@@ -361,9 +403,12 @@ class NvidiaFabricDriver(BaseFabricDriver):
                     _cuda_try(_cuda_driver.cuMemRelease(handle.value), "cuMemRelease")
                 except Exception:
                     pass
-            if va.value:
+            if reserved_va and mapped_va:
                 try:
-                    _cuda_try(_cuda_driver.cuMemAddressFree(va.value, alloc_size), "cuMemAddressFree")
+                    _cuda_try(
+                        _cuda_driver.cuMemAddressFree(mapped_va, alloc_size),
+                        "cuMemAddressFree",
+                    )
                 except Exception:
                     pass
             raise
@@ -396,35 +441,48 @@ class NvidiaFabricDriver(BaseFabricDriver):
         )
         return int(imported.value)
 
-    def import_and_map(self, peer_rank: int, handle_bytes: bytes, size: int) -> PeerMapping:
+    def import_and_map(
+        self, peer_rank: int, handle_bytes: bytes, size: int, va: Optional[int] = None
+    ) -> PeerMapping:
         self._check_initialized()
         imported_handle = self._import_handle(handle_bytes)
 
         granularity = self._get_granularity()
-        va = ctypes.c_uint64()
-
+        reserved_va = va is None
+        mapped_va = int(va) if va is not None else 0
         mapped = False
         try:
+            if reserved_va:
+                reserved = ctypes.c_uint64()
+                _cuda_try(
+                    _cuda_driver.cuMemAddressReserve(
+                        ctypes.byref(reserved), size, granularity, 0, 0
+                    ),
+                    "cuMemAddressReserve",
+                )
+                mapped_va = int(reserved.value)
             _cuda_try(
-                _cuda_driver.cuMemAddressReserve(ctypes.byref(va), size, granularity, 0, 0),
-                "cuMemAddressReserve",
+                _cuda_driver.cuMemMap(mapped_va, size, 0, imported_handle, 0),
+                "cuMemMap",
             )
-            _cuda_try(_cuda_driver.cuMemMap(va.value, size, 0, imported_handle, 0), "cuMemMap")
             mapped = True
-            self._mem_set_access(int(va.value), size)
+            self._mem_set_access(mapped_va, size)
         except Exception:
             if mapped:
                 try:
-                    _cuda_try(_cuda_driver.cuMemUnmap(va.value, size), "cuMemUnmap")
+                    _cuda_try(_cuda_driver.cuMemUnmap(mapped_va, size), "cuMemUnmap")
                 except Exception:
                     pass
             try:
                 _cuda_try(_cuda_driver.cuMemRelease(imported_handle), "cuMemRelease")
             except Exception:
                 pass
-            if va.value:
+            if reserved_va and mapped_va:
                 try:
-                    _cuda_try(_cuda_driver.cuMemAddressFree(va.value, size), "cuMemAddressFree")
+                    _cuda_try(
+                        _cuda_driver.cuMemAddressFree(mapped_va, size),
+                        "cuMemAddressFree",
+                    )
                 except Exception:
                     pass
             raise
@@ -432,7 +490,7 @@ class NvidiaFabricDriver(BaseFabricDriver):
         return PeerMapping(
             peer_rank=peer_rank,
             transport=InterconnectLevel.INTRA_RACK_FABRIC,
-            remote_va=int(va.value),
+            remote_va=mapped_va,
             size=size,
             _driver_handle=imported_handle,
         )
@@ -440,15 +498,29 @@ class NvidiaFabricDriver(BaseFabricDriver):
     def cleanup_import(self, mapping: PeerMapping) -> None:
         self._check_initialized()
         _run_cleanup_steps(
-            lambda: _cuda_try(_cuda_driver.cuMemUnmap(mapping.remote_va, mapping.size), "cuMemUnmap"),
-            lambda: _cuda_try(_cuda_driver.cuMemRelease(mapping._driver_handle), "cuMemRelease"),
-            lambda: _cuda_try(_cuda_driver.cuMemAddressFree(mapping.remote_va, mapping.size), "cuMemAddressFree"),
+            lambda: _cuda_try(
+                _cuda_driver.cuMemUnmap(mapping.remote_va, mapping.size), "cuMemUnmap"
+            ),
+            lambda: _cuda_try(
+                _cuda_driver.cuMemRelease(mapping._driver_handle), "cuMemRelease"
+            ),
+            lambda: _cuda_try(
+                _cuda_driver.cuMemAddressFree(mapping.remote_va, mapping.size),
+                "cuMemAddressFree",
+            ),
         )
 
     def cleanup_local(self, allocation: LocalAllocation) -> None:
         self._check_initialized()
         _run_cleanup_steps(
-            lambda: _cuda_try(_cuda_driver.cuMemUnmap(allocation.va, allocation.size), "cuMemUnmap"),
-            lambda: _cuda_try(_cuda_driver.cuMemRelease(allocation.handle), "cuMemRelease"),
-            lambda: _cuda_try(_cuda_driver.cuMemAddressFree(allocation.va, allocation.size), "cuMemAddressFree"),
+            lambda: _cuda_try(
+                _cuda_driver.cuMemUnmap(allocation.va, allocation.size), "cuMemUnmap"
+            ),
+            lambda: _cuda_try(
+                _cuda_driver.cuMemRelease(allocation.handle), "cuMemRelease"
+            ),
+            lambda: _cuda_try(
+                _cuda_driver.cuMemAddressFree(allocation.va, allocation.size),
+                "cuMemAddressFree",
+            ),
         )

@@ -2,21 +2,21 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Abstract base classes, shared dataclasses, and exceptions for fabric drivers.
+Abstract base classes, shared dataclasses, and exceptions for memory drivers.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from iris.host.distributed.topology import InterconnectLevel
 
 __all__ = [
     "PeerMapping",
     "LocalAllocation",
-    "BaseFabricDriver",
+    "BaseDriver",
     "DriverError",
     "DriverNotSupported",
 ]
@@ -50,23 +50,27 @@ class DriverNotSupported(DriverError):
     """The current hardware or software stack does not support this driver."""
 
 
-class BaseFabricDriver(ABC):
-    """Cross-node fabric memory sharing (for example NVSwitch or xGMI)."""
+class BaseDriver(ABC):
+    """Generic base class for local and fabric memory drivers."""
 
     @abstractmethod
     def initialize(self, device_ordinal: int) -> None:
         """Prepare the driver for a specific local GPU."""
 
     @abstractmethod
-    def allocate_exportable(self, size: int) -> LocalAllocation:
-        """Allocate memory that can be shared through the fabric transport."""
+    def allocate_exportable(
+        self, size: int, va: Optional[int] = None
+    ) -> LocalAllocation:
+        """Allocate exportable memory, optionally mapping it at a caller-reserved VA."""
 
     @abstractmethod
     def export_handle(self, allocation: LocalAllocation) -> bytes:
         """Export a transport-specific handle for a local allocation."""
 
     @abstractmethod
-    def import_and_map(self, peer_rank: int, handle_bytes: bytes, size: int) -> PeerMapping:
+    def import_and_map(
+        self, peer_rank: int, handle_bytes: bytes, size: int, va: Optional[int] = None
+    ) -> PeerMapping:
         """Import a peer handle and map it into the local virtual address space."""
 
     @abstractmethod
