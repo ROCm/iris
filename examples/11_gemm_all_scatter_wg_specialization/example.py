@@ -12,6 +12,7 @@ via iris.store.
 Run with:
     torchrun --nproc_per_node=2 --standalone example.py --validate
 """
+
 import argparse
 import math
 import os
@@ -103,11 +104,23 @@ def main():
     # Warmup
     ctx.barrier()
     matmul._call(
-        local_A, local_B, local_C, global_C, bias, locks,
-        rank, world_size, gemm_sms, num_sms,
-        args["BLK_M"], args["BLK_N"], args["BLK_K"],
-        args["gsize_m"], args["num_stages"],
-        ctx.get_heap_bases(), "gfx942",
+        local_A,
+        local_B,
+        local_C,
+        global_C,
+        bias,
+        locks,
+        rank,
+        world_size,
+        gemm_sms,
+        num_sms,
+        args["BLK_M"],
+        args["BLK_N"],
+        args["BLK_K"],
+        args["gsize_m"],
+        args["num_stages"],
+        ctx.get_heap_bases(),
+        "gfx942",
     )
     torch.cuda.synchronize()
     ctx.barrier()
@@ -115,11 +128,23 @@ def main():
     # Run again with fresh locks for validation
     reset_locks()
     matmul._call(
-        local_A, local_B, local_C, global_C, bias, locks,
-        rank, world_size, gemm_sms, num_sms,
-        args["BLK_M"], args["BLK_N"], args["BLK_K"],
-        args["gsize_m"], args["num_stages"],
-        ctx.get_heap_bases(), "gfx942",
+        local_A,
+        local_B,
+        local_C,
+        global_C,
+        bias,
+        locks,
+        rank,
+        world_size,
+        gemm_sms,
+        num_sms,
+        args["BLK_M"],
+        args["BLK_N"],
+        args["BLK_K"],
+        args["gsize_m"],
+        args["num_stages"],
+        ctx.get_heap_bases(),
+        "gfx942",
     )
     torch.cuda.synchronize()
     ctx.barrier()

@@ -40,6 +40,7 @@ from iris.mem.triton.context import Context
 # Triton kernels
 # ---------------------------------------------------------------------------
 
+
 @triton.jit
 def producer_kernel(
     device_ctx,
@@ -112,6 +113,7 @@ def consumer_kernel(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Context OO API message-passing example",
@@ -126,6 +128,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     args = parse_args()
@@ -162,11 +165,25 @@ def main():
 
     if rank == 0:
         producer_kernel[grid](
-            device_ctx, source, data_buf, flag, N, rank, world_size, BLOCK_SIZE,
+            device_ctx,
+            source,
+            data_buf,
+            flag,
+            N,
+            rank,
+            world_size,
+            BLOCK_SIZE,
         )
     else:
         consumer_kernel[grid](
-            device_ctx, data_buf, result, flag, N, rank, world_size, BLOCK_SIZE,
+            device_ctx,
+            data_buf,
+            result,
+            flag,
+            N,
+            rank,
+            world_size,
+            BLOCK_SIZE,
         )
 
     shmem.barrier()

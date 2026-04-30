@@ -34,6 +34,7 @@ import iris
 # Triton kernel
 # ---------------------------------------------------------------------------
 
+
 @triton.jit
 def atomic_add_kernel(
     counter_ptr,
@@ -58,6 +59,7 @@ def atomic_add_kernel(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="iris.atomic_add example",
@@ -71,6 +73,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     args = parse_args()

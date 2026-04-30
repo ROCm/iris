@@ -13,6 +13,7 @@ Run with:
     torchrun --nproc_per_node=2 --standalone example.py --validate
     torchrun --nproc_per_node=8 --standalone example.py --csv example_config.csv
 """
+
 import argparse
 import csv
 import math
@@ -20,7 +21,6 @@ import os
 
 import torch
 import torch.distributed as dist
-import triton
 
 from matmul_wrapper import matmul
 from gemm_all_scatter_bulk_synchronous import persistent_all_scatter
@@ -89,11 +89,20 @@ def run_config(ctx, args, rank, world_size, cu_count):
             if not only_comm:
                 # GEMM: full A x local B -> columns [0, local_n) of C
                 matmul._call(
-                    A, local_B, C, None,
-                    rank, world_size, gemm_sms,
-                    args["BLK_M"], args["BLK_N"], args["BLK_K"],
-                    args["gsize_m"], args["num_stages"],
-                    ctx.get_heap_bases(), "gfx942",
+                    A,
+                    local_B,
+                    C,
+                    None,
+                    rank,
+                    world_size,
+                    gemm_sms,
+                    args["BLK_M"],
+                    args["BLK_N"],
+                    args["BLK_K"],
+                    args["gsize_m"],
+                    args["num_stages"],
+                    ctx.get_heap_bases(),
+                    "gfx942",
                 )
             if not only_gemm:
                 # Scatter: put local columns to all remote ranks

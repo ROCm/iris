@@ -11,6 +11,7 @@ rank reads partial results from all ranks and reduces them into the global outpu
 Run with:
     torchrun --nproc_per_node=2 --standalone example.py --validate
 """
+
 import argparse
 import math
 import os
@@ -115,15 +116,29 @@ def main():
     # Warmup
     ctx.barrier()
     matmul._call(
-        local_A, local_B, local_C, global_C, bias,
-        P, locks, tile_completed,
-        rank, world_size, gemm_sms,
-        args["BLK_M"], args["BLK_N"], args["BLK_K"],
-        args["gsize_m"], args["two_tiles"],
-        args["num_stages"], args["num_warps"],
-        args["waves_per_eu"], args["mfmaInstrSize"],
+        local_A,
+        local_B,
+        local_C,
+        global_C,
+        bias,
+        P,
+        locks,
+        tile_completed,
+        rank,
+        world_size,
+        gemm_sms,
+        args["BLK_M"],
+        args["BLK_N"],
+        args["BLK_K"],
+        args["gsize_m"],
+        args["two_tiles"],
+        args["num_stages"],
+        args["num_warps"],
+        args["waves_per_eu"],
+        args["mfmaInstrSize"],
         args["kpack"],
-        ctx.get_heap_bases(), cu_count,
+        ctx.get_heap_bases(),
+        cu_count,
     )
     torch.cuda.synchronize()
     ctx.barrier()
@@ -131,15 +146,29 @@ def main():
     # Run again with fresh buffers for validation
     reset_buffers()
     matmul._call(
-        local_A, local_B, local_C, global_C, bias,
-        P, locks, tile_completed,
-        rank, world_size, gemm_sms,
-        args["BLK_M"], args["BLK_N"], args["BLK_K"],
-        args["gsize_m"], args["two_tiles"],
-        args["num_stages"], args["num_warps"],
-        args["waves_per_eu"], args["mfmaInstrSize"],
+        local_A,
+        local_B,
+        local_C,
+        global_C,
+        bias,
+        P,
+        locks,
+        tile_completed,
+        rank,
+        world_size,
+        gemm_sms,
+        args["BLK_M"],
+        args["BLK_N"],
+        args["BLK_K"],
+        args["gsize_m"],
+        args["two_tiles"],
+        args["num_stages"],
+        args["num_warps"],
+        args["waves_per_eu"],
+        args["mfmaInstrSize"],
         args["kpack"],
-        ctx.get_heap_bases(), cu_count,
+        ctx.get_heap_bases(),
+        cu_count,
     )
     torch.cuda.synchronize()
     ctx.barrier()

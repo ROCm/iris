@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
-import os
 
 import torch
-import triton
 
 from gemm_all_reduce_atomics import persistent_gemm_all_reduce
 

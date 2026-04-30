@@ -13,6 +13,7 @@ Run with:
     torchrun --nproc_per_node=2 --standalone example.py --validate
     torchrun --nproc_per_node=8 --standalone example.py --csv example_config.csv
 """
+
 import argparse
 import csv
 import math
@@ -93,11 +94,20 @@ def run_config(ctx, args, rank, world_size, cu_count):
             if not only_comm:
                 # GEMM: partial-A x partial-B -> local_C (partial sum)
                 matmul._call(
-                    local_A, local_B, local_C, None,
-                    rank, world_size, gemm_sms,
-                    args["BLK_M"], args["BLK_N"], args["BLK_K"],
-                    args["gsize_m"], args["num_stages"],
-                    ctx.get_heap_bases(), "gfx942",
+                    local_A,
+                    local_B,
+                    local_C,
+                    None,
+                    rank,
+                    world_size,
+                    gemm_sms,
+                    args["BLK_M"],
+                    args["BLK_N"],
+                    args["BLK_K"],
+                    args["gsize_m"],
+                    args["num_stages"],
+                    ctx.get_heap_bases(),
+                    "gfx942",
                 )
             if not only_gemm:
                 # All-reduce: sum partial results from all ranks -> global_C

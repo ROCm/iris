@@ -128,10 +128,7 @@ def main():
     torch.cuda.synchronize()
 
     if rank == 0:
-        ctx.info(
-            f"all_gather: world_size={world_size}, input=({M},{N}), "
-            f"output=({world_size * M},{N}), dtype={dtype}"
-        )
+        ctx.info(f"all_gather: world_size={world_size}, input=({M},{N}), output=({world_size * M},{N}), dtype={dtype}")
 
     if args["validate"]:
         for r in range(world_size):

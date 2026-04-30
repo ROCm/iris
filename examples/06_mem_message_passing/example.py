@@ -37,6 +37,7 @@ import iris
 # Triton kernels
 # ---------------------------------------------------------------------------
 
+
 @triton.jit
 def producer_kernel(
     src_ptr,
@@ -102,6 +103,7 @@ def consumer_kernel(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Flag-based message passing example",
@@ -116,6 +118,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     args = parse_args()
@@ -134,10 +137,10 @@ def main():
     assert world_size == 2, "This example requires exactly 2 ranks."
 
     # Symmetric-heap allocations.
-    source = ctx.zeros(N, dtype=torch.float32)   # producer's data
-    data_buf = ctx.zeros(N, dtype=torch.float32)   # consumer receives data here
-    result = ctx.zeros(N, dtype=torch.float32)     # consumer writes 2*data here
-    flag = ctx.zeros(1, dtype=torch.int32)         # signalling flag
+    source = ctx.zeros(N, dtype=torch.float32)  # producer's data
+    data_buf = ctx.zeros(N, dtype=torch.float32)  # consumer receives data here
+    result = ctx.zeros(N, dtype=torch.float32)  # consumer writes 2*data here
+    flag = ctx.zeros(1, dtype=torch.int32)  # signalling flag
 
     # Producer fills source.
     if rank == 0:

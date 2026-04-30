@@ -10,12 +10,12 @@ then scatters its portion of C to all other ranks via iris.store.
 Run with:
     torchrun --nproc_per_node=2 --standalone example.py --validate
 """
+
 import argparse
 import os
 
 import torch
 import torch.distributed as dist
-import triton
 
 from matmul_wrapper import matmul
 
@@ -87,11 +87,21 @@ def main():
     # Warmup
     ctx.barrier()
     matmul._call(
-        local_A, local_B, local_C, global_C, bias,
-        rank, world_size, cu_count,
-        args["BLK_M"], args["BLK_N"], args["BLK_K"],
-        args["gsize_m"], args["num_stages"],
-        ctx.get_heap_bases(), "gfx942",
+        local_A,
+        local_B,
+        local_C,
+        global_C,
+        bias,
+        rank,
+        world_size,
+        cu_count,
+        args["BLK_M"],
+        args["BLK_N"],
+        args["BLK_K"],
+        args["gsize_m"],
+        args["num_stages"],
+        ctx.get_heap_bases(),
+        "gfx942",
     )
     torch.cuda.synchronize()
     ctx.barrier()

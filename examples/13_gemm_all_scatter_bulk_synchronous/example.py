@@ -12,13 +12,13 @@ kernels run sequentially (bulk synchronous).
 Run with:
     torchrun --nproc_per_node=2 --standalone example.py --validate
 """
+
 import argparse
 import math
 import os
 
 import torch
 import torch.distributed as dist
-import triton
 
 from matmul_wrapper import matmul
 from gemm_all_scatter_bulk_synchronous import persistent_all_scatter
@@ -98,11 +98,20 @@ def main():
         with torch.cuda.stream(main_stream):
             # GEMM kernel
             matmul._call(
-                local_A, local_B, C, bias,
-                rank, world_size, gemm_sms,
-                args["BLK_M"], args["BLK_N"], args["BLK_K"],
-                args["gsize_m"], args["num_stages"],
-                ctx.get_heap_bases(), "gfx942",
+                local_A,
+                local_B,
+                C,
+                bias,
+                rank,
+                world_size,
+                gemm_sms,
+                args["BLK_M"],
+                args["BLK_N"],
+                args["BLK_K"],
+                args["gsize_m"],
+                args["num_stages"],
+                ctx.get_heap_bases(),
+                "gfx942",
             )
             # Scatter kernel (same stream, runs after GEMM completes)
             persistent_all_scatter[(comm_sms,)](

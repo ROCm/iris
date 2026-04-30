@@ -33,6 +33,7 @@ import iris
 # Triton kernels
 # ---------------------------------------------------------------------------
 
+
 @triton.jit
 def store_kernel(
     src_ptr,
@@ -73,6 +74,7 @@ def load_kernel(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="iris.load / iris.store example",
@@ -87,6 +89,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     args = parse_args()
@@ -105,9 +108,9 @@ def main():
     assert world_size >= 2, "This example requires at least 2 ranks."
 
     # Allocate symmetric-heap buffers visible to all ranks.
-    source = ctx.zeros(N, dtype=torch.float32)   # rank 0 fills this
+    source = ctx.zeros(N, dtype=torch.float32)  # rank 0 fills this
     store_dst = ctx.zeros(N, dtype=torch.float32)  # target for iris.store
-    load_dst = ctx.zeros(N, dtype=torch.float32)   # target for iris.load result
+    load_dst = ctx.zeros(N, dtype=torch.float32)  # target for iris.load result
 
     # Rank 0 initialises its source buffer.
     if rank == 0:

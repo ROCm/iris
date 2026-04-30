@@ -12,12 +12,12 @@ Run with:
     torchrun --nproc_per_node=2 --standalone example.py --validate
     torchrun --nproc_per_node=2 --standalone example.py --trace_tiles
 """
+
 import argparse
 import os
 
 import torch
 import torch.distributed as dist
-import triton
 
 from matmul_wrapper import matmul
 
@@ -83,11 +83,21 @@ def main():
     # Warmup
     ctx.barrier()
     matmul._call(
-        A, local_B, local_C, global_C, bias,
-        rank, world_size, cu_count,
-        args["BLK_M"], args["BLK_N"], args["BLK_K"],
-        args["gsize_m"], args["num_stages"],
-        ctx.get_device_context(), "gfx942",
+        A,
+        local_B,
+        local_C,
+        global_C,
+        bias,
+        rank,
+        world_size,
+        cu_count,
+        args["BLK_M"],
+        args["BLK_N"],
+        args["BLK_K"],
+        args["gsize_m"],
+        args["num_stages"],
+        ctx.get_device_context(),
+        "gfx942",
         TRACING=args["trace_tiles"],
     )
     torch.cuda.synchronize()

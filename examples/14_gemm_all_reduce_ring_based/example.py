@@ -11,6 +11,7 @@ ranks using a ring topology. GEMM and communication run on separate streams.
 Run with:
     torchrun --nproc_per_node=2 --standalone example.py --validate
 """
+
 import argparse
 import os
 
@@ -113,11 +114,21 @@ def main():
         ctx.barrier()
         with torch.cuda.stream(gemm_stream):
             matmul._call(
-                local_A, local_B, local_C, bias, locks,
-                rank, world_size, gemm_sms,
-                args["BLK_M"], args["BLK_N"], args["BLK_K"],
-                args["gsize_m"], args["num_stages"],
-                ctx.get_heap_bases(), "gfx942",
+                local_A,
+                local_B,
+                local_C,
+                bias,
+                locks,
+                rank,
+                world_size,
+                gemm_sms,
+                args["BLK_M"],
+                args["BLK_N"],
+                args["BLK_K"],
+                args["gsize_m"],
+                args["num_stages"],
+                ctx.get_heap_bases(),
+                "gfx942",
             )
         with torch.cuda.stream(comm_stream):
             persistent_all_reduce[(comm_sms,)](

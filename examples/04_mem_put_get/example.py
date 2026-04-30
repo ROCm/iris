@@ -33,6 +33,7 @@ import iris
 # Triton kernels
 # ---------------------------------------------------------------------------
 
+
 @triton.jit
 def put_kernel(
     local_ptr,
@@ -71,6 +72,7 @@ def get_kernel(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="iris.put / iris.get example",
@@ -85,6 +87,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     args = parse_args()
@@ -103,9 +106,9 @@ def main():
     assert world_size >= 2, "This example requires at least 2 ranks."
 
     # Symmetric-heap buffers.
-    source = ctx.zeros(N, dtype=torch.float32)    # rank 0 fills this
-    put_dst = ctx.zeros(N, dtype=torch.float32)   # target for iris.put
-    get_dst = ctx.zeros(N, dtype=torch.float32)   # target for iris.get
+    source = ctx.zeros(N, dtype=torch.float32)  # rank 0 fills this
+    put_dst = ctx.zeros(N, dtype=torch.float32)  # target for iris.put
+    get_dst = ctx.zeros(N, dtype=torch.float32)  # target for iris.get
 
     # Rank 0 initialises its source buffer.
     if rank == 0:

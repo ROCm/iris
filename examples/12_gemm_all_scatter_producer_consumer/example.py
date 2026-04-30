@@ -11,6 +11,7 @@ to remote ranks via iris.store. The two kernels run on separate streams.
 Run with:
     torchrun --nproc_per_node=2 --standalone example.py --validate
 """
+
 import argparse
 import math
 import os
@@ -103,11 +104,21 @@ def main():
         ctx.barrier()
         with torch.cuda.stream(gemm_stream):
             matmul._call(
-                local_A, local_B, C, bias, locks,
-                rank, world_size, gemm_sms,
-                args["BLK_M"], args["BLK_N"], args["BLK_K"],
-                args["gsize_m"], args["num_stages"],
-                ctx.get_heap_bases(), "gfx942",
+                local_A,
+                local_B,
+                C,
+                bias,
+                locks,
+                rank,
+                world_size,
+                gemm_sms,
+                args["BLK_M"],
+                args["BLK_N"],
+                args["BLK_K"],
+                args["gsize_m"],
+                args["num_stages"],
+                ctx.get_heap_bases(),
+                "gfx942",
             )
         with torch.cuda.stream(comm_stream):
             persistent_all_scatter[(comm_sms,)](
