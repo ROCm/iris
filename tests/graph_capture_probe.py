@@ -20,6 +20,7 @@ returns stale capture-time results, validation will fail.
 Run with:
     torchrun --nproc_per_node=2 --standalone tests/graph_capture_probe.py
 """
+
 import os
 import traceback
 
@@ -49,6 +50,7 @@ def teardown(ctx):
 # ---------------------------------------------------------------------------
 # Harness
 # ---------------------------------------------------------------------------
+
 
 def try_capture(name, warmup_fn, capture_fn, reset_fn, replay_setup_fn, validate_fn, ctx, rank):
     """
@@ -139,6 +141,7 @@ def try_capture(name, warmup_fn, capture_fn, reset_fn, replay_setup_fn, validate
 # Test cases
 # ---------------------------------------------------------------------------
 
+
 def test_device_barrier(ctx, rank, world_size):
     """device_barrier — known capturable (device-side atomics, no NCCL)."""
     buf = ctx.zeros((64,), dtype=torch.float32)
@@ -169,6 +172,7 @@ def test_device_barrier(ctx, rank, world_size):
 
 def test_host_barrier(ctx, rank, world_size):
     """host barrier — known NOT capturable (uses NCCL on ROCm)."""
+
     def warmup():
         ctx.barrier()
 
@@ -383,6 +387,7 @@ def test_ops_matmul_all_reduce(ctx, rank, world_size):
     C = ctx.zeros((M, N), dtype=torch.float16)
 
     from iris.ops.config import FusedConfig
+
     config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant="atomic")
 
     # Compute a reference for validation with specific input values
@@ -420,6 +425,7 @@ def test_ops_matmul_all_reduce(ctx, rank, world_size):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     ctx, rank, world_size = setup()
