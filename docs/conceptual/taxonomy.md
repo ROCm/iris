@@ -70,7 +70,7 @@ The fundamental insight is that **achieving peak performance requires computatio
 
 **Description:** Traditional approach with separate compute and communication kernels, synchronized at the host.
 
-**Example Implementation:** [examples/12_gemm_all_scatter_bulk_synchronous](https://github.com/ROCm/iris/tree/main/examples/12_gemm_all_scatter_bulk_synchronous)
+**Example Implementation:** [examples/13_gemm_all_scatter_bulk_synchronous](https://github.com/ROCm/iris/tree/main/examples/13_gemm_all_scatter_bulk_synchronous)
 
 **Characteristics:**
 - Two separate kernel launches
@@ -100,7 +100,7 @@ The fundamental insight is that **achieving peak performance requires computatio
 
 **Description:** Separate compute and communication kernels running concurrently with fine-grained synchronization.
 
-**Example Implementation:** [examples/11_gemm_all_scatter_producer_consumer](https://github.com/ROCm/iris/tree/main/examples/11_gemm_all_scatter_producer_consumer)
+**Example Implementation:** [examples/12_gemm_all_scatter_producer_consumer](https://github.com/ROCm/iris/tree/main/examples/12_gemm_all_scatter_producer_consumer)
 
 **Characteristics:**
 - Two kernels launched on different streams to establish concurrency
@@ -149,7 +149,7 @@ data = iris.load(buffer + offsets, consumer_rank, mask=mask)
 
 **Description:** Single über-kernel that computes then communicates sequentially.
 
-**Example Implementation:** [examples/07_gemm_all_scatter](https://github.com/ROCm/iris/tree/main/examples/07_gemm_all_scatter)
+**Example Implementation:** [examples/08_gemm_all_scatter](https://github.com/ROCm/iris/tree/main/examples/08_gemm_all_scatter)
 
 **Characteristics:**
 - Single kernel launch
@@ -187,7 +187,7 @@ data = iris.load(buffer + offsets, consumer_rank, mask=mask)
 
 **Description:** Single kernel where work groups specialize as either producers or consumers at launch.
 
-**Example Implementation:** [examples/10_gemm_all_scatter_wg_specialization](https://github.com/ROCm/iris/tree/main/examples/10_gemm_all_scatter_wg_specialization)
+**Example Implementation:** [examples/11_gemm_all_scatter_wg_specialization](https://github.com/ROCm/iris/tree/main/examples/11_gemm_all_scatter_wg_specialization)
 
 **Characteristics:**
 - Single kernel with branching at entry: `if (block_id < num_gem_cus)`

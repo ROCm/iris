@@ -47,7 +47,7 @@ while not (project_root / "tests").is_dir() or not (project_root / "examples").i
     project_root = project_root.parent
 print(f"Project Root: {project_root}")
 
-module_dir = project_root / "examples" / "13_flash_decode"
+module_dir = project_root / "examples" / "19_flash_decode"
 print(f"Module Directory: {module_dir}")
 
 target_file = module_dir / "flash_decode_fused_layer.py"

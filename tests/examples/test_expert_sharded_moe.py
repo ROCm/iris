@@ -28,7 +28,7 @@ while not (PROJECT_ROOT / "tests").is_dir() or not (PROJECT_ROOT / "examples").i
         raise FileNotFoundError("Could not find project root")
     PROJECT_ROOT = PROJECT_ROOT.parent
 
-EXAMPLE_DIR = PROJECT_ROOT / "examples" / "31_expert_sharded_moe"
+EXAMPLE_DIR = PROJECT_ROOT / "examples" / "22_expert_sharded_moe"
 # The example modules use local absolute imports (e.g. `from expert_assignment import ...`),
 # so ensure the example directory is on sys.path before loading them.
 sys.path.insert(0, str(EXAMPLE_DIR))
