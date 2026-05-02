@@ -1170,6 +1170,54 @@ class Iris:
 
             all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
+        def all_to_all_v(
+            self,
+            output_tensor,
+            input_tensor,
+            send_counts,
+            send_displs,
+            recv_counts,
+            recv_displs,
+            group=None,
+            async_op=False,
+            config=None,
+            remote_recv_displs=None,
+        ):
+            """
+            Variable-size all-to-all collective operation.
+
+            Each rank sends send_counts[i] elements starting at send_displs[i] to rank i,
+            and receives recv_counts[i] elements from rank i at recv_displs[i].
+
+            Args:
+                output_tensor: Flat output tensor on symmetric heap.
+                input_tensor: Flat input tensor on symmetric heap.
+                send_counts: list[int] -- elements to send to each rank.
+                send_displs: list[int] -- element offsets in input for each rank.
+                recv_counts: list[int] -- elements to receive from each rank.
+                recv_displs: list[int] -- element offsets in output for each rank.
+                group: ProcessGroup or None.
+                async_op: If True, returns without barrier.
+                config: Config instance.
+                remote_recv_displs: Optional list[int]. If provided, skips internal
+                    all_gather for displacement exchange (~20ms saving).
+            """
+            from iris.ccl.all_to_all import all_to_all_v as _all_to_all_v
+
+            _all_to_all_v(
+                output_tensor,
+                input_tensor,
+                send_counts,
+                send_displs,
+                recv_counts,
+                recv_displs,
+                self._iris,
+                group=group,
+                async_op=async_op,
+                config=config,
+                remote_recv_displs=remote_recv_displs,
+            )
+
         def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
             All-gather collective operation.

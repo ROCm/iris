@@ -113,13 +113,12 @@ def persistent_all_to_all(
             data = tl.load(input_ptr_local)
             tl.store(output_ptr_local, data, cache_modifier=".wt")
 
-            # Process all remote ranks
-            for i in range(world_size):
+            # Process remote ranks with staggered ordering to avoid write contention
+            for step in range(world_size):
+                i = (group_rank + step) % world_size
                 target_rank = rank_start + i * rank_stride
                 if i != group_rank:
-                    # Calculate which chunk of input to read based on rank_in_group
-                    rank_in_group_target = i
-                    input_offset_remote = input_base_m + (input_base_n + rank_in_group_target * N * stride_in_n)
+                    input_offset_remote = input_base_m + (input_base_n + i * N * stride_in_n)
                     output_offset_remote = output_base_m + (output_base_n + group_rank * N * stride_out_n)
                     input_ptr_remote = input_ptr + input_offset_remote
                     output_ptr_remote = output_ptr + output_offset_remote
@@ -152,13 +151,12 @@ def persistent_all_to_all(
             data = tl.load(input_ptr_local, mask=mask)
             tl.store(output_ptr_local, data, mask=mask, cache_modifier=".wt")
 
-            # Process all remote ranks
-            for i in range(world_size):
+            # Process remote ranks with staggered ordering to avoid write contention
+            for step in range(world_size):
+                i = (group_rank + step) % world_size
                 target_rank = rank_start + i * rank_stride
                 if i != group_rank:
-                    # Calculate which chunk of input to read based on rank_in_group
-                    rank_in_group_target = i
-                    input_offset_remote = input_base_m + (input_base_n + rank_in_group_target * N * stride_in_n)
+                    input_offset_remote = input_base_m + (input_base_n + i * N * stride_in_n)
                     output_offset_remote = output_base_m + (output_base_n + group_rank * N * stride_out_n)
                     input_ptr_remote = input_ptr + input_offset_remote
                     output_ptr_remote = output_ptr + output_offset_remote
@@ -224,4 +222,115 @@ def launch(
         algorithm="all_to_all",
         rank=rank_global,
         dtype=input_tensor.dtype,
+    )
+
+
+@triton.jit()
+def persistent_all_to_all_v(
+    input_ptr,
+    output_ptr,
+    send_counts_ptr,
+    send_displs_ptr,
+    recv_counts_ptr,
+    recv_displs_ptr,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+):
+    """
+    Persistent all-to-all-v kernel for variable-sized exchanges.
+
+    1D layout: input and output are flat buffers. send_counts[i] elements
+    starting at send_displs[i] go to rank i. recv_counts[i] elements from
+    rank i land at recv_displs[i] in the output.
+
+    Each SM iterates over (rank, tile_within_chunk) pairs using staggered
+    rank ordering to avoid write contention.
+    """
+    pid = tl.program_id(0)
+
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+
+    # Process each peer rank with staggered ordering
+    for step in range(world_size):
+        i = (group_rank + step) % world_size
+        target_rank = rank_start + i * rank_stride
+
+        # Load counts and displacements for this peer
+        send_count = tl.load(send_counts_ptr + i)
+        send_displ = tl.load(send_displs_ptr + i)
+        recv_displ = tl.load(recv_displs_ptr + i)
+
+        num_tiles = tl.cdiv(send_count, BLOCK_SIZE)
+
+        # Each SM handles a subset of tiles for this peer
+        for tile_id in range(pid, num_tiles, COMM_SMS):
+            offset = tile_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+            mask = offset < send_count
+
+            # Load from local input at send_displ + offset
+            data = tl.load(input_ptr + send_displ + offset, mask=mask)
+
+            if i == group_rank:
+                # Local copy: write to output at recv_displ
+                tl.store(output_ptr + recv_displ + offset, data, mask=mask, cache_modifier=".wt")
+            else:
+                # Remote write: store to target rank's output at recv_displ for group_rank
+                # Target rank's recv_displ for data from us is at recv_displs[group_rank] on target
+                # We pre-compute this on the host and pass the right displacement
+                iris.store(
+                    output_ptr + recv_displ + offset,
+                    data,
+                    iris_rank,
+                    target_rank,
+                    heap_bases,
+                    mask=mask,
+                )
+
+
+def launch_v(
+    input_tensor,
+    output_tensor,
+    send_counts_t,
+    send_displs_t,
+    kernel_recv_displs_t,
+    ctx,
+    rank_in_group,
+    rank_global,
+    world_size,
+    rank_start,
+    rank_stride,
+    config,
+):
+    """Launch the Triton all-to-all-v kernel."""
+    block_size = config.block_size_n  # Use block_size_n as the 1D tile size
+
+    persistent_all_to_all_v[(config.comm_sms,)](
+        input_tensor,
+        output_tensor,
+        send_counts_t,
+        send_displs_t,
+        kernel_recv_displs_t,
+        kernel_recv_displs_t,  # recv_displs for self-copy path
+        ctx.get_heap_bases(),
+        rank_in_group,
+        rank_global,
+        world_size,
+        rank_start,
+        rank_stride,
+        block_size,
+        config.comm_sms,
+        config.num_xcds,
+        config.chunk_size,
+        num_stages=config.num_stages,
+        num_warps=config.num_warps,
+        waves_per_eu=config.waves_per_eu,
     )
