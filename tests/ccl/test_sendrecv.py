@@ -133,8 +133,8 @@ def test_send_recv_paired(dtype, M, N):
     elif rank == 1:
         shmem.ccl.recv(tensor, src=0, config=config)
     else:
-        # send/recv internally call ctx.barrier(), which requires all ranks
-        shmem.barrier()
+        # send/recv use device_barrier internally — all ranks must participate
+        shmem.device_barrier()
 
     torch.cuda.synchronize()
 
