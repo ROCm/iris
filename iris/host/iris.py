@@ -1317,6 +1317,90 @@ class Iris:
                 config=config,
             )
 
+        def sendrecv(self, send_tensor, recv_tensor, dst, src, group=None, tag=0, config=None):
+            """
+            Simultaneous send and recv.
+
+            Sends send_tensor to dst rank while receiving into recv_tensor from
+            src rank. Both operations are launched, then a barrier ensures
+            completion.
+
+            Args:
+                send_tensor: Tensor to send, shape (M, N).
+                recv_tensor: Tensor to receive into, shape (M, N). Must be on
+                             the symmetric heap.
+                dst: Destination rank for send.
+                src: Source rank for recv.
+                group: ProcessGroup or None. If None, uses all ranks.
+                tag: Communication tag (default: 0).
+                config: Config with kernel parameters (default: None).
+            """
+            from iris.ccl.sendrecv import sendrecv
+
+            sendrecv(send_tensor, recv_tensor, self._iris, dst=dst, src=src, group=group, tag=tag, config=config)
+
+        def barrier(self, group=None):
+            """
+            Global barrier: all ranks block until every rank has arrived.
+
+            Uses device-side atomic flag signaling on the symmetric heap.
+
+            Args:
+                group: ProcessGroup or None. If None, uses all ranks.
+            """
+            from iris.ccl.barrier import barrier
+
+            barrier(self._iris, group=group)
+
+        def reduce(self, output_tensor, input_tensor, dst=0, op=None, group=None, async_op=False, config=None):
+            """
+            Reduce: sum inputs across all ranks, result stored only on root (dst).
+
+            Args:
+                output_tensor: Shape (M, N) - receives the reduced result on root.
+                input_tensor: Shape (M, N) - local rank's partial data.
+                dst: Destination rank that receives the result. Default: 0.
+                op: ReduceOp (only SUM supported). Default: ReduceOp.SUM.
+                group: ProcessGroup or None. If None, uses all ranks.
+                async_op: If True, skip trailing barrier. Default: False.
+                config: Config with kernel parameters. Default: None.
+            """
+            from iris.ccl.reduce import reduce
+
+            reduce(output_tensor, input_tensor, self._iris, dst=dst, op=op, group=group, async_op=async_op, config=config)
+
+        def scatter(self, output_tensor, input_tensor, src=0, group=None, async_op=False, config=None):
+            """
+            Scatter: root rank distributes equal-sized chunks to all ranks.
+
+            Args:
+                output_tensor: Shape (M, N) - receives this rank's chunk.
+                input_tensor: Shape (world_size * M, N) - only root's contents used.
+                src: Source (root) rank. Default: 0.
+                group: ProcessGroup or None.
+                async_op: If True, skip trailing barrier.
+                config: Config with kernel parameters.
+            """
+            from iris.ccl.scatter import scatter
+
+            scatter(output_tensor, input_tensor, self._iris, src=src, group=group, async_op=async_op, config=config)
+
+        def gather(self, output_tensor, input_tensor, dst=0, group=None, async_op=False, config=None):
+            """
+            Gather: each rank sends its input to the root rank.
+
+            Args:
+                output_tensor: Shape (world_size * M, N) - concatenated result on root.
+                input_tensor: Shape (M, N) - local rank's data.
+                dst: Destination (root) rank. Default: 0.
+                group: ProcessGroup or None.
+                async_op: If True, skip trailing barrier.
+                config: Config with kernel parameters.
+            """
+            from iris.ccl.gather import gather
+
+            gather(output_tensor, input_tensor, self._iris, dst=dst, group=group, async_op=async_op, config=config)
+
 
 def iris(heap_size=1 << 30, allocator_type="torch"):
     """
