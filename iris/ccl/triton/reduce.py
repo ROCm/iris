@@ -90,10 +90,9 @@ def persistent_reduce(
         local_data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
 
         if group_rank == dst:
-            # Root: just store own data — output was pre-zeroed, so this
-            # initializes the tile.  Non-root ranks will accumulate on top
-            # after acquiring the lock.
-            tl.store(output_ptr + output_offset, local_data, mask=mask)
+            # Root: data was already copied to output on the host side
+            # before the barrier.  Nothing to do here.
+            pass
         else:
             # Non-root: acquire lock, read-modify-write on root's output
             while (
@@ -171,10 +170,15 @@ def launch(
 
     locks = ctx.zeros((total_tiles,), dtype=torch.int32)
 
-    # Zero output and ensure all ranks see it before the kernel runs.
-    # Root will write its own data in-kernel; non-root ranks will
-    # read-modify-write on root's output via locks.
-    output_tensor.zero_()
+    # Root initializes output with its own data on the host side,
+    # before the barrier.  This avoids a race between root's in-kernel
+    # tl.store and non-root's iris.load (non-root could read stale zeros
+    # or partial root data).  Non-root ranks zero their output (unused
+    # but keeps heap symmetric).
+    if rank_in_group == dst:
+        output_tensor.copy_(input_tensor)
+    else:
+        output_tensor.zero_()
     ctx.barrier()
 
     heap_bases = ctx.get_heap_bases()
