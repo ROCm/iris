@@ -1318,6 +1318,149 @@ class Iris:
             )
 
 
+<<<<<<< HEAD
+=======
+        def scatter(self, output_tensor, input_tensor, src=0, group=None, async_op=False, config=None):
+            """
+            Scatter collective operation.
+
+            Root rank distributes equal-sized chunks of its data to all ranks.
+            Input on root is (world_size * M, N), each rank receives (M, N).
+            On non-root ranks, input_tensor is ignored.
+
+            Args:
+                output_tensor: Output tensor of shape (M, N) - receives this rank's chunk
+                input_tensor: Input tensor of shape (world_size * M, N) on root, ignored on non-root
+                src: Source (root) rank within the group (default: 0)
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> ctx.ccl.scatter(output_tensor, input_tensor, src=0)
+
+                >>> # Custom configuration
+                >>> from iris.ccl import Config
+                >>> config = Config(block_size_m=32, block_size_n=64)
+                >>> ctx.ccl.scatter(output_tensor, input_tensor, src=0, config=config)
+
+                >>> # Async operation (no barrier)
+                >>> ctx.ccl.scatter(output_tensor, input_tensor, src=0, async_op=True)
+            """
+            from iris.ccl.scatter import scatter
+
+            scatter(
+                output_tensor,
+                input_tensor,
+                self._iris,
+                src=src,
+                group=group,
+                async_op=async_op,
+                config=config,
+            )
+
+
+        def send(self, tensor, dst, group=None, tag=0, config=None):
+            """
+            Send tensor to destination rank.
+
+            The sender writes data directly to the receiver's output buffer
+            via XGMI/P2P remote writes, then signals completion with an
+            atomic flag. Must be paired with a matching ``recv`` on the
+            destination rank.
+
+            Args:
+                tensor: Tensor to send, shape (M, N).
+                dst: Destination rank within the group.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                tag: Communication tag for matching send/recv pairs (default: 0).
+                config: Config instance with kernel parameters (default: None).
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> if ctx.get_rank() == 0:
+                ...     ctx.ccl.send(tensor, dst=1)
+                >>> elif ctx.get_rank() == 1:
+                ...     ctx.ccl.recv(tensor, src=0)
+            """
+            from iris.ccl.sendrecv import send
+
+            send(tensor, self._iris, dst, group=group, tag=tag, config=config)
+
+        def recv(self, tensor, src, group=None, tag=0, config=None):
+            """
+            Receive tensor from source rank.
+
+            The receiver spins waiting for the sender's completion flag.
+            Once signaled, data is already in place in tensor (written by
+            the sender's remote store). Must be paired with a matching
+            ``send`` on the source rank.
+
+            Args:
+                tensor: Output tensor to receive into, shape (M, N).
+                        Must be on the symmetric heap.
+                src: Source rank within the group.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                tag: Communication tag for matching send/recv pairs (default: 0).
+                config: Config instance with kernel parameters (default: None).
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> if ctx.get_rank() == 0:
+                ...     ctx.ccl.send(tensor, dst=1)
+                >>> elif ctx.get_rank() == 1:
+                ...     ctx.ccl.recv(tensor, src=0)
+            """
+            from iris.ccl.sendrecv import recv
+
+            recv(tensor, self._iris, src, group=group, tag=tag, config=config)
+
+        def sendrecv(self, send_tensor, recv_tensor, dst, src, group=None, tag=0, config=None):
+            """
+            Simultaneous send and recv.
+
+            Sends send_tensor to dst rank while receiving into recv_tensor
+            from src rank. A barrier is performed after both operations.
+
+            Args:
+                send_tensor: Tensor to send, shape (M, N).
+                recv_tensor: Tensor to receive into, shape (M, N).
+                             Must be on the symmetric heap.
+                dst: Destination rank for send.
+                src: Source rank for recv.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                tag: Communication tag (default: 0).
+                config: Config instance with kernel parameters (default: None).
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> rank = ctx.get_rank()
+                >>> world_size = ctx.get_num_ranks()
+                >>> ctx.ccl.sendrecv(
+                ...     send_buf, recv_buf,
+                ...     dst=(rank + 1) % world_size,
+                ...     src=(rank - 1) % world_size,
+                ... )
+            """
+            from iris.ccl.sendrecv import sendrecv
+
+            sendrecv(
+                send_tensor,
+                recv_tensor,
+                self._iris,
+                dst,
+                src,
+                group=group,
+                tag=tag,
+                config=config,
+            )
+
+
+>>>>>>> 3faa101d (Add reduce collective operation)
 def iris(heap_size=1 << 30, allocator_type="torch"):
     """
     Create and return an Iris instance with the specified heap size.
