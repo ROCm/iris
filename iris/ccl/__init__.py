@@ -12,5 +12,24 @@ Collective operations are accessed through the Iris instance's ccl attribute:
 
 from .config import Config
 from .utils import ReduceOp
+from .moe_dispatch import MoEDispatcher, MoEDispatchConfig, DispatchHandle
+from .moe_utils import (
+    ExptAssignment,
+    make_expt_dict_uniform,
+    make_expt_assignment,
+    topk,
+    TopkResult,
+)
 
-__all__ = ["Config", "ReduceOp"]
+__all__ = [
+    "Config",
+    "ReduceOp",
+    "MoEDispatcher",
+    "MoEDispatchConfig",
+    "DispatchHandle",
+    "ExptAssignment",
+    "make_expt_dict_uniform",
+    "make_expt_assignment",
+    "topk",
+    "TopkResult",
+]
