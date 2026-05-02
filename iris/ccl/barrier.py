@@ -17,41 +17,13 @@ def barrier(ctx, group=None):
     """
     Global barrier: all ranks block until every rank has arrived.
 
-    Uses device-side atomic flag signaling on the symmetric heap.
-    A flags workspace (one int32 per rank) is allocated on first call
-    and cached on the ctx for reuse.
-
-    Each call follows a clear-then-signal protocol:
-    1. Zero the flags array (clear stale values from previous barrier).
-    2. Host-side barrier (ctx.barrier()) to ensure all ranks have cleared
-       before any rank starts signaling.
-    3. Launch the kernel which signals peers (sets their flag to 1) and
-       spin-waits until all peers have signaled back.
+    Delegates to ``ctx.device_barrier()`` which uses a single-kernel
+    epoch-counter approach (atomic_add + spin-wait) on the symmetric heap.
+    Stateless w.r.t. host-side epoch tracking — no zeroing or preamble
+    host barrier needed.
 
     Args:
         ctx: Iris instance.
         group: ProcessGroup or None. If None, uses all ranks.
     """
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
-
-    # Cache flags tensor per group on the ctx instance.
-    # Use a dict keyed by group (None for default group).
-    if not hasattr(ctx, "_ccl_barrier_flags"):
-        ctx._ccl_barrier_flags = {}
-
-    if group not in ctx._ccl_barrier_flags:
-        # Allocate num_ranks elements so global rank indexing is always in-bounds,
-        # even when operating on a subset group.
-        ctx._ccl_barrier_flags[group] = ctx.zeros((ctx.get_num_ranks(),), dtype=torch.int32)
-
-    flags = ctx._ccl_barrier_flags[group]
-
-    # Clear flags and synchronize before signaling.
-    # This prevents races where a rank from a previous barrier call
-    # left stale signal values that the next call misreads as arrivals.
-    flags.zero_()
-    ctx.barrier()
-
-    from iris.ccl.triton.barrier import launch
-
-    launch(flags, ctx, rank_global, world_size, rank_start, rank_stride)
+    ctx.device_barrier(group)

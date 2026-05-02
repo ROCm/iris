@@ -88,7 +88,7 @@ def all_reduce_preamble(
 
     if variant in (VARIANT_ATOMIC, VARIANT_SPINLOCK, VARIANT_ONE_SHOT):
         output_tensor.zero_()
-        ctx.barrier()
+        ctx.device_barrier()
 
     elif variant == VARIANT_RING:
         num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
@@ -111,7 +111,7 @@ def all_reduce_preamble(
             workspace.flags.zero_()
 
         output_tensor.zero_()
-        ctx.barrier()
+        ctx.device_barrier()
 
     elif variant == VARIANT_TWO_SHOT:
         pass

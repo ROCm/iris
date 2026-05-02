@@ -353,7 +353,7 @@ def launch(
         else:
             output_tensor.zero_()
         torch.cuda.synchronize()
-        ctx.barrier()
+        ctx.device_barrier()
 
         iris_launch(
             persistent_reduce_lock,
