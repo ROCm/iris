@@ -1317,6 +1317,12 @@ class Iris:
                 config=config,
             )
 
+        def broadcast(self, tensor, src=0, group=None, async_op=False, config=None):
+            """Broadcast: root rank sends its data to all other ranks (in-place)."""
+            from iris.ccl.broadcast import broadcast
+
+            broadcast(tensor, self._iris, src=src, group=group, async_op=async_op, config=config)
+
         def sendrecv(self, send_tensor, recv_tensor, dst, src, group=None, tag=0, config=None):
             """
             Simultaneous send and recv.
