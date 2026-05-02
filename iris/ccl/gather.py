@@ -37,8 +37,7 @@ def gather(output_tensor, input_tensor, ctx, dst=0, group=None, async_op=False, 
 
     if dst < 0 or dst >= world_size:
         raise ValueError(
-            f"dst rank {dst} is out of range for world_size {world_size}. "
-            f"Expected 0 <= dst < {world_size}."
+            f"dst rank {dst} is out of range for world_size {world_size}. Expected 0 <= dst < {world_size}."
         )
 
     M, N = input_tensor.shape[:2]

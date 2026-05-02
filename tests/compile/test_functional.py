@@ -26,6 +26,7 @@ import iris.compile  # registers torch.ops.iris.*
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _skip_unless_distributed():
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -48,6 +49,7 @@ def _cleanup(ctx):
 # ---------------------------------------------------------------------------
 # all_reduce
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("M, N", [(128, 64), (1024, 256)])
@@ -74,8 +76,7 @@ def test_all_reduce_compile(dtype, M, N):
     atol = 1e-3 if dtype == torch.float16 else 1e-5
     try:
         assert torch.allclose(compiled_out, eager_out, atol=atol), (
-            f"all_reduce mismatch: max diff = "
-            f"{(compiled_out - eager_out).abs().max().item()}"
+            f"all_reduce mismatch: max diff = {(compiled_out - eager_out).abs().max().item()}"
         )
     finally:
         _cleanup(ctx)
@@ -84,6 +85,7 @@ def test_all_reduce_compile(dtype, M, N):
 # ---------------------------------------------------------------------------
 # all_gather
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("M, N", [(128, 64), (1024, 256)])
@@ -111,8 +113,7 @@ def test_all_gather_compile(dtype, M, N):
     atol = 1e-3 if dtype == torch.float16 else 1e-5
     try:
         assert torch.allclose(compiled_out, eager_out, atol=atol), (
-            f"all_gather mismatch: max diff = "
-            f"{(compiled_out - eager_out).abs().max().item()}"
+            f"all_gather mismatch: max diff = {(compiled_out - eager_out).abs().max().item()}"
         )
     finally:
         _cleanup(ctx)
@@ -121,6 +122,7 @@ def test_all_gather_compile(dtype, M, N):
 # ---------------------------------------------------------------------------
 # reduce_scatter
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("M, N", [(128, 64), (1024, 256)])
@@ -146,8 +148,7 @@ def test_reduce_scatter_compile(dtype, M, N):
     atol = 1e-3 if dtype == torch.float16 else 1e-5
     try:
         assert torch.allclose(compiled_out, eager_out, atol=atol), (
-            f"reduce_scatter mismatch: max diff = "
-            f"{(compiled_out - eager_out).abs().max().item()}"
+            f"reduce_scatter mismatch: max diff = {(compiled_out - eager_out).abs().max().item()}"
         )
     finally:
         _cleanup(ctx)
@@ -156,6 +157,7 @@ def test_reduce_scatter_compile(dtype, M, N):
 # ---------------------------------------------------------------------------
 # all_to_all
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("M, N_per_rank", [(128, 64), (1024, 128)])
@@ -183,8 +185,7 @@ def test_all_to_all_compile(dtype, M, N_per_rank):
     atol = 1e-3 if dtype == torch.float16 else 1e-5
     try:
         assert torch.allclose(compiled_out, eager_out, atol=atol), (
-            f"all_to_all mismatch: max diff = "
-            f"{(compiled_out - eager_out).abs().max().item()}"
+            f"all_to_all mismatch: max diff = {(compiled_out - eager_out).abs().max().item()}"
         )
     finally:
         _cleanup(ctx)
@@ -193,6 +194,7 @@ def test_all_to_all_compile(dtype, M, N_per_rank):
 # ---------------------------------------------------------------------------
 # Context management
 # ---------------------------------------------------------------------------
+
 
 def test_set_context_rejects_non_iris():
     """set_context raises TypeError for non-Iris objects."""
@@ -204,6 +206,7 @@ def test_get_context_without_set():
     """get_context raises RuntimeError before set_context is called."""
     # Temporarily clear the global context
     import iris.compile.functional as _mod
+
     saved = _mod._iris_ctx
     _mod._iris_ctx = None
     try:

@@ -52,8 +52,7 @@ def get_context() -> Iris:
     """
     if _iris_ctx is None:
         raise RuntimeError(
-            "Iris context not set. Call iris.compile.set_context(ctx) "
-            "before using compiled collectives."
+            "Iris context not set. Call iris.compile.set_context(ctx) before using compiled collectives."
         )
     return _iris_ctx
 
@@ -118,13 +117,16 @@ def _all_gather_meta(input: torch.Tensor) -> torch.Tensor:
 
     if input.ndim >= 2:
         return torch.empty(
-            world_size * input.shape[0], *input.shape[1:],
-            dtype=input.dtype, device=input.device,
+            world_size * input.shape[0],
+            *input.shape[1:],
+            dtype=input.dtype,
+            device=input.device,
         )
     else:
         return torch.empty(
             world_size * input.shape[0],
-            dtype=input.dtype, device=input.device,
+            dtype=input.dtype,
+            device=input.device,
         )
 
 

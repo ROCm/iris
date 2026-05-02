@@ -36,6 +36,7 @@ def _world():
 # Helpers -- create an IrisProcessGroup on top of the already-initialised PG
 # ---------------------------------------------------------------------------
 
+
 def _make_iris_pg():
     """Construct an IrisProcessGroup wrapping the current distributed state."""
     from iris.distributed.process_group import IrisProcessGroup
@@ -51,6 +52,7 @@ def _make_iris_pg():
 # All-Reduce
 # ===================================================================
 
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_allreduce(dtype):
     """Each rank contributes (rank+1); result should be sum(1..world_size)."""
@@ -65,14 +67,15 @@ def test_allreduce(dtype):
     work.wait()
 
     expected = sum(range(1, world_size + 1))
-    assert torch.allclose(
-        tensor, torch.full_like(tensor, expected), atol=1e-2
-    ), f"rank {rank}: expected {expected}, got {tensor[0, 0].item()}"
+    assert torch.allclose(tensor, torch.full_like(tensor, expected), atol=1e-2), (
+        f"rank {rank}: expected {expected}, got {tensor[0, 0].item()}"
+    )
 
 
 # ===================================================================
 # All-Gather (list variant)
 # ===================================================================
+
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
 def test_allgather(dtype):
@@ -89,14 +92,15 @@ def test_allgather(dtype):
 
     for i in range(world_size):
         expected_val = float(i + 1)
-        assert torch.allclose(
-            output_list[i], torch.full_like(output_list[i], expected_val), atol=1e-2
-        ), f"rank {rank}: chunk {i} expected {expected_val}, got {output_list[i][0, 0].item()}"
+        assert torch.allclose(output_list[i], torch.full_like(output_list[i], expected_val), atol=1e-2), (
+            f"rank {rank}: chunk {i} expected {expected_val}, got {output_list[i][0, 0].item()}"
+        )
 
 
 # ===================================================================
 # All-Gather (flat / into_tensor variant)
 # ===================================================================
+
 
 def test_allgather_into_tensor():
     """all_gather_into_tensor style -- flat output."""
@@ -114,14 +118,15 @@ def test_allgather_into_tensor():
     for i in range(world_size):
         chunk = output_tensor[i * M : (i + 1) * M]
         expected_val = float(i + 1)
-        assert torch.allclose(
-            chunk, torch.full_like(chunk, expected_val), atol=1e-2
-        ), f"rank {rank}: chunk {i} expected {expected_val}, got {chunk[0, 0].item()}"
+        assert torch.allclose(chunk, torch.full_like(chunk, expected_val), atol=1e-2), (
+            f"rank {rank}: chunk {i} expected {expected_val}, got {chunk[0, 0].item()}"
+        )
 
 
 # ===================================================================
 # Reduce-Scatter (list variant)
 # ===================================================================
+
 
 def test_reduce_scatter():
     """Reduce then scatter -- each rank gets the sum of its chunk."""
@@ -132,10 +137,7 @@ def test_reduce_scatter():
     dtype = torch.float32
 
     # Each rank contributes world_size chunks, each filled with (rank+1)
-    input_list = [
-        torch.full((M, N), float(rank + 1), dtype=dtype, device=f"cuda:{rank}")
-        for _ in range(world_size)
-    ]
+    input_list = [torch.full((M, N), float(rank + 1), dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
     output_tensor = torch.zeros(M, N, dtype=dtype, device=f"cuda:{rank}")
 
     opts = dist.ReduceScatterOptions()
@@ -144,14 +146,15 @@ def test_reduce_scatter():
     work.wait()
 
     expected = sum(range(1, world_size + 1))
-    assert torch.allclose(
-        output_tensor, torch.full_like(output_tensor, expected), atol=1e-2
-    ), f"rank {rank}: expected {expected}, got {output_tensor[0, 0].item()}"
+    assert torch.allclose(output_tensor, torch.full_like(output_tensor, expected), atol=1e-2), (
+        f"rank {rank}: expected {expected}, got {output_tensor[0, 0].item()}"
+    )
 
 
 # ===================================================================
 # Reduce-Scatter (flat / into_tensor variant)
 # ===================================================================
+
 
 def test_reduce_scatter_tensor():
     """reduce_scatter_tensor -- flat input/output."""
@@ -161,9 +164,7 @@ def test_reduce_scatter_tensor():
     M_per_rank, N = 32, 16
     dtype = torch.float32
 
-    input_tensor = torch.full(
-        (world_size * M_per_rank, N), float(rank + 1), dtype=dtype, device=f"cuda:{rank}"
-    )
+    input_tensor = torch.full((world_size * M_per_rank, N), float(rank + 1), dtype=dtype, device=f"cuda:{rank}")
     output_tensor = torch.zeros(M_per_rank, N, dtype=dtype, device=f"cuda:{rank}")
 
     opts = dist.ReduceScatterOptions()
@@ -172,14 +173,15 @@ def test_reduce_scatter_tensor():
     work.wait()
 
     expected = sum(range(1, world_size + 1))
-    assert torch.allclose(
-        output_tensor, torch.full_like(output_tensor, expected), atol=1e-2
-    ), f"rank {rank}: expected {expected}, got {output_tensor[0, 0].item()}"
+    assert torch.allclose(output_tensor, torch.full_like(output_tensor, expected), atol=1e-2), (
+        f"rank {rank}: expected {expected}, got {output_tensor[0, 0].item()}"
+    )
 
 
 # ===================================================================
 # All-to-All (list variant)
 # ===================================================================
+
 
 def test_alltoall():
     """Each rank sends its rank value to all; rank i receives values from all ranks."""
@@ -189,14 +191,8 @@ def test_alltoall():
     M, N = 16, 8
     dtype = torch.float32
 
-    input_list = [
-        torch.full((M, N), float(rank), dtype=dtype, device=f"cuda:{rank}")
-        for _ in range(world_size)
-    ]
-    output_list = [
-        torch.zeros(M, N, dtype=dtype, device=f"cuda:{rank}")
-        for _ in range(world_size)
-    ]
+    input_list = [torch.full((M, N), float(rank), dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
+    output_list = [torch.zeros(M, N, dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
 
     opts = dist.AllToAllOptions()
     work = pg.alltoall(output_list, input_list, opts)
@@ -205,14 +201,15 @@ def test_alltoall():
     # Each output_list[i] should contain the value i (sent by rank i)
     for i in range(world_size):
         expected_val = float(i)
-        assert torch.allclose(
-            output_list[i], torch.full_like(output_list[i], expected_val), atol=1e-2
-        ), f"rank {rank}: from rank {i} expected {expected_val}, got {output_list[i][0, 0].item()}"
+        assert torch.allclose(output_list[i], torch.full_like(output_list[i], expected_val), atol=1e-2), (
+            f"rank {rank}: from rank {i} expected {expected_val}, got {output_list[i][0, 0].item()}"
+        )
 
 
 # ===================================================================
 # All-to-All (flat / base variant)
 # ===================================================================
+
 
 def test_alltoall_base():
     """all_to_all with single concatenated tensors."""
@@ -234,14 +231,15 @@ def test_alltoall_base():
     for i in range(world_size):
         chunk = output_tensor[:, i * N : (i + 1) * N]
         expected_val = float(i)
-        assert torch.allclose(
-            chunk, torch.full_like(chunk, expected_val), atol=1e-2
-        ), f"rank {rank}: chunk {i} expected {expected_val}, got {chunk[0, 0].item()}"
+        assert torch.allclose(chunk, torch.full_like(chunk, expected_val), atol=1e-2), (
+            f"rank {rank}: chunk {i} expected {expected_val}, got {chunk[0, 0].item()}"
+        )
 
 
 # ===================================================================
 # Barrier
 # ===================================================================
+
 
 def test_barrier():
     """Barrier should complete without error."""
@@ -254,6 +252,7 @@ def test_barrier():
 # ===================================================================
 # Broadcast
 # ===================================================================
+
 
 def test_broadcast():
     """Broadcast from rank 0."""
@@ -271,14 +270,15 @@ def test_broadcast():
     work = pg.broadcast([tensor], opts)
     work.wait()
 
-    assert torch.allclose(
-        tensor, torch.full_like(tensor, 42.0), atol=1e-2
-    ), f"rank {rank}: expected 42.0, got {tensor[0, 0].item()}"
+    assert torch.allclose(tensor, torch.full_like(tensor, 42.0), atol=1e-2), (
+        f"rank {rank}: expected 42.0, got {tensor[0, 0].item()}"
+    )
 
 
 # ===================================================================
 # Backend name
 # ===================================================================
+
 
 def test_backend_name():
     """Verify getBackendName returns 'iris'."""

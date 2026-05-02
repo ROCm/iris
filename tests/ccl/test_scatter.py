@@ -45,10 +45,7 @@ def test_scatter(dtype, M, N, block_size_m, block_size_n):
     pytorch_output = torch.zeros(M, N, dtype=dtype, device=f"cuda:{rank}")
     scatter_list = None
     if rank == 0:
-        scatter_list = [
-            torch.full((M, N), float(i + 1), dtype=dtype, device=f"cuda:{rank}")
-            for i in range(world_size)
-        ]
+        scatter_list = [torch.full((M, N), float(i + 1), dtype=dtype, device=f"cuda:{rank}") for i in range(world_size)]
 
     shmem.barrier()
     dist.scatter(pytorch_output, scatter_list, src=0)
@@ -77,8 +74,7 @@ def test_scatter(dtype, M, N, block_size_m, block_size_n):
 
     try:
         assert torch.allclose(iris_output, pytorch_output, atol=atol), (
-            f"Max difference: {max_diff}, expected < {atol}\n"
-            f"Rank {rank}: Iris output doesn't match PyTorch's scatter"
+            f"Max difference: {max_diff}, expected < {atol}\nRank {rank}: Iris output doesn't match PyTorch's scatter"
         )
     finally:
         shmem.barrier()
@@ -122,10 +118,7 @@ def test_scatter_nonzero_root(dtype, M, N):
     pytorch_output = torch.zeros(M, N, dtype=dtype, device=f"cuda:{rank}")
     scatter_list = None
     if rank == src:
-        scatter_list = [
-            torch.full((M, N), float(i + 1), dtype=dtype, device=f"cuda:{rank}")
-            for i in range(world_size)
-        ]
+        scatter_list = [torch.full((M, N), float(i + 1), dtype=dtype, device=f"cuda:{rank}") for i in range(world_size)]
 
     shmem.barrier()
     dist.scatter(pytorch_output, scatter_list, src=src)

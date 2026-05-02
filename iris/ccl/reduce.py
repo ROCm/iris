@@ -45,9 +45,7 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
     if dst < 0 or dst >= world_size:
-        raise ValueError(
-            f"dst must be in [0, world_size), got dst={dst}, world_size={world_size}."
-        )
+        raise ValueError(f"dst must be in [0, world_size), got dst={dst}, world_size={world_size}.")
 
     if config.use_gluon:
         from iris.ccl.gluon.reduce import launch

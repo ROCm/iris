@@ -33,9 +33,7 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
     if src < 0 or src >= world_size:
-        raise ValueError(
-            f"src must be in [0, world_size), got src={src}, world_size={world_size}."
-        )
+        raise ValueError(f"src must be in [0, world_size), got src={src}, world_size={world_size}.")
 
     if config.use_gluon:
         from iris.ccl.gluon.broadcast import launch

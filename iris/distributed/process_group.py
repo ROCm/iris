@@ -50,6 +50,7 @@ from iris.host.logging.logging import logger
 # Work handle -- returned by every collective
 # ---------------------------------------------------------------------------
 
+
 def _ret_work(tensors):
     """Wrap finished tensors into a ``torch._C._distributed_c10d.Work`` object.
 
@@ -78,14 +79,13 @@ def _map_reduce_op(torch_op):
     """
     if torch_op in _TORCH_TO_IRIS_REDUCE_OP:
         return _TORCH_TO_IRIS_REDUCE_OP[torch_op]
-    raise NotImplementedError(
-        f"Iris backend only supports ReduceOp.SUM, got {torch_op}"
-    )
+    raise NotImplementedError(f"Iris backend only supports ReduceOp.SUM, got {torch_op}")
 
 
 # ---------------------------------------------------------------------------
 # ProcessGroup implementation
 # ---------------------------------------------------------------------------
+
 
 class IrisProcessGroup(ProcessGroup):
     """``torch.distributed.ProcessGroup`` backed by iris CCL.
@@ -420,9 +420,7 @@ class IrisProcessGroup(ProcessGroup):
         world_size = self.size()
 
         if output_split_sizes or input_split_sizes:
-            raise NotImplementedError(
-                "Iris backend does not support non-uniform split sizes in alltoall_base"
-            )
+            raise NotImplementedError("Iris backend does not support non-uniform split sizes in alltoall_base")
 
         if input_tensor.dim() == 1:
             N_total = input_tensor.numel()
@@ -478,6 +476,7 @@ class IrisProcessGroup(ProcessGroup):
 # ---------------------------------------------------------------------------
 # Factory function used by register_backend
 # ---------------------------------------------------------------------------
+
 
 def _create_iris_backend(prefix_store, rank, world_size, timeout):
     """Factory called by ``torch.distributed.init_process_group(backend='iris')``."""
