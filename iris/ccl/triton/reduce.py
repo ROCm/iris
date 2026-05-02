@@ -81,59 +81,57 @@ def persistent_reduce_lock(
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-        if group_rank == dst:
-            continue
+        if group_rank != dst:
+            input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+            output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
 
-        input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-        output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+            local_data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
 
-        local_data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
+            while (
+                iris.atomic_cas(
+                    locks_ptr + tile_id,
+                    0,
+                    1,
+                    iris_rank,
+                    dst_iris_rank,
+                    heap_bases,
+                    sem="acquire",
+                    scope="sys",
+                )
+                != 0
+            ):
+                pass
 
-        while (
-            iris.atomic_cas(
-                locks_ptr + tile_id,
-                0,
-                1,
+            current_value = iris.load(
+                output_ptr + output_offset,
                 iris_rank,
                 dst_iris_rank,
                 heap_bases,
-                sem="acquire",
+                mask=mask,
+            )
+
+            acc = current_value.to(acc_dtype) + local_data.to(acc_dtype)
+            result = acc.to(output_ptr.type.element_ty)
+
+            iris.store(
+                output_ptr + output_offset,
+                result,
+                iris_rank,
+                dst_iris_rank,
+                heap_bases,
+                mask=mask,
+                hint=(1, BLOCK_SIZE_N),
+            )
+
+            iris.atomic_xchg(
+                locks_ptr + tile_id,
+                0,
+                iris_rank,
+                dst_iris_rank,
+                heap_bases,
+                sem="release",
                 scope="sys",
             )
-            != 0
-        ):
-            pass
-
-        current_value = iris.load(
-            output_ptr + output_offset,
-            iris_rank,
-            dst_iris_rank,
-            heap_bases,
-            mask=mask,
-        )
-
-        acc = current_value.to(acc_dtype) + local_data.to(acc_dtype)
-        result = acc.to(output_ptr.type.element_ty)
-
-        iris.store(
-            output_ptr + output_offset,
-            result,
-            iris_rank,
-            dst_iris_rank,
-            heap_bases,
-            mask=mask,
-            hint=(1, BLOCK_SIZE_N),
-        )
-
-        iris.atomic_xchg(
-            locks_ptr + tile_id,
-            0,
-            iris_rank,
-            dst_iris_rank,
-            heap_bases,
-            sem="release",
-            scope="sys",
-        )
 
 
 @triton.jit()
