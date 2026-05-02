@@ -1317,6 +1317,130 @@ class Iris:
                 config=config,
             )
 
+        def broadcast(self, tensor, src=0, group=None, async_op=False, config=None):
+            """
+            In-place broadcast: src rank's data is copied to all other ranks.
+
+            Args:
+                tensor: Tensor on the symmetric heap. Modified in-place.
+                src: Source rank within the group (default: 0).
+                group: ProcessGroup or None.
+                async_op: If True, skip trailing barrier.
+                config: Config with kernel parameters.
+            """
+            from iris.ccl.broadcast import broadcast
+
+            broadcast(tensor, self._iris, src=src, group=group, async_op=async_op, config=config)
+
+        def reduce(self, output_tensor, input_tensor, dst=0, op=None, group=None, async_op=False, config=None):
+            """
+            Reduce: sum inputs across all ranks, result stored only on dst.
+
+            Args:
+                output_tensor: Shape (M, N) — receives the reduced result on dst.
+                input_tensor: Shape (M, N) — local rank's partial data.
+                dst: Destination rank (default: 0).
+                op: ReduceOp (only SUM supported).
+                group: ProcessGroup or None.
+                async_op: If True, skip trailing barrier.
+                config: Config with kernel parameters.
+            """
+            from iris.ccl.reduce import reduce
+
+            reduce(output_tensor, input_tensor, self._iris, dst=dst, op=op, group=group, async_op=async_op, config=config)
+
+        def scatter(self, output_tensor, input_tensor, src=0, group=None, async_op=False, config=None):
+            """
+            Scatter: root distributes equal-sized chunks to all ranks.
+
+            Args:
+                output_tensor: Shape (M, N) — receives this rank's chunk.
+                input_tensor: Shape (world_size * M, N) — must be allocated on all ranks.
+                src: Source rank (default: 0).
+                group: ProcessGroup or None.
+                async_op: If True, skip trailing barrier.
+                config: Config with kernel parameters.
+            """
+            from iris.ccl.scatter import scatter
+
+            scatter(output_tensor, input_tensor, self._iris, src=src, group=group, async_op=async_op, config=config)
+
+        def gather(self, output_tensor, input_tensor, dst=0, group=None, async_op=False, config=None):
+            """
+            Gather: each rank sends its input to the root rank.
+
+            Args:
+                output_tensor: Shape (world_size * M, N) — must be allocated on all ranks.
+                input_tensor: Shape (M, N).
+                dst: Destination rank (default: 0).
+                group: ProcessGroup or None.
+                async_op: If True, skip trailing barrier.
+                config: Config with kernel parameters.
+            """
+            from iris.ccl.gather import gather
+
+            gather(output_tensor, input_tensor, self._iris, dst=dst, group=group, async_op=async_op, config=config)
+
+        def send(self, tensor, dst, group=None, tag=0, config=None):
+            """
+            Send tensor to destination rank.
+
+            Args:
+                tensor: Tensor to send. Must be on symmetric heap.
+                dst: Destination rank within the group.
+                group: ProcessGroup or None.
+                tag: Communication tag (currently unused).
+                config: Config with kernel parameters.
+            """
+            from iris.ccl.sendrecv import send
+
+            send(tensor, self._iris, dst, group=group, tag=tag, config=config)
+
+        def recv(self, tensor, src, group=None, tag=0, config=None):
+            """
+            Receive tensor from source rank.
+
+            Args:
+                tensor: Output tensor. Must be on symmetric heap.
+                src: Source rank within the group.
+                group: ProcessGroup or None.
+                tag: Communication tag (currently unused).
+                config: Config with kernel parameters.
+            """
+            from iris.ccl.sendrecv import recv
+
+            recv(tensor, self._iris, src, group=group, tag=tag, config=config)
+
+        def sendrecv(self, send_tensor, recv_tensor, dst, src, group=None, tag=0, config=None):
+            """
+            Simultaneous send and recv.
+
+            Args:
+                send_tensor: Tensor to send.
+                recv_tensor: Tensor to receive into. Must be on symmetric heap.
+                dst: Destination rank for send.
+                src: Source rank for recv.
+                group: ProcessGroup or None.
+                tag: Communication tag (currently unused).
+                config: Config with kernel parameters.
+            """
+            from iris.ccl.sendrecv import sendrecv
+
+            sendrecv(send_tensor, recv_tensor, self._iris, dst, src, group=group, tag=tag, config=config)
+
+        def barrier(self, group=None):
+            """
+            GPU-side barrier: all ranks block until every rank has arrived.
+
+            Uses device-side atomic flag signaling on the symmetric heap.
+
+            Args:
+                group: ProcessGroup or None.
+            """
+            from iris.ccl.barrier import barrier
+
+            barrier(self._iris, group=group)
+
 
 def iris(heap_size=1 << 30, allocator_type="torch"):
     """
