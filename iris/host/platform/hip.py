@@ -153,10 +153,17 @@ def get_cu_count(device_id=None):
     return cu_count.value
 
 
+_rocm_version_cache = None
+
+
 def get_rocm_version():
+    global _rocm_version_cache
+    if _rocm_version_cache is not None:
+        return _rocm_version_cache
+
     if not _is_amd_backend:
-        # Not applicable for CUDA
-        return (-1, -1)
+        _rocm_version_cache = (-1, -1)
+        return _rocm_version_cache
 
     major, minor = -1, -1
 
@@ -179,10 +186,10 @@ def get_rocm_version():
             major = int(version.split(".")[0])
             minor = int(version.split(".")[1])
     except (FileNotFoundError, IOError, ValueError, IndexError):
-        # If we can't read the version file, return -1, -1
         pass
 
-    return (major, minor)
+    _rocm_version_cache = (major, minor)
+    return _rocm_version_cache
 
 
 def get_wall_clock_rate(device_id):
@@ -215,20 +222,28 @@ def get_arch_string(device_id=None):
         return f"sm_{props.major}{props.minor}"
 
 
+_xcc_cache = {}
+
+
 def get_num_xcc(device_id=None):
     if device_id is None:
         device_id = get_device_id()
 
+    if device_id in _xcc_cache:
+        return _xcc_cache[device_id]
+
     if not _is_amd_backend:
-        # XCC is AMD-specific, return 1 for CUDA
+        _xcc_cache[device_id] = 1
         return 1
 
     rocm_major, _ = get_rocm_version()
     if rocm_major < 7:
+        _xcc_cache[device_id] = 8
         return 8
     hipDeviceAttributeNumberOfXccs = 10018
     xcc_count = ctypes.c_int()
     gpu_try(gpu_runtime.hipDeviceGetAttribute(ctypes.byref(xcc_count), hipDeviceAttributeNumberOfXccs, device_id))
+    _xcc_cache[device_id] = xcc_count.value
     return xcc_count.value
 
 
