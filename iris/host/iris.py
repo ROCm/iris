@@ -1205,6 +1205,80 @@ class Iris:
 
             all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
+        def gather(self, output_tensor, input_tensor, dst=0, group=None, async_op=False, config=None):
+            """
+            Gather collective operation.
+
+            Each rank sends its input tensor to the root rank (dst). The root
+            concatenates all inputs along dimension 0 (rows), producing output
+            of shape (world_size * M, N). Output is only valid on the root rank.
+
+            Args:
+                output_tensor: Output tensor of shape (world_size * M, N). Must be
+                               allocated on all ranks (needed for address translation),
+                               but only root's contents are meaningful.
+                input_tensor: Input tensor of shape (M, N) - local rank's data to send
+                dst: Destination rank within the group that receives the result.
+                     Default: 0.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> # Input: (M, N), Output on root: (world_size * M, N)
+                >>> ctx.ccl.gather(output_tensor, input_tensor)
+
+                >>> # Gather to rank 2
+                >>> ctx.ccl.gather(output_tensor, input_tensor, dst=2)
+
+                >>> # Async operation (no barrier)
+                >>> ctx.ccl.gather(output_tensor, input_tensor, async_op=True)
+            """
+            from iris.ccl.gather import gather
+
+            gather(output_tensor, input_tensor, self._iris, dst=dst, group=group, async_op=async_op, config=config)
+
+        def broadcast(self, tensor, src=0, group=None, async_op=False, config=None):
+            """
+            Broadcast collective operation.
+
+            Root rank sends its data to all other ranks. In-place: tensor is
+            both input (on root) and output (on all ranks). After the operation,
+            every rank holds a copy of root's data.
+
+            Args:
+                tensor: Tensor of shape (M, N) -- root's data is broadcast to all ranks in-place.
+                src: Source rank within the group (default: 0).
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> ctx.ccl.broadcast(tensor, src=0)
+
+                >>> # Custom configuration
+                >>> from iris.ccl import Config
+                >>> config = Config(block_size_m=128, block_size_n=32)
+                >>> ctx.ccl.broadcast(tensor, src=0, config=config)
+
+                >>> # Broadcast from last rank
+                >>> ctx.ccl.broadcast(tensor, src=ctx.get_num_ranks() - 1)
+
+                >>> # Async operation (no barrier)
+                >>> ctx.ccl.broadcast(tensor, src=0, async_op=True)
+            """
+            from iris.ccl.broadcast import broadcast
+
+            broadcast(tensor, self._iris, src=src, group=group, async_op=async_op, config=config)
+
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
             Prepare reusable workspace for all-reduce.
@@ -1317,9 +1391,43 @@ class Iris:
                 config=config,
             )
 
+        def reduce(self, output_tensor, input_tensor, dst=0, op=None, group=None, async_op=False, config=None):
+            """
+            Reduce collective operation.
 
-<<<<<<< HEAD
-=======
+            Sum inputs across all ranks, result stored only on root (dst).
+            All ranks contribute their input_tensor. The element-wise sum is
+            computed and written to output_tensor on the root rank only.
+            Non-root ranks' output_tensor contents are undefined (MPI semantics).
+
+            Args:
+                output_tensor: Output tensor of shape (M, N) - receives the reduced result on root
+                input_tensor: Input tensor of shape (M, N) - local rank's partial data
+                dst: Destination rank (within the group) that receives the result.
+                     Default: 0.
+                op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
+                    Default: ReduceOp.SUM.
+                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                       Default: None.
+                async_op: If False, performs a barrier at the end. If True, returns immediately.
+                          Default: False.
+                config: Config instance with kernel parameters (default: None).
+                        If None, uses default Config values.
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> ctx.ccl.reduce(output_tensor, input_tensor, dst=0)
+
+                >>> # Reduce to rank 2
+                >>> ctx.ccl.reduce(output_tensor, input_tensor, dst=2)
+
+                >>> # Async operation (no barrier)
+                >>> ctx.ccl.reduce(output_tensor, input_tensor, async_op=True)
+            """
+            from iris.ccl.reduce import reduce
+
+            reduce(output_tensor, input_tensor, self._iris, dst=dst, op=op, group=group, async_op=async_op, config=config)
+
         def scatter(self, output_tensor, input_tensor, src=0, group=None, async_op=False, config=None):
             """
             Scatter collective operation.
@@ -1459,8 +1567,30 @@ class Iris:
                 config=config,
             )
 
+        def ccl_barrier(self, group=None):
+            """
+            GPU-side barrier: all ranks block until every rank has arrived.
 
->>>>>>> 3faa101d (Add reduce collective operation)
+            Uses device-side atomic flag signaling on the symmetric heap.
+            A flags workspace (one int32 per rank) is allocated on first call
+            and cached on the ctx for reuse.
+
+            Note: This is distinct from ctx.barrier() which synchronizes both
+            the GPU device and performs a distributed barrier. This method
+            performs ONLY the distributed barrier using GPU kernels.
+
+            Args:
+                group: ProcessGroup or None. If None, uses all ranks.
+
+            Example:
+                >>> ctx = iris.iris()
+                >>> ctx.ccl.ccl_barrier()  # GPU-side barrier only
+            """
+            from iris.ccl.barrier import barrier
+
+            barrier(self._iris, group=group)
+
+
 def iris(heap_size=1 << 30, allocator_type="torch"):
     """
     Create and return an Iris instance with the specified heap size.
