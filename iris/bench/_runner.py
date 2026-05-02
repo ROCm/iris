@@ -23,7 +23,6 @@ from torch.distributed.launcher.api import LaunchConfig, elastic_launch
 from ._core import (
     AxisDef,
     BenchmarkDef,
-    EnvDef,
     Result,
     State,
     _SkipCombination,
