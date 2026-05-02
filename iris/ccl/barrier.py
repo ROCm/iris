@@ -8,10 +8,6 @@ GPU-side barrier using atomic signaling on the symmetric heap.
 Triton only (no Gluon support).
 """
 
-import torch
-
-from iris.ccl.utils import extract_group_info
-
 
 def barrier(ctx, group=None):
     """
