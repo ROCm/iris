@@ -164,7 +164,7 @@ class OpsNamespace:
             >>> output = shmem.zeros((M, N_local), dtype=torch.float16)
             >>> shmem.ops.matmul_reduce_scatter(output, A, B)
         """
-        return matmul_reduce_scatter(self._shmem, output_tensor, A, B, bias, async_op, config, workspace)
+        return matmul_reduce_scatter(self._shmem, output_tensor, A, B, async_op, config, workspace)
 
 
 # Export public API
