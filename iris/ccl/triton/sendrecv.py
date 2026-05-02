@@ -4,8 +4,8 @@
 """
 Triton kernels for point-to-point send/recv communication.
 
-Send kernel: load local data, iris.store to destination buffer, signal flag.
-Recv kernel: spin on flag, data already in place from sender's iris.store.
+Send kernel: load local data, iris.store to destination buffer.
+Synchronization is handled at the host level via ctx.barrier().
 """
 
 import triton
@@ -18,8 +18,6 @@ from iris.host.tracing.kernel_artifacts import iris_launch
 def send_kernel(
     input_ptr,
     output_ptr,
-    flag_ptr,
-    done_counter_ptr,
     M,
     N,
     stride_in_m,
@@ -29,18 +27,16 @@ def send_kernel(
     heap_bases: tl.tensor,
     iris_rank: tl.constexpr,
     dst_iris_rank: tl.constexpr,
-    tag: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
 ):
     """
-    Send kernel: write local data to receiver's output buffer, then signal.
+    Send kernel: write local data to receiver's output buffer via iris.store.
 
-    Uses a completion counter so the last PID to finish its tiles
-    signals the receiver. This guarantees all remote stores have been
-    issued before the flag is set.
+    Synchronization is done host-side (ctx.barrier after kernel completes),
+    matching the pattern used by all_gather.
     """
     pid = tl.program_id(0)
 
@@ -92,68 +88,27 @@ def send_kernel(
             hint=(1, BLOCK_SIZE_N),
         )
 
-    # Grid-wide completion: each PID increments counter after finishing all tiles.
-    # The last PID (counter reaches COMM_SMS) signals the receiver.
-    count = tl.atomic_add(done_counter_ptr, 1, sem="release", scope="sys")
-    if count == COMM_SMS - 1:
-        iris.atomic_xchg(
-            flag_ptr,
-            1,
-            iris_rank,
-            dst_iris_rank,
-            heap_bases,
-            sem="release",
-            scope="sys",
-        )
-
-
-@triton.jit()
-def recv_kernel(
-    flag_ptr,
-    iris_rank: tl.constexpr,
-):
-    """
-    Recv kernel: spin on flag until sender signals completion.
-
-    The receiver's output buffer is already populated by the sender's
-    iris.store calls. This kernel only needs to wait for the completion
-    flag, then reset it for the next send/recv round.
-    """
-    while tl.atomic_cas(flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
-        pass
-
-    tl.atomic_xchg(flag_ptr, 0, sem="release", scope="sys")
-
 
 def launch_send(
     input_tensor,
     output_tensor,
-    flag_tensor,
     ctx,
     rank_global,
     dst_iris_rank,
-    tag,
     config,
 ):
     """Launch the Triton send kernel."""
-    import torch
-
     M, N = input_tensor.shape[:2]
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
     heap_bases = ctx.get_heap_bases()
 
-    # Completion counter for grid-wide synchronization (local, not on heap)
-    done_counter = torch.zeros(1, dtype=torch.int32, device=input_tensor.device)
-
     iris_launch(
         send_kernel,
         (config.comm_sms,),
         input_tensor,
         output_tensor,
-        flag_tensor,
-        done_counter,
         M,
         N,
         stride_in_m,
@@ -163,7 +118,6 @@ def launch_send(
         heap_bases,
         rank_global,
         dst_iris_rank,
-        tag,
         config.block_size_m,
         config.block_size_n,
         config.swizzle_size,
@@ -174,23 +128,4 @@ def launch_send(
         algorithm="send",
         rank=rank_global,
         dtype=input_tensor.dtype,
-    )
-
-
-def launch_recv(
-    flag_tensor,
-    rank_global,
-    config,
-):
-    """Launch the Triton recv kernel."""
-    iris_launch(
-        recv_kernel,
-        (1,),
-        flag_tensor,
-        rank_global,
-        num_stages=config.num_stages,
-        num_warps=config.num_warps,
-        waves_per_eu=config.waves_per_eu,
-        algorithm="recv",
-        rank=rank_global,
     )

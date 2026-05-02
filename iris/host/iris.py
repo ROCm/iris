@@ -1323,6 +1323,36 @@ class Iris:
 
             broadcast(tensor, self._iris, src=src, group=group, async_op=async_op, config=config)
 
+        def send(self, tensor, dst, group=None, tag=0, config=None):
+            """
+            Send tensor to destination rank.
+
+            Args:
+                tensor: Tensor to send, shape (M, N).
+                dst: Destination rank within the group.
+                group: ProcessGroup or None. If None, uses all ranks.
+                tag: Communication tag (default: 0).
+                config: Config with kernel parameters (default: None).
+            """
+            from iris.ccl.sendrecv import send
+
+            send(tensor, self._iris, dst=dst, group=group, tag=tag, config=config)
+
+        def recv(self, tensor, src, group=None, tag=0, config=None):
+            """
+            Receive tensor from source rank into tensor.
+
+            Args:
+                tensor: Output tensor to receive into, shape (M, N).
+                src: Source rank within the group.
+                group: ProcessGroup or None. If None, uses all ranks.
+                tag: Communication tag (default: 0).
+                config: Config with kernel parameters (default: None).
+            """
+            from iris.ccl.sendrecv import recv
+
+            recv(tensor, self._iris, src=src, group=group, tag=tag, config=config)
+
         def sendrecv(self, send_tensor, recv_tensor, dst, src, group=None, tag=0, config=None):
             """
             Simultaneous send and recv.
