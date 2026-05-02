@@ -12,5 +12,6 @@ Collective operations are accessed through the Iris instance's ccl attribute:
 
 from .config import Config
 from .utils import ReduceOp
+from .fused_ar_rmsnorm import all_reduce_rmsnorm, all_reduce_rmsnorm_preamble, AllReduceRMSNormWorkspace
 
-__all__ = ["Config", "ReduceOp"]
+__all__ = ["Config", "ReduceOp", "all_reduce_rmsnorm", "all_reduce_rmsnorm_preamble", "AllReduceRMSNormWorkspace"]
