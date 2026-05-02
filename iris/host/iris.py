@@ -1347,7 +1347,9 @@ class Iris:
             """
             from iris.ccl.reduce import reduce
 
-            reduce(output_tensor, input_tensor, self._iris, dst=dst, op=op, group=group, async_op=async_op, config=config)
+            reduce(
+                output_tensor, input_tensor, self._iris, dst=dst, op=op, group=group, async_op=async_op, config=config
+            )
 
         def scatter(self, output_tensor, input_tensor, src=0, group=None, async_op=False, config=None):
             """
