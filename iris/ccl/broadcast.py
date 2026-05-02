@@ -47,7 +47,7 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
     numel = tensor.numel()
     if numel == 0:
         if not async_op:
-            ctx.barrier(group=group)
+            ctx.device_barrier(group)
         return
 
     from iris.ccl.triton.broadcast import launch
@@ -69,4 +69,4 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
     )
 
     if not async_op:
-        ctx.barrier(group=group)
+        ctx.device_barrier(group)

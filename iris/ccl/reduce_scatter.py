@@ -70,4 +70,4 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
     )
 
     if not async_op:
-        ctx.barrier()
+        ctx.device_barrier(group)

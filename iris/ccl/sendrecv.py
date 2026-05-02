@@ -50,7 +50,7 @@ def send(tensor, ctx, dst, group=None, tag=0, config=None):
         dst_iris_rank,
         config,
     )
-    ctx.barrier()
+    ctx.device_barrier(group)
 
 
 def recv(tensor, ctx, src, group=None, tag=0, config=None):
@@ -69,7 +69,7 @@ def recv(tensor, ctx, src, group=None, tag=0, config=None):
         tag: Communication tag (default: 0). Currently unused.
         config: Config with kernel parameters (default: None).
     """
-    ctx.barrier()
+    ctx.device_barrier(group)
 
 
 def sendrecv(send_tensor, recv_tensor, ctx, dst, src, group=None, tag=0, config=None):
@@ -114,4 +114,4 @@ def sendrecv(send_tensor, recv_tensor, ctx, dst, src, group=None, tag=0, config=
         dst_iris_rank,
         config,
     )
-    ctx.barrier()
+    ctx.device_barrier(group)

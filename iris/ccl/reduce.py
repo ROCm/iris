@@ -71,4 +71,4 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
     )
 
     if not async_op:
-        ctx.barrier()
+        ctx.device_barrier(group)

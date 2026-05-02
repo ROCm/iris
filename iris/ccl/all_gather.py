@@ -57,4 +57,4 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     )
 
     if not async_op:
-        ctx.barrier()
+        ctx.device_barrier(group)
