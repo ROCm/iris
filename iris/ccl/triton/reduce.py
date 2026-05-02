@@ -83,67 +83,63 @@ def persistent_reduce(
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
         mask = (rm[:, None] < M) & (rn[None, :] < N)
 
+        # Root's data was pre-copied to output on the host side.
+        if group_rank == dst:
+            continue
+
         input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
 
-        # Load local contribution
         local_data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
 
-        if group_rank == dst:
-            # Root: data was already copied to output on the host side
-            # before the barrier.  Nothing to do here.
-            pass
-        else:
-            # Non-root: acquire lock, read-modify-write on root's output
-            while (
-                iris.atomic_cas(
-                    locks_ptr + tile_id,
-                    0,
-                    1,
-                    iris_rank,
-                    dst_iris_rank,
-                    heap_bases,
-                    sem="acquire",
-                    scope="sys",
-                )
-                != 0
-            ):
-                pass
-
-            # Load current accumulated value from root's output tile
-            current_value = iris.load(
-                output_ptr + output_offset,
-                iris_rank,
-                dst_iris_rank,
-                heap_bases,
-                mask=mask,
-            )
-
-            # Accumulate
-            acc = current_value.to(acc_dtype) + local_data.to(acc_dtype)
-            result = acc.to(output_ptr.type.element_ty)
-
-            # Store back to root's output tile
-            iris.store(
-                output_ptr + output_offset,
-                result,
-                iris_rank,
-                dst_iris_rank,
-                heap_bases,
-                mask=mask,
-                hint=(1, BLOCK_SIZE_N),
-            )
-
-            # Release lock
-            iris.atomic_xchg(
+        # Acquire per-tile lock on root's heap
+        while (
+            iris.atomic_cas(
                 locks_ptr + tile_id,
                 0,
+                1,
                 iris_rank,
                 dst_iris_rank,
                 heap_bases,
-                sem="release",
+                sem="acquire",
                 scope="sys",
             )
+            != 0
+        ):
+            pass
+
+        # Read-modify-write: load current accumulated value, add ours, store back
+        current_value = iris.load(
+            output_ptr + output_offset,
+            iris_rank,
+            dst_iris_rank,
+            heap_bases,
+            mask=mask,
+        )
+
+        acc = current_value.to(acc_dtype) + local_data.to(acc_dtype)
+        result = acc.to(output_ptr.type.element_ty)
+
+        iris.store(
+            output_ptr + output_offset,
+            result,
+            iris_rank,
+            dst_iris_rank,
+            heap_bases,
+            mask=mask,
+            hint=(1, BLOCK_SIZE_N),
+        )
+
+        # Release lock
+        iris.atomic_xchg(
+            locks_ptr + tile_id,
+            0,
+            iris_rank,
+            dst_iris_rank,
+            heap_bases,
+            sem="release",
+            scope="sys",
+        )
 
 
 def launch(
@@ -170,15 +166,16 @@ def launch(
 
     locks = ctx.zeros((total_tiles,), dtype=torch.int32)
 
-    # Root initializes output with its own data on the host side,
-    # before the barrier.  This avoids a race between root's in-kernel
-    # tl.store and non-root's iris.load (non-root could read stale zeros
-    # or partial root data).  Non-root ranks zero their output (unused
-    # but keeps heap symmetric).
+    # Root copies its data into the output tensor on the host side so
+    # non-root ranks can accumulate on top of it.  All ranks synchronize
+    # the GPU stream before the host barrier to guarantee the copy (and
+    # zeroing of locks) is globally visible via XGMI before any non-root
+    # rank starts its iris.load.
     if rank_in_group == dst:
         output_tensor.copy_(input_tensor)
     else:
         output_tensor.zero_()
+    torch.cuda.synchronize()
     ctx.barrier()
 
     heap_bases = ctx.get_heap_bases()
