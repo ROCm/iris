@@ -601,7 +601,7 @@ def main(argv: list[str] | None = None) -> None:
     # Launch once per unique (num_ranks, env_combo), collecting results
     all_results: list[Result] = []
 
-    for num_ranks, env_combo in sorted(launch_configs):
+    for num_ranks, env_combo in sorted(launch_configs, key=lambda x: (x[0], sorted(x[1].items()))):
         config = LaunchConfig(
             min_nodes=1,
             max_nodes=1,
