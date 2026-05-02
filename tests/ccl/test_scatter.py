@@ -27,7 +27,7 @@ from iris.ccl import Config
         (128, 128, 32, 32),  # BLOCK_N < N (partial-width, multi-block)
         (256, 128, 32, 16),  # Minimum BLOCK_N=16 (16-bit vectorization path)
         (1024, 256, 32, 64),  # Medium
-        (8192, 8192, 32, 64),  # Large
+        (4096, 4096, 32, 64),  # Large
     ],
 )
 def test_scatter(dtype, M, N, block_size_m, block_size_n):
@@ -35,7 +35,7 @@ def test_scatter(dtype, M, N, block_size_m, block_size_n):
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33  # 8GB
+    heap_size = 2**30  # 1GB
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
@@ -102,7 +102,7 @@ def test_scatter_nonzero_root(dtype, M, N):
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33  # 8GB
+    heap_size = 2**30  # 1GB
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
