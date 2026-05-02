@@ -1317,7 +1317,6 @@ class Iris:
                 config=config,
             )
 
-
         def gemm_reduce_scatter_preamble(self, input_tensor, weight_shard, config=None, workspace=None):
             """
             Allocate workspace for fused GEMM + reduce-scatter.
