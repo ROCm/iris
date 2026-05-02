@@ -185,23 +185,37 @@ def persistent_broadcast_ring(
             # Wait until next rank is ready (flag == 0)
             while (
                 iris.atomic_cas(
-                    remote_flag_ptr, 0, 0,
-                    iris_rank, next_rank, heap_bases,
-                    sem="acquire", scope="sys",
-                ) != 0
+                    remote_flag_ptr,
+                    0,
+                    0,
+                    iris_rank,
+                    next_rank,
+                    heap_bases,
+                    sem="acquire",
+                    scope="sys",
+                )
+                != 0
             ):
                 pass
 
             iris.store(
-                ring_buffer + tile_offset, data,
-                iris_rank, next_rank, heap_bases,
-                mask=mask, hint=(1, BLOCK_SIZE_N),
+                ring_buffer + tile_offset,
+                data,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                mask=mask,
+                hint=(1, BLOCK_SIZE_N),
             )
             tl.debug_barrier()
             iris.atomic_xchg(
-                remote_flag_ptr, 1,
-                iris_rank, next_rank, heap_bases,
-                sem="release", scope="sys",
+                remote_flag_ptr,
+                1,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                sem="release",
+                scope="sys",
             )
 
         elif ring_pos == world_size - 1:
@@ -230,23 +244,37 @@ def persistent_broadcast_ring(
             # Forward to next rank
             while (
                 iris.atomic_cas(
-                    remote_flag_ptr, 0, 0,
-                    iris_rank, next_rank, heap_bases,
-                    sem="acquire", scope="sys",
-                ) != 0
+                    remote_flag_ptr,
+                    0,
+                    0,
+                    iris_rank,
+                    next_rank,
+                    heap_bases,
+                    sem="acquire",
+                    scope="sys",
+                )
+                != 0
             ):
                 pass
 
             iris.store(
-                ring_buffer + tile_offset, data,
-                iris_rank, next_rank, heap_bases,
-                mask=mask, hint=(1, BLOCK_SIZE_N),
+                ring_buffer + tile_offset,
+                data,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                mask=mask,
+                hint=(1, BLOCK_SIZE_N),
             )
             tl.debug_barrier()
             iris.atomic_xchg(
-                remote_flag_ptr, 1,
-                iris_rank, next_rank, heap_bases,
-                sem="release", scope="sys",
+                remote_flag_ptr,
+                1,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                sem="release",
+                scope="sys",
             )
 
 
