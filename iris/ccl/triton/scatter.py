@@ -157,11 +157,13 @@ def launch(
     M, N = output_tensor.shape[:2]
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
-    # Input strides: only meaningful on root, but we need valid values for kernel launch
+    # Input strides: only meaningful on root, but Triton specializes on stride values
+    # so we must pass non-zero strides to avoid zero-stride specialization issues.
+    # Non-root ranks pass output strides as a safe placeholder (kernel early-exits anyway).
     if rank_in_group == src:
         stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     else:
-        stride_in_m, stride_in_n = 0, 0
+        stride_in_m, stride_in_n = stride_out_m, stride_out_n
 
     heap_bases = ctx.get_heap_bases()
 

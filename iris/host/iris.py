@@ -1591,6 +1591,9 @@ class Iris:
 
             barrier(self._iris, group=group)
 
+        # Alias so tests can call shmem.ccl.barrier()
+        barrier = ccl_barrier
+
 
 def iris(heap_size=1 << 30, allocator_type="torch"):
     """
