@@ -23,7 +23,6 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
     """
-    from iris.ccl.config import Config
     from iris.ccl.utils import ReduceOp
 
     if op is None:
@@ -33,8 +32,12 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
             f"Only ReduceOp.SUM is currently supported, got {op}. "
             "Support for other operations will be added in a future release."
         )
-    if config is None:
-        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+    # Resolve autotuning: fills in any AUTOTUNE fields via cache or benchmarking
+    from iris.ccl.autotune import resolve_config
+
+    config = resolve_config(
+        "reduce_scatter", config, reduce_scatter, output_tensor, input_tensor, ctx, op=op, group=group
+    )
     if config.use_gluon:
         raise ValueError(
             "reduce_scatter does not support use_gluon=True. "

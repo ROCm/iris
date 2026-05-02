@@ -24,10 +24,10 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
     """
-    from iris.ccl.config import Config
+    # Resolve autotuning: fills in any AUTOTUNE fields via cache or benchmarking
+    from iris.ccl.autotune import resolve_config
 
-    if config is None:
-        config = Config(block_size_m=32, block_size_n=64)
+    config = resolve_config("all_gather", config, all_gather, output_tensor, input_tensor, ctx, group=group)
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 

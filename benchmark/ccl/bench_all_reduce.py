@@ -5,6 +5,7 @@
 """Benchmark for iris-ccl all-reduce collective."""
 
 import torch
+import torch.distributed as dist
 import iris.bench as bench
 from iris.ccl import Config
 
@@ -14,7 +15,26 @@ from iris.ccl import Config
 @bench.axis("M", bench.power_of_two(10, 14))
 @bench.axis("N", bench.power_of_two(10, 14))
 @bench.axis("dtype", [torch.float16, torch.bfloat16])
-@bench.axis("variant", ["two_shot"])
+def rccl_all_reduce(state, ctx):
+    M, N, dtype = state["M"], state["N"], state["dtype"]
+    world_size = dist.get_world_size()
+
+    inp = torch.ones((M, N), device="cuda", dtype=dtype)
+
+    # All-reduce bus bandwidth: 2 * (W-1)/W * data_size
+    state.set_bytes(int(M * N * inp.element_size() * 2 * (world_size - 1) / world_size))
+
+    state.exec(
+        lambda: dist.all_reduce(inp, op=dist.ReduceOp.SUM),
+    )
+
+
+@bench.register
+@bench.axis("num_ranks", [2, 4, 8])
+@bench.axis("M", bench.power_of_two(10, 14))
+@bench.axis("N", bench.power_of_two(10, 14))
+@bench.axis("dtype", [torch.float16, torch.bfloat16])
+@bench.axis("variant", ["two_shot", "one_shot", "ring", "atomic", "spinlock"])
 def all_reduce(state, ctx):
     M, N, dtype = state["M"], state["N"], state["dtype"]
     variant = state["variant"]
@@ -37,6 +57,32 @@ def all_reduce(state, ctx):
     state.exec(
         lambda: ctx.ccl.all_reduce(out, inp, config=config, workspace=workspace),
         preamble_fn=preamble,
+    )
+
+
+@bench.register
+@bench.axis("num_ranks", [2, 4, 8])
+@bench.axis("M", bench.power_of_two(10, 14))
+@bench.axis("N", bench.power_of_two(10, 14))
+@bench.axis("dtype", [torch.float16, torch.bfloat16])
+def all_reduce_autotuned(state, ctx):
+    M, N, dtype = state["M"], state["N"], state["dtype"]
+    world_size = ctx.get_num_ranks()
+
+    inp = ctx.zeros((M, N), dtype=dtype)
+    out = ctx.zeros((M, N), dtype=dtype)
+    inp.fill_(float(ctx.get_rank() + 1))
+
+    # All-reduce bus bandwidth: 2 * (W-1)/W * data_size
+    state.set_bytes(int(M * N * inp.element_size() * 2 * (world_size - 1) / world_size))
+
+    # Let autotuner pick the best config
+    config = Config.autotune()
+    workspace = ctx.ccl.all_reduce_preamble(out, inp, config=config)
+
+    state.exec(
+        lambda: ctx.ccl.all_reduce(out, inp, config=config, workspace=workspace),
+        preamble_fn=lambda: out.zero_(),
     )
 
 

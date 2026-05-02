@@ -5,8 +5,33 @@
 Configuration structures for iris-ccl collective operations.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields, replace
 import iris
+
+
+class _AutoTuneSentinel:
+    """Sentinel value indicating a Config field should be auto-tuned.
+
+    Usage:
+        >>> from iris.ccl import AUTOTUNE
+        >>> config = Config(block_size_m=AUTOTUNE, comm_sms=64)
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return "AUTOTUNE"
+
+    def __bool__(self):
+        raise TypeError("AUTOTUNE sentinel cannot be used as a boolean")
+
+
+AUTOTUNE = _AutoTuneSentinel()
 
 
 @dataclass
@@ -17,6 +42,8 @@ class Config:
     This configuration struct encapsulates common kernel parameters that can be
     set once and reused across multiple collective calls, similar to the
     origami config pattern from ROCm libraries.
+
+    Fields set to AUTOTUNE will be automatically tuned on first call and cached.
 
     Args:
         block_size_m: Block size for the M dimension tiling (default: 128)
@@ -75,28 +102,94 @@ class Config:
         >>> # All-gather with partitioned variant
         >>> config = Config(all_gather_variant="partitioned")
         >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
+
+        >>> # Auto-tune all fields
+        >>> from iris.ccl import AUTOTUNE
+        >>> ctx.ccl.all_gather(output_tensor, input_tensor)  # all fields auto-tuned
+
+        >>> # Partial auto-tune: fix comm_sms, tune everything else
+        >>> config = Config(comm_sms=64, block_size_m=AUTOTUNE)
+        >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
     """
 
-    block_size_m: int = 32
-    block_size_n: int = 64
-    swizzle_size: int = 4
-    comm_sms: int = 64
+    block_size_m: int = field(
+        default=32,
+        metadata={
+            "search_space": [8, 16, 32, 64, 128],
+        },
+    )
+    block_size_n: int = field(
+        default=64,
+        metadata={
+            "search_space": [32, 64, 128, 256],
+        },
+    )
+    swizzle_size: int = field(
+        default=4,
+        metadata={
+            "search_space": [2, 4, 6, 8],
+        },
+    )
+    comm_sms: int = field(
+        default=64,
+        metadata={
+            "search_space": [32, 48, 64, 80, 96, 108],
+        },
+    )
     num_xcds: int | None = None
     chunk_size: int | None = None
     use_gluon: bool = False
-    all_gather_variant: str = "persistent"
-    all_reduce_variant: str = "two_shot"
-    all_reduce_distribution: int = 1
+    all_gather_variant: str = field(
+        default="persistent",
+        metadata={
+            "search_space": ["persistent", "partitioned"],
+            "collectives": ["all_gather"],
+        },
+    )
+    all_reduce_variant: str = field(
+        default="two_shot",
+        metadata={
+            "search_space": ["two_shot", "one_shot", "atomic"],
+            "collectives": ["all_reduce"],
+        },
+    )
+    all_reduce_distribution: int = field(
+        default=1,
+        metadata={
+            "search_space": [0, 1],
+            "collectives": ["all_reduce", "reduce_scatter"],
+        },
+    )
     all_reduce_num_rings: int = 1
     all_reduce_ring_slice_n: int | None = None
     reduce_scatter_variant: str = "two_shot"
-    num_stages: int = 1
-    num_warps: int = 4
+    num_stages: int = field(
+        default=1,
+        metadata={
+            "search_space": [1, 2],
+        },
+    )
+    num_warps: int = field(
+        default=4,
+        metadata={
+            "search_space": [2, 4, 8],
+        },
+    )
     threads_per_warp: int = 64
-    waves_per_eu: int = 0
+    waves_per_eu: int = field(
+        default=0,
+        metadata={
+            "search_space": [0, 1, 2],
+        },
+    )
 
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
+        # If any field is AUTOTUNE, skip validation — it will be resolved
+        # and validated after autotuning fills in concrete values.
+        if self.get_autotune_fields():
+            return
+
         if self.num_xcds is None:
             self.num_xcds = iris.hip.get_num_xcc()
 
@@ -148,3 +241,74 @@ class Config:
             raise ValueError(f"threads_per_warp must be 32 (NVIDIA) or 64 (AMD), got {self.threads_per_warp}")
         if self.num_warps <= 0:
             raise ValueError(f"num_warps must be positive, got {self.num_warps}")
+
+    def get_autotune_fields(self) -> list[str]:
+        """Return names of fields set to AUTOTUNE."""
+        return [f.name for f in fields(self) if getattr(self, f.name) is AUTOTUNE]
+
+    def with_resolved(self, **kwargs) -> "Config":
+        """Return a copy with specified fields overridden.
+
+        This creates a new Config with the given fields replaced. The new
+        Config goes through normal __post_init__ validation, so all
+        resolved values must be concrete.
+        """
+        return replace(self, **kwargs)
+
+    @classmethod
+    def autotune(cls, **fixed_fields) -> "Config":
+        """Create a Config that auto-tunes all fields except those specified.
+
+        Fields passed as keyword arguments are pinned to the given values.
+        All other fields are marked as AUTOTUNE and will be searched during
+        the first collective call.
+
+        Args:
+            **fixed_fields: Fields to pin (e.g., comm_sms=64).
+
+        Returns:
+            Config with unspecified fields set to AUTOTUNE.
+
+        Example:
+            >>> Config.autotune(comm_sms=64)        # fix comm_sms, tune the rest
+            >>> Config.autotune()                    # tune everything
+            >>> Config.autotune(block_size_m=32, comm_sms=64)  # fix two, tune the rest
+        """
+        all_field_names = {f.name for f in fields(cls)}
+        invalid = set(fixed_fields) - all_field_names
+        if invalid:
+            raise TypeError(f"Unknown Config fields: {invalid}")
+
+        kwargs = {f.name: AUTOTUNE for f in fields(cls) if f.name not in fixed_fields}
+        kwargs.update(fixed_fields)
+        # num_xcds and chunk_size are always auto-derived, never tuned
+        kwargs["num_xcds"] = None
+        kwargs["chunk_size"] = None
+        return cls(**kwargs)
+
+    @classmethod
+    def get_tunable_fields(cls, collective: str) -> list[str]:
+        """Return field names that are tunable for a given collective."""
+        result = []
+        for f in fields(cls):
+            meta = f.metadata
+            if "search_space" not in meta:
+                continue
+            collectives = meta.get("collectives")
+            if collectives is None or collective in collectives:
+                result.append(f.name)
+        return result
+
+    @classmethod
+    def get_search_space(cls, collective: str) -> dict[str, list]:
+        """Return ``{field_name: [candidate_values]}`` for a given collective."""
+        result = {}
+        for f in fields(cls):
+            meta = f.metadata
+            if "search_space" not in meta:
+                continue
+            collectives = meta.get("collectives")
+            if collectives is not None and collective not in collectives:
+                continue
+            result[f.name] = meta["search_space"]
+        return result
