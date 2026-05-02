@@ -77,6 +77,10 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         workspace.prepared = False
 
     if not async_op:
-        ctx.barrier()
+        # all_pairs_chunked only writes to local output (no remote stores),
+        # so a post-kernel barrier is unnecessary — cuda stream ordering
+        # already guarantees local writes are visible to subsequent ops.
+        if variant != "all_pairs_chunked":
+            ctx.device_barrier(group=group)
 
     return workspace
