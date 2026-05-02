@@ -46,7 +46,7 @@ def _fused_matmul_all_reduce_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     EVEN_K: tl.constexpr,
     VARIANT: tl.constexpr,
-    SIGNAL_VALUE = 1,
+    SIGNAL_VALUE=1,
 ):
     """
     Fused GEMM + All-Reduce kernel with configurable all-reduce variant.
@@ -134,7 +134,9 @@ def _fused_matmul_all_reduce_kernel(
         # Use atomic_xchg with release semantics to ensure memory ordering
         tile_id = pid_m * num_tiles_n + pid_n
         lock_ptr = locks + tile_id
-        tl.atomic_xchg(lock_ptr, SIGNAL_VALUE, sem="release", scope="sys")  # Release ensures prior stores visible to remote GPUs
+        tl.atomic_xchg(
+            lock_ptr, SIGNAL_VALUE, sem="release", scope="sys"
+        )  # Release ensures prior stores visible to remote GPUs
 
         # Create source view only when needed (aux_buffer is not None)
         src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)

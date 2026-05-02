@@ -45,7 +45,7 @@ def _fused_matmul_reduce_scatter_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     EVEN_K: tl.constexpr,
-    SIGNAL_VALUE = 1,
+    SIGNAL_VALUE=1,
 ):
     """
     Fused GEMM + Reduce-Scatter kernel.
