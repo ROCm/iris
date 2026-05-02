@@ -9,6 +9,24 @@ Triton only (no gluon support).
 
 from iris.ccl.utils import extract_group_info
 
+# Cached default configs for auto-variant selection.
+# Config() is expensive (~14ms due to hip.get_num_xcc()), so we construct once.
+_default_configs = {}
+
+
+def _get_default_config(variant):
+    """Return a cached default Config for the given variant."""
+    if variant not in _default_configs:
+        from iris.ccl.config import Config
+
+        _default_configs[variant] = Config(
+            all_reduce_variant=variant,
+            block_size_m=32,
+            block_size_n=64,
+            all_reduce_distribution=1,
+        )
+    return _default_configs[variant]
+
 
 def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
     """Prepare reusable workspace for all-reduce."""
@@ -31,7 +49,6 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         config: Config with kernel parameters
         workspace: Reusable workspace from all_reduce_preamble
     """
-    from iris.ccl.config import Config
     from iris.ccl.utils import ReduceOp
 
     if op is None:
@@ -48,16 +65,8 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         #   two_shot: wins at M≥256 (Rabenseifner reduce-scatter + all-gather)
         # Crossover at ~720KB total message size.
         msg_bytes = output_tensor.nelement() * output_tensor.element_size()
-        if msg_bytes <= 768 * 1024:  # 768KB threshold
-            variant = "all_pairs_chunked"
-        else:
-            variant = "two_shot"
-        config = Config(
-            all_reduce_variant=variant,
-            block_size_m=32,
-            block_size_n=64,
-            all_reduce_distribution=1,
-        )
+        variant = "all_pairs_chunked" if msg_bytes <= 768 * 1024 else "two_shot"
+        config = _get_default_config(variant)
     if config.use_gluon:
         raise ValueError(
             "all_reduce does not support use_gluon=True. "
