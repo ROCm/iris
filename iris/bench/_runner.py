@@ -23,6 +23,7 @@ from torch.distributed.launcher.api import LaunchConfig, elastic_launch
 from ._core import (
     AxisDef,
     BenchmarkDef,
+    EnvDef,
     Result,
     State,
     _SkipCombination,
@@ -166,6 +167,27 @@ def _get_benchmark_num_ranks(
         return values
 
     return [_DEFAULT_NUM_RANKS]
+
+
+def _get_benchmark_env_combos(
+    bdef: BenchmarkDef,
+) -> list[dict[str, str]]:
+    """Return the list of env-var combinations for a benchmark.
+
+    Each element is a dict mapping env var names to string values.
+    If the benchmark has no ``@env`` decorators, returns ``[{}]``
+    (one combo with no env vars set).
+    """
+    if not bdef.envs:
+        return [{}]
+
+    names = [e.name for e in bdef.envs]
+    value_lists = [e.values for e in bdef.envs]
+
+    combos = []
+    for vals in itertools.product(*value_lists):
+        combos.append(dict(zip(names, vals)))
+    return combos
 
 
 # Output formatters
@@ -320,6 +342,7 @@ def _run_benchmarks_worker(
     n_warmup: int,
     n_repeat: int,
     benchmark_filter: str | None,
+    active_env: dict[str, str] | None = None,
 ) -> list[Result]:
     """Worker that runs inside each rank via ``elastic_launch``.
 
@@ -342,9 +365,17 @@ def _run_benchmarks_worker(
 
     all_results: list[Result] = []
 
+    if active_env is None:
+        active_env = {}
+
     for bdef in benchmarks:
         # Filter by name
         if benchmark_filter and not re.search(benchmark_filter, bdef.name):
+            continue
+
+        # Check if this benchmark should run with this env combo
+        bench_env_combos = _get_benchmark_env_combos(bdef)
+        if active_env not in bench_env_combos:
             continue
 
         # Check if this benchmark should run at this world_size
@@ -379,6 +410,9 @@ def _run_benchmarks_worker(
                 # Include num_ranks in params so it appears in output
                 if has_nr_axis or _NUM_RANKS_AXIS in axis_overrides:
                     params[_NUM_RANKS_AXIS] = world_size
+                # Include env vars in params so they appear in output
+                if active_env:
+                    params.update(active_env)
                 params.update(zip(axis_names, combo))
 
                 state = State(params, n_warmup=n_warmup, n_repeat=n_repeat)
@@ -543,22 +577,32 @@ def main(argv: list[str] | None = None) -> None:
         print("No benchmarks registered.", file=sys.stderr)
         sys.exit(1)
 
-    # Collect the union of all num_ranks values across registered benchmarks
-    all_num_ranks: set[int] = set()
+    # Collect the union of all (num_ranks, env_combo) pairs across benchmarks.
+    # Each unique combination triggers a separate elastic_launch because both
+    # num_ranks and env vars require process respawning.
+    launch_configs: list[tuple[int, dict[str, str]]] = []
+    seen_configs: set[tuple[int, tuple[tuple[str, str], ...]]] = set()
+
     for bdef in benchmarks:
-        # Skip benchmarks that don't match the filter before collecting num_ranks
         if args.benchmark_filter and not re.search(args.benchmark_filter, bdef.name):
             continue
-        all_num_ranks.update(_get_benchmark_num_ranks(bdef, axis_overrides, skip_overrides))
+        nr_values = _get_benchmark_num_ranks(bdef, axis_overrides, skip_overrides)
+        env_combos = _get_benchmark_env_combos(bdef)
+        for nr in nr_values:
+            for env_combo in env_combos:
+                key = (nr, tuple(sorted(env_combo.items())))
+                if key not in seen_configs:
+                    seen_configs.add(key)
+                    launch_configs.append((nr, env_combo))
 
-    if not all_num_ranks:
+    if not launch_configs:
         print("No benchmark configurations to run after applying filters/skips.", file=sys.stderr)
         sys.exit(1)
 
-    # Launch once per unique num_ranks, collecting results across runs
+    # Launch once per unique (num_ranks, env_combo), collecting results
     all_results: list[Result] = []
 
-    for num_ranks in sorted(all_num_ranks):
+    for num_ranks, env_combo in sorted(launch_configs):
         config = LaunchConfig(
             min_nodes=1,
             max_nodes=1,
@@ -567,18 +611,34 @@ def main(argv: list[str] | None = None) -> None:
             rdzv_endpoint="localhost:0",
             max_restarts=0,
         )
-        results_by_rank = elastic_launch(config, _run_benchmarks_worker)(
-            benchmarks,
-            axis_overrides,
-            skip_overrides,
-            args.heap_size,
-            args.use_gluon,
-            args.n_warmup,
-            args.n_repeat,
-            args.benchmark_filter,
-        )
-        # Rank 0 returns the results; other ranks return []
-        all_results.extend(results_by_rank[0])
+
+        # Set env vars before spawn, restore after
+        saved_env: dict[str, str | None] = {}
+        for k, v in env_combo.items():
+            saved_env[k] = os.environ.get(k)
+            os.environ[k] = v
+
+        try:
+            results_by_rank = elastic_launch(config, _run_benchmarks_worker)(
+                benchmarks,
+                axis_overrides,
+                skip_overrides,
+                args.heap_size,
+                args.use_gluon,
+                args.n_warmup,
+                args.n_repeat,
+                args.benchmark_filter,
+                env_combo,
+            )
+            # Rank 0 returns the results; other ranks return []
+            all_results.extend(results_by_rank[0])
+        finally:
+            # Restore original env
+            for k, orig in saved_env.items():
+                if orig is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = orig
 
     # Format and output (runs in the main process)
     if args.benchmark_format == "json":

@@ -115,9 +115,11 @@ Run::
 from ._core import (
     AxisDef,
     BenchmarkDef,
+    EnvDef,
     Result,
     State,
     axis,
+    env,
     linear_range,
     power_of_two,
     register,
@@ -127,9 +129,11 @@ from ._runner import main
 __all__ = [
     "AxisDef",
     "BenchmarkDef",
+    "EnvDef",
     "Result",
     "State",
     "axis",
+    "env",
     "linear_range",
     "main",
     "power_of_two",

@@ -19,12 +19,26 @@ class AxisDef:
 
 
 @dataclass
+class EnvDef:
+    """An environment variable sweep axis (name + list of values).
+
+    Unlike regular axes, env axes force process respawning because
+    environment variables like ``NCCL_MIN_CTAS`` are read at
+    ``init_process_group`` time and cannot be changed mid-process.
+    """
+
+    name: str
+    values: list[str]
+
+
+@dataclass
 class BenchmarkDef:
     """A registered benchmark: function + axes."""
 
     name: str
     fn: Callable
     axes: list[AxisDef]
+    envs: list[EnvDef] = field(default_factory=list)
 
 
 @dataclass
@@ -220,6 +234,42 @@ def axis(name: str, values: list[Any]):
     return decorator
 
 
+def env(name: str, values: list[str | int]):
+    """Define an environment variable sweep for a benchmark.
+
+    Environment variables are set **before process spawn**, so each unique
+    combination of env values triggers a separate ``elastic_launch``.  This
+    is necessary because libraries like NCCL/RCCL read env vars at
+    ``init_process_group`` time and cannot be reconfigured mid-process.
+
+    Multiple ``@env`` decorators stack; the framework generates the
+    Cartesian product of all env axes at runtime.
+
+    Parameters
+    ----------
+    name:
+        Environment variable name (e.g. ``"NCCL_MIN_CTAS"``).
+    values:
+        List of values to sweep.  Converted to strings for ``os.environ``.
+
+    Example::
+
+        @bench.register
+        @bench.env("NCCL_MIN_CTAS", [32, 64, 128, 256])
+        @bench.axis("M", bench.power_of_two(10, 14))
+        def rccl_sweep(state, ctx):
+            ...
+    """
+
+    def decorator(fn: Callable) -> Callable:
+        if not hasattr(fn, "_bench_envs"):
+            fn._bench_envs = []
+        fn._bench_envs.insert(0, EnvDef(name, [str(v) for v in values]))
+        return fn
+
+    return decorator
+
+
 def register(fn: Callable) -> Callable:
     """Register *fn* as a benchmark.  Must be the **outermost** decorator.
 
@@ -228,5 +278,6 @@ def register(fn: Callable) -> Callable:
     (or Gluon context if ``--use_gluon`` is passed).
     """
     axes: list[AxisDef] = getattr(fn, "_bench_axes", [])
-    _registry.append(BenchmarkDef(name=fn.__name__, fn=fn, axes=axes))
+    envs: list[EnvDef] = getattr(fn, "_bench_envs", [])
+    _registry.append(BenchmarkDef(name=fn.__name__, fn=fn, axes=axes, envs=envs))
     return fn
