@@ -42,7 +42,22 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
             "Support for other operations will be added in a future release."
         )
     if config is None:
-        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+        # Auto-select variant based on message size.
+        # Benchmark data (MI300X, 8 GPUs, bf16, N=2880):
+        #   all_pairs_chunked: wins at M≤128 (every rank reads all others, barrier-free)
+        #   two_shot: wins at M≥256 (Rabenseifner reduce-scatter + all-gather)
+        # Crossover at ~720KB total message size.
+        msg_bytes = output_tensor.nelement() * output_tensor.element_size()
+        if msg_bytes <= 768 * 1024:  # 768KB threshold
+            variant = "all_pairs_chunked"
+        else:
+            variant = "two_shot"
+        config = Config(
+            all_reduce_variant=variant,
+            block_size_m=32,
+            block_size_n=64,
+            all_reduce_distribution=1,
+        )
     if config.use_gluon:
         raise ValueError(
             "all_reduce does not support use_gluon=True. "
@@ -51,7 +66,14 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         )
 
     variant = config.all_reduce_variant.lower()
-    valid_variants = ["atomic", "spinlock", "ring", "two_shot", "one_shot", "all_pairs_chunked"]
+    if variant == "auto":
+        msg_bytes = output_tensor.nelement() * output_tensor.element_size()
+        if msg_bytes <= 768 * 1024:
+            variant = "all_pairs_chunked"
+        else:
+            variant = "two_shot"
+        config.all_reduce_variant = variant
+    valid_variants = ["atomic", "spinlock", "ring", "two_shot", "one_shot", "all_pairs_chunked", "auto"]
     if variant not in valid_variants:
         raise ValueError(f"Invalid all_reduce_variant: {variant}. Must be one of: {', '.join(valid_variants)}")
 
