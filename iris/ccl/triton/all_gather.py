@@ -336,8 +336,7 @@ def persistent_all_gather_pull(
                 data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
                 tl.store(output_ptr + output_offset, data, mask=mask, cache_modifier=".wt")
             else:
-                data = iris.load(input_ptr + input_offset, iris_rank, source_rank,
-                                 heap_bases, mask=mask)
+                data = iris.load(input_ptr + input_offset, iris_rank, source_rank, heap_bases, mask=mask)
                 tl.store(output_ptr + output_offset, data, mask=mask, cache_modifier=".wt")
 
 

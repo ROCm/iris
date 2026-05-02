@@ -211,12 +211,10 @@ def persistent_reduce_scatter_simple(
             if i == group_rank:
                 data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
             else:
-                data = iris.load(input_ptr + input_offset, iris_rank, source_rank,
-                                 heap_bases, mask=mask)
+                data = iris.load(input_ptr + input_offset, iris_rank, source_rank, heap_bases, mask=mask)
             acc += data.to(acc_dtype)
 
-        tl.store(output_ptr + output_offset, acc.to(output_ptr.type.element_ty),
-                 mask=mask, cache_modifier=".wt")
+        tl.store(output_ptr + output_offset, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt")
 
 
 def launch(
