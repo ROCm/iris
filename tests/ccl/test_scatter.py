@@ -52,14 +52,12 @@ def test_scatter(dtype, M, N, block_size_m, block_size_n):
     torch.cuda.synchronize()
 
     # Iris scatter: root has (world_size * M, N) input, output is (M, N)
+    # All ranks must allocate the same size to keep symmetric heap offsets aligned.
+    iris_input = shmem.zeros((world_size * M, N), dtype=dtype)
     if rank == 0:
-        iris_input = shmem.zeros((world_size * M, N), dtype=dtype)
         # Fill input: chunk i = (i+1) to match scatter_list above
         for i in range(world_size):
             iris_input[i * M : (i + 1) * M, :].fill_(float(i + 1))
-    else:
-        # Non-root: input is ignored, but we still need a valid tensor for the kernel launch
-        iris_input = shmem.zeros((1, 1), dtype=dtype)
 
     iris_output = shmem.zeros((M, N), dtype=dtype)
 
@@ -125,12 +123,11 @@ def test_scatter_nonzero_root(dtype, M, N):
     torch.cuda.synchronize()
 
     # Iris scatter with non-zero root
+    # All ranks must allocate the same size to keep symmetric heap offsets aligned.
+    iris_input = shmem.zeros((world_size * M, N), dtype=dtype)
     if rank == src:
-        iris_input = shmem.zeros((world_size * M, N), dtype=dtype)
         for i in range(world_size):
             iris_input[i * M : (i + 1) * M, :].fill_(float(i + 1))
-    else:
-        iris_input = shmem.zeros((1, 1), dtype=dtype)
 
     iris_output = shmem.zeros((M, N), dtype=dtype)
 
