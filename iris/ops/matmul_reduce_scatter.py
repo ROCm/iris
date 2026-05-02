@@ -45,7 +45,7 @@ def _fused_matmul_reduce_scatter_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     EVEN_K: tl.constexpr,
-    SIGNAL_VALUE=1,
+    signal_value=1,
 ):
     """
     Fused GEMM + Reduce-Scatter kernel.
@@ -106,7 +106,7 @@ def _fused_matmul_reduce_scatter_kernel(
     # Signal tile is ready
     tile_id = pid_m * num_tiles_n + pid_n
     lock_ptr = locks + tile_id
-    tl.atomic_xchg(lock_ptr, SIGNAL_VALUE, sem="release", scope="gpu")
+    tl.atomic_xchg(lock_ptr, signal_value, sem="release", scope="gpu")
 
     # Create tile object and context
     tile_obj = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
@@ -116,7 +116,7 @@ def _fused_matmul_reduce_scatter_kernel(
     src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
     dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
-    ctx.reduce_scatter(tile_obj, src_view, dst_view, locks, SIGNAL_VALUE)
+    ctx.reduce_scatter(tile_obj, src_view, dst_view, locks, signal_value)
 
 
 def matmul_reduce_scatter_preamble(
@@ -258,7 +258,8 @@ def matmul_reduce_scatter(
     even_k = K % config.block_size_k == 0
 
     # Increment call counter for producer-consumer signal value.
-    workspace.call_counter += 1
+    # Wrap at INT32_MAX since locks are int32 tensors.
+    workspace.call_counter = (workspace.call_counter % 0x7FFFFFFF) + 1
     signal_value = workspace.call_counter
 
     iris_launch(
