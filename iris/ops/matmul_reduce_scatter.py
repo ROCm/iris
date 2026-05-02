@@ -45,6 +45,7 @@ def _fused_matmul_reduce_scatter_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     EVEN_K: tl.constexpr,
+    SIGNAL_VALUE = 1,
 ):
     """
     Fused GEMM + Reduce-Scatter kernel.
@@ -105,7 +106,7 @@ def _fused_matmul_reduce_scatter_kernel(
     # Signal tile is ready
     tile_id = pid_m * num_tiles_n + pid_n
     lock_ptr = locks + tile_id
-    tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")
+    tl.atomic_xchg(lock_ptr, SIGNAL_VALUE, sem="release", scope="gpu")
 
     # Create tile object and context
     tile_obj = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
@@ -115,7 +116,7 @@ def _fused_matmul_reduce_scatter_kernel(
     src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
     dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
-    ctx.reduce_scatter(tile_obj, src_view, dst_view, locks)
+    ctx.reduce_scatter(tile_obj, src_view, dst_view, locks, SIGNAL_VALUE)
 
 
 def matmul_reduce_scatter_preamble(
@@ -173,8 +174,6 @@ def matmul_reduce_scatter_preamble(
 
     if workspace.locks is None or workspace.locks.numel() != total_tiles:
         workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
-    else:
-        workspace.locks.zero_()
 
     if workspace.aux_buffer is None or workspace.aux_buffer.shape != (M, N):
         workspace.aux_buffer = shmem.zeros((M, N), dtype=dtype)
@@ -258,6 +257,10 @@ def matmul_reduce_scatter(
 
     even_k = K % config.block_size_k == 0
 
+    # Increment call counter for producer-consumer signal value.
+    workspace.call_counter += 1
+    signal_value = workspace.call_counter
+
     iris_launch(
         _fused_matmul_reduce_scatter_kernel,
         grid,
@@ -282,6 +285,7 @@ def matmul_reduce_scatter(
         config.block_size_n,
         config.block_size_k,
         even_k,
+        signal_value,
         algorithm="matmul_reduce_scatter",
         rank=rank,
         dtype=A.dtype,
