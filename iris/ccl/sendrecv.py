@@ -36,7 +36,7 @@ def _get_sendrecv_flags(ctx):
     stale cache entries from the previous mutable-default-argument approach,
     which caused SIGABRT crashes when tests created multiple iris instances.
     """
-    if not hasattr(ctx, '_sendrecv_flags'):
+    if not hasattr(ctx, "_sendrecv_flags"):
         world_size = ctx.get_num_ranks()
         ctx._sendrecv_flags = ctx.zeros((world_size * _MAX_SENDRECV_TAGS,), dtype=torch.int32)
     return ctx._sendrecv_flags

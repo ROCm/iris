@@ -45,9 +45,7 @@ def test_barrier_basic():
     # (because all ranks allocated at the same heap offset and each rank
     # wrote to its own slot before barrier completed).
     # Verify our own write survived the barrier.
-    assert data[rank].item() == float(rank + 1), (
-        f"Rank {rank}: own value corrupted after barrier"
-    )
+    assert data[rank].item() == float(rank + 1), f"Rank {rank}: own value corrupted after barrier"
 
     try:
         # Ensure no crash or hang occurred
@@ -80,9 +78,7 @@ def test_barrier_multiple_calls():
             torch.cuda.synchronize()
 
             # Verify our value is intact after each barrier
-            assert data[0].item() == float(rank + i), (
-                f"Rank {rank}: value wrong after barrier iteration {i}"
-            )
+            assert data[0].item() == float(rank + i), f"Rank {rank}: value wrong after barrier iteration {i}"
     finally:
         shmem.barrier()
         del shmem
@@ -150,6 +146,7 @@ def test_barrier_with_all_reduce():
 
     M, N = 128, 64
     from iris.ccl import Config
+
     config = Config(all_reduce_variant="two_shot", block_size_m=32, block_size_n=64)
 
     try:

@@ -139,9 +139,7 @@ def test_send_recv_paired(dtype, M, N):
         expected = torch.full((M, N), 42.0, dtype=dtype, device=f"cuda:{rank}")
         atol = 1e-3 if dtype == torch.float16 else 1e-5
         max_diff = torch.abs(tensor - expected).max().item()
-        assert torch.allclose(tensor, expected, atol=atol), (
-            f"Rank 1: max diff {max_diff}, expected 42.0 from rank 0"
-        )
+        assert torch.allclose(tensor, expected, atol=atol), f"Rank 1: max diff {max_diff}, expected 42.0 from rank 0"
 
     try:
         pass
