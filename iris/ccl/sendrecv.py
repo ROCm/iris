@@ -8,7 +8,6 @@ Uses the same pattern as all_gather: write data via iris.store,
 then synchronize with ctx.barrier() on the host side.
 """
 
-import torch
 from iris.ccl.utils import extract_group_info
 
 
