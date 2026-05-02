@@ -11,6 +11,7 @@ Collective operations are accessed through the Iris instance's ccl attribute:
 """
 
 from .config import Config
+from .p2p import P2PConfig, P2POp, P2PState, P2PWork
 from .utils import ReduceOp
 
-__all__ = ["Config", "ReduceOp"]
+__all__ = ["Config", "P2PConfig", "P2POp", "P2PState", "P2PWork", "ReduceOp"]

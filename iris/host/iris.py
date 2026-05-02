@@ -1317,6 +1317,42 @@ class Iris:
                 config=config,
             )
 
+        def init_p2p(self, max_numel=2**20, dtype=None, config=None):
+            """Initialize P2P state.  Must be called collectively by all ranks."""
+            from iris.ccl.p2p import init_p2p as _init_p2p
+
+            return _init_p2p(self._iris, max_numel=max_numel, dtype=dtype, config=config)
+
+        def send(self, tensor, dst, p2p_state, group=None, tag=0):
+            """Blocking point-to-point send."""
+            from iris.ccl.p2p import send as _send
+
+            _send(self._iris, tensor, dst, p2p_state, group=group, tag=tag)
+
+        def recv(self, tensor, src, p2p_state, group=None, tag=0):
+            """Blocking point-to-point recv."""
+            from iris.ccl.p2p import recv as _recv
+
+            _recv(self._iris, tensor, src, p2p_state, group=group, tag=tag)
+
+        def isend(self, tensor, dst, p2p_state, group=None, tag=0):
+            """Non-blocking send.  Returns P2PWork."""
+            from iris.ccl.p2p import isend as _isend
+
+            return _isend(self._iris, tensor, dst, p2p_state, group=group, tag=tag)
+
+        def irecv(self, tensor, src, p2p_state, group=None, tag=0):
+            """Non-blocking recv.  Returns P2PWork."""
+            from iris.ccl.p2p import irecv as _irecv
+
+            return _irecv(self._iris, tensor, src, p2p_state, group=group, tag=tag)
+
+        def batch_isend_irecv(self, p2p_op_list, p2p_state):
+            """Batched async P2P operations.  Returns list of P2PWork."""
+            from iris.ccl.p2p import batch_isend_irecv as _batch
+
+            return _batch(self._iris, p2p_op_list, p2p_state)
+
 
 def iris(heap_size=1 << 30, allocator_type="torch"):
     """
