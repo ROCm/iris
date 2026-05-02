@@ -12,5 +12,16 @@ Collective operations are accessed through the Iris instance's ccl attribute:
 
 from .config import Config
 from .utils import ReduceOp
+from .fused_gemm_rs import (
+    gemm_reduce_scatter,
+    gemm_reduce_scatter_preamble,
+    GemmReduceScatterWorkspace,
+)
 
-__all__ = ["Config", "ReduceOp"]
+__all__ = [
+    "Config",
+    "ReduceOp",
+    "gemm_reduce_scatter",
+    "gemm_reduce_scatter_preamble",
+    "GemmReduceScatterWorkspace",
+]

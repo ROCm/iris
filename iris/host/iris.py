@@ -1318,6 +1318,56 @@ class Iris:
             )
 
 
+        def gemm_reduce_scatter_preamble(self, input_tensor, weight_shard, config=None, workspace=None):
+            """
+            Allocate workspace for fused GEMM + reduce-scatter.
+
+            Args:
+                input_tensor: [tokens, H_shard] activation tensor (shape inference).
+                weight_shard: [H_shard, K] weight shard (shape inference).
+                config: Optional Config instance.
+                workspace: Optional existing workspace to reuse.
+
+            Returns:
+                GemmReduceScatterWorkspace ready for gemm_reduce_scatter().
+            """
+            from iris.ccl.fused_gemm_rs import gemm_reduce_scatter_preamble as _fn
+
+            return _fn(input_tensor, weight_shard, self._iris, config=config, workspace=workspace)
+
+        def gemm_reduce_scatter(
+            self, input_tensor, weight_shard, group=None, async_op=False, config=None, workspace=None
+        ):
+            """
+            Fused GEMM + reduce-scatter collective.
+
+            Computes partial = input @ weight_shard and atomically scatters each
+            output tile to its destination rank.
+
+            Args:
+                input_tensor: [tokens, H_shard] this rank's input shard.
+                weight_shard: [H_shard, K] this rank's weight shard.
+                group: ProcessGroup or None.
+                async_op: If False, barrier after kernel.
+                config: Optional Config instance.
+                workspace: Optional pre-allocated workspace.
+
+            Returns:
+                torch.Tensor: [tokens, shard_size] in input_tensor's dtype.
+            """
+            from iris.ccl.fused_gemm_rs import gemm_reduce_scatter as _fn
+
+            return _fn(
+                input_tensor,
+                weight_shard,
+                self._iris,
+                group=group,
+                async_op=async_op,
+                config=config,
+                workspace=workspace,
+            )
+
+
 def iris(heap_size=1 << 30, allocator_type="torch"):
     """
     Create and return an Iris instance with the specified heap size.
