@@ -31,8 +31,7 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
         config = Config()
     if config.use_gluon:
         raise ValueError(
-            "broadcast does not support use_gluon=True. "
-            "Gluon implementation is not available for broadcast."
+            "broadcast does not support use_gluon=True. Gluon implementation is not available for broadcast."
         )
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
