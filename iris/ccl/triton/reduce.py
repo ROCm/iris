@@ -20,7 +20,7 @@ import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from ..utils import chiplet_transform_chunked
 
-RING_THRESHOLD = 1 << 30  # Disabled — ring reduce has bugs, using lock-based only
+RING_THRESHOLD = 1 << 18  # 256K elements — ring for large, lock-based for small
 
 
 @triton.jit()
@@ -154,7 +154,6 @@ def persistent_reduce_ring(
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
     next_rank: tl.constexpr,
-    ring_pos: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -163,22 +162,11 @@ def persistent_reduce_ring(
     CHUNK_SIZE: tl.constexpr,
 ):
     """
-    Ring reduce kernel — partial sums pipeline toward root.
+    Symmetric ring reduce — same pattern as all_reduce ring.
 
-    Ring order for reduce: data flows dst+1 -> dst+2 -> ... -> dst
-    ring_pos: 0 = first sender (dst+1), ..., world_size-2 = last before root,
-              world_size-1 = root (dst)
-
-    First sender (ring_pos == 0):
-        Load local data, push to next_rank's ring_buffer, signal.
-
-    Middle ranks (0 < ring_pos < world_size - 1):
-        Wait for signal, load accumulated value from ring_buffer,
-        add local data, forward to next_rank's ring_buffer, signal.
-
-    Root (ring_pos == world_size - 1):
-        Wait for signal, load accumulated value from ring_buffer,
-        add local data, store final result to output.
+    Every rank participates identically in world_size-1 steps:
+    send local/accumulated data to next, receive from predecessor, accumulate.
+    After all steps, every rank holds the full reduction — only dst writes output.
     """
     pid = tl.program_id(0)
 
@@ -188,137 +176,90 @@ def persistent_reduce_ring(
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
-    tl.assume(total_tiles > 0)
 
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
 
-    for tile_id in range(pid, total_tiles, COMM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+    if total_tiles > 0:
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
+            tl.assume(pid_m >= 0)
+            tl.assume(pid_n >= 0)
 
-        rm_base = pid_m * BLOCK_SIZE_M
-        rn_base = pid_n * BLOCK_SIZE_N
-        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
-        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
+            rm_base = pid_m * BLOCK_SIZE_M
+            rn_base = pid_n * BLOCK_SIZE_N
+            rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+            rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+            rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-        input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-        tile_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+            input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+            tile_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
 
-        flag_ptr = flags + tile_id
-        remote_flag_ptr = flags + tile_id
+            local_flag_ptr = flags + tile_id
+            remote_flag_ptr = flags + tile_id
 
-        local_data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
+            local_data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
+            acc = local_data.to(acc_dtype)
+            send_data = local_data
 
-        if ring_pos == 0:
-            # First sender: push local data to next rank, signal
-            while (
-                iris.atomic_cas(
-                    remote_flag_ptr,
-                    0,
-                    0,
+            for _step in range(0, world_size - 1):
+                while (
+                    iris.atomic_cas(
+                        remote_flag_ptr,
+                        0,
+                        0,
+                        iris_rank,
+                        next_rank,
+                        heap_bases,
+                        sem="acquire",
+                        scope="sys",
+                    )
+                    != 0
+                ):
+                    pass
+
+                iris.store(
+                    ring_buffer + tile_offset,
+                    send_data,
                     iris_rank,
                     next_rank,
                     heap_bases,
-                    sem="acquire",
-                    scope="sys",
+                    mask=mask,
+                    hint=(1, BLOCK_SIZE_N),
                 )
-                != 0
-            ):
-                pass
-
-            iris.store(
-                ring_buffer + tile_offset,
-                local_data,
-                iris_rank,
-                next_rank,
-                heap_bases,
-                mask=mask,
-                hint=(1, BLOCK_SIZE_N),
-            )
-            tl.debug_barrier()
-            iris.atomic_xchg(
-                remote_flag_ptr,
-                1,
-                iris_rank,
-                next_rank,
-                heap_bases,
-                sem="release",
-                scope="sys",
-            )
-
-        elif ring_pos == world_size - 1:
-            # Root: wait for accumulated data, add local, store final result
-            while tl.atomic_cas(flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
-                pass
-
-            incoming = tl.load(ring_buffer + tile_offset, mask=mask, other=0.0)
-            acc = incoming.to(acc_dtype) + local_data.to(acc_dtype)
-            tl.store(
-                output_ptr + tile_offset,
-                acc.to(output_ptr.type.element_ty),
-                mask=mask,
-            )
-
-            tl.debug_barrier()
-            tl.atomic_xchg(flag_ptr, 0, sem="release", scope="sys")
-
-        else:
-            # Middle: wait, load accumulated, add local, forward
-            while tl.atomic_cas(flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
-                pass
-
-            incoming = tl.load(ring_buffer + tile_offset, mask=mask, other=0.0)
-            acc = incoming.to(acc_dtype) + local_data.to(acc_dtype)
-            send_data = acc.to(output_ptr.type.element_ty)
-
-            tl.debug_barrier()
-            tl.atomic_xchg(flag_ptr, 0, sem="release", scope="sys")
-
-            # Forward reduced data to next rank
-            while (
-                iris.atomic_cas(
+                tl.debug_barrier()
+                iris.atomic_xchg(
                     remote_flag_ptr,
-                    0,
-                    0,
+                    1,
                     iris_rank,
                     next_rank,
                     heap_bases,
-                    sem="acquire",
+                    sem="release",
                     scope="sys",
                 )
-                != 0
-            ):
-                pass
 
-            iris.store(
-                ring_buffer + tile_offset,
-                send_data,
-                iris_rank,
-                next_rank,
-                heap_bases,
-                mask=mask,
-                hint=(1, BLOCK_SIZE_N),
-            )
-            tl.debug_barrier()
-            iris.atomic_xchg(
-                remote_flag_ptr,
-                1,
-                iris_rank,
-                next_rank,
-                heap_bases,
-                sem="release",
-                scope="sys",
-            )
+                while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
+                    pass
+
+                recv_tile = tl.load(ring_buffer + tile_offset, mask=mask, other=0.0)
+                acc += recv_tile.to(acc_dtype)
+                send_data = recv_tile
+                tl.debug_barrier()
+                tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+
+            if group_rank == dst:
+                tl.store(
+                    output_ptr + tile_offset,
+                    acc.to(output_ptr.type.element_ty),
+                    mask=mask,
+                )
 
 
 def launch(
@@ -392,9 +333,6 @@ def launch(
         total_tiles = num_pid_m * num_pid_n
         flags = ctx.zeros((total_tiles,), dtype=torch.int32)
 
-        # Ring position: first sender is dst+1, root (dst) is last
-        ring_pos = (rank_in_group - dst - 1) % world_size
-
         # Next rank in ring (global iris rank)
         next_group_rank = (rank_in_group + 1) % world_size
         next_rank = rank_start + next_group_rank * rank_stride
@@ -423,7 +361,6 @@ def launch(
             rank_start,
             rank_stride,
             next_rank,
-            ring_pos,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,

@@ -290,10 +290,8 @@ def launch(
     config,
 ):
     """Launch the broadcast kernel — ring for large messages, direct for small."""
-    M = tensor.shape[0]
-    N = 1
-    stride_m = tensor.stride(0)
-    stride_n = 1
+    M, N = tensor.shape[:2]
+    stride_m, stride_n = tensor.stride(0), tensor.stride(1)
 
     heap_bases = ctx.get_heap_bases()
 
@@ -328,7 +326,7 @@ def launch(
         )
     else:
         # Ring broadcast: allocate ring buffer + flags on symmetric heap
-        ring_buffer = ctx.zeros((M,), dtype=tensor.dtype)
+        ring_buffer = ctx.zeros((M, N), dtype=tensor.dtype)
         num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
         num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
         total_tiles = num_pid_m * num_pid_n

@@ -52,9 +52,13 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
 
     from iris.ccl.triton.broadcast import launch
 
-    # Flatten to 1-D — broadcast is a plain data copy so shape doesn't
-    # matter, only the total number of elements.
-    tensor = tensor.contiguous().view(-1)
+    tensor = tensor.contiguous()
+    if tensor.dim() == 1:
+        block_n = config.block_size_n
+        if tensor.shape[0] >= block_n:
+            tensor = tensor.view(-1, block_n)
+        else:
+            tensor = tensor.view(1, -1)
 
     launch(
         tensor,
