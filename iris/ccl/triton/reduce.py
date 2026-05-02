@@ -20,7 +20,7 @@ import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from ..utils import chiplet_transform_chunked
 
-RING_THRESHOLD = 1 << 18  # 256K elements
+RING_THRESHOLD = 1 << 30  # Disabled — ring reduce has bugs, using lock-based only
 
 
 @triton.jit()
