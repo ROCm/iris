@@ -2,15 +2,44 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Triton kernel for reduce-scatter collective communication.
-Uses the two-shot approach: reduce assigned tiles and store only to own rank.
+Triton kernels for reduce-scatter collective communication.
+
+Supports two variants:
+- two_shot: Each rank reads all other ranks' data for its assigned tiles (all-pairs read).
+- ring_chunked: Ring-based Rabenseifner-style reduce-scatter with flag-based synchronization.
 """
 
+import functools
+
+import torch
 import triton
 import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from ..utils import chiplet_transform_chunked
+
+
+@functools.lru_cache(maxsize=8)
+def _default_config(block_size_m, block_size_n, comm_sms=64, distribution=1):
+    """Cache default Config objects to avoid repeated HIP queries (subprocess overhead)."""
+    from ..config import Config
+
+    return Config(
+        block_size_m=block_size_m, block_size_n=block_size_n, comm_sms=comm_sms, all_reduce_distribution=distribution
+    )
+
+
+@triton.jit()
+def _translate_fast(ptr, local_base, remote_base, hint: tl.constexpr = None):
+    """Fast pointer translation with pre-loaded bases (avoids repeated heap_bases loads)."""
+    ptr_int = tl.cast(ptr, tl.uint64)
+    offset = ptr_int - local_base
+    remote_byte = tl.cast(remote_base, tl.pointer_type(tl.int8))
+    translated_byte = remote_byte + offset
+    translated = tl.cast(translated_byte, ptr.dtype)
+    if hint is not None:
+        translated = tl.max_contiguous(tl.multiple_of(translated, hint), hint)
+    return translated
 
 
 @triton.jit()
@@ -38,10 +67,14 @@ def persistent_reduce_scatter_two_shot(
     DISTRIBUTION: tl.constexpr,
 ):
     """
-    Reduce-scatter using two-shot approach.
+    Reduce-scatter using two-shot approach with hoisted heap base loads.
 
     Each rank reduces its assigned tiles from all ranks and stores the result
     only to its own output (no broadcast to other ranks).
+
+    Optimizations:
+    - Pre-loads local heap base once outside the tile loop.
+    - Uses _translate_fast() with pre-loaded bases (avoids repeated heap_bases loads).
     """
     pid = tl.program_id(0)
 
@@ -53,6 +86,9 @@ def persistent_reduce_scatter_two_shot(
     total_tiles = num_pid_m * num_pid_n
 
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
+
+    # Pre-load local base once (avoids repeated heap_bases loads in _translate_fast)
+    local_base = tl.load(heap_bases + iris_rank)
 
     tiles_per_rank = tl.cdiv(total_tiles, world_size)
     if DISTRIBUTION == 0:
@@ -100,44 +136,228 @@ def persistent_reduce_scatter_two_shot(
         out_ptr = output_ptr + output_offset
 
         # Fast path: NO MASKS (full tiles)
-        # The masking is problem size dependent, and the compiler does not recognize it can have two paths
-        # (one with masks and one without). Separate unmasked paths allow the compiler to generate
-        # more efficient vectorized instructions.
         if is_full:
-            start_rank_idx = pid % world_size
-            start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
-            for i in tl.static_range(1, world_size):
-                remote_rank_idx = (start_rank_idx + i) % world_size
-                remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+            # Load local data first (no XGMI, no translation — direct HBM read)
+            acc = tl.load(base_ptr).to(acc_dtype)
+            # Then load from remote ranks only (XGMI reads)
+            for i in tl.static_range(world_size):
+                remote_rank_global = rank_start + i * rank_stride
+                if remote_rank_global != iris_rank:
+                    remote_base_i = tl.load(heap_bases + remote_rank_global)
+                    translated_i = _translate_fast(base_ptr, local_base, remote_base_i, hint=(1, BLOCK_SIZE_N))
+                    acc += tl.load(translated_i).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
-
-            # Store only to own rank (no broadcast)
             tl.store(out_ptr, reduced, cache_modifier=".wt")
 
-        # Slow path: MASKED (only boundary tiles land here)
-        # This path handles tiles at tensor boundaries where not all elements are valid.
+        # Slow path: MASKED (only boundary tiles)
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-            start_rank_idx = pid % world_size
-            start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(
-                acc_dtype
-            )
-            for i in tl.static_range(1, world_size):
-                remote_rank_idx = (start_rank_idx + i) % world_size
-                remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(
-                    acc_dtype
-                )
+            # Load local data first (no XGMI, no translation)
+            acc = tl.load(base_ptr, mask=mask, other=0.0).to(acc_dtype)
+            # Then load from remote ranks only
+            for i in tl.static_range(world_size):
+                remote_rank_global = rank_start + i * rank_stride
+                if remote_rank_global != iris_rank:
+                    remote_base_i = tl.load(heap_bases + remote_rank_global)
+                    translated_i = _translate_fast(base_ptr, local_base, remote_base_i, hint=(1, BLOCK_SIZE_N))
+                    acc += tl.load(translated_i, mask=mask, other=0.0).to(acc_dtype)
 
             reduced = acc.to(output_ptr.type.element_ty)
-
-            # Store only to own rank (no broadcast)
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
+
+
+@triton.jit()
+def persistent_reduce_scatter_ring(
+    input_ptr,
+    output_ptr,
+    ring_buffer,
+    flags,
+    M,
+    N,
+    stride_in_m,
+    stride_in_n,
+    stride_out_m,
+    stride_out_n,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    next_rank: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    DISTRIBUTION: tl.constexpr,
+):
+    """
+    Ring-based reduce-scatter (Rabenseifner-style).
+
+    All ranks participate in reducing ALL tiles through the ring. Each rank:
+      1. Loads its local data for the tile
+      2. Stores to ring_buffer on the next rank and signals
+      3. Waits for data from the previous rank
+      4. Accumulates the received data with its local partial sum
+      5. Forwards the received data to the next rank
+      6. After world_size-1 steps, the tile is fully reduced
+      7. Only the owning rank writes the result to output
+
+    This achieves O(1) remote reads/writes per step instead of O(N) in two_shot,
+    while each rank only stores results for its assigned tiles.
+    """
+    pid_raw = tl.program_id(0)
+
+    pid = pid_raw
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid_raw, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+
+    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
+
+    # Tile ownership: determine which tiles this rank will store results for
+    tiles_per_rank = tl.cdiv(total_tiles, world_size)
+
+    # ALL ranks process ALL tiles through the ring
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        tile_offset_in = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        tile_offset_out = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+
+        # Load local data for this tile
+        local_tile = tl.load(input_ptr + tile_offset_in, mask=mask, other=0)
+        acc = local_tile.to(acc_dtype)
+        send_data = local_tile
+
+        flag_offset = tile_id
+        remote_flag_ptr = flags + flag_offset
+        local_flag_ptr = flags + flag_offset
+
+        # Ring reduce: world_size - 1 steps
+        for _step in range(0, world_size - 1):
+            # 1. Wait for next rank's ring_buffer to be free (flag == 0)
+            while (
+                iris.atomic_cas(
+                    remote_flag_ptr,
+                    0,
+                    0,
+                    iris_rank,
+                    next_rank,
+                    heap_bases,
+                    sem="acquire",
+                    scope="sys",
+                )
+                != 0
+            ):
+                pass
+
+            # 2. Store data to next rank's ring_buffer
+            iris.store(
+                ring_buffer + tile_offset_in,
+                send_data,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                mask=mask,
+                hint=(1, BLOCK_SIZE_N),
+            )
+            tl.debug_barrier()
+
+            # 3. Signal next rank that data is ready (set flag to 1)
+            iris.atomic_xchg(
+                remote_flag_ptr,
+                1,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                sem="release",
+                scope="sys",
+            )
+
+            # 4. Wait for previous rank's data (our flag becomes 1)
+            while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
+                pass
+
+            # 5. Read received data from our ring_buffer
+            recv_tile = tl.load(ring_buffer + tile_offset_in, mask=mask, other=0)
+
+            # 6. Accumulate
+            acc += recv_tile.to(acc_dtype)
+
+            # Forward the received data (not the accumulated result)
+            send_data = recv_tile
+
+            # 7. Reset our flag for next step
+            tl.debug_barrier()
+            tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+
+        # Only the owning rank stores the result (reduce-scatter vs all-reduce)
+        if DISTRIBUTION == 0:
+            # Striding: rank owns tiles rank, rank+world_size, rank+2*world_size, ...
+            is_owner = (tile_id % world_size) == group_rank
+        else:
+            # Block: rank owns tiles [rank*tiles_per_rank, (rank+1)*tiles_per_rank)
+            owner_start = group_rank * tiles_per_rank
+            is_owner = (tile_id >= owner_start) & (tile_id < owner_start + tiles_per_rank)
+
+        if is_owner:
+            tl.store(
+                output_ptr + tile_offset_out,
+                acc.to(output_ptr.type.element_ty),
+                mask=mask,
+            )
+
+
+class ReduceScatterWorkspace:
+    """Workspace for ring-based reduce-scatter."""
+
+    __slots__ = ("ring_buffer", "flags", "prepared", "variant")
+
+    def __init__(self):
+        self.ring_buffer = None
+        self.flags = None
+        self.prepared = False
+        self.variant = None
+
+
+def _prepare_ring_workspace(ctx, M, N, dtype, total_tiles, workspace):
+    """Allocate ring buffer and flags for ring_chunked variant."""
+    if workspace.ring_buffer is None or workspace.ring_buffer.shape != (M, N) or workspace.ring_buffer.dtype != dtype:
+        workspace.ring_buffer = ctx.zeros((M, N), dtype=dtype)
+    else:
+        workspace.ring_buffer.zero_()
+
+    if workspace.flags is None or workspace.flags.numel() != total_tiles:
+        workspace.flags = ctx.zeros((total_tiles,), dtype=torch.int32)
+    else:
+        workspace.flags.zero_()
+
+    workspace.prepared = True
+    workspace.variant = "ring_chunked"
 
 
 def launch(
@@ -150,6 +370,7 @@ def launch(
     rank_start,
     rank_stride,
     config,
+    workspace=None,
 ):
     """Launch the Triton reduce-scatter kernel."""
     M, N = input_tensor.shape[:2]
@@ -158,35 +379,96 @@ def launch(
 
     heap_bases = ctx.get_heap_bases()
     distribution = config.all_reduce_distribution
+    variant = getattr(config, "reduce_scatter_variant", "two_shot")
 
-    iris_launch(
-        persistent_reduce_scatter_two_shot,
-        (config.comm_sms,),
-        input_tensor,
-        output_tensor,
-        M,
-        N,
-        stride_in_m,
-        stride_in_n,
-        stride_out_m,
-        stride_out_n,
-        heap_bases,
-        rank_in_group,
-        rank_global,
-        world_size,
-        rank_start,
-        rank_stride,
-        config.block_size_m,
-        config.block_size_n,
-        config.swizzle_size,
-        config.comm_sms,
-        config.num_xcds,
-        config.chunk_size,
-        distribution,
-        num_stages=config.num_stages,
-        num_warps=config.num_warps,
-        waves_per_eu=config.waves_per_eu,
-        algorithm="reduce_scatter",
-        rank=rank_global,
-        dtype=input_tensor.dtype,
-    )
+    if variant == "two_shot":
+        iris_launch(
+            persistent_reduce_scatter_two_shot,
+            (config.comm_sms,),
+            input_tensor,
+            output_tensor,
+            M,
+            N,
+            stride_in_m,
+            stride_in_n,
+            stride_out_m,
+            stride_out_n,
+            heap_bases,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config.block_size_m,
+            config.block_size_n,
+            config.swizzle_size,
+            config.comm_sms,
+            config.num_xcds,
+            config.chunk_size,
+            distribution,
+            num_stages=config.num_stages,
+            num_warps=config.num_warps,
+            waves_per_eu=config.waves_per_eu,
+            algorithm="reduce_scatter",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
+        )
+
+    elif variant == "ring_chunked":
+        # Compute total tiles for workspace allocation
+        num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
+        num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
+        total_tiles = num_pid_m * num_pid_n
+
+        # Prepare workspace
+        if workspace is None:
+            workspace = ReduceScatterWorkspace()
+        if not workspace.prepared or workspace.variant != "ring_chunked":
+            _prepare_ring_workspace(ctx, M, N, input_tensor.dtype, total_tiles, workspace)
+
+        # Validate workspace sizes
+        if workspace.flags.numel() < total_tiles:
+            raise ValueError(
+                f"Flags array too small: have {workspace.flags.numel()} but need {total_tiles}. "
+                f"Pre-allocate workspace with the smallest block sizes you intend to use."
+            )
+
+        # Calculate next rank in the ring
+        next_rank_global = rank_start + ((rank_in_group + 1) % world_size) * rank_stride
+
+        iris_launch(
+            persistent_reduce_scatter_ring,
+            (config.comm_sms,),
+            input_tensor,
+            output_tensor,
+            workspace.ring_buffer,
+            workspace.flags,
+            M,
+            N,
+            stride_in_m,
+            stride_in_n,
+            stride_out_m,
+            stride_out_n,
+            heap_bases,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            next_rank_global,
+            config.block_size_m,
+            config.block_size_n,
+            config.swizzle_size,
+            config.comm_sms,
+            config.num_xcds,
+            config.chunk_size,
+            distribution,
+            num_stages=config.num_stages,
+            num_warps=config.num_warps,
+            waves_per_eu=config.waves_per_eu,
+            algorithm="reduce_scatter_ring",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
+        )
+    else:
+        raise ValueError(f"reduce_scatter_variant must be 'two_shot' or 'ring_chunked', got '{variant}'.")

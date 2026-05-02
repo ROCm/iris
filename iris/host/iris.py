@@ -1275,7 +1275,9 @@ class Iris:
                 workspace=workspace,
             )
 
-        def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
+        def reduce_scatter(
+            self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None, workspace=None
+        ):
             """
             Reduce-scatter collective operation.
 
@@ -1288,21 +1290,23 @@ class Iris:
                 input_tensor: Input tensor of shape (M, N) - local rank's partial data
                 op: Reduction operation to apply. Currently only ReduceOp.SUM is supported.
                     Default: ReduceOp.SUM.
-                group: ProcessGroup or None. If None, uses all ranks in shmem context.
+                group: ProcessGroup or None. If None, uses all ranks in context.
                        Default: None.
                 async_op: If False, performs a barrier at the end. If True, returns immediately.
                           Default: False.
                 config: Config instance with kernel parameters (default: None).
                         If None, uses default Config values.
-                        Only supports reduce_scatter_variant="two_shot".
+                        Supports reduce_scatter_variant="two_shot" or "ring_chunked".
+                workspace: ReduceScatterWorkspace for reusing ring buffers across calls.
+                           Only used by ring_chunked variant. If None, allocated internally.
 
             Example:
                 >>> ctx = iris.iris()
                 >>> ctx.ccl.reduce_scatter(output_tensor, input_tensor)
 
-                >>> # Custom configuration
+                >>> # Ring-chunked variant
                 >>> from iris.ccl import Config
-                >>> config = Config(reduce_scatter_variant="two_shot", all_reduce_distribution=1)
+                >>> config = Config(reduce_scatter_variant="ring_chunked")
                 >>> ctx.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
             """
             from iris.ccl.reduce_scatter import reduce_scatter
@@ -1315,6 +1319,7 @@ class Iris:
                 group=group,
                 async_op=async_op,
                 config=config,
+                workspace=workspace,
             )
 
 
