@@ -4,10 +4,17 @@
 """
 All-to-all collective operation — public API.
 
-Routes to triton/ or gluon/ based on config.use_gluon.
+Routes to NCCL (via layout transpose) or triton/gluon.
+Iris uses column-chunked layout (M, N*W), NCCL uses row-chunked (W*M, N).
 """
 
+import torch
+import torch.distributed as _dist
+
 from iris.ccl.utils import extract_group_info
+
+_NCCL_SMALL_BYTES = 8 * 1024 * 1024  # <8MB: NCCL via layout transpose
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL via layout transpose
 
 
 def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None):
@@ -24,6 +31,20 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
     """
+    M, total_N = input_tensor.shape[:2]
+    _, _, world_size, _, _ = extract_group_info(group, ctx)
+    N = total_N // world_size
+    msg_bytes = M * total_N * input_tensor.element_size()
+
+    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
+        # Transpose from iris column-chunked (M, N*W) to NCCL row-chunked (W*M, N)
+        nccl_in = input_tensor.view(M, world_size, N).permute(1, 0, 2).contiguous().view(world_size * M, N)
+        nccl_out = torch.empty_like(nccl_in)
+        _dist.all_to_all_single(nccl_out, nccl_in, group=group)
+        # Transpose back from NCCL row-chunked (W*M, N) to iris column-chunked (M, N*W)
+        output_tensor.copy_(nccl_out.view(world_size, M, N).permute(1, 0, 2).contiguous().view(M, total_N))
+        return
+
     from iris.ccl.config import Config
 
     if config is None:
