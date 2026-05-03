@@ -756,6 +756,18 @@ def persistent_all_reduce_two_shot(
         )
 
 
+_dummy_barrier_cache: dict = {}
+
+
+def _get_dummy_barrier(device):
+    """Return cached dummy barrier tensors for the no-inline-barrier path."""
+    if device not in _dummy_barrier_cache:
+        _dummy_barrier_cache[device] = tuple(
+            torch.zeros(1, dtype=torch.int32, device=device) for _ in range(3)
+        )
+    return _dummy_barrier_cache[device]
+
+
 def launch(
     output_tensor,
     input_tensor,
@@ -814,9 +826,7 @@ def launch(
     if inline_barrier and barrier_state is not None:
         barrier_flags, wg_done, barrier_sense = barrier_state
     else:
-        barrier_flags = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
-        wg_done = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
-        barrier_sense = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
+        barrier_flags, wg_done, barrier_sense = _get_dummy_barrier(input_tensor.device)
 
     if variant == VARIANT_ATOMIC:
         iris_launch(
