@@ -13,8 +13,8 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_FALLBACK_BYTES = 4 * 1024 * 1024  # <4MB: NCCL avoids Triton launch overhead
-_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree all-reduce may be more efficient
+_NCCL_FALLBACK_BYTES = 8 * 1024 * 1024  # <8MB: NCCL (native loses on MI300X at 2-4MB)
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree all-reduce is more efficient
 
 
 def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
