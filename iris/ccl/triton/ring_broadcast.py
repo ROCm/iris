@@ -2,15 +2,16 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Ring broadcast kernel for iris CCL.
+Ring broadcast kernel — per-tile independent processing, no separate ring buffer.
 
-Pipeline broadcast through a ring of ranks. Each rank reads from its
-predecessor and writes locally, then signals the next rank.
+Each CTA independently processes its assigned tiles through the ring.
+No inter-CTA barriers, no pid-0 coordination.
 
-Ring order: root -> root+1 -> root+2 -> ... -> root-1
-Each step, one more rank has the chunk. After W-1 steps, all ranks have it.
+Ring order: root -> root+1 -> ... -> root-1
+Root writes its data directly to rank 1's tensor. Rank 1 reads from its own tensor
+(root already wrote there) and forwards to rank 2's tensor. Etc.
 
-Uses per-chunk flag signaling (producer-consumer) instead of global barriers.
+Uses per-tile flags on the symmetric heap for producer-consumer handshake.
 """
 
 import torch
@@ -18,21 +19,18 @@ import triton
 import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
+from iris.ccl.utils import inline_device_barrier
 from ..utils import chiplet_transform_chunked
 
 
 @triton.jit()
 def persistent_ring_broadcast(
     data_ptr,
-    flags_ptr,
-    arrive_ptr,
-    ready_ptr,
+    flags,
     M,
     N,
     stride_m,
     stride_n,
-    num_chunks,
-    chunk_rows,
     heap_bases: tl.tensor,
     group_rank: tl.constexpr,
     iris_rank: tl.constexpr,
@@ -40,113 +38,116 @@ def persistent_ring_broadcast(
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
     root: tl.constexpr,
+    next_rank: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    FLAGS_PER_TILE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
-    pid = tl.program_id(0)
-
+    pid_raw = tl.program_id(0)
+    pid = pid_raw
     if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+        pid = chiplet_transform_chunked(pid_raw, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+
+    tl.static_assert(FLAGS_PER_TILE >= 1, "FLAGS_PER_TILE must be >= 1")
 
     ring_pos = (group_rank - root + world_size) % world_size
-    prev_group_rank = (group_rank - 1 + world_size) % world_size
-    prev_global = rank_start + prev_group_rank * rank_stride
+    is_root = ring_pos == 0
+    is_last = ring_pos == world_size - 1
 
-    from_base = tl.load(heap_bases + iris_rank)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
 
-    if ring_pos == 0:
-        if pid == 0:
-            for c in range(num_chunks):
-                own_flag_ptr = flags_ptr + c
-                own_offset = tl.cast(own_flag_ptr, tl.uint64) - from_base
-                own_translated = tl.cast(
-                    tl.cast(from_base, tl.pointer_type(tl.int8)) + own_offset,
-                    own_flag_ptr.dtype,
-                )
-                tl.atomic_xchg(own_translated, 1, sem="release", scope="sys")
-    else:
-        expected_step = ring_pos
-        prev_base = tl.load(heap_bases + prev_global)
-        num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    if total_tiles > 0:
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        for c in range(num_chunks):
-            row_start = c * chunk_rows
-            actual_chunk_rows = tl.minimum(chunk_rows, M - row_start)
+            tl.assume(pid_m >= 0)
+            tl.assume(pid_n >= 0)
 
-            # pid 0 waits for predecessor's flag, then releases all CTAs
-            if pid == 0:
-                prev_flag_ptr = flags_ptr + c
-                prev_offset = tl.cast(prev_flag_ptr, tl.uint64) - from_base
-                prev_translated = tl.cast(
-                    tl.cast(prev_base, tl.pointer_type(tl.int8)) + prev_offset,
-                    prev_flag_ptr.dtype,
-                )
-                while (
-                    tl.atomic_cas(prev_translated, expected_step, expected_step, sem="acquire", scope="sys")
-                    < expected_step
-                ):
-                    pass
-                tl.debug_barrier()
-                tl.atomic_xchg(prev_translated, 0, sem="release", scope="sys")
+            rm_base = pid_m * BLOCK_SIZE_M
+            rn_base = pid_n * BLOCK_SIZE_N
+            rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+            rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+            rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-                tl.atomic_xchg(ready_ptr, c + 1, sem="release", scope="gpu")
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            tile_offset = rm[:, None] * stride_m + rn[None, :] * stride_n
 
-            if pid != 0:
-                while tl.atomic_cas(ready_ptr, c + 1, c + 1, sem="acquire", scope="gpu") < (c + 1):
-                    pass
+            flag_offset = tile_id * FLAGS_PER_TILE
+            remote_flag_ptr = flags + flag_offset
+            local_flag_ptr = flags + flag_offset
 
-            # Process tiles
-            num_pid_m_chunk = tl.cdiv(actual_chunk_rows, BLOCK_SIZE_M)
-            total_tiles = num_pid_m_chunk * num_pid_n
+            if is_root:
+                tile_data = tl.load(data_ptr + tile_offset, mask=mask, other=0)
 
-            for tile_offset in range(pid, total_tiles, COMM_SMS):
-                pid_m = tile_offset // num_pid_n
-                pid_n = tile_offset % num_pid_n
-
-                rm_base = row_start + pid_m * BLOCK_SIZE_M
-                rn_base = pid_n * BLOCK_SIZE_N
-
-                rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
-                rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-                rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-                rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-                offset = rm[:, None] * stride_m + rn[None, :] * stride_n
-                src_ptr = data_ptr + offset
-
-                is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
-
-                if is_full:
-                    data = iris.load(src_ptr, iris_rank, prev_global, heap_bases, hint=(1, BLOCK_SIZE_N))
-                    tl.store(src_ptr, data, cache_modifier=".wt")
-                else:
-                    mask = (rm[:, None] < M) & (rn[None, :] < N)
-                    data = iris.load(src_ptr, iris_rank, prev_global, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N))
-                    tl.store(src_ptr, data, mask=mask, cache_modifier=".wt")
-
-            # Each CTA: flush all stores then signal arrival
-            tl.inline_asm_elementwise("s_waitcnt vmcnt(0)", "=r", [], dtype=tl.int32, is_pure=False, pack=1)
-            expected_arrive = (c + 1) * COMM_SMS
-            tl.atomic_add(arrive_ptr, 1, sem="release", scope="gpu")
-
-            # pid 0: wait for all CTAs to arrive, then signal flag
-            if pid == 0:
-                while (
-                    tl.atomic_cas(arrive_ptr, expected_arrive, expected_arrive, sem="acquire", scope="gpu")
-                    < expected_arrive
-                ):
+                if not is_last:
+                    iris.store(
+                        data_ptr + tile_offset, tile_data,
+                        iris_rank, next_rank, heap_bases,
+                        mask=mask, hint=(1, BLOCK_SIZE_N),
+                    )
+                    tl.debug_barrier()
+                    iris.atomic_xchg(
+                        remote_flag_ptr, 1, iris_rank, next_rank, heap_bases,
+                        sem="release", scope="sys",
+                    )
+            else:
+                while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
                     pass
 
-                own_flag_ptr = flags_ptr + c
-                own_offset = tl.cast(own_flag_ptr, tl.uint64) - from_base
-                own_translated = tl.cast(
-                    tl.cast(from_base, tl.pointer_type(tl.int8)) + own_offset,
-                    own_flag_ptr.dtype,
-                )
-                tl.atomic_xchg(own_translated, expected_step + 1, sem="release", scope="sys")
+                tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
+
+                if not is_last:
+                    tile_data = tl.load(data_ptr + tile_offset, mask=mask, other=0)
+
+                    iris.store(
+                        data_ptr + tile_offset, tile_data,
+                        iris_rank, next_rank, heap_bases,
+                        mask=mask, hint=(1, BLOCK_SIZE_N),
+                    )
+                    tl.debug_barrier()
+                    iris.atomic_xchg(
+                        remote_flag_ptr, 1, iris_rank, next_rank, heap_bases,
+                        sem="release", scope="sys",
+                    )
+
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
+        )
+
+
+_dummy_barrier_cache: dict = {}
+
+
+def _get_dummy_barrier(device):
+    if device not in _dummy_barrier_cache:
+        _dummy_barrier_cache[device] = tuple(torch.zeros(1, dtype=torch.int32, device=device) for _ in range(3))
+    return _dummy_barrier_cache[device]
 
 
 def launch(
@@ -159,39 +160,44 @@ def launch(
     rank_stride,
     root,
     config,
-    flags=None,
+    inline_barrier=False,
+    barrier_state=None,
 ):
-    """Launch ring broadcast kernel."""
+    """Launch per-tile ring broadcast kernel."""
     M, N = tensor.shape[:2]
     stride_m, stride_n = tensor.stride(0), tensor.stride(1)
 
-    chunk_rows = max(config.block_size_m, M // (world_size * 2))
-    chunk_rows = ((chunk_rows + config.block_size_m - 1) // config.block_size_m) * config.block_size_m
-    num_chunks = (M + chunk_rows - 1) // chunk_rows
+    block_m = config.block_size_m
+    block_n = config.block_size_n
+    num_pid_m = (M + block_m - 1) // block_m
+    num_pid_n = (N + block_n - 1) // block_n
+    total_tiles = num_pid_m * num_pid_n
+    flags_per_tile = 1
 
-    if flags is None:
-        flags = ctx.zeros((num_chunks,), dtype=torch.int32)
+    total_flags = total_tiles * flags_per_tile
+    flags = ctx.zeros((total_flags,), dtype=torch.int32)
 
-    dev = ctx.get_device()
-    ring_sms = config.comm_sms
-    arrive_counter = torch.zeros((1,), dtype=torch.int32, device=dev)
-    ready_counter = torch.zeros((1,), dtype=torch.int32, device=dev)
+    ring_pos = (rank_in_group - root + world_size) % world_size
+    next_in_ring = (ring_pos + 1) % world_size
+    next_group_rank = (root + next_in_ring) % world_size
+    next_rank = rank_start + next_group_rank * rank_stride
 
     heap_bases = ctx.get_heap_bases()
 
+    if inline_barrier and barrier_state is not None:
+        barrier_flags, wg_done, barrier_sense = barrier_state
+    else:
+        barrier_flags, wg_done, barrier_sense = _get_dummy_barrier(tensor.device)
+
     iris_launch(
         persistent_ring_broadcast,
-        (ring_sms,),
+        (config.comm_sms,),
         tensor,
         flags,
-        arrive_counter,
-        ready_counter,
         M,
         N,
         stride_m,
         stride_n,
-        num_chunks,
-        chunk_rows,
         heap_bases,
         rank_in_group,
         rank_global,
@@ -199,11 +205,18 @@ def launch(
         rank_start,
         rank_stride,
         root,
+        next_rank,
+        barrier_flags,
+        wg_done,
+        barrier_sense,
         config.block_size_m,
         config.block_size_n,
-        ring_sms,
+        config.swizzle_size,
+        config.comm_sms,
         config.num_xcds,
         config.chunk_size,
+        flags_per_tile,
+        inline_barrier,
         num_stages=config.num_stages,
         num_warps=config.num_warps,
         waves_per_eu=config.waves_per_eu,
@@ -211,5 +224,3 @@ def launch(
         rank=rank_global,
         dtype=tensor.dtype,
     )
-
-    return flags
