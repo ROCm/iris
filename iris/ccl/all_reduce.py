@@ -13,7 +13,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_FALLBACK_BYTES = 8 * 1024 * 1024  # <8MB: NCCL (native kernel not competitive on MI300X)
+_NCCL_FALLBACK_BYTES = 2 * 1024 * 1024  # <2MB: NCCL — two_shot kernel has correctness issues below 2MB
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree all-reduce is more efficient
 
 
