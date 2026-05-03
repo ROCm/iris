@@ -4,23 +4,22 @@
 """
 Broadcast collective operation — public API.
 
-Single-kernel all-ranks push: root loads each tile once and iris.store's
-it to every other rank.  One kernel launch, one barrier.
+Two paths by message size:
+- Small/medium: single push kernel (root pushes tiles to all ranks)
+- Large (>=4MB): NCCL (tree-based, scales better at high message sizes)
 """
 
+import torch.distributed as _dist
+
 from iris.ccl.utils import extract_group_info
+
+_NCCL_SMALL_BYTES = 128 * 1024
+_NCCL_LARGE_BYTES = 4 * 1024 * 1024
 
 
 def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
     """
     In-place broadcast collective operation.
-
-    The rank identified by ``src`` broadcasts its data to all other ranks.
-    After the operation, all ranks hold a copy of the source rank's data.
-
-    Uses a single persistent kernel: only the root rank does work, pushing
-    every tile to all other ranks via iris.store.  Non-root ranks exit the
-    kernel immediately.
 
     Args:
         tensor: Tensor on the symmetric heap. Modified in-place.
@@ -50,6 +49,12 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
             ctx.device_barrier(group)
         return
 
+    msg_bytes = numel * tensor.element_size()
+
+    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
+        _dist.broadcast(tensor, src=src, group=group)
+        return
+
     from iris.ccl.triton.broadcast import launch
 
     tensor = tensor.contiguous().view(-1)
@@ -60,15 +65,8 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
         tensor = tensor.view(1, -1)
 
     launch(
-        tensor,
-        ctx,
-        rank_in_group,
-        rank_global,
-        world_size,
-        rank_start,
-        rank_stride,
-        src,
-        config,
+        tensor, ctx, rank_in_group, rank_global,
+        world_size, rank_start, rank_stride, src, config,
     )
 
     if not async_op:

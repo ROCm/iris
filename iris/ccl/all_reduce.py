@@ -4,10 +4,16 @@
 """
 All-reduce collective operation — public API.
 
-Triton only (no gluon support).
+Two paths by message size:
+- Small (<512KB): NCCL (avoids Triton dispatch overhead)
+- Large (>=512KB): native two_shot kernel
 """
 
+import torch.distributed as _dist
+
 from iris.ccl.utils import extract_group_info
+
+_NCCL_FALLBACK_BYTES = 512 * 1024
 
 
 def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
@@ -31,6 +37,15 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         config: Config with kernel parameters
         workspace: Reusable workspace from all_reduce_preamble
     """
+    M, N = input_tensor.shape[:2]
+    msg_bytes = M * N * input_tensor.element_size()
+
+    if msg_bytes < _NCCL_FALLBACK_BYTES:
+        if output_tensor.data_ptr() != input_tensor.data_ptr():
+            output_tensor.copy_(input_tensor)
+        _dist.all_reduce(output_tensor, group=group)
+        return None
+
     from iris.ccl.config import Config
     from iris.ccl.utils import ReduceOp
 

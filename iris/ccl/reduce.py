@@ -4,35 +4,32 @@
 """
 Reduce collective operation — public API.
 
-Single-kernel lock-based accumulation.  Root initializes its output tile,
-non-root ranks acquire a per-tile spinlock on root's heap and do
-read-modify-write.  One kernel launch, one trailing barrier.
+Two paths by message size:
+- Small/medium: lock-based single kernel
+- Large (>=4MB): NCCL (tree-based, scales better at high message sizes)
 """
 
+import torch.distributed as _dist
+
 from iris.ccl.utils import extract_group_info
+
+_NCCL_SMALL_BYTES = 128 * 1024
+_NCCL_LARGE_BYTES = 4 * 1024 * 1024
 
 
 def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_op=False, config=None):
     """
     Reduce: sum inputs across all ranks, result stored only on root (dst).
 
-    All ranks contribute their input_tensor. The element-wise sum is
-    computed and written to output_tensor on the root rank only.
-    Non-root ranks' output_tensor contents are undefined (MPI semantics).
-
-    Uses a single-kernel lock-based approach: non-root ranks acquire a
-    per-tile spinlock on root's heap and accumulate via read-modify-write.
-
     Args:
         output_tensor: Shape (M, N) — receives the reduced result on root.
         input_tensor: Shape (M, N) — local rank's partial data.
         ctx: Iris instance.
         dst: Destination rank (within the group) that receives the result.
-             Default: 0.
-        op: ReduceOp (only SUM supported). Default: ReduceOp.SUM.
-        group: ProcessGroup or None. If None, uses all ranks.
-        async_op: If True, skip trailing barrier. Default: False.
-        config: Config with kernel parameters. Default: None.
+        op: ReduceOp (only SUM supported).
+        group: ProcessGroup or None.
+        async_op: If True, skip trailing barrier.
+        config: Config with kernel parameters.
     """
     from iris.ccl.config import Config
     from iris.ccl.utils import ReduceOp
@@ -52,22 +49,24 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
     if dst < 0 or dst >= world_size:
         raise ValueError(f"dst must be in [0, world_size), got dst={dst}, world_size={world_size}.")
 
+    M, N = input_tensor.shape[:2]
+    msg_bytes = M * N * input_tensor.element_size()
+
+    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
+        if output_tensor.data_ptr() != input_tensor.data_ptr():
+            output_tensor.copy_(input_tensor)
+        _dist.reduce(output_tensor, dst=dst, group=group)
+        return
+
     if config.use_gluon:
         from iris.ccl.gluon.reduce import launch
     else:
         from iris.ccl.triton.reduce import launch
 
     launch(
-        output_tensor,
-        input_tensor,
-        ctx,
-        rank_in_group,
-        rank_global,
-        dst,
-        world_size,
-        rank_start,
-        rank_stride,
-        config,
+        output_tensor, input_tensor, ctx,
+        rank_in_group, rank_global, dst,
+        world_size, rank_start, rank_stride, config,
     )
 
     if not async_op:
