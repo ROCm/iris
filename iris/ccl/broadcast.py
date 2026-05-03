@@ -14,6 +14,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
+_NCCL_SMALL_BYTES = 512 * 1024  # <512KB: NCCL avoids Triton launch overhead
 _TWOPHASE_BYTES = 512 * 1024
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree broadcast is more efficient
 
@@ -54,6 +55,11 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
 
     # Large messages: NCCL tree broadcast is more bandwidth-efficient.
     if msg_bytes >= _NCCL_LARGE_BYTES:
+        _dist.broadcast(tensor, src=src, group=group)
+        return
+
+    # Small messages: NCCL avoids Triton launch overhead.
+    if msg_bytes < _NCCL_SMALL_BYTES:
         _dist.broadcast(tensor, src=src, group=group)
         return
 

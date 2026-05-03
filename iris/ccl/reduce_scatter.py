@@ -11,6 +11,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
+_NCCL_SMALL_BYTES = 512 * 1024  # <512KB: NCCL avoids Triton launch overhead
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree-based is more bandwidth-efficient
 
 
@@ -43,6 +44,13 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
     M, N = input_tensor.shape[:2]
     msg_bytes = M * N * input_tensor.element_size()
+
+    # Small messages: NCCL avoids Triton launch overhead
+    if msg_bytes < _NCCL_SMALL_BYTES:
+        chunk_m = M // world_size
+        out_chunk = output_tensor[rank_in_group * chunk_m : (rank_in_group + 1) * chunk_m]
+        _dist.reduce_scatter_tensor(out_chunk, input_tensor, group=group)
+        return
 
     # Large messages: NCCL tree-based reduce-scatter is more bandwidth-efficient
     # because the iris kernel reads ALL ranks' data per tile (O(world_size * msg_bytes)),
