@@ -97,14 +97,23 @@ def persistent_ring_broadcast(
 
                 if not is_last:
                     iris.store(
-                        data_ptr + tile_offset, tile_data,
-                        iris_rank, next_rank, heap_bases,
-                        mask=mask, hint=(1, BLOCK_SIZE_N),
+                        data_ptr + tile_offset,
+                        tile_data,
+                        iris_rank,
+                        next_rank,
+                        heap_bases,
+                        mask=mask,
+                        hint=(1, BLOCK_SIZE_N),
                     )
                     tl.debug_barrier()
                     iris.atomic_xchg(
-                        remote_flag_ptr, 1, iris_rank, next_rank, heap_bases,
-                        sem="release", scope="sys",
+                        remote_flag_ptr,
+                        1,
+                        iris_rank,
+                        next_rank,
+                        heap_bases,
+                        sem="release",
+                        scope="sys",
                     )
             else:
                 while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
@@ -116,14 +125,23 @@ def persistent_ring_broadcast(
                     tile_data = tl.load(data_ptr + tile_offset, mask=mask, other=0)
 
                     iris.store(
-                        data_ptr + tile_offset, tile_data,
-                        iris_rank, next_rank, heap_bases,
-                        mask=mask, hint=(1, BLOCK_SIZE_N),
+                        data_ptr + tile_offset,
+                        tile_data,
+                        iris_rank,
+                        next_rank,
+                        heap_bases,
+                        mask=mask,
+                        hint=(1, BLOCK_SIZE_N),
                     )
                     tl.debug_barrier()
                     iris.atomic_xchg(
-                        remote_flag_ptr, 1, iris_rank, next_rank, heap_bases,
-                        sem="release", scope="sys",
+                        remote_flag_ptr,
+                        1,
+                        iris_rank,
+                        next_rank,
+                        heap_bases,
+                        sem="release",
+                        scope="sys",
                     )
 
     if INLINE_BARRIER:
