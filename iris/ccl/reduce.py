@@ -11,7 +11,7 @@ Two paths by message size:
 
 from iris.ccl.utils import extract_group_info
 
-_TWOPHASE_BYTES = 512 * 1024
+_TWOPHASE_BYTES = 64 * 1024
 
 
 def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_op=False, config=None):
@@ -46,8 +46,19 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
     if dst < 0 or dst >= world_size:
         raise ValueError(f"dst must be in [0, world_size), got dst={dst}, world_size={world_size}.")
 
-    M, N = input_tensor.shape[:2]
-    msg_bytes = M * N * input_tensor.element_size()
+    # Compute message size before reshape
+    numel = input_tensor.numel()
+    msg_bytes = numel * input_tensor.element_size()
+
+    # Reshape for efficient tiling (same as broadcast.py)
+    # Avoids M=1 with block_size_m=32 where 31/32 rows are masked/wasted.
+    block_n = config.block_size_n
+    if numel >= block_n:
+        input_tensor = input_tensor.contiguous().view(-1, block_n)
+        output_tensor = output_tensor.contiguous().view(-1, block_n)
+    else:
+        input_tensor = input_tensor.contiguous().view(1, -1)
+        output_tensor = output_tensor.contiguous().view(1, -1)
 
     if config.use_gluon:
         from iris.ccl.gluon.reduce import launch
