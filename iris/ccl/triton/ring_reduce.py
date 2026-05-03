@@ -103,7 +103,10 @@ def persistent_ring_reduce(
             tl.atomic_add(arrive_ptr, 1, sem="release", scope="gpu")
 
             if pid == 0:
-                while tl.atomic_cas(arrive_ptr, expected_arrive, expected_arrive, sem="acquire", scope="gpu") < expected_arrive:
+                while (
+                    tl.atomic_cas(arrive_ptr, expected_arrive, expected_arrive, sem="acquire", scope="gpu")
+                    < expected_arrive
+                ):
                     pass
 
                 own_flag_ptr = flags_ptr + c
@@ -131,7 +134,10 @@ def persistent_ring_reduce(
                     tl.cast(prev_base, tl.pointer_type(tl.int8)) + prev_offset,
                     prev_flag_ptr.dtype,
                 )
-                while tl.atomic_cas(prev_translated, expected_step, expected_step, sem="acquire", scope="sys") < expected_step:
+                while (
+                    tl.atomic_cas(prev_translated, expected_step, expected_step, sem="acquire", scope="sys")
+                    < expected_step
+                ):
                     pass
 
                 tl.atomic_xchg(ready_ptr, c + 1, sem="release", scope="gpu")
@@ -168,17 +174,24 @@ def persistent_ring_reduce(
                     tl.store(output_ptr + out_offset, acc.to(output_ptr.type.element_ty), cache_modifier=".wt")
                 else:
                     mask = (rm[:, None] < M) & (rn[None, :] < N)
-                    remote_data = iris.load(src_ptr, iris_rank, prev_global, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N))
+                    remote_data = iris.load(
+                        src_ptr, iris_rank, prev_global, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)
+                    )
                     local_data = tl.load(input_ptr + in_offset, mask=mask, other=0.0)
                     acc = remote_data.to(acc_dtype) + local_data.to(acc_dtype)
-                    tl.store(output_ptr + out_offset, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt")
+                    tl.store(
+                        output_ptr + out_offset, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt"
+                    )
 
             # Inter-CTA arrive barrier
             expected_arrive = (c + 1) * COMM_SMS
             tl.atomic_add(arrive_ptr, 1, sem="release", scope="gpu")
 
             if pid == 0:
-                while tl.atomic_cas(arrive_ptr, expected_arrive, expected_arrive, sem="acquire", scope="gpu") < expected_arrive:
+                while (
+                    tl.atomic_cas(arrive_ptr, expected_arrive, expected_arrive, sem="acquire", scope="gpu")
+                    < expected_arrive
+                ):
                     pass
 
                 own_flag_ptr = flags_ptr + c

@@ -84,7 +84,10 @@ def persistent_ring_broadcast(
                     tl.cast(prev_base, tl.pointer_type(tl.int8)) + prev_offset,
                     prev_flag_ptr.dtype,
                 )
-                while tl.atomic_cas(prev_translated, expected_step, expected_step, sem="acquire", scope="sys") < expected_step:
+                while (
+                    tl.atomic_cas(prev_translated, expected_step, expected_step, sem="acquire", scope="sys")
+                    < expected_step
+                ):
                     pass
 
                 tl.atomic_xchg(ready_ptr, c + 1, sem="release", scope="gpu")
@@ -129,7 +132,10 @@ def persistent_ring_broadcast(
 
             # pid 0: wait for all CTAs to arrive, then signal flag
             if pid == 0:
-                while tl.atomic_cas(arrive_ptr, expected_arrive, expected_arrive, sem="acquire", scope="gpu") < expected_arrive:
+                while (
+                    tl.atomic_cas(arrive_ptr, expected_arrive, expected_arrive, sem="acquire", scope="gpu")
+                    < expected_arrive
+                ):
                     pass
 
                 own_flag_ptr = flags_ptr + c

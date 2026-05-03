@@ -64,9 +64,16 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         from iris.ccl.triton.reduce import launch
 
     launch(
-        output_tensor, input_tensor, ctx,
-        rank_in_group, rank_global, dst,
-        world_size, rank_start, rank_stride, config,
+        output_tensor,
+        input_tensor,
+        ctx,
+        rank_in_group,
+        rank_global,
+        dst,
+        world_size,
+        rank_start,
+        rank_stride,
+        config,
     )
 
     if not async_op:

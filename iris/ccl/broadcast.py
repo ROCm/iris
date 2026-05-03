@@ -65,8 +65,15 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
         tensor = tensor.view(1, -1)
 
     launch(
-        tensor, ctx, rank_in_group, rank_global,
-        world_size, rank_start, rank_stride, src, config,
+        tensor,
+        ctx,
+        rank_in_group,
+        rank_global,
+        world_size,
+        rank_start,
+        rank_stride,
+        src,
+        config,
     )
 
     if not async_op:
