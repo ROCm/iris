@@ -5,15 +5,16 @@
 All-reduce collective operation — public API.
 
 Two paths by message size:
-- Small (<512KB): NCCL (avoids Triton dispatch overhead)
-- Large (>=512KB): native two_shot kernel
+- Small (<256KB): NCCL (avoids Triton launch overhead)
+- Medium (256KB-8MB): native two_shot Triton kernel
+- Large (>=8MB): NCCL tree all-reduce (more bandwidth-efficient)
 """
 
 import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_FALLBACK_BYTES = 2 * 1024 * 1024  # <2MB: NCCL — two_shot kernel has correctness issues below 2MB
+_NCCL_FALLBACK_BYTES = 256 * 1024  # <256KB: NCCL avoids Triton launch overhead
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree all-reduce is more efficient
 
 
