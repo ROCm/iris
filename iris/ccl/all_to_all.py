@@ -37,6 +37,10 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     msg_bytes = M * total_N * input_tensor.element_size()
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
+        if M == 1:
+            # M=1: column-chunked (1, N*W) and row-chunked (W*N) are identical in memory
+            _dist.all_to_all_single(output_tensor.view(-1), input_tensor.view(-1), group=group)
+            return
         # Transpose from iris column-chunked (M, N*W) to NCCL row-chunked (W*M, N)
         nccl_in = input_tensor.view(M, world_size, N).permute(1, 0, 2).contiguous().view(world_size * M, N)
         nccl_out = torch.empty_like(nccl_in)
