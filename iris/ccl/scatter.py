@@ -13,7 +13,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 32 * 1024  # <32KB: NCCL avoids Triton launch overhead
+_NCCL_SMALL_BYTES = 0  # Triton is faster than NCCL wrapper (avoids list construction)
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL is more bandwidth-efficient
 
 
