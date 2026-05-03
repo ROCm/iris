@@ -51,7 +51,7 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
 
     msg_bytes = numel * tensor.element_size()
 
-    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
+    if msg_bytes < _NCCL_SMALL_BYTES:
         _dist.broadcast(tensor, src=src, group=group)
         return
 
@@ -62,7 +62,10 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
     else:
         tensor = tensor.view(1, -1)
 
-    from iris.ccl.triton.ring_broadcast import launch
+    if msg_bytes >= _NCCL_LARGE_BYTES:
+        from iris.ccl.triton.ring_broadcast import launch
+    else:
+        from iris.ccl.triton.broadcast import launch
 
     launch(
         tensor,
