@@ -11,7 +11,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 8 * 1024 * 1024  # <8MB: NCCL (native loses on MI300X at 2-4MB)
+_NCCL_SMALL_BYTES = 256 * 1024  # <256KB: NCCL avoids Triton launch overhead
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree-based is more bandwidth-efficient
 
 
@@ -28,12 +28,13 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
     """
-    # Fast NCCL dispatch — compute size before imports
+    # Fast NCCL dispatch — avoid extract_group_info overhead for small/large messages
     M, N = input_tensor.shape[:2]
     msg_bytes = M * N * input_tensor.element_size()
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        rank_in_group, _, world_size, _, _ = extract_group_info(group, ctx)
+        world_size = _dist.get_world_size(group)
+        rank_in_group = _dist.get_rank(group)
         chunk_m = M // world_size
         out_chunk = output_tensor[rank_in_group * chunk_m : (rank_in_group + 1) * chunk_m]
         _dist.reduce_scatter_tensor(out_chunk, input_tensor, group=group)

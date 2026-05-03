@@ -13,7 +13,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 2 * 1024 * 1024  # <2MB: NCCL avoids Triton launch overhead
+_NCCL_SMALL_BYTES = 256 * 1024  # <256KB: NCCL avoids Triton launch overhead
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL is more bandwidth-efficient
 
 
@@ -37,15 +37,14 @@ def scatter(output_tensor, input_tensor, ctx, src=0, group=None, async_op=False,
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
     """
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
-
+    # Fast NCCL dispatch — avoid extract_group_info overhead for small/large messages
     M, N = output_tensor.shape[:2]
     msg_bytes = M * N * output_tensor.element_size()
 
-    # Small and large messages: use NCCL (avoids Triton launch overhead at small
-    # sizes, and tree-based scatter is more bandwidth-efficient at large sizes).
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        # torch.distributed.scatter requires list-of-tensors on root
+        # Lightweight rank/world_size for NCCL path only
+        world_size = _dist.get_world_size(group)
+        rank_in_group = _dist.get_rank(group)
         scatter_list = None
         if rank_in_group == src:
             scatter_list = list(input_tensor.chunk(world_size, dim=0))
@@ -56,6 +55,8 @@ def scatter(output_tensor, input_tensor, ctx, src=0, group=None, async_op=False,
 
     if config is None:
         config = Config(block_size_m=32, block_size_n=64)
+
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
     # Validate input shape on ALL ranks — symmetric allocation is required for
     # RMA address translation, so every rank must allocate (world_size * M, N).
