@@ -52,45 +52,29 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
     M, N = input_tensor.shape[:2]
     msg_bytes = M * N * input_tensor.element_size()
 
-    if msg_bytes < _NCCL_SMALL_BYTES:
+    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
         if output_tensor.data_ptr() != input_tensor.data_ptr():
             output_tensor.copy_(input_tensor)
         _dist.reduce(output_tensor, dst=dst, group=group)
         return
 
-    if msg_bytes >= _NCCL_LARGE_BYTES:
-        from iris.ccl.triton.ring_reduce import launch
-
-        launch(
-            output_tensor,
-            input_tensor,
-            ctx,
-            rank_in_group,
-            rank_global,
-            world_size,
-            rank_start,
-            rank_stride,
-            dst,
-            config,
-        )
+    if config.use_gluon:
+        from iris.ccl.gluon.reduce import launch
     else:
-        if config.use_gluon:
-            from iris.ccl.gluon.reduce import launch
-        else:
-            from iris.ccl.triton.reduce import launch
+        from iris.ccl.triton.reduce import launch
 
-        launch(
-            output_tensor,
-            input_tensor,
-            ctx,
-            rank_in_group,
-            rank_global,
-            dst,
-            world_size,
-            rank_start,
-            rank_stride,
-            config,
-        )
+    launch(
+        output_tensor,
+        input_tensor,
+        ctx,
+        rank_in_group,
+        rank_global,
+        dst,
+        world_size,
+        rank_start,
+        rank_stride,
+        config,
+    )
 
     if not async_op:
         ctx.device_barrier(group)
