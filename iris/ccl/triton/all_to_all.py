@@ -106,17 +106,24 @@ def persistent_all_to_all(
             if is_full:
                 data = tl.load(in_ptr)
                 iris.store(
-                    out_ptr, data,
-                    iris_rank, target_rank, heap_bases,
+                    out_ptr,
+                    data,
+                    iris_rank,
+                    target_rank,
+                    heap_bases,
                     hint=(1, BLOCK_SIZE_N),
                 )
             else:
                 mask = (rm[:, None] < M) & (rn[None, :] < N)
                 data = tl.load(in_ptr, mask=mask)
                 iris.store(
-                    out_ptr, data,
-                    iris_rank, target_rank, heap_bases,
-                    mask=mask, hint=(1, BLOCK_SIZE_N),
+                    out_ptr,
+                    data,
+                    iris_rank,
+                    target_rank,
+                    heap_bases,
+                    mask=mask,
+                    hint=(1, BLOCK_SIZE_N),
                 )
 
     if INLINE_BARRIER:
