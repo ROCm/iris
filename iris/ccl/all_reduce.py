@@ -13,7 +13,8 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_FALLBACK_BYTES = 0  # disabled — native kernel handles all sizes
+_NCCL_FALLBACK_BYTES = 0  # disabled for small sizes — native kernel handles them
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree all-reduce may be more efficient
 
 
 def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
@@ -40,7 +41,7 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
     numel = input_tensor.numel()
     msg_bytes = numel * input_tensor.element_size()
 
-    if msg_bytes < _NCCL_FALLBACK_BYTES:
+    if msg_bytes < _NCCL_FALLBACK_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
         if output_tensor.data_ptr() != input_tensor.data_ptr():
             output_tensor.copy_(input_tensor)
         _dist.all_reduce(output_tensor, group=group)

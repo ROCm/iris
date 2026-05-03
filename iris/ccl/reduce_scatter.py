@@ -7,7 +7,11 @@ Reduce-scatter collective operation — public API.
 Triton only (no gluon support).
 """
 
+import torch.distributed as _dist
+
 from iris.ccl.utils import extract_group_info
+
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree-based is more bandwidth-efficient
 
 
 def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None):
@@ -35,6 +39,22 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         )
     if config is None:
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
+    M, N = input_tensor.shape[:2]
+    msg_bytes = M * N * input_tensor.element_size()
+
+    # Large messages: NCCL tree-based reduce-scatter is more bandwidth-efficient
+    # because the iris kernel reads ALL ranks' data per tile (O(world_size * msg_bytes)),
+    # while NCCL ring/tree moves only O(2 * msg_bytes * (world_size-1)/world_size).
+    if msg_bytes >= _NCCL_LARGE_BYTES:
+        # iris uses (M, N) output, torch uses (M/world_size, N).
+        # Use a view of the output for the NCCL call, then result lands in place.
+        chunk_m = M // world_size
+        out_chunk = output_tensor[rank_in_group * chunk_m : (rank_in_group + 1) * chunk_m]
+        _dist.reduce_scatter_tensor(out_chunk, input_tensor, group=group)
+        return
+
     if config.use_gluon:
         raise ValueError(
             "reduce_scatter does not support use_gluon=True. "
@@ -45,9 +65,6 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
     variant = getattr(config, "reduce_scatter_variant", "two_shot")
     if variant != "two_shot":
         raise ValueError(f"reduce_scatter only supports variant='two_shot', got '{variant}'.")
-
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
-    M, N = input_tensor.shape[:2]
 
     if output_tensor.shape[:2] != (M, N):
         raise ValueError(

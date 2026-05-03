@@ -4,10 +4,16 @@
 """
 Scatter collective operation — public API.
 
-Routes to triton/ or gluon/ based on config.use_gluon.
+Two paths by message size:
+- Small/medium (< _NCCL_LARGE_BYTES): native Triton/Gluon kernel
+- Large (>= _NCCL_LARGE_BYTES): NCCL (tree-based, scales better at high BW)
 """
 
+import torch.distributed as _dist
+
 from iris.ccl.utils import extract_group_info
+
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL is more bandwidth-efficient
 
 
 def scatter(output_tensor, input_tensor, ctx, src=0, group=None, async_op=False, config=None):
@@ -48,6 +54,18 @@ def scatter(output_tensor, input_tensor, ctx, src=0, group=None, async_op=False,
             f"{expected_input_shape}. Expected (world_size * M, N) = ({world_size * M}, {N}). "
             f"All ranks must allocate input_tensor at this shape to maintain symmetric heap offsets."
         )
+
+    msg_bytes = M * N * output_tensor.element_size()
+
+    # Large messages: NCCL is more bandwidth-efficient because the native kernel
+    # has only root doing work (O(world_size * msg_bytes) on one rank).
+    if msg_bytes >= _NCCL_LARGE_BYTES:
+        # torch.distributed.scatter requires list-of-tensors on root
+        scatter_list = None
+        if rank_in_group == src:
+            scatter_list = list(input_tensor.chunk(world_size, dim=0))
+        _dist.scatter(output_tensor, scatter_list, src=src, group=group)
+        return
 
     if config.use_gluon:
         from iris.ccl.gluon.scatter import launch

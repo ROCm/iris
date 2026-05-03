@@ -9,9 +9,12 @@ Two paths by message size:
 - Large (>= _TWOPHASE_BYTES): Two-phase (reduce-scatter + push to root)
 """
 
+import torch.distributed as _dist
+
 from iris.ccl.utils import extract_group_info
 
 _TWOPHASE_BYTES = 64 * 1024
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree reduce is more efficient
 
 
 def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_op=False, config=None):
@@ -49,6 +52,15 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
     # Compute message size before reshape
     numel = input_tensor.numel()
     msg_bytes = numel * input_tensor.element_size()
+
+    # Large messages: NCCL tree reduce is more bandwidth-efficient.
+    if msg_bytes >= _NCCL_LARGE_BYTES:
+        # torch.distributed.reduce is in-place on the input tensor
+        t = input_tensor.clone()
+        _dist.reduce(t, dst=dst, group=group)
+        if rank_in_group == dst:
+            output_tensor.copy_(t)
+        return
 
     # Reshape for efficient tiling (same as broadcast.py)
     # Avoids M=1 with block_size_m=32 where 31/32 rows are masked/wasted.

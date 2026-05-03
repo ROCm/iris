@@ -4,10 +4,16 @@
 """
 Gather collective operation -- public API.
 
-Routes to triton/ or gluon/ based on config.use_gluon.
+Two paths by message size:
+- Small/medium (< _NCCL_LARGE_BYTES): native Triton/Gluon kernel
+- Large (>= _NCCL_LARGE_BYTES): NCCL (tree-based, scales better at high BW)
 """
 
+import torch.distributed as _dist
+
 from iris.ccl.utils import extract_group_info
+
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL is more bandwidth-efficient
 
 
 def gather(output_tensor, input_tensor, ctx, dst=0, group=None, async_op=False, config=None):
@@ -47,6 +53,17 @@ def gather(output_tensor, input_tensor, ctx, dst=0, group=None, async_op=False, 
             f"Output tensor shape {output_tensor.shape[:2]} does not match expected shape "
             f"{expected_output_shape}. Expected (world_size * M, N) = ({world_size * M}, {N})"
         )
+
+    msg_bytes = M * N * input_tensor.element_size()
+
+    # Large messages: NCCL tree-based gather is more bandwidth-efficient.
+    if msg_bytes >= _NCCL_LARGE_BYTES:
+        # torch.distributed.gather requires list-of-tensors on root
+        gather_list = None
+        if rank_in_group == dst:
+            gather_list = list(output_tensor.chunk(world_size, dim=0))
+        _dist.gather(input_tensor, gather_list, dst=dst, group=group)
+        return
 
     if config.use_gluon:
         from iris.ccl.gluon.gather import launch

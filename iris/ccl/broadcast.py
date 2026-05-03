@@ -4,14 +4,18 @@
 """
 Broadcast collective operation — public API.
 
-Two paths by message size:
+Three paths by message size:
 - Small/medium (< _TWOPHASE_BYTES): Pull-based kernel (non-root reads from root)
-- Large (>= _TWOPHASE_BYTES): Two-phase kernel (parallel pull + all-gather)
+- Medium (>= _TWOPHASE_BYTES, < _NCCL_LARGE_BYTES): Two-phase kernel
+- Large (>= _NCCL_LARGE_BYTES): NCCL tree broadcast (more bandwidth-efficient)
 """
+
+import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
 _TWOPHASE_BYTES = 512 * 1024
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree broadcast is more efficient
 
 
 def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
@@ -47,6 +51,11 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
         return
 
     msg_bytes = numel * tensor.element_size()
+
+    # Large messages: NCCL tree broadcast is more bandwidth-efficient.
+    if msg_bytes >= _NCCL_LARGE_BYTES:
+        _dist.broadcast(tensor, src=src, group=group)
+        return
 
     tensor = tensor.contiguous().view(-1)
     block_n = config.block_size_n

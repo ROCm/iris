@@ -12,6 +12,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 128 * 1024
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL is more bandwidth-efficient
 
 
 def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None):
@@ -38,7 +39,7 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     M, N = input_tensor.shape[:2]
     msg_bytes = M * N * input_tensor.element_size()
 
-    if msg_bytes < _NCCL_SMALL_BYTES:
+    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
         _dist.all_to_all_single(output_tensor, input_tensor, group=group)
         return
 
