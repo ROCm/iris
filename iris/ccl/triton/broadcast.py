@@ -83,8 +83,16 @@ def persistent_broadcast_direct(
 
     if INLINE_BARRIER:
         inline_device_barrier(
-            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
-            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
         )
 
 
@@ -95,9 +103,8 @@ def _get_dummy_barrier(device):
     """Return cached dummy barrier tensors for the no-inline-barrier path."""
     if device not in _dummy_barrier_cache:
         import torch
-        _dummy_barrier_cache[device] = tuple(
-            torch.zeros(1, dtype=torch.int32, device=device) for _ in range(3)
-        )
+
+        _dummy_barrier_cache[device] = tuple(torch.zeros(1, dtype=torch.int32, device=device) for _ in range(3))
     return _dummy_barrier_cache[device]
 
 
@@ -115,7 +122,6 @@ def launch(
     barrier_state=None,
 ):
     """Launch the pull-based broadcast kernel."""
-    import torch
 
     M, N = tensor.shape[:2]
     stride_m, stride_n = tensor.stride(0), tensor.stride(1)
