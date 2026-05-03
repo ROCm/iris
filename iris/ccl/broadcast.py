@@ -55,14 +55,14 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
         _dist.broadcast(tensor, src=src, group=group)
         return
 
-    from iris.ccl.triton.broadcast import launch
-
     tensor = tensor.contiguous().view(-1)
     block_n = config.block_size_n
     if numel >= block_n:
         tensor = tensor.view(-1, block_n)
     else:
         tensor = tensor.view(1, -1)
+
+    from iris.ccl.triton.ring_broadcast import launch
 
     launch(
         tensor,

@@ -61,7 +61,7 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
     if config.use_gluon:
         from iris.ccl.gluon.reduce import launch
     else:
-        from iris.ccl.triton.reduce import launch
+        from iris.ccl.triton.ring_reduce import launch
 
     launch(
         output_tensor,
@@ -69,10 +69,10 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         ctx,
         rank_in_group,
         rank_global,
-        dst,
         world_size,
         rank_start,
         rank_stride,
+        dst,
         config,
     )
 

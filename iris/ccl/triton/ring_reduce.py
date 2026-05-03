@@ -139,6 +139,8 @@ def persistent_ring_reduce(
                     < expected_step
                 ):
                     pass
+                tl.debug_barrier()
+                tl.atomic_xchg(prev_translated, 0, sem="release", scope="sys")
 
                 tl.atomic_xchg(ready_ptr, c + 1, sem="release", scope="gpu")
 
