@@ -13,6 +13,7 @@ import triton
 import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
+from iris.ccl.utils import inline_device_barrier
 
 
 @triton.jit()
@@ -32,12 +33,16 @@ def persistent_gather(
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
     dst: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
     """
     Persistent gather kernel (push model).
@@ -148,6 +153,32 @@ def persistent_gather(
                 hint=(1, BLOCK_SIZE_N),
             )
 
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
+        )
+
+
+_dummy_barrier_cache: dict = {}
+
+
+def _get_dummy_barrier(device):
+    """Return cached dummy barrier tensors for the no-inline-barrier path."""
+    if device not in _dummy_barrier_cache:
+        import torch
+
+        _dummy_barrier_cache[device] = tuple(torch.zeros(1, dtype=torch.int32, device=device) for _ in range(3))
+    return _dummy_barrier_cache[device]
+
 
 def launch(
     input_tensor,
@@ -160,6 +191,8 @@ def launch(
     rank_stride,
     dst,
     config,
+    inline_barrier=False,
+    barrier_state=None,
 ):
     """Launch the Triton gather kernel."""
     M, N = input_tensor.shape[:2]
@@ -167,6 +200,11 @@ def launch(
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
     heap_bases = ctx.get_heap_bases()
+
+    if inline_barrier and barrier_state is not None:
+        barrier_flags, wg_done, barrier_sense = barrier_state
+    else:
+        barrier_flags, wg_done, barrier_sense = _get_dummy_barrier(input_tensor.device)
 
     iris_launch(
         persistent_gather,
@@ -186,12 +224,16 @@ def launch(
         rank_start,
         rank_stride,
         dst,
+        barrier_flags,
+        wg_done,
+        barrier_sense,
         config.block_size_m,
         config.block_size_n,
         config.swizzle_size,
         config.comm_sms,
         config.num_xcds,
         config.chunk_size,
+        inline_barrier,
         num_stages=config.num_stages,
         num_warps=config.num_warps,
         waves_per_eu=config.waves_per_eu,

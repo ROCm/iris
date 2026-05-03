@@ -37,8 +37,8 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         config: Config with kernel parameters
         workspace: Reusable workspace from all_reduce_preamble
     """
-    M, N = input_tensor.shape[:2]
-    msg_bytes = M * N * input_tensor.element_size()
+    numel = input_tensor.numel()
+    msg_bytes = numel * input_tensor.element_size()
 
     if msg_bytes < _NCCL_FALLBACK_BYTES:
         if output_tensor.data_ptr() != input_tensor.data_ptr():
@@ -69,6 +69,16 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
     valid_variants = ["atomic", "spinlock", "ring", "two_shot", "one_shot"]
     if variant not in valid_variants:
         raise ValueError(f"Invalid all_reduce_variant: {variant}. Must be one of: {', '.join(valid_variants)}")
+
+    # Reshape for efficient tiling (same as broadcast.py / reduce.py)
+    # Avoids M=1 with block_size_m=32 where 31/32 rows are masked/wasted.
+    block_n = config.block_size_n
+    if numel >= block_n:
+        input_tensor = input_tensor.contiguous().view(-1, block_n)
+        output_tensor = output_tensor.contiguous().view(-1, block_n)
+    else:
+        input_tensor = input_tensor.contiguous().view(1, -1)
+        output_tensor = output_tensor.contiguous().view(1, -1)
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 

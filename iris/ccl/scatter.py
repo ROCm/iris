@@ -51,21 +51,40 @@ def scatter(output_tensor, input_tensor, ctx, src=0, group=None, async_op=False,
 
     if config.use_gluon:
         from iris.ccl.gluon.scatter import launch
+
+        launch(
+            input_tensor,
+            output_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            src,
+            config,
+        )
+        if not async_op:
+            ctx.device_barrier(group)
     else:
         from iris.ccl.triton.scatter import launch
 
-    launch(
-        input_tensor,
-        output_tensor,
-        ctx,
-        rank_in_group,
-        rank_global,
-        world_size,
-        rank_start,
-        rank_stride,
-        src,
-        config,
-    )
+        use_inline = not async_op
+        barrier_state = None
+        if use_inline:
+            barrier_state = ctx._get_inline_barrier_state(group)
 
-    if not async_op:
-        ctx.device_barrier(group)
+        launch(
+            input_tensor,
+            output_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            src,
+            config,
+            inline_barrier=use_inline,
+            barrier_state=barrier_state,
+        )
