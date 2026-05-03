@@ -77,7 +77,6 @@ def persistent_broadcast_direct(
         tl.store(ptrs, data, mask=mask)
 
 
-
 def launch(
     tensor,
     ctx,
