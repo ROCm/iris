@@ -32,6 +32,18 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         async_op: If True, skip trailing barrier.
         config: Config with kernel parameters.
     """
+    # Compute message size early for fast NCCL dispatch
+    numel = input_tensor.numel()
+    msg_bytes = numel * input_tensor.element_size()
+
+    # Small and large messages: use NCCL (avoids Triton launch overhead at small
+    # sizes, and NCCL tree reduce is more bandwidth-efficient at large sizes).
+    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
+        # torch.distributed.reduce is in-place — use output_tensor directly on dst
+        output_tensor.copy_(input_tensor)
+        _dist.reduce(output_tensor, dst=dst, group=group)
+        return
+
     from iris.ccl.config import Config
     from iris.ccl.utils import ReduceOp
 
@@ -49,27 +61,6 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
 
     if dst < 0 or dst >= world_size:
         raise ValueError(f"dst must be in [0, world_size), got dst={dst}, world_size={world_size}.")
-
-    # Compute message size before reshape
-    numel = input_tensor.numel()
-    msg_bytes = numel * input_tensor.element_size()
-
-    # Small messages: NCCL avoids Triton launch overhead.
-    if msg_bytes < _NCCL_SMALL_BYTES:
-        t = input_tensor.clone()
-        _dist.reduce(t, dst=dst, group=group)
-        if rank_in_group == dst:
-            output_tensor.copy_(t)
-        return
-
-    # Large messages: NCCL tree reduce is more bandwidth-efficient.
-    if msg_bytes >= _NCCL_LARGE_BYTES:
-        # torch.distributed.reduce is in-place on the input tensor
-        t = input_tensor.clone()
-        _dist.reduce(t, dst=dst, group=group)
-        if rank_in_group == dst:
-            output_tensor.copy_(t)
-        return
 
     # Reshape for efficient tiling (same as broadcast.py)
     # Avoids M=1 with block_size_m=32 where 31/32 rows are masked/wasted.

@@ -13,6 +13,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
+_NCCL_SMALL_BYTES = 2 * 1024 * 1024  # <2MB: NCCL avoids Triton launch overhead
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL is more bandwidth-efficient
 
 
@@ -34,11 +35,6 @@ def gather(output_tensor, input_tensor, ctx, dst=0, group=None, async_op=False, 
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
     """
-    from iris.ccl.config import Config
-
-    if config is None:
-        config = Config(block_size_m=32, block_size_n=64)
-
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
     if dst < 0 or dst >= world_size:
@@ -47,23 +43,29 @@ def gather(output_tensor, input_tensor, ctx, dst=0, group=None, async_op=False, 
         )
 
     M, N = input_tensor.shape[:2]
-    expected_output_shape = (world_size * M, N)
-    if output_tensor.shape[:2] != expected_output_shape:
-        raise ValueError(
-            f"Output tensor shape {output_tensor.shape[:2]} does not match expected shape "
-            f"{expected_output_shape}. Expected (world_size * M, N) = ({world_size * M}, {N})"
-        )
-
     msg_bytes = M * N * input_tensor.element_size()
 
-    # Large messages: NCCL tree-based gather is more bandwidth-efficient.
-    if msg_bytes >= _NCCL_LARGE_BYTES:
+    # Small and large messages: use NCCL (avoids Triton launch overhead at small
+    # sizes, and tree-based gather is more bandwidth-efficient at large sizes).
+    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
         # torch.distributed.gather requires list-of-tensors on root
         gather_list = None
         if rank_in_group == dst:
             gather_list = list(output_tensor.chunk(world_size, dim=0))
         _dist.gather(input_tensor, gather_list, dst=dst, group=group)
         return
+
+    from iris.ccl.config import Config
+
+    if config is None:
+        config = Config(block_size_m=32, block_size_n=64)
+
+    expected_output_shape = (world_size * M, N)
+    if output_tensor.shape[:2] != expected_output_shape:
+        raise ValueError(
+            f"Output tensor shape {output_tensor.shape[:2]} does not match expected shape "
+            f"{expected_output_shape}. Expected (world_size * M, N) = ({world_size * M}, {N})"
+        )
 
     if config.use_gluon:
         from iris.ccl.gluon.gather import launch
