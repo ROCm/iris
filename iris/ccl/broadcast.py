@@ -64,6 +64,7 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
         # Two-phase: parallel pull from root + all-gather
         from iris.ccl.triton.broadcast_twophase import launch as launch_twophase
 
+        ctx.device_barrier(group)
         launch_twophase(
             tensor,
             ctx,
@@ -81,6 +82,7 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
         # Pull-based: non-root reads from root
         from iris.ccl.triton.broadcast import launch
 
+        ctx.device_barrier(group)
         launch(
             tensor,
             ctx,

@@ -70,6 +70,7 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         # Two-phase: reduce-scatter + push to root
         from iris.ccl.triton.reduce_twophase import launch as launch_twophase
 
+        ctx.device_barrier(group)
         use_inline = not async_op
         barrier_state = None
         if use_inline:
@@ -93,6 +94,7 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         # Direct-read: root reads all peers
         from iris.ccl.triton.reduce import launch
 
+        ctx.device_barrier(group)
         use_inline = not async_op
         barrier_state = None
         if use_inline:

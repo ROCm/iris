@@ -52,13 +52,6 @@ def persistent_reduce_direct(
     if NUM_XCDS != 1:
         pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
-    # Pre-barrier: ensure all ranks' input is visible before reads
-    if INLINE_BARRIER:
-        inline_device_barrier(
-            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
-            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
-        )
-
     is_dst = group_rank == dst
 
     if is_dst:

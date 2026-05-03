@@ -45,13 +45,6 @@ def persistent_broadcast_direct(
     """Pull-based broadcast — all non-root ranks read from root's heap."""
     pid = tl.program_id(0)
 
-    # Pre-barrier: ensure root's data is visible before non-root reads
-    if INLINE_BARRIER:
-        inline_device_barrier(
-            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
-            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
-        )
-
     is_src = group_rank == src
 
     if not is_src:
