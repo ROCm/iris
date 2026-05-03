@@ -10,6 +10,7 @@ from typing import Tuple
 import triton
 import triton.language as tl
 from iris.host.distributed.helpers import extract_group_info as _extract_group_info
+from iris.host.distributed.helpers import _translate_ptr
 
 
 @triton.jit()
@@ -76,3 +77,63 @@ def extract_group_info(group, ctx) -> Tuple[int, int, int, int, int]:
     """
 
     return _extract_group_info(group, ctx.get_rank(), ctx.get_num_ranks())
+
+
+@triton.jit()
+def inline_device_barrier(
+    pid,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
+    heap_bases: tl.tensor,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+):
+    """
+    Inline device barrier — folds cross-rank sync into the collective kernel.
+
+    All CTAs signal completion, pid 0 does cross-rank barrier, then signals
+    all other CTAs to proceed. Eliminates the second kernel launch (~15us).
+
+    Uses a sense-reversal barrier so wg_done doesn't need resetting between calls.
+    """
+    tl.debug_barrier()
+
+    sense = tl.load(barrier_sense_ptr)
+    next_sense = 1 - sense
+
+    if pid == 0:
+        # pid 0: wait for all CTAs to arrive
+        tl.atomic_add(wg_done_ptr, 1, sem="acquire", scope="gpu")
+        while tl.atomic_cas(wg_done_ptr, COMM_SMS, COMM_SMS, sem="acquire", scope="gpu") < COMM_SMS:
+            pass
+
+        # Reset wg_done for next use
+        tl.atomic_xchg(wg_done_ptr, 0, sem="release", scope="gpu")
+
+        # Cross-rank barrier: increment own flag, poll remotes
+        own_flag_ptr = barrier_flags_ptr + iris_rank
+        own_translated = _translate_ptr(own_flag_ptr, iris_rank, iris_rank, heap_bases)
+        old = tl.atomic_add(own_translated, 1, sem="release", scope="sys")
+        target = old + 1
+
+        for i in range(world_size):
+            remote_rank = rank_start + i * rank_stride
+            if remote_rank != iris_rank:
+                remote_flag_ptr = barrier_flags_ptr + remote_rank
+                remote_translated = _translate_ptr(remote_flag_ptr, iris_rank, remote_rank, heap_bases)
+                while (
+                    tl.atomic_cas(remote_translated, target, target, sem="acquire", scope="sys") < target
+                ):
+                    pass
+
+        # Signal all CTAs: flip sense
+        tl.atomic_xchg(barrier_sense_ptr, next_sense, sem="release", scope="gpu")
+    else:
+        # Non-zero pids: signal arrival then wait for pid 0
+        tl.atomic_add(wg_done_ptr, 1, sem="release", scope="gpu")
+        while tl.atomic_cas(barrier_sense_ptr, next_sense, next_sense, sem="acquire", scope="gpu") != next_sense:
+            pass

@@ -57,6 +57,11 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
 
     from iris.ccl.triton.reduce_scatter import launch
 
+    use_inline = not async_op
+    barrier_state = None
+    if use_inline:
+        barrier_state = ctx._get_inline_barrier_state(group)
+
     launch(
         output_tensor,
         input_tensor,
@@ -67,7 +72,6 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         rank_start,
         rank_stride,
         config,
+        inline_barrier=use_inline,
+        barrier_state=barrier_state,
     )
-
-    if not async_op:
-        ctx.device_barrier(group)

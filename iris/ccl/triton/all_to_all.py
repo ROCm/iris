@@ -10,6 +10,7 @@ import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from ..utils import chiplet_transform_chunked
+from iris.ccl.utils import inline_device_barrier
 
 
 @triton.jit()
@@ -28,12 +29,16 @@ def persistent_all_to_all(
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
     """
     Persistent all-to-all kernel.
@@ -176,6 +181,12 @@ def persistent_all_to_all(
                         hint=(1, BLOCK_SIZE_N),
                     )
 
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
+            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
+        )
+
 
 def launch(
     input_tensor,
@@ -187,13 +198,24 @@ def launch(
     rank_start,
     rank_stride,
     config,
+    inline_barrier=False,
+    barrier_state=None,
 ):
     """Launch the Triton all-to-all kernel."""
+    import torch
+
     M, total_N = input_tensor.shape[:2]
     N = total_N // world_size
 
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
+
+    if inline_barrier and barrier_state is not None:
+        barrier_flags, wg_done, barrier_sense = barrier_state
+    else:
+        barrier_flags = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
+        wg_done = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
+        barrier_sense = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
 
     iris_launch(
         persistent_all_to_all,
@@ -212,12 +234,16 @@ def launch(
         world_size,
         rank_start,
         rank_stride,
+        barrier_flags,
+        wg_done,
+        barrier_sense,
         config.block_size_m,
         config.block_size_n,
         config.swizzle_size,
         config.comm_sms,
         config.num_xcds,
         config.chunk_size,
+        inline_barrier,
         num_stages=config.num_stages,
         num_warps=config.num_warps,
         waves_per_eu=config.waves_per_eu,

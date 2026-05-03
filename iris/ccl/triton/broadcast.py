@@ -14,6 +14,7 @@ import triton
 import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
+from iris.ccl.utils import inline_device_barrier
 
 
 @triton.jit()
@@ -30,51 +31,61 @@ def persistent_broadcast_direct(
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
     """Pull-based broadcast — all non-root ranks read from root's heap."""
     pid = tl.program_id(0)
 
-    if group_rank == src:
-        return
+    is_src = group_rank == src
 
-    src_iris_rank = rank_start + src * rank_stride
+    if not is_src:
+        src_iris_rank = rank_start + src * rank_stride
 
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
-    tl.assume(total_tiles > 0)
+        num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+        num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+        total_tiles = num_pid_m * num_pid_n
+        tl.assume(total_tiles > 0)
 
-    for tile_id in range(pid, total_tiles, COMM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
+            tl.assume(pid_m >= 0)
+            tl.assume(pid_n >= 0)
 
-        rm_base = pid_m * BLOCK_SIZE_M
-        rn_base = pid_n * BLOCK_SIZE_N
-        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
-        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+            rm_base = pid_m * BLOCK_SIZE_M
+            rn_base = pid_n * BLOCK_SIZE_N
+            rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+            rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+            rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-        offset = rm[:, None] * stride_m + rn[None, :] * stride_n
-        ptrs = tensor_ptr + offset
+            offset = rm[:, None] * stride_m + rn[None, :] * stride_n
+            ptrs = tensor_ptr + offset
 
-        data = iris.load(ptrs, iris_rank, src_iris_rank, heap_bases, mask=mask)
-        tl.store(ptrs, data, mask=mask)
+            data = iris.load(ptrs, iris_rank, src_iris_rank, heap_bases, mask=mask)
+            tl.store(ptrs, data, mask=mask)
+
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
+            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
+        )
 
 
 def launch(
@@ -87,12 +98,23 @@ def launch(
     rank_stride,
     src,
     config,
+    inline_barrier=False,
+    barrier_state=None,
 ):
     """Launch the pull-based broadcast kernel."""
+    import torch
+
     M, N = tensor.shape[:2]
     stride_m, stride_n = tensor.stride(0), tensor.stride(1)
 
     heap_bases = ctx.get_heap_bases()
+
+    if inline_barrier and barrier_state is not None:
+        barrier_flags, wg_done, barrier_sense = barrier_state
+    else:
+        barrier_flags = torch.empty(1, dtype=torch.int32, device=tensor.device)
+        wg_done = torch.empty(1, dtype=torch.int32, device=tensor.device)
+        barrier_sense = torch.empty(1, dtype=torch.int32, device=tensor.device)
 
     iris_launch(
         persistent_broadcast_direct,
@@ -109,12 +131,16 @@ def launch(
         world_size,
         rank_start,
         rank_stride,
+        barrier_flags,
+        wg_done,
+        barrier_sense,
         config.block_size_m,
         config.block_size_n,
         config.swizzle_size,
         config.comm_sms,
         config.num_xcds,
         config.chunk_size,
+        inline_barrier,
         num_stages=config.num_stages,
         num_warps=config.num_warps,
         waves_per_eu=config.waves_per_eu,

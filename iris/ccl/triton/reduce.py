@@ -15,6 +15,7 @@ import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from ..utils import chiplet_transform_chunked
+from iris.ccl.utils import inline_device_barrier
 
 
 @triton.jit()
@@ -34,12 +35,16 @@ def persistent_reduce_direct(
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
     """Direct-read reduce — dst reads from all ranks and accumulates locally."""
     pid = tl.program_id(0)
@@ -47,70 +52,76 @@ def persistent_reduce_direct(
     if NUM_XCDS != 1:
         pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
-    if group_rank != dst:
-        return
+    is_dst = group_rank == dst
 
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
+    if is_dst:
+        num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+        num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+        total_tiles = num_pid_m * num_pid_n
 
-    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
+        acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
 
-    for tile_id in range(pid, total_tiles, COMM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
+            tl.assume(pid_m >= 0)
+            tl.assume(pid_n >= 0)
 
-        rm_base = pid_m * BLOCK_SIZE_M
-        rn_base = pid_n * BLOCK_SIZE_N
-        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
-        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+            rm_base = pid_m * BLOCK_SIZE_M
+            rn_base = pid_n * BLOCK_SIZE_N
+            rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+            rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+            rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
-        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+            is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
 
-        input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-        output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
-        base_ptr = input_ptr + input_offset
+            input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+            output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+            base_ptr = input_ptr + input_offset
 
-        if is_full:
-            start_rank_idx = pid % world_size
-            start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
-            for i in tl.static_range(1, world_size):
-                remote_rank_idx = (start_rank_idx + i) % world_size
-                remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
+            if is_full:
+                start_rank_idx = pid % world_size
+                start_rank_global = rank_start + start_rank_idx * rank_stride
+                acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
+                for i in tl.static_range(1, world_size):
+                    remote_rank_idx = (start_rank_idx + i) % world_size
+                    remote_rank = rank_start + remote_rank_idx * rank_stride
+                    acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
 
-            tl.store(
-                output_ptr + output_offset,
-                acc.to(output_ptr.type.element_ty),
-                cache_modifier=".wt",
-            )
-        else:
-            mask = (rm[:, None] < M) & (rn[None, :] < N)
+                tl.store(
+                    output_ptr + output_offset,
+                    acc.to(output_ptr.type.element_ty),
+                    cache_modifier=".wt",
+                )
+            else:
+                mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-            start_rank_idx = pid % world_size
-            start_rank_global = rank_start + start_rank_idx * rank_stride
-            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask).to(acc_dtype)
-            for i in tl.static_range(1, world_size):
-                remote_rank_idx = (start_rank_idx + i) % world_size
-                remote_rank = rank_start + remote_rank_idx * rank_stride
-                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+                start_rank_idx = pid % world_size
+                start_rank_global = rank_start + start_rank_idx * rank_stride
+                acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask).to(acc_dtype)
+                for i in tl.static_range(1, world_size):
+                    remote_rank_idx = (start_rank_idx + i) % world_size
+                    remote_rank = rank_start + remote_rank_idx * rank_stride
+                    acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
 
-            tl.store(
-                output_ptr + output_offset,
-                acc.to(output_ptr.type.element_ty),
-                mask=mask,
-                cache_modifier=".wt",
-            )
+                tl.store(
+                    output_ptr + output_offset,
+                    acc.to(output_ptr.type.element_ty),
+                    mask=mask,
+                    cache_modifier=".wt",
+                )
+
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
+            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
+        )
 
 
 def launch(
@@ -124,13 +135,24 @@ def launch(
     rank_start,
     rank_stride,
     config,
+    inline_barrier=False,
+    barrier_state=None,
 ):
     """Launch the direct-read reduce kernel."""
+    import torch
+
     M, N = input_tensor.shape[:2]
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
     heap_bases = ctx.get_heap_bases()
+
+    if inline_barrier and barrier_state is not None:
+        barrier_flags, wg_done, barrier_sense = barrier_state
+    else:
+        barrier_flags = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
+        wg_done = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
+        barrier_sense = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
 
     iris_launch(
         persistent_reduce_direct,
@@ -150,12 +172,16 @@ def launch(
         world_size,
         rank_start,
         rank_stride,
+        barrier_flags,
+        wg_done,
+        barrier_sense,
         config.block_size_m,
         config.block_size_n,
         config.swizzle_size,
         config.comm_sms,
         config.num_xcds,
         config.chunk_size,
+        inline_barrier,
         algorithm="reduce",
         rank=rank_global,
         dtype=input_tensor.dtype,

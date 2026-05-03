@@ -143,6 +143,7 @@ class Iris:
 
         # Device-side barrier state, keyed by process group (None = all ranks).
         self._device_barrier_state: dict[Any, torch.Tensor] = {}
+        self._inline_barrier_state: dict[Any, tuple] = {}
 
         # Initialize tracing
         self.tracing = Tracing(self)
@@ -1042,6 +1043,17 @@ class Iris:
             self.num_ranks,
             self.get_heap_bases(),
         )
+
+    def _get_inline_barrier_state(self, group=None):
+        """Return (barrier_flags, wg_done, barrier_sense) for inline barriers."""
+        if group not in self._inline_barrier_state:
+            if group not in self._device_barrier_state:
+                self._device_barrier_state[group] = self.zeros((self.num_ranks,), dtype=torch.int32)
+            barrier_flags = self._device_barrier_state[group]
+            wg_done = torch.zeros(1, dtype=torch.int32, device=self.get_device())
+            barrier_sense = torch.zeros(1, dtype=torch.int32, device=self.get_device())
+            self._inline_barrier_state[group] = (barrier_flags, wg_done, barrier_sense)
+        return self._inline_barrier_state[group]
 
     def get_device(self):
         """

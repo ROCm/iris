@@ -9,6 +9,7 @@ import triton
 import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
+from iris.ccl.utils import inline_device_barrier
 
 
 @triton.jit()
@@ -27,12 +28,16 @@ def persistent_all_gather(
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
     """
     Persistent all-gather kernel.
@@ -40,23 +45,6 @@ def persistent_all_gather(
     Each rank sends its input tensor to all ranks, and all ranks receive
     and concatenate all input tensors along dimension 0 (rows), matching
     torch.distributed.all_gather_into_tensor behavior.
-
-    Args:
-        input_ptr: Pointer to input tensor (local rank's data to send) of shape (M, N)
-        output_ptr: Pointer to output tensor (will receive from all ranks) of shape (world_size * M, N)
-        M: Number of rows per rank (output will be world_size * M rows)
-        N: Number of columns
-        stride_in_m, stride_in_n: Strides for input tensor
-        stride_out_m, stride_out_n: Strides for output tensor
-        heap_bases: Heap base pointers for all ranks
-        group_rank: Rank within the ProcessGroup (0 to group_size-1), used for tile assignment and comparisons
-        iris_rank: Rank in the iris context, used for iris RMA operations (heap_bases indexing)
-        world_size: Total number of ranks in the group
-        BLOCK_SIZE_M, BLOCK_SIZE_N: Block sizes for tiling
-        GROUP_SIZE_M: Group size for M dimension tiling
-        COMM_SMS: Number of SMs for communication
-        NUM_XCDS: Number of XCDs
-        CHUNK_SIZE: Chunk size for chiplet transform
     """
     pid = tl.program_id(0)
 
@@ -138,6 +126,12 @@ def persistent_all_gather(
                     hint=(1, BLOCK_SIZE_N),
                 )
 
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
+            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
+        )
+
 
 @triton.jit()
 def persistent_all_gather_partitioned(
@@ -155,41 +149,19 @@ def persistent_all_gather_partitioned(
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
     """
     Persistent all-gather kernel with rank-partitioned work distribution.
-
-    Each PID is assigned to work on a specific destination rank, and multiple PIDs
-    partition the tiles for that rank. This avoids the inner loop over world_size.
-
-    Work distribution:
-    - PIDs are partitioned across destination ranks
-    - PIDs_per_rank = COMM_SMS // world_size
-    - Each group of PIDs handles all tiles for one destination rank
-    - Within each rank group, PIDs partition the tiles
-
-    Args:
-        input_ptr: Pointer to input tensor (local rank's data to send) of shape (M, N)
-        output_ptr: Pointer to output tensor (will receive from all ranks) of shape (world_size * M, N)
-        M: Number of rows per rank (output will be world_size * M rows)
-        N: Number of columns
-        stride_in_m, stride_in_n: Strides for input tensor
-        stride_out_m, stride_out_n: Strides for output tensor
-        heap_bases: Heap base pointers for all ranks
-        group_rank: Rank within the ProcessGroup (0 to group_size-1), used for tile assignment and comparisons
-        iris_rank: Rank in the iris context, used for iris RMA operations (heap_bases indexing)
-        world_size: Total number of ranks in the group
-        BLOCK_SIZE_M, BLOCK_SIZE_N: Block sizes for tiling
-        GROUP_SIZE_M: Group size for M dimension tiling
-        COMM_SMS: Number of SMs for communication (must be divisible by world_size)
-        NUM_XCDS: Number of XCDs
-        CHUNK_SIZE: Chunk size for chiplet transform
     """
     pid = tl.program_id(0)
 
@@ -276,6 +248,12 @@ def persistent_all_gather_partitioned(
                 hint=(1, BLOCK_SIZE_N),
             )
 
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
+            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
+        )
+
 
 def launch(
     input_tensor,
@@ -287,13 +265,16 @@ def launch(
     rank_start,
     rank_stride,
     config,
+    inline_barrier=False,
+    barrier_state=None,
 ):
     """Launch the Triton all-gather kernel."""
+    import torch
+
     M, N = input_tensor.shape[:2]
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
-    # Validate COMM_SMS divisibility for partitioned variant
     if config.all_gather_variant == "partitioned" and config.comm_sms % world_size != 0:
         raise ValueError(
             f"For all_gather_variant='partitioned', COMM_SMS ({config.comm_sms}) must be divisible by world_size ({world_size}). "
@@ -302,7 +283,13 @@ def launch(
 
     heap_bases = ctx.get_heap_bases()
 
-    # Dispatch to the appropriate kernel based on variant
+    if inline_barrier and barrier_state is not None:
+        barrier_flags, wg_done, barrier_sense = barrier_state
+    else:
+        barrier_flags = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
+        wg_done = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
+        barrier_sense = torch.empty(1, dtype=torch.int32, device=input_tensor.device)
+
     if config.all_gather_variant == "persistent":
         kernel_fn = persistent_all_gather
     elif config.all_gather_variant == "partitioned":
@@ -327,12 +314,16 @@ def launch(
         world_size,
         rank_start,
         rank_stride,
+        barrier_flags,
+        wg_done,
+        barrier_sense,
         config.block_size_m,
         config.block_size_n,
         config.swizzle_size,
         config.comm_sms,
         config.num_xcds,
         config.chunk_size,
+        inline_barrier,
         num_stages=config.num_stages,
         num_warps=config.num_warps,
         waves_per_eu=config.waves_per_eu,

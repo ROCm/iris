@@ -64,6 +64,11 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
 
     from iris.ccl.triton.broadcast import launch
 
+    use_inline = not async_op
+    barrier_state = None
+    if use_inline:
+        barrier_state = ctx._get_inline_barrier_state(group)
+
     launch(
         tensor,
         ctx,
@@ -74,7 +79,6 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
         rank_stride,
         src,
         config,
+        inline_barrier=use_inline,
+        barrier_state=barrier_state,
     )
-
-    if not async_op:
-        ctx.device_barrier(group)

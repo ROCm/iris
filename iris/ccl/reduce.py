@@ -60,21 +60,40 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
 
     if config.use_gluon:
         from iris.ccl.gluon.reduce import launch
+
+        launch(
+            output_tensor,
+            input_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            dst,
+            world_size,
+            rank_start,
+            rank_stride,
+            config,
+        )
+        if not async_op:
+            ctx.device_barrier(group)
     else:
         from iris.ccl.triton.reduce import launch
 
-    launch(
-        output_tensor,
-        input_tensor,
-        ctx,
-        rank_in_group,
-        rank_global,
-        dst,
-        world_size,
-        rank_start,
-        rank_stride,
-        config,
-    )
+        use_inline = not async_op
+        barrier_state = None
+        if use_inline:
+            barrier_state = ctx._get_inline_barrier_state(group)
 
-    if not async_op:
-        ctx.device_barrier(group)
+        launch(
+            output_tensor,
+            input_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            dst,
+            world_size,
+            rank_start,
+            rank_stride,
+            config,
+            inline_barrier=use_inline,
+            barrier_state=barrier_state,
+        )

@@ -74,6 +74,11 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
 
     from iris.ccl.triton.all_reduce import launch
 
+    use_inline = not async_op
+    barrier_state = None
+    if use_inline:
+        barrier_state = ctx._get_inline_barrier_state(group)
+
     workspace = launch(
         output_tensor,
         input_tensor,
@@ -86,20 +91,13 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         config,
         workspace,
         group=group,
+        inline_barrier=use_inline,
+        barrier_state=barrier_state,
     )
 
     if workspace is not None:
-        # Ring and two_shot variants don't need preamble re-run:
-        #   - Ring: flags self-reset to 0 after each step, ring_buffer is always
-        #     written before read, no output zeroing needed.
-        #   - Two_shot: preamble is a no-op (pass).
-        # Atomic/spinlock/one_shot: output must be re-zeroed before each call
-        # because they accumulate atomically into output.
         variant = getattr(config, "all_reduce_variant", "two_shot").lower()
         if variant not in ("ring", "two_shot"):
             workspace.prepared = False
-
-    if not async_op:
-        ctx.device_barrier(group)
 
     return workspace
