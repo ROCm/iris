@@ -4,30 +4,23 @@
 """
 Reduce — Triton kernel.
 
-Ring reduce: partial sums pipeline around the ring toward root.  Each rank
-receives the running accumulator from its predecessor, adds its local data,
-and forwards to the next rank.  Per-tile flag signaling provides
-synchronization — barriers are part of the algorithm.
-
-For small messages (< RING_THRESHOLD elements), falls back to the lock-based
-kernel where non-root ranks do atomic read-modify-write on root's heap.
+Direct-read reduce: the destination rank reads all other ranks' input
+tensors via iris.load and accumulates locally.  Non-dst ranks do no work
+(the pre-kernel barrier ensures their input is visible).  No locks or
+flags needed — same pattern as two_shot all-reduce's reduce phase.
 """
 
-import torch
 import triton
 import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from ..utils import chiplet_transform_chunked
 
-RING_THRESHOLD = 1 << 18  # 256K elements — ring for large, lock-based for small
-
 
 @triton.jit()
-def persistent_reduce_lock(
+def persistent_reduce_direct(
     input_ptr,
     output_ptr,
-    locks_ptr,
     M,
     N,
     stride_in_m,
@@ -48,17 +41,18 @@ def persistent_reduce_lock(
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
 ):
-    """Lock-based reduce — fallback for small messages."""
+    """Direct-read reduce — dst reads from all ranks and accumulates locally."""
     pid = tl.program_id(0)
 
     if NUM_XCDS != 1:
         pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
+    if group_rank != dst:
+        return
+
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
-
-    dst_iris_rank = rank_start + dst * rank_stride
 
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
 
@@ -79,187 +73,44 @@ def persistent_reduce_lock(
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-        if group_rank != dst:
-            input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-            output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
 
-            local_data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
+        input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+        base_ptr = input_ptr + input_offset
 
-            while (
-                iris.atomic_cas(
-                    locks_ptr + tile_id,
-                    0,
-                    1,
-                    iris_rank,
-                    dst_iris_rank,
-                    heap_bases,
-                    sem="acquire",
-                    scope="sys",
-                )
-                != 0
-            ):
-                pass
+        if is_full:
+            start_rank_idx = pid % world_size
+            start_rank_global = rank_start + start_rank_idx * rank_stride
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank_idx = (start_rank_idx + i) % world_size
+                remote_rank = rank_start + remote_rank_idx * rank_stride
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
 
-            current_value = iris.load(
+            tl.store(
                 output_ptr + output_offset,
-                iris_rank,
-                dst_iris_rank,
-                heap_bases,
-                mask=mask,
+                acc.to(output_ptr.type.element_ty),
+                cache_modifier=".wt",
             )
-
-            acc = current_value.to(acc_dtype) + local_data.to(acc_dtype)
-            result = acc.to(output_ptr.type.element_ty)
-
-            iris.store(
-                output_ptr + output_offset,
-                result,
-                iris_rank,
-                dst_iris_rank,
-                heap_bases,
-                mask=mask,
-                hint=(1, BLOCK_SIZE_N),
-            )
-
-            iris.atomic_xchg(
-                locks_ptr + tile_id,
-                0,
-                iris_rank,
-                dst_iris_rank,
-                heap_bases,
-                sem="release",
-                scope="sys",
-            )
-
-
-@triton.jit()
-def persistent_reduce_ring(
-    input_ptr,
-    output_ptr,
-    ring_buffer,
-    flags,
-    M,
-    N,
-    stride_in_m,
-    stride_in_n,
-    stride_out_m,
-    stride_out_n,
-    heap_bases: tl.tensor,
-    group_rank: tl.constexpr,
-    iris_rank: tl.constexpr,
-    dst: tl.constexpr,
-    world_size: tl.constexpr,
-    rank_start: tl.constexpr,
-    rank_stride: tl.constexpr,
-    next_rank: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    COMM_SMS: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
-    CHUNK_SIZE: tl.constexpr,
-):
-    """
-    Symmetric ring reduce — same pattern as all_reduce ring.
-
-    Every rank participates identically in world_size-1 steps:
-    send local/accumulated data to next, receive from predecessor, accumulate.
-    After all steps, every rank holds the full reduction — only dst writes output.
-    """
-    pid = tl.program_id(0)
-
-    if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
-
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
-
-    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
-
-    if total_tiles > 0:
-        for tile_id in range(pid, total_tiles, COMM_SMS):
-            num_pid_in_group = GROUP_SIZE_M * num_pid_n
-            group_id = tile_id // num_pid_in_group
-            first_pid_m = group_id * GROUP_SIZE_M
-            group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-            pid_n = (tile_id % num_pid_in_group) // group_size_m
-
-            tl.assume(pid_m >= 0)
-            tl.assume(pid_n >= 0)
-
-            rm_base = pid_m * BLOCK_SIZE_M
-            rn_base = pid_n * BLOCK_SIZE_N
-            rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
-            rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-            rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
-            input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-            tile_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+            start_rank_idx = pid % world_size
+            start_rank_global = rank_start + start_rank_idx * rank_stride
+            acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases, mask=mask).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank_idx = (start_rank_idx + i) % world_size
+                remote_rank = rank_start + remote_rank_idx * rank_stride
+                acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
 
-            local_flag_ptr = flags + tile_id
-            remote_flag_ptr = flags + tile_id
-
-            local_data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
-            acc = local_data.to(acc_dtype)
-            send_data = local_data
-
-            for _step in range(0, world_size - 1):
-                while (
-                    iris.atomic_cas(
-                        remote_flag_ptr,
-                        0,
-                        0,
-                        iris_rank,
-                        next_rank,
-                        heap_bases,
-                        sem="acquire",
-                        scope="sys",
-                    )
-                    != 0
-                ):
-                    pass
-
-                iris.store(
-                    ring_buffer + tile_offset,
-                    send_data,
-                    iris_rank,
-                    next_rank,
-                    heap_bases,
-                    mask=mask,
-                    hint=(1, BLOCK_SIZE_N),
-                )
-                tl.debug_barrier()
-                iris.atomic_xchg(
-                    remote_flag_ptr,
-                    1,
-                    iris_rank,
-                    next_rank,
-                    heap_bases,
-                    sem="release",
-                    scope="sys",
-                )
-
-                while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
-                    pass
-
-                recv_tile = tl.load(ring_buffer + tile_offset, mask=mask, other=0.0)
-                acc += recv_tile.to(acc_dtype)
-                send_data = recv_tile
-                tl.debug_barrier()
-                tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
-
-            if group_rank == dst:
-                tl.store(
-                    output_ptr + tile_offset,
-                    acc.to(output_ptr.type.element_ty),
-                    mask=mask,
-                )
+            tl.store(
+                output_ptr + output_offset,
+                acc.to(output_ptr.type.element_ty),
+                mask=mask,
+                cache_modifier=".wt",
+            )
 
 
 def launch(
@@ -274,100 +125,40 @@ def launch(
     rank_stride,
     config,
 ):
-    """Launch reduce — ring for large messages, lock-based for small."""
+    """Launch the direct-read reduce kernel."""
     M, N = input_tensor.shape[:2]
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
     heap_bases = ctx.get_heap_bases()
 
-    if M * N < RING_THRESHOLD or world_size <= 2:
-        # Lock-based fallback for small messages
-        num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
-        num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-        total_tiles = num_pid_m * num_pid_n
+    ctx.device_barrier()
 
-        locks = ctx.zeros((total_tiles,), dtype=torch.int32)
-
-        if rank_in_group == dst:
-            output_tensor.copy_(input_tensor)
-        else:
-            output_tensor.zero_()
-        torch.cuda.synchronize()
-        ctx.device_barrier()
-
-        iris_launch(
-            persistent_reduce_lock,
-            (config.comm_sms,),
-            input_tensor,
-            output_tensor,
-            locks,
-            M,
-            N,
-            stride_in_m,
-            stride_in_n,
-            stride_out_m,
-            stride_out_n,
-            heap_bases,
-            rank_in_group,
-            rank_global,
-            dst,
-            world_size,
-            rank_start,
-            rank_stride,
-            config.block_size_m,
-            config.block_size_n,
-            config.swizzle_size,
-            config.comm_sms,
-            config.num_xcds,
-            config.chunk_size,
-            algorithm="reduce",
-            rank=rank_global,
-            dtype=input_tensor.dtype,
-        )
-    else:
-        # Ring reduce
-        ring_buffer = ctx.zeros((M, N), dtype=input_tensor.dtype)
-        num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
-        num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-        total_tiles = num_pid_m * num_pid_n
-        flags = ctx.zeros((total_tiles,), dtype=torch.int32)
-
-        # Next rank in ring (global iris rank)
-        next_group_rank = (rank_in_group + 1) % world_size
-        next_rank = rank_start + next_group_rank * rank_stride
-
-        # Pre-kernel barrier to ensure ring_buffer and flags are visible
-        ctx.device_barrier()
-
-        iris_launch(
-            persistent_reduce_ring,
-            (config.comm_sms,),
-            input_tensor,
-            output_tensor,
-            ring_buffer,
-            flags,
-            M,
-            N,
-            stride_in_m,
-            stride_in_n,
-            stride_out_m,
-            stride_out_n,
-            heap_bases,
-            rank_in_group,
-            rank_global,
-            dst,
-            world_size,
-            rank_start,
-            rank_stride,
-            next_rank,
-            config.block_size_m,
-            config.block_size_n,
-            config.swizzle_size,
-            config.comm_sms,
-            config.num_xcds,
-            config.chunk_size,
-            algorithm="reduce",
-            rank=rank_global,
-            dtype=input_tensor.dtype,
-        )
+    iris_launch(
+        persistent_reduce_direct,
+        (config.comm_sms,),
+        input_tensor,
+        output_tensor,
+        M,
+        N,
+        stride_in_m,
+        stride_in_n,
+        stride_out_m,
+        stride_out_n,
+        heap_bases,
+        rank_in_group,
+        rank_global,
+        dst,
+        world_size,
+        rank_start,
+        rank_stride,
+        config.block_size_m,
+        config.block_size_n,
+        config.swizzle_size,
+        config.comm_sms,
+        config.num_xcds,
+        config.chunk_size,
+        algorithm="reduce",
+        rank=rank_global,
+        dtype=input_tensor.dtype,
+    )
