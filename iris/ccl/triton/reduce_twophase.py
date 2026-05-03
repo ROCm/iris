@@ -60,6 +60,13 @@ def persistent_reduce_twophase(
     acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
     dst_global = rank_start + dst * rank_stride
 
+    # ---- Pre-barrier: ensure all ranks' input is visible ----
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
+            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
+        )
+
     # Stripe tiles across ranks (same as two_shot all-reduce DISTRIBUTION=0)
     start_tile = group_rank
     stride = world_size

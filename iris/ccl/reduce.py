@@ -5,16 +5,13 @@
 Reduce collective operation — public API.
 
 Two paths by message size:
-- Small/medium: lock-based single kernel
-- Large (>=4MB): NCCL (tree-based, scales better at high message sizes)
+- Small/medium (< _TWOPHASE_BYTES): Direct-read (root reads all peers)
+- Large (>= _TWOPHASE_BYTES): Two-phase (reduce-scatter + push to root)
 """
-
-import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 128 * 1024
-_NCCL_LARGE_BYTES = 1 * 1024 * 1024
+_TWOPHASE_BYTES = 512 * 1024
 
 
 def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_op=False, config=None):
@@ -52,12 +49,6 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
     M, N = input_tensor.shape[:2]
     msg_bytes = M * N * input_tensor.element_size()
 
-    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        if output_tensor.data_ptr() != input_tensor.data_ptr():
-            output_tensor.copy_(input_tensor)
-        _dist.reduce(output_tensor, dst=dst, group=group)
-        return
-
     if config.use_gluon:
         from iris.ccl.gluon.reduce import launch
 
@@ -75,7 +66,31 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         )
         if not async_op:
             ctx.device_barrier(group)
+    elif msg_bytes >= _TWOPHASE_BYTES and world_size > 1:
+        # Two-phase: reduce-scatter + push to root
+        from iris.ccl.triton.reduce_twophase import launch as launch_twophase
+
+        use_inline = not async_op
+        barrier_state = None
+        if use_inline:
+            barrier_state = ctx._get_inline_barrier_state(group)
+
+        launch_twophase(
+            output_tensor,
+            input_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            dst,
+            world_size,
+            rank_start,
+            rank_stride,
+            config,
+            inline_barrier=use_inline,
+            barrier_state=barrier_state,
+        )
     else:
+        # Direct-read: root reads all peers
         from iris.ccl.triton.reduce import launch
 
         use_inline = not async_op

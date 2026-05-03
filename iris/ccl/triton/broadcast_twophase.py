@@ -53,6 +53,13 @@ def persistent_broadcast_twophase(
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     src_global = rank_start + src * rank_stride
 
+    # ---- Pre-barrier: ensure root's data is visible before pull ----
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
+            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
+        )
+
     # ---- Phase 1: Each non-root rank pulls its chunk from root ----
     # Root already has its data — no work needed.
     # Non-root ranks read their assigned chunk from root in PARALLEL.

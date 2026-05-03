@@ -5,16 +5,13 @@
 Broadcast collective operation — public API.
 
 Two paths by message size:
-- Small/medium: single push kernel (root pushes tiles to all ranks)
-- Large (>=4MB): NCCL (tree-based, scales better at high message sizes)
+- Small/medium (< _TWOPHASE_BYTES): Pull-based kernel (non-root reads from root)
+- Large (>= _TWOPHASE_BYTES): Two-phase kernel (parallel pull + all-gather)
 """
-
-import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 128 * 1024
-_NCCL_LARGE_BYTES = 1 * 1024 * 1024
+_TWOPHASE_BYTES = 512 * 1024
 
 
 def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
@@ -51,10 +48,6 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
 
     msg_bytes = numel * tensor.element_size()
 
-    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        _dist.broadcast(tensor, src=src, group=group)
-        return
-
     tensor = tensor.contiguous().view(-1)
     block_n = config.block_size_n
     if numel >= block_n:
@@ -62,23 +55,42 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
     else:
         tensor = tensor.view(1, -1)
 
-    from iris.ccl.triton.broadcast import launch
-
     use_inline = not async_op
     barrier_state = None
     if use_inline:
         barrier_state = ctx._get_inline_barrier_state(group)
 
-    launch(
-        tensor,
-        ctx,
-        rank_in_group,
-        rank_global,
-        world_size,
-        rank_start,
-        rank_stride,
-        src,
-        config,
-        inline_barrier=use_inline,
-        barrier_state=barrier_state,
-    )
+    if msg_bytes >= _TWOPHASE_BYTES and world_size > 1:
+        # Two-phase: parallel pull from root + all-gather
+        from iris.ccl.triton.broadcast_twophase import launch as launch_twophase
+
+        launch_twophase(
+            tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            src,
+            config,
+            inline_barrier=use_inline,
+            barrier_state=barrier_state,
+        )
+    else:
+        # Pull-based: non-root reads from root
+        from iris.ccl.triton.broadcast import launch
+
+        launch(
+            tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            src,
+            config,
+            inline_barrier=use_inline,
+            barrier_state=barrier_state,
+        )
