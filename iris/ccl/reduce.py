@@ -44,9 +44,15 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
     # Small and large messages: use NCCL (avoids Triton launch overhead at small
     # sizes, and NCCL tree reduce is more bandwidth-efficient at large sizes).
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        # torch.distributed.reduce is in-place — use output_tensor directly on dst
-        output_tensor.copy_(input_tensor)
-        _dist.reduce(output_tensor, dst=dst, group=group)
+        # torch.distributed.reduce is in-place. Avoid full copy on all ranks —
+        # reduce in-place on input, then copy result to output only on root.
+        if output_tensor.data_ptr() == input_tensor.data_ptr():
+            _dist.reduce(output_tensor, dst=dst, group=group)
+        else:
+            _dist.reduce(input_tensor, dst=dst, group=group)
+            rank_in_group = _dist.get_rank(group)
+            if rank_in_group == dst:
+                output_tensor.copy_(input_tensor)
         return
 
     from iris.ccl.config import Config

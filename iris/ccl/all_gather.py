@@ -5,9 +5,9 @@
 All-gather collective operation — public API.
 
 Three paths by message size:
-- Small (<128KB): NCCL (avoids Triton dispatch overhead)
-- Medium (128KB-4MB): native Triton kernel
-- Large (>=4MB): NCCL (tree-based, scales better at high BW)
+- Small (<256KB): NCCL (avoids Triton launch overhead)
+- Medium (256KB-2MB): native Triton kernel
+- Large (>=2MB): NCCL (ring/tree-based, scales better at high BW)
 """
 
 import torch.distributed as _dist
@@ -15,7 +15,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 256 * 1024  # <256KB: NCCL avoids Triton launch overhead
-_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree-based is more bandwidth-efficient
+_NCCL_LARGE_BYTES = 2 * 1024 * 1024  # >=2MB: NCCL ring/tree is more bandwidth-efficient
 
 
 def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None):

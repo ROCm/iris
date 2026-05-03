@@ -14,7 +14,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 256 * 1024  # <256KB: NCCL avoids Triton launch overhead
-_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL is more bandwidth-efficient
+_NCCL_LARGE_BYTES = 2 * 1024 * 1024  # >=2MB: NCCL is more bandwidth-efficient
 
 
 def gather(output_tensor, input_tensor, ctx, dst=0, group=None, async_op=False, config=None):
