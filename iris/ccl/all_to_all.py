@@ -29,19 +29,20 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
     """
-    from iris.ccl.config import Config
-
-    if config is None:
-        config = Config(block_size_m=32, block_size_n=128)
-
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
-
+    # Fast NCCL dispatch — skip Config/extract_group_info overhead
     M, N = input_tensor.shape[:2]
     msg_bytes = M * N * input_tensor.element_size()
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
         _dist.all_to_all_single(output_tensor, input_tensor, group=group)
         return
+
+    from iris.ccl.config import Config
+
+    if config is None:
+        config = Config(block_size_m=32, block_size_n=128)
+
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
     if config.use_gluon:
         from iris.ccl.gluon.all_to_all import launch

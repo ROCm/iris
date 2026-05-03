@@ -31,6 +31,18 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
         async_op: If True, skip trailing barrier.
         config: Config with kernel parameters. Default: None.
     """
+    # Fast NCCL dispatch — skip Config/extract_group_info overhead
+    numel = tensor.numel()
+    if numel == 0:
+        if not async_op:
+            ctx.device_barrier(group)
+        return
+
+    msg_bytes = numel * tensor.element_size()
+    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
+        _dist.broadcast(tensor, src=src, group=group)
+        return
+
     from iris.ccl.config import Config
 
     if config is None:
@@ -44,24 +56,6 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
 
     if src < 0 or src >= world_size:
         raise ValueError(f"src rank {src} out of range [0, {world_size})")
-
-    numel = tensor.numel()
-    if numel == 0:
-        if not async_op:
-            ctx.device_barrier(group)
-        return
-
-    msg_bytes = numel * tensor.element_size()
-
-    # Large messages: NCCL tree broadcast is more bandwidth-efficient.
-    if msg_bytes >= _NCCL_LARGE_BYTES:
-        _dist.broadcast(tensor, src=src, group=group)
-        return
-
-    # Small messages: NCCL avoids Triton launch overhead.
-    if msg_bytes < _NCCL_SMALL_BYTES:
-        _dist.broadcast(tensor, src=src, group=group)
-        return
 
     tensor = tensor.contiguous().view(-1)
     block_n = config.block_size_n
