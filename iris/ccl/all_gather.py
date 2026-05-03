@@ -14,8 +14,8 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 128 * 1024
-_NCCL_LARGE_BYTES = 4 * 1024 * 1024
+_NCCL_SMALL_BYTES = 0
+_NCCL_LARGE_BYTES = 1 << 62  # disabled — native kernel handles all sizes
 
 
 def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None):

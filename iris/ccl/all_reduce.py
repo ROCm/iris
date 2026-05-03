@@ -13,7 +13,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_FALLBACK_BYTES = 128 * 1024
+_NCCL_FALLBACK_BYTES = 0  # disabled — native kernel handles all sizes
 
 
 def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
