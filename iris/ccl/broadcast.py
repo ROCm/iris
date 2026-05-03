@@ -59,8 +59,6 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
     else:
         tensor = tensor.view(1, -1)
 
-    ctx.device_barrier(group)
-
     launch(
         tensor,
         ctx,

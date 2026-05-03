@@ -132,8 +132,6 @@ def launch(
 
     heap_bases = ctx.get_heap_bases()
 
-    ctx.device_barrier()
-
     iris_launch(
         persistent_reduce_direct,
         (config.comm_sms,),
