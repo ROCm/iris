@@ -90,8 +90,16 @@ def persistent_broadcast_twophase(
     # ---- Mid-barrier: all ranks have their chunk from root ----
     if INLINE_BARRIER:
         inline_device_barrier(
-            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
-            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
         )
 
     # ---- Phase 2: All-gather — each rank pushes its chunk to all others ----
@@ -134,8 +142,16 @@ def persistent_broadcast_twophase(
     # ---- Post-barrier: all ranks have complete data ----
     if INLINE_BARRIER:
         inline_device_barrier(
-            pid, barrier_flags_ptr, wg_done_ptr, barrier_sense_ptr,
-            heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS,
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
         )
 
 
@@ -146,9 +162,8 @@ def _get_dummy_barrier(device):
     """Return cached dummy barrier tensors for the no-inline-barrier path."""
     if device not in _dummy_barrier_cache:
         import torch
-        _dummy_barrier_cache[device] = tuple(
-            torch.zeros(1, dtype=torch.int32, device=device) for _ in range(3)
-        )
+
+        _dummy_barrier_cache[device] = tuple(torch.zeros(1, dtype=torch.int32, device=device) for _ in range(3))
     return _dummy_barrier_cache[device]
 
 
