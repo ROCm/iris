@@ -36,6 +36,11 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
     numel = input_tensor.numel()
     msg_bytes = numel * input_tensor.element_size()
 
+    # Validate dst early (before NCCL dispatch) to give a clean error
+    world_size = _dist.get_world_size(group)
+    if dst < 0 or dst >= world_size:
+        raise ValueError(f"dst must be in [0, world_size), got dst={dst}, world_size={world_size}.")
+
     # Small and large messages: use NCCL (avoids Triton launch overhead at small
     # sizes, and NCCL tree reduce is more bandwidth-efficient at large sizes).
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
@@ -58,9 +63,6 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         config = Config(block_size_m=32, block_size_n=64)
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
-
-    if dst < 0 or dst >= world_size:
-        raise ValueError(f"dst must be in [0, world_size), got dst={dst}, world_size={world_size}.")
 
     # Reshape for efficient tiling (same as broadcast.py)
     # Avoids M=1 with block_size_m=32 where 31/32 rows are masked/wasted.
