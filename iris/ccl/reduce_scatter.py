@@ -11,7 +11,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 8 * 1024 * 1024  # All NCCL — native kernel not competitive
+_NCCL_SMALL_BYTES = 0  # Native kernel competitive after barrier fix
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree-based is more bandwidth-efficient
 
 
@@ -73,6 +73,8 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         )
 
     from iris.ccl.triton.reduce_scatter import launch
+
+    ctx.device_barrier(group)
 
     use_inline = not async_op
     barrier_state = None
