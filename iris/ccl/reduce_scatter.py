@@ -14,6 +14,17 @@ from iris.ccl.utils import extract_group_info
 _NCCL_SMALL_BYTES = 8 * 1024 * 1024  # <8MB: NCCL (barrier overhead dominates below)
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree-based is more bandwidth-efficient
 
+_rs_group_cache: dict = {}
+
+
+def _get_rs_group_info(group):
+    cached = _rs_group_cache.get(group)
+    if cached is not None:
+        return cached
+    info = (_dist.get_world_size(group), _dist.get_rank(group))
+    _rs_group_cache[group] = info
+    return info
+
 
 def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None):
     """
@@ -28,22 +39,23 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
     """
-    # Fast NCCL dispatch — avoid extract_group_info overhead for small/large messages
     M, N = input_tensor.shape[:2]
     msg_bytes = M * N * input_tensor.element_size()
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        world_size = _dist.get_world_size(group)
+        world_size, rank_in_group = _get_rs_group_info(group)
         if M < world_size:
             flat = input_tensor.contiguous().view(-1)
             chunk_size = flat.numel() // world_size
             out_flat = output_tensor.contiguous().view(-1)
             _dist.reduce_scatter_tensor(out_flat[:chunk_size], flat, group=group)
         else:
-            rank_in_group = _dist.get_rank(group)
             chunk_m = M // world_size
-            out_chunk = output_tensor[rank_in_group * chunk_m : (rank_in_group + 1) * chunk_m]
-            _dist.reduce_scatter_tensor(out_chunk, input_tensor, group=group)
+            _dist.reduce_scatter_tensor(
+                output_tensor[rank_in_group * chunk_m : (rank_in_group + 1) * chunk_m],
+                input_tensor,
+                group=group,
+            )
         return
 
     from iris.ccl.config import Config

@@ -16,6 +16,9 @@ from iris.ccl.utils import extract_group_info
 _NCCL_SMALL_BYTES = 8 * 1024 * 1024  # <8MB: NCCL via layout transpose
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL via layout transpose
 
+_a2a_nccl_bufs: dict = {}
+_a2a_ws_cache: dict = {}
+
 
 def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None):
     """
@@ -35,15 +38,27 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     msg_bytes = M * total_N * input_tensor.element_size()
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        world_size = _dist.get_world_size(group)
+        ws = _a2a_ws_cache.get(group)
+        if ws is None:
+            ws = _dist.get_world_size(group)
+            _a2a_ws_cache[group] = ws
+        world_size = ws
         N = total_N // world_size
         if M == 1:
             _dist.all_to_all_single(output_tensor.view(-1), input_tensor.view(-1), group=group)
             return
-        nccl_in = input_tensor.view(M, world_size, N).permute(1, 0, 2).contiguous().view(world_size * M, N)
-        nccl_out = torch.empty_like(nccl_in)
+        buf_key = (M, N, world_size, input_tensor.dtype, input_tensor.device)
+        bufs = _a2a_nccl_bufs.get(buf_key)
+        if bufs is None:
+            bufs = (
+                torch.empty(world_size * M, N, dtype=input_tensor.dtype, device=input_tensor.device),
+                torch.empty(world_size * M, N, dtype=input_tensor.dtype, device=input_tensor.device),
+            )
+            _a2a_nccl_bufs[buf_key] = bufs
+        nccl_in, nccl_out = bufs
+        nccl_in.view(world_size, M, N).copy_(input_tensor.view(M, world_size, N).permute(1, 0, 2))
         _dist.all_to_all_single(nccl_out, nccl_in, group=group)
-        output_tensor.copy_(nccl_out.view(world_size, M, N).permute(1, 0, 2).contiguous().view(M, total_N))
+        output_tensor.view(M, world_size, N).permute(1, 0, 2).copy_(nccl_out.view(world_size, M, N))
         return
 
     from iris.ccl.config import Config
