@@ -72,6 +72,9 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     else:
         from iris.ccl.triton.all_gather import launch
 
+        if config.all_gather_variant == "pull":
+            ctx.device_barrier(group)
+
         use_inline = not async_op
         barrier_state = None
         if use_inline:
