@@ -271,6 +271,124 @@ def persistent_all_gather_partitioned(
         )
 
 
+@triton.jit()
+def persistent_all_gather_pull(
+    input_ptr,
+    output_ptr,
+    M,
+    N,
+    stride_in_m,
+    stride_in_n,
+    stride_out_m,
+    stride_out_n,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
+):
+    """
+    Pull-based all-gather: each rank reads all remote input shards via iris.load
+    and assembles the full output locally.
+
+    Eliminates XGMI write contention — each rank reads from W peers and writes
+    only to its own output buffer. Reads are distributed across XGMI links
+    (each link serves 1 reader), unlike push-based where all W ranks write to
+    every peer simultaneously (W-1 concurrent writers per GPU).
+    """
+    pid = tl.program_id(0)
+
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+    tl.assume(total_tiles > 0)
+
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+        tl.assume(tile_id >= 0)
+        tl.assume(stride_in_m >= 0)
+        tl.assume(stride_in_n >= 0)
+        tl.assume(stride_out_m >= 0)
+        tl.assume(stride_out_n >= 0)
+
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        input_mask = (rm[:, None] < M) & (rn[None, :] < N)
+
+        input_base_m = rm[:, None] * stride_in_m
+        input_base_n = rn[None, :] * stride_in_n
+        input_offset = input_base_m + input_base_n
+
+        for i in tl.static_range(world_size):
+            source_rank = rank_start + i * rank_stride
+
+            # Output rows: rank i's shard goes to output[i*M : (i+1)*M, :]
+            rm_output = rm + i * M
+            output_base_m = rm_output[:, None] * stride_out_m
+            output_base_n = rn[None, :] * stride_out_n
+            output_offset = output_base_m + output_base_n
+            output_ptr_target = output_ptr + output_offset
+            output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+            input_ptr_source = input_ptr + input_offset
+            input_ptr_source = tl.multiple_of(input_ptr_source, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+            if i == group_rank:
+                # Local: direct load + store
+                data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
+                tl.store(output_ptr_target, data, mask=input_mask, cache_modifier=".wt")
+            else:
+                # Remote: pull via iris.load from source rank's input buffer
+                data = iris.load(
+                    input_ptr_source,
+                    iris_rank,
+                    source_rank,
+                    heap_bases,
+                    mask=input_mask,
+                    other=0.0,
+                    hint=(1, BLOCK_SIZE_N),
+                )
+                tl.store(output_ptr_target, data, mask=input_mask, cache_modifier=".wt")
+
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
+        )
+
+
 _dummy_barrier_cache: dict = {}
 
 
@@ -318,6 +436,8 @@ def launch(
         kernel_fn = persistent_all_gather
     elif config.all_gather_variant == "partitioned":
         kernel_fn = persistent_all_gather_partitioned
+    elif config.all_gather_variant == "pull":
+        kernel_fn = persistent_all_gather_pull
     else:
         raise ValueError(f"Unknown all_gather_variant: {config.all_gather_variant}")
 

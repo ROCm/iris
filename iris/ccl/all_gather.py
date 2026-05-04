@@ -14,8 +14,8 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 8 * 1024 * 1024  # All NCCL — native kernel not competitive
-_NCCL_LARGE_BYTES = 2 * 1024 * 1024  # >=2MB: NCCL ring/tree is more bandwidth-efficient
+_NCCL_SMALL_BYTES = 0  # Pull-based kernel competitive at all sizes
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL ring/tree is more bandwidth-efficient
 
 
 def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None):
@@ -42,7 +42,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     from iris.ccl.config import Config
 
     if config is None:
-        config = Config(block_size_m=32, block_size_n=128, comm_sms=64, num_warps=8)
+        config = Config(block_size_m=32, block_size_n=128, comm_sms=64, num_warps=8, all_gather_variant="pull")
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 

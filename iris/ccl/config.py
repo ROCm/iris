@@ -114,9 +114,9 @@ class Config:
             raise ValueError(f"comm_sms must be positive, got {self.comm_sms}")
         if self.num_xcds <= 0:
             raise ValueError(f"num_xcds must be positive, got {self.num_xcds}")
-        if self.all_gather_variant not in ["persistent", "partitioned"]:
+        if self.all_gather_variant not in ["persistent", "partitioned", "pull"]:
             raise ValueError(
-                f"all_gather_variant must be one of: 'persistent', 'partitioned', got {self.all_gather_variant}"
+                f"all_gather_variant must be one of: 'persistent', 'partitioned', 'pull', got {self.all_gather_variant}"
             )
         if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock"]:
             raise ValueError(
