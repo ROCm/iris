@@ -730,8 +730,6 @@ def persistent_all_reduce_two_shot(
         # (one with masks and one without). Separate unmasked paths allow the compiler to generate
         # more efficient vectorized instructions.
         if is_full:
-            mask = (rm[:, None] < M) & (rn[None, :] < N)
-
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
             acc = iris.load(base_ptr, iris_rank, start_rank_global, heap_bases).to(acc_dtype)
