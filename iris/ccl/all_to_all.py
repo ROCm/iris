@@ -14,7 +14,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0  # no NCCL small-message path — native kernel handles all sizes
-_NCCL_LARGE_BYTES = 64 * 1024 * 1024  # >=64MB: NCCL (transpose overhead amortized)
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL (native kernel loses at large sizes)
 
 _a2a_nccl_bufs: dict = {}
 _a2a_ws_cache: dict = {}
