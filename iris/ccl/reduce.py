@@ -13,7 +13,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 0  # Triton is fast enough at all sizes
+_NCCL_SMALL_BYTES = 512 * 1024  # <512KB: NCCL (native wins at 1MB+)
 _TWOPHASE_BYTES = 64 * 1024
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree reduce is more efficient
 

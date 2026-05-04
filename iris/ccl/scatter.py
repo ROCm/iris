@@ -14,7 +14,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0  # Triton is faster than NCCL wrapper (avoids list construction)
-_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL is more bandwidth-efficient
+_NCCL_LARGE_BYTES = 256 * 1024  # >=256KB: NCCL (native scatter regresses at large sizes)
 
 
 def scatter(output_tensor, input_tensor, ctx, src=0, group=None, async_op=False, config=None):
