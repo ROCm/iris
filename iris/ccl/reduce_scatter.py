@@ -34,10 +34,16 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
         world_size = _dist.get_world_size(group)
-        rank_in_group = _dist.get_rank(group)
-        chunk_m = M // world_size
-        out_chunk = output_tensor[rank_in_group * chunk_m : (rank_in_group + 1) * chunk_m]
-        _dist.reduce_scatter_tensor(out_chunk, input_tensor, group=group)
+        if M < world_size:
+            flat = input_tensor.contiguous().view(-1)
+            chunk_size = flat.numel() // world_size
+            out_flat = output_tensor.contiguous().view(-1)
+            _dist.reduce_scatter_tensor(out_flat[:chunk_size], flat, group=group)
+        else:
+            rank_in_group = _dist.get_rank(group)
+            chunk_m = M // world_size
+            out_chunk = output_tensor[rank_in_group * chunk_m : (rank_in_group + 1) * chunk_m]
+            _dist.reduce_scatter_tensor(out_chunk, input_tensor, group=group)
         return
 
     from iris.ccl.config import Config

@@ -32,20 +32,17 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         config: Config with kernel parameters
     """
     M, total_N = input_tensor.shape[:2]
-    _, _, world_size, _, _ = extract_group_info(group, ctx)
-    N = total_N // world_size
     msg_bytes = M * total_N * input_tensor.element_size()
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
+        world_size = _dist.get_world_size(group)
+        N = total_N // world_size
         if M == 1:
-            # M=1: column-chunked (1, N*W) and row-chunked (W*N) are identical in memory
             _dist.all_to_all_single(output_tensor.view(-1), input_tensor.view(-1), group=group)
             return
-        # Transpose from iris column-chunked (M, N*W) to NCCL row-chunked (W*M, N)
         nccl_in = input_tensor.view(M, world_size, N).permute(1, 0, 2).contiguous().view(world_size * M, N)
         nccl_out = torch.empty_like(nccl_in)
         _dist.all_to_all_single(nccl_out, nccl_in, group=group)
-        # Transpose back from NCCL row-chunked (W*M, N) to iris column-chunked (M, N*W)
         output_tensor.copy_(nccl_out.view(world_size, M, N).permute(1, 0, 2).contiguous().view(M, total_N))
         return
 
@@ -55,6 +52,7 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         config = Config(block_size_m=32, block_size_n=128)
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
+    N = total_N // world_size
 
     if config.use_gluon:
         from iris.ccl.gluon.all_to_all import launch
