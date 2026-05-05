@@ -59,7 +59,7 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
             "Support for other operations will be added in a future release."
         )
     if config is None:
-        if msg_bytes <= 512 * 1024:
+        if msg_bytes <= 256 * 1024:
             config = Config(block_size_m=32, block_size_n=64, comm_sms=64, all_reduce_variant="one_shot_fused")
         else:
             config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)

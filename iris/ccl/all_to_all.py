@@ -6,6 +6,12 @@ All-to-all collective operation — public API.
 
 Routes to NCCL (via layout transpose) or triton/gluon.
 Iris uses column-chunked layout (M, N*W), NCCL uses row-chunked (W*M, N).
+
+Native (triton/gluon) kernel handles messages < 512KB total.
+Above that, NCCL's ring algorithm wins on bandwidth despite the layout
+transpose overhead.  Benchmark crossover on MI355X 8-GPU (XGMI):
+  256KB total (~32KB/rank): iris 1.34x NCCL  -> native
+  512KB total (~64KB/rank): iris 0.67x NCCL  -> NCCL
 """
 
 import torch
@@ -14,7 +20,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0  # no NCCL small-message path — native kernel wins at small sizes
-_NCCL_LARGE_BYTES = 4 * 1024 * 1024  # >=4MB total: NCCL (native loses at >=512KB per-rank)
+_NCCL_LARGE_BYTES = 512 * 1024  # >=512KB total: NCCL (native loses at ~64KB/rank on 8 GPUs)
 
 _a2a_nccl_bufs: dict = {}
 _a2a_ws_cache: dict = {}
