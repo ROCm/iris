@@ -77,7 +77,14 @@ def all_reduce_preamble(
         config = Config()
 
     variant = config.all_reduce_variant.lower()
-    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK, VARIANT_ONE_SHOT_FUSED]:
+    if variant not in [
+        VARIANT_ATOMIC,
+        VARIANT_RING,
+        VARIANT_TWO_SHOT,
+        VARIANT_ONE_SHOT,
+        VARIANT_SPINLOCK,
+        VARIANT_ONE_SHOT_FUSED,
+    ]:
         raise ValueError(
             f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}, {VARIANT_ONE_SHOT_FUSED}"
         )
@@ -593,7 +600,18 @@ def persistent_all_reduce_one_shot_fused(
         pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
     # --- START BARRIER ---
-    _fused_barrier(pid, start_flags_ptr, start_wg_done_ptr, start_sense_ptr, heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS)
+    _fused_barrier(
+        pid,
+        start_flags_ptr,
+        start_wg_done_ptr,
+        start_sense_ptr,
+        heap_bases,
+        iris_rank,
+        world_size,
+        rank_start,
+        rank_stride,
+        COMM_SMS,
+    )
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -643,7 +661,18 @@ def persistent_all_reduce_one_shot_fused(
         )
 
     # --- END BARRIER ---
-    _fused_barrier(pid, end_flags_ptr, end_wg_done_ptr, end_sense_ptr, heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS)
+    _fused_barrier(
+        pid,
+        end_flags_ptr,
+        end_wg_done_ptr,
+        end_sense_ptr,
+        heap_bases,
+        iris_rank,
+        world_size,
+        rank_start,
+        rank_stride,
+        COMM_SMS,
+    )
 
 
 @triton.jit()
