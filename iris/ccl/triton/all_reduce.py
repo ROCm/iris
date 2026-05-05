@@ -14,7 +14,7 @@ import triton.language as tl
 import torch
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
-from ..utils import chiplet_transform_chunked
+from ..utils import chiplet_transform_chunked, inline_device_barrier
 
 # Variant types
 VARIANT_ATOMIC = "atomic"
@@ -88,7 +88,7 @@ def all_reduce_preamble(
 
     if variant in (VARIANT_ATOMIC, VARIANT_SPINLOCK, VARIANT_ONE_SHOT):
         output_tensor.zero_()
-        ctx.barrier()
+        ctx.device_barrier()
 
     elif variant == VARIANT_RING:
         num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
@@ -111,7 +111,7 @@ def all_reduce_preamble(
             workspace.flags.zero_()
 
         output_tensor.zero_()
-        ctx.barrier()
+        ctx.device_barrier()
 
     elif variant == VARIANT_TWO_SHOT:
         pass
@@ -145,12 +145,16 @@ def persistent_all_reduce_atomic(
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
     """
     Atomic-based all-reduce kernel.
@@ -234,6 +238,20 @@ def persistent_all_reduce_atomic(
         # Ensure all atomic operations complete before moving to next tile
         tl.debug_barrier()
 
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
+        )
+
 
 @triton.jit()
 def persistent_all_reduce_spinlock(
@@ -252,12 +270,16 @@ def persistent_all_reduce_spinlock(
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
     """
     Spinlock-based all-reduce kernel that mimics an "atomic add" by using a lock per tile.
@@ -342,6 +364,20 @@ def persistent_all_reduce_spinlock(
             # Release lock for this tile at dest_rank
             iris.atomic_xchg(locks_ptr + tile_id, 0, iris_rank, dest_rank, heap_bases, sem="release", scope="sys")
 
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
+        )
+
 
 @triton.jit()
 def persistent_all_reduce_one_shot(
@@ -359,12 +395,16 @@ def persistent_all_reduce_one_shot(
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
     """
     One-shot all-reduce for small/latency-bound buffers.
@@ -423,6 +463,20 @@ def persistent_all_reduce_one_shot(
             mask=mask,
         )
 
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
+        )
+
 
 @triton.jit()
 def persistent_all_reduce_ring(
@@ -443,6 +497,9 @@ def persistent_all_reduce_ring(
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
     next_rank: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -452,6 +509,7 @@ def persistent_all_reduce_ring(
     NUM_RINGS: tl.constexpr,
     SLICE_SIZE_N: tl.constexpr,
     FLAGS_PER_TILE: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
     """
     Ring-based all-reduce kernel that streams whole tiles around the ring using a
@@ -570,6 +628,20 @@ def persistent_all_reduce_ring(
                     mask=mask,
                 )
 
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
+        )
+
 
 @triton.jit
 def persistent_all_reduce_two_shot(
@@ -587,13 +659,17 @@ def persistent_all_reduce_two_shot(
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
+    barrier_flags_ptr,
+    wg_done_ptr,
+    barrier_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     COMM_SMS: tl.constexpr,
-    NUM_XCDS: tl.constexpr,  # unused here but kept for signature compatibility
-    CHUNK_SIZE: tl.constexpr,  # unused here but kept for signature compatibility
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
     DISTRIBUTION: tl.constexpr,
+    INLINE_BARRIER: tl.constexpr = False,
 ):
     """Reduce assigned tiles for a rank and broadcast the result to all peers.
     Single kernel: unmasked fast path for full tiles, masked slow path for tails.
@@ -705,6 +781,30 @@ def persistent_all_reduce_two_shot(
                         hint=(1, BLOCK_SIZE_N),
                     )
 
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
+        )
+
+
+_dummy_barrier_cache: dict = {}
+
+
+def _get_dummy_barrier(device):
+    """Return cached dummy barrier tensors for the no-inline-barrier path."""
+    if device not in _dummy_barrier_cache:
+        _dummy_barrier_cache[device] = tuple(torch.zeros(1, dtype=torch.int32, device=device) for _ in range(3))
+    return _dummy_barrier_cache[device]
+
 
 def launch(
     output_tensor,
@@ -718,6 +818,8 @@ def launch(
     config,
     workspace,
     group=None,
+    inline_barrier=False,
+    barrier_state=None,
 ):
     """Launch the appropriate Triton all-reduce kernel variant."""
     M, N = input_tensor.shape[:2]
@@ -759,6 +861,11 @@ def launch(
 
     heap_bases = ctx.get_heap_bases()
 
+    if inline_barrier and barrier_state is not None:
+        barrier_flags, wg_done, barrier_sense = barrier_state
+    else:
+        barrier_flags, wg_done, barrier_sense = _get_dummy_barrier(input_tensor.device)
+
     if variant == VARIANT_ATOMIC:
         iris_launch(
             persistent_all_reduce_atomic,
@@ -777,12 +884,16 @@ def launch(
             world_size,
             rank_start,
             rank_stride,
+            barrier_flags,
+            wg_done,
+            barrier_sense,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            inline_barrier,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
@@ -821,12 +932,16 @@ def launch(
             world_size,
             rank_start,
             rank_stride,
+            barrier_flags,
+            wg_done,
+            barrier_sense,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            inline_barrier,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
@@ -848,13 +963,9 @@ def launch(
                 f"Pre-allocate workspace with the smallest block sizes you intend to use."
             )
 
-        # Calculate next rank in the ring for group support
-        # next_rank must be a global rank for iris RMA operations
         if group is None:
-            # Simple case: next rank is just (rank_in_group + 1) % world_size (which equals global rank)
             next_rank = (rank_in_group + 1) % world_size
         else:
-            # Group case: get the group ranks and find next in ring
             import torch.distributed as dist
 
             group_ranks = dist.get_process_group_ranks(group)
@@ -881,6 +992,9 @@ def launch(
             rank_start,
             rank_stride,
             next_rank,
+            barrier_flags,
+            wg_done,
+            barrier_sense,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
@@ -890,6 +1004,7 @@ def launch(
             config.all_reduce_num_rings,
             slice_n,
             workspace.flags_per_tile,
+            inline_barrier,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
@@ -913,6 +1028,9 @@ def launch(
             world_size,
             rank_start,
             rank_stride,
+            barrier_flags,
+            wg_done,
+            barrier_sense,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
@@ -920,6 +1038,7 @@ def launch(
             config.num_xcds,
             config.chunk_size,
             config.all_reduce_distribution,
+            inline_barrier,
             num_warps=8,
             num_stages=1,
             waves_per_eu=1,
@@ -945,12 +1064,16 @@ def launch(
             world_size,
             rank_start,
             rank_stride,
+            barrier_flags,
+            wg_done,
+            barrier_sense,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            inline_barrier,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
