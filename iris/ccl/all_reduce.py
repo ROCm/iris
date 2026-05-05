@@ -14,7 +14,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_FALLBACK_BYTES = 2 * 1024 * 1024  # <2MB: NCCL (native only wins at 4MB+)
+_NCCL_FALLBACK_BYTES = 4 * 1024 * 1024  # <4MB: NCCL (native two_shot wins at 4MB+)
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree all-reduce is more efficient
 
 

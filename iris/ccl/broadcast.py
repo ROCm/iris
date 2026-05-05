@@ -5,8 +5,7 @@
 Broadcast collective operation — public API.
 
 Three paths by message size:
-- Small (<256KB): NCCL (avoids Triton launch overhead)
-- Small/medium (256KB-512KB): Pull-based kernel (non-root reads from root)
+- Small (<512KB): NCCL (avoids Triton launch overhead)
 - Medium (512KB-8MB): Two-phase kernel (scatter + all-gather)
 - Large (>=8MB): NCCL tree broadcast
 """
@@ -15,7 +14,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 256 * 1024  # <256KB: NCCL avoids Triton launch + pull overhead
+_NCCL_SMALL_BYTES = 512 * 1024  # <512KB: NCCL (native pull loses at 256KB)
 _TWOPHASE_BYTES = 512 * 1024
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree broadcast
 
