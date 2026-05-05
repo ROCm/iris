@@ -42,7 +42,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     from iris.ccl.config import Config
 
     if config is None:
-        config = Config(block_size_m=32, block_size_n=128, comm_sms=64, num_warps=8, all_gather_variant="pull")
+        config = Config(block_size_m=32, block_size_n=128, comm_sms=64, num_warps=8, all_gather_variant="persistent")
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
