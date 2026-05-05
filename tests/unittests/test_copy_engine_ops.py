@@ -12,6 +12,7 @@ import iris
 def _copy_engine_linear_kernel(
     src,
     dst,
+    flag,
     num_elements,
     from_rank: tl.constexpr,
     to_rank: tl.constexpr,
@@ -32,6 +33,10 @@ def _copy_engine_linear_kernel(
         mask=mask,
         USE_COPY_ENGINE=True,
     )
+    # Each block signals completion to force cache coherency on destination GPU
+    iris.atomic_add(flag, 1, from_rank, to_rank, heap_bases, copy_engine_ctx=copy_engine_ctx, USE_COPY_ENGINE=True)
+    # Wait for this block's SDMA operations to complete
+    iris.quiet(copy_engine_ctx, to_rank)
 
 
 def _require_two_ranks(shmem):
@@ -65,12 +70,14 @@ def test_copy_engine_device_linear_put(num_elements):
 
     src = _allocate_symmetric_range(shmem, num_elements, torch.float32)
     dst = shmem.zeros(num_elements, device="cuda", dtype=torch.float32)
+    completion_flag = shmem.zeros(1, device="cuda", dtype=torch.int32)
 
     grid = _make_grid(num_elements, 128)
     if rank == 0:
         _copy_engine_linear_kernel[grid](
             src,
             dst,
+            completion_flag,
             num_elements,
             rank,
             remote_rank,
@@ -82,6 +89,9 @@ def test_copy_engine_device_linear_put(num_elements):
     shmem.barrier()
 
     if rank == 1:
+        # Verify all blocks completed (one signal per block)
+        num_blocks = triton.cdiv(num_elements, 128)
+        assert completion_flag.item() == num_blocks, f"Expected {num_blocks} signals, got {completion_flag.item()}"
         expected = _make_expected(num_elements, torch.float32, dst.device)
         assert torch.allclose(dst, expected)
 
@@ -99,9 +109,10 @@ def test_copy_engine_host_put(num_elements):
 
     src = _allocate_symmetric_range(shmem, num_elements, torch.float32)
     dst = shmem.zeros(num_elements, device="cuda", dtype=torch.float32)
+    completion_flag = shmem.zeros(1, device="cuda", dtype=torch.int32)
 
     if rank == 0:
-        shmem.put(src, dst_rank=remote_rank, dst_tensor=dst, async_op=True)
+        shmem.put(src, dst_rank=remote_rank, dst_tensor=dst, signal_flag=completion_flag, signal_value=1, async_op=True)
         shmem.quiet(dst_rank=remote_rank)
 
     shmem.barrier()
@@ -533,12 +544,14 @@ def test_copy_engine_different_dtypes(dtype):
     num_elements = 256
     src = _allocate_symmetric_range(shmem, num_elements, dtype)
     dst = shmem.zeros(num_elements, device="cuda", dtype=dtype)
+    completion_flag = shmem.zeros(1, device="cuda", dtype=torch.int32)
 
     grid = _make_grid(num_elements, 128)
     if rank == 0:
         _copy_engine_linear_kernel[grid](
             src,
             dst,
+            completion_flag,
             num_elements,
             rank,
             remote_rank,
@@ -550,6 +563,8 @@ def test_copy_engine_different_dtypes(dtype):
     shmem.barrier()
 
     if rank == 1:
+        num_blocks = triton.cdiv(num_elements, 128)
+        assert completion_flag.item() == num_blocks, f"Expected {num_blocks} signals, got {completion_flag.item()}"
         expected = _make_expected(num_elements, dtype, dst.device)
         assert torch.allclose(dst, expected)
 
@@ -571,12 +586,14 @@ def test_copy_engine_bidirectional():
     # Scale by rank to make data different
     src.mul_(rank + 1)
     dst = shmem.zeros(num_elements, device="cuda", dtype=torch.float32)
+    completion_flag = shmem.zeros(1, device="cuda", dtype=torch.int32)
 
     grid = _make_grid(num_elements, 128)
     # Both ranks send their data
     _copy_engine_linear_kernel[grid](
         src,
         dst,
+        completion_flag,
         num_elements,
         rank,
         remote_rank,
@@ -588,6 +605,8 @@ def test_copy_engine_bidirectional():
     shmem.barrier()
 
     # Each rank should have received the other's data
+    num_blocks = triton.cdiv(num_elements, 128)
+    assert completion_flag.item() == num_blocks, f"Expected {num_blocks} signals, got {completion_flag.item()}"
     expected = _make_expected(num_elements, torch.float32, dst.device) * (remote_rank + 1)
     assert torch.allclose(dst, expected)
 

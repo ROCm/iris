@@ -1146,7 +1146,6 @@ class Iris:
                 src_rank, dst_rank, channel, wait_ptr, wait_val, src_ptr, dst_ptr, size, wait_bits
             )
             sdma_ep.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
-            self.copy_engines.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
         elif has_wait:
             # Wait + copy
             wait_val = int(wait_value if wait_value is not None else 0)
@@ -1227,7 +1226,6 @@ class Iris:
                 src_rank, dst_rank, channel, wait_ptr, wait_val, tile, int(dst_ptr), int(dst_stride), wait_bits
             )
             sdma_ep.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
-            self.copy_engines.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
         elif has_wait:
             # Wait + tile copy
             wait_val = int(wait_value if wait_value is not None else 0)
@@ -1297,7 +1295,6 @@ class Iris:
                 src_rank, dst_rank, channel, wait_ptr, wait_val, list(tiles), dst_ptr_list, dst_stride_list, wait_bits
             )
             sdma_ep.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
-            self.copy_engines.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
         elif has_wait:
             # Wait + tiles copy
             wait_val = int(wait_value if wait_value is not None else 0)
@@ -3543,6 +3540,40 @@ def atomic_max(
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+
+@triton.jit
+def quiet(copy_engine_ctx: tl.tensor, to_rank):
+    """
+    Wait for all submitted SDMA operations to complete for the specified destination rank.
+
+    Polls the hardware read pointer until it catches up to the committed write pointer,
+    ensuring all previously submitted SDMA packets to the destination rank have been processed.
+
+    Args:
+        copy_engine_ctx: Copy engine context tensor containing queue metadata
+        to_rank: The destination rank whose SDMA queue should be drained
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(src, dst, heap_bases, copy_engine_ctx):
+        >>>     # Submit SDMA operations
+        >>>     iris.put(src, dst, 0, 1, heap_bases, copy_engine_ctx, USE_COPY_ENGINE=True)
+        >>>     # Wait for completion
+        >>>     iris.quiet(copy_engine_ctx, 1)
+    """
+    # Extract queue pointers from context
+    # Context layout: [queue_buf, rptr, wptr, doorbell, cached_wptr, committed_wptr]
+    handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+    read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
+    committed_wptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
+
+    # Read current committed write pointer (all submitted packets from all blocks)
+    target = tl.load(committed_wptr, cache_modifier=".cv", volatile=True)
+
+    # Poll until hardware read pointer catches up
+    while tl.load(read_ptr, cache_modifier=".cv", volatile=True) < target:
+        pass
 
 
 def iris(heap_size=1 << 30, allocator_type="torch"):
