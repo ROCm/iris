@@ -14,7 +14,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 0  # native pull wins at all sizes (23us vs NCCL 27-66us)
+_NCCL_SMALL_BYTES = 16 * 1024  # native loses below 16KB (32us vs NCCL 23us on MI300X)
 _TWOPHASE_BYTES = 512 * 1024
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree broadcast
 
