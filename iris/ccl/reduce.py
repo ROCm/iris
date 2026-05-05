@@ -4,9 +4,12 @@
 """
 Reduce collective operation — public API.
 
-Two paths by message size:
-- Small/medium (< _TWOPHASE_BYTES): Direct-read (root reads all peers)
-- Large (>= _TWOPHASE_BYTES): Two-phase (reduce-scatter + push to root)
+Four paths by message size:
+- Small (<512KB): NCCL (avoids Triton launch overhead)
+- Small/medium (512KB-64KB): Direct-read (root reads all peers)
+- Medium (64KB-8MB): Two-phase (reduce-scatter + push to root)
+- Large (8MB-64MB): Ring reduce (pipelined, (W-1)/W BW efficiency)
+- Very large (>=64MB): NCCL tree reduce
 """
 
 import torch.distributed as _dist
@@ -15,7 +18,8 @@ from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 512 * 1024  # <512KB: NCCL (native wins at 1MB+)
 _TWOPHASE_BYTES = 64 * 1024
-_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree reduce is more efficient
+_RING_BYTES = 8 * 1024 * 1024  # >=8MB: ring reduce (pipelined, (W-1)/W BW)
+_NCCL_LARGE_BYTES = 64 * 1024 * 1024  # >=64MB: NCCL tree reduce
 
 
 def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_op=False, config=None):
@@ -97,8 +101,29 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         )
         if not async_op:
             ctx.device_barrier(group)
+    elif msg_bytes >= _RING_BYTES and world_size > 1:
+        from iris.ccl.triton.reduce_ring import launch as launch_ring
+
+        use_inline = not async_op
+        barrier_state = None
+        if use_inline:
+            barrier_state = ctx._get_inline_barrier_state(group)
+
+        launch_ring(
+            output_tensor,
+            input_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            dst,
+            world_size,
+            rank_start,
+            rank_stride,
+            config,
+            inline_barrier=use_inline,
+            barrier_state=barrier_state,
+        )
     elif msg_bytes >= _TWOPHASE_BYTES and world_size > 1:
-        # Two-phase: reduce-scatter + push to root
         from iris.ccl.triton.reduce_twophase import launch as launch_twophase
 
         use_inline = not async_op
@@ -121,7 +146,6 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
             barrier_state=barrier_state,
         )
     else:
-        # Direct-read: root reads all peers
         from iris.ccl.triton.reduce import launch
 
         use_inline = not async_op
