@@ -14,8 +14,8 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 1 * 1024 * 1024  # <1MB: NCCL (native loses at 512KB due to launch overhead)
-_NCCL_LARGE_BYTES = 2 * 1024 * 1024  # >=2MB: NCCL ring/tree more efficient (native loses at 2-4MB)
+_NCCL_SMALL_BYTES = 0  # native kernel wins at all sizes (24us vs NCCL 33-72us)
+_NCCL_LARGE_BYTES = 2 * 1024 * 1024  # >=2MB: NCCL ring/tree more efficient
 
 
 def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None):

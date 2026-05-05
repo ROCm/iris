@@ -11,7 +11,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 8 * 1024 * 1024  # <8MB: NCCL (barrier overhead dominates below)
+_NCCL_SMALL_BYTES = 0  # native kernel wins at all sizes (24us vs NCCL 32-63us)
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree-based is more bandwidth-efficient
 
 _rs_group_cache: dict = {}

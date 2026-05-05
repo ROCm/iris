@@ -15,7 +15,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 256 * 1024  # <256KB: NCCL (native twophase wins at 256KB+)
+_NCCL_SMALL_BYTES = 0  # native kernel wins at all sizes (25us vs NCCL 27-61us)
 _TWOPHASE_BYTES = 64 * 1024
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree reduce
 

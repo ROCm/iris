@@ -13,7 +13,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 512 * 1024  # <512KB: NCCL (native kernel launch overhead dominates)
+_NCCL_SMALL_BYTES = 0  # native pull wins at all sizes (23us vs NCCL 39-68us)
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL (native scatter competitive up to 8MB)
 
 

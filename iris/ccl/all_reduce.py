@@ -14,7 +14,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_FALLBACK_BYTES = 32 * 1024  # <32KB: NCCL (kernel launch overhead dominates)
+_NCCL_FALLBACK_BYTES = 0  # native kernel wins at all sizes (26us vs NCCL 32-44us)
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree all-reduce is more efficient
 
 
