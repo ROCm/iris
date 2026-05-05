@@ -22,6 +22,7 @@ VARIANT_RING = "ring"
 VARIANT_TWO_SHOT = "two_shot"
 VARIANT_ONE_SHOT = "one_shot"
 VARIANT_SPINLOCK = "spinlock"
+VARIANT_ONE_SHOT_FUSED = "one_shot_fused"
 
 
 @dataclass
@@ -47,6 +48,8 @@ class AllReduceWorkspace:
     locks: Optional[torch.Tensor] = None
     num_rings: int = 1
     flags_per_tile: int = 0
+    start_flags: Optional[torch.Tensor] = None
+    end_flags: Optional[torch.Tensor] = None
     prepared: bool = False
 
 
@@ -69,9 +72,9 @@ def all_reduce_preamble(
         config = Config()
 
     variant = config.all_reduce_variant.lower()
-    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK]:
+    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK, VARIANT_ONE_SHOT_FUSED]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}, {VARIANT_ONE_SHOT_FUSED}"
         )
 
     M, N = input_tensor.shape[:2]
@@ -112,6 +115,13 @@ def all_reduce_preamble(
 
         output_tensor.zero_()
         ctx.device_barrier()
+
+    elif variant == VARIANT_ONE_SHOT_FUSED:
+        num_ranks = ctx.get_num_ranks()
+        if workspace.start_flags is None or workspace.start_flags.numel() != num_ranks:
+            workspace.start_flags = ctx.zeros((num_ranks,), dtype=torch.int32)
+        if workspace.end_flags is None or workspace.end_flags.numel() != num_ranks:
+            workspace.end_flags = ctx.zeros((num_ranks,), dtype=torch.int32)
 
     elif variant == VARIANT_TWO_SHOT:
         pass
@@ -476,6 +486,132 @@ def persistent_all_reduce_one_shot(
             rank_stride,
             COMM_SMS,
         )
+
+
+@triton.jit()
+def _fused_barrier(
+    pid,
+    flags_ptr,
+    heap_bases: tl.tensor,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+):
+    """
+    Monotonic cross-rank barrier using per-rank flag counters on symmetric heap.
+    All COMM_SMS CTAs participate. Target = ceil(old+1, COMM_SMS) ensures every
+    CTA on every rank has passed before any CTA proceeds. Never zeroed — safe
+    for CUDA graph capture.
+    """
+    tl.debug_barrier()
+
+    own_flag_ptr = flags_ptr + iris_rank
+    own_translated = _translate_ptr(own_flag_ptr, iris_rank, iris_rank, heap_bases)
+    old = tl.atomic_add(own_translated, 1, sem="release", scope="sys")
+    target = ((old // COMM_SMS) + 1) * COMM_SMS
+
+    for i in range(world_size):
+        remote_rank = rank_start + i * rank_stride
+        if remote_rank != iris_rank:
+            remote_flag_ptr = flags_ptr + remote_rank
+            remote_translated = _translate_ptr(remote_flag_ptr, iris_rank, remote_rank, heap_bases)
+            while tl.atomic_cas(remote_translated, target, target, sem="acquire", scope="sys") < target:
+                pass
+
+
+@triton.jit()
+def persistent_all_reduce_one_shot_fused(
+    input_ptr,
+    output_ptr,
+    M,
+    N,
+    stride_in_m,
+    stride_in_n,
+    stride_out_m,
+    stride_out_n,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    start_flags_ptr,
+    end_flags_ptr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+):
+    """
+    One-shot all-reduce with fused start+end barriers.
+
+    START BARRIER: ensures all ranks' inputs are ready before reading.
+    REDUCE: each CTA gathers all partials via iris.load, reduces in fp32.
+    END BARRIER: ensures all local outputs are written before downstream ops.
+
+    Monotonic flag counters — never zeroed, CUDA graph safe.
+    """
+    pid = tl.program_id(0)
+
+    if NUM_XCDS != 1:
+        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
+
+    # --- START BARRIER ---
+    _fused_barrier(pid, start_flags_ptr, heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS)
+
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+
+    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
+
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+
+        input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+
+        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+
+        for i in range(world_size):
+            remote_rank = rank_start + i * rank_stride
+            partial = iris.load(
+                input_ptr + input_offset,
+                iris_rank,
+                remote_rank,
+                heap_bases,
+                mask=mask,
+            )
+            acc += partial.to(acc_dtype)
+
+        tl.store(
+            output_ptr + output_offset,
+            acc.to(output_ptr.type.element_ty),
+            mask=mask,
+        )
+
+    # --- END BARRIER ---
+    _fused_barrier(pid, end_flags_ptr, heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS)
 
 
 @triton.jit()
@@ -846,6 +982,7 @@ def launch(
         or (variant == VARIANT_RING and workspace.num_rings != config.all_reduce_num_rings)
         or (variant == VARIANT_RING and workspace.flags_per_tile != 1)
         or (variant == VARIANT_SPINLOCK and (workspace.locks is None))
+        or (variant == VARIANT_ONE_SHOT_FUSED and (workspace.start_flags is None or workspace.end_flags is None))
     )
 
     if needs_prepare:
@@ -1072,6 +1209,42 @@ def launch(
             config.num_xcds,
             config.chunk_size,
             inline_barrier,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
+        )
+
+    elif variant == VARIANT_ONE_SHOT_FUSED:
+        if workspace is None or workspace.start_flags is None or workspace.end_flags is None:
+            raise RuntimeError(
+                "one_shot_fused variant requires workspace with start_flags and end_flags. "
+                "Call all_reduce_preamble first."
+            )
+        iris_launch(
+            persistent_all_reduce_one_shot_fused,
+            (config.comm_sms,),
+            input_tensor,
+            output_tensor,
+            M,
+            N,
+            stride_in_m,
+            stride_in_n,
+            stride_out_m,
+            stride_out_n,
+            heap_bases,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            workspace.start_flags,
+            workspace.end_flags,
+            config.block_size_m,
+            config.block_size_n,
+            config.swizzle_size,
+            config.comm_sms,
+            config.num_xcds,
+            config.chunk_size,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
