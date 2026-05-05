@@ -163,9 +163,7 @@ def persistent_reduce_ring(
 
                         if is_full:
                             local = tl.load(output_ptr + out_offset).to(acc_dtype)
-                            remote = iris.load(
-                                output_ptr + out_offset, iris_rank, succ_iris, heap_bases
-                            ).to(acc_dtype)
+                            remote = iris.load(output_ptr + out_offset, iris_rank, succ_iris, heap_bases).to(acc_dtype)
                             acc = local + remote
                             tl.store(
                                 output_ptr + out_offset,
@@ -175,9 +173,9 @@ def persistent_reduce_ring(
                         else:
                             mask = (rm[:, None] < M) & (rn[None, :] < N)
                             local = tl.load(output_ptr + out_offset, mask=mask, other=0.0).to(acc_dtype)
-                            remote = iris.load(
-                                output_ptr + out_offset, iris_rank, succ_iris, heap_bases, mask=mask
-                            ).to(acc_dtype)
+                            remote = iris.load(output_ptr + out_offset, iris_rank, succ_iris, heap_bases, mask=mask).to(
+                                acc_dtype
+                            )
                             acc = local + remote
                             tl.store(
                                 output_ptr + out_offset,
