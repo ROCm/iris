@@ -1281,9 +1281,14 @@ def launch(
                 "one_shot_fused variant requires workspace with start_flags and end_flags. "
                 "Call all_reduce_preamble first."
             )
+        num_pid_m_f = (M + config.block_size_m - 1) // config.block_size_m
+        num_pid_n_f = (N + config.block_size_n - 1) // config.block_size_n
+        total_tiles_f = num_pid_m_f * num_pid_n_f
+        fused_sms = min(total_tiles_f, config.comm_sms)
+        fused_sms = max(fused_sms, 1)
         iris_launch(
             persistent_all_reduce_one_shot_fused,
-            (config.comm_sms,),
+            (fused_sms,),
             input_tensor,
             output_tensor,
             M,
@@ -1307,7 +1312,7 @@ def launch(
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
-            config.comm_sms,
+            fused_sms,
             config.num_xcds,
             config.chunk_size,
             algorithm="all_reduce",
