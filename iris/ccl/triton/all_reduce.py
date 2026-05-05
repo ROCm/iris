@@ -15,6 +15,7 @@ import torch
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from ..utils import chiplet_transform_chunked, inline_device_barrier
+from iris.host.distributed.helpers import _translate_ptr
 
 # Variant types
 VARIANT_ATOMIC = "atomic"
@@ -50,6 +51,10 @@ class AllReduceWorkspace:
     flags_per_tile: int = 0
     start_flags: Optional[torch.Tensor] = None
     end_flags: Optional[torch.Tensor] = None
+    start_wg_done: Optional[torch.Tensor] = None
+    start_sense: Optional[torch.Tensor] = None
+    end_wg_done: Optional[torch.Tensor] = None
+    end_sense: Optional[torch.Tensor] = None
     prepared: bool = False
 
 
@@ -122,6 +127,14 @@ def all_reduce_preamble(
             workspace.start_flags = ctx.zeros((num_ranks,), dtype=torch.int32)
         if workspace.end_flags is None or workspace.end_flags.numel() != num_ranks:
             workspace.end_flags = ctx.zeros((num_ranks,), dtype=torch.int32)
+        if workspace.start_wg_done is None:
+            workspace.start_wg_done = torch.zeros((1,), dtype=torch.int32, device="cuda")
+        if workspace.start_sense is None:
+            workspace.start_sense = torch.zeros((1,), dtype=torch.int32, device="cuda")
+        if workspace.end_wg_done is None:
+            workspace.end_wg_done = torch.zeros((1,), dtype=torch.int32, device="cuda")
+        if workspace.end_sense is None:
+            workspace.end_sense = torch.zeros((1,), dtype=torch.int32, device="cuda")
 
     elif variant == VARIANT_TWO_SHOT:
         pass
@@ -492,6 +505,8 @@ def persistent_all_reduce_one_shot(
 def _fused_barrier(
     pid,
     flags_ptr,
+    wg_done_ptr,
+    sense_ptr,
     heap_bases: tl.tensor,
     iris_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -500,25 +515,38 @@ def _fused_barrier(
     COMM_SMS: tl.constexpr,
 ):
     """
-    Monotonic cross-rank barrier using per-rank flag counters on symmetric heap.
-    All COMM_SMS CTAs participate. Target = ceil(old+1, COMM_SMS) ensures every
-    CTA on every rank has passed before any CTA proceeds. Never zeroed — safe
-    for CUDA graph capture.
+    PID-0-only cross-rank barrier with sense reversal.
+    Same pattern as inline_device_barrier but using separate flag/sense arrays.
     """
     tl.debug_barrier()
 
-    own_flag_ptr = flags_ptr + iris_rank
-    own_translated = _translate_ptr(own_flag_ptr, iris_rank, iris_rank, heap_bases)
-    old = tl.atomic_add(own_translated, 1, sem="release", scope="sys")
-    target = ((old // COMM_SMS) + 1) * COMM_SMS
+    sense = tl.load(sense_ptr)
+    next_sense = 1 - sense
 
-    for i in range(world_size):
-        remote_rank = rank_start + i * rank_stride
-        if remote_rank != iris_rank:
-            remote_flag_ptr = flags_ptr + remote_rank
-            remote_translated = _translate_ptr(remote_flag_ptr, iris_rank, remote_rank, heap_bases)
-            while tl.atomic_cas(remote_translated, target, target, sem="acquire", scope="sys") < target:
-                pass
+    if pid == 0:
+        tl.atomic_add(wg_done_ptr, 1, sem="acquire", scope="gpu")
+        while tl.atomic_cas(wg_done_ptr, COMM_SMS, COMM_SMS, sem="acquire", scope="gpu") < COMM_SMS:
+            pass
+        tl.atomic_xchg(wg_done_ptr, 0, sem="release", scope="gpu")
+
+        own_flag_ptr = flags_ptr + iris_rank
+        own_translated = _translate_ptr(own_flag_ptr, iris_rank, iris_rank, heap_bases)
+        old = tl.atomic_add(own_translated, 1, sem="release", scope="sys")
+        target = old + 1
+
+        for i in range(world_size):
+            remote_rank = rank_start + i * rank_stride
+            if remote_rank != iris_rank:
+                remote_flag_ptr = flags_ptr + remote_rank
+                remote_translated = _translate_ptr(remote_flag_ptr, iris_rank, remote_rank, heap_bases)
+                while tl.atomic_cas(remote_translated, target, target, sem="acquire", scope="sys") < target:
+                    pass
+
+        tl.atomic_xchg(sense_ptr, next_sense, sem="release", scope="gpu")
+    else:
+        tl.atomic_add(wg_done_ptr, 1, sem="release", scope="gpu")
+        while tl.atomic_cas(sense_ptr, next_sense, next_sense, sem="acquire", scope="gpu") != next_sense:
+            pass
 
 
 @triton.jit()
@@ -539,6 +567,10 @@ def persistent_all_reduce_one_shot_fused(
     rank_stride: tl.constexpr,
     start_flags_ptr,
     end_flags_ptr,
+    start_wg_done_ptr,
+    start_sense_ptr,
+    end_wg_done_ptr,
+    end_sense_ptr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -553,7 +585,7 @@ def persistent_all_reduce_one_shot_fused(
     REDUCE: each CTA gathers all partials via iris.load, reduces in fp32.
     END BARRIER: ensures all local outputs are written before downstream ops.
 
-    Monotonic flag counters — never zeroed, CUDA graph safe.
+    Monotonic cross-rank flags, sense-reversal for intra-GPU sync.
     """
     pid = tl.program_id(0)
 
@@ -561,7 +593,7 @@ def persistent_all_reduce_one_shot_fused(
         pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
 
     # --- START BARRIER ---
-    _fused_barrier(pid, start_flags_ptr, heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS)
+    _fused_barrier(pid, start_flags_ptr, start_wg_done_ptr, start_sense_ptr, heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS)
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -611,7 +643,7 @@ def persistent_all_reduce_one_shot_fused(
         )
 
     # --- END BARRIER ---
-    _fused_barrier(pid, end_flags_ptr, heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS)
+    _fused_barrier(pid, end_flags_ptr, end_wg_done_ptr, end_sense_ptr, heap_bases, iris_rank, world_size, rank_start, rank_stride, COMM_SMS)
 
 
 @triton.jit()
@@ -1239,6 +1271,10 @@ def launch(
             rank_stride,
             workspace.start_flags,
             workspace.end_flags,
+            workspace.start_wg_done,
+            workspace.start_sense,
+            workspace.end_wg_done,
+            workspace.end_sense,
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
