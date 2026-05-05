@@ -301,13 +301,23 @@ def persistent_all_gather_pull(
     """
     Pull-based all-gather: each rank reads all remote input shards via iris.load
     and assembles the full output locally.
-
-    Eliminates XGMI write contention — each rank reads from W peers and writes
-    only to its own output buffer. Reads are distributed across XGMI links
-    (each link serves 1 reader), unlike push-based where all W ranks write to
-    every peer simultaneously (W-1 concurrent writers per GPU).
     """
     pid = tl.program_id(0)
+
+    # Start barrier: ensure all ranks' inputs are visible before reading
+    if INLINE_BARRIER:
+        inline_device_barrier(
+            pid,
+            barrier_flags_ptr,
+            wg_done_ptr,
+            barrier_sense_ptr,
+            heap_bases,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
+            COMM_SMS,
+        )
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
