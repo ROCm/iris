@@ -4,12 +4,11 @@
 """
 Broadcast collective operation — public API.
 
-Four paths by message size:
+Three paths by message size:
 - Small (<256KB): NCCL (avoids Triton launch overhead)
 - Small/medium (256KB-512KB): Pull-based kernel (non-root reads from root)
 - Medium (512KB-8MB): Two-phase kernel (scatter + all-gather)
-- Large (8MB-64MB): Ring broadcast (pipelined, (W-1)/W BW efficiency)
-- Very large (>=64MB): NCCL tree broadcast
+- Large (>=8MB): NCCL tree broadcast
 """
 
 import torch.distributed as _dist
@@ -18,8 +17,7 @@ from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 256 * 1024  # <256KB: NCCL avoids Triton launch + pull overhead
 _TWOPHASE_BYTES = 512 * 1024
-_RING_BYTES = 8 * 1024 * 1024  # >=8MB: ring broadcast (pipelined, (W-1)/W BW)
-_NCCL_LARGE_BYTES = 64 * 1024 * 1024  # >=64MB: NCCL tree broadcast
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree broadcast
 
 
 def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
@@ -72,23 +70,7 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
     if use_inline:
         barrier_state = ctx._get_inline_barrier_state(group)
 
-    if msg_bytes >= _RING_BYTES and world_size > 1:
-        from iris.ccl.triton.broadcast_ring import launch as launch_ring
-
-        launch_ring(
-            tensor,
-            ctx,
-            rank_in_group,
-            rank_global,
-            world_size,
-            rank_start,
-            rank_stride,
-            src,
-            config,
-            inline_barrier=use_inline,
-            barrier_state=barrier_state,
-        )
-    elif msg_bytes >= _TWOPHASE_BYTES and world_size > 1:
+    if msg_bytes >= _TWOPHASE_BYTES and world_size > 1:
         from iris.ccl.triton.broadcast_twophase import launch as launch_twophase
 
         launch_twophase(
