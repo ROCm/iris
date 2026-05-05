@@ -14,7 +14,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_FALLBACK_BYTES = 4 * 1024 * 1024  # <4MB: NCCL (native two_shot wins at 4MB+)
+_NCCL_FALLBACK_BYTES = 32 * 1024  # <32KB: NCCL (kernel launch overhead dominates)
 _NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree all-reduce is more efficient
 
 
@@ -59,7 +59,10 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
             "Support for other operations will be added in a future release."
         )
     if config is None:
-        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+        if msg_bytes <= 2 * 1024 * 1024:
+            config = Config(block_size_m=32, block_size_n=64, comm_sms=64, all_reduce_variant="one_shot_fused")
+        else:
+            config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
     if config.use_gluon:
         raise ValueError(
             "all_reduce does not support use_gluon=True. "
