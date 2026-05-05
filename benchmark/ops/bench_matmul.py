@@ -7,7 +7,6 @@
 import torch
 import iris.bench as bench
 
-from iris.ops import FusedConfig
 from iris.ops.matmul import matmul as _matmul
 from iris.ops.matmul import matmul_preamble as _matmul_preamble
 
@@ -29,14 +28,17 @@ def _register_local_matmul(state, ctx, *, m_key: str, pytorch: bool) -> None:
         C_torch = torch.empty((M, N), device="cuda", dtype=dtype)
         state.exec(lambda: torch.mm(A_data, B_data, out=C_torch))
     else:
-        A = ctx.zeros((M, K), dtype=dtype)
-        A.copy_(A_data)
+        # Use iris heap allocation (same as tritonblas_rcclbaseline)
+        torch.manual_seed(123 + rank)
+        A = ctx.randn((M, K), dtype=dtype)
+        torch.manual_seed(456)
+        B = ctx.randn((K, N), dtype=dtype)
         C = ctx.zeros((M, N), dtype=dtype)
 
-        workspace = _matmul_preamble(ctx, A, B_data, FusedConfig())
+        workspace = _matmul_preamble(ctx, A, B)
+        # Using async_op=True to match torch
         state.exec(
-            lambda: _matmul(ctx, C, A, B_data, workspace=workspace),
-            preamble_fn=lambda: C.zero_(),
+            lambda: _matmul(ctx, C, A, B, workspace=workspace, async_op=True),
         )
 
 

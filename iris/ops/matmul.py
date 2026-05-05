@@ -12,40 +12,59 @@ from typing import Optional
 import torch
 
 # Use tritonBLAS for optimized GEMM
-from tritonblas.matmul import persistent_matmul_lt, _make_matmul_selector
-from tritonblas.config import matmul_preamble as tritonblas_preamble
-
-from .config import FusedConfig
+# Import tritonBLAS
+from tritonblas.matmul import persistent_matmul_lt
+from tritonblas.matmul import _make_matmul_selector
 from .workspace import FusedWorkspace
-
-
-# Removed custom kernel - now using tritonBLAS's optimized persistent_matmul
 
 
 def matmul_preamble(
     shmem,
     A: torch.Tensor,
     B: torch.Tensor,
-    config: Optional[FusedConfig] = None,
+    selector=None,
 ) -> FusedWorkspace:
-    """Allocate workspace for local matmul (none needed)."""
-    if config is None:
-        config = FusedConfig()
+    """Allocate workspace for local matmul.
 
+    Args:
+        shmem: Iris context
+        A: Input matrix A of shape (M, K)
+        B: Input matrix B of shape (K, N)
+        selector: Optional tritonBLAS selector (if None, creates one)
+
+    Returns:
+        FusedWorkspace with selector stored
+    """
     M, K = A.shape
     K2, N = B.shape
     world_size = shmem.get_num_ranks()
 
     assert K == K2, f"Inner dimensions must match: A has K={K}, B has K={K2}"
 
-    # No workspace needed for local matmul
-    return FusedWorkspace(
+    # Create selector if not provided
+    if selector is None:
+        selector = _make_matmul_selector(
+            M,
+            N,
+            K,
+            A.dtype,
+            B.dtype,
+            A.dtype,  # output dtype
+            A.device,
+            streamk=False,  # Use persistent kernel
+        )
+
+    # Store selector in workspace
+    workspace = FusedWorkspace(
         operation="matmul",
         shape=(M, N, K),
         dtype=A.dtype,
         world_size=world_size,
         prepared=True,
     )
+    workspace.selector = selector
+
+    return workspace
 
 
 def matmul(
@@ -55,10 +74,7 @@ def matmul(
     B: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
     async_op: bool = False,
-    config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
-    num_warps: Optional[int] = None,
-    num_stages: Optional[int] = None,
 ) -> FusedWorkspace:
     """
     Local matrix multiplication using tritonBLAS.
@@ -72,23 +88,15 @@ def matmul(
         output_tensor: Output tensor C of shape (M, N)
         A: Input matrix A of shape (M, K)
         B: Input matrix B of shape (K, N)
-        bias: Optional bias vector (M,) - broadcast across N dimension
+        bias: Optional bias vector (N,) - broadcast across M dimension
         async_op: If False, performs barrier at end
-        config: Optional FusedConfig for tuning
-        workspace: Optional pre-allocated workspace
-        num_warps: Optional number of warps (ignored - tritonBLAS chooses)
-        num_stages: Optional pipeline stages (ignored - tritonBLAS chooses)
 
     Returns:
         FusedWorkspace object
     """
-    if config is None:
-        config = FusedConfig()
-
     M_local, K = A.shape
     K2, N = B.shape
     world_size = shmem.get_num_ranks()
-    rank = shmem.get_rank()
 
     assert K == K2, f"Inner dimensions must match: A has K={K}, B has K={K2}"
 
@@ -97,28 +105,9 @@ def matmul(
 
     # Allocate workspace if not provided
     if workspace is None:
-        workspace = matmul_preamble(shmem, A, B, config)
+        workspace = matmul_preamble(shmem, A, B)
 
-    # Create tritonBLAS selector to choose optimal block sizes
-    selector = _make_matmul_selector(
-        M,
-        N,
-        K,
-        A.dtype,
-        B.dtype,
-        output_tensor.dtype,
-        A.device,
-        streamk=False,  # Use persistent kernel
-    )
-
-    # Use tritonBLAS with work-stealing for better performance
-    use_work_stealing = config.work_stealing if hasattr(config, "work_stealing") else False
-    tritonblas_config = None
-
-    if use_work_stealing:
-        # Allocate tritonBLAS work-stealing buffers
-        tritonblas_config = tritonblas_preamble(selector)
-        tritonblas_config.reset(streamk=False, work_stealing=True)
+    selector = workspace.selector
 
     # Call tritonBLAS persistent matmul
     # Note: tritonBLAS expects bias as (N,) not (M,), so we need to handle this
@@ -140,9 +129,9 @@ def matmul(
         B,
         output_tensor,
         selector,
-        config=tritonblas_config,
-        bias=bias,  # Will be None for now due to dimension mismatch
-        work_stealing=use_work_stealing,
+        config=None,
+        bias=bias,
+        work_stealing=False,
     )
 
     if not async_op:

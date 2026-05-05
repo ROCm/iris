@@ -9,7 +9,6 @@ import os
 import torch
 import iris.bench as bench
 
-from iris.ops import FusedConfig
 from iris.ops.all_gather_matmul_copy_engine import (
     all_gather_matmul_copy_engine as _copy_engine,
     all_gather_matmul_copy_engine_preamble,
@@ -17,8 +16,8 @@ from iris.ops.all_gather_matmul_copy_engine import (
 from tritonblas.matmul import _make_matmul_selector
 
 
-def _selector_and_config(M: int, N: int, K: int, dtype: torch.dtype, device: torch.device) -> tuple:
-    selector = _make_matmul_selector(
+def _make_selector(M: int, N: int, K: int, dtype: torch.dtype, device: torch.device):
+    return _make_matmul_selector(
         M,
         N,
         K,
@@ -28,14 +27,6 @@ def _selector_and_config(M: int, N: int, K: int, dtype: torch.dtype, device: tor
         device,
         streamk=False,
     )
-    config = FusedConfig(
-        block_size_m=selector.block_m,
-        block_size_n=selector.block_n,
-        block_size_k=selector.block_k,
-        group_size_m=selector.group_m,
-        num_xcds=max(1, int(getattr(selector, "num_sms", 1))),
-    )
-    return selector, config
 
 
 def _register_copy_engine(state, ctx, *, device_initiated: bool, host_transfer_backend: str = "anvil") -> None:
@@ -48,17 +39,15 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool, host_transfer_b
 
     K_local = K // world_size
     device = torch.device(f"cuda:{torch.cuda.current_device()}")
-    selector, config = _selector_and_config(M, N, K, dtype, device)
+    selector = _make_selector(M, N, K, dtype, device)
 
-    if M % config.block_size_m != 0:
-        state.skip(f"M={M} must be divisible by block_size_m={config.block_size_m}")
-    if K % config.block_size_k != 0:
-        state.skip(f"K={K} must be divisible by block_size_k={config.block_size_k}")
-    if K_local % config.block_size_k != 0:
-        state.skip(f"K_local={K_local} must be divisible by block_size_k={config.block_size_k}")
+    if M % selector.block_m != 0:
+        state.skip(f"M={M} must be divisible by block_size_m={selector.block_m}")
+    if K % selector.block_k != 0:
+        state.skip(f"K={K} must be divisible by block_size_k={selector.block_k}")
+    if K_local % selector.block_k != 0:
+        state.skip(f"K_local={K_local} must be divisible by block_size_k={selector.block_k}")
 
-    m_tiles_per_batch = config.group_size_m
-    k_per_flag = 4
     host_transfer_backend = os.environ.get("IRIS_BENCH_HOST_TRANSFER_BACKEND", host_transfer_backend)
 
     A_sharded = ctx.zeros((M, K_local), dtype=dtype)
@@ -73,11 +62,9 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool, host_transfer_b
         ctx,
         A_sharded,
         B,
-        config,
-        k_per_flag=k_per_flag,
-        m_tiles_per_batch=m_tiles_per_batch,
+        selector=selector,
     )
-    workspace.selector = selector
+    m_tiles_per_batch = workspace.m_tiles_per_batch
 
     flag_iteration = [0]
 
@@ -87,12 +74,9 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool, host_transfer_b
             C,
             A_sharded,
             B,
-            config=config,
             async_op=False,
             workspace=workspace,
             flag_iteration=flag_iteration[0],
-            k_per_flag=k_per_flag,
-            m_tiles_per_batch=m_tiles_per_batch,
             device_initiated=device_initiated,
             host_transfer_backend=host_transfer_backend,
         )
@@ -100,7 +84,7 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool, host_transfer_b
 
     state.set_flops(2 * M * N * K)
     state.set_bytes((world_size - 1) * M * K_local * A_sharded.element_size())
-    state.add_counter("group_size_m", float(config.group_size_m))
+    state.add_counter("group_size_m", float(selector.group_m))
     state.add_counter("m_tiles_per_batch", float(m_tiles_per_batch))
     state.add_counter("device_initiated", 1.0 if device_initiated else 0.0)
     state.add_counter("host_transfer_backend_hip_memcpy", 1.0 if host_transfer_backend == "hip_memcpy" else 0.0)

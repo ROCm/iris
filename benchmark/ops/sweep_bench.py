@@ -30,25 +30,34 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # Dimension configurations to test.
 # Each entry contains M_local (per-rank M), N, K, and an optional label.
 DIMENSION_CONFIGS = [
-    {"m_local": 2048, "n": 2048, "k": 16384, "label": "M2048_N2048_K16384"},
-    {"m_local": 2048, "n": 16384, "k": 2048, "label": "M2048_N16384_K2048"},
-    {"m_local": 2048, "n": 16384, "k": 16384, "label": "M2048_N16384_K16384"},
-    {"m_local": 2048, "n": 16384, "k": 65536, "label": "M2048_N16384_K65536"},
-    {"m_local": 2048, "n": 131072, "k": 16384, "label": "M2048_N131072_K16384"},
-    {"m_local": 16384, "n": 2048, "k": 2048, "label": "M16384_N2048_K2048"},
-    {"m_local": 16384, "n": 2048, "k": 16384, "label": "M16384_N2048_K16384"},
-    {"m_local": 16384, "n": 2048, "k": 131072, "label": "M16384_N2048_K131072"},
-    {"m_local": 16384, "n": 16384, "k": 2048, "label": "M16384_N16384_K2048"},
-    {"m_local": 131072, "n": 2048, "k": 16384, "label": "M131072_N2048_K16384"},
+    # {"m_local": 2048, "n": 2048, "k": 16384, "label": "M2048_N2048_K16384"},
+    # {"m_local": 2048, "n": 16384, "k": 2048, "label": "M2048_N16384_K2048"},
+    # {"m_local": 2048, "n": 16384, "k": 16384, "label": "M2048_N16384_K16384"},
+    # {"m_local": 2048, "n": 16384, "k": 65536, "label": "M2048_N16384_K65536"},
+    # {"m_local": 2048, "n": 131072, "k": 16384, "label": "M2048_N131072_K16384"},
+    # {"m_local": 16384, "n": 2048, "k": 2048, "label": "M16384_N2048_K2048"},
+    # {"m_local": 16384, "n": 2048, "k": 16384, "label": "M16384_N2048_K16384"},
+    # {"m_local": 16384, "n": 2048, "k": 131072, "label": "M16384_N2048_K131072"},
+    # {"m_local": 16384, "n": 16384, "k": 2048, "label": "M16384_N16384_K2048"},
+    # {"m_local": 131072, "n": 2048, "k": 16384, "label": "M131072_N2048_K16384"},
+    # From Paper: Design Space Exploration of DMA based finer-grain compute communication overlap
+    {"m_local": 16384, "n": 16384, "k": 131072, "label": "g1"},
     {"m_local": 131072, "n": 16384, "k": 16384, "label": "g2"},
+    {"m_local": 53248, "n": 16384, "k": 131072, "label": "g3"},
+    {"m_local": 16384, "n": 53248, "k": 16384, "label": "g4"},
+    {"m_local": 8192, "n": 8192, "k": 262144, "label": "g5"},
+    {"m_local": 262144, "n": 8192, "k": 8192, "label": "g6"},
+    {"m_local": 28672, "n": 8192, "k": 262144, "label": "g7"},
+    {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"},
+    {"m_local": 196608, "n": 18432, "k": 16384, "label": "g9"},
+    {"m_local": 196608, "n": 106496, "k": 16384, "label": "g10"},
+    {"m_local": 1048576, "n": 10240, "k": 8192, "label": "g11"},
+    {"m_local": 1048576, "n": 57344, "k": 8192, "label": "g12"},
+    {"m_local": 1607680, "n": 57344, "k": 8192, "label": "g13"},
     {"m_local": 147456, "n": 28672, "k": 4096, "label": "g14"},
     {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"}, # run out of heap memory
     {"m_local": 229376, "n": 28672, "k": 4096, "label": "g16"},
-    {"m_local": 8192, "n": 8192, "k": 262144, "label": "g5"},
-    {"m_local": 262144, "n": 8192, "k": 8192, "label": "g6"},
-    {"m_local": 16384, "n": 16384, "k": 131072, "label": "g1"},
-    {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"}, # run out of heap memory
-    {"m_local": 196608, "n": 18432, "k": 16384, "label": "g9"},
+
     {"m_local": 4096, "n": 14336, "k": 4096, "label": "mixtral_gate"},
     {"m_local": 4096, "n": 11008, "k": 4096, "label": "llama7b_gate"},
     {"m_local": 4096, "n": 4096, "k": 4096, "label": "pow2_4k"},
@@ -147,6 +156,8 @@ BENCHMARK_CONFIGS = {
 
 TIMEOUT_SECONDS = 150
 NUM_GPUS = 8
+DEFAULT_HEAP_SIZE = 1 << 34  # 16 GB
+HEAP_SIZE_SAFETY_FACTOR = 1.25  # Multiply calculated size by this factor for safety
 
 
 def log(msg: str):
@@ -162,6 +173,83 @@ def _dimension_label(config: Dict[str, Any]) -> str:
     return str(config.get("label") or f"M{config['m_local']}_N{config['n']}_K{config['k']}")
 
 
+def _calculate_heap_size(m: int, n: int, k: int, operation: str, num_gpus: int, safety_factor: float = HEAP_SIZE_SAFETY_FACTOR) -> int:
+    """Calculate required heap size based on matrix dimensions and operation type.
+
+    The heap is used for symmetric memory buffers across GPUs for all allocations via ctx.zeros(), ctx.randn(), etc.
+
+    For all_gather_matmul:
+        - Input A_sharded per rank: (M × K_local) where K_local = K / num_gpus
+        - Gathered A_full: (M × K) - allocated in heap
+        - Matrix B: (K × N) - allocated in heap
+        - Output C: (M × N) - allocated in heap
+        - Communication workspace and intermediate buffers
+
+    For matmul_all_gather:
+        - Input A: (M_local × K) where M_local is per-rank
+        - Matrix B: (K × N) - allocated in heap
+        - Output C_local: (M_local × N) per rank - allocated in heap
+        - Gathered C_full: (M_total × N) where M_total = M_local * num_gpus - allocated in heap
+        - Communication workspace
+
+    Returns:
+        Heap size in bytes
+    """
+    element_size = 2  # fp16 = 2 bytes
+
+    if operation == "all_gather_matmul":
+        # All allocations from bench_all_gather_matmul.py:
+        # - A_sharded: M × K_local (per rank, before gather)
+        # - A_gathered_parts: list of (M × K_local) × num_gpus
+        # - A_gathered: M × K (full gathered matrix)
+        # - B: K × N
+        # - C: M × N (output)
+        k_local = k // num_gpus
+
+        a_sharded_size = m * k_local * element_size
+        a_gathered_parts_size = m * k_local * num_gpus * element_size  # List of tensors
+        a_gathered_size = m * k * element_size
+        b_size = k * n * element_size
+        c_size = m * n * element_size
+
+        # For HBM buffer variant, there's additional workspace
+        # Use conservative estimate: sum of all possible allocations
+        total_size = a_sharded_size + a_gathered_parts_size + a_gathered_size + b_size + c_size
+
+    elif operation == "matmul_all_gather":
+        # All allocations from bench_matmul_all_gather.py:
+        # NOTE: m represents TOTAL M across all GPUs, so M_local = m / num_gpus
+        # - A: M_local × K (per rank)
+        # - B: K × N
+        # - C_local: M_local × N (for pytorch/tritonblas variants)
+        # - C: M × N (FULL output on EACH GPU where M = total across all ranks)
+        m_local = m // num_gpus
+
+        a_size = m_local * k * element_size
+        b_size = k * n * element_size
+        c_local_size = m_local * n * element_size  # For pytorch/tritonblas variants
+        c_size = m * n * element_size  # Full gathered output (M total)
+
+        # Conservative estimate: assume both C_local and C are allocated
+        total_size = a_size + b_size + c_local_size + c_size
+
+    else:
+        total_size = DEFAULT_HEAP_SIZE
+
+    # Apply safety factor and ensure minimum size
+    required_size = int(total_size * safety_factor)
+    heap_size = max(DEFAULT_HEAP_SIZE, required_size)
+
+    # Warn if heap size is unreasonably large (likely won't fit on GPU)
+    # MI300X has ~192 GB per GPU
+    max_reasonable_heap = 180 << 30  # 180 GB to leave room for PyTorch overhead
+    if heap_size > max_reasonable_heap:
+        log(f"  WARNING: Calculated heap size ({heap_size / (1<<30):.2f} GB) exceeds typical GPU memory (~192 GB)")
+        log("           This configuration may fail with out-of-memory errors")
+
+    return heap_size
+
+
 def _run_bench_benchmark(
     benchmark_name: str,
     script: str,
@@ -170,6 +258,8 @@ def _run_bench_benchmark(
     k: int,
     benchmark_filter: str,
     axes: Dict[str, str],
+    heap_size: int,
+    operation: str,
 ) -> Optional[Dict[str, Any]]:
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -179,6 +269,13 @@ def _run_bench_benchmark(
     ) as tmp_file:
         benchmark_out = tmp_file.name
 
+    # For matmul_all_gather, m represents total M, but the benchmark expects M_local
+    # So we divide by NUM_GPUS to get the per-rank dimension
+    if operation == "matmul_all_gather" and axes['m'] == "M_local":
+        m_value = m // NUM_GPUS
+    else:
+        m_value = m
+
     cmd = [
         sys.executable,
         script,
@@ -186,13 +283,15 @@ def _run_bench_benchmark(
         f"--benchmark_out={benchmark_out}",
         f"--benchmark_filter={benchmark_filter}",
         f"--axis_num_ranks={NUM_GPUS}",
-        f"--axis_{axes['m']}={m}",
+        f"--axis_{axes['m']}={m_value}",
         f"--axis_{axes['n']}={n}",
         f"--axis_{axes['k']}={k}",
         "--axis_dtype=fp16",
+        f"--heap_size={heap_size}",
     ]
 
     log(f"  Running {benchmark_name}: M={m}, N={n}, K={k}")
+    log(f"    Heap size: {heap_size / (1 << 30):.2f} GB")
     log(f"    Command: {' '.join(cmd)}")
 
     process = None
@@ -211,8 +310,9 @@ def _run_bench_benchmark(
         if result.returncode != 0:
             log("    ✗ Failed: Non-zero return code")
             log(f"    Return code: {result.returncode}")
-            error_log_file = PROJECT_ROOT / f"benchmark_error_{benchmark_name}_M{m}_N{n}_K{k}.log"
+            error_log_file = PROJECT_ROOT / f"benchmark_error_{operation}_{benchmark_name}_M{m}_N{n}_K{k}.log"
             with open(error_log_file, "w") as f:
+                f.write(f"Operation: {operation}\n")
                 f.write(f"Benchmark: {benchmark_name}\n")
                 f.write(f"Dimensions: M={m}, N={n}, K={k}\n")
                 f.write(f"Command: {' '.join(cmd)}\n")
@@ -278,8 +378,9 @@ def _run_bench_benchmark(
                     process.wait()
             except ProcessLookupError:
                 pass
-        error_log_file = PROJECT_ROOT / f"benchmark_timeout_{benchmark_name}_M{m}_N{n}_K{k}.log"
+        error_log_file = PROJECT_ROOT / f"benchmark_timeout_{operation}_{benchmark_name}_M{m}_N{n}_K{k}.log"
         with open(error_log_file, "w") as f:
+            f.write(f"Operation: {operation}\n")
             f.write(f"Benchmark: {benchmark_name}\n")
             f.write(f"Dimensions: M={m}, N={n}, K={k}\n")
             f.write(f"Command: {' '.join(cmd)}\n")
@@ -313,6 +414,8 @@ def run_benchmark(
     m: int,
     n: int,
     k: int,
+    heap_size: int,
+    operation: str,
 ) -> Optional[Dict[str, Any]]:
     return _run_bench_benchmark(
         benchmark_name,
@@ -322,6 +425,8 @@ def run_benchmark(
         k,
         bench_config["benchmark_filter"],
         bench_config.get("axes", {"m": "M", "n": "N", "k": "K"}),
+        heap_size,
+        operation,
     )
 
 
@@ -343,26 +448,46 @@ def main():
         default=None,
         help="Output JSON file path (default: benchmark/ops/{operation}/benchmark_sweep_results.json)",
     )
+    parser.add_argument(
+        "--shapes",
+        type=str,
+        default=None,
+        help="Comma-separated list of shape labels to run (e.g., 'g1,g2,pow2_4k'). If not provided, runs all shapes.",
+    )
     args = parser.parse_args()
 
     operation = args.operation
     benchmarks = BENCHMARK_CONFIGS[operation]
 
+    # Filter shapes if --shapes argument provided
+    if args.shapes:
+        requested_labels = set(label.strip() for label in args.shapes.split(","))
+        filtered_configs = [cfg for cfg in DIMENSION_CONFIGS if cfg["label"] in requested_labels]
+        if not filtered_configs:
+            log(f"Error: No shapes found matching: {args.shapes}")
+            log(f"Available labels: {', '.join(cfg['label'] for cfg in DIMENSION_CONFIGS)}")
+            sys.exit(1)
+        dimension_configs = filtered_configs
+        log(f"Running benchmarks for shapes: {', '.join(cfg['label'] for cfg in dimension_configs)}")
+    else:
+        dimension_configs = DIMENSION_CONFIGS
+        log(f"Running benchmarks for all {len(dimension_configs)} shapes")
+
     # Determine output file
     if args.output:
         output_file = Path(args.output)
     else:
-        output_file = PROJECT_ROOT / f"benchmark/ops/{operation}/benchmark_sweep_results.json"
+        output_file = PROJECT_ROOT / f"benchmark/ops/benchmark_sweep_results_{operation}.json"
 
     log("=" * 80)
     log(f"{operation.upper().replace('_', '-')} Benchmark Sweep")
     log("=" * 80)
-    log(f"Dimension configurations: {len(DIMENSION_CONFIGS)}")
-    for config in DIMENSION_CONFIGS:
+    log(f"Dimension configurations: {len(dimension_configs)}")
+    for config in dimension_configs:
         m, n, k = _dimension_values(config)
         log(f"  - {_dimension_label(config)}: M={m}, N={n}, K={k}")
     log(f"Benchmarks per configuration: {len(benchmarks)}")
-    log(f"Total benchmarks: {len(DIMENSION_CONFIGS) * len(benchmarks)}")
+    log(f"Total benchmarks: {len(dimension_configs) * len(benchmarks)}")
     log(f"Timeout per benchmark: {TIMEOUT_SECONDS}s")
     log(f"GPUs: {NUM_GPUS}")
     log(f"Output file: {output_file}")
@@ -371,12 +496,15 @@ def main():
 
     results = []
 
-    log(f"Running {len(DIMENSION_CONFIGS)} dimension configurations...\n")
+    log(f"Running {len(dimension_configs)} dimension configurations...\n")
 
-    for idx, config in enumerate(DIMENSION_CONFIGS, 1):
+    for idx, config in enumerate(dimension_configs, 1):
         m, n, k = _dimension_values(config)
         label = _dimension_label(config)
-        log(f"[{idx}/{len(DIMENSION_CONFIGS)}] Testing {label}: M={m}, N={n}, K={k}")
+
+        heap_size = _calculate_heap_size(m, n, k, operation, NUM_GPUS, HEAP_SIZE_SAFETY_FACTOR)
+        log(f"[{idx}/{len(dimension_configs)}] Testing {label}: M={m}, N={n}, K={k}")
+        log(f"  Calculated heap size: {heap_size / (1 << 30):.2f} GB (factor: {HEAP_SIZE_SAFETY_FACTOR})")
 
         row = {"label": label, "M": m, "N": n, "K": k, "operation": operation, "benchmarks": {}}
 
@@ -388,6 +516,8 @@ def main():
                 m=m,
                 n=n,
                 k=k,
+                heap_size=heap_size,
+                operation=operation,
             )
 
             if result is not None:

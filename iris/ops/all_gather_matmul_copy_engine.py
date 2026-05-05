@@ -350,7 +350,6 @@ def all_gather_matmul_copy_engine_preamble(
     A_sharded: torch.Tensor,
     B: torch.Tensor,
     selector=None,
-    k_per_flag: int = 4,
     m_tiles_per_batch: Optional[int] = None,
     staged_a_layout: str = "k_contiguous",
 ) -> FusedWorkspace:
@@ -537,7 +536,6 @@ def all_gather_matmul_copy_engine(
     async_op: bool = False,
     workspace: Optional[FusedWorkspace] = None,
     flag_iteration: int = 0,
-    k_per_flag: int = 4,
     staged_a_layout: str = "k_contiguous",
     num_warps: Optional[int] = None,
     num_stages: Optional[int] = None,
@@ -581,7 +579,7 @@ def all_gather_matmul_copy_engine(
 
     if workspace is None:
         workspace = all_gather_matmul_copy_engine_preamble(
-            shmem, A_sharded, B, k_per_flag=k_per_flag, staged_a_layout=staged_a_layout
+            shmem, A_sharded, B, staged_a_layout=staged_a_layout
         )
 
     selector = workspace.selector
