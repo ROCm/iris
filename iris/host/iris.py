@@ -1155,6 +1155,7 @@ class Iris:
             self._ag_replay_cache = {}
             self._bc_replay_cache = {}
             self._rd_replay_cache = {}
+            self._ag_flat_replay_cache = {}
             self._ar_replay_ready = False
             import torch.distributed as _dist
 
@@ -1257,7 +1258,13 @@ class Iris:
                     self._all_gather_into_tensor(ov, iv, group=group)
                     return None
                 ag_bytes = input_tensor.numel() * input_tensor.element_size()
-                if ag_bytes >= 8 * 1024:
+                if ag_bytes < 8 * 1024:
+                    cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr())
+                    cached_fn = self._ag_flat_replay_cache.get(cache_key)
+                    if cached_fn is not None:
+                        cached_fn()
+                        return None
+                else:
                     cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr())
                     cached_fn = self._ag_replay_cache.get(cache_key)
                     if cached_fn is not None:
@@ -1268,7 +1275,12 @@ class Iris:
             result = all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
             if config is None and not async_op and group is None:
                 ag_bytes = input_tensor.numel() * input_tensor.element_size()
-                if ag_bytes >= 8 * 1024:
+                if ag_bytes < 8 * 1024:
+                    replay = self._build_ag_flat_replay(input_tensor, output_tensor)
+                    if replay is not None:
+                        cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr())
+                        self._ag_flat_replay_cache[cache_key] = replay
+                elif ag_bytes >= 8 * 1024:
                     replay = self._build_ag_replay(input_tensor, output_tensor)
                     if replay is not None:
                         cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr())
@@ -1716,6 +1728,53 @@ class Iris:
                         waves_per_eu=config.waves_per_eu,
                     )
 
+                return replay
+            except Exception:
+                return None
+
+        def _build_ag_flat_replay(self, input_tensor, output_tensor):
+            try:
+                from iris.ccl.triton.all_gather_flat import persistent_all_gather_flat, _get_barrier_flags
+                from iris.ccl.config import Config
+                from iris.ccl.utils import extract_group_info
+
+                ctx = self._iris
+                config = Config(block_size_m=32, block_size_n=64, comm_sms=64, num_warps=8)
+                rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(None, ctx)
+                heap_bases = ctx.get_heap_bases()
+                start_flags, end_flags = _get_barrier_flags(ctx, None)
+
+                block_n = config.block_size_n
+                numel_in = input_tensor.numel()
+                numel_out = output_tensor.numel()
+                input_flat = input_tensor.contiguous().view(-1)
+                output_flat = output_tensor.contiguous().view(-1)
+                if numel_in >= block_n:
+                    inp_r = input_flat.view(-1, block_n)
+                else:
+                    inp_r = input_flat.view(1, -1)
+                if numel_out >= block_n:
+                    out_r = output_flat.view(-1, block_n)
+                else:
+                    out_r = output_flat.view(1, -1)
+                chunk_rows = inp_r.shape[0]
+                N = inp_r.shape[1]
+                sm, sn = inp_r.stride(0), inp_r.stride(1)
+                om, on = out_r.stride(0), out_r.stride(1)
+                grid = (config.comm_sms,)
+                kernel = persistent_all_gather_flat
+                nx = config.num_xcds
+                cs = config.chunk_size
+
+                def replay():
+                    kernel[grid](
+                        inp_r, out_r, chunk_rows, N, sm, sn, om, on,
+                        heap_bases,
+                        rank_in_group, rank_global, world_size, rank_start, rank_stride,
+                        start_flags, end_flags,
+                        32, 64, 64, nx, cs,
+                        num_warps=8, num_stages=config.num_stages, waves_per_eu=config.waves_per_eu,
+                    )
                 return replay
             except Exception:
                 return None
