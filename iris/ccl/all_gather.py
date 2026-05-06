@@ -13,13 +13,14 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
-_RING_BYTES = 512 * 1024          # >=512KB: use ring all-gather
+_RING_BYTES = 512 * 1024  # >=512KB: use ring all-gather
 _NCCL_LARGE_BYTES = 512 * 1024  # all sizes go to NCCL — ring/flat don't beat NCCL
 
 
 def _ring_config_for_size(msg_bytes):
     """Size-adaptive ring config to minimize tile loop passes."""
     from iris.ccl.config import Config
+
     if msg_bytes <= 2 * 1024 * 1024:
         return Config(block_size_m=32, block_size_n=64, comm_sms=64, num_warps=8)
     return Config(block_size_m=32, block_size_n=128, comm_sms=64, num_warps=8)

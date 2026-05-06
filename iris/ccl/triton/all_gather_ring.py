@@ -171,6 +171,7 @@ def _get_step_flags(ctx, group=None):
     key = ("all_gather_ring", group)
     if key not in _step_flags_cache:
         import torch
+
         _step_flags_cache[key] = ctx.zeros((ctx.num_ranks,), dtype=torch.int32)
         ctx.device_barrier(group)
     return _step_flags_cache[key]

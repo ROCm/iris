@@ -204,7 +204,9 @@ def persistent_reduce_ring(
                             )
                         else:
                             mask = (rm[:, None] < M) & (rn[None, :] < N)
-                            local = tl.load(output_ptr + out_offset, mask=mask, other=0.0, cache_modifier=".cg").to(acc_dtype)
+                            local = tl.load(output_ptr + out_offset, mask=mask, other=0.0, cache_modifier=".cg").to(
+                                acc_dtype
+                            )
                             remote = iris.load(output_ptr + out_offset, iris_rank, succ_iris, heap_bases, mask=mask).to(
                                 acc_dtype
                             )
@@ -317,7 +319,7 @@ def _get_step_flags(ctx, group=None):
     """Get or create point-to-point step flags on symmetric heap."""
     key = ("reduce_ring", group)
     if key not in _step_flags_cache:
-        _step_flags_cache[key] = ctx.zeros((ctx.num_ranks,), dtype=__import__('torch').int32)
+        _step_flags_cache[key] = ctx.zeros((ctx.num_ranks,), dtype=__import__("torch").int32)
         ctx.device_barrier(group)
     return _step_flags_cache[key]
 

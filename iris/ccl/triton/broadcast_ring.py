@@ -198,7 +198,7 @@ def _get_step_flags(ctx, group=None):
     """Get or create point-to-point step flags on symmetric heap. Monotonic, never reset."""
     key = group
     if key not in _step_flags_cache:
-        _step_flags_cache[key] = ctx.zeros((ctx.num_ranks,), dtype=__import__('torch').int32)
+        _step_flags_cache[key] = ctx.zeros((ctx.num_ranks,), dtype=__import__("torch").int32)
         ctx.device_barrier(group)
     return _step_flags_cache[key]
 
