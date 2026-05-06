@@ -92,6 +92,23 @@ class SymmetricHeap:
 
         self.refresh_peer_access()
 
+    def close_fd_conns(self):
+        """Close all FD-passing sockets.
+
+        Called from ``iris.__del__`` to eagerly release UNIX domain sockets
+        before the allocator is torn down.  Without this, a fast rank can
+        unlink and rebind a socket path while a slow rank's old ``fd_conns``
+        still reference the previous listener, causing stale-connection hangs
+        on the next ``setup_fd_mesh`` call when iris is reconstructed.
+        """
+        if self.fd_conns is not None:
+            for sock in self.fd_conns.values():
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            self.fd_conns = None
+
     def allocate(self, num_elements: int, dtype: torch.dtype, alignment: int = 1024) -> torch.Tensor:
         """
         Allocate a tensor on the symmetric heap.

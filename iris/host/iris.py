@@ -153,9 +153,14 @@ class Iris:
     def __del__(self):
         """Cleanup resources on deletion."""
         try:
-            if hasattr(self, "heap") and hasattr(self.heap, "allocator"):
-                if hasattr(self.heap.allocator, "close"):
-                    self.heap.allocator.close()
+            # Close FD-passing sockets before allocator cleanup to avoid
+            # stale socket reuse when iris.iris() is constructed repeatedly
+            # within the same process (e.g., parametrized tests).
+            if hasattr(self, "heap"):
+                self.heap.close_fd_conns()
+                if hasattr(self.heap, "allocator"):
+                    if hasattr(self.heap.allocator, "close"):
+                        self.heap.allocator.close()
         except Exception:
             pass  # Best effort cleanup in destructor (GC context)
 
