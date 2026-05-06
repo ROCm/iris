@@ -1149,6 +1149,7 @@ class Iris:
             self._iris = iris_instance
             self._nccl_cache = {}
             self._ar_workspace = None
+            self._ar_osf_workspace = None
             import torch.distributed as _dist
 
             self._all_gather_into_tensor = _dist.all_gather_into_tensor
@@ -1315,7 +1316,10 @@ class Iris:
                     self._all_reduce(output_tensor, group=group)
                     return None
                 if workspace is None:
-                    workspace = self._ar_workspace
+                    if msg_bytes < 128 * 1024:
+                        workspace = self._ar_osf_workspace
+                    else:
+                        workspace = self._ar_workspace
             from iris.ccl.all_reduce import all_reduce
 
             result_ws = all_reduce(
@@ -1329,7 +1333,10 @@ class Iris:
                 workspace=workspace,
             )
             if result_ws is not None and config is None:
-                self._ar_workspace = result_ws
+                if getattr(result_ws, "variant", "") == "one_shot_fused":
+                    self._ar_osf_workspace = result_ws
+                else:
+                    self._ar_workspace = result_ws
             return result_ws
 
         def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
