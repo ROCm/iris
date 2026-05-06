@@ -12,8 +12,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
-_RING_BYTES = 512 * 1024     # >=512KB: ring reduce with p2p flags
-_NCCL_LARGE_BYTES = 0        # NCCL at all sizes (ring reduce doesn't pipeline)
+_NCCL_LARGE_BYTES = 2 * 1024 * 1024  # >=2MB: NCCL (flat reduce wins only at 512KB-1MB)
 
 _reduce_group_cache: dict = {}
 
@@ -99,25 +98,6 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         )
         if not async_op:
             ctx.device_barrier(group)
-    elif msg_bytes >= _RING_BYTES and world_size > 1:
-        from iris.ccl.triton.reduce_ring import launch as launch_ring
-
-        launch_ring(
-            output_tensor,
-            input_tensor,
-            ctx,
-            rank_in_group,
-            rank_global,
-            dst,
-            world_size,
-            rank_start,
-            rank_stride,
-            config,
-            inline_barrier=use_inline,
-            barrier_state=barrier_state,
-            group=group,
-            use_p2p=True,
-        )
     else:
         from iris.ccl.triton.reduce import launch
 

@@ -14,7 +14,7 @@ from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
 _RING_BYTES = 512 * 1024          # >=512KB: use ring all-gather
-_NCCL_LARGE_BYTES = 32 * 1024 * 1024  # >=32MB: NCCL
+_NCCL_LARGE_BYTES = 4 * 1024 * 1024  # >=4MB per-rank: NCCL (ring loses at large sizes)
 
 
 def _ring_config_for_size(msg_bytes):

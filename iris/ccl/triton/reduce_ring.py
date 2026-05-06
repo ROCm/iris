@@ -194,7 +194,7 @@ def persistent_reduce_ring(
                         is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
 
                         if is_full:
-                            local = tl.load(output_ptr + out_offset).to(acc_dtype)
+                            local = tl.load(output_ptr + out_offset, cache_modifier=".cg").to(acc_dtype)
                             remote = iris.load(output_ptr + out_offset, iris_rank, succ_iris, heap_bases).to(acc_dtype)
                             acc = local + remote
                             tl.store(
@@ -204,7 +204,7 @@ def persistent_reduce_ring(
                             )
                         else:
                             mask = (rm[:, None] < M) & (rn[None, :] < N)
-                            local = tl.load(output_ptr + out_offset, mask=mask, other=0.0).to(acc_dtype)
+                            local = tl.load(output_ptr + out_offset, mask=mask, other=0.0, cache_modifier=".cg").to(acc_dtype)
                             remote = iris.load(output_ptr + out_offset, iris_rank, succ_iris, heap_bases, mask=mask).to(
                                 acc_dtype
                             )
@@ -231,6 +231,60 @@ def persistent_reduce_ring(
                 rank_stride,
                 COMM_SMS,
             )
+
+    # Gather phase: root collects fully-reduced chunks from other ranks.
+    # After the ring steps, rank at ring_pos=p owns the fully-reduced chunk p.
+    # Root (ring_pos=0) already has chunk 0. It needs chunks 1..W-1 from the
+    # ranks at ring_pos 1..W-1.
+    #
+    # We do this as sequential gather steps (one chunk at a time) to avoid
+    # reading stale data from ranks that haven't finished yet.
+    if ring_pos == 0:
+        for gather_chunk in tl.static_range(1, world_size):
+            # The rank that owns this chunk has ring_pos = gather_chunk
+            # ring_pos = (group_rank - dst + W) % W => group_rank = (ring_pos + dst) % W
+            owner_group = (gather_chunk + dst) % world_size
+            owner_iris = rank_start + owner_group * rank_stride
+
+            if USE_P2P:
+                # Wait for owner to finish all its ring steps
+                # After W-1 ring steps + initial copy = W signals total
+                target = step_base + world_size
+                if pid == 0:
+                    remote_ptr = step_flags_ptr + owner_iris
+                    remote_translated = _translate_ptr(remote_ptr, iris_rank, owner_iris, heap_bases)
+                    while tl.atomic_cas(remote_translated, target, target, sem="acquire", scope="sys") < target:
+                        pass
+            tl.debug_barrier()
+
+            c_row_start = gather_chunk * chunk_rows
+            c_actual_rows = tl.minimum(chunk_rows, M - c_row_start)
+            num_pid_m_chunk = tl.cdiv(c_actual_rows, BLOCK_SIZE_M)
+            total_tiles_chunk = num_pid_m_chunk * num_pid_n
+
+            for tile_id in range(pid, total_tiles_chunk, COMM_SMS):
+                pid_m = tile_id // num_pid_n
+                pid_n = tile_id % num_pid_n
+
+                rm_base = c_row_start + pid_m * BLOCK_SIZE_M
+                rn_base = pid_n * BLOCK_SIZE_N
+
+                rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
+                rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
+                rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+                rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+                out_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+
+                is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+
+                if is_full:
+                    data = iris.load(output_ptr + out_offset, iris_rank, owner_iris, heap_bases)
+                    tl.store(output_ptr + out_offset, data, cache_modifier=".wt")
+                else:
+                    mask = (rm[:, None] < M) & (rn[None, :] < N)
+                    data = iris.load(output_ptr + out_offset, iris_rank, owner_iris, heap_bases, mask=mask)
+                    tl.store(output_ptr + out_offset, data, mask=mask, cache_modifier=".wt")
 
 
 _dummy_barrier_cache: dict = {}

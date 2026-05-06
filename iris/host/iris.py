@@ -1243,7 +1243,7 @@ class Iris:
             """
             if config is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
-                if msg_bytes < 512 * 1024 or msg_bytes >= 32 * 1024 * 1024:
+                if msg_bytes < 512 * 1024 or msg_bytes >= 4 * 1024 * 1024:
                     import torch.distributed as _dist
                     _dist.all_gather_into_tensor(output_tensor, input_tensor, group=group)
                     return None
@@ -1412,14 +1412,16 @@ class Iris:
                 config: Config with kernel parameters.
             """
             if config is None and op is None and not async_op:
-                import torch.distributed as _dist
-                if output_tensor.data_ptr() == input_tensor.data_ptr():
-                    _dist.reduce(output_tensor, dst=dst, group=group)
-                else:
-                    _dist.reduce(input_tensor, dst=dst, group=group)
-                    if _dist.get_rank(group) == dst:
-                        output_tensor.copy_(input_tensor)
-                return
+                msg_bytes = input_tensor.numel() * input_tensor.element_size()
+                if msg_bytes < 512 * 1024 or msg_bytes >= 2 * 1024 * 1024:
+                    import torch.distributed as _dist
+                    if output_tensor.data_ptr() == input_tensor.data_ptr():
+                        _dist.reduce(output_tensor, dst=dst, group=group)
+                    else:
+                        _dist.reduce(input_tensor, dst=dst, group=group)
+                        if _dist.get_rank(group) == dst:
+                            output_tensor.copy_(input_tensor)
+                    return
             from iris.ccl.reduce import reduce
 
             reduce(

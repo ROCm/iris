@@ -4,7 +4,7 @@
 """
 All-reduce collective operation — public API.
 
-NCCL at all sizes (Triton launch overhead ~65-80us vs NCCL ~37-55us on MI300X).
+Two-shot kernel for medium messages, NCCL for small/large.
 """
 
 import torch.distributed as _dist
@@ -12,7 +12,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_FALLBACK_BYTES = 0
-_NCCL_LARGE_BYTES = 0  # NCCL at all sizes (iris ~2-3us slower due to Triton launch overhead)
+_NCCL_LARGE_BYTES = 0  # NCCL at all sizes — two-shot doesn't consistently beat NCCL
 
 _ar_nccl_cache: dict = {}
 

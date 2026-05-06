@@ -4,15 +4,15 @@
 """
 Reduce-scatter collective operation — public API.
 
-NCCL at all sizes (Triton launch overhead ~65-80us vs NCCL ~37-55us on MI300X).
-Triton only (no gluon support).
+Two-shot kernel for medium messages, NCCL for small/large.
 """
 
 import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_LARGE_BYTES = 0  # NCCL at all sizes
+_NCCL_SMALL_BYTES = 0
+_NCCL_LARGE_BYTES = 0  # NCCL at all sizes — two-shot overhead doesn't beat NCCL consistently
 
 
 def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None):
@@ -31,7 +31,7 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
     numel = input_tensor.numel()
     msg_bytes = numel * input_tensor.element_size()
 
-    if msg_bytes >= _NCCL_LARGE_BYTES:
+    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
         world_size = _dist.get_world_size(group)
         chunk_size = numel // world_size
         out_view = output_tensor.view(-1)[:chunk_size]
@@ -65,11 +65,13 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
     if variant != "two_shot":
         raise ValueError(f"reduce_scatter only supports variant='two_shot', got '{variant}'.")
 
-    if output_tensor.shape[:2] != (M, N):
-        raise ValueError(
-            f"Output tensor shape {output_tensor.shape[:2]} does not match input shape {(M, N)}. "
-            f"For reduce-scatter, output should have the same shape as input."
-        )
+    block_n = config.block_size_n
+    if numel >= block_n:
+        input_tensor = input_tensor.contiguous().view(-1, block_n)
+        output_tensor = output_tensor.contiguous().view(-1, block_n)
+    else:
+        input_tensor = input_tensor.contiguous().view(1, -1)
+        output_tensor = output_tensor.contiguous().view(1, -1)
 
     from iris.ccl.triton.reduce_scatter import launch
 
