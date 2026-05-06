@@ -12,7 +12,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_FALLBACK_BYTES = 0
-_NCCL_LARGE_BYTES = 0  # NCCL at all sizes — two-shot doesn't consistently beat NCCL
+_NCCL_LARGE_BYTES = 512 * 1024  # <512KB: native one_shot_fused, >=512KB: NCCL
 
 _ar_nccl_cache: dict = {}
 
@@ -59,7 +59,7 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
             "Support for other operations will be added in a future release."
         )
     if config is None:
-        config = Config(block_size_m=32, block_size_n=64, all_reduce_variant="two_shot")
+        config = Config(block_size_m=32, block_size_n=64, all_reduce_variant="one_shot_fused", comm_sms=64)
     if config.use_gluon:
         raise ValueError(
             "all_reduce does not support use_gluon=True. "

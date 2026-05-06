@@ -1148,6 +1148,7 @@ class Iris:
             """
             self._iris = iris_instance
             self._nccl_cache = {}
+            self._ar_workspace = None
 
         def all_to_all(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
@@ -1306,15 +1307,19 @@ class Iris:
                 >>> # Async operation (no barrier)
                 >>> ctx.ccl.all_reduce(output_tensor, input_tensor, async_op=True)
             """
-            if config is None and op is None and not async_op and workspace is None:
-                import torch.distributed as _dist
-                if output_tensor.data_ptr() != input_tensor.data_ptr():
-                    output_tensor.copy_(input_tensor)
-                _dist.all_reduce(output_tensor, group=group)
-                return None
+            if config is None and op is None and not async_op:
+                msg_bytes = input_tensor.numel() * input_tensor.element_size()
+                if msg_bytes >= 512 * 1024:
+                    import torch.distributed as _dist
+                    if output_tensor.data_ptr() != input_tensor.data_ptr():
+                        output_tensor.copy_(input_tensor)
+                    _dist.all_reduce(output_tensor, group=group)
+                    return None
+                if workspace is None:
+                    workspace = self._ar_workspace
             from iris.ccl.all_reduce import all_reduce
 
-            return all_reduce(
+            result_ws = all_reduce(
                 output_tensor,
                 input_tensor,
                 self._iris,
@@ -1324,6 +1329,9 @@ class Iris:
                 config=config,
                 workspace=workspace,
             )
+            if result_ws is not None and config is None:
+                self._ar_workspace = result_ws
+            return result_ws
 
         def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
             """
