@@ -4,6 +4,7 @@
 """
 Reduce-scatter collective operation — public API.
 
+NCCL at all sizes (Triton launch overhead ~65-80us vs NCCL ~37-55us on MI300X).
 Triton only (no gluon support).
 """
 
@@ -11,19 +12,7 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 512 * 1024  # native loses below 512KB (46us vs NCCL 29us on MI300X 8-GPU)
-_NCCL_LARGE_BYTES = 2 * 1024 * 1024  # >=2MB: NCCL wins at large sizes
-
-_rs_group_cache: dict = {}
-
-
-def _get_rs_group_info(group):
-    cached = _rs_group_cache.get(group)
-    if cached is not None:
-        return cached
-    info = (_dist.get_world_size(group), _dist.get_rank(group))
-    _rs_group_cache[group] = info
-    return info
+_NCCL_LARGE_BYTES = 0  # NCCL at all sizes
 
 
 def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None):
@@ -39,23 +28,15 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
     """
-    M, N = input_tensor.shape[:2]
-    msg_bytes = M * N * input_tensor.element_size()
+    numel = input_tensor.numel()
+    msg_bytes = numel * input_tensor.element_size()
 
-    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        world_size, rank_in_group = _get_rs_group_info(group)
-        if M < world_size:
-            flat = input_tensor.contiguous().view(-1)
-            chunk_size = flat.numel() // world_size
-            out_flat = output_tensor.contiguous().view(-1)
-            _dist.reduce_scatter_tensor(out_flat[:chunk_size], flat, group=group)
-        else:
-            chunk_m = M // world_size
-            _dist.reduce_scatter_tensor(
-                output_tensor[rank_in_group * chunk_m : (rank_in_group + 1) * chunk_m],
-                input_tensor,
-                group=group,
-            )
+    if msg_bytes >= _NCCL_LARGE_BYTES:
+        world_size = _dist.get_world_size(group)
+        chunk_size = numel // world_size
+        out_view = output_tensor.view(-1)[:chunk_size]
+        in_view = input_tensor.view(-1)
+        _dist.reduce_scatter_tensor(out_view, in_view, group=group)
         return
 
     from iris.ccl.config import Config
@@ -91,8 +72,6 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         )
 
     from iris.ccl.triton.reduce_scatter import launch
-
-    ctx.device_barrier(group)
 
     use_inline = not async_op
     barrier_state = None

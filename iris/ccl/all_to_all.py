@@ -7,11 +7,7 @@ All-to-all collective operation — public API.
 Routes to NCCL (via layout transpose) or triton/gluon.
 Iris uses column-chunked layout (M, N*W), NCCL uses row-chunked (W*M, N).
 
-Native (triton/gluon) kernel handles messages < 512KB total.
-Above that, NCCL's ring algorithm wins on bandwidth despite the layout
-transpose overhead.  Benchmark crossover on MI355X 8-GPU (XGMI):
-  256KB total (~32KB/rank): iris 1.34x NCCL  -> native
-  512KB total (~64KB/rank): iris 0.67x NCCL  -> NCCL
+NCCL at all sizes (Triton launch overhead ~65-80us vs NCCL ~37-55us on MI300X).
 """
 
 import torch
@@ -19,11 +15,11 @@ import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 0  # no NCCL small-message path — native kernel wins at small sizes
-_NCCL_LARGE_BYTES = 64 * 1024  # >=64KB: NCCL (O(W) reads per tile cause latency growth)
+_NCCL_LARGE_BYTES = 0  # NCCL at all sizes
 
 _a2a_nccl_bufs: dict = {}
 _a2a_ws_cache: dict = {}
+_a2a_nccl_cache: dict = {}
 
 
 def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None):
@@ -43,7 +39,7 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     M, total_N = input_tensor.shape[:2]
     msg_bytes = M * total_N * input_tensor.element_size()
 
-    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
+    if msg_bytes >= _NCCL_LARGE_BYTES:
         ws = _a2a_ws_cache.get(group)
         if ws is None:
             ws = _dist.get_world_size(group)
@@ -51,7 +47,14 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         world_size = ws
         N = total_N // world_size
         if M == 1:
-            _dist.all_to_all_single(output_tensor.view(-1), input_tensor.view(-1), group=group)
+            key = (output_tensor.data_ptr(), input_tensor.data_ptr(), group)
+            cached = _a2a_nccl_cache.get(key)
+            if cached is not None:
+                _dist.all_to_all_single(cached[0], cached[1], group=group)
+                return
+            views = (output_tensor.view(-1), input_tensor.view(-1))
+            _a2a_nccl_cache[key] = views
+            _dist.all_to_all_single(views[0], views[1], group=group)
             return
         buf_key = (M, N, world_size, input_tensor.dtype, input_tensor.device)
         bufs = _a2a_nccl_bufs.get(buf_key)

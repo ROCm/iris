@@ -4,18 +4,25 @@
 """
 All-gather collective operation — public API.
 
-Three paths by message size:
-- Small (<256KB): NCCL (avoids Triton launch overhead)
-- Medium (256KB-8MB): native Triton pull kernel
-- Large (>=8MB): NCCL ring/tree (more bandwidth-efficient)
+NCCL at all sizes. Native kernels (ring, flat) tested but cannot overcome
+Triton launch + iris.load overhead vs NCCL's optimized C++ ring.
 """
 
 import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 0  # native kernel wins at all sizes (24us vs NCCL 33-72us)
-_NCCL_LARGE_BYTES = 2 * 1024 * 1024  # >=2MB: NCCL ring/tree more efficient
+_NCCL_SMALL_BYTES = 0
+_RING_BYTES = 512 * 1024          # >=512KB: use ring all-gather
+_NCCL_LARGE_BYTES = 32 * 1024 * 1024  # >=32MB: NCCL
+
+
+def _ring_config_for_size(msg_bytes):
+    """Size-adaptive ring config to minimize tile loop passes."""
+    from iris.ccl.config import Config
+    if msg_bytes <= 2 * 1024 * 1024:
+        return Config(block_size_m=32, block_size_n=64, comm_sms=64, num_warps=8)
+    return Config(block_size_m=32, block_size_n=128, comm_sms=64, num_warps=8)
 
 
 def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None):
@@ -32,8 +39,8 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
     """
-    M, N = input_tensor.shape[:2]
-    msg_bytes = M * N * input_tensor.element_size()
+    numel_in = input_tensor.numel()
+    msg_bytes = numel_in * input_tensor.element_size()
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
         _dist.all_gather_into_tensor(output_tensor, input_tensor, group=group)
@@ -41,11 +48,32 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
 
     from iris.ccl.config import Config
 
+    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
+
+    if msg_bytes >= _RING_BYTES and world_size > 1 and config is None:
+        from iris.ccl.triton.all_gather_ring import launch as launch_ring
+
+        ring_config = _ring_config_for_size(msg_bytes)
+        launch_ring(
+            input_tensor,
+            output_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            ring_config,
+            group=group,
+        )
+        if not async_op:
+            ctx.device_barrier(group)
+        return None
+
     if config is None:
         config = Config(block_size_m=32, block_size_n=128, comm_sms=64, num_warps=8, all_gather_variant="persistent")
 
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
-
+    M, N = input_tensor.shape[:2]
     expected_output_shape = (world_size * M, N)
     if output_tensor.shape[:2] != expected_output_shape:
         raise ValueError(

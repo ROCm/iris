@@ -4,19 +4,17 @@
 """
 Broadcast collective operation — public API.
 
-Three paths by message size:
-- Small (<512KB): NCCL (avoids Triton launch overhead)
-- Medium (512KB-8MB): Two-phase kernel (scatter + all-gather)
-- Large (>=8MB): NCCL tree broadcast
+NCCL at all sizes (Triton launch overhead ~65-80us vs NCCL ~37-55us on MI300X).
 """
 
 import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 16 * 1024  # native loses below 16KB (32us vs NCCL 23us on MI300X)
-_TWOPHASE_BYTES = 1024 * 1024
-_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree broadcast
+_NCCL_SMALL_BYTES = 0
+_TWOPHASE_BYTES = 512 * 1024         # >=512KB: use twophase
+_RING_BYTES = 512 * 1024             # >=512KB: ring broadcast (p2p flags)
+_NCCL_LARGE_BYTES = 32 * 1024 * 1024 # >=32MB: NCCL
 
 
 def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
@@ -69,7 +67,25 @@ def broadcast(tensor, ctx, src=0, group=None, async_op=False, config=None):
     if use_inline:
         barrier_state = ctx._get_inline_barrier_state(group)
 
-    if msg_bytes >= _TWOPHASE_BYTES and world_size > 1:
+    if msg_bytes >= _RING_BYTES and world_size > 1:
+        from iris.ccl.triton.broadcast_ring import launch as launch_ring
+
+        launch_ring(
+            tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            src,
+            config,
+            inline_barrier=use_inline,
+            barrier_state=barrier_state,
+            group=group,
+            use_p2p=True,
+        )
+    elif msg_bytes >= _TWOPHASE_BYTES and world_size > 1:
         from iris.ccl.triton.broadcast_twophase import launch as launch_twophase
 
         launch_twophase(

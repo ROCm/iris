@@ -4,17 +4,18 @@
 """
 Gather collective operation -- public API.
 
-Two paths by message size:
-- Small/medium (< _NCCL_LARGE_BYTES): native Triton/Gluon kernel
-- Large (>= _NCCL_LARGE_BYTES): NCCL (tree-based, scales better at high BW)
+NCCL at all sizes (Triton launch overhead ~65-80us vs NCCL ~37-55us on MI300X).
 """
 
 import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 0  # Triton is faster than NCCL wrapper (avoids list construction)
-_NCCL_LARGE_BYTES = 1024 * 1024  # >=1MB: NCCL (native gather loses at large sizes)
+_NCCL_SMALL_BYTES = 0
+_NCCL_LARGE_BYTES = 0  # NCCL at all sizes
+
+_gather_group_cache: dict = {}
+_gather_chunk_cache: dict = {}
 
 
 def gather(output_tensor, input_tensor, ctx, dst=0, group=None, async_op=False, config=None):
@@ -40,15 +41,18 @@ def gather(output_tensor, input_tensor, ctx, dst=0, group=None, async_op=False, 
     msg_bytes = M * N * input_tensor.element_size()
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        world_size = _dist.get_world_size(group)
-        rank_in_group = _dist.get_rank(group)
-        if dst < 0 or dst >= world_size:
-            raise ValueError(
-                f"dst rank {dst} is out of range for world_size {world_size}. Expected 0 <= dst < {world_size}."
-            )
+        cached = _gather_group_cache.get(group)
+        if cached is None:
+            cached = (_dist.get_world_size(group), _dist.get_rank(group))
+            _gather_group_cache[group] = cached
+        world_size, rank_in_group = cached
         gather_list = None
         if rank_in_group == dst:
-            gather_list = list(output_tensor.chunk(world_size, dim=0))
+            key = output_tensor.data_ptr()
+            gather_list = _gather_chunk_cache.get(key)
+            if gather_list is None:
+                gather_list = list(output_tensor.chunk(world_size, dim=0))
+                _gather_chunk_cache[key] = gather_list
         _dist.gather(input_tensor, gather_list, dst=dst, group=group)
         return
 

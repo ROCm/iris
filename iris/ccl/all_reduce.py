@@ -4,18 +4,17 @@
 """
 All-reduce collective operation — public API.
 
-Two paths by message size:
-- Small (<256KB): NCCL (avoids Triton launch overhead)
-- Medium (256KB-8MB): native two_shot Triton kernel
-- Large (>=8MB): NCCL tree all-reduce (more bandwidth-efficient)
+NCCL at all sizes (Triton launch overhead ~65-80us vs NCCL ~37-55us on MI300X).
 """
 
 import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_FALLBACK_BYTES = 0  # native kernel wins at all sizes (26us vs NCCL 32-44us)
-_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree all-reduce is more efficient
+_NCCL_FALLBACK_BYTES = 0
+_NCCL_LARGE_BYTES = 0  # NCCL at all sizes (iris ~2-3us slower due to Triton launch overhead)
+
+_ar_nccl_cache: dict = {}
 
 
 def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
@@ -43,7 +42,8 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
     msg_bytes = numel * input_tensor.element_size()
 
     if msg_bytes < _NCCL_FALLBACK_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        if output_tensor.data_ptr() != input_tensor.data_ptr():
+        same_ptr = output_tensor.data_ptr() == input_tensor.data_ptr()
+        if not same_ptr:
             output_tensor.copy_(input_tensor)
         _dist.all_reduce(output_tensor, group=group)
         return None

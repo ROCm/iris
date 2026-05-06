@@ -4,17 +4,18 @@
 """
 Scatter collective operation — public API.
 
-Two paths by message size:
-- Small/medium (< _NCCL_LARGE_BYTES): native Triton/Gluon kernel
-- Large (>= _NCCL_LARGE_BYTES): NCCL (tree-based, scales better at high BW)
+NCCL at all sizes (Triton launch overhead ~65-80us vs NCCL ~37-55us on MI300X).
 """
 
 import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 0  # native pull wins at all sizes (23us vs NCCL 39-68us)
-_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL (native scatter competitive up to 8MB)
+_NCCL_SMALL_BYTES = 0
+_NCCL_LARGE_BYTES = 0  # NCCL at all sizes
+
+_scatter_group_cache: dict = {}
+_scatter_chunk_cache: dict = {}
 
 
 def scatter(output_tensor, input_tensor, ctx, src=0, group=None, async_op=False, config=None):
@@ -42,12 +43,18 @@ def scatter(output_tensor, input_tensor, ctx, src=0, group=None, async_op=False,
     msg_bytes = M * N * output_tensor.element_size()
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        # Lightweight rank/world_size for NCCL path only
-        world_size = _dist.get_world_size(group)
-        rank_in_group = _dist.get_rank(group)
+        cached = _scatter_group_cache.get(group)
+        if cached is None:
+            cached = (_dist.get_world_size(group), _dist.get_rank(group))
+            _scatter_group_cache[group] = cached
+        world_size, rank_in_group = cached
         scatter_list = None
         if rank_in_group == src:
-            scatter_list = list(input_tensor.chunk(world_size, dim=0))
+            key = input_tensor.data_ptr()
+            scatter_list = _scatter_chunk_cache.get(key)
+            if scatter_list is None:
+                scatter_list = list(input_tensor.chunk(world_size, dim=0))
+                _scatter_chunk_cache[key] = scatter_list
         _dist.scatter(output_tensor, scatter_list, src=src, group=group)
         return
 

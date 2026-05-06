@@ -4,20 +4,18 @@
 """
 Reduce collective operation — public API.
 
-Three paths by message size:
-- Small (<512KB): NCCL (avoids Triton launch overhead)
-- Small/medium (512KB-64KB): Direct-read (root reads all peers)
-- Medium (64KB-8MB): Two-phase (reduce-scatter + push to root)
-- Large (>=8MB): NCCL tree reduce
+NCCL at all sizes (Triton launch overhead ~65-80us vs NCCL ~37-55us on MI300X).
 """
 
 import torch.distributed as _dist
 
 from iris.ccl.utils import extract_group_info
 
-_NCCL_SMALL_BYTES = 0  # native kernel wins at all sizes (25us vs NCCL 27-61us)
-_TWOPHASE_BYTES = 64 * 1024
-_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # >=8MB: NCCL tree reduce
+_NCCL_SMALL_BYTES = 0
+_RING_BYTES = 512 * 1024     # >=512KB: ring reduce with p2p flags
+_NCCL_LARGE_BYTES = 0        # NCCL at all sizes (ring reduce doesn't pipeline)
+
+_reduce_group_cache: dict = {}
 
 
 def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_op=False, config=None):
@@ -38,21 +36,18 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
     numel = input_tensor.numel()
     msg_bytes = numel * input_tensor.element_size()
 
-    # Validate dst early (before NCCL dispatch) to give a clean error
-    world_size = _dist.get_world_size(group)
-    if dst < 0 or dst >= world_size:
-        raise ValueError(f"dst must be in [0, world_size), got dst={dst}, world_size={world_size}.")
-
-    # Small and large messages: use NCCL (avoids Triton launch overhead at small
-    # sizes, and NCCL tree reduce is more bandwidth-efficient at large sizes).
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        # torch.distributed.reduce is in-place. Avoid full copy on all ranks —
-        # reduce in-place on input, then copy result to output only on root.
+        cached = _reduce_group_cache.get(group)
+        if cached is None:
+            cached = (_dist.get_world_size(group), _dist.get_rank(group))
+            _reduce_group_cache[group] = cached
+        world_size, rank_in_group = cached
+        if dst < 0 or dst >= world_size:
+            raise ValueError(f"dst must be in [0, world_size), got dst={dst}, world_size={world_size}.")
         if output_tensor.data_ptr() == input_tensor.data_ptr():
             _dist.reduce(output_tensor, dst=dst, group=group)
         else:
             _dist.reduce(input_tensor, dst=dst, group=group)
-            rank_in_group = _dist.get_rank(group)
             if rank_in_group == dst:
                 output_tensor.copy_(input_tensor)
         return
@@ -82,6 +77,11 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         input_tensor = input_tensor.contiguous().view(1, -1)
         output_tensor = output_tensor.contiguous().view(1, -1)
 
+    use_inline = not async_op
+    barrier_state = None
+    if use_inline:
+        barrier_state = ctx._get_inline_barrier_state(group)
+
     if config.use_gluon:
         from iris.ccl.gluon.reduce import launch
 
@@ -99,15 +99,10 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         )
         if not async_op:
             ctx.device_barrier(group)
-    elif msg_bytes >= _TWOPHASE_BYTES and world_size > 1:
-        from iris.ccl.triton.reduce_twophase import launch as launch_twophase
+    elif msg_bytes >= _RING_BYTES and world_size > 1:
+        from iris.ccl.triton.reduce_ring import launch as launch_ring
 
-        use_inline = not async_op
-        barrier_state = None
-        if use_inline:
-            barrier_state = ctx._get_inline_barrier_state(group)
-
-        launch_twophase(
+        launch_ring(
             output_tensor,
             input_tensor,
             ctx,
@@ -120,14 +115,11 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
             config,
             inline_barrier=use_inline,
             barrier_state=barrier_state,
+            group=group,
+            use_p2p=True,
         )
     else:
         from iris.ccl.triton.reduce import launch
-
-        use_inline = not async_op
-        barrier_state = None
-        if use_inline:
-            barrier_state = ctx._get_inline_barrier_state(group)
 
         launch(
             output_tensor,
