@@ -1156,6 +1156,9 @@ class Iris:
             self._bc_replay_cache = {}
             self._rd_replay_cache = {}
             self._ag_flat_replay_cache = {}
+            self._sc_replay_cache = {}
+            self._ga_replay_cache = {}
+            self._a2a_replay_cache = {}
             self._ar_replay_ready = False
             import torch.distributed as _dist
 
@@ -1201,14 +1204,17 @@ class Iris:
                 >>> ctx.ccl.all_to_all(output_tensor, input_tensor, async_op=True)
             """
             if config is None and not async_op and input_tensor.shape[0] == 1:
-                key = ("a2a", output_tensor.data_ptr(), input_tensor.data_ptr())
-                cached = self._nccl_cache.get(key)
-                if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
-                    self._all_to_all_single(cached[2], cached[3])
+                cache_key = (output_tensor.data_ptr(), input_tensor.data_ptr(), input_tensor.numel())
+                cached_fn = self._a2a_replay_cache.get(cache_key)
+                if cached_fn is not None:
+                    cached_fn()
                     return
                 ov, iv = output_tensor.contiguous().view(-1), input_tensor.contiguous().view(-1)
-                self._nccl_cache[key] = (output_tensor, input_tensor, ov, iv)
-                self._all_to_all_single(ov, iv)
+                a2a_fn = self._all_to_all_single
+                def _a2a_replay(_ov=ov, _iv=iv, _fn=a2a_fn):
+                    _fn(_ov, _iv)
+                self._a2a_replay_cache[cache_key] = _a2a_replay
+                _a2a_replay()
                 return
             from iris.ccl.all_to_all import all_to_all
 
@@ -2010,16 +2016,19 @@ class Iris:
                 config: Config with kernel parameters.
             """
             if config is None and not async_op:
-                key = ("sc", input_tensor.data_ptr(), src)
-                cached = self._nccl_cache.get(key)
-                if cached is not None and cached[0] is input_tensor:
-                    self._scatter(output_tensor, cached[1], src=src, group=group)
+                cache_key = (output_tensor.data_ptr(), input_tensor.data_ptr(), input_tensor.numel(), src)
+                cached_fn = self._sc_replay_cache.get(cache_key)
+                if cached_fn is not None:
+                    cached_fn()
                     return
                 ws = self._get_world_size(group)
                 rank = self._get_rank(group)
                 scatter_list = list(input_tensor.chunk(ws, dim=0)) if rank == src else None
-                self._nccl_cache[key] = (input_tensor, scatter_list)
-                self._scatter(output_tensor, scatter_list, src=src, group=group)
+                scatter_fn = self._scatter
+                def _sc_replay(_o=output_tensor, _sl=scatter_list, _src=src, _g=group, _fn=scatter_fn):
+                    _fn(_o, _sl, src=_src, group=_g)
+                self._sc_replay_cache[cache_key] = _sc_replay
+                _sc_replay()
                 return
             from iris.ccl.scatter import scatter
 
@@ -2038,16 +2047,19 @@ class Iris:
                 config: Config with kernel parameters.
             """
             if config is None and not async_op:
-                key = ("ga", output_tensor.data_ptr(), dst)
-                cached = self._nccl_cache.get(key)
-                if cached is not None and cached[0] is output_tensor:
-                    self._gather(input_tensor, cached[1], dst=dst, group=group)
+                cache_key = (output_tensor.data_ptr(), input_tensor.data_ptr(), input_tensor.numel(), dst)
+                cached_fn = self._ga_replay_cache.get(cache_key)
+                if cached_fn is not None:
+                    cached_fn()
                     return
                 ws = self._get_world_size(group)
                 rank = self._get_rank(group)
                 gather_list = list(output_tensor.chunk(ws, dim=0)) if rank == dst else None
-                self._nccl_cache[key] = (output_tensor, gather_list)
-                self._gather(input_tensor, gather_list, dst=dst, group=group)
+                gather_fn = self._gather
+                def _ga_replay(_i=input_tensor, _gl=gather_list, _dst=dst, _g=group, _fn=gather_fn):
+                    _fn(_i, _gl, dst=_dst, group=_g)
+                self._ga_replay_cache[cache_key] = _ga_replay
+                _ga_replay()
                 return
             from iris.ccl.gather import gather
 
