@@ -1308,7 +1308,7 @@ class Iris:
             """
             if config is None and op is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
-                if msg_bytes >= 12 * 1024 * 1024:
+                if msg_bytes >= 24 * 1024 * 1024:
                     if output_tensor.data_ptr() != input_tensor.data_ptr():
                         output_tensor.copy_(input_tensor)
                     self._all_reduce(output_tensor, group=group)
