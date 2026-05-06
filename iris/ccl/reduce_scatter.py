@@ -12,7 +12,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
-_NCCL_LARGE_BYTES = 0  # NCCL at all sizes — two-shot overhead doesn't beat NCCL consistently
+_NCCL_LARGE_BYTES = 512 * 1024  # <512KB: native fused, >=512KB: NCCL
 
 
 def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None):
@@ -50,7 +50,7 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
             "Support for other operations will be added in a future release."
         )
     if config is None:
-        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1, comm_sms=64)
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
@@ -61,9 +61,9 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
             "Use default config (use_gluon=False)."
         )
 
-    variant = getattr(config, "reduce_scatter_variant", "two_shot")
-    if variant != "two_shot":
-        raise ValueError(f"reduce_scatter only supports variant='two_shot', got '{variant}'.")
+    variant = getattr(config, "reduce_scatter_variant", "fused")
+    if variant not in ("two_shot", "fused"):
+        raise ValueError(f"reduce_scatter variant must be 'two_shot' or 'fused', got '{variant}'.")
 
     block_n = config.block_size_n
     if numel >= block_n:
@@ -75,21 +75,35 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
 
     from iris.ccl.triton.reduce_scatter import launch
 
-    use_inline = not async_op
-    barrier_state = None
-    if use_inline:
-        barrier_state = ctx._get_inline_barrier_state(group)
+    if variant == "fused":
+        launch(
+            output_tensor,
+            input_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config,
+            variant="fused",
+        )
+    else:
+        use_inline = not async_op
+        barrier_state = None
+        if use_inline:
+            barrier_state = ctx._get_inline_barrier_state(group)
 
-    launch(
-        output_tensor,
-        input_tensor,
-        ctx,
-        rank_in_group,
-        rank_global,
-        world_size,
-        rank_start,
-        rank_stride,
-        config,
-        inline_barrier=use_inline,
-        barrier_state=barrier_state,
-    )
+        launch(
+            output_tensor,
+            input_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config,
+            inline_barrier=use_inline,
+            barrier_state=barrier_state,
+        )

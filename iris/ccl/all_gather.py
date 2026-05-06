@@ -13,8 +13,8 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
-_RING_BYTES = 512 * 1024  # >=512KB: use ring all-gather
-_NCCL_LARGE_BYTES = 512 * 1024  # all sizes go to NCCL — ring/flat don't beat NCCL
+_FLAT_BYTES = 512 * 1024          # <512KB: use flat fused all-gather
+_NCCL_LARGE_BYTES = 512 * 1024  # >=512KB: NCCL
 
 
 def _ring_config_for_size(msg_bytes):
@@ -43,7 +43,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     numel_in = input_tensor.numel()
     msg_bytes = numel_in * input_tensor.element_size()
 
-    if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
+    if msg_bytes >= _NCCL_LARGE_BYTES:
         _dist.all_gather_into_tensor(output_tensor, input_tensor, group=group)
         return None
 
@@ -51,11 +51,11 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
-    if msg_bytes >= _RING_BYTES and world_size > 1 and config is None:
-        from iris.ccl.triton.all_gather_ring import launch as launch_ring
+    if msg_bytes < _FLAT_BYTES and world_size > 1 and config is None:
+        from iris.ccl.triton.all_gather_flat import launch as launch_flat
 
-        ring_config = _ring_config_for_size(msg_bytes)
-        launch_ring(
+        flat_config = Config(block_size_m=32, block_size_n=64, comm_sms=64, num_warps=8)
+        launch_flat(
             input_tensor,
             output_tensor,
             ctx,
@@ -64,11 +64,9 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
             world_size,
             rank_start,
             rank_stride,
-            ring_config,
+            flat_config,
             group=group,
         )
-        if not async_op:
-            ctx.device_barrier(group)
         return None
 
     if config is None:
