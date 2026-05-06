@@ -42,7 +42,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     msg_bytes = numel_in * input_tensor.element_size()
 
     is_flat = input_tensor.dim() == 1 or input_tensor.shape[0] == 1
-    nccl_threshold = 2 * 1024 * 1024 if is_flat else _NCCL_LARGE_BYTES
+    nccl_threshold = 4 * 1024 * 1024 if is_flat else _NCCL_LARGE_BYTES
 
     if msg_bytes >= nccl_threshold:
         _dist.all_gather_into_tensor(output_tensor, input_tensor, group=group)
