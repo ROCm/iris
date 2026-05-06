@@ -12,8 +12,8 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
-_TWOPHASE_BYTES = 512 * 1024  # >=512KB: use twophase
-_RING_BYTES = 512 * 1024  # >=512KB: ring broadcast (p2p flags)
+_TWOPHASE_BYTES = 1 * 1024 * 1024  # >=1MB: use twophase
+_RING_BYTES = 1 * 1024 * 1024  # >=1MB: ring broadcast (p2p flags)
 _NCCL_LARGE_BYTES = 128 * 1024 * 1024  # >=128MB: NCCL
 
 

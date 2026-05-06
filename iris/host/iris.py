@@ -1937,7 +1937,7 @@ class Iris:
             """
             if config is None and not async_op and group is None:
                 msg_bytes = tensor.numel() * tensor.element_size()
-                if msg_bytes < 512 * 1024:
+                if msg_bytes < 1 * 1024 * 1024:
                     cache_key = (tensor.data_ptr(), src)
                     cached_fn = self._bc_replay_cache.get(cache_key)
                     if cached_fn is not None:
@@ -1948,7 +1948,7 @@ class Iris:
             broadcast(tensor, self._iris, src=src, group=group, async_op=async_op, config=config)
             if config is None and not async_op and group is None:
                 msg_bytes = tensor.numel() * tensor.element_size()
-                if msg_bytes < 512 * 1024:
+                if msg_bytes < 1 * 1024 * 1024:
                     replay = self._build_bc_replay(tensor, src)
                     if replay is not None:
                         cache_key = (tensor.data_ptr(), src)
