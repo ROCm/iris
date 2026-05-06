@@ -9,16 +9,70 @@ hiding the details of allocators and inter-process memory sharing.
 """
 
 import logging
+import os
+import struct
 
 import numpy as np
 import torch
-import os
 
 from iris.host.logging.logging import _log_rank, logger
 from iris.host.memory.allocators import TorchAllocator, VMemAllocator, VMemChunkedAllocator
+from iris.drivers.base import PeerMapping
 from iris.host.distributed.fd_passing import setup_fd_infrastructure
 from iris.host.distributed.helpers import distributed_allgather
 from iris.host.platform.utils import is_simulation_env
+
+logger = logging.getLogger("iris.host.memory.symmetric_heap")
+
+# Layout of LocalHipDriver handle bytes: native int FD, then uint64 offset,
+# then uint64 base_size. See LocalHipDriver.export_handle in
+# iris/drivers/local/amd.py.
+_LOCAL_HIP_HANDLE_FMT = "=iQQ"
+_LOCAL_HIP_HANDLE_BYTES = struct.calcsize(_LOCAL_HIP_HANDLE_FMT)
+_LOCAL_CUDA_HANDLE_FMT = "=i"
+_LOCAL_CUDA_HANDLE_BYTES = struct.calcsize(_LOCAL_CUDA_HANDLE_FMT)
+
+
+def _extract_fd_from_local_handle(handle_bytes: bytes) -> int:
+    """Extract the FD from a local-driver handle byte string."""
+    if len(handle_bytes) == _LOCAL_HIP_HANDLE_BYTES:
+        fd, _offset, _base_size = struct.unpack(_LOCAL_HIP_HANDLE_FMT, handle_bytes)
+        return fd
+    if len(handle_bytes) == _LOCAL_CUDA_HANDLE_BYTES:
+        (fd,) = struct.unpack(_LOCAL_CUDA_HANDLE_FMT, handle_bytes)
+        return fd
+    raise RuntimeError(
+        "Unsupported local driver handle size: "
+        f"expected {_LOCAL_HIP_HANDLE_BYTES} (HIP) or {_LOCAL_CUDA_HANDLE_BYTES} "
+        f"(CUDA), got {len(handle_bytes)}"
+    )
+
+
+def _replace_fd_in_local_handle(handle_bytes: bytes, new_fd: int) -> bytes:
+    """Return a copy of handle_bytes with the FD field replaced."""
+    if len(handle_bytes) == _LOCAL_HIP_HANDLE_BYTES:
+        _old_fd, offset, base_size = struct.unpack(_LOCAL_HIP_HANDLE_FMT, handle_bytes)
+        return struct.pack(_LOCAL_HIP_HANDLE_FMT, new_fd, offset, base_size)
+    if len(handle_bytes) == _LOCAL_CUDA_HANDLE_BYTES:
+        return struct.pack(_LOCAL_CUDA_HANDLE_FMT, new_fd)
+    raise RuntimeError(
+        "Unsupported local driver handle size: "
+        f"expected {_LOCAL_HIP_HANDLE_BYTES} (HIP) or {_LOCAL_CUDA_HANDLE_BYTES} "
+        f"(CUDA), got {len(handle_bytes)}"
+    )
+
+
+def _validate_local_handle(handle_bytes: bytes) -> None:
+    """Validate that handle_bytes matches a supported local-driver layout."""
+    if len(handle_bytes) not in (
+        _LOCAL_HIP_HANDLE_BYTES,
+        _LOCAL_CUDA_HANDLE_BYTES,
+    ):
+        raise RuntimeError(
+            "Unsupported local driver handle size: "
+            f"expected {_LOCAL_HIP_HANDLE_BYTES} (HIP) or {_LOCAL_CUDA_HANDLE_BYTES} "
+            f"(CUDA), got {len(handle_bytes)}"
+        )
 
 
 class SymmetricHeap:
@@ -28,8 +82,16 @@ class SymmetricHeap:
     Manages distributed memory with symmetric addressing across ranks,
     handling all allocator coordination and memory sharing internally.
 
-    Supports multiple allocator backends: 'torch' (default) and 'vmem'.
+    Supports multiple allocator backends: 'torch' (default), 'vmem', and
+    'vmem_chunked'.
     """
+
+    _PEER_REFRESH_FAILURE_MESSAGE = (
+        "SymmetricHeap peer refresh failed unrecoverably. "
+        "Peer refresh is intentionally fatal because partial peer mappings "
+        "or VA reservations may remain; destroy the Iris context or restart "
+        "the process instead of retrying."
+    )
 
     def __init__(
         self,
@@ -47,7 +109,8 @@ class SymmetricHeap:
             device_id: GPU device ID
             cur_rank: Current process rank
             num_ranks: Total number of ranks
-            allocator_type: Type of allocator ("torch" or "vmem"); default "torch"
+            allocator_type: Type of allocator ("torch", "vmem", or
+                "vmem_chunked"); default "torch"
 
         Raises:
             ValueError: If allocator_type is not supported
@@ -56,6 +119,7 @@ class SymmetricHeap:
         self.device_id = device_id
         self.cur_rank = cur_rank
         self.num_ranks = num_ranks
+        self._peer_va_ranges = {}
         allocator_type = os.environ.get("IRIS_ALLOCATOR", allocator_type).lower()
         _log_rank(
             logging.INFO,
@@ -75,11 +139,38 @@ class SymmetricHeap:
         elif allocator_type == "vmem":
             self.allocator = VMemAllocator(heap_size, device_id, cur_rank, num_ranks)
         elif allocator_type == "vmem_chunked":
-            self.allocator = VMemChunkedAllocator(heap_size, device_id, cur_rank, num_ranks)
-        else:
-            raise ValueError(f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem', 'vmem_chunked'")
+            from iris.host.distributed.topology import TopologyDiscovery
 
-        self.fd_conns = setup_fd_infrastructure(cur_rank, num_ranks)
+            try:
+                topology = TopologyDiscovery.discover()
+            except Exception as exc:
+                logger.warning(
+                    "TopologyDiscovery.discover() failed (%s); VMemChunkedAllocator will default to INTRA_NODE driver.",
+                    exc,
+                )
+                topology = None
+            self.allocator = VMemChunkedAllocator(
+                heap_size,
+                device_id,
+                cur_rank,
+                num_ranks,
+                topology=topology,
+            )
+        else:
+            raise ValueError(
+                f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem', 'vmem_chunked'"
+            )
+
+        needs_fd_infra = True
+        if isinstance(self.allocator, VMemChunkedAllocator):
+            from iris.host.distributed.topology import InterconnectLevel
+
+            if self.allocator.transport_tier == InterconnectLevel.INTRA_RACK_FABRIC:
+                needs_fd_infra = False
+
+        self.fd_conns = (
+            setup_fd_infrastructure(cur_rank, num_ranks) if needs_fd_infra else None
+        )
         device = self.allocator.get_device()
 
         # Use int64 instead of uint64 for gloo backend compatibility
@@ -87,11 +178,16 @@ class SymmetricHeap:
         heap_bases_array = np.zeros(self.num_ranks, dtype=np.int64)
         # Create on CPU first, then move to device to avoid FFM ioctl issue
         if is_simulation_env():
-            self.heap_bases = torch.tensor(heap_bases_array, device="cpu", dtype=torch.int64)
+            self.heap_bases = torch.tensor(
+                heap_bases_array, device="cpu", dtype=torch.int64
+            )
             self.heap_bases = self.heap_bases.to(device)
         else:
-            self.heap_bases = torch.tensor(heap_bases_array, device=device, dtype=torch.int64)
+            self.heap_bases = torch.tensor(
+                heap_bases_array, device=device, dtype=torch.int64
+            )
 
+        self._peer_refresh_failed = False
         self.refresh_peer_access()
 
     def close_fd_conns(self):
@@ -111,7 +207,18 @@ class SymmetricHeap:
                     pass
             self.fd_conns = None
 
-    def allocate(self, num_elements: int, dtype: torch.dtype, alignment: int = 1024) -> torch.Tensor:
+    def _ensure_peer_refresh_healthy(self) -> None:
+        if self._peer_refresh_failed:
+            raise RuntimeError(self._PEER_REFRESH_FAILURE_MESSAGE)
+
+    def _peer_va_size(self) -> int:
+        if isinstance(self.allocator, (VMemAllocator, VMemChunkedAllocator)):
+            return self.allocator.va_size
+        return self.heap_size
+
+    def allocate(
+        self, num_elements: int, dtype: torch.dtype, alignment: int = 1024
+    ) -> torch.Tensor:
         """
         Allocate a tensor on the symmetric heap.
 
@@ -139,12 +246,14 @@ class SymmetricHeap:
             rank=self.cur_rank,
             num_ranks=self.num_ranks,
         )
+
+        self._ensure_peer_refresh_healthy()
+
         min_bytes = self.allocator.get_minimum_allocation_size()
         element_size = torch.tensor([], dtype=dtype).element_size()
         min_elements = max(1, (min_bytes + element_size - 1) // element_size)
         actual_elements = max(num_elements, min_elements)
 
-        # For chunked allocator, track chunk count to detect growth
         is_chunked = isinstance(self.allocator, VMemChunkedAllocator)
         chunks_before = self.allocator.get_num_chunks() if is_chunked else 0
 
@@ -152,7 +261,6 @@ class SymmetricHeap:
         tensor = tensor[:num_elements]
 
         if is_chunked:
-            # Only refresh peer access if new chunks were grown
             chunks_after = self.allocator.get_num_chunks()
             if chunks_after > chunks_before:
                 self.refresh_peer_access()
@@ -169,13 +277,38 @@ class SymmetricHeap:
         """
         Check if a tensor is allocated on the symmetric heap.
 
+        Returns True for any tensor whose memory falls inside either:
+        - the local allocator's own heap (delegates to allocator.owns_tensor), or
+        - any peer-VA region the symmetric heap has imported via
+          _refresh_peer_access_chunked / _refresh_peer_access_fabric.
+
+        The peer-region check is needed because the symmetric heap calls
+        driver.import_and_map directly (rather than through the allocator's
+        import_peer_chunk method), so peer mappings are tracked on the
+        symmetric heap, not the allocator. Without this check, peer-imported
+        tensors would incorrectly report as NOT on the symmetric heap.
+
         Args:
             tensor: PyTorch tensor to check
 
         Returns:
             True if tensor is on the symmetric heap, False otherwise
         """
-        return self.allocator.owns_tensor(tensor)
+        if self.allocator.owns_tensor(tensor):
+            return True
+
+        if not tensor.is_cuda or tensor.numel() == 0:
+            return False
+
+        if not self._peer_va_ranges:
+            return False
+
+        ptr = tensor.data_ptr()
+        va_size = self._peer_va_size()
+        for peer_va_base in self._peer_va_ranges.values():
+            if peer_va_base <= ptr < peer_va_base + va_size:
+                return True
+        return False
 
     def is_symmetric(self, tensor: torch.Tensor) -> bool:
         """
@@ -201,13 +334,30 @@ class SymmetricHeap:
 
     def get_heap_bases(self) -> torch.Tensor:
         """Get heap base addresses for all ranks as a tensor."""
+        self._ensure_peer_refresh_healthy()
         return self.heap_bases
 
     def refresh_peer_access(self):
         """
-        Refresh peer DMA-BUF imports using segmented export/import.
+        Refresh peer imports for the active allocator backend.
         Collective: all ranks must call together. Do not cache heap_bases.
+
+        Failure policy: refresh is not recoverable. The low-level refresh paths
+        are intentionally not transactional; if any error is raised, partial
+        imports or VA reservations may remain. This method marks the heap as
+        failed and rejects future heap operations instead of allowing retries
+        against possibly-stale mapping state.
         """
+        self._ensure_peer_refresh_healthy()
+        try:
+            self._refresh_peer_access_impl()
+        except Exception as exc:
+            self._peer_refresh_failed = True
+            logger.critical(self._PEER_REFRESH_FAILURE_MESSAGE, exc_info=True)
+            raise RuntimeError(self._PEER_REFRESH_FAILURE_MESSAGE) from exc
+
+    def _refresh_peer_access_impl(self):
+        """Implementation for refresh_peer_access; caller owns fatal handling."""
         import torch.distributed as dist
 
         _log_rank(
@@ -225,18 +375,33 @@ class SymmetricHeap:
         my_base = self.allocator.get_base_address()
         # Use int64 instead of uint64 to avoid gloo issues with all_gather_object
         local_base_arr = np.array([my_base], dtype=np.int64)
-        all_bases_arr = distributed_allgather(local_base_arr).reshape(self.num_ranks).astype(np.int64)
+        all_bases_arr = (
+            distributed_allgather(local_base_arr)
+            .reshape(self.num_ranks)
+            .astype(np.int64)
+        )
         self.heap_bases[self.cur_rank] = int(all_bases_arr[self.cur_rank])
 
-        if self.num_ranks == 1 or self.fd_conns is None:
+        if self.num_ranks == 1:
             return
 
         # Dispatch to allocator-specific peer access path
         if isinstance(self.allocator, VMemChunkedAllocator):
-            self._refresh_peer_access_chunked(dist)
+            from iris.host.distributed.topology import InterconnectLevel
+
+            if self.allocator.transport_tier == InterconnectLevel.INTRA_RACK_FABRIC:
+                self._refresh_peer_access_fabric(dist)
+            else:
+                if self.fd_conns is None:
+                    return
+                self._refresh_peer_access_chunked(dist)
         elif hasattr(self.allocator, "get_allocation_segments"):
+            if self.fd_conns is None:
+                return
             self._refresh_peer_access_segmented(dist)
         elif hasattr(self.allocator, "establish_peer_access"):
+            if self.fd_conns is None:
+                return
             self._refresh_peer_access_torch(dist, all_bases_arr)
         else:
             return
@@ -246,7 +411,7 @@ class SymmetricHeap:
 
     def _refresh_peer_access_torch(self, dist, all_bases_arr):
         """Peer access for TorchAllocator (IPC-based)."""
-        from iris.util import is_simulation_env
+        from iris.host.platform.utils import is_simulation_env
 
         if is_simulation_env():
             for r in range(self.num_ranks):
@@ -257,97 +422,269 @@ class SymmetricHeap:
             for r in range(self.num_ranks):
                 self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
 
+    def _get_collective_device(self, dist) -> torch.device:
+        """Choose a safe device for small distributed tensor collectives."""
+        if not dist.is_initialized():
+            return self.allocator.get_device()
+        try:
+            backend = str(dist.get_backend()).lower()
+        except Exception:
+            backend = "gloo"
+        if backend == "nccl":
+            return self.allocator.get_device()
+        return torch.device("cpu")
+
+    def _ensure_chunk_tracking_state(self) -> None:
+        if not hasattr(self, "_shared_chunk_counts"):
+            self._shared_chunk_counts = [0] * self.num_ranks
+        if not hasattr(self, "_peer_va_ranges"):
+            self._peer_va_ranges = {}
+        if not hasattr(self, "_peer_imported_mappings"):
+            self._peer_imported_mappings = {}
+
+    def _gather_total_chunk_counts(self, dist, local_total: int) -> list[int]:
+        count_device = self._get_collective_device(dist)
+        local_total_tensor = torch.tensor(
+            [local_total], dtype=torch.int64, device=count_device
+        )
+        gathered_counts = [
+            torch.zeros(1, dtype=torch.int64, device=count_device)
+            for _ in range(self.num_ranks)
+        ]
+        dist.all_gather(gathered_counts, local_total_tensor)
+        return [int(count.item()) for count in gathered_counts]
+
     def _refresh_peer_access_chunked(self, dist):
         """
-        Peer access for VMemChunkedAllocator (chunk-based).
+        Peer access for VMemChunkedAllocator on local-host (FD-based) transports.
 
-        Only exchanges NEW chunks that haven't been shared yet.
-        Each chunk is exported via hipMemExportToShareableHandle (VMem handle export),
-        not hipMemGetHandleForAddressRange (address range export).
+        Uses Unix-domain sockets for FD passing, but routes export/import
+        through the driver abstraction. The handle-byte layout is driver-
+        specific; this method only extracts and replaces the embedded FD
+        field for socket transport.
+
+        Supports both LocalHipDriver's 20-byte DMA-BUF layout and
+        LocalCudaDriver's 4-byte POSIX-FD layout.
         """
-        from iris.fd_passing import send_fd, recv_fd
-        from iris.hip import (
-            mem_export_to_shareable_handle,
-            mem_import_from_shareable_handle,
-            mem_map,
-            mem_set_access,
-            mem_address_reserve,
-            hipMemAccessDesc,
-            hipMemLocationTypeDevice,
-            hipMemAccessFlagsProtReadWrite,
+        from iris.host.distributed.fd_passing import recv_fd, send_fd
+
+        self._ensure_chunk_tracking_state()
+
+        my_total = self.allocator.get_num_chunks()
+        total_chunks_per_rank = self._gather_total_chunk_counts(dist, my_total)
+        my_total = total_chunks_per_rank[self.cur_rank]
+        my_already_shared = self._shared_chunk_counts[self.cur_rank]
+        new_chunk_records = self.allocator.get_allocation_chunks_since(
+            my_already_shared
         )
 
-        chunks = self.allocator.get_allocation_chunks()
+        my_metadata = [
+            (offset, size, handle_bytes)
+            for (_idx, offset, size, handle_bytes) in new_chunk_records
+        ]
+        gathered_metadata = [None] * self.num_ranks
+        dist.all_gather_object(gathered_metadata, my_metadata)
 
-        # Track which chunks have been shared already
-        if not hasattr(self, "_shared_chunk_count"):
-            self._shared_chunk_count = 0
+        new_fds = [
+            _extract_fd_from_local_handle(handle_bytes)
+            for (_offset, _size, handle_bytes) in my_metadata
+        ]
 
-        new_chunks = chunks[self._shared_chunk_count :]
-        if not new_chunks and self._shared_chunk_count > 0:
-            # Nothing new to share, but ensure heap_bases are set
-            return
+        pending_cloned_fds = []
+        try:
+            for peer, sock in self.fd_conns.items():
+                if peer == self.cur_rank:
+                    continue
 
-        # Export new chunk handles as DMA-BUF fds
-        new_fds = []
-        for chunk_idx, offset, size, handle in new_chunks:
-            fd = mem_export_to_shareable_handle(handle)
-            new_fds.append((fd, offset, size))
+                if peer not in self._peer_va_ranges:
+                    peer_va_base = self.allocator.driver.reserve_va(
+                        self.allocator.va_size,
+                        self.allocator.granularity,
+                    )
+                    self._peer_va_ranges[peer] = peer_va_base
+                else:
+                    peer_va_base = self._peer_va_ranges[peer]
+                self._peer_imported_mappings.setdefault(peer, [])
 
-        access_desc = hipMemAccessDesc()
-        access_desc.location.type = hipMemLocationTypeDevice
-        access_desc.location.id = self.device_id
-        access_desc.flags = hipMemAccessFlagsProtReadWrite
+                peer_metadata = gathered_metadata[peer]
+                if peer_metadata is None:
+                    raise RuntimeError(f"Missing chunk metadata for peer {peer}")
 
-        for peer, sock in self.fd_conns.items():
+                peer_new_count = (
+                    total_chunks_per_rank[peer] - self._shared_chunk_counts[peer]
+                )
+                if peer_new_count != len(peer_metadata):
+                    raise RuntimeError(
+                        f"Chunk metadata count mismatch for peer {peer}: "
+                        f"expected {peer_new_count}, got {len(peer_metadata)}"
+                    )
+
+                for peer_offset, peer_size, peer_handle_bytes in peer_metadata:
+                    if peer_offset + peer_size > self.allocator.va_size:
+                        raise RuntimeError(
+                            f"Peer {peer} chunk extends beyond va_size: "
+                            f"offset={peer_offset}, size={peer_size}, "
+                            f"va_size={self.allocator.va_size}"
+                        )
+                    _validate_local_handle(peer_handle_bytes)
+
+                cloned_fds = []
+                if self.cur_rank > peer:
+                    for my_fd in new_fds:
+                        send_fd(sock, my_fd)
+                    for _ in range(peer_new_count):
+                        cloned_fd, _ = recv_fd(sock)
+                        cloned_fds.append(cloned_fd)
+                        pending_cloned_fds.append(cloned_fd)
+                else:
+                    for _ in range(peer_new_count):
+                        cloned_fd, _ = recv_fd(sock)
+                        cloned_fds.append(cloned_fd)
+                        pending_cloned_fds.append(cloned_fd)
+                    for my_fd in new_fds:
+                        send_fd(sock, my_fd)
+
+                for cloned_fd, (peer_offset, peer_size, peer_handle_bytes) in zip(
+                    cloned_fds, peer_metadata
+                ):
+                    # After the upfront metadata validation above, handing the
+                    # FD to import_and_map transfers ownership to the driver.
+                    # Remove it from the local pending list first so the
+                    # cleanup path below only closes never-consumed FDs.
+                    pending_cloned_fds.pop(0)
+                    reconstructed_handle = _replace_fd_in_local_handle(
+                        peer_handle_bytes, cloned_fd
+                    )
+                    mapping = self.allocator.driver.import_and_map(
+                        peer,
+                        reconstructed_handle,
+                        peer_size,
+                        va=peer_va_base + peer_offset,
+                    )
+                    self._peer_imported_mappings[peer].append(mapping)
+
+                self._shared_chunk_counts[peer] = total_chunks_per_rank[peer]
+                self.heap_bases[peer] = peer_va_base
+        finally:
+            for fd in new_fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            for fd in pending_cloned_fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+        self._shared_chunk_counts[self.cur_rank] = my_total
+
+    def _refresh_peer_access_fabric(self, dist):
+        """
+        Peer access for VMemChunkedAllocator using fabric handles.
+
+        Works across hosts in the same fabric domain. Handle bytes travel
+        through torch.distributed collectives instead of AF_UNIX sockets.
+
+        Note: there is no FD cleanup in this method (cf.
+        _refresh_peer_access_chunked's try/finally). Fabric handles are
+        plain bytes, not kernel resources, so there is nothing to close.
+        """
+        handle_bytes_size = 64
+        record_bytes = 8 + 8 + handle_bytes_size
+
+        self._ensure_chunk_tracking_state()
+
+        my_total = self.allocator.get_num_chunks()
+        total_chunks_per_rank = self._gather_total_chunk_counts(dist, my_total)
+        my_total = total_chunks_per_rank[self.cur_rank]
+        my_already_shared = self._shared_chunk_counts[self.cur_rank]
+        new_chunks = self.allocator.get_allocation_chunks_since(my_already_shared)
+
+        payload = bytearray(len(new_chunks) * record_bytes)
+        for index, (_chunk_idx, offset, size, handle_bytes) in enumerate(new_chunks):
+            if len(handle_bytes) != handle_bytes_size:
+                raise RuntimeError(
+                    f"Expected {handle_bytes_size}-byte fabric handle, got {len(handle_bytes)}"
+                )
+            record_offset = index * record_bytes
+            payload[record_offset : record_offset + 8] = int(offset).to_bytes(
+                8, "little", signed=False
+            )
+            payload[record_offset + 8 : record_offset + 16] = int(size).to_bytes(
+                8, "little", signed=False
+            )
+            payload[record_offset + 16 : record_offset + record_bytes] = handle_bytes
+
+        gathered_payloads = [None] * self.num_ranks
+        dist.all_gather_object(gathered_payloads, bytes(payload))
+
+        for peer in range(self.num_ranks):
             if peer == self.cur_rank:
+                self._shared_chunk_counts[peer] = total_chunks_per_rank[peer]
                 continue
 
-            if not hasattr(self, "_peer_va_ranges"):
-                self._peer_va_ranges = {}
-            if not hasattr(self, "_peer_imported_mappings"):
-                self._peer_imported_mappings = {}
+            peer_new_count = (
+                total_chunks_per_rank[peer] - self._shared_chunk_counts[peer]
+            )
+            if peer_new_count == 0:
+                if peer in self._peer_va_ranges:
+                    self.heap_bases[peer] = self._peer_va_ranges[peer]
+                continue
+
+            peer_payload = gathered_payloads[peer] or b""
+            expected_size = peer_new_count * record_bytes
+            if len(peer_payload) != expected_size:
+                raise RuntimeError(
+                    f"Fabric payload size mismatch for peer {peer}: expected {expected_size}, got {len(peer_payload)}"
+                )
 
             if peer not in self._peer_va_ranges:
-                # Reserve VA for this peer's chunks -- same size as our VA
-                peer_va_base = mem_address_reserve(self.allocator.va_size, self.allocator.granularity, 0)
+                peer_va_base = self.allocator.driver.reserve_va(
+                    self.allocator.va_size,
+                    self.allocator.granularity,
+                )
                 self._peer_va_ranges[peer] = peer_va_base
-            if peer not in self._peer_imported_mappings:
-                self._peer_imported_mappings[peer] = []
-            peer_va_base = self._peer_va_ranges[peer]
+            else:
+                peer_va_base = self._peer_va_ranges[peer]
+            self._peer_imported_mappings.setdefault(peer, [])
 
-            # Exchange new chunk fds
-            for my_fd, my_offset, my_size in new_fds:
-                if self.cur_rank > peer:
-                    send_fd(sock, my_fd)
-                    peer_fd, _ = recv_fd(sock)
-                else:
-                    peer_fd, _ = recv_fd(sock)
-                    send_fd(sock, my_fd)
+            for index in range(peer_new_count):
+                record_offset = index * record_bytes
+                chunk_offset = int.from_bytes(
+                    peer_payload[record_offset : record_offset + 8],
+                    "little",
+                    signed=False,
+                )
+                chunk_size = int.from_bytes(
+                    peer_payload[record_offset + 8 : record_offset + 16],
+                    "little",
+                    signed=False,
+                )
+                handle_bytes = peer_payload[
+                    record_offset + 16 : record_offset + record_bytes
+                ]
+                if chunk_offset + chunk_size > self.allocator.va_size:
+                    raise RuntimeError(
+                        f"Peer {peer} chunk extends beyond va_size: "
+                        f"offset={chunk_offset}, size={chunk_size}, "
+                        f"va_size={self.allocator.va_size}"
+                    )
+                mapping = self.allocator.driver.import_and_map(
+                    peer,
+                    handle_bytes,
+                    chunk_size,
+                    va=peer_va_base + chunk_offset,
+                )
+                self._peer_imported_mappings[peer].append(mapping)
 
-                # Import and map peer's chunk
-                imported_handle = mem_import_from_shareable_handle(peer_fd)
-                os.close(peer_fd)
-
-                peer_va = peer_va_base + my_offset
-                mem_map(peer_va, my_size, 0, imported_handle)
-                mem_set_access(peer_va, my_size, access_desc)
-
-                # Track for cleanup: must unmap + release before freeing VA
-                self._peer_imported_mappings[peer].append((imported_handle, peer_va, my_size))
-
+            self._shared_chunk_counts[peer] = total_chunks_per_rank[peer]
             self.heap_bases[peer] = peer_va_base
-
-        # Close our exported fds
-        for fd, _, _ in new_fds:
-            os.close(fd)
-
-        self._shared_chunk_count = len(chunks)
 
     def _refresh_peer_access_segmented(self, dist):
         """Peer access for VMemAllocator (segment-based, legacy)."""
-        from iris.fd_passing import send_fd, recv_fd
-        from iris.hip import (
+        from iris.host.distributed.fd_passing import recv_fd, send_fd
+        from iris.host.platform.hip import (
             export_dmabuf_handle,
             mem_import_from_shareable_handle,
             mem_map,
@@ -385,7 +722,9 @@ class SymmetricHeap:
                 self._peer_va_ranges = {}
 
             if peer not in self._peer_va_ranges:
-                peer_va_base = mem_address_reserve(self.heap_size, self.allocator.granularity, 0)
+                peer_va_base = mem_address_reserve(
+                    self.heap_size, self.allocator.granularity, 0
+                )
                 self._peer_va_ranges[peer] = peer_va_base
             else:
                 peer_va_base = self._peer_va_ranges[peer]
@@ -428,7 +767,9 @@ class SymmetricHeap:
                 self._peer_imported_segments[peer].add(segment_key)
 
                 # Track for cleanup
-                self._peer_imported_mappings[peer].append((imported_handle, peer_va, segment_size))
+                self._peer_imported_mappings[peer].append(
+                    (imported_handle, peer_va, segment_size)
+                )
 
                 new_cumulative = offset + segment_size
                 if new_cumulative > cumulative_size:
@@ -471,8 +812,12 @@ class SymmetricHeap:
         Raises:
             RuntimeError: If allocator doesn't support imports or import fails
         """
+        self._ensure_peer_refresh_healthy()
+
         if not hasattr(self.allocator, "import_external_tensor"):
-            raise RuntimeError(f"{type(self.allocator).__name__} does not support as_symmetric().")
+            raise RuntimeError(
+                f"{type(self.allocator).__name__} does not support as_symmetric()."
+            )
 
         imported = self.allocator.import_external_tensor(external_tensor)
         self.refresh_peer_access()
@@ -480,10 +825,6 @@ class SymmetricHeap:
 
     def close(self):
         """Release resources held by the symmetric heap."""
-        # Synchronize GPU to ensure all in-flight kernels complete before
-        # unmapping memory.  Without this, async operations (NCCL collectives,
-        # .zero_(), .fill_()) may still reference mapped addresses, causing
-        # hipErrorUnknown when the VA ranges are freed.
         try:
             import torch
 
@@ -492,41 +833,42 @@ class SymmetricHeap:
         except Exception:
             pass
 
-        # Unmap and release peer-imported chunks BEFORE freeing VA ranges.
-        # mem_address_free on a VA range with active mappings corrupts the
-        # HIP runtime, causing hipErrorUnknown on subsequent GPU operations.
         if hasattr(self, "_peer_imported_mappings"):
-            try:
-                from iris.hip import mem_unmap, mem_release
+            has_driver = hasattr(self.allocator, "driver")
+            for peer, mappings in self._peer_imported_mappings.items():
+                for entry in mappings:
+                    try:
+                        if has_driver and isinstance(entry, PeerMapping):
+                            self.allocator.driver.cleanup_import(entry)
+                        else:
+                            from iris.host.platform.hip import mem_release, mem_unmap
 
-                for peer, mappings in self._peer_imported_mappings.items():
-                    for handle, va, size in mappings:
-                        try:
+                            handle, va, size = entry
                             mem_unmap(va, size)
-                        except Exception:
-                            pass
-                        try:
                             mem_release(handle)
-                        except Exception:
-                            pass
-                self._peer_imported_mappings.clear()
-            except ImportError:
-                pass
+                    except Exception as exc:
+                        logger.warning("cleanup failed for peer %d: %s", peer, exc)
+            self._peer_imported_mappings.clear()
 
         # Free peer VA ranges (now safe -- all mappings have been removed)
-        if hasattr(self, "_peer_va_ranges"):
-            try:
-                from iris.hip import mem_address_free
+        if self._peer_va_ranges:
+            va_size = self._peer_va_size()
+            has_driver = hasattr(self.allocator, "driver")
+            if has_driver:
+                for peer, va_base in self._peer_va_ranges.items():
+                    try:
+                        self.allocator.driver.free_va(va_base, va_size)
+                    except Exception as exc:
+                        logger.warning("free_va failed for peer %d: %s", peer, exc)
+            else:
+                from iris.host.platform.hip import mem_address_free
 
                 for peer, va_base in self._peer_va_ranges.items():
                     try:
-                        va_size = getattr(self.allocator, "va_size", self.heap_size)
                         mem_address_free(va_base, va_size)
-                    except Exception:
-                        pass
-                self._peer_va_ranges.clear()
-            except ImportError:
-                pass
+                    except Exception as exc:
+                        logger.warning("VA free failed for peer %d: %s", peer, exc)
+            self._peer_va_ranges.clear()
 
         # Close the allocator
         if hasattr(self, "allocator") and hasattr(self.allocator, "close"):

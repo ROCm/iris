@@ -471,6 +471,7 @@ class LocalCudaDriver(BaseDriver):
             except OSError:
                 pass
             _cuda_try(err, "cuMemImportFromShareableHandle")
+        os.close(fd_value)
         return int(imported.value)
 
     def import_and_map(
@@ -481,11 +482,11 @@ class LocalCudaDriver(BaseDriver):
         imported_handle = self._import_handle(handle_bytes)
 
         granularity = self._get_granularity()
-        reserved_va = va is None
+        va_owned = va is None
         mapped_va = int(va) if va is not None else 0
         mapped = False
         try:
-            if reserved_va:
+            if va_owned:
                 reserved = ctypes.c_uint64()
                 _cuda_try(
                     _cuda_driver.cuMemAddressReserve(
@@ -519,7 +520,7 @@ class LocalCudaDriver(BaseDriver):
                     ),
                 )
             )
-            if reserved_va and mapped_va:
+            if va_owned and mapped_va:
                 steps.append(
                     (
                         "cuMemAddressFree",
@@ -532,18 +533,28 @@ class LocalCudaDriver(BaseDriver):
             _cleanup_after_failure(*steps)
             raise
 
+        tag = "driver_va" if va_owned else "caller_va"
         return PeerMapping(
             peer_rank=peer_rank,
             transport=InterconnectLevel.INTRA_NODE,
             remote_va=mapped_va,
             size=size,
-            _driver_handle=imported_handle,
+            _driver_handle=(tag, imported_handle),
         )
 
     def cleanup_import(self, mapping: PeerMapping) -> None:
         """Unmap, release, and free an imported CUDA VMM mapping."""
         self._check_initialized()
-        _run_cleanup_steps(
+        if (
+            isinstance(mapping._driver_handle, tuple)
+            and len(mapping._driver_handle) == 2
+        ):
+            tag, imported_handle = mapping._driver_handle
+        else:
+            tag = "driver_va"
+            imported_handle = mapping._driver_handle
+
+        steps: list[tuple[str, Callable[[], None]]] = [
             (
                 "cuMemUnmap",
                 lambda: _cuda_try(
@@ -554,17 +565,21 @@ class LocalCudaDriver(BaseDriver):
             (
                 "cuMemRelease",
                 lambda: _cuda_try(
-                    _cuda_driver.cuMemRelease(mapping._driver_handle), "cuMemRelease"
+                    _cuda_driver.cuMemRelease(imported_handle), "cuMemRelease"
                 ),
             ),
-            (
-                "cuMemAddressFree",
-                lambda: _cuda_try(
-                    _cuda_driver.cuMemAddressFree(mapping.remote_va, mapping.size),
+        ]
+        if tag == "driver_va":
+            steps.append(
+                (
                     "cuMemAddressFree",
-                ),
-            ),
-        )
+                    lambda: _cuda_try(
+                        _cuda_driver.cuMemAddressFree(mapping.remote_va, mapping.size),
+                        "cuMemAddressFree",
+                    ),
+                )
+            )
+        _run_cleanup_steps(*steps)
 
     def cleanup_local(self, allocation: LocalAllocation) -> None:
         """Unmap, release, and conditionally free a local CUDA VMM allocation."""

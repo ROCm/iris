@@ -157,6 +157,9 @@ def _configure_signatures() -> None:
     hip_mem_get_handle_for_address_range = _get_required_hip_symbol(
         "hipMemGetHandleForAddressRange"
     )
+    hip_mem_import_from_shareable_handle = _get_required_hip_symbol(
+        "hipMemImportFromShareableHandle"
+    )
     hip_import_external_memory = _get_required_hip_symbol("hipImportExternalMemory")
     hip_external_memory_get_mapped_buffer = _get_required_hip_symbol(
         "hipExternalMemoryGetMappedBuffer"
@@ -232,6 +235,13 @@ def _configure_signatures() -> None:
         ctypes.c_ulonglong,
     ]
     hip_mem_get_handle_for_address_range.restype = ctypes.c_int
+
+    hip_mem_import_from_shareable_handle.argtypes = [
+        ctypes.POINTER(hipMemGenericAllocationHandle_t),
+        ctypes.c_void_p,
+        ctypes.c_int,
+    ]
+    hip_mem_import_from_shareable_handle.restype = ctypes.c_int
 
     hip_import_external_memory.argtypes = [
         ctypes.POINTER(hipExternalMemory_t),
@@ -501,18 +511,77 @@ class LocalHipDriver(BaseDriver):
     def import_and_map(
         self, peer_rank: int, handle_bytes: bytes, size: int, va: Optional[int] = None
     ) -> PeerMapping:
-        """Import a DMA-BUF descriptor; caller-supplied import VA is not supported."""
+        """Import a DMA-BUF descriptor and map it into local GPU address space."""
         self._check_initialized()
-        if va is not None:
-            raise LocalHipNotSupported(
-                "LocalHipDriver does not support caller-supplied VA on import"
-            )
         if len(handle_bytes) != _AMD_HANDLE_BYTES:
             raise LocalHipError(
                 f"AMD local handle must be {_AMD_HANDLE_BYTES} bytes, got {len(handle_bytes)}"
             )
 
         fd, offset, base_size = struct.unpack(_AMD_HANDLE_FMT, handle_bytes)
+        if size > base_size - offset:
+            raise LocalHipError(
+                f"Requested map size {size} exceeds imported base range {base_size} at offset {offset}"
+            )
+
+        if va is not None:
+            mapped_va = int(va)
+            imported_handle = hipMemGenericAllocationHandle_t()
+            mapped = False
+            fd_open = True
+            try:
+                _hip_try(
+                    _hip.hipMemImportFromShareableHandle(
+                        ctypes.byref(imported_handle),
+                        ctypes.c_void_p(fd),
+                        hipMemHandleTypePosixFileDescriptor,
+                    ),
+                    "hipMemImportFromShareableHandle",
+                )
+                os.close(fd)
+                fd_open = False
+
+                _hip_try(
+                    _hip.hipMemMap(
+                        ctypes.c_void_p(mapped_va), size, offset, imported_handle, 0
+                    ),
+                    "hipMemMap",
+                )
+                mapped = True
+                self._mem_set_access(mapped_va, size)
+                return PeerMapping(
+                    peer_rank=peer_rank,
+                    transport=InterconnectLevel.INTRA_NODE,
+                    remote_va=mapped_va,
+                    size=size,
+                    _driver_handle=("vmm", int(imported_handle.value)),
+                )
+            except Exception:
+                steps: list[tuple[str, Callable[[], None]]] = []
+                if mapped:
+                    steps.append(
+                        (
+                            "hipMemUnmap",
+                            lambda: _hip_try(
+                                _hip.hipMemUnmap(ctypes.c_void_p(mapped_va), size),
+                                "hipMemUnmap",
+                            ),
+                        )
+                    )
+                if imported_handle.value:
+                    steps.append(
+                        (
+                            "hipMemRelease",
+                            lambda: _hip_try(
+                                _hip.hipMemRelease(imported_handle),
+                                "hipMemRelease",
+                            ),
+                        )
+                    )
+                if fd_open:
+                    steps.append(("os.close", lambda: os.close(fd)))
+                _cleanup_after_failure(*steps)
+                raise
 
         mem_handle_desc = hipExternalMemoryHandleDesc()
         mem_handle_desc.type = hipExternalMemoryHandleTypeOpaqueFd
@@ -552,11 +621,6 @@ class LocalHipDriver(BaseDriver):
                     "hipExternalMemoryGetMappedBuffer returned a null pointer"
                 )
 
-            if size > base_size - offset:
-                raise LocalHipError(
-                    f"Requested map size {size} exceeds imported base range {base_size} at offset {offset}"
-                )
-
             remote_va = int(mapped_base.value) + int(offset)
             return PeerMapping(
                 peer_rank=peer_rank,
@@ -581,6 +645,32 @@ class LocalHipDriver(BaseDriver):
     def cleanup_import(self, mapping: PeerMapping) -> None:
         """Release an imported HIP external-memory mapping."""
         self._check_initialized()
+        if (
+            isinstance(mapping._driver_handle, tuple)
+            and len(mapping._driver_handle) == 2
+            and mapping._driver_handle[0] == "vmm"
+        ):
+            imported_handle = hipMemGenericAllocationHandle_t(mapping._driver_handle[1])
+            _run_cleanup_steps(
+                (
+                    "hipMemUnmap",
+                    lambda: _hip_try(
+                        _hip.hipMemUnmap(
+                            ctypes.c_void_p(mapping.remote_va), mapping.size
+                        ),
+                        "hipMemUnmap",
+                    ),
+                ),
+                (
+                    "hipMemRelease",
+                    lambda: _hip_try(
+                        _hip.hipMemRelease(imported_handle),
+                        "hipMemRelease",
+                    ),
+                ),
+            )
+            return
+
         ext_mem, _base_size = mapping._driver_handle
         try:
             _hip_try(_hip.hipDestroyExternalMemory(ext_mem), "hipDestroyExternalMemory")
