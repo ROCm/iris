@@ -1229,7 +1229,7 @@ class Iris:
             """
             if config is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
-                if msg_bytes >= 768 * 1024:
+                if msg_bytes >= 512 * 1024:
                     import torch.distributed as _dist
 
                     _dist.all_gather_into_tensor(output_tensor.contiguous(), input_tensor.contiguous(), group=group)
