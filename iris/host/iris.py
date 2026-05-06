@@ -1206,7 +1206,7 @@ class Iris:
                 if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
                     self._all_to_all_single(cached[2], cached[3])
                     return
-                ov, iv = output_tensor.view(-1), input_tensor.view(-1)
+                ov, iv = output_tensor.contiguous().view(-1), input_tensor.contiguous().view(-1)
                 self._nccl_cache[key] = (output_tensor, input_tensor, ov, iv)
                 self._all_to_all_single(ov, iv)
                 return
@@ -1247,13 +1247,13 @@ class Iris:
             """
             if config is None and not async_op and group is None:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
-                if msg_bytes >= 2 * 1024 * 1024:
+                if msg_bytes < 8 * 1024 or msg_bytes >= 2 * 1024 * 1024:
                     key = ("ag", output_tensor.data_ptr(), input_tensor.data_ptr())
                     cached = self._nccl_cache.get(key)
                     if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
                         self._all_gather_into_tensor(cached[2], cached[3], group=group)
                         return None
-                    ov, iv = output_tensor.view(-1), input_tensor.view(-1)
+                    ov, iv = output_tensor.contiguous().view(-1), input_tensor.contiguous().view(-1)
                     self._nccl_cache[key] = (output_tensor, input_tensor, ov, iv)
                     self._all_gather_into_tensor(ov, iv, group=group)
                     return None
@@ -1396,7 +1396,6 @@ class Iris:
 
                 ctx = self._iris
                 from iris.ccl.utils import extract_group_info
-
                 rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(None, ctx)
                 heap_bases = ctx.get_heap_bases()
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
@@ -1406,16 +1405,8 @@ class Iris:
                     config = Config(block_size_m=32, block_size_n=128, all_reduce_variant="one_shot_fused", comm_sms=64)
                     block_n = 128
                     numel = input_tensor.numel()
-                    inp_r = (
-                        input_tensor.contiguous().view(-1, block_n)
-                        if numel >= block_n
-                        else input_tensor.contiguous().view(1, -1)
-                    )
-                    out_r = (
-                        output_tensor.contiguous().view(-1, block_n)
-                        if numel >= block_n
-                        else output_tensor.contiguous().view(1, -1)
-                    )
+                    inp_r = input_tensor.contiguous().view(-1, block_n) if numel >= block_n else input_tensor.contiguous().view(1, -1)
+                    out_r = output_tensor.contiguous().view(-1, block_n) if numel >= block_n else output_tensor.contiguous().view(1, -1)
                     M, N = inp_r.shape
                     num_pid_m = (M + 32 - 1) // 32
                     num_pid_n = (N + 128 - 1) // 128
@@ -1432,48 +1423,21 @@ class Iris:
 
                     def replay():
                         kernel[grid](
-                            inp_r,
-                            out_r,
-                            M,
-                            N,
-                            sm,
-                            sn,
-                            om,
-                            on,
+                            inp_r, out_r, M, N, sm, sn, om, on,
                             heap_bases,
-                            rank_in_group,
-                            rank_global,
-                            world_size,
-                            rank_start,
-                            rank_stride,
-                            sf,
-                            ef,
-                            32,
-                            128,
-                            sw,
-                            fused_sms,
-                            nx,
-                            cs,
-                            num_warps=16,
-                            num_stages=2,
+                            rank_in_group, rank_global, world_size, rank_start, rank_stride,
+                            sf, ef,
+                            32, 128, sw, fused_sms, nx, cs,
+                            num_warps=16, num_stages=2,
                         )
-
                     return replay
 
                 elif variant == "two_shot":
                     config = Config(block_size_m=32, block_size_n=64, all_reduce_variant="two_shot", comm_sms=64)
                     block_n = 64
                     numel = input_tensor.numel()
-                    inp_r = (
-                        input_tensor.contiguous().view(-1, block_n)
-                        if numel >= block_n
-                        else input_tensor.contiguous().view(1, -1)
-                    )
-                    out_r = (
-                        output_tensor.contiguous().view(-1, block_n)
-                        if numel >= block_n
-                        else output_tensor.contiguous().view(1, -1)
-                    )
+                    inp_r = input_tensor.contiguous().view(-1, block_n) if numel >= block_n else input_tensor.contiguous().view(1, -1)
+                    out_r = output_tensor.contiguous().view(-1, block_n) if numel >= block_n else output_tensor.contiguous().view(1, -1)
                     M, N = inp_r.shape
                     grid = (64,)
                     kernel = persistent_all_reduce_two_shot
@@ -1488,36 +1452,13 @@ class Iris:
 
                     def replay():
                         kernel[grid](
-                            inp_r,
-                            out_r,
-                            M,
-                            N,
-                            sm,
-                            sn,
-                            om,
-                            on,
+                            inp_r, out_r, M, N, sm, sn, om, on,
                             heap_bases,
-                            rank_in_group,
-                            rank_global,
-                            world_size,
-                            rank_start,
-                            rank_stride,
-                            bf,
-                            wg,
-                            bs,
-                            32,
-                            64,
-                            sw,
-                            64,
-                            nx,
-                            cs,
-                            distr,
-                            True,
-                            num_warps=8,
-                            num_stages=1,
-                            waves_per_eu=1,
+                            rank_in_group, rank_global, world_size, rank_start, rank_stride,
+                            bf, wg, bs,
+                            32, 64, sw, 64, nx, cs, distr, True,
+                            num_warps=8, num_stages=1, waves_per_eu=1,
                         )
-
                     return replay
 
             except Exception:
@@ -1606,16 +1547,8 @@ class Iris:
 
                 block_n = config.block_size_n
                 numel = input_tensor.numel()
-                inp_r = (
-                    input_tensor.contiguous().view(-1, block_n)
-                    if numel >= block_n
-                    else input_tensor.contiguous().view(1, -1)
-                )
-                out_r = (
-                    output_tensor.contiguous().view(-1, block_n)
-                    if numel >= block_n
-                    else output_tensor.contiguous().view(1, -1)
-                )
+                inp_r = input_tensor.contiguous().view(-1, block_n) if numel >= block_n else input_tensor.contiguous().view(1, -1)
+                out_r = output_tensor.contiguous().view(-1, block_n) if numel >= block_n else output_tensor.contiguous().view(1, -1)
                 M, N = inp_r.shape
                 grid = (config.comm_sms,)
                 kernel = persistent_reduce_scatter_two_shot
@@ -1628,36 +1561,13 @@ class Iris:
 
                 def replay():
                     kernel[grid](
-                        inp_r,
-                        out_r,
-                        M,
-                        N,
-                        sm,
-                        sn,
-                        om,
-                        on,
+                        inp_r, out_r, M, N, sm, sn, om, on,
                         heap_bases,
-                        rank_in_group,
-                        rank_global,
-                        world_size,
-                        rank_start,
-                        rank_stride,
-                        bf,
-                        wg,
-                        bs,
-                        32,
-                        64,
-                        sw,
-                        64,
-                        nx,
-                        cs,
-                        distr,
-                        True,
-                        num_warps=config.num_warps,
-                        num_stages=config.num_stages,
-                        waves_per_eu=config.waves_per_eu,
+                        rank_in_group, rank_global, world_size, rank_start, rank_stride,
+                        bf, wg, bs,
+                        32, 64, sw, 64, nx, cs, distr, True,
+                        num_warps=config.num_warps, num_stages=config.num_stages, waves_per_eu=config.waves_per_eu,
                     )
-
                 return replay
             except Exception:
                 return None
@@ -1699,35 +1609,13 @@ class Iris:
 
                 def replay():
                     kernel[grid](
-                        inp_r,
-                        out_r,
-                        M,
-                        N,
-                        sm,
-                        sn,
-                        om,
-                        on,
+                        inp_r, out_r, M, N, sm, sn, om, on,
                         heap_bases,
-                        rank_in_group,
-                        rank_global,
-                        world_size,
-                        rank_start,
-                        rank_stride,
-                        bf,
-                        wg,
-                        bs,
-                        32,
-                        64,
-                        sw,
-                        64,
-                        nx,
-                        cs,
-                        True,
-                        num_warps=config.num_warps,
-                        num_stages=config.num_stages,
-                        waves_per_eu=config.waves_per_eu,
+                        rank_in_group, rank_global, world_size, rank_start, rank_stride,
+                        bf, wg, bs,
+                        32, 64, sw, 64, nx, cs, True,
+                        num_warps=config.num_warps, num_stages=config.num_stages, waves_per_eu=config.waves_per_eu,
                     )
-
                 return replay
             except Exception:
                 return None
@@ -1827,33 +1715,13 @@ class Iris:
 
                 def replay():
                     kernel[grid](
-                        t_r,
-                        M,
-                        N,
-                        sm,
-                        sn,
+                        t_r, M, N, sm, sn,
                         heap_bases,
-                        rank_in_group,
-                        rank_global,
-                        src,
-                        world_size,
-                        rank_start,
-                        rank_stride,
-                        bf,
-                        wg,
-                        bs,
-                        32,
-                        64,
-                        sw,
-                        64,
-                        nx,
-                        cs,
-                        True,
-                        num_warps=config.num_warps,
-                        num_stages=config.num_stages,
-                        waves_per_eu=config.waves_per_eu,
+                        rank_in_group, rank_global, src, world_size, rank_start, rank_stride,
+                        bf, wg, bs,
+                        32, 64, sw, 64, nx, cs, True,
+                        num_warps=config.num_warps, num_stages=config.num_stages, waves_per_eu=config.waves_per_eu,
                     )
-
                 return replay
             except Exception:
                 return None
@@ -1890,36 +1758,13 @@ class Iris:
 
                 def replay():
                     kernel[grid](
-                        inp_r,
-                        out_r,
-                        M,
-                        N,
-                        sm,
-                        sn,
-                        om,
-                        on,
+                        inp_r, out_r, M, N, sm, sn, om, on,
                         heap_bases,
-                        rank_in_group,
-                        rank_global,
-                        dst,
-                        world_size,
-                        rank_start,
-                        rank_stride,
-                        bf,
-                        wg,
-                        bs,
-                        32,
-                        64,
-                        sw,
-                        64,
-                        nx,
-                        cs,
-                        True,
-                        num_warps=config.num_warps,
-                        num_stages=config.num_stages,
-                        waves_per_eu=config.waves_per_eu,
+                        rank_in_group, rank_global, dst, world_size, rank_start, rank_stride,
+                        bf, wg, bs,
+                        32, 64, sw, 64, nx, cs, True,
+                        num_warps=config.num_warps, num_stages=config.num_stages, waves_per_eu=config.waves_per_eu,
                     )
-
                 return replay
             except Exception:
                 return None
