@@ -12,7 +12,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_FALLBACK_BYTES = 0
-_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # <8MB: native two_shot, >=8MB: NCCL
+_NCCL_LARGE_BYTES = 12 * 1024 * 1024  # <12MB: native two_shot, >=12MB: NCCL
 
 _ar_nccl_cache: dict = {}
 
