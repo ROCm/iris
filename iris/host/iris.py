@@ -1768,13 +1768,32 @@ class Iris:
 
                 def replay():
                     kernel[grid](
-                        inp_r, out_r, chunk_rows, N, sm, sn, om, on,
+                        inp_r,
+                        out_r,
+                        chunk_rows,
+                        N,
+                        sm,
+                        sn,
+                        om,
+                        on,
                         heap_bases,
-                        rank_in_group, rank_global, world_size, rank_start, rank_stride,
-                        start_flags, end_flags,
-                        32, 64, 64, nx, cs,
-                        num_warps=8, num_stages=config.num_stages, waves_per_eu=config.waves_per_eu,
+                        rank_in_group,
+                        rank_global,
+                        world_size,
+                        rank_start,
+                        rank_stride,
+                        start_flags,
+                        end_flags,
+                        32,
+                        64,
+                        64,
+                        nx,
+                        cs,
+                        num_warps=8,
+                        num_stages=config.num_stages,
+                        waves_per_eu=config.waves_per_eu,
                     )
+
                 return replay
             except Exception:
                 return None
