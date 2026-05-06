@@ -1155,6 +1155,7 @@ class Iris:
             self._ag_replay_cache = {}
             self._bc_replay_cache = {}
             self._rd_replay_cache = {}
+            self._rd_ring_replay_cache = {}
             self._ag_flat_replay_cache = {}
             self._sc_replay_cache = {}
             self._ga_replay_cache = {}
@@ -1932,6 +1933,58 @@ class Iris:
             except Exception:
                 return None
 
+        def _build_rd_ring_replay(self, input_tensor, output_tensor, dst):
+            try:
+                from iris.ccl.triton.reduce_ring import (
+                    persistent_reduce_ring,
+                    _get_step_flags,
+                    _advance_step_base,
+                )
+                from iris.ccl.config import Config
+                from iris.ccl.utils import extract_group_info
+
+                ctx = self._iris
+                config = Config(block_size_m=32, block_size_n=64, comm_sms=64)
+                rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(None, ctx)
+                heap_bases = ctx.get_heap_bases()
+                barrier_state = ctx._get_inline_barrier_state(None)
+                bf, wg, bs = barrier_state
+
+                block_n = config.block_size_n
+                numel = input_tensor.numel()
+                if numel >= block_n:
+                    inp_r = input_tensor.contiguous().view(-1, block_n)
+                    out_r = output_tensor.contiguous().view(-1, block_n)
+                else:
+                    inp_r = input_tensor.contiguous().view(1, -1)
+                    out_r = output_tensor.contiguous().view(1, -1)
+                M, N = inp_r.shape
+                chunk_rows = (M + world_size - 1) // world_size
+                chunk_rows = ((chunk_rows + config.block_size_m - 1) // config.block_size_m) * config.block_size_m
+                grid = (config.comm_sms,)
+                kernel = persistent_reduce_ring
+                step_flags = _get_step_flags(ctx, None)
+                sm, sn = inp_r.stride(0), inp_r.stride(1)
+                om, on = out_r.stride(0), out_r.stride(1)
+                nx = config.num_xcds
+                cs = config.chunk_size
+                _ws = world_size
+
+                def replay():
+                    sb = _advance_step_base(_ws, None)
+                    kernel[grid](
+                        inp_r, out_r, M, N, sm, sn, om, on, chunk_rows,
+                        heap_bases, rank_in_group, rank_global, dst,
+                        world_size, rank_start, rank_stride,
+                        step_flags, sb, bf, wg, bs,
+                        32, 64, 64, nx, cs, True, True,
+                        num_warps=8, num_stages=1, waves_per_eu=1,
+                    )
+
+                return replay
+            except Exception:
+                return None
+
         def broadcast(self, tensor, src=0, group=None, async_op=False, config=None):
             """
             In-place broadcast: src rank's data is copied to all other ranks.
@@ -1992,6 +2045,12 @@ class Iris:
                     if cached_fn is not None:
                         cached_fn()
                         return
+                elif rd_bytes < 4 * 1024 * 1024:
+                    cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr(), dst)
+                    cached_fn = self._rd_ring_replay_cache.get(cache_key)
+                    if cached_fn is not None:
+                        cached_fn()
+                        return
             from iris.ccl.reduce import reduce
 
             reduce(
@@ -2004,6 +2063,11 @@ class Iris:
                     if replay is not None:
                         cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr(), dst)
                         self._rd_replay_cache[cache_key] = replay
+                elif rd_bytes < 4 * 1024 * 1024:
+                    replay = self._build_rd_ring_replay(input_tensor, output_tensor, dst)
+                    if replay is not None:
+                        cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr(), dst)
+                        self._rd_ring_replay_cache[cache_key] = replay
 
         def scatter(self, output_tensor, input_tensor, src=0, group=None, async_op=False, config=None):
             """
