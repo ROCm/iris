@@ -1231,6 +1231,7 @@ class Iris:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
                 if msg_bytes >= 768 * 1024:
                     import torch.distributed as _dist
+
                     _dist.all_gather_into_tensor(output_tensor.contiguous(), input_tensor.contiguous(), group=group)
                     return None
             from iris.ccl.all_gather import all_gather
@@ -1355,6 +1356,7 @@ class Iris:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
                 if msg_bytes >= 768 * 1024:
                     import torch.distributed as _dist
+
                     _dist.reduce_scatter_tensor(output_tensor.contiguous(), input_tensor.contiguous(), group=group)
                     return
             from iris.ccl.reduce_scatter import reduce_scatter
