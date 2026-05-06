@@ -1150,6 +1150,7 @@ class Iris:
             self._nccl_cache = {}
             self._ar_workspace = None
             import torch.distributed as _dist
+
             self._all_gather_into_tensor = _dist.all_gather_into_tensor
             self._all_reduce = _dist.all_reduce
             self._reduce_scatter_tensor = _dist.reduce_scatter_tensor
@@ -1370,6 +1371,7 @@ class Iris:
                         self._reduce_scatter_tensor(cached[2], cached[3], group=group)
                         return
                     import torch.distributed as _dist
+
                     ws = _dist.get_world_size(group)
                     numel = input_tensor.numel()
                     ov = output_tensor.view(-1)[: numel // ws]
@@ -1425,6 +1427,7 @@ class Iris:
                     else:
                         self._reduce(input_tensor, dst=dst, group=group)
                         import torch.distributed as _dist
+
                         if _dist.get_rank(group) == dst:
                             output_tensor.copy_(input_tensor)
                     return
