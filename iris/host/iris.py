@@ -2059,8 +2059,9 @@ class Iris:
                     if output_tensor.data_ptr() == input_tensor.data_ptr():
                         self._reduce(output_tensor, dst=dst, group=group)
                     else:
-                        output_tensor.copy_(input_tensor)
-                        self._reduce(output_tensor, dst=dst, group=group)
+                        self._reduce(input_tensor, dst=dst, group=group)
+                        if self._get_rank(group) == dst:
+                            output_tensor.copy_(input_tensor)
                     return
             if config is None and op is None and not async_op and group is None:
                 rd_bytes = input_tensor.numel() * input_tensor.element_size()

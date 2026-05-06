@@ -47,8 +47,9 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         if output_tensor.data_ptr() == input_tensor.data_ptr():
             _dist.reduce(output_tensor, dst=dst, group=group)
         else:
-            output_tensor.copy_(input_tensor)
-            _dist.reduce(output_tensor, dst=dst, group=group)
+            _dist.reduce(input_tensor, dst=dst, group=group)
+            if rank_in_group == dst:
+                output_tensor.copy_(input_tensor)
         return
 
     from iris.ccl.config import Config
