@@ -94,7 +94,6 @@ def persistent_reduce_scatter_two_shot(
 
         is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
 
-        # Build indices (used by both paths)
         rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
 
@@ -102,15 +101,17 @@ def persistent_reduce_scatter_two_shot(
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
 
         input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
-        output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
-
         base_ptr = input_ptr + input_offset
+
+        if DISTRIBUTION == 0:
+            out_rm_base = tile_offset * BLOCK_SIZE_M
+        else:
+            out_rm_base = (tile_id - start_tile) * BLOCK_SIZE_M
+        out_rm = out_rm_base + tl.arange(0, BLOCK_SIZE_M)
+        out_rm = tl.max_contiguous(tl.multiple_of(out_rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        output_offset = out_rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
         out_ptr = output_ptr + output_offset
 
-        # Fast path: NO MASKS (full tiles)
-        # The masking is problem size dependent, and the compiler does not recognize it can have two paths
-        # (one with masks and one without). Separate unmasked paths allow the compiler to generate
-        # more efficient vectorized instructions.
         if is_full:
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride
@@ -122,11 +123,8 @@ def persistent_reduce_scatter_two_shot(
 
             reduced = acc.to(output_ptr.type.element_ty)
 
-            # Store only to own rank (no broadcast)
             tl.store(out_ptr, reduced, cache_modifier=".wt")
 
-        # Slow path: MASKED (only boundary tiles land here)
-        # This path handles tiles at tensor boundaries where not all elements are valid.
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
@@ -140,7 +138,6 @@ def persistent_reduce_scatter_two_shot(
 
             reduced = acc.to(output_ptr.type.element_ty)
 
-            # Store only to own rank (no broadcast)
             tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
 
     if INLINE_BARRIER:

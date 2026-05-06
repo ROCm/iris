@@ -1304,7 +1304,7 @@ class Iris:
             """
             if config is None and op is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
-                if msg_bytes >= 768 * 1024:
+                if msg_bytes >= 8 * 1024 * 1024:
                     import torch.distributed as _dist
 
                     if output_tensor.data_ptr() != input_tensor.data_ptr():
@@ -1361,7 +1361,7 @@ class Iris:
             """
             if config is None and op is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
-                if msg_bytes >= 768 * 1024:
+                if msg_bytes >= 8 * 1024 * 1024:
                     import torch.distributed as _dist
 
                     key = ("rs", output_tensor.data_ptr(), input_tensor.data_ptr())

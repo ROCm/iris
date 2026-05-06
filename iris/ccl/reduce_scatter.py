@@ -12,7 +12,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
-_NCCL_LARGE_BYTES = 768 * 1024  # <768KB: native fused, >=768KB: NCCL
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # <8MB: native two_shot, >=8MB: NCCL
 
 
 def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None):
@@ -59,7 +59,7 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
             "Use default config (use_gluon=False)."
         )
 
-    variant = getattr(config, "reduce_scatter_variant", "fused")
+    variant = getattr(config, "reduce_scatter_variant", "two_shot")
     if variant not in ("two_shot", "fused"):
         raise ValueError(f"reduce_scatter variant must be 'two_shot' or 'fused', got '{variant}'.")
 
@@ -87,11 +87,6 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
             variant="fused",
         )
     else:
-        use_inline = not async_op
-        barrier_state = None
-        if use_inline:
-            barrier_state = ctx._get_inline_barrier_state(group)
-
         launch(
             output_tensor,
             input_tensor,
@@ -102,6 +97,6 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
             rank_start,
             rank_stride,
             config,
-            inline_barrier=use_inline,
-            barrier_state=barrier_state,
+            inline_barrier=False,
+            barrier_state=None,
         )

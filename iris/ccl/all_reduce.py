@@ -4,7 +4,7 @@
 """
 All-reduce collective operation — public API.
 
-Two-shot kernel for medium messages, NCCL for small/large.
+Two-shot kernel for medium messages, NCCL for large.
 """
 
 import torch.distributed as _dist
@@ -12,7 +12,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_FALLBACK_BYTES = 0
-_NCCL_LARGE_BYTES = 768 * 1024  # <768KB: native two_shot, >=768KB: NCCL
+_NCCL_LARGE_BYTES = 8 * 1024 * 1024  # <8MB: native two_shot, >=8MB: NCCL
 
 _ar_nccl_cache: dict = {}
 
