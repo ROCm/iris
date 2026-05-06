@@ -12,7 +12,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
-_NCCL_LARGE_BYTES = 12 * 1024 * 1024  # <12MB: native two_shot, >=12MB: NCCL
+_NCCL_LARGE_BYTES = 32 * 1024 * 1024  # <32MB: native two_shot, >=32MB: NCCL
 
 
 def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None):
