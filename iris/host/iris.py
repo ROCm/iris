@@ -1211,8 +1211,10 @@ class Iris:
                     return
                 ov, iv = output_tensor.contiguous().view(-1), input_tensor.contiguous().view(-1)
                 a2a_fn = self._all_to_all_single
+
                 def _a2a_replay(_ov=ov, _iv=iv, _fn=a2a_fn):
                     _fn(_ov, _iv)
+
                 self._a2a_replay_cache[cache_key] = _a2a_replay
                 _a2a_replay()
                 return
@@ -2025,8 +2027,10 @@ class Iris:
                 rank = self._get_rank(group)
                 scatter_list = list(input_tensor.chunk(ws, dim=0)) if rank == src else None
                 scatter_fn = self._scatter
+
                 def _sc_replay(_o=output_tensor, _sl=scatter_list, _src=src, _g=group, _fn=scatter_fn):
                     _fn(_o, _sl, src=_src, group=_g)
+
                 self._sc_replay_cache[cache_key] = _sc_replay
                 _sc_replay()
                 return
@@ -2056,8 +2060,10 @@ class Iris:
                 rank = self._get_rank(group)
                 gather_list = list(output_tensor.chunk(ws, dim=0)) if rank == dst else None
                 gather_fn = self._gather
+
                 def _ga_replay(_i=input_tensor, _gl=gather_list, _dst=dst, _g=group, _fn=gather_fn):
                     _fn(_i, _gl, dst=_dst, group=_g)
+
                 self._ga_replay_cache[cache_key] = _ga_replay
                 _ga_replay()
                 return
