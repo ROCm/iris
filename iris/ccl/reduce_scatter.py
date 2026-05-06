@@ -32,7 +32,9 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
     msg_bytes = numel * input_tensor.element_size()
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        _dist.reduce_scatter_tensor(output_tensor.contiguous(), input_tensor.contiguous(), group=group)
+        world_size = _dist.get_world_size(group)
+        chunk_size = numel // world_size
+        _dist.reduce_scatter_tensor(output_tensor.view(-1)[:chunk_size], input_tensor.view(-1), group=group)
         return
 
     from iris.ccl.config import Config
