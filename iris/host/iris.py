@@ -1242,11 +1242,9 @@ class Iris:
                 >>> ctx.ccl.all_gather(output_tensor, input_tensor, async_op=True)
             """
             if config is None and not async_op:
-                msg_bytes = input_tensor.numel() * input_tensor.element_size()
-                if msg_bytes < 512 * 1024 or msg_bytes >= 4 * 1024 * 1024:
-                    import torch.distributed as _dist
-                    _dist.all_gather_into_tensor(output_tensor, input_tensor, group=group)
-                    return None
+                import torch.distributed as _dist
+                _dist.all_gather_into_tensor(output_tensor, input_tensor, group=group)
+                return None
             from iris.ccl.all_gather import all_gather
 
             return all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
