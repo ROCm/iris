@@ -1173,6 +1173,7 @@ class Iris:
             self._scatter = _dist.scatter
             self._gather = _dist.gather
             self._all_to_all_single = _dist.all_to_all_single
+            self._all_to_all = _dist.all_to_all
 
         def all_to_all(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
@@ -1204,17 +1205,33 @@ class Iris:
                 >>> # Async operation (no barrier)
                 >>> ctx.ccl.all_to_all(output_tensor, input_tensor, async_op=True)
             """
-            if config is None and not async_op and input_tensor.shape[0] == 1:
+            if config is None and not async_op:
                 cache_key = (output_tensor.data_ptr(), input_tensor.data_ptr(), input_tensor.numel())
                 cached_fn = self._a2a_replay_cache.get(cache_key)
                 if cached_fn is not None:
                     cached_fn()
                     return
-                ov, iv = output_tensor.contiguous().view(-1), input_tensor.contiguous().view(-1)
-                a2a_fn = self._all_to_all_single
+                ndim = input_tensor.dim()
+                M = input_tensor.shape[0] if ndim >= 2 else 1
+                ws = self._get_world_size(group)
+                if M == 1:
+                    ov = output_tensor.contiguous().view(-1)
+                    iv = input_tensor.contiguous().view(-1)
+                    a2a_fn = self._all_to_all_single
 
-                def _a2a_replay(_ov=ov, _iv=iv, _fn=a2a_fn):
-                    _fn(_ov, _iv)
+                    def _a2a_replay(_ov=ov, _iv=iv, _fn=a2a_fn):
+                        _fn(_ov, _iv)
+                elif M == ws:
+                    out_chunks = list(output_tensor.contiguous().chunk(ws, dim=0))
+                    in_chunks = list(input_tensor.contiguous().chunk(ws, dim=0))
+                    a2a_fn = self._all_to_all
+
+                    def _a2a_replay(_oc=out_chunks, _ic=in_chunks, _fn=a2a_fn):
+                        _fn(_oc, _ic)
+                else:
+                    from iris.ccl.all_to_all import all_to_all
+                    all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
+                    return
 
                 self._a2a_replay_cache[cache_key] = _a2a_replay
                 _a2a_replay()
