@@ -1150,6 +1150,12 @@ class Iris:
             self._nccl_cache = {}
             self._ar_workspace = None
             self._ar_osf_workspace = None
+            self._ar_replay_cache = {}
+            self._rs_replay_cache = {}
+            self._ag_replay_cache = {}
+            self._bc_replay_cache = {}
+            self._rd_replay_cache = {}
+            self._ar_replay_ready = False
             import torch.distributed as _dist
 
             self._all_gather_into_tensor = _dist.all_gather_into_tensor
@@ -1238,7 +1244,7 @@ class Iris:
                 >>> # Async operation (no barrier)
                 >>> ctx.ccl.all_gather(output_tensor, input_tensor, async_op=True)
             """
-            if config is None and not async_op:
+            if config is None and not async_op and group is None:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
                 if msg_bytes >= 2 * 1024 * 1024:
                     key = ("ag", output_tensor.data_ptr(), input_tensor.data_ptr())
@@ -1250,9 +1256,24 @@ class Iris:
                     self._nccl_cache[key] = (output_tensor, input_tensor, ov, iv)
                     self._all_gather_into_tensor(ov, iv, group=group)
                     return None
+                ag_bytes = input_tensor.numel() * input_tensor.element_size()
+                if ag_bytes >= 8 * 1024:
+                    cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr())
+                    cached_fn = self._ag_replay_cache.get(cache_key)
+                    if cached_fn is not None:
+                        cached_fn()
+                        return None
             from iris.ccl.all_gather import all_gather
 
-            return all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
+            result = all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
+            if config is None and not async_op and group is None:
+                ag_bytes = input_tensor.numel() * input_tensor.element_size()
+                if ag_bytes >= 8 * 1024:
+                    replay = self._build_ag_replay(input_tensor, output_tensor)
+                    if replay is not None:
+                        cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr())
+                        self._ag_replay_cache[cache_key] = replay
+            return result
 
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
@@ -1311,12 +1332,17 @@ class Iris:
                 >>> # Async operation (no barrier)
                 >>> ctx.ccl.all_reduce(output_tensor, input_tensor, async_op=True)
             """
-            if config is None and op is None and not async_op:
+            if config is None and op is None and not async_op and group is None:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
                 if msg_bytes >= 24 * 1024 * 1024:
                     if output_tensor.data_ptr() != input_tensor.data_ptr():
                         output_tensor.copy_(input_tensor)
                     self._all_reduce(output_tensor, group=group)
+                    return None
+                cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr())
+                cached = self._ar_replay_cache.get(cache_key)
+                if cached is not None:
+                    cached()
                     return None
                 if workspace is None:
                     if msg_bytes < 128 * 1024:
@@ -1340,7 +1366,92 @@ class Iris:
                     self._ar_osf_workspace = result_ws
                 else:
                     self._ar_workspace = result_ws
+                if group is None and op is None and not async_op:
+                    replay = self._build_ar_replay(input_tensor, output_tensor, result_ws)
+                    if replay is not None:
+                        cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr())
+                        self._ar_replay_cache[cache_key] = replay
             return result_ws
+
+        def _build_ar_replay(self, input_tensor, output_tensor, workspace):
+            """Build a cached replay callable for all-reduce, bypassing Python dispatch."""
+            try:
+                from iris.ccl.triton.all_reduce import (
+                    persistent_all_reduce_one_shot_fused,
+                    persistent_all_reduce_two_shot,
+                )
+                from iris.ccl.config import Config
+
+                ctx = self._iris
+                from iris.ccl.utils import extract_group_info
+                rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(None, ctx)
+                heap_bases = ctx.get_heap_bases()
+                msg_bytes = input_tensor.numel() * input_tensor.element_size()
+
+                variant = getattr(workspace, "variant", "")
+                if variant == "one_shot_fused":
+                    config = Config(block_size_m=32, block_size_n=128, all_reduce_variant="one_shot_fused", comm_sms=64)
+                    block_n = 128
+                    numel = input_tensor.numel()
+                    inp_r = input_tensor.contiguous().view(-1, block_n) if numel >= block_n else input_tensor.contiguous().view(1, -1)
+                    out_r = output_tensor.contiguous().view(-1, block_n) if numel >= block_n else output_tensor.contiguous().view(1, -1)
+                    M, N = inp_r.shape
+                    num_pid_m = (M + 32 - 1) // 32
+                    num_pid_n = (N + 128 - 1) // 128
+                    fused_sms = min(num_pid_m * num_pid_n, 64)
+                    grid = (fused_sms,)
+                    kernel = persistent_all_reduce_one_shot_fused
+                    sf = workspace.start_flags
+                    ef = workspace.end_flags
+                    sw = config.swizzle_size
+                    nx = config.num_xcds
+                    cs = config.chunk_size
+                    sm, sn = inp_r.stride(0), inp_r.stride(1)
+                    om, on = out_r.stride(0), out_r.stride(1)
+
+                    def replay():
+                        kernel[grid](
+                            inp_r, out_r, M, N, sm, sn, om, on,
+                            heap_bases,
+                            rank_in_group, rank_global, world_size, rank_start, rank_stride,
+                            sf, ef,
+                            32, 128, sw, fused_sms, nx, cs,
+                            num_warps=16, num_stages=2,
+                        )
+                    return replay
+
+                elif variant == "two_shot":
+                    config = Config(block_size_m=32, block_size_n=64, all_reduce_variant="two_shot", comm_sms=64)
+                    block_n = 64
+                    numel = input_tensor.numel()
+                    inp_r = input_tensor.contiguous().view(-1, block_n) if numel >= block_n else input_tensor.contiguous().view(1, -1)
+                    out_r = output_tensor.contiguous().view(-1, block_n) if numel >= block_n else output_tensor.contiguous().view(1, -1)
+                    M, N = inp_r.shape
+                    grid = (64,)
+                    kernel = persistent_all_reduce_two_shot
+                    barrier_state = ctx._get_inline_barrier_state(None)
+                    bf, wg, bs = barrier_state
+                    sw = config.swizzle_size
+                    nx = config.num_xcds
+                    cs = config.chunk_size
+                    distr = config.all_reduce_distribution
+                    sm, sn = inp_r.stride(0), inp_r.stride(1)
+                    om, on = out_r.stride(0), out_r.stride(1)
+
+                    def replay():
+                        kernel[grid](
+                            inp_r, out_r, M, N, sm, sn, om, on,
+                            heap_bases,
+                            rank_in_group, rank_global, world_size, rank_start, rank_stride,
+                            bf, wg, bs,
+                            32, 64, sw, 64, nx, cs, distr, True,
+                            num_warps=8, num_stages=1, waves_per_eu=1,
+                        )
+                    return replay
+
+            except Exception:
+                return None
+            return None
 
         def reduce_scatter(self, output_tensor, input_tensor, op=None, group=None, async_op=False, config=None):
             """
@@ -1372,7 +1483,7 @@ class Iris:
                 >>> config = Config(reduce_scatter_variant="two_shot", all_reduce_distribution=1)
                 >>> ctx.ccl.reduce_scatter(output_tensor, input_tensor, config=config)
             """
-            if config is None and op is None and not async_op:
+            if config is None and op is None and not async_op and group is None:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
                 if msg_bytes >= 32 * 1024 * 1024:
                     key = ("rs", output_tensor.data_ptr(), input_tensor.data_ptr())
@@ -1387,6 +1498,11 @@ class Iris:
                     self._nccl_cache[key] = (output_tensor, input_tensor, ov, iv)
                     self._reduce_scatter_tensor(ov, iv, group=group)
                     return
+                cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr())
+                cached_fn = self._rs_replay_cache.get(cache_key)
+                if cached_fn is not None:
+                    cached_fn()
+                    return
             from iris.ccl.reduce_scatter import reduce_scatter
 
             reduce_scatter(
@@ -1398,6 +1514,182 @@ class Iris:
                 async_op=async_op,
                 config=config,
             )
+            if config is None and op is None and not async_op and group is None:
+                replay = self._build_rs_replay(input_tensor, output_tensor)
+                if replay is not None:
+                    cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr())
+                    self._rs_replay_cache[cache_key] = replay
+
+        def _build_rs_replay(self, input_tensor, output_tensor):
+            try:
+                from iris.ccl.triton.reduce_scatter import persistent_reduce_scatter_two_shot
+                from iris.ccl.config import Config
+                from iris.ccl.utils import extract_group_info
+
+                ctx = self._iris
+                config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1, comm_sms=64)
+                rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(None, ctx)
+                heap_bases = ctx.get_heap_bases()
+                barrier_state = ctx._get_inline_barrier_state(None)
+                bf, wg, bs = barrier_state
+
+                block_n = config.block_size_n
+                numel = input_tensor.numel()
+                inp_r = input_tensor.contiguous().view(-1, block_n) if numel >= block_n else input_tensor.contiguous().view(1, -1)
+                out_r = output_tensor.contiguous().view(-1, block_n) if numel >= block_n else output_tensor.contiguous().view(1, -1)
+                M, N = inp_r.shape
+                grid = (config.comm_sms,)
+                kernel = persistent_reduce_scatter_two_shot
+                sw = config.swizzle_size
+                nx = config.num_xcds
+                cs = config.chunk_size
+                distr = config.all_reduce_distribution
+                sm, sn = inp_r.stride(0), inp_r.stride(1)
+                om, on = out_r.stride(0), out_r.stride(1)
+
+                def replay():
+                    kernel[grid](
+                        inp_r, out_r, M, N, sm, sn, om, on,
+                        heap_bases,
+                        rank_in_group, rank_global, world_size, rank_start, rank_stride,
+                        bf, wg, bs,
+                        32, 64, sw, 64, nx, cs, distr, True,
+                        num_warps=config.num_warps, num_stages=config.num_stages, waves_per_eu=config.waves_per_eu,
+                    )
+                return replay
+            except Exception:
+                return None
+
+        def _build_ag_replay(self, input_tensor, output_tensor):
+            try:
+                from iris.ccl.triton.all_gather import persistent_all_gather
+                from iris.ccl.config import Config
+                from iris.ccl.utils import extract_group_info
+
+                ctx = self._iris
+                config = Config(block_size_m=32, block_size_n=64, comm_sms=64)
+                rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(None, ctx)
+                heap_bases = ctx.get_heap_bases()
+                barrier_state = ctx._get_inline_barrier_state(None)
+                bf, wg, bs = barrier_state
+
+                block_n = config.block_size_n
+                numel = input_tensor.numel()
+                is_flat = input_tensor.dim() == 1 or (input_tensor.dim() == 2 and input_tensor.shape[0] == 1)
+                if is_flat and numel >= block_n:
+                    inp_r = input_tensor.contiguous().view(-1, block_n)
+                    out_r = output_tensor.contiguous().view(-1, block_n)
+                else:
+                    inp_r = input_tensor.contiguous()
+                    out_r = output_tensor.contiguous()
+
+                M, N = inp_r.shape if inp_r.dim() >= 2 else (1, inp_r.numel())
+                if inp_r.dim() < 2:
+                    inp_r = inp_r.view(1, -1)
+                    out_r = out_r.view(1, -1)
+                grid = (config.comm_sms,)
+                kernel = persistent_all_gather
+                sw = config.swizzle_size
+                nx = config.num_xcds
+                cs = config.chunk_size
+                sm, sn = inp_r.stride(0), inp_r.stride(1)
+                om, on = out_r.stride(0), out_r.stride(1)
+
+                def replay():
+                    kernel[grid](
+                        inp_r, out_r, M, N, sm, sn, om, on,
+                        heap_bases,
+                        rank_in_group, rank_global, world_size, rank_start, rank_stride,
+                        bf, wg, bs,
+                        32, 64, sw, 64, nx, cs, True,
+                        num_warps=config.num_warps, num_stages=config.num_stages, waves_per_eu=config.waves_per_eu,
+                    )
+                return replay
+            except Exception:
+                return None
+
+        def _build_bc_replay(self, tensor, src):
+            try:
+                from iris.ccl.triton.broadcast import persistent_broadcast_direct
+                from iris.ccl.config import Config
+                from iris.ccl.utils import extract_group_info
+
+                ctx = self._iris
+                config = Config(block_size_m=32, block_size_n=64, comm_sms=64)
+                rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(None, ctx)
+                heap_bases = ctx.get_heap_bases()
+                barrier_state = ctx._get_inline_barrier_state(None)
+                bf, wg, bs = barrier_state
+
+                block_n = config.block_size_n
+                numel = tensor.numel()
+                if numel >= block_n:
+                    t_r = tensor.contiguous().view(-1, block_n)
+                else:
+                    t_r = tensor.contiguous().view(1, -1)
+                M, N = t_r.shape
+                grid = (config.comm_sms,)
+                kernel = persistent_broadcast_direct
+                sw = config.swizzle_size
+                nx = config.num_xcds
+                cs = config.chunk_size
+                sm, sn = t_r.stride(0), t_r.stride(1)
+
+                def replay():
+                    kernel[grid](
+                        t_r, M, N, sm, sn,
+                        heap_bases,
+                        rank_in_group, rank_global, src, world_size, rank_start, rank_stride,
+                        bf, wg, bs,
+                        32, 64, sw, 64, nx, cs, True,
+                        num_warps=config.num_warps, num_stages=config.num_stages, waves_per_eu=config.waves_per_eu,
+                    )
+                return replay
+            except Exception:
+                return None
+
+        def _build_rd_replay(self, input_tensor, output_tensor, dst):
+            try:
+                from iris.ccl.triton.reduce import persistent_reduce_direct
+                from iris.ccl.config import Config
+                from iris.ccl.utils import extract_group_info
+
+                ctx = self._iris
+                config = Config(block_size_m=32, block_size_n=64, comm_sms=64)
+                rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(None, ctx)
+                heap_bases = ctx.get_heap_bases()
+                barrier_state = ctx._get_inline_barrier_state(None)
+                bf, wg, bs = barrier_state
+
+                block_n = config.block_size_n
+                numel = input_tensor.numel()
+                if numel >= block_n:
+                    inp_r = input_tensor.contiguous().view(-1, block_n)
+                    out_r = output_tensor.contiguous().view(-1, block_n)
+                else:
+                    inp_r = input_tensor.contiguous().view(1, -1)
+                    out_r = output_tensor.contiguous().view(1, -1)
+                M, N = inp_r.shape
+                grid = (config.comm_sms,)
+                kernel = persistent_reduce_direct
+                sw = config.swizzle_size
+                nx = config.num_xcds
+                cs = config.chunk_size
+                sm, sn = inp_r.stride(0), inp_r.stride(1)
+                om, on = out_r.stride(0), out_r.stride(1)
+
+                def replay():
+                    kernel[grid](
+                        inp_r, out_r, M, N, sm, sn, om, on,
+                        heap_bases,
+                        rank_in_group, rank_global, dst, world_size, rank_start, rank_stride,
+                        bf, wg, bs,
+                        32, 64, sw, 64, nx, cs, True,
+                        num_warps=config.num_warps, num_stages=config.num_stages, waves_per_eu=config.waves_per_eu,
+                    )
+                return replay
+            except Exception:
+                return None
 
         def broadcast(self, tensor, src=0, group=None, async_op=False, config=None):
             """
@@ -1410,9 +1702,24 @@ class Iris:
                 async_op: If True, skip trailing barrier.
                 config: Config with kernel parameters.
             """
+            if config is None and not async_op and group is None:
+                msg_bytes = tensor.numel() * tensor.element_size()
+                if msg_bytes < 512 * 1024:
+                    cache_key = (tensor.data_ptr(), src)
+                    cached_fn = self._bc_replay_cache.get(cache_key)
+                    if cached_fn is not None:
+                        cached_fn()
+                        return
             from iris.ccl.broadcast import broadcast
 
             broadcast(tensor, self._iris, src=src, group=group, async_op=async_op, config=config)
+            if config is None and not async_op and group is None:
+                msg_bytes = tensor.numel() * tensor.element_size()
+                if msg_bytes < 512 * 1024:
+                    replay = self._build_bc_replay(tensor, src)
+                    if replay is not None:
+                        cache_key = (tensor.data_ptr(), src)
+                        self._bc_replay_cache[cache_key] = replay
 
         def reduce(self, output_tensor, input_tensor, dst=0, op=None, group=None, async_op=False, config=None):
             """
@@ -1437,11 +1744,26 @@ class Iris:
                         if self._get_rank(group) == dst:
                             output_tensor.copy_(input_tensor)
                     return
+            if config is None and op is None and not async_op and group is None:
+                rd_bytes = input_tensor.numel() * input_tensor.element_size()
+                if rd_bytes < 1 * 1024 * 1024:
+                    cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr(), dst)
+                    cached_fn = self._rd_replay_cache.get(cache_key)
+                    if cached_fn is not None:
+                        cached_fn()
+                        return
             from iris.ccl.reduce import reduce
 
             reduce(
                 output_tensor, input_tensor, self._iris, dst=dst, op=op, group=group, async_op=async_op, config=config
             )
+            if config is None and op is None and not async_op and group is None:
+                rd_bytes = input_tensor.numel() * input_tensor.element_size()
+                if rd_bytes < 1 * 1024 * 1024:
+                    replay = self._build_rd_replay(input_tensor, output_tensor, dst)
+                    if replay is not None:
+                        cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr(), dst)
+                        self._rd_replay_cache[cache_key] = replay
 
         def scatter(self, output_tensor, input_tensor, src=0, group=None, async_op=False, config=None):
             """
