@@ -41,7 +41,10 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     numel_in = input_tensor.numel()
     msg_bytes = numel_in * input_tensor.element_size()
 
-    if msg_bytes >= _NCCL_LARGE_BYTES:
+    is_flat = input_tensor.dim() == 1 or input_tensor.shape[0] == 1
+    nccl_threshold = 2 * 1024 * 1024 if is_flat else _NCCL_LARGE_BYTES
+
+    if msg_bytes >= nccl_threshold:
         _dist.all_gather_into_tensor(output_tensor, input_tensor, group=group)
         return None
 
@@ -69,6 +72,11 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
 
     if config is None:
         config = _ring_config_for_size(msg_bytes)
+
+    block_n = config.block_size_n
+    if is_flat and numel_in >= block_n:
+        input_tensor = input_tensor.contiguous().view(-1, block_n)
+        output_tensor = output_tensor.contiguous().view(-1, block_n)
 
     M, N = input_tensor.shape[:2]
     expected_output_shape = (world_size * M, N)

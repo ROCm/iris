@@ -1236,7 +1236,7 @@ class Iris:
             """
             if config is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
-                if msg_bytes >= 512 * 1024:
+                if msg_bytes >= 2 * 1024 * 1024:
                     key = ("ag", output_tensor.data_ptr(), input_tensor.data_ptr())
                     cached = self._nccl_cache.get(key)
                     if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
