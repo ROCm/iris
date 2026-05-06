@@ -1973,13 +1973,12 @@ class Iris:
                     if output_tensor.data_ptr() == input_tensor.data_ptr():
                         self._reduce(output_tensor, dst=dst, group=group)
                     else:
-                        self._reduce(input_tensor, dst=dst, group=group)
-                        if self._get_rank(group) == dst:
-                            output_tensor.copy_(input_tensor)
+                        output_tensor.copy_(input_tensor)
+                        self._reduce(output_tensor, dst=dst, group=group)
                     return
             if config is None and op is None and not async_op and group is None:
                 rd_bytes = input_tensor.numel() * input_tensor.element_size()
-                if rd_bytes < 1 * 1024 * 1024:
+                if rd_bytes < 2 * 1024 * 1024:
                     cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr(), dst)
                     cached_fn = self._rd_replay_cache.get(cache_key)
                     if cached_fn is not None:
@@ -1992,7 +1991,7 @@ class Iris:
             )
             if config is None and op is None and not async_op and group is None:
                 rd_bytes = input_tensor.numel() * input_tensor.element_size()
-                if rd_bytes < 1 * 1024 * 1024:
+                if rd_bytes < 2 * 1024 * 1024:
                     replay = self._build_rd_replay(input_tensor, output_tensor, dst)
                     if replay is not None:
                         cache_key = (input_tensor.data_ptr(), output_tensor.data_ptr(), dst)

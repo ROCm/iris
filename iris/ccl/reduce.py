@@ -12,7 +12,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
-_RING_BYTES = 1 * 1024 * 1024  # >=1MB: ring reduce (pipelined, distributes BW)
+_RING_BYTES = 2 * 1024 * 1024  # >=2MB: ring reduce (direct wins up to 2MB)
 _NCCL_LARGE_BYTES = 4 * 1024 * 1024  # >=4MB: NCCL
 
 _reduce_group_cache: dict = {}
@@ -47,9 +47,8 @@ def reduce(output_tensor, input_tensor, ctx, dst=0, op=None, group=None, async_o
         if output_tensor.data_ptr() == input_tensor.data_ptr():
             _dist.reduce(output_tensor, dst=dst, group=group)
         else:
-            _dist.reduce(input_tensor, dst=dst, group=group)
-            if rank_in_group == dst:
-                output_tensor.copy_(input_tensor)
+            output_tensor.copy_(input_tensor)
+            _dist.reduce(output_tensor, dst=dst, group=group)
         return
 
     from iris.ccl.config import Config
