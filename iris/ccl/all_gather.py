@@ -4,8 +4,7 @@
 """
 All-gather collective operation — public API.
 
-NCCL at all sizes. Native kernels (ring, flat) tested but cannot overcome
-Triton launch + iris.load overhead vs NCCL's optimized C++ ring.
+Flat fused kernel for small messages, push ring for medium, NCCL for large.
 """
 
 import torch.distributed as _dist
@@ -13,16 +12,15 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
-_FLAT_BYTES = 512 * 1024  # <512KB: use flat fused all-gather
-_NCCL_LARGE_BYTES = 512 * 1024  # >=512KB: NCCL
+_FLAT_BYTES = 64 * 1024  # <64KB per-rank: use flat fused all-gather
+_RING_BYTES = 512 * 1024  # 64KB-512KB per-rank: use push ring
+_NCCL_LARGE_BYTES = 512 * 1024  # >=512KB per-rank: NCCL
 
 
 def _ring_config_for_size(msg_bytes):
-    """Size-adaptive ring config to minimize tile loop passes."""
+    """Ring config for medium-to-large messages."""
     from iris.ccl.config import Config
 
-    if msg_bytes <= 2 * 1024 * 1024:
-        return Config(block_size_m=32, block_size_n=64, comm_sms=64, num_warps=8)
     return Config(block_size_m=32, block_size_n=128, comm_sms=64, num_warps=8)
 
 
@@ -70,7 +68,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         return None
 
     if config is None:
-        config = Config(block_size_m=32, block_size_n=128, comm_sms=64, num_warps=8, all_gather_variant="persistent")
+        config = _ring_config_for_size(msg_bytes)
 
     M, N = input_tensor.shape[:2]
     expected_output_shape = (world_size * M, N)
