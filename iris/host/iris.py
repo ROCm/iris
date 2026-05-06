@@ -1230,6 +1230,7 @@ class Iris:
                         _fn(_oc, _ic)
                 else:
                     from iris.ccl.all_to_all import all_to_all
+
                     all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
                     return
 
