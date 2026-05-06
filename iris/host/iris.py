@@ -1157,6 +1157,11 @@ class Iris:
             self._reduce_scatter_tensor = _dist.reduce_scatter_tensor
             self._broadcast = _dist.broadcast
             self._reduce = _dist.reduce
+            self._get_world_size = _dist.get_world_size
+            self._get_rank = _dist.get_rank
+            self._scatter = _dist.scatter
+            self._gather = _dist.gather
+            self._all_to_all_single = _dist.all_to_all_single
 
         def all_to_all(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
@@ -1189,16 +1194,14 @@ class Iris:
                 >>> ctx.ccl.all_to_all(output_tensor, input_tensor, async_op=True)
             """
             if config is None and not async_op and input_tensor.shape[0] == 1:
-                import torch.distributed as _dist
-
                 key = ("a2a", output_tensor.data_ptr(), input_tensor.data_ptr())
                 cached = self._nccl_cache.get(key)
                 if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
-                    _dist.all_to_all_single(cached[2], cached[3])
+                    self._all_to_all_single(cached[2], cached[3])
                     return
                 ov, iv = output_tensor.view(-1), input_tensor.view(-1)
                 self._nccl_cache[key] = (output_tensor, input_tensor, ov, iv)
-                _dist.all_to_all_single(ov, iv)
+                self._all_to_all_single(ov, iv)
                 return
             from iris.ccl.all_to_all import all_to_all
 
@@ -1377,9 +1380,7 @@ class Iris:
                     if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
                         self._reduce_scatter_tensor(cached[2], cached[3], group=group)
                         return
-                    import torch.distributed as _dist
-
-                    ws = _dist.get_world_size(group)
+                    ws = self._get_world_size(group)
                     numel = input_tensor.numel()
                     ov = output_tensor.view(-1)[: numel // ws]
                     iv = input_tensor.view(-1)
@@ -1433,9 +1434,7 @@ class Iris:
                         self._reduce(output_tensor, dst=dst, group=group)
                     else:
                         self._reduce(input_tensor, dst=dst, group=group)
-                        import torch.distributed as _dist
-
-                        if _dist.get_rank(group) == dst:
+                        if self._get_rank(group) == dst:
                             output_tensor.copy_(input_tensor)
                     return
             from iris.ccl.reduce import reduce
@@ -1457,18 +1456,16 @@ class Iris:
                 config: Config with kernel parameters.
             """
             if config is None and not async_op:
-                import torch.distributed as _dist
-
                 key = ("sc", input_tensor.data_ptr(), src)
                 cached = self._nccl_cache.get(key)
                 if cached is not None and cached[0] is input_tensor:
-                    _dist.scatter(output_tensor, cached[1], src=src, group=group)
+                    self._scatter(output_tensor, cached[1], src=src, group=group)
                     return
-                ws = _dist.get_world_size(group)
-                rank = _dist.get_rank(group)
+                ws = self._get_world_size(group)
+                rank = self._get_rank(group)
                 scatter_list = list(input_tensor.chunk(ws, dim=0)) if rank == src else None
                 self._nccl_cache[key] = (input_tensor, scatter_list)
-                _dist.scatter(output_tensor, scatter_list, src=src, group=group)
+                self._scatter(output_tensor, scatter_list, src=src, group=group)
                 return
             from iris.ccl.scatter import scatter
 
@@ -1487,18 +1484,16 @@ class Iris:
                 config: Config with kernel parameters.
             """
             if config is None and not async_op:
-                import torch.distributed as _dist
-
                 key = ("ga", output_tensor.data_ptr(), dst)
                 cached = self._nccl_cache.get(key)
                 if cached is not None and cached[0] is output_tensor:
-                    _dist.gather(input_tensor, cached[1], dst=dst, group=group)
+                    self._gather(input_tensor, cached[1], dst=dst, group=group)
                     return
-                ws = _dist.get_world_size(group)
-                rank = _dist.get_rank(group)
+                ws = self._get_world_size(group)
+                rank = self._get_rank(group)
                 gather_list = list(output_tensor.chunk(ws, dim=0)) if rank == dst else None
                 self._nccl_cache[key] = (output_tensor, gather_list)
-                _dist.gather(input_tensor, gather_list, dst=dst, group=group)
+                self._gather(input_tensor, gather_list, dst=dst, group=group)
                 return
             from iris.ccl.gather import gather
 
