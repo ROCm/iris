@@ -1196,23 +1196,6 @@ class Iris:
 
             all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
-        def _nccl_reduce_scatter(self, output_tensor, input_tensor, group=None):
-            """Fast NCCL reduce_scatter — bypasses dispatch."""
-            import torch.distributed as _dist
-
-            key = ("_rs", output_tensor.data_ptr(), input_tensor.data_ptr())
-            cached = self._nccl_cache.get(key)
-            if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
-                _dist.reduce_scatter_tensor(cached[2], cached[3], group=group)
-                return
-            world_size = _dist.get_world_size(group)
-            numel = input_tensor.numel()
-            chunk_size = numel // world_size
-            out_view = output_tensor.view(-1)[:chunk_size]
-            in_view = input_tensor.view(-1)
-            self._nccl_cache[key] = (output_tensor, input_tensor, out_view, in_view)
-            _dist.reduce_scatter_tensor(out_view, in_view, group=group)
-
         def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
             All-gather collective operation.
@@ -1246,17 +1229,9 @@ class Iris:
             """
             if config is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
-                if msg_bytes >= 512 * 1024:
+                if msg_bytes >= 768 * 1024:
                     import torch.distributed as _dist
-
-                    key = ("ag", output_tensor.data_ptr(), input_tensor.data_ptr())
-                    cached = self._nccl_cache.get(key)
-                    if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
-                        _dist.all_gather_into_tensor(cached[2], cached[3], group=group)
-                        return None
-                    ov, iv = output_tensor.view(-1), input_tensor.view(-1)
-                    self._nccl_cache[key] = (output_tensor, input_tensor, ov, iv)
-                    _dist.all_gather_into_tensor(ov, iv, group=group)
+                    _dist.all_gather_into_tensor(output_tensor.contiguous(), input_tensor.contiguous(), group=group)
                     return None
             from iris.ccl.all_gather import all_gather
 
@@ -1321,7 +1296,7 @@ class Iris:
             """
             if config is None and op is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
-                if msg_bytes >= 512 * 1024:
+                if msg_bytes >= 768 * 1024:
                     import torch.distributed as _dist
 
                     if output_tensor.data_ptr() != input_tensor.data_ptr():
@@ -1378,20 +1353,9 @@ class Iris:
             """
             if config is None and op is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
-                if msg_bytes >= 512 * 1024:
+                if msg_bytes >= 768 * 1024:
                     import torch.distributed as _dist
-
-                    key = ("rs", output_tensor.data_ptr(), input_tensor.data_ptr())
-                    cached = self._nccl_cache.get(key)
-                    if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
-                        _dist.reduce_scatter_tensor(cached[2], cached[3], group=group)
-                        return
-                    ws = _dist.get_world_size(group)
-                    numel = input_tensor.numel()
-                    ov = output_tensor.view(-1)[: numel // ws]
-                    iv = input_tensor.view(-1)
-                    self._nccl_cache[key] = (output_tensor, input_tensor, ov, iv)
-                    _dist.reduce_scatter_tensor(ov, iv, group=group)
+                    _dist.reduce_scatter_tensor(output_tensor.contiguous(), input_tensor.contiguous(), group=group)
                     return
             from iris.ccl.reduce_scatter import reduce_scatter
 

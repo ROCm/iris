@@ -12,7 +12,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
-_NCCL_LARGE_BYTES = 512 * 1024  # <512KB: native fused, >=512KB: NCCL
+_NCCL_LARGE_BYTES = 768 * 1024  # <768KB: native fused, >=768KB: NCCL
 
 
 def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None):
@@ -32,11 +32,7 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
     msg_bytes = numel * input_tensor.element_size()
 
     if msg_bytes < _NCCL_SMALL_BYTES or msg_bytes >= _NCCL_LARGE_BYTES:
-        world_size = _dist.get_world_size(group)
-        chunk_size = numel // world_size
-        out_view = output_tensor.view(-1)[:chunk_size]
-        in_view = input_tensor.view(-1)
-        _dist.reduce_scatter_tensor(out_view, in_view, group=group)
+        _dist.reduce_scatter_tensor(output_tensor.contiguous(), input_tensor.contiguous(), group=group)
         return
 
     from iris.ccl.config import Config
