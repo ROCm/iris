@@ -1149,6 +1149,12 @@ class Iris:
             self._iris = iris_instance
             self._nccl_cache = {}
             self._ar_workspace = None
+            import torch.distributed as _dist
+            self._all_gather_into_tensor = _dist.all_gather_into_tensor
+            self._all_reduce = _dist.all_reduce
+            self._reduce_scatter_tensor = _dist.reduce_scatter_tensor
+            self._broadcast = _dist.broadcast
+            self._reduce = _dist.reduce
 
         def all_to_all(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """
@@ -1230,16 +1236,14 @@ class Iris:
             if config is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
                 if msg_bytes >= 512 * 1024:
-                    import torch.distributed as _dist
-
                     key = ("ag", output_tensor.data_ptr(), input_tensor.data_ptr())
                     cached = self._nccl_cache.get(key)
                     if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
-                        _dist.all_gather_into_tensor(cached[2], cached[3], group=group)
+                        self._all_gather_into_tensor(cached[2], cached[3], group=group)
                         return None
                     ov, iv = output_tensor.view(-1), input_tensor.view(-1)
                     self._nccl_cache[key] = (output_tensor, input_tensor, ov, iv)
-                    _dist.all_gather_into_tensor(ov, iv, group=group)
+                    self._all_gather_into_tensor(ov, iv, group=group)
                     return None
             from iris.ccl.all_gather import all_gather
 
@@ -1305,11 +1309,9 @@ class Iris:
             if config is None and op is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
                 if msg_bytes >= 12 * 1024 * 1024:
-                    import torch.distributed as _dist
-
                     if output_tensor.data_ptr() != input_tensor.data_ptr():
                         output_tensor.copy_(input_tensor)
-                    _dist.all_reduce(output_tensor, group=group)
+                    self._all_reduce(output_tensor, group=group)
                     return None
                 if workspace is None:
                     workspace = self._ar_workspace
@@ -1362,19 +1364,18 @@ class Iris:
             if config is None and op is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
                 if msg_bytes >= 12 * 1024 * 1024:
-                    import torch.distributed as _dist
-
                     key = ("rs", output_tensor.data_ptr(), input_tensor.data_ptr())
                     cached = self._nccl_cache.get(key)
                     if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
-                        _dist.reduce_scatter_tensor(cached[2], cached[3], group=group)
+                        self._reduce_scatter_tensor(cached[2], cached[3], group=group)
                         return
+                    import torch.distributed as _dist
                     ws = _dist.get_world_size(group)
                     numel = input_tensor.numel()
                     ov = output_tensor.view(-1)[: numel // ws]
                     iv = input_tensor.view(-1)
                     self._nccl_cache[key] = (output_tensor, input_tensor, ov, iv)
-                    _dist.reduce_scatter_tensor(ov, iv, group=group)
+                    self._reduce_scatter_tensor(ov, iv, group=group)
                     return
             from iris.ccl.reduce_scatter import reduce_scatter
 
@@ -1419,12 +1420,11 @@ class Iris:
             if config is None and op is None and not async_op:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
                 if msg_bytes < 512 * 1024 or msg_bytes >= 512 * 1024:
-                    import torch.distributed as _dist
-
                     if output_tensor.data_ptr() == input_tensor.data_ptr():
-                        _dist.reduce(output_tensor, dst=dst, group=group)
+                        self._reduce(output_tensor, dst=dst, group=group)
                     else:
-                        _dist.reduce(input_tensor, dst=dst, group=group)
+                        self._reduce(input_tensor, dst=dst, group=group)
+                        import torch.distributed as _dist
                         if _dist.get_rank(group) == dst:
                             output_tensor.copy_(input_tensor)
                     return
