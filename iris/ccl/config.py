@@ -141,7 +141,9 @@ class Config:
             raise ValueError(f"all_reduce_ring_slice_n must be a power of two, got {self.all_reduce_ring_slice_n}")
 
         if self.reduce_scatter_variant not in ("two_shot", "fused"):
-            raise ValueError(f"reduce_scatter_variant must be 'two_shot' or 'fused', got '{self.reduce_scatter_variant}'")
+            raise ValueError(
+                f"reduce_scatter_variant must be 'two_shot' or 'fused', got '{self.reduce_scatter_variant}'"
+            )
 
         if self.threads_per_warp not in (32, 64):
             raise ValueError(f"threads_per_warp must be 32 (NVIDIA) or 64 (AMD), got {self.threads_per_warp}")

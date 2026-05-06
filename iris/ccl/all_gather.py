@@ -13,7 +13,7 @@ import torch.distributed as _dist
 from iris.ccl.utils import extract_group_info
 
 _NCCL_SMALL_BYTES = 0
-_FLAT_BYTES = 512 * 1024          # <512KB: use flat fused all-gather
+_FLAT_BYTES = 512 * 1024  # <512KB: use flat fused all-gather
 _NCCL_LARGE_BYTES = 512 * 1024  # >=512KB: NCCL
 
 

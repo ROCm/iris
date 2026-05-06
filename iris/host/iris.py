@@ -1248,6 +1248,7 @@ class Iris:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
                 if msg_bytes >= 512 * 1024:
                     import torch.distributed as _dist
+
                     key = ("ag", output_tensor.data_ptr(), input_tensor.data_ptr())
                     cached = self._nccl_cache.get(key)
                     if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
@@ -1379,6 +1380,7 @@ class Iris:
                 msg_bytes = input_tensor.numel() * input_tensor.element_size()
                 if msg_bytes >= 512 * 1024:
                     import torch.distributed as _dist
+
                     key = ("rs", output_tensor.data_ptr(), input_tensor.data_ptr())
                     cached = self._nccl_cache.get(key)
                     if cached is not None and cached[0] is output_tensor and cached[1] is input_tensor:
@@ -1386,7 +1388,7 @@ class Iris:
                         return
                     ws = _dist.get_world_size(group)
                     numel = input_tensor.numel()
-                    ov = output_tensor.view(-1)[:numel // ws]
+                    ov = output_tensor.view(-1)[: numel // ws]
                     iv = input_tensor.view(-1)
                     self._nccl_cache[key] = (output_tensor, input_tensor, ov, iv)
                     _dist.reduce_scatter_tensor(ov, iv, group=group)
