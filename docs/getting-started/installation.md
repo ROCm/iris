@@ -75,6 +75,8 @@ If you prefer to build and run Docker containers manually:
 pip install -e .
 ```
 
+For scheduler-managed clusters, see the [SLURM guide](slurm.md).
+
 
 ### 4. Apptainer/Singularity
 
@@ -98,3 +100,4 @@ Once you have Iris running with any of these methods:
 
 - Explore the [Examples](../reference/examples.md) directory
 - Learn about the [Programming Model](../conceptual/programming-model.md)
+- For batch-scheduled environments, see [Running Iris on SLURM](slurm.md)

@@ -195,12 +195,13 @@ if __name__ == "__main__":
 
 For more examples, see the [Examples](reference/examples.md) page with ready-to-run scripts and usage patterns.
 
-For other setup methods, see the [Installation Guide](getting-started/installation.md).
+For other setup methods, see the [Installation Guide](getting-started/installation.md). For scheduler-managed clusters, see [Running Iris on SLURM](getting-started/slurm.md).
 
 ## Documentation Structure
 
 ### 📚 **Getting Started**
   - **[Installation](getting-started/installation.md)**: Set up Iris on your system
+  - **[SLURM](getting-started/slurm.md)**: Build and run Iris on scheduler-managed GPU clusters
   - **[Examples](reference/examples.md)**: Working code examples
   - **[Contributing](CONTRIBUTING.md)**: How to contribute
 
@@ -243,4 +244,4 @@ Want to contribute to Iris? Check out the [Contributing Guide](CONTRIBUTING.md) 
 
 ---
 
-**Ready to start your multi-GPU journey? Begin with the [Installation Guide](getting-started/installation.md)!**
+**Ready to start your multi-GPU journey? Begin with the [Installation Guide](getting-started/installation.md) or the [SLURM guide](getting-started/slurm.md)!**
