@@ -155,9 +155,7 @@ def one_shot_all_reduce_gluon(
     total_tiles = gl.cdiv(N_ELEMENTS, BLOCK_SIZE)
 
     ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE // (THREADS_PER_WARP * WARPS_PER_CTA)
-    flat_layout: gl.constexpr = gl.BlockedLayout(
-        [ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0]
-    )
+    flat_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
         base_offset = tile_id * BLOCK_SIZE
@@ -220,7 +218,6 @@ def launch(
     group=None,
 ):
     """Launch the Gluon one-shot all-reduce kernel."""
-    import torch
 
     numel = input_tensor.numel()
     flat_input = input_tensor.contiguous().view(-1)
