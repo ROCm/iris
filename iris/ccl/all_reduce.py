@@ -69,13 +69,11 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         from iris.ccl.gluon.all_reduce import launch as gluon_launch
 
         inplace = output_tensor.data_ptr() == input_tensor.data_ptr()
-        actual_output = output_tensor
         if inplace:
-            if workspace is not None and hasattr(workspace, '_inplace_buf') and workspace._inplace_buf.shape == output_tensor.shape and workspace._inplace_buf.dtype == output_tensor.dtype:
-                actual_output = workspace._inplace_buf
-            else:
-                import torch
-                actual_output = torch.empty_like(output_tensor)
+            import torch
+            actual_output = torch.empty_like(output_tensor)
+        else:
+            actual_output = output_tensor
 
         workspace = gluon_launch(
             actual_output,
@@ -92,7 +90,6 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         )
 
         if inplace:
-            workspace._inplace_buf = actual_output
             output_tensor.copy_(actual_output)
     else:
         from iris.ccl.triton.all_reduce import launch
