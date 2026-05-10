@@ -88,9 +88,10 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         )
 
     if workspace is not None:
-        workspace.prepared = False
+        if variant not in ("one_shot", "one_shot_gluon"):
+            workspace.prepared = False
 
-    if not async_op:
+    if not async_op and variant not in ("one_shot", "one_shot_gluon"):
         ctx.barrier()
 
     return workspace

@@ -251,7 +251,7 @@ def launch(
         workspace.end_flags,
         block_size,
         num_sms,
-        False,
+        getattr(config, "all_reduce_single_barrier", False),
         config.threads_per_warp,
         num_warps,
         tracing_enabled,
