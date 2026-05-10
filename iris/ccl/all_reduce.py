@@ -90,6 +90,7 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         )
 
         if inplace:
+            ctx.barrier()
             output_tensor.copy_(actual_output)
     else:
         from iris.ccl.triton.all_reduce import launch
