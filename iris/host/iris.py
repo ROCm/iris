@@ -135,6 +135,10 @@ class Iris:
 
         distributed_barrier()
 
+        # Pre-warm hardware queries (safe to call here, breaks graph capture later)
+        from iris.host.platform import hip
+        hip.get_num_xcc(gpu_id)
+
         # Initialize CCL interface
         self.ccl = self.CCL(self)
 
@@ -1135,6 +1139,15 @@ class Iris:
                 iris_instance: The parent Iris instance
             """
             self._iris = iris_instance
+            self._default_gluon_workspace = self._init_gluon_workspace()
+
+        def _init_gluon_workspace(self):
+            """Pre-create gluon workspace so graph capture doesn't need to allocate."""
+            try:
+                from iris.ccl.gluon.all_reduce import _GluonAllReduceWorkspace
+                return _GluonAllReduceWorkspace(self._iris, self._iris.num_ranks)
+            except Exception:
+                return None
 
         def all_to_all(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
             """

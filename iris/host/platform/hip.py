@@ -215,20 +215,28 @@ def get_arch_string(device_id=None):
         return f"sm_{props.major}{props.minor}"
 
 
+_num_xcc_cache = {}
+
+
 def get_num_xcc(device_id=None):
     if device_id is None:
         device_id = get_device_id()
 
+    if device_id in _num_xcc_cache:
+        return _num_xcc_cache[device_id]
+
     if not _is_amd_backend:
-        # XCC is AMD-specific, return 1 for CUDA
+        _num_xcc_cache[device_id] = 1
         return 1
 
     rocm_major, _ = get_rocm_version()
     if rocm_major < 7:
+        _num_xcc_cache[device_id] = 8
         return 8
     hipDeviceAttributeNumberOfXccs = 10018
     xcc_count = ctypes.c_int()
     gpu_try(gpu_runtime.hipDeviceGetAttribute(ctypes.byref(xcc_count), hipDeviceAttributeNumberOfXccs, device_id))
+    _num_xcc_cache[device_id] = xcc_count.value
     return xcc_count.value
 
 

@@ -13,6 +13,14 @@ from iris.ccl.utils import extract_group_info
 
 def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
     """Prepare reusable workspace for all-reduce."""
+    import torch
+
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "iris all_reduce_preamble: cannot create workspace during graph capture. "
+            "Call all_reduce_preamble once outside capture first."
+        )
+
     from iris.ccl.config import Config
 
     if config is None:
@@ -29,6 +37,10 @@ def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace
     return _preamble(output_tensor, input_tensor, ctx, config=config, workspace=workspace)
 
 
+_cached_config = None
+_cached_group_info = {}
+
+
 def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None, workspace=None):
     """
     All-reduce: sum inputs across all ranks, result on every rank.
@@ -43,7 +55,8 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         config: Config with kernel parameters
         workspace: Reusable workspace from all_reduce_preamble
     """
-    from iris.ccl.config import Config
+    global _cached_config
+    import torch
     from iris.ccl.utils import ReduceOp
 
     if op is None:
@@ -53,8 +66,17 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
             f"Only ReduceOp.SUM is currently supported, got {op}. "
             "Support for other operations will be added in a future release."
         )
+
+    capturing = torch.cuda.is_current_stream_capturing()
+
     if config is None:
-        config = Config(all_reduce_variant="one_shot_gluon", use_gluon=True)
+        if _cached_config is not None:
+            config = _cached_config
+        else:
+            from iris.ccl.config import Config
+            config = Config(all_reduce_variant="one_shot_gluon", use_gluon=True)
+            _cached_config = config
+
     if config.use_gluon and config.all_reduce_variant != "one_shot_gluon":
         config.all_reduce_variant = "one_shot_gluon"
 
@@ -63,14 +85,21 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
     if variant not in valid_variants:
         raise ValueError(f"Invalid all_reduce_variant: {variant}. Must be one of: {', '.join(valid_variants)}")
 
-    rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
+    group_key = id(group) if group is not None else None
+    if group_key in _cached_group_info:
+        rank_in_group, rank_global, world_size, rank_start, rank_stride = _cached_group_info[group_key]
+    else:
+        rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
+        _cached_group_info[group_key] = (rank_in_group, rank_global, world_size, rank_start, rank_stride)
 
     if variant == "one_shot_gluon":
         from iris.ccl.gluon.all_reduce import launch as gluon_launch
 
+        if workspace is None and hasattr(ctx, 'ccl') and hasattr(ctx.ccl, '_default_gluon_workspace'):
+            workspace = ctx.ccl._default_gluon_workspace
+
         inplace = output_tensor.data_ptr() == input_tensor.data_ptr()
-        if inplace:
-            import torch
+        if inplace and not capturing:
             actual_output = torch.empty_like(output_tensor)
         else:
             actual_output = output_tensor
@@ -89,7 +118,7 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
             group=group,
         )
 
-        if inplace:
+        if inplace and not capturing:
             ctx.barrier()
             output_tensor.copy_(actual_output)
     else:
@@ -113,7 +142,7 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         if variant not in ("one_shot", "one_shot_gluon"):
             workspace.prepared = False
 
-    if not async_op and variant not in ("one_shot", "one_shot_gluon"):
+    if not async_op and variant not in ("one_shot", "one_shot_gluon") and not capturing:
         ctx.barrier()
 
     return workspace

@@ -232,6 +232,12 @@ def launch(
     tracing_enabled = bool(tracing and getattr(tracing, "enabled", False))
 
     if workspace is None or not hasattr(workspace, "start_flags"):
+        import torch
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "iris gluon all_reduce: workspace must be pre-created before graph capture. "
+                "Call all_reduce or all_reduce_preamble once outside capture first."
+            )
         workspace = _GluonAllReduceWorkspace(ctx, world_size)
 
     iris_launch(
