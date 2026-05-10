@@ -83,9 +83,9 @@ class Config:
     comm_sms: int = 64
     num_xcds: int | None = None
     chunk_size: int | None = None
-    use_gluon: bool = False
+    use_gluon: bool = True
     all_gather_variant: str = "persistent"
-    all_reduce_variant: str = "two_shot"
+    all_reduce_variant: str = "one_shot_gluon"
     all_reduce_single_barrier: bool = False
     all_reduce_distribution: int = 1
     all_reduce_num_rings: int = 1

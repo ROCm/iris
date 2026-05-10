@@ -54,7 +54,7 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
             "Support for other operations will be added in a future release."
         )
     if config is None:
-        config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+        config = Config(all_reduce_variant="one_shot_gluon", use_gluon=True)
     if config.use_gluon and config.all_reduce_variant != "one_shot_gluon":
         config.all_reduce_variant = "one_shot_gluon"
 
@@ -68,8 +68,17 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
     if variant == "one_shot_gluon":
         from iris.ccl.gluon.all_reduce import launch as gluon_launch
 
+        inplace = output_tensor.data_ptr() == input_tensor.data_ptr()
+        actual_output = output_tensor
+        if inplace:
+            if workspace is not None and hasattr(workspace, '_inplace_buf') and workspace._inplace_buf.shape == output_tensor.shape and workspace._inplace_buf.dtype == output_tensor.dtype:
+                actual_output = workspace._inplace_buf
+            else:
+                import torch
+                actual_output = torch.empty_like(output_tensor)
+
         workspace = gluon_launch(
-            output_tensor,
+            actual_output,
             input_tensor,
             ctx,
             rank_in_group,
@@ -81,6 +90,10 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
             workspace=workspace,
             group=group,
         )
+
+        if inplace:
+            workspace._inplace_buf = actual_output
+            output_tensor.copy_(actual_output)
     else:
         from iris.ccl.triton.all_reduce import launch
 
