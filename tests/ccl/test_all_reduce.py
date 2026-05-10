@@ -19,6 +19,7 @@ from iris.ccl import Config
         # "ring",
         "two_shot",
         "one_shot",
+        "one_shot_gluon",
         # TODO enable these tests when support for cache-modifiers is in place.
         # "spinlock",
     ],
@@ -72,21 +73,22 @@ def test_all_reduce(variant, dtype, M, N, block_size_m, block_size_n):
 
     # Run Iris all_reduce with specified variant
     shmem.barrier()
-    config = Config(all_reduce_variant=variant, block_size_m=block_size_m, block_size_n=block_size_n)
-    if variant == "two_shot":
-        # Test both distribution modes for two_shot
-        config.all_reduce_distribution = 0  # striding
-    if variant == "ring":
-        config.all_reduce_num_rings = min(2, config.comm_sms)
+    if variant == "one_shot_gluon":
+        config = Config(all_reduce_variant=variant, use_gluon=True)
+        shmem.ccl.all_reduce(iris_output_tensor, iris_input_tensor, config=config)
+        torch.cuda.synchronize()
+    else:
+        config = Config(all_reduce_variant=variant, block_size_m=block_size_m, block_size_n=block_size_n)
+        if variant == "two_shot":
+            config.all_reduce_distribution = 0  # striding
+        if variant == "ring":
+            config.all_reduce_num_rings = min(2, config.comm_sms)
 
-    # Explicitly call preamble to ensure proper initialization and synchronization
-    # This helps with test isolation when tests run sequentially
-    workspace = shmem.ccl.all_reduce_preamble(iris_output_tensor, iris_input_tensor, config=config)
-    shmem.barrier()  # Ensure all ranks have completed preamble before starting kernel
+        workspace = shmem.ccl.all_reduce_preamble(iris_output_tensor, iris_input_tensor, config=config)
+        shmem.barrier()
 
-    # Now call all_reduce with the prepared workspace
-    shmem.ccl.all_reduce(iris_output_tensor, iris_input_tensor, config=config, workspace=workspace)
-    torch.cuda.synchronize()
+        shmem.ccl.all_reduce(iris_output_tensor, iris_input_tensor, config=config, workspace=workspace)
+        torch.cuda.synchronize()
 
     # Compare results
     atol = 1e-3 if dtype == torch.float16 else 1e-5

@@ -266,6 +266,15 @@ def launch(
     return workspace
 
 
+def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
+    """Allocate barrier flag tensors for the gluon one-shot all-reduce."""
+    world_size = ctx.get_num_ranks()
+    if workspace is None or not hasattr(workspace, "start_flags"):
+        workspace = _GluonAllReduceWorkspace(ctx, world_size)
+    workspace.prepared = True
+    return workspace
+
+
 class _GluonAllReduceWorkspace:
     """Holds barrier flag tensors for the gluon one-shot all-reduce."""
 
