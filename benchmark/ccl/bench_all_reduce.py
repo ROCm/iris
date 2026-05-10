@@ -5,6 +5,7 @@
 """Benchmark for iris-ccl all-reduce collective."""
 
 import torch
+import torch.distributed as dist
 import iris.bench as bench
 from iris.ccl import Config
 
@@ -36,6 +37,30 @@ def all_reduce(state, ctx):
 
     state.exec(
         lambda: ctx.ccl.all_reduce(out, inp, config=config, workspace=workspace),
+        preamble_fn=preamble,
+    )
+
+
+@bench.register
+@bench.axis("num_ranks", [8])
+@bench.axis("numel", [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072])
+@bench.axis("dtype", [torch.bfloat16])
+def rccl_all_reduce_small(state, ctx):
+    """RCCL baseline for small-message all-reduce."""
+    numel = state["numel"]
+    dtype = state["dtype"]
+    world_size = ctx.get_num_ranks()
+    rank = ctx.get_rank()
+
+    state.set_bytes(int(numel * torch.tensor([], dtype=dtype).element_size() * 2 * (world_size - 1) / world_size))
+
+    tensor = torch.full((1, numel), float(rank + 1), dtype=dtype, device=torch.device("cuda"))
+
+    def preamble():
+        tensor.fill_(float(rank + 1))
+
+    state.exec(
+        lambda: dist.all_reduce(tensor, op=dist.ReduceOp.SUM),
         preamble_fn=preamble,
     )
 
