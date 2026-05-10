@@ -130,40 +130,41 @@ def one_shot_all_reduce_gluon(
     ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE // (THREADS_PER_WARP * WARPS_PER_CTA)
     flat_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
 
-    if INPLACE:
-        for tile_id in range(pid, total_tiles, COMM_SMS):
-            base_offset = tile_id * BLOCK_SIZE
-            offsets = base_offset + gl.arange(0, BLOCK_SIZE, layout=flat_layout)
-            is_full = base_offset + BLOCK_SIZE <= N_ELEMENTS
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        base_offset = tile_id * BLOCK_SIZE
+        offsets = base_offset + gl.arange(0, BLOCK_SIZE, layout=flat_layout)
+        is_full = base_offset + BLOCK_SIZE <= N_ELEMENTS
 
-            if is_full:
-                r0_base = gl.load(ctx.heap_bases + rank_start)
-                r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-                acc = gl.load(r0_ptr + offsets).to(gl.float32)
+        if is_full:
+            r0_base = gl.load(ctx.heap_bases + rank_start)
+            r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+            acc = gl.load(r0_ptr + offsets).to(gl.float32)
 
-                for i in range(1, world_size):
-                    remote_rank = rank_start + i * rank_stride
-                    ri_base = gl.load(ctx.heap_bases + remote_rank)
-                    ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-                    acc += gl.load(ri_ptr + offsets).to(gl.float32)
+            for i in range(1, world_size):
+                remote_rank = rank_start + i * rank_stride
+                ri_base = gl.load(ctx.heap_bases + remote_rank)
+                ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                acc += gl.load(ri_ptr + offsets).to(gl.float32)
 
-                gl.store(scratch_ptr + offsets, acc.to(scratch_ptr.type.element_ty))
-            else:
-                mask = offsets < N_ELEMENTS
-                r0_base = gl.load(ctx.heap_bases + rank_start)
-                r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-                acc = gl.load(r0_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
+            gl.store(scratch_ptr + offsets, acc.to(scratch_ptr.type.element_ty))
+        else:
+            mask = offsets < N_ELEMENTS
+            r0_base = gl.load(ctx.heap_bases + rank_start)
+            r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+            acc = gl.load(r0_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
 
-                for i in range(1, world_size):
-                    remote_rank = rank_start + i * rank_stride
-                    ri_base = gl.load(ctx.heap_bases + remote_rank)
-                    ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-                    acc += gl.load(ri_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
+            for i in range(1, world_size):
+                remote_rank = rank_start + i * rank_stride
+                ri_base = gl.load(ctx.heap_bases + remote_rank)
+                ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                acc += gl.load(ri_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
 
-                gl.store(scratch_ptr + offsets, acc.to(scratch_ptr.type.element_ty), mask=mask)
+            gl.store(scratch_ptr + offsets, acc.to(scratch_ptr.type.element_ty), mask=mask)
 
+    if INPLACE or not SINGLE_BARRIER:
         _gluon_barrier(ctx, end_flags_ptr, group_rank, world_size, rank_start, rank_stride)
 
+    if INPLACE:
         for tile_id in range(pid, total_tiles, COMM_SMS):
             base_offset = tile_id * BLOCK_SIZE
             offsets = base_offset + gl.arange(0, BLOCK_SIZE, layout=flat_layout)
@@ -176,40 +177,6 @@ def one_shot_all_reduce_gluon(
                 mask = offsets < N_ELEMENTS
                 vals = gl.load(scratch_ptr + offsets, mask=mask, other=0.0)
                 gl.store(output_ptr + offsets, vals, mask=mask)
-    else:
-        for tile_id in range(pid, total_tiles, COMM_SMS):
-            base_offset = tile_id * BLOCK_SIZE
-            offsets = base_offset + gl.arange(0, BLOCK_SIZE, layout=flat_layout)
-            is_full = base_offset + BLOCK_SIZE <= N_ELEMENTS
-
-            if is_full:
-                r0_base = gl.load(ctx.heap_bases + rank_start)
-                r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-                acc = gl.load(r0_ptr + offsets).to(gl.float32)
-
-                for i in range(1, world_size):
-                    remote_rank = rank_start + i * rank_stride
-                    ri_base = gl.load(ctx.heap_bases + remote_rank)
-                    ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-                    acc += gl.load(ri_ptr + offsets).to(gl.float32)
-
-                gl.store(output_ptr + offsets, acc.to(output_ptr.type.element_ty))
-            else:
-                mask = offsets < N_ELEMENTS
-                r0_base = gl.load(ctx.heap_bases + rank_start)
-                r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-                acc = gl.load(r0_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
-
-                for i in range(1, world_size):
-                    remote_rank = rank_start + i * rank_stride
-                    ri_base = gl.load(ctx.heap_bases + remote_rank)
-                    ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-                    acc += gl.load(ri_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
-
-                gl.store(output_ptr + offsets, acc.to(output_ptr.type.element_ty), mask=mask)
-
-        if not SINGLE_BARRIER:
-            _gluon_barrier(ctx, end_flags_ptr, group_rank, world_size, rank_start, rank_stride)
 
 
 def _get_num_sms(numel):
