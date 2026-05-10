@@ -108,7 +108,7 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
                         "iris all_reduce: in-place graph capture requires a pre-warmed workspace. "
                         "Call all_reduce once outside capture first."
                     )
-                scratch = ctx.zeros((output_tensor.numel(),), dtype=output_tensor.dtype)
+                scratch = torch.empty(output_tensor.numel(), dtype=output_tensor.dtype, device=output_tensor.device)
                 if workspace is not None:
                     workspace._scratch = scratch
                 actual_output = scratch.view(output_tensor.shape)
