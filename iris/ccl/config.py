@@ -86,6 +86,7 @@ class Config:
     use_gluon: bool = False
     all_gather_variant: str = "persistent"
     all_reduce_variant: str = "two_shot"
+    all_reduce_single_barrier: bool = False
     all_reduce_distribution: int = 1
     all_reduce_num_rings: int = 1
     all_reduce_ring_slice_n: int | None = None
@@ -118,9 +119,9 @@ class Config:
             raise ValueError(
                 f"all_gather_variant must be one of: 'persistent', 'partitioned', got {self.all_gather_variant}"
             )
-        if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock"]:
+        if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "one_shot_gluon", "spinlock"]:
             raise ValueError(
-                f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'spinlock', got {self.all_reduce_variant}"
+                f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'one_shot_gluon', 'spinlock', got {self.all_reduce_variant}"
             )
         if self.all_reduce_distribution not in [0, 1]:
             raise ValueError(

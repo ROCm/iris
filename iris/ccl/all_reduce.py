@@ -4,7 +4,8 @@
 """
 All-reduce collective operation — public API.
 
-Triton only (no gluon support).
+Supports Triton variants (atomic, spinlock, ring, two_shot, one_shot)
+and a Gluon variant (one_shot_gluon) optimized for small messages.
 """
 
 from iris.ccl.utils import extract_group_info
@@ -43,35 +44,48 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         )
     if config is None:
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
-    if config.use_gluon:
-        raise ValueError(
-            "all_reduce does not support use_gluon=True. "
-            "Gluon implementation is not available for all_reduce. "
-            "Use default config (use_gluon=False)."
-        )
+    if config.use_gluon and config.all_reduce_variant != "one_shot_gluon":
+        config.all_reduce_variant = "one_shot_gluon"
 
     variant = config.all_reduce_variant.lower()
-    valid_variants = ["atomic", "spinlock", "ring", "two_shot", "one_shot"]
+    valid_variants = ["atomic", "spinlock", "ring", "two_shot", "one_shot", "one_shot_gluon"]
     if variant not in valid_variants:
         raise ValueError(f"Invalid all_reduce_variant: {variant}. Must be one of: {', '.join(valid_variants)}")
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
-    from iris.ccl.triton.all_reduce import launch
+    if variant == "one_shot_gluon":
+        from iris.ccl.gluon.all_reduce import launch as gluon_launch
 
-    workspace = launch(
-        output_tensor,
-        input_tensor,
-        ctx,
-        rank_in_group,
-        rank_global,
-        world_size,
-        rank_start,
-        rank_stride,
-        config,
-        workspace,
-        group=group,
-    )
+        workspace = gluon_launch(
+            output_tensor,
+            input_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config,
+            workspace=workspace,
+            group=group,
+        )
+    else:
+        from iris.ccl.triton.all_reduce import launch
+
+        workspace = launch(
+            output_tensor,
+            input_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config,
+            workspace,
+            group=group,
+        )
 
     if workspace is not None:
         workspace.prepared = False
