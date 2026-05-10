@@ -99,8 +99,21 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
             workspace = ctx.ccl._default_gluon_workspace
 
         inplace = output_tensor.data_ptr() == input_tensor.data_ptr()
-        if inplace and not capturing:
-            actual_output = torch.empty_like(output_tensor)
+        if inplace:
+            has_scratch = (workspace is not None and getattr(workspace, '_scratch', None) is not None
+                           and workspace._scratch.numel() >= output_tensor.numel())
+            if not has_scratch:
+                if capturing:
+                    raise RuntimeError(
+                        "iris all_reduce: in-place graph capture requires a pre-warmed workspace. "
+                        "Call all_reduce once outside capture first."
+                    )
+                scratch = torch.empty(output_tensor.numel(), dtype=output_tensor.dtype, device=output_tensor.device)
+                if workspace is not None:
+                    workspace._scratch = scratch
+                actual_output = scratch.view(output_tensor.shape)
+            else:
+                actual_output = workspace._scratch[:output_tensor.numel()].view(output_tensor.shape)
         else:
             actual_output = output_tensor
 
@@ -118,8 +131,9 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
             group=group,
         )
 
-        if inplace and not capturing:
-            ctx.barrier()
+        if inplace:
+            if not capturing:
+                ctx.barrier()
             output_tensor.copy_(actual_output)
     else:
         from iris.ccl.triton.all_reduce import launch

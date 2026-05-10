@@ -289,4 +289,5 @@ class _GluonAllReduceWorkspace:
 
         self.start_flags = ctx.zeros((world_size,), dtype=torch.int32)
         self.end_flags = ctx.zeros((world_size,), dtype=torch.int32)
+        self._scratch = None
         self.prepared = True
