@@ -95,9 +95,11 @@ def one_shot_all_reduce_gluon(
     rank_stride: gl.constexpr,
     start_flags_ptr,
     end_flags_ptr,
+    scratch_ptr,
     BLOCK_SIZE: gl.constexpr,
     COMM_SMS: gl.constexpr,
     SINGLE_BARRIER: gl.constexpr,
+    INPLACE: gl.constexpr,
     THREADS_PER_WARP: gl.constexpr,
     WARPS_PER_CTA: gl.constexpr,
     TRACING: gl.constexpr = False,
@@ -105,49 +107,20 @@ def one_shot_all_reduce_gluon(
     """
     One-shot all-reduce using gluon with flat 1D tiling.
 
-    Each CTA reads all remote inputs via heap_bases pointer translation,
-    accumulates in FP32, and writes the reduced result locally. The read-
-    from-remote pattern means no rank writes to another rank's memory
-    during the data phase — only the barrier touches remote memory.
+    For in-place operation (INPLACE=True), uses a two-phase approach:
+      1. Read all remote data, accumulate, write to scratch buffer
+      2. Mid-barrier to ensure all ranks finished reading input
+      3. Copy scratch to output (which aliases input)
+    This prevents the read-write race across ranks via XGMI.
 
-    When SINGLE_BARRIER=True (graph replay mode):
-      start_barrier → reduce → done
-      The start_barrier of replay N+1 guarantees all ranks finished
-      writing output in replay N. End barrier is redundant.
-
-    When SINGLE_BARRIER=False (standalone mode):
-      start_barrier → reduce → end_barrier
-
-    Memory layout (BlockedLayout):
-        A 1D BlockedLayout distributes BLOCK_SIZE elements across the
-        thread hierarchy:
-            ELEMS_PER_THREAD = BLOCK_SIZE // (THREADS_PER_WARP * WARPS_PER_CTA)
-
-    Args:
-        IrisDeviceCtx: Gluon device context class for remote memory operations.
-        context_tensor: Opaque tensor holding IrisDeviceCtx state.
-        input_ptr: Pointer to local input tensor (flattened, N_ELEMENTS).
-        output_ptr: Pointer to output tensor (flattened, N_ELEMENTS).
-        N_ELEMENTS: Total number of elements in the tensor.
-        group_rank: This rank's index within the ProcessGroup (0..world_size-1).
-        iris_rank: This rank's global index in the iris context (for RMA addressing).
-        world_size: Total number of ranks in the group.
-        rank_start: First iris rank in the group (for RMA target computation).
-        rank_stride: Stride between consecutive iris ranks in the group.
-        start_flags_ptr: Pointer to start barrier flags (world_size int32s on symmetric heap).
-        end_flags_ptr: Pointer to end barrier flags (world_size int32s on symmetric heap).
-        BLOCK_SIZE: Elements per tile (must be multiple of THREADS_PER_WARP * WARPS_PER_CTA).
-        COMM_SMS: Number of CUs for persistent scheduling.
-        SINGLE_BARRIER: If True, skip end barrier (safe for graph replay).
-        THREADS_PER_WARP: Threads per warp/wavefront (64 for AMD).
-        WARPS_PER_CTA: Number of warps per workgroup.
+    For non-in-place (INPLACE=False), reads and writes directly in a
+    single pass — no scratch buffer needed.
     """
     ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)
     pid = gl.program_id(0)
 
     _gluon_barrier(ctx, start_flags_ptr, group_rank, world_size, rank_start, rank_stride)
 
-    # Hoist local heap base: avoids redundant gl.load(heap_bases) in inner loop
     local_base = gl.load(ctx.heap_bases + iris_rank)
     input_int = tl.cast(input_ptr, gl.uint64)
     input_offset = input_int - local_base
@@ -157,39 +130,86 @@ def one_shot_all_reduce_gluon(
     ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE // (THREADS_PER_WARP * WARPS_PER_CTA)
     flat_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
 
-    for tile_id in range(pid, total_tiles, COMM_SMS):
-        base_offset = tile_id * BLOCK_SIZE
-        offsets = base_offset + gl.arange(0, BLOCK_SIZE, layout=flat_layout)
-        is_full = base_offset + BLOCK_SIZE <= N_ELEMENTS
+    if INPLACE:
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            base_offset = tile_id * BLOCK_SIZE
+            offsets = base_offset + gl.arange(0, BLOCK_SIZE, layout=flat_layout)
+            is_full = base_offset + BLOCK_SIZE <= N_ELEMENTS
 
-        if is_full:
-            r0_base = gl.load(ctx.heap_bases + rank_start)
-            r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-            acc = gl.load(r0_ptr + offsets).to(gl.float32)
+            if is_full:
+                r0_base = gl.load(ctx.heap_bases + rank_start)
+                r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                acc = gl.load(r0_ptr + offsets).to(gl.float32)
 
-            for i in range(1, world_size):
-                remote_rank = rank_start + i * rank_stride
-                ri_base = gl.load(ctx.heap_bases + remote_rank)
-                ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-                acc += gl.load(ri_ptr + offsets).to(gl.float32)
+                for i in range(1, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    ri_base = gl.load(ctx.heap_bases + remote_rank)
+                    ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                    acc += gl.load(ri_ptr + offsets).to(gl.float32)
 
-            gl.store(output_ptr + offsets, acc.to(output_ptr.type.element_ty))
-        else:
-            mask = offsets < N_ELEMENTS
-            r0_base = gl.load(ctx.heap_bases + rank_start)
-            r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-            acc = gl.load(r0_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
+                gl.store(scratch_ptr + offsets, acc.to(scratch_ptr.type.element_ty))
+            else:
+                mask = offsets < N_ELEMENTS
+                r0_base = gl.load(ctx.heap_bases + rank_start)
+                r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                acc = gl.load(r0_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
 
-            for i in range(1, world_size):
-                remote_rank = rank_start + i * rank_stride
-                ri_base = gl.load(ctx.heap_bases + remote_rank)
-                ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
-                acc += gl.load(ri_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
+                for i in range(1, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    ri_base = gl.load(ctx.heap_bases + remote_rank)
+                    ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                    acc += gl.load(ri_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
 
-            gl.store(output_ptr + offsets, acc.to(output_ptr.type.element_ty), mask=mask)
+                gl.store(scratch_ptr + offsets, acc.to(scratch_ptr.type.element_ty), mask=mask)
 
-    if not SINGLE_BARRIER:
         _gluon_barrier(ctx, end_flags_ptr, group_rank, world_size, rank_start, rank_stride)
+
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            base_offset = tile_id * BLOCK_SIZE
+            offsets = base_offset + gl.arange(0, BLOCK_SIZE, layout=flat_layout)
+            is_full = base_offset + BLOCK_SIZE <= N_ELEMENTS
+
+            if is_full:
+                vals = gl.load(scratch_ptr + offsets)
+                gl.store(output_ptr + offsets, vals)
+            else:
+                mask = offsets < N_ELEMENTS
+                vals = gl.load(scratch_ptr + offsets, mask=mask, other=0.0)
+                gl.store(output_ptr + offsets, vals, mask=mask)
+    else:
+        for tile_id in range(pid, total_tiles, COMM_SMS):
+            base_offset = tile_id * BLOCK_SIZE
+            offsets = base_offset + gl.arange(0, BLOCK_SIZE, layout=flat_layout)
+            is_full = base_offset + BLOCK_SIZE <= N_ELEMENTS
+
+            if is_full:
+                r0_base = gl.load(ctx.heap_bases + rank_start)
+                r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                acc = gl.load(r0_ptr + offsets).to(gl.float32)
+
+                for i in range(1, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    ri_base = gl.load(ctx.heap_bases + remote_rank)
+                    ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                    acc += gl.load(ri_ptr + offsets).to(gl.float32)
+
+                gl.store(output_ptr + offsets, acc.to(output_ptr.type.element_ty))
+            else:
+                mask = offsets < N_ELEMENTS
+                r0_base = gl.load(ctx.heap_bases + rank_start)
+                r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                acc = gl.load(r0_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
+
+                for i in range(1, world_size):
+                    remote_rank = rank_start + i * rank_stride
+                    ri_base = gl.load(ctx.heap_bases + remote_rank)
+                    ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                    acc += gl.load(ri_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
+
+                gl.store(output_ptr + offsets, acc.to(output_ptr.type.element_ty), mask=mask)
+
+        if not SINGLE_BARRIER:
+            _gluon_barrier(ctx, end_flags_ptr, group_rank, world_size, rank_start, rank_stride)
 
 
 def _get_num_sms(numel):
@@ -218,6 +238,7 @@ def launch(
     group=None,
 ):
     """Launch the Gluon one-shot all-reduce kernel."""
+    import torch
 
     numel = input_tensor.numel()
     flat_input = input_tensor.contiguous().view(-1)
@@ -232,13 +253,25 @@ def launch(
     tracing_enabled = bool(tracing and getattr(tracing, "enabled", False))
 
     if workspace is None or not hasattr(workspace, "start_flags"):
-        import torch
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
                 "iris gluon all_reduce: workspace must be pre-created before graph capture. "
                 "Call all_reduce or all_reduce_preamble once outside capture first."
             )
         workspace = _GluonAllReduceWorkspace(ctx, world_size)
+
+    inplace = output_tensor.data_ptr() == input_tensor.data_ptr()
+    if inplace:
+        if workspace._scratch is None or workspace._scratch.numel() < numel:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "iris gluon all_reduce: in-place graph capture requires a pre-warmed workspace. "
+                    "Call all_reduce once outside capture first."
+                )
+            workspace._scratch = torch.empty(numel, dtype=input_tensor.dtype, device=input_tensor.device)
+        scratch_flat = workspace._scratch[:numel]
+    else:
+        scratch_flat = flat_output
 
     iris_launch(
         one_shot_all_reduce_gluon,
@@ -255,9 +288,11 @@ def launch(
         rank_stride,
         workspace.start_flags,
         workspace.end_flags,
+        scratch_flat,
         block_size,
         num_sms,
         getattr(config, "all_reduce_single_barrier", False),
+        inplace,
         config.threads_per_warp,
         num_warps,
         tracing_enabled,

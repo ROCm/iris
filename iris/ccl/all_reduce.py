@@ -98,14 +98,8 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         if workspace is None and hasattr(ctx, 'ccl') and hasattr(ctx.ccl, '_default_gluon_workspace'):
             workspace = ctx.ccl._default_gluon_workspace
 
-        inplace = output_tensor.data_ptr() == input_tensor.data_ptr()
-        if inplace and not capturing:
-            actual_output = torch.empty_like(output_tensor)
-        else:
-            actual_output = output_tensor
-
         workspace = gluon_launch(
-            actual_output,
+            output_tensor,
             input_tensor,
             ctx,
             rank_in_group,
@@ -117,10 +111,6 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
             workspace=workspace,
             group=group,
         )
-
-        if inplace and not capturing:
-            ctx.barrier()
-            output_tensor.copy_(actual_output)
     else:
         from iris.ccl.triton.all_reduce import launch
 
