@@ -156,44 +156,60 @@ def bench_iris_variant(numel, ctx, variant, use_gluon, dtype=torch.bfloat16, war
     ctx.barrier()
 
     # Graph capture (single_barrier for gluon)
+    # Use async_op=True to skip host barrier, which is not graph-capturable.
     if variant == "one_shot_gluon":
         config_graph = Config(
             all_reduce_variant=variant,
             use_gluon=use_gluon,
             all_reduce_single_barrier=True,
         )
-
-        def fn_graph():
-            ctx.ccl.all_reduce(out, inp, config=config_graph, workspace=workspace, async_op=True)
     else:
-        fn_graph = fn
+        config_graph = Config(all_reduce_variant=variant, use_gluon=use_gluon)
+
+    # Pre-create workspace outside capture
+    workspace_graph = None
+    if variant != "one_shot_gluon":
+        workspace_graph = ctx.ccl.all_reduce_preamble(out, inp, config=config_graph)
+    else:
+        from iris.ccl.gluon.all_reduce import _GluonAllReduceWorkspace
+        workspace_graph = _GluonAllReduceWorkspace(ctx, WORLD_SIZE)
+
+    # Pre-extract group info outside capture (calls HIP APIs)
+    from iris.ccl.utils import extract_group_info
+    _rig, _rg, _ws, _rs, _rst = extract_group_info(None, ctx)
+
+    def fn_graph():
+        ctx.ccl.all_reduce(out, inp, config=config_graph, workspace=workspace_graph, async_op=True)
 
     for _ in range(warmup):
         fn_graph()
     torch.cuda.synchronize()
 
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        g = torch.cuda.CUDAGraph()
-        g.capture_begin()
-        fn_graph()
-        g.capture_end()
-    torch.cuda.current_stream().wait_stream(stream)
-    torch.cuda.synchronize()
+    try:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            g = torch.cuda.CUDAGraph()
+            g.capture_begin()
+            fn_graph()
+            g.capture_end()
+        torch.cuda.current_stream().wait_stream(stream)
+        torch.cuda.synchronize()
 
-    ctx.barrier()
-    for _ in range(warmup):
-        g.replay()
-    torch.cuda.synchronize()
-    ctx.barrier()
+        ctx.barrier()
+        for _ in range(warmup):
+            g.replay()
+        torch.cuda.synchronize()
+        ctx.barrier()
 
-    t0 = time.perf_counter()
-    for _ in range(iters):
-        g.replay()
-    torch.cuda.synchronize()
-    graph = (time.perf_counter() - t0) / iters
-    del g
+        t0 = time.perf_counter()
+        for _ in range(iters):
+            g.replay()
+        torch.cuda.synchronize()
+        graph = (time.perf_counter() - t0) / iters
+        del g
+    except Exception:
+        graph = -1.0
 
     # Correctness check
     expected = WORLD_SIZE * (WORLD_SIZE + 1) / 2.0
