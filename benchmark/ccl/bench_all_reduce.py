@@ -62,23 +62,17 @@ def all_reduce_small(state, ctx):
 
     state.set_bytes(int(numel * inp.element_size() * 2 * (world_size - 1) / world_size))
 
-    if variant == "one_shot_gluon":
-        config = Config(all_reduce_variant=variant, use_gluon=True)
-        state.exec(
-            lambda: ctx.ccl.all_reduce(out, inp, config=config),
-        )
-    else:
-        config = Config(all_reduce_variant=variant)
-        workspace = ctx.ccl.all_reduce_preamble(out, inp, config=config)
+    use_gluon = variant == "one_shot_gluon"
+    config = Config(all_reduce_variant=variant, use_gluon=use_gluon)
+    workspace = ctx.ccl.all_reduce_preamble(out, inp, config=config)
 
-        def preamble():
-            out.zero_()
-            ctx.ccl.all_reduce_preamble(out, inp, config=config, workspace=workspace)
+    def preamble():
+        out.zero_()
 
-        state.exec(
-            lambda: ctx.ccl.all_reduce(out, inp, config=config, workspace=workspace),
-            preamble_fn=preamble,
-        )
+    state.exec(
+        lambda: ctx.ccl.all_reduce(out, inp, config=config, workspace=workspace),
+        preamble_fn=preamble,
+    )
 
 
 if __name__ == "__main__":
