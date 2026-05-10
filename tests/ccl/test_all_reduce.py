@@ -173,6 +173,50 @@ def test_all_reduce_two_shot_distribution(distribution, dtype=torch.float32, M=1
         gc.collect()
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("numel", [1024, 4096, 16384, 131072])
+def test_all_reduce_inplace_default_config(dtype, numel):
+    """Test in-place all-reduce with no Config (hits default one_shot_gluon).
+
+    Exercises the in-place detection path in ccl/all_reduce.py: when
+    output.data_ptr() == input.data_ptr(), the dispatch allocates an
+    internal scratch buffer, runs the gluon kernel, and copies back.
+    """
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33
+    shmem = iris.iris(heap_size)
+    rank = shmem.get_rank()
+
+    ref = torch.full((1, numel), float(rank + 1), dtype=dtype, device=f"cuda:{rank}")
+    dist.all_reduce(ref, op=dist.ReduceOp.SUM)
+    torch.cuda.synchronize()
+
+    buf = shmem.zeros((1, numel), dtype=dtype)
+    buf.fill_(float(rank + 1))
+
+    workspace = shmem.ccl.all_reduce_preamble(buf, buf)
+    shmem.barrier()
+
+    shmem.ccl.all_reduce(buf, buf, workspace=workspace)
+    torch.cuda.synchronize()
+
+    atol = 1e-3 if dtype == torch.float16 else 1e-5
+    max_diff = torch.abs(buf - ref).max().item()
+
+    try:
+        assert torch.allclose(buf, ref, atol=atol), (
+            f"In-place all-reduce failed: max_diff={max_diff}, atol={atol}\n"
+            f"Rank {rank}, numel={numel}, dtype={dtype}"
+        )
+    finally:
+        shmem.barrier()
+        del shmem
+        import gc
+        gc.collect()
+
+
 def test_all_reduce_spinlock_lock_too_small():
     """Test that ValueError is raised when the spinlock lock array is too small for current tile count.
 
