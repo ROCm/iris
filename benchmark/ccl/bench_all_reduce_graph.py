@@ -106,7 +106,7 @@ def bench_rccl(numel, dtype=torch.bfloat16, warmup=50, iters=200):
     return wall, events, graph
 
 
-def bench_iris_variant(numel, ctx, variant, use_gluon, dtype=torch.bfloat16, warmup=50, iters=200):
+def bench_iris_variant(numel, ctx, variant, use_gluon, dtype=torch.bfloat16, warmup=100, iters=200):
     inp = ctx.zeros((1, numel), dtype=dtype)
     out = ctx.zeros((1, numel), dtype=dtype)
     inp.fill_(float(ctx.get_rank() + 1))
@@ -125,6 +125,9 @@ def bench_iris_variant(numel, ctx, variant, use_gluon, dtype=torch.bfloat16, war
             out.zero_()
             ctx.ccl.all_reduce_preamble(out, inp, config=config, workspace=workspace)
 
+    # JIT compilation warmup — first call compiles the kernel
+    fn()
+    torch.cuda.synchronize()
     ctx.barrier()
 
     # Wall clock
@@ -221,7 +224,7 @@ def bench_iris_variant(numel, ctx, variant, use_gluon, dtype=torch.bfloat16, war
 
 
 def main():
-    ctx = iris.iris(2**33)
+    ctx = iris.iris(2**28)  # 256MB — small messages only, avoid OOM with graph capture
 
     sizes = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
     variants = [
