@@ -55,7 +55,7 @@ def rccl_all_reduce(state, ctx):
 @bench.axis("M", ALL_MS)
 @bench.axis("N", [2880])
 @bench.axis("dtype", [torch.bfloat16])
-@bench.axis("variant", ["two_shot", "ring", "one_shot"])
+@bench.axis("variant", ["two_shot", "ring", "one_shot", "one_shot_gluon"])
 def iris_all_reduce(state, ctx):
     M, N, dtype = state["M"], state["N"], state["dtype"]
     variant = state["variant"]
@@ -68,7 +68,8 @@ def iris_all_reduce(state, ctx):
     out = ctx.zeros((M, N), dtype=dtype)
     inp.fill_(float(ctx.get_rank() + 1))
 
-    config = Config(all_reduce_variant=variant)
+    use_gluon = variant == "one_shot_gluon"
+    config = Config(all_reduce_variant=variant, use_gluon=use_gluon)
     workspace = ctx.ccl.all_reduce_preamble(out, inp, config=config)
 
     def preamble():

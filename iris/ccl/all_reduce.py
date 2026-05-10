@@ -13,6 +13,17 @@ from iris.ccl.utils import extract_group_info
 
 def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
     """Prepare reusable workspace for all-reduce."""
+    from iris.ccl.config import Config
+
+    if config is None:
+        config = Config()
+
+    variant = config.all_reduce_variant.lower()
+    if variant == "one_shot_gluon" or config.use_gluon:
+        from iris.ccl.gluon.all_reduce import all_reduce_preamble as _gluon_preamble
+
+        return _gluon_preamble(output_tensor, input_tensor, ctx, config=config, workspace=workspace)
+
     from iris.ccl.triton.all_reduce import all_reduce_preamble as _preamble
 
     return _preamble(output_tensor, input_tensor, ctx, config=config, workspace=workspace)
