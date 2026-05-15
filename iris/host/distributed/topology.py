@@ -1122,20 +1122,10 @@ class TopologyDiscovery:
             if num_gpus <= 0:
                 raise RuntimeError("TopologyDiscovery requires at least one GPU")
 
-            # Use LOCAL_RANK (set by torchrun/SLURM) for per-node GPU assignment.
-            # This is more robust than global_rank % num_gpus, which breaks when
-            # ranks aren't distributed in a way that aligns with device_count
-            # (e.g., 2 nodes with 8 GPUs each but only 4 ranks per node).
-            # The % num_gpus clamp handles isolation (LOCAL_RANK=3, device_count=1).
-            local_rank = int(os.environ.get("LOCAL_RANK", 0))
-            self.gpu_id = local_rank % num_gpus
-            # MUST set device BEFORE init_process_group — NCCL needs a CUDA
-            # device assigned to this process, otherwise all ranks fight over
-            # GPU 0 and init either fails or produces world_size=1.
-            torch.cuda.set_device(self.gpu_id)
             if dist.is_initialized():
                 self.rank = dist.get_rank()
                 self.world_size = dist.get_world_size()
+                self.gpu_id = torch.cuda.current_device()
             else:
                 raise RuntimeError("TopologyDiscovery requires an initialized distributed process group.")
 

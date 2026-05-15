@@ -378,7 +378,12 @@ class LocalHipDriver(BaseDriver):
         logger.info("LocalHipDriver initialized (device %d)", device_ordinal)
 
     def allocate_exportable(
-        self, size: int, va: Optional[int] = None
+        self,
+        size: int,
+        va: Optional[int] = None,
+        *,
+        access_va: Optional[int] = None,
+        access_size: Optional[int] = None,
     ) -> LocalAllocation:
         """
         Allocate HIP VMem exportable as a DMA-BUF.
@@ -387,6 +392,8 @@ class LocalHipDriver(BaseDriver):
         granularity-aligned VA range containing [va, va + size).
         """
         self._check_initialized()
+        if (access_va is None) != (access_size is None):
+            raise LocalHipError("access_va and access_size must be provided together")
         props = self._make_alloc_props()
         granularity = self._get_granularity()
         alloc_size = _round_up(size, granularity)
@@ -418,7 +425,10 @@ class LocalHipDriver(BaseDriver):
                 "hipMemMap",
             )
             mapped = True
-            self._mem_set_access(mapped_va, alloc_size)
+            self._mem_set_access(
+                int(access_va) if access_va is not None else mapped_va,
+                int(access_size) if access_size is not None else alloc_size,
+            )
             return LocalAllocation(
                 va=mapped_va,
                 size=alloc_size,
@@ -509,10 +519,19 @@ class LocalHipDriver(BaseDriver):
         return self._export_range(allocation.va, allocation.size)
 
     def import_and_map(
-        self, peer_rank: int, handle_bytes: bytes, size: int, va: Optional[int] = None
+        self,
+        peer_rank: int,
+        handle_bytes: bytes,
+        size: int,
+        va: Optional[int] = None,
+        *,
+        access_va: Optional[int] = None,
+        access_size: Optional[int] = None,
     ) -> PeerMapping:
         """Import a DMA-BUF descriptor and map it into local GPU address space."""
         self._check_initialized()
+        if (access_va is None) != (access_size is None):
+            raise LocalHipError("access_va and access_size must be provided together")
         if len(handle_bytes) != _AMD_HANDLE_BYTES:
             raise LocalHipError(
                 f"AMD local handle must be {_AMD_HANDLE_BYTES} bytes, got {len(handle_bytes)}"
@@ -548,7 +567,10 @@ class LocalHipDriver(BaseDriver):
                     "hipMemMap",
                 )
                 mapped = True
-                self._mem_set_access(mapped_va, size)
+                self._mem_set_access(
+                    int(access_va) if access_va is not None else mapped_va,
+                    int(access_size) if access_size is not None else size,
+                )
                 return PeerMapping(
                     peer_rank=peer_rank,
                     transport=InterconnectLevel.INTRA_NODE,

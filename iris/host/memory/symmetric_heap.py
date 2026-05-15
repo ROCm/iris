@@ -15,7 +15,7 @@ import struct
 import numpy as np
 import torch
 
-from iris.host.logging.logging import _log_rank, logger
+from iris.host.logging.logging import _log_rank
 from iris.host.memory.allocators import TorchAllocator, VMemAllocator, VMemChunkedAllocator
 from iris.drivers.base import PeerMapping
 from iris.host.distributed.fd_passing import setup_fd_infrastructure
@@ -142,7 +142,7 @@ class SymmetricHeap:
             from iris.host.distributed.topology import TopologyDiscovery
 
             try:
-                topology = TopologyDiscovery.discover()
+                topology = TopologyDiscovery().discover()
             except Exception as exc:
                 logger.warning(
                     "TopologyDiscovery.discover() failed (%s); VMemChunkedAllocator will default to INTRA_NODE driver.",
@@ -555,11 +555,18 @@ class SymmetricHeap:
                     reconstructed_handle = _replace_fd_in_local_handle(
                         peer_handle_bytes, cloned_fd
                     )
+                    import_kwargs = {}
+                    if len(peer_handle_bytes) == _LOCAL_HIP_HANDLE_BYTES:
+                        import_kwargs = {
+                            "access_va": peer_va_base,
+                            "access_size": peer_offset + peer_size,
+                        }
                     mapping = self.allocator.driver.import_and_map(
                         peer,
                         reconstructed_handle,
                         peer_size,
                         va=peer_va_base + peer_offset,
+                        **import_kwargs,
                     )
                     self._peer_imported_mappings[peer].append(mapping)
 

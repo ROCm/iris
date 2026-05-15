@@ -266,7 +266,15 @@ class VMemChunkedAllocator(BaseAllocator):
             )
 
         target_va = self.base_va + self.mapped_extent
-        allocation = self.driver.allocate_exportable(self.chunk_size, va=target_va)
+        alloc_kwargs = {}
+        if self.driver.__class__.__name__ == "LocalHipDriver":
+            alloc_kwargs = {
+                "access_va": self.base_va,
+                "access_size": self.mapped_extent + self.chunk_size,
+            }
+        allocation = self.driver.allocate_exportable(
+            self.chunk_size, va=target_va, **alloc_kwargs
+        )
         self.chunks.append(allocation)
         self._shared_regions.append(
             _SharedRegion(va=allocation.va, size=allocation.size, allocation=allocation)
@@ -506,8 +514,18 @@ class VMemChunkedAllocator(BaseAllocator):
 
             target_base_va = self.base_va + target_offset
             handle_bytes = self.driver.export_pointer_handle(alloc_base, alloc_size)
+            import_kwargs = {}
+            if self.driver.__class__.__name__ == "LocalHipDriver":
+                import_kwargs = {
+                    "access_va": self.base_va,
+                    "access_size": target_offset + aligned_alloc_size,
+                }
             mapping = self.driver.import_and_map(
-                self.cur_rank, handle_bytes, aligned_alloc_size, va=target_base_va
+                self.cur_rank,
+                handle_bytes,
+                aligned_alloc_size,
+                va=target_base_va,
+                **import_kwargs,
             )
             self._imported_heap_mappings.append(mapping)
             self._shared_regions.append(

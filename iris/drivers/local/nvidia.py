@@ -362,7 +362,12 @@ class LocalCudaDriver(BaseDriver):
         logger.info("LocalCudaDriver initialized (device %d)", device_ordinal)
 
     def allocate_exportable(
-        self, size: int, va: Optional[int] = None
+        self,
+        size: int,
+        va: Optional[int] = None,
+        *,
+        access_va: Optional[int] = None,
+        access_size: Optional[int] = None,
     ) -> LocalAllocation:
         """
         Allocate CUDA VMM memory exportable as a POSIX FD.
@@ -371,6 +376,8 @@ class LocalCudaDriver(BaseDriver):
         granularity-aligned VA range containing [va, va + size).
         """
         self._check_initialized()
+        if (access_va is None) != (access_size is None):
+            raise LocalCudaError("access_va and access_size must be provided together")
         props = self._make_alloc_props()
         granularity = self._get_granularity()
         alloc_size = _round_up(size, granularity)
@@ -401,7 +408,10 @@ class LocalCudaDriver(BaseDriver):
                 "cuMemMap",
             )
             mapped = True
-            self._mem_set_access(mapped_va, alloc_size)
+            self._mem_set_access(
+                int(access_va) if access_va is not None else mapped_va,
+                int(access_size) if access_size is not None else alloc_size,
+            )
             return LocalAllocation(
                 va=mapped_va,
                 size=alloc_size,
@@ -475,10 +485,19 @@ class LocalCudaDriver(BaseDriver):
         return int(imported.value)
 
     def import_and_map(
-        self, peer_rank: int, handle_bytes: bytes, size: int, va: Optional[int] = None
+        self,
+        peer_rank: int,
+        handle_bytes: bytes,
+        size: int,
+        va: Optional[int] = None,
+        *,
+        access_va: Optional[int] = None,
+        access_size: Optional[int] = None,
     ) -> PeerMapping:
         """Import a POSIX-FD handle and map it into local CUDA VMM VA space."""
         self._check_initialized()
+        if (access_va is None) != (access_size is None):
+            raise LocalCudaError("access_va and access_size must be provided together")
         imported_handle = self._import_handle(handle_bytes)
 
         granularity = self._get_granularity()
@@ -500,7 +519,10 @@ class LocalCudaDriver(BaseDriver):
                 "cuMemMap",
             )
             mapped = True
-            self._mem_set_access(mapped_va, size)
+            self._mem_set_access(
+                int(access_va) if access_va is not None else mapped_va,
+                int(access_size) if access_size is not None else size,
+            )
         except Exception:
             steps: list[tuple[str, Callable[[], None]]] = []
             if mapped:

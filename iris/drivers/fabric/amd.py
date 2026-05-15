@@ -28,7 +28,12 @@ class AmdFabricDriver(BaseDriver):
         raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
 
     def allocate_exportable(
-        self, size: int, va: Optional[int] = None
+        self,
+        size: int,
+        va: Optional[int] = None,
+        *,
+        access_va: Optional[int] = None,
+        access_size: Optional[int] = None,
     ) -> LocalAllocation:
         raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
 
@@ -36,7 +41,14 @@ class AmdFabricDriver(BaseDriver):
         raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
 
     def import_and_map(
-        self, peer_rank: int, handle_bytes: bytes, size: int, va: Optional[int] = None
+        self,
+        peer_rank: int,
+        handle_bytes: bytes,
+        size: int,
+        va: Optional[int] = None,
+        *,
+        access_va: Optional[int] = None,
+        access_size: Optional[int] = None,
     ) -> PeerMapping:
         raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
 
