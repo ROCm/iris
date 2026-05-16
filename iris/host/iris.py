@@ -640,6 +640,14 @@ class Iris:
         """
         return self.heap.is_symmetric(tensor)
 
+    def get_remote_ptrs(self, tensor: torch.Tensor):
+        """Look up per-rank pointer table for a registered external tensor."""
+        return self.heap.get_remote_ptrs(tensor)
+
+    def is_registered(self, tensor: torch.Tensor) -> bool:
+        """Check if a tensor has been registered for cross-rank IPC access."""
+        return self.heap.is_registered(tensor)
+
     def full(self, size, fill_value, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
         """
         Creates a tensor of size size filled with fill_value. The tensor's dtype is inferred from fill_value.

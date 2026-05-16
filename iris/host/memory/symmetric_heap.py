@@ -323,17 +323,23 @@ class SymmetricHeap:
 
     def as_symmetric(self, external_tensor: torch.Tensor) -> torch.Tensor:
         """
-        Place an external PyTorch tensor on the symmetric heap.
+        Make an external PyTorch tensor accessible across all ranks.
 
-        With the torch allocator: allocates on the heap and copies the data;
-        the returned tensor is independent of the input. With the vmem
-        allocator: imports the memory so both tensors share the same storage.
+        With the torch allocator (IPC mode): exchanges dmabuf handles with peers
+        so each rank can read the tensor directly. No copy. The original tensor
+        is returned.
+
+        With the torch allocator (force_copy mode): allocates on the heap and
+        copies the data; the returned tensor is independent of the input.
+
+        With the vmem allocator: imports the memory so both tensors share the
+        same storage via VA mapping.
 
         Args:
             external_tensor: External PyTorch tensor (must be CUDA, contiguous)
 
         Returns:
-            Tensor on the symmetric heap (same shape/dtype; copy or shared per allocator)
+            Tensor accessible across ranks (original or heap copy per allocator)
 
         Raises:
             RuntimeError: If allocator doesn't support imports or import fails
@@ -341,6 +347,22 @@ class SymmetricHeap:
         if not hasattr(self.allocator, "import_external_tensor"):
             raise RuntimeError(f"{type(self.allocator).__name__} does not support as_symmetric().")
 
+        if hasattr(self.allocator, "set_fd_conns") and self.fd_conns is not None:
+            self.allocator.set_fd_conns(self.fd_conns)
+
         imported = self.allocator.import_external_tensor(external_tensor)
-        self.refresh_peer_access()
+        if imported.data_ptr() != external_tensor.data_ptr():
+            self.refresh_peer_access()
         return imported
+
+    def get_remote_ptrs(self, tensor: torch.Tensor):
+        """Look up per-rank pointer table for a registered external tensor."""
+        if hasattr(self.allocator, "get_remote_ptrs"):
+            return self.allocator.get_remote_ptrs(tensor)
+        return None
+
+    def is_registered(self, tensor: torch.Tensor) -> bool:
+        """Check if a tensor has been registered for cross-rank IPC access."""
+        if hasattr(self.allocator, "is_registered"):
+            return self.allocator.is_registered(tensor)
+        return False

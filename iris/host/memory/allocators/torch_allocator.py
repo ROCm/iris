@@ -75,6 +75,10 @@ class TorchAllocator(BaseAllocator):
             self.memory_pool = torch.empty(heap_size, device=self.device, dtype=torch.int8)
 
         self._peer_ext_mem_handles: Dict[int, object] = {}
+        self._buffer_registry: Dict[int, torch.Tensor] = {}
+        self._buffer_registry_sizes: Dict[int, int] = {}
+        self._buffer_ext_mem_handles: Dict[int, list] = {}
+        self._fd_conns = None
 
     def get_minimum_allocation_size(self) -> int:
         """Minimum allocation size in bytes (PyTorch allows 0-size views)."""
@@ -197,35 +201,133 @@ class TorchAllocator(BaseAllocator):
             except Exception:
                 pass
         self._peer_ext_mem_handles.clear()
+        for data_ptr in list(self._buffer_registry.keys()):
+            self._unregister_buffer(data_ptr)
 
     def get_device(self) -> torch.device:
         """Get the torch device."""
         return self.memory_pool.device
 
-    def import_external_tensor(self, external_tensor: torch.Tensor) -> torch.Tensor:
+    def import_external_tensor(self, external_tensor: torch.Tensor, force_copy: bool = False) -> torch.Tensor:
         """
-        Place an external tensor's data on the symmetric heap by copying.
+        Make an external tensor accessible across ranks.
 
-        Unlike the VMem allocator, this does not share memory with the external
-        tensor: it allocates on the heap and copies. Subsequent changes to the
-        external tensor are not visible in the returned tensor.
+        When force_copy=False (default): exchanges IPC handles with all peers
+        so each rank can read this tensor directly. No copy. The original tensor
+        is returned and a per-rank pointer table is stored in the buffer registry.
+
+        When force_copy=True: allocates on the heap and copies (legacy behavior).
 
         Args:
-            external_tensor: External PyTorch tensor to copy from (must be CUDA, contiguous)
+            external_tensor: External PyTorch tensor (must be CUDA, contiguous)
+            force_copy: If True, use legacy copy-to-heap behavior
 
         Returns:
-            New tensor on the symmetric heap with the same data and shape.
+            The original tensor (IPC mode) or a heap copy (force_copy mode).
         """
         if not external_tensor.is_cuda:
             raise RuntimeError("Can only import CUDA tensors")
         if not external_tensor.is_contiguous():
             raise RuntimeError("Only contiguous tensors can be imported; call .contiguous() before as_symmetric()")
-        num_elements = external_tensor.numel()
-        dtype = external_tensor.dtype
-        shape = external_tensor.shape
-        heap_tensor = self.allocate(num_elements, dtype)
-        heap_tensor = heap_tensor.reshape(shape).copy_(external_tensor)
-        return heap_tensor
+
+        if force_copy:
+            num_elements = external_tensor.numel()
+            dtype = external_tensor.dtype
+            shape = external_tensor.shape
+            heap_tensor = self.allocate(num_elements, dtype)
+            heap_tensor = heap_tensor.reshape(shape).copy_(external_tensor)
+            return heap_tensor
+
+        ptr = external_tensor.data_ptr()
+        size = external_tensor.numel() * external_tensor.element_size()
+
+        if ptr in self._buffer_registry:
+            # Guard against caching allocator address reuse
+            if self._buffer_registry_sizes[ptr] != size:
+                self._unregister_buffer(ptr)
+            else:
+                return external_tensor
+        remote_ptrs = self._exchange_buffer_fds(ptr, size)
+
+        input_bases = torch.tensor(remote_ptrs, dtype=torch.int64, device=external_tensor.device)
+        self._buffer_registry[ptr] = input_bases
+        self._buffer_registry_sizes[ptr] = size
+
+        _log_rank(
+            logging.INFO,
+            "TorchAllocator: registered external buffer ptr=0x%x size=%d",
+            ptr,
+            size,
+            rank=self.cur_rank,
+            num_ranks=self.num_ranks,
+        )
+
+        return external_tensor
+
+    def _exchange_buffer_fds(self, data_ptr: int, size: int) -> list:
+        """
+        Exchange dmabuf handles for a single buffer with all peers.
+
+        Same pattern as establish_peer_access but for one tensor.
+        Requires fd_conns to be set via set_fd_conns().
+
+        Returns:
+            List of mapped pointers indexed by rank.
+        """
+        if self._fd_conns is None:
+            raise RuntimeError("fd_conns not set; call set_fd_conns() first")
+
+        fd, base, export_size = export_dmabuf_handle(data_ptr, size)
+        my_metadata = struct.pack("QQQ", base, export_size, data_ptr)
+
+        remote_ptrs = [0] * self.num_ranks
+        remote_ptrs[self.cur_rank] = data_ptr
+        ext_mem_handles = []
+
+        with managed_fd(fd):
+            for peer, sock in self._fd_conns.items():
+                if peer == self.cur_rank:
+                    continue
+
+                if self.cur_rank > peer:
+                    send_fd(sock, fd, payload=my_metadata)
+                    peer_fd, peer_metadata = recv_fd(sock, payload_size=24)
+                else:
+                    peer_fd, peer_metadata = recv_fd(sock, payload_size=24)
+                    send_fd(sock, fd, payload=my_metadata)
+
+                peer_base, peer_size, peer_data_ptr = struct.unpack("QQQ", peer_metadata)
+
+                with managed_fd(peer_fd):
+                    mapped_ptr, ext_mem_handle = import_dmabuf_handle(peer_fd, peer_size, peer_data_ptr, peer_base)
+                    remote_ptrs[peer] = mapped_ptr
+                    ext_mem_handles.append(ext_mem_handle)
+
+        self._buffer_ext_mem_handles[data_ptr] = ext_mem_handles
+        return remote_ptrs
+
+    def _unregister_buffer(self, data_ptr: int):
+        """Remove a buffer from the registry and clean up its handles."""
+        self._buffer_registry.pop(data_ptr, None)
+        self._buffer_registry_sizes.pop(data_ptr, None)
+        handles = self._buffer_ext_mem_handles.pop(data_ptr, [])
+        for handle in handles:
+            try:
+                destroy_external_memory(handle)
+            except Exception:
+                pass
+
+    def set_fd_conns(self, fd_conns):
+        """Store reference to fd connections for per-tensor IPC exchange."""
+        self._fd_conns = fd_conns
+
+    def get_remote_ptrs(self, tensor: torch.Tensor):
+        """Look up per-rank pointer table for a registered tensor."""
+        return self._buffer_registry.get(tensor.data_ptr())
+
+    def is_registered(self, tensor: torch.Tensor) -> bool:
+        """Check if a tensor has been registered for cross-rank access."""
+        return tensor.data_ptr() in self._buffer_registry
 
     def owns_tensor(self, tensor: torch.Tensor) -> bool:
         """
