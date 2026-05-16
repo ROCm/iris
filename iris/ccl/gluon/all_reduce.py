@@ -207,7 +207,7 @@ def _resolve_input_bases(input_tensor, ctx, workspace, rank_global, world_size, 
         return remote_ptrs
 
     heap_bases = ctx.get_heap_bases()
-    offset = input_tensor.data_ptr() - int(heap_bases[rank_global].item())
+    offset = input_tensor.data_ptr() - heap_bases[rank_global]
     input_bases = heap_bases[rank_start::rank_stride][:world_size] + offset
     workspace._input_bases_cache[key] = input_bases
     return input_bases
