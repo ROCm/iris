@@ -229,11 +229,6 @@ def _resolve_input_bases(input_tensor, ctx, workspace, rank_global, world_size, 
 
     if not on_heap:
         if key not in workspace._graph_buf_map:
-            if capturing:
-                raise RuntimeError(
-                    "iris gluon all_reduce: non-heap tensor must be seen during warmup "
-                    "before graph capture. Call all_reduce once outside capture first."
-                )
             buf = torch.empty(world_size, dtype=torch.int64, device=input_tensor.device)
             workspace._graph_buf_map[key] = buf
         return workspace._graph_buf_map[key]
