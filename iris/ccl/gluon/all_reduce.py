@@ -26,6 +26,8 @@ try:
 except ImportError as e:
     raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False.") from e
 
+from contextlib import contextmanager
+
 from iris.mem.gluon.context import Context as IrisDeviceCtx
 from iris.host.tracing.kernel_artifacts import iris_launch
 
@@ -190,11 +192,13 @@ def _resolve_input_bases(input_tensor, ctx, workspace, rank_global, world_size, 
     """Build the per-rank pointer table for the gluon kernel.
 
     Returns a (world_size,) int64 device tensor. Each entry is the
-    data pointer for the corresponding group rank. The kernel reads from
-    these directly — no offset arithmetic needed.
+    data pointer for the corresponding group rank.
 
-    Graph-safe: pre-computes heap invariants during warmup, uses in-place
-    torch.add during capture to avoid allocation or D2H sync.
+    During graph capture (workspace._is_capturing=True): allocates a
+    per-tensor buffer and records the tensor for deferred IPC registration.
+    The graph bakes the buffer ADDRESS; contents are filled after capture
+    by register_graph_buffers(). No torch.add in the graph — avoids
+    clobbering IPC pointers on replay.
     """
     import torch
 
@@ -209,28 +213,27 @@ def _resolve_input_bases(input_tensor, ctx, workspace, rank_global, world_size, 
         workspace._input_bases_cache[key] = remote_ptrs
         return remote_ptrs
 
-    capturing = torch.cuda.is_current_stream_capturing()
+    if getattr(workspace, "_is_capturing", False):
+        if key not in workspace._graph_capture_bufs:
+            buf = torch.empty(world_size, dtype=torch.int64, device=input_tensor.device)
+            workspace._graph_capture_bufs[key] = buf
+            workspace._graph_unreg_tensors.append((input_tensor, buf))
+        return workspace._graph_capture_bufs[key]
 
     if not hasattr(workspace, "_heap_bases_slice"):
-        if capturing:
+        if torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
                 "iris gluon all_reduce: workspace must be warmed up before graph capture. "
-                "Call all_reduce once outside capture first."
+                "Use workspace.capture() context manager for graph capture."
             )
         heap_bases = ctx.get_heap_bases()
         workspace._heap_bases_slice = heap_bases[rank_start::rank_stride][:world_size].contiguous()
         workspace._local_heap_base = int(heap_bases[rank_global].item())
-        workspace._input_bases_buf = torch.empty(world_size, dtype=torch.int64, device=heap_bases.device)
 
     offset = key - workspace._local_heap_base
-
-    if capturing:
-        torch.add(workspace._heap_bases_slice, offset, out=workspace._input_bases_buf)
-        return workspace._input_bases_buf
-    else:
-        result = workspace._heap_bases_slice + offset
-        workspace._input_bases_cache[key] = result
-        return result
+    result = workspace._heap_bases_slice + offset
+    workspace._input_bases_cache[key] = result
+    return result
 
 
 def launch(
@@ -246,7 +249,13 @@ def launch(
     workspace=None,
     group=None,
 ):
-    """Launch the Gluon one-shot all-reduce kernel."""
+    """Launch the Gluon one-shot all-reduce kernel.
+
+    Graph-capture safe: in eager mode, zeros barrier flags and uses end barrier
+    (SINGLE_BARRIER=False). During graph capture, skips the zero and elides the
+    end barrier (SINGLE_BARRIER=True) — flags accumulate across replays and the
+    relative barrier protocol handles it.
+    """
     import torch
 
     numel = input_tensor.numel()
@@ -269,10 +278,16 @@ def launch(
             )
         workspace = _GluonAllReduceWorkspace(ctx, world_size)
 
+    capturing = torch.cuda.is_current_stream_capturing()
+
+    if not capturing:
+        workspace.start_flags.zero_()
+        workspace.end_flags.zero_()
+
     inplace = output_tensor.data_ptr() == input_tensor.data_ptr()
     if inplace:
         if workspace._scratch is None or workspace._scratch.numel() < numel:
-            if torch.cuda.is_current_stream_capturing():
+            if capturing:
                 raise RuntimeError(
                     "iris gluon all_reduce: in-place graph capture requires a pre-warmed workspace. "
                     "Call all_reduce once outside capture first."
@@ -305,7 +320,7 @@ def launch(
         scratch_flat,
         block_size,
         num_sms,
-        getattr(config, "all_reduce_single_barrier", False),
+        capturing,
         inplace,
         config.threads_per_warp,
         num_warps,
@@ -336,7 +351,36 @@ class _GluonAllReduceWorkspace:
     def __init__(self, ctx, world_size):
         import torch
 
+        self.ctx = ctx
+        self.world_size = world_size
         self.start_flags = ctx.zeros((world_size,), dtype=torch.int32)
         self.end_flags = ctx.zeros((world_size,), dtype=torch.int32)
         self._scratch = None
         self.prepared = True
+        self._is_capturing = False
+        self._graph_capture_bufs = {}
+        self._graph_unreg_tensors = []
+        self._input_bases_cache = {}
+
+    @contextmanager
+    def capture(self):
+        self._is_capturing = True
+        self._graph_capture_bufs = {}
+        self._graph_unreg_tensors = []
+        self._input_bases_cache = {}
+        try:
+            yield
+        finally:
+            self._is_capturing = False
+            self._register_graph_buffers()
+
+    def _register_graph_buffers(self):
+        if not self._graph_unreg_tensors:
+            return
+        for tensor, buf in self._graph_unreg_tensors:
+            if not self.ctx.is_registered(tensor):
+                self.ctx.as_symmetric(tensor)
+            remote_ptrs = self.ctx.get_remote_ptrs(tensor)
+            if remote_ptrs is not None:
+                buf.copy_(remote_ptrs)
+        self._graph_unreg_tensors = []
