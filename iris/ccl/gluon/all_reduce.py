@@ -193,8 +193,9 @@ def _resolve_input_bases(input_tensor, ctx, workspace, rank_global, world_size, 
     data pointer for the corresponding group rank. The kernel reads from
     these directly — no offset arithmetic needed.
 
-    Graph-safe: pre-computes heap invariants during warmup, uses in-place
-    torch.add during capture to avoid allocation or D2H sync.
+    Graph-safe: during capture, returns a fixed-address buffer WITHOUT
+    baking any torch.add into the graph. After capture, the caller fills
+    the buffer with real IPC pointers via register_graph_buffers().
     """
     import torch
 
@@ -220,7 +221,26 @@ def _resolve_input_bases(input_tensor, ctx, workspace, rank_global, world_size, 
         heap_bases = ctx.get_heap_bases()
         workspace._heap_bases_slice = heap_bases[rank_start::rank_stride][:world_size].contiguous()
         workspace._local_heap_base = int(heap_bases[rank_global].item())
-        workspace._input_bases_buf = torch.empty(world_size, dtype=torch.int64, device=heap_bases.device)
+
+    if not hasattr(workspace, "_graph_buf_map"):
+        workspace._graph_buf_map = {}
+
+    on_heap = ctx.heap.on_symmetric_heap(input_tensor) if hasattr(ctx, "heap") else True
+
+    if not on_heap:
+        if key not in workspace._graph_buf_map:
+            if capturing:
+                raise RuntimeError(
+                    "iris gluon all_reduce: non-heap tensor must be seen during warmup "
+                    "before graph capture. Call all_reduce once outside capture first."
+                )
+            buf = torch.empty(world_size, dtype=torch.int64, device=input_tensor.device)
+            workspace._graph_buf_map[key] = buf
+        return workspace._graph_buf_map[key]
+
+    if not hasattr(workspace, "_input_bases_buf"):
+        device = input_tensor.device
+        workspace._input_bases_buf = torch.empty(world_size, dtype=torch.int64, device=device)
 
     offset = key - workspace._local_heap_base
 

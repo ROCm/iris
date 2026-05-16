@@ -648,6 +648,23 @@ class Iris:
         """Check if a tensor has been registered for cross-rank IPC access."""
         return self.heap.is_registered(tensor)
 
+    def register_graph_buffers(self, workspace, tensors):
+        """IPC-register graph-captured tensors and fill their pointer tables.
+
+        Called after graph capture ends. For each tensor:
+        1. as_symmetric() exchanges dmabuf handles with peers
+        2. The resulting IPC pointer table is written into the corresponding
+           input_bases_buf that was baked into the captured graph
+        """
+        if not hasattr(workspace, "_graph_buf_map"):
+            return
+        for t in tensors:
+            ptr = t.data_ptr()
+            self.as_symmetric(t)
+            remote_ptrs = self.get_remote_ptrs(t)
+            if remote_ptrs is not None and ptr in workspace._graph_buf_map:
+                workspace._graph_buf_map[ptr].copy_(remote_ptrs)
+
     def full(self, size, fill_value, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
         """
         Creates a tensor of size size filled with fill_value. The tensor's dtype is inferred from fill_value.
