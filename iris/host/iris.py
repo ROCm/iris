@@ -648,6 +648,14 @@ class Iris:
         """Check if a tensor has been registered for cross-rank IPC access."""
         return self.heap.is_registered(tensor)
 
+    def register_graph_buffers(self, workspace, tensors):
+        """Register graph-captured tensors for cross-rank IPC access and fill workspace pointer tables."""
+        for t in tensors:
+            if not self.heap.is_registered(t):
+                self.heap.as_symmetric(t)
+        if hasattr(workspace, "_register_graph_buffers"):
+            workspace._register_graph_buffers()
+
     def full(self, size, fill_value, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
         """
         Creates a tensor of size size filled with fill_value. The tensor's dtype is inferred from fill_value.
