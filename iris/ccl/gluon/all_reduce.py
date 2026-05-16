@@ -88,6 +88,7 @@ def one_shot_all_reduce_gluon(
     input_ptr,
     output_ptr,
     N_ELEMENTS,
+    input_bases_ptr,
     group_rank: gl.constexpr,
     iris_rank: gl.constexpr,
     world_size: gl.constexpr,
@@ -107,6 +108,10 @@ def one_shot_all_reduce_gluon(
     """
     One-shot all-reduce using gluon with flat 1D tiling.
 
+    Remote reads use a host-populated pointer table (input_bases_ptr)
+    with group-relative indexing. The host computes all address
+    translation — the kernel is allocator-agnostic.
+
     For in-place operation (INPLACE=True), uses a two-phase approach:
       1. Read all remote data, accumulate, write to scratch buffer
       2. Mid-barrier to ensure all ranks finished reading input
@@ -121,10 +126,6 @@ def one_shot_all_reduce_gluon(
 
     _gluon_barrier(ctx, start_flags_ptr, group_rank, world_size, rank_start, rank_stride)
 
-    local_base = gl.load(ctx.heap_bases + iris_rank)
-    input_int = tl.cast(input_ptr, gl.uint64)
-    input_offset = input_int - local_base
-
     total_tiles = gl.cdiv(N_ELEMENTS, BLOCK_SIZE)
 
     ELEMS_PER_THREAD: gl.constexpr = BLOCK_SIZE // (THREADS_PER_WARP * WARPS_PER_CTA)
@@ -136,27 +137,21 @@ def one_shot_all_reduce_gluon(
         is_full = base_offset + BLOCK_SIZE <= N_ELEMENTS
 
         if is_full:
-            r0_base = gl.load(ctx.heap_bases + rank_start)
-            r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+            r0_ptr = tl.cast(gl.load(input_bases_ptr + 0), input_ptr.dtype)
             acc = gl.load(r0_ptr + offsets).to(gl.float32)
 
             for i in range(1, world_size):
-                remote_rank = rank_start + i * rank_stride
-                ri_base = gl.load(ctx.heap_bases + remote_rank)
-                ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                ri_ptr = tl.cast(gl.load(input_bases_ptr + i), input_ptr.dtype)
                 acc += gl.load(ri_ptr + offsets).to(gl.float32)
 
             gl.store(scratch_ptr + offsets, acc.to(scratch_ptr.type.element_ty))
         else:
             mask = offsets < N_ELEMENTS
-            r0_base = gl.load(ctx.heap_bases + rank_start)
-            r0_ptr = tl.cast(tl.cast(r0_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+            r0_ptr = tl.cast(gl.load(input_bases_ptr + 0), input_ptr.dtype)
             acc = gl.load(r0_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
 
             for i in range(1, world_size):
-                remote_rank = rank_start + i * rank_stride
-                ri_base = gl.load(ctx.heap_bases + remote_rank)
-                ri_ptr = tl.cast(tl.cast(ri_base, gl.pointer_type(gl.int8)) + input_offset, input_ptr.dtype)
+                ri_ptr = tl.cast(gl.load(input_bases_ptr + i), input_ptr.dtype)
                 acc += gl.load(ri_ptr + offsets, mask=mask, other=0.0).to(gl.float32)
 
             gl.store(scratch_ptr + offsets, acc.to(scratch_ptr.type.element_ty), mask=mask)
@@ -189,6 +184,33 @@ def _get_num_sms(numel):
         return min(total_tiles, 4)
     else:
         return min(total_tiles, 16)
+
+
+def _resolve_input_bases(input_tensor, ctx, workspace, rank_global, world_size, rank_start, rank_stride):
+    """Build the per-rank pointer table for the gluon kernel.
+
+    Returns a cached (world_size,) int64 device tensor. Each entry is the
+    data pointer for the corresponding group rank. The kernel reads from
+    these directly — no offset arithmetic needed.
+    """
+    import torch
+
+    key = input_tensor.data_ptr()
+    if not hasattr(workspace, "_input_bases_cache"):
+        workspace._input_bases_cache = {}
+    if key in workspace._input_bases_cache:
+        return workspace._input_bases_cache[key]
+
+    remote_ptrs = getattr(ctx, "get_remote_ptrs", lambda t: None)(input_tensor)
+    if remote_ptrs is not None:
+        workspace._input_bases_cache[key] = remote_ptrs
+        return remote_ptrs
+
+    heap_bases = ctx.get_heap_bases()
+    offset = input_tensor.data_ptr() - int(heap_bases[rank_global].item())
+    input_bases = heap_bases[rank_start::rank_stride][:world_size] + offset
+    workspace._input_bases_cache[key] = input_bases
+    return input_bases
 
 
 def launch(
@@ -240,6 +262,10 @@ def launch(
     else:
         scratch_flat = flat_output
 
+    input_bases = _resolve_input_bases(
+        input_tensor, ctx, workspace, rank_global, world_size, rank_start, rank_stride
+    )
+
     iris_launch(
         one_shot_all_reduce_gluon,
         (num_sms,),
@@ -248,6 +274,7 @@ def launch(
         flat_input,
         flat_output,
         numel,
+        input_bases,
         rank_in_group,
         rank_global,
         world_size,
