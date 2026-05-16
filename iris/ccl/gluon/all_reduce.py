@@ -189,9 +189,12 @@ def _get_num_sms(numel):
 def _resolve_input_bases(input_tensor, ctx, workspace, rank_global, world_size, rank_start, rank_stride):
     """Build the per-rank pointer table for the gluon kernel.
 
-    Returns a cached (world_size,) int64 device tensor. Each entry is the
+    Returns a (world_size,) int64 device tensor. Each entry is the
     data pointer for the corresponding group rank. The kernel reads from
     these directly — no offset arithmetic needed.
+
+    Graph-safe: pre-computes heap invariants during warmup, uses in-place
+    torch.add during capture to avoid allocation or D2H sync.
     """
     import torch
 
@@ -206,11 +209,28 @@ def _resolve_input_bases(input_tensor, ctx, workspace, rank_global, world_size, 
         workspace._input_bases_cache[key] = remote_ptrs
         return remote_ptrs
 
-    heap_bases = ctx.get_heap_bases()
-    offset = input_tensor.data_ptr() - heap_bases[rank_global]
-    input_bases = heap_bases[rank_start::rank_stride][:world_size] + offset
-    workspace._input_bases_cache[key] = input_bases
-    return input_bases
+    capturing = torch.cuda.is_current_stream_capturing()
+
+    if not hasattr(workspace, "_heap_bases_slice"):
+        if capturing:
+            raise RuntimeError(
+                "iris gluon all_reduce: workspace must be warmed up before graph capture. "
+                "Call all_reduce once outside capture first."
+            )
+        heap_bases = ctx.get_heap_bases()
+        workspace._heap_bases_slice = heap_bases[rank_start::rank_stride][:world_size].contiguous()
+        workspace._local_heap_base = int(heap_bases[rank_global].item())
+        workspace._input_bases_buf = torch.empty(world_size, dtype=torch.int64, device=heap_bases.device)
+
+    offset = key - workspace._local_heap_base
+
+    if capturing:
+        torch.add(workspace._heap_bases_slice, offset, out=workspace._input_bases_buf)
+        return workspace._input_bases_buf
+    else:
+        result = workspace._heap_bases_slice + offset
+        workspace._input_bases_cache[key] = result
+        return result
 
 
 def launch(
