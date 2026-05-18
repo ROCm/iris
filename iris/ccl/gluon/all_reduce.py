@@ -44,16 +44,27 @@ def _gluon_barrier(
     """
     GPU-side barrier using gluon atomics.
 
-    Fence budget: 1 buffer_wbl2 (release atomic) + 1 buffer_inv (inline asm)
-    = 2 fences total, vs ~15 for Triton's barrier.
+    Fence budget: 1 buffer_wbl2 + 1 release atomic + 1 buffer_inv
+    = 3 fences total, vs ~15 for Triton's barrier.
 
     Protocol:
-      1. Release atomic_add on local flag (buffer_wbl2 fence)
+      0. Explicit buffer_wbl2 to flush dirty L2 lines to DRAM
+         (ensures data written by host-side copy is visible via XGMI)
+      1. Release atomic_add on local flag
       2. Relaxed atomic_add to all remote flags (0 fences)
       3. Poll local copies of all remote flags with .cv loads (0 fences)
       4. Inline buffer_inv to invalidate L2 (1 fence)
     """
     cur_rank = ctx_obj.cur_rank
+
+    tl.inline_asm_elementwise(
+        "buffer_wbl2 sc0 sc1",
+        "=r",
+        args=[],
+        dtype=tl.int32,
+        is_pure=False,
+        pack=1,
+    )
 
     my_flag = flags_ptr + group_rank
 
