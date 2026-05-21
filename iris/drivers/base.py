@@ -108,12 +108,8 @@ class BaseDriver(ABC):
 
     def get_address_range(self, ptr: int) -> tuple[int, int]:
         """Return the base VA and size of the allocation containing ptr."""
-        raise DriverNotSupported(
-            f"{type(self).__name__} does not support get_address_range"
-        )
+        raise DriverNotSupported(f"{type(self).__name__} does not support get_address_range")
 
     def export_pointer_handle(self, ptr: int, size: int) -> bytes:
         """Export a peer handle for an arbitrary device pointer."""
-        raise DriverNotSupported(
-            f"{type(self).__name__} does not support export_pointer_handle"
-        )
+        raise DriverNotSupported(f"{type(self).__name__} does not support export_pointer_handle")

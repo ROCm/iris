@@ -31,6 +31,4 @@ class DriverFactory:
                 return AmdFabricDriver()
             if interconnect == InterconnectLevel.INTRA_NODE:
                 return LocalHipDriver()
-        raise DriverNotSupported(
-            f"No driver for vendor={vendor!r}, interconnect={interconnect!r}"
-        )
+        raise DriverNotSupported(f"No driver for vendor={vendor!r}, interconnect={interconnect!r}")

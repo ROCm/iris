@@ -169,9 +169,7 @@ class VMemChunkedAllocator(BaseAllocator):
 
         vendor = _detect_vendor()
         if vendor == "unknown":
-            raise RuntimeError(
-                "VMemChunkedAllocator: could not detect GPU vendor; no compatible driver available"
-            )
+            raise RuntimeError("VMemChunkedAllocator: could not detect GPU vendor; no compatible driver available")
 
         interconnect = InterconnectLevel.INTRA_NODE
         if topology is not None:
@@ -188,10 +186,7 @@ class VMemChunkedAllocator(BaseAllocator):
                     for peer_rank, peer_info in topology.gpu_info.items():
                         if peer_rank == cur_rank:
                             continue
-                        if (
-                            peer_info.hostname != own_info.hostname
-                            and peer_info.fabric_info.domain_key == own_domain
-                        ):
+                        if peer_info.hostname != own_info.hostname and peer_info.fabric_info.domain_key == own_domain:
                             interconnect = InterconnectLevel.INTRA_RACK_FABRIC
                             logger.info(
                                 "Rank %d using fabric driver: peer %d on host %s shares fabric domain %s",
@@ -226,9 +221,7 @@ class VMemChunkedAllocator(BaseAllocator):
         self.chunk_size = max(effective_chunk, self.granularity)
         # granularity is a power of two (asserted above), so the bitmask trick
         # (x + a - 1) & ~(a - 1) is safe for this alignment.
-        self.chunk_size = (self.chunk_size + self.granularity - 1) & ~(
-            self.granularity - 1
-        )
+        self.chunk_size = (self.chunk_size + self.granularity - 1) & ~(self.granularity - 1)
         if not _is_power_of_two(self.chunk_size):
             raise RuntimeError(
                 f"VMemChunkedAllocator: computed chunk_size {self.chunk_size} "
@@ -272,13 +265,9 @@ class VMemChunkedAllocator(BaseAllocator):
                 "access_va": self.base_va,
                 "access_size": self.mapped_extent + self.chunk_size,
             }
-        allocation = self.driver.allocate_exportable(
-            self.chunk_size, va=target_va, **alloc_kwargs
-        )
+        allocation = self.driver.allocate_exportable(self.chunk_size, va=target_va, **alloc_kwargs)
         self.chunks.append(allocation)
-        self._shared_regions.append(
-            _SharedRegion(va=allocation.va, size=allocation.size, allocation=allocation)
-        )
+        self._shared_regions.append(_SharedRegion(va=allocation.va, size=allocation.size, allocation=allocation))
         self.mapped_extent += self.chunk_size
 
     def _process_pending_frees(self):
@@ -320,9 +309,7 @@ class VMemChunkedAllocator(BaseAllocator):
         """
         return self._interconnect
 
-    def allocate(
-        self, num_elements: int, dtype: torch.dtype, alignment: int = 1024
-    ) -> torch.Tensor:
+    def allocate(self, num_elements: int, dtype: torch.dtype, alignment: int = 1024) -> torch.Tensor:
         with self.lock:
             if num_elements == 0:
                 return torch.empty(0, dtype=dtype, device=self.device)
@@ -337,9 +324,7 @@ class VMemChunkedAllocator(BaseAllocator):
             size_class = _next_power_of_two(size_bytes)
             # Ensure alignment to granularity
             aligned_size = max(size_class, self.min_alignment)
-            aligned_size = (aligned_size + self.granularity - 1) & ~(
-                self.granularity - 1
-            )
+            aligned_size = (aligned_size + self.granularity - 1) & ~(self.granularity - 1)
 
             # Try free list first
             if self.free_lists[aligned_size]:
@@ -347,17 +332,12 @@ class VMemChunkedAllocator(BaseAllocator):
             else:
                 # Bump allocate
                 # Align the bump pointer
-                aligned_bump = (self.bump + self.min_alignment - 1) & ~(
-                    self.min_alignment - 1
-                )
+                aligned_bump = (self.bump + self.min_alignment - 1) & ~(self.min_alignment - 1)
 
                 needed = aligned_bump + aligned_size - self.mapped_extent
                 if needed > 0:
                     n_new_chunks = math.ceil(needed / self.chunk_size)
-                    if (
-                        self.mapped_extent + n_new_chunks * self.chunk_size
-                        > self.va_size
-                    ):
+                    if self.mapped_extent + n_new_chunks * self.chunk_size > self.va_size:
                         raise RuntimeError(
                             f"VMemChunkedAllocator: requested allocation needs "
                             f"{n_new_chunks} chunks ({n_new_chunks * self.chunk_size} bytes), "
@@ -451,9 +431,7 @@ class VMemChunkedAllocator(BaseAllocator):
         if start_index < 0:
             raise ValueError(f"start_index must be non-negative, got {start_index}")
         if start_index > len(self._shared_regions):
-            raise ValueError(
-                f"start_index {start_index} exceeds exported region count {len(self._shared_regions)}"
-            )
+            raise ValueError(f"start_index {start_index} exceeds exported region count {len(self._shared_regions)}")
 
         result = []
         for i in range(start_index, len(self._shared_regions)):
@@ -490,21 +468,15 @@ class VMemChunkedAllocator(BaseAllocator):
             if not external_tensor.is_cuda:
                 raise RuntimeError("Can only import CUDA/HIP tensors")
             if not external_tensor.is_contiguous():
-                raise RuntimeError(
-                    "Only contiguous tensors can be imported; call .contiguous() before as_symmetric()"
-                )
+                raise RuntimeError("Only contiguous tensors can be imported; call .contiguous() before as_symmetric()")
 
             external_ptr = external_tensor.data_ptr()
             tensor_size = external_tensor.numel() * external_tensor.element_size()
             alloc_base, alloc_size = self.driver.get_address_range(external_ptr)
             offset_in_alloc = external_ptr - alloc_base
-            aligned_alloc_size = (alloc_size + self.granularity - 1) & ~(
-                self.granularity - 1
-            )
+            aligned_alloc_size = (alloc_size + self.granularity - 1) & ~(self.granularity - 1)
 
-            target_offset = (self.mapped_extent + self.granularity - 1) & ~(
-                self.granularity - 1
-            )
+            target_offset = (self.mapped_extent + self.granularity - 1) & ~(self.granularity - 1)
             if target_offset + aligned_alloc_size > self.va_size:
                 raise RuntimeError(
                     f"VMemChunkedAllocator: imported tensor needs {aligned_alloc_size} bytes "
@@ -528,20 +500,14 @@ class VMemChunkedAllocator(BaseAllocator):
                 **import_kwargs,
             )
             self._imported_heap_mappings.append(mapping)
-            self._shared_regions.append(
-                _SharedRegion(
-                    va=target_base_va, size=aligned_alloc_size, allocation=None
-                )
-            )
+            self._shared_regions.append(_SharedRegion(va=target_base_va, size=aligned_alloc_size, allocation=None))
             self.mapped_extent = target_offset + aligned_alloc_size
             self.bump = max(self.bump, self.mapped_extent)
 
             tensor_va = target_base_va + offset_in_alloc
             iface = _CUDAArrayInterface(tensor_va, tensor_size)
             tensor_bytes = torch.as_tensor(iface, device=self.device)
-            return tensor_bytes.view(external_tensor.dtype).reshape(
-                external_tensor.shape
-            )
+            return tensor_bytes.view(external_tensor.dtype).reshape(external_tensor.shape)
 
     def _import_release_callback(self, mapping: PeerMapping) -> None:
         """Called when an imported tensor's storage is GC'd.
@@ -615,9 +581,7 @@ class VMemChunkedAllocator(BaseAllocator):
     def get_stats(self):
         """Return allocator statistics."""
         total_free = sum(len(v) for v in self.free_lists.values())
-        free_bytes = sum(
-            size_class * len(offsets) for size_class, offsets in self.free_lists.items()
-        )
+        free_bytes = sum(size_class * len(offsets) for size_class, offsets in self.free_lists.items())
         return {
             "num_chunks": len(self.chunks),
             "mapped_bytes": self.mapped_extent,

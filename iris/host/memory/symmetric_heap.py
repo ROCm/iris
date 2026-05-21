@@ -157,9 +157,7 @@ class SymmetricHeap:
                 topology=topology,
             )
         else:
-            raise ValueError(
-                f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem', 'vmem_chunked'"
-            )
+            raise ValueError(f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem', 'vmem_chunked'")
 
         needs_fd_infra = True
         if isinstance(self.allocator, VMemChunkedAllocator):
@@ -168,9 +166,7 @@ class SymmetricHeap:
             if self.allocator.transport_tier == InterconnectLevel.INTRA_RACK_FABRIC:
                 needs_fd_infra = False
 
-        self.fd_conns = (
-            setup_fd_infrastructure(cur_rank, num_ranks) if needs_fd_infra else None
-        )
+        self.fd_conns = setup_fd_infrastructure(cur_rank, num_ranks) if needs_fd_infra else None
         device = self.allocator.get_device()
 
         # Use int64 instead of uint64 for gloo backend compatibility
@@ -178,14 +174,10 @@ class SymmetricHeap:
         heap_bases_array = np.zeros(self.num_ranks, dtype=np.int64)
         # Create on CPU first, then move to device to avoid FFM ioctl issue
         if is_simulation_env():
-            self.heap_bases = torch.tensor(
-                heap_bases_array, device="cpu", dtype=torch.int64
-            )
+            self.heap_bases = torch.tensor(heap_bases_array, device="cpu", dtype=torch.int64)
             self.heap_bases = self.heap_bases.to(device)
         else:
-            self.heap_bases = torch.tensor(
-                heap_bases_array, device=device, dtype=torch.int64
-            )
+            self.heap_bases = torch.tensor(heap_bases_array, device=device, dtype=torch.int64)
 
         self._peer_refresh_failed = False
         self.refresh_peer_access()
@@ -216,9 +208,7 @@ class SymmetricHeap:
             return self.allocator.va_size
         return self.heap_size
 
-    def allocate(
-        self, num_elements: int, dtype: torch.dtype, alignment: int = 1024
-    ) -> torch.Tensor:
+    def allocate(self, num_elements: int, dtype: torch.dtype, alignment: int = 1024) -> torch.Tensor:
         """
         Allocate a tensor on the symmetric heap.
 
@@ -375,11 +365,7 @@ class SymmetricHeap:
         my_base = self.allocator.get_base_address()
         # Use int64 instead of uint64 to avoid gloo issues with all_gather_object
         local_base_arr = np.array([my_base], dtype=np.int64)
-        all_bases_arr = (
-            distributed_allgather(local_base_arr)
-            .reshape(self.num_ranks)
-            .astype(np.int64)
-        )
+        all_bases_arr = distributed_allgather(local_base_arr).reshape(self.num_ranks).astype(np.int64)
         self.heap_bases[self.cur_rank] = int(all_bases_arr[self.cur_rank])
 
         if self.num_ranks == 1:
@@ -444,13 +430,8 @@ class SymmetricHeap:
 
     def _gather_total_chunk_counts(self, dist, local_total: int) -> list[int]:
         count_device = self._get_collective_device(dist)
-        local_total_tensor = torch.tensor(
-            [local_total], dtype=torch.int64, device=count_device
-        )
-        gathered_counts = [
-            torch.zeros(1, dtype=torch.int64, device=count_device)
-            for _ in range(self.num_ranks)
-        ]
+        local_total_tensor = torch.tensor([local_total], dtype=torch.int64, device=count_device)
+        gathered_counts = [torch.zeros(1, dtype=torch.int64, device=count_device) for _ in range(self.num_ranks)]
         dist.all_gather(gathered_counts, local_total_tensor)
         return [int(count.item()) for count in gathered_counts]
 
@@ -474,21 +455,13 @@ class SymmetricHeap:
         total_chunks_per_rank = self._gather_total_chunk_counts(dist, my_total)
         my_total = total_chunks_per_rank[self.cur_rank]
         my_already_shared = self._shared_chunk_counts[self.cur_rank]
-        new_chunk_records = self.allocator.get_allocation_chunks_since(
-            my_already_shared
-        )
+        new_chunk_records = self.allocator.get_allocation_chunks_since(my_already_shared)
 
-        my_metadata = [
-            (offset, size, handle_bytes)
-            for (_idx, offset, size, handle_bytes) in new_chunk_records
-        ]
+        my_metadata = [(offset, size, handle_bytes) for (_idx, offset, size, handle_bytes) in new_chunk_records]
         gathered_metadata = [None] * self.num_ranks
         dist.all_gather_object(gathered_metadata, my_metadata)
 
-        new_fds = [
-            _extract_fd_from_local_handle(handle_bytes)
-            for (_offset, _size, handle_bytes) in my_metadata
-        ]
+        new_fds = [_extract_fd_from_local_handle(handle_bytes) for (_offset, _size, handle_bytes) in my_metadata]
 
         pending_cloned_fds = []
         try:
@@ -510,9 +483,7 @@ class SymmetricHeap:
                 if peer_metadata is None:
                     raise RuntimeError(f"Missing chunk metadata for peer {peer}")
 
-                peer_new_count = (
-                    total_chunks_per_rank[peer] - self._shared_chunk_counts[peer]
-                )
+                peer_new_count = total_chunks_per_rank[peer] - self._shared_chunk_counts[peer]
                 if peer_new_count != len(peer_metadata):
                     raise RuntimeError(
                         f"Chunk metadata count mismatch for peer {peer}: "
@@ -544,17 +515,13 @@ class SymmetricHeap:
                     for my_fd in new_fds:
                         send_fd(sock, my_fd)
 
-                for cloned_fd, (peer_offset, peer_size, peer_handle_bytes) in zip(
-                    cloned_fds, peer_metadata
-                ):
+                for cloned_fd, (peer_offset, peer_size, peer_handle_bytes) in zip(cloned_fds, peer_metadata):
                     # After the upfront metadata validation above, handing the
                     # FD to import_and_map transfers ownership to the driver.
                     # Remove it from the local pending list first so the
                     # cleanup path below only closes never-consumed FDs.
                     pending_cloned_fds.pop(0)
-                    reconstructed_handle = _replace_fd_in_local_handle(
-                        peer_handle_bytes, cloned_fd
-                    )
+                    reconstructed_handle = _replace_fd_in_local_handle(peer_handle_bytes, cloned_fd)
                     import_kwargs = {}
                     if len(peer_handle_bytes) == _LOCAL_HIP_HANDLE_BYTES:
                         import_kwargs = {
@@ -611,16 +578,10 @@ class SymmetricHeap:
         payload = bytearray(len(new_chunks) * record_bytes)
         for index, (_chunk_idx, offset, size, handle_bytes) in enumerate(new_chunks):
             if len(handle_bytes) != handle_bytes_size:
-                raise RuntimeError(
-                    f"Expected {handle_bytes_size}-byte fabric handle, got {len(handle_bytes)}"
-                )
+                raise RuntimeError(f"Expected {handle_bytes_size}-byte fabric handle, got {len(handle_bytes)}")
             record_offset = index * record_bytes
-            payload[record_offset : record_offset + 8] = int(offset).to_bytes(
-                8, "little", signed=False
-            )
-            payload[record_offset + 8 : record_offset + 16] = int(size).to_bytes(
-                8, "little", signed=False
-            )
+            payload[record_offset : record_offset + 8] = int(offset).to_bytes(8, "little", signed=False)
+            payload[record_offset + 8 : record_offset + 16] = int(size).to_bytes(8, "little", signed=False)
             payload[record_offset + 16 : record_offset + record_bytes] = handle_bytes
 
         gathered_payloads = [None] * self.num_ranks
@@ -631,9 +592,7 @@ class SymmetricHeap:
                 self._shared_chunk_counts[peer] = total_chunks_per_rank[peer]
                 continue
 
-            peer_new_count = (
-                total_chunks_per_rank[peer] - self._shared_chunk_counts[peer]
-            )
+            peer_new_count = total_chunks_per_rank[peer] - self._shared_chunk_counts[peer]
             if peer_new_count == 0:
                 if peer in self._peer_va_ranges:
                     self.heap_bases[peer] = self._peer_va_ranges[peer]
@@ -668,9 +627,7 @@ class SymmetricHeap:
                     "little",
                     signed=False,
                 )
-                handle_bytes = peer_payload[
-                    record_offset + 16 : record_offset + record_bytes
-                ]
+                handle_bytes = peer_payload[record_offset + 16 : record_offset + record_bytes]
                 if chunk_offset + chunk_size > self.allocator.va_size:
                     raise RuntimeError(
                         f"Peer {peer} chunk extends beyond va_size: "
@@ -729,9 +686,7 @@ class SymmetricHeap:
                 self._peer_va_ranges = {}
 
             if peer not in self._peer_va_ranges:
-                peer_va_base = mem_address_reserve(
-                    self.heap_size, self.allocator.granularity, 0
-                )
+                peer_va_base = mem_address_reserve(self.heap_size, self.allocator.granularity, 0)
                 self._peer_va_ranges[peer] = peer_va_base
             else:
                 peer_va_base = self._peer_va_ranges[peer]
@@ -774,9 +729,7 @@ class SymmetricHeap:
                 self._peer_imported_segments[peer].add(segment_key)
 
                 # Track for cleanup
-                self._peer_imported_mappings[peer].append(
-                    (imported_handle, peer_va, segment_size)
-                )
+                self._peer_imported_mappings[peer].append((imported_handle, peer_va, segment_size))
 
                 new_cumulative = offset + segment_size
                 if new_cumulative > cumulative_size:
@@ -801,7 +754,6 @@ class SymmetricHeap:
         if dist.is_initialized():
             dist.barrier()
 
-
     def as_symmetric(self, external_tensor: torch.Tensor) -> torch.Tensor:
         """
         Place an external PyTorch tensor on the symmetric heap.
@@ -822,9 +774,7 @@ class SymmetricHeap:
         self._ensure_peer_refresh_healthy()
 
         if not hasattr(self.allocator, "import_external_tensor"):
-            raise RuntimeError(
-                f"{type(self.allocator).__name__} does not support as_symmetric()."
-            )
+            raise RuntimeError(f"{type(self.allocator).__name__} does not support as_symmetric().")
 
         imported = self.allocator.import_external_tensor(external_tensor)
         self.refresh_peer_access()

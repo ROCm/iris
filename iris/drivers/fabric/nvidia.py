@@ -69,10 +69,7 @@ def _cuda_try(err: int, op_name: str = "CUDA operation") -> None:
     error_name = str(err)
     if _cuda_driver is not None and hasattr(_cuda_driver, "cuGetErrorName"):
         ptr = ctypes.c_char_p()
-        if (
-            _cuda_driver.cuGetErrorName(err, ctypes.byref(ptr)) == CUDA_SUCCESS
-            and ptr.value
-        ):
+        if _cuda_driver.cuGetErrorName(err, ctypes.byref(ptr)) == CUDA_SUCCESS and ptr.value:
             error_name = ptr.value.decode("utf-8")
     message = f"{op_name} failed with {error_name} ({err})"
     if err == CUDA_ERROR_NOT_SUPPORTED:
@@ -98,18 +95,12 @@ def _normalize_fabric_handle_bytes(raw_handle: Any) -> bytes:
             data = bytes(raw_handle)
         except Exception:
             try:
-                data = ctypes.string_at(
-                    ctypes.addressof(raw_handle), FABRIC_HANDLE_BYTES
-                )
+                data = ctypes.string_at(ctypes.addressof(raw_handle), FABRIC_HANDLE_BYTES)
             except Exception as exc:
-                raise CudaFabricError(
-                    "Unable to convert fabric handle object to bytes"
-                ) from exc
+                raise CudaFabricError("Unable to convert fabric handle object to bytes") from exc
 
     if len(data) != FABRIC_HANDLE_BYTES:
-        raise CudaFabricError(
-            f"Fabric handle serialization expected {FABRIC_HANDLE_BYTES} bytes, got {len(data)}"
-        )
+        raise CudaFabricError(f"Fabric handle serialization expected {FABRIC_HANDLE_BYTES} bytes, got {len(data)}")
     return data
 
 
@@ -174,9 +165,7 @@ def _configure_cuda_signatures() -> None:
     cu_device_get = _get_required_cuda_symbol("cuDeviceGet")
     cu_device_primary_ctx_retain = _get_required_cuda_symbol("cuDevicePrimaryCtxRetain")
     cu_ctx_set_current = _get_required_cuda_symbol("cuCtxSetCurrent")
-    cu_mem_get_allocation_granularity = _get_required_cuda_symbol(
-        "cuMemGetAllocationGranularity"
-    )
+    cu_mem_get_allocation_granularity = _get_required_cuda_symbol("cuMemGetAllocationGranularity")
     cu_mem_address_reserve = _get_required_cuda_symbol("cuMemAddressReserve")
     cu_mem_address_free = _get_required_cuda_symbol("cuMemAddressFree")
     cu_mem_create = _get_required_cuda_symbol("cuMemCreate")
@@ -184,12 +173,8 @@ def _configure_cuda_signatures() -> None:
     cu_mem_map = _get_required_cuda_symbol("cuMemMap")
     cu_mem_unmap = _get_required_cuda_symbol("cuMemUnmap")
     cu_mem_set_access = _get_required_cuda_symbol("cuMemSetAccess")
-    cu_mem_export_to_shareable_handle = _get_required_cuda_symbol(
-        "cuMemExportToShareableHandle"
-    )
-    cu_mem_import_from_shareable_handle = _get_required_cuda_symbol(
-        "cuMemImportFromShareableHandle"
-    )
+    cu_mem_export_to_shareable_handle = _get_required_cuda_symbol("cuMemExportToShareableHandle")
+    cu_mem_import_from_shareable_handle = _get_required_cuda_symbol("cuMemImportFromShareableHandle")
 
     cu_init.argtypes = [ctypes.c_uint]
     cu_init.restype = ctypes.c_int
@@ -335,9 +320,7 @@ class NvidiaFabricDriver(BaseDriver):
         _configure_cuda_signatures()
         _cuda_try(_cuda_driver.cuInit(0), "cuInit")
         dev = ctypes.c_int()
-        _cuda_try(
-            _cuda_driver.cuDeviceGet(ctypes.byref(dev), device_ordinal), "cuDeviceGet"
-        )
+        _cuda_try(_cuda_driver.cuDeviceGet(ctypes.byref(dev), device_ordinal), "cuDeviceGet")
         ctx = ctypes.c_void_p()
         _cuda_try(
             _cuda_driver.cuDevicePrimaryCtxRetain(ctypes.byref(ctx), dev.value),
@@ -351,9 +334,7 @@ class NvidiaFabricDriver(BaseDriver):
 
     def _check_initialized(self) -> None:
         if not self._initialized:
-            raise CudaFabricError(
-                "NvidiaFabricDriver not initialized — call initialize() first"
-            )
+            raise CudaFabricError("NvidiaFabricDriver not initialized — call initialize() first")
 
     def allocate_exportable(
         self,
@@ -379,16 +360,12 @@ class NvidiaFabricDriver(BaseDriver):
             if reserved_va:
                 reserved = ctypes.c_uint64()
                 _cuda_try(
-                    _cuda_driver.cuMemAddressReserve(
-                        ctypes.byref(reserved), alloc_size, granularity, 0, 0
-                    ),
+                    _cuda_driver.cuMemAddressReserve(ctypes.byref(reserved), alloc_size, granularity, 0, 0),
                     "cuMemAddressReserve",
                 )
                 mapped_va = int(reserved.value)
             _cuda_try(
-                _cuda_driver.cuMemCreate(
-                    ctypes.byref(handle), alloc_size, ctypes.byref(props), 0
-                ),
+                _cuda_driver.cuMemCreate(ctypes.byref(handle), alloc_size, ctypes.byref(props), 0),
                 "cuMemCreate",
             )
             _cuda_try(
@@ -409,9 +386,7 @@ class NvidiaFabricDriver(BaseDriver):
         except Exception:
             if mapped:
                 try:
-                    _cuda_try(
-                        _cuda_driver.cuMemUnmap(mapped_va, alloc_size), "cuMemUnmap"
-                    )
+                    _cuda_try(_cuda_driver.cuMemUnmap(mapped_va, alloc_size), "cuMemUnmap")
                 except Exception:
                     pass
             if handle.value:
@@ -480,9 +455,7 @@ class NvidiaFabricDriver(BaseDriver):
             if va_owned:
                 reserved = ctypes.c_uint64()
                 _cuda_try(
-                    _cuda_driver.cuMemAddressReserve(
-                        ctypes.byref(reserved), size, granularity, 0, 0
-                    ),
+                    _cuda_driver.cuMemAddressReserve(ctypes.byref(reserved), size, granularity, 0, 0),
                     "cuMemAddressReserve",
                 )
                 mapped_va = int(reserved.value)
@@ -526,10 +499,7 @@ class NvidiaFabricDriver(BaseDriver):
 
     def cleanup_import(self, mapping: PeerMapping) -> None:
         self._check_initialized()
-        if (
-            isinstance(mapping._driver_handle, tuple)
-            and len(mapping._driver_handle) == 2
-        ):
+        if isinstance(mapping._driver_handle, tuple) and len(mapping._driver_handle) == 2:
             tag, imported_handle = mapping._driver_handle
         else:
             tag = "driver_va"
@@ -604,9 +574,7 @@ class NvidiaFabricDriver(BaseDriver):
 
         reserved = ctypes.c_uint64()
         _cuda_try(
-            _cuda_driver.cuMemAddressReserve(
-                ctypes.byref(reserved), size, alignment, 0, 0
-            ),
+            _cuda_driver.cuMemAddressReserve(ctypes.byref(reserved), size, alignment, 0, 0),
             "cuMemAddressReserve",
         )
         return int(reserved.value)

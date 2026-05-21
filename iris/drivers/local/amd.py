@@ -143,9 +143,7 @@ def _configure_signatures() -> None:
         return
 
     hip_set_device = _get_required_hip_symbol("hipSetDevice")
-    hip_mem_get_allocation_granularity = _get_required_hip_symbol(
-        "hipMemGetAllocationGranularity"
-    )
+    hip_mem_get_allocation_granularity = _get_required_hip_symbol("hipMemGetAllocationGranularity")
     hip_mem_create = _get_required_hip_symbol("hipMemCreate")
     hip_mem_address_reserve = _get_required_hip_symbol("hipMemAddressReserve")
     hip_mem_map = _get_required_hip_symbol("hipMemMap")
@@ -154,16 +152,10 @@ def _configure_signatures() -> None:
     hip_mem_release = _get_required_hip_symbol("hipMemRelease")
     hip_mem_address_free = _get_required_hip_symbol("hipMemAddressFree")
     hip_mem_get_address_range = _get_required_hip_symbol("hipMemGetAddressRange")
-    hip_mem_get_handle_for_address_range = _get_required_hip_symbol(
-        "hipMemGetHandleForAddressRange"
-    )
-    hip_mem_import_from_shareable_handle = _get_required_hip_symbol(
-        "hipMemImportFromShareableHandle"
-    )
+    hip_mem_get_handle_for_address_range = _get_required_hip_symbol("hipMemGetHandleForAddressRange")
+    hip_mem_import_from_shareable_handle = _get_required_hip_symbol("hipMemImportFromShareableHandle")
     hip_import_external_memory = _get_required_hip_symbol("hipImportExternalMemory")
-    hip_external_memory_get_mapped_buffer = _get_required_hip_symbol(
-        "hipExternalMemoryGetMappedBuffer"
-    )
+    hip_external_memory_get_mapped_buffer = _get_required_hip_symbol("hipExternalMemoryGetMappedBuffer")
     hip_destroy_external_memory = _get_required_hip_symbol("hipDestroyExternalMemory")
     hip_get_error_string = _get_required_hip_symbol("hipGetErrorString")
 
@@ -305,9 +297,7 @@ def _cleanup_after_failure(*steps: tuple[str, Callable[[], None]]) -> None:
         try:
             step()
         except Exception as exc:
-            logger.warning(
-                "Cleanup step %s failed after earlier failure: %s", name, exc
-            )
+            logger.warning("Cleanup step %s failed after earlier failure: %s", name, exc)
 
 
 class LocalHipDriver(BaseDriver):
@@ -325,9 +315,7 @@ class LocalHipDriver(BaseDriver):
 
     def _check_initialized(self) -> None:
         if not self._initialized:
-            raise LocalHipError(
-                "LocalHipDriver not initialized - call initialize() first"
-            )
+            raise LocalHipError("LocalHipDriver not initialized - call initialize() first")
 
     def _make_alloc_props(self) -> hipMemAllocationProp:
         props = hipMemAllocationProp()
@@ -407,17 +395,13 @@ class LocalHipDriver(BaseDriver):
             if reserved_va:
                 reserved = ctypes.c_void_p()
                 _hip_try(
-                    _hip.hipMemAddressReserve(
-                        ctypes.byref(reserved), alloc_size, granularity, None, 0
-                    ),
+                    _hip.hipMemAddressReserve(ctypes.byref(reserved), alloc_size, granularity, None, 0),
                     "hipMemAddressReserve",
                 )
                 mapped_va = int(reserved.value)
 
             _hip_try(
-                _hip.hipMemCreate(
-                    ctypes.byref(handle), alloc_size, ctypes.byref(props), 0
-                ),
+                _hip.hipMemCreate(ctypes.byref(handle), alloc_size, ctypes.byref(props), 0),
                 "hipMemCreate",
             )
             _hip_try(
@@ -452,9 +436,7 @@ class LocalHipDriver(BaseDriver):
                     (
                         "hipMemRelease",
                         lambda: _hip_try(
-                            _hip.hipMemRelease(
-                                hipMemGenericAllocationHandle_t(handle.value)
-                            ),
+                            _hip.hipMemRelease(hipMemGenericAllocationHandle_t(handle.value)),
                             "hipMemRelease",
                         ),
                     )
@@ -464,9 +446,7 @@ class LocalHipDriver(BaseDriver):
                     (
                         "hipMemAddressFree",
                         lambda: _hip_try(
-                            _hip.hipMemAddressFree(
-                                ctypes.c_void_p(mapped_va), alloc_size
-                            ),
+                            _hip.hipMemAddressFree(ctypes.c_void_p(mapped_va), alloc_size),
                             "hipMemAddressFree",
                         ),
                     )
@@ -479,9 +459,7 @@ class LocalHipDriver(BaseDriver):
         base_size = ctypes.c_size_t()
         allocation_ptr = ctypes.c_void_p(int(va))
         _hip_try(
-            _hip.hipMemGetAddressRange(
-                ctypes.byref(base_ptr), ctypes.byref(base_size), allocation_ptr
-            ),
+            _hip.hipMemGetAddressRange(ctypes.byref(base_ptr), ctypes.byref(base_size), allocation_ptr),
             "hipMemGetAddressRange",
         )
         if base_ptr.value is None:
@@ -489,9 +467,7 @@ class LocalHipDriver(BaseDriver):
 
         fd = ctypes.c_int(-1)
         _hip_try(
-            _hip.hipMemGetHandleForAddressRange(
-                ctypes.byref(fd), allocation_ptr, size, 1, 0
-            ),
+            _hip.hipMemGetHandleForAddressRange(ctypes.byref(fd), allocation_ptr, size, 1, 0),
             "hipMemGetHandleForAddressRange",
         )
         fd_value = int(fd.value)
@@ -533,15 +509,11 @@ class LocalHipDriver(BaseDriver):
         if (access_va is None) != (access_size is None):
             raise LocalHipError("access_va and access_size must be provided together")
         if len(handle_bytes) != _AMD_HANDLE_BYTES:
-            raise LocalHipError(
-                f"AMD local handle must be {_AMD_HANDLE_BYTES} bytes, got {len(handle_bytes)}"
-            )
+            raise LocalHipError(f"AMD local handle must be {_AMD_HANDLE_BYTES} bytes, got {len(handle_bytes)}")
 
         fd, offset, base_size = struct.unpack(_AMD_HANDLE_FMT, handle_bytes)
         if size > base_size - offset:
-            raise LocalHipError(
-                f"Requested map size {size} exceeds imported base range {base_size} at offset {offset}"
-            )
+            raise LocalHipError(f"Requested map size {size} exceeds imported base range {base_size} at offset {offset}")
 
         if va is not None:
             mapped_va = int(va)
@@ -561,9 +533,7 @@ class LocalHipDriver(BaseDriver):
                 fd_open = False
 
                 _hip_try(
-                    _hip.hipMemMap(
-                        ctypes.c_void_p(mapped_va), size, offset, imported_handle, 0
-                    ),
+                    _hip.hipMemMap(ctypes.c_void_p(mapped_va), size, offset, imported_handle, 0),
                     "hipMemMap",
                 )
                 mapped = True
@@ -616,9 +586,7 @@ class LocalHipDriver(BaseDriver):
             # ROCm 7.1+ external memory import is preferred over
             # hipMemImportFromShareableHandle to avoid the ROCm 7.0 MemObjMap
             # segfault path for imported memory objects.
-            err = _hip.hipImportExternalMemory(
-                ctypes.byref(ext_mem), ctypes.byref(mem_handle_desc)
-            )
+            err = _hip.hipImportExternalMemory(ctypes.byref(ext_mem), ctypes.byref(mem_handle_desc))
             if err != HIP_SUCCESS:
                 try:
                     os.close(fd)
@@ -633,15 +601,11 @@ class LocalHipDriver(BaseDriver):
 
             mapped_base = ctypes.c_void_p()
             _hip_try(
-                _hip.hipExternalMemoryGetMappedBuffer(
-                    ctypes.byref(mapped_base), ext_mem, ctypes.byref(buffer_desc)
-                ),
+                _hip.hipExternalMemoryGetMappedBuffer(ctypes.byref(mapped_base), ext_mem, ctypes.byref(buffer_desc)),
                 "hipExternalMemoryGetMappedBuffer",
             )
             if mapped_base.value is None:
-                raise LocalHipError(
-                    "hipExternalMemoryGetMappedBuffer returned a null pointer"
-                )
+                raise LocalHipError("hipExternalMemoryGetMappedBuffer returned a null pointer")
 
             remote_va = int(mapped_base.value) + int(offset)
             return PeerMapping(
@@ -677,9 +641,7 @@ class LocalHipDriver(BaseDriver):
                 (
                     "hipMemUnmap",
                     lambda: _hip_try(
-                        _hip.hipMemUnmap(
-                            ctypes.c_void_p(mapping.remote_va), mapping.size
-                        ),
+                        _hip.hipMemUnmap(ctypes.c_void_p(mapping.remote_va), mapping.size),
                         "hipMemUnmap",
                     ),
                 ),
@@ -697,9 +659,7 @@ class LocalHipDriver(BaseDriver):
         try:
             _hip_try(_hip.hipDestroyExternalMemory(ext_mem), "hipDestroyExternalMemory")
         except Exception:
-            logger.warning(
-                "hipDestroyExternalMemory failed during import cleanup", exc_info=True
-            )
+            logger.warning("hipDestroyExternalMemory failed during import cleanup", exc_info=True)
             raise
 
     def cleanup_local(self, allocation: LocalAllocation) -> None:
@@ -716,9 +676,7 @@ class LocalHipDriver(BaseDriver):
             (
                 "hipMemRelease",
                 lambda: _hip_try(
-                    _hip.hipMemRelease(
-                        hipMemGenericAllocationHandle_t(int(allocation.handle))
-                    ),
+                    _hip.hipMemRelease(hipMemGenericAllocationHandle_t(int(allocation.handle))),
                     "hipMemRelease",
                 ),
             ),
@@ -728,9 +686,7 @@ class LocalHipDriver(BaseDriver):
                 (
                     "hipMemAddressFree",
                     lambda: _hip_try(
-                        _hip.hipMemAddressFree(
-                            ctypes.c_void_p(allocation.va), allocation.size
-                        ),
+                        _hip.hipMemAddressFree(ctypes.c_void_p(allocation.va), allocation.size),
                         "hipMemAddressFree",
                     ),
                 )
