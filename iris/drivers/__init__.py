@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Shared driver package types for fabric backends.
+Shared driver package types for memory backends.
 """
 
 from __future__ import annotations
@@ -10,14 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from iris.drivers.base import BaseFabricDriver
+from iris.drivers.base import BaseDriver
 
 __all__ = ["DriverStack"]
 
 
 @dataclass
 class DriverStack:
-    """Fabric drivers available for a rank."""
+    """Driver available for a rank."""
 
     vendor: str
-    fabric: Optional[BaseFabricDriver]
+    driver: Optional[BaseDriver]

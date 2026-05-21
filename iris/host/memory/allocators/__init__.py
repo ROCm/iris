@@ -5,3 +5,4 @@
 from .base import BaseAllocator  # noqa: F401
 from .torch_allocator import TorchAllocator  # noqa: F401
 from .vmem_allocator import VMemAllocator  # noqa: F401
+from .vmem_chunked_allocator import VMemChunkedAllocator  # noqa: F401
