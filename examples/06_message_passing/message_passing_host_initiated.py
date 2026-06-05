@@ -8,7 +8,7 @@ controlled by the HOST (Python/CPU) instead of a device kernel, while
 the consumer (GPU 1) remains a device kernel.
 
 Key difference from message_passing_put.py:
-- Producer: Host uses anvil to initiate SDMA transfers from Python
+- Producer: Host uses sdma_ep (rocm-xio) to initiate SDMA transfers from Python
 - Consumer: Same device kernel waiting for data
 
 This shows how to orchestrate GPU-to-GPU transfers from Python without
