@@ -1,0 +1,290 @@
+{
+    "_meta": {
+        "description": "Champion configs for HBM buffer AG+MM ws=8 on MI300X (gfx942)",
+        "source": "sweep (3489 trials), optimize-loop iter3",
+        "gpu": "AMD Instinct MI300X (gfx942)",
+        "date": "2026-04-13",
+        "convention": "Shapes are (M, N, K) for col-parallel (M-sharded) AG+MM"
+    },
+    "enabled": true,
+    "shapes": {
+        "262144x8192x8192": {
+            "label": "g6",
+            "description": "Llama-70B MLP hidden x hidden \u2014 M-dominant",
+            "M": 262144,
+            "N": 8192,
+            "K": 8192,
+            "params": {
+                "block_size_m": 256,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 24,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 64,
+                "num_fetch_sms": 52,
+                "num_fetch_stages": 4,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 139.069
+        },
+        "131072x16384x16384": {
+            "label": "g2",
+            "description": "Llama MLP variant \u2014 balanced large",
+            "M": 131072,
+            "N": 16384,
+            "K": 16384,
+            "params": {
+                "block_size_m": 256,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 24,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 32,
+                "num_fetch_sms": 4,
+                "num_fetch_stages": 64,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 167.345
+        },
+        "147456x28672x4096": {
+            "label": "g14",
+            "description": "Llama-70B up-projection medium batch",
+            "M": 147456,
+            "N": 28672,
+            "K": 4096,
+            "params": {
+                "block_size_m": 256,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 24,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 16,
+                "num_fetch_sms": 59,
+                "num_fetch_stages": 36,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 74.244
+        },
+        "229376x28672x4096": {
+            "label": "g16",
+            "description": "Llama-70B up-projection mid batch",
+            "M": 229376,
+            "N": 28672,
+            "K": 4096,
+            "params": {
+                "block_size_m": 256,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 24,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 16,
+                "num_fetch_sms": 4,
+                "num_fetch_stages": 56,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 114.265
+        },
+        "327680x28672x4096": {
+            "label": "g15",
+            "description": "Llama-70B up-projection large batch",
+            "M": 327680,
+            "N": 28672,
+            "K": 4096,
+            "params": {
+                "block_size_m": 256,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 24,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 16,
+                "num_fetch_sms": 4,
+                "num_fetch_stages": 32,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 162.136
+        },
+        "8192x8192x262144": {
+            "label": "g5",
+            "description": "K-dominant square",
+            "M": 8192,
+            "N": 8192,
+            "K": 262144,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 32,
+                "num_fetch_sms": 4,
+                "num_fetch_stages": 8,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 217.725
+        },
+        "16384x16384x131072": {
+            "label": "g1",
+            "description": "K-dominant large",
+            "M": 16384,
+            "N": 16384,
+            "K": 131072,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 16,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 16,
+                "num_fetch_sms": 16,
+                "num_fetch_stages": 8,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 223.748
+        },
+        "196608x18432x16384": {
+            "label": "g9",
+            "description": "Large balanced shape",
+            "M": 196608,
+            "N": 18432,
+            "K": 16384,
+            "params": {
+                "block_size_m": 256,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 1,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 32,
+                "num_fetch_sms": 32,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 32
+            },
+            "expected_iris_ms": 266.608
+        },
+        "262144x28672x8192": {
+            "label": "g8",
+            "description": "Large wide shape",
+            "M": 262144,
+            "N": 28672,
+            "K": 8192,
+            "params": {
+                "block_size_m": 256,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 1,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 128,
+                "num_fetch_sms": 32,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 32
+            },
+            "expected_iris_ms": 278.546
+        },
+        "4096x14336x4096": {
+            "label": "mixtral_gate",
+            "description": "Mixtral gate projection",
+            "M": 4096,
+            "N": 14336,
+            "K": 4096,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 1,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 16,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 64
+            },
+            "expected_iris_ms": 1.933
+        },
+        "4096x11008x4096": {
+            "label": "llama7b_gate",
+            "description": "Llama-7B gate projection",
+            "M": 4096,
+            "N": 11008,
+            "K": 4096,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 128,
+                "block_size_k": 64,
+                "group_size_m": 1,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 16,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 64
+            },
+            "expected_iris_ms": 1.946
+        },
+        "4096x4096x4096": {
+            "label": "pow2_4k",
+            "description": "Small power-of-2 square shape",
+            "M": 4096,
+            "N": 4096,
+            "K": 4096,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 1,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 8,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 64
+            },
+            "expected_iris_ms": 1.512
+        }
+    },
+    "default_params": {
+        "block_size_m": 256,
+        "block_size_n": 256,
+        "block_size_k": 64,
+        "group_size_m": 24,
+        "num_xcds": 8,
+        "allow_tf32": true,
+        "num_warps": 8,
+        "num_stages": 2,
+        "k_per_flag": 8,
+        "num_fetch_sms": 32,
+        "num_fetch_stages": 1,
+        "first_stage_fetch_sms": 64
+    }
+}

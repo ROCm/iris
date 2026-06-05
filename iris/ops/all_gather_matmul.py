@@ -9,13 +9,13 @@ This operation computes C = all_gather(A_sharded) @ B by pulling
 tiles from remote ranks on-demand during GEMM computation.
 """
 
+import logging
 from typing import Optional
 import torch
 import triton
 import triton.language as tl
 import iris
-import iris.x
-from iris.tracing.kernel_artifacts import iris_launch
+from iris.host.tracing.kernel_artifacts import iris_launch
 
 from tritonblas.kernels.stages import GemmContext, ScheduleContext
 
@@ -83,7 +83,7 @@ def _fused_all_gather_matmul_kernel(
 
         # Create DeviceContext and TensorView for gather operations
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
-        src_view = iris.x.make_tensor_view(A_sharded, M, K_local, stride_am, stride_ak)
+        src_view = iris.make_tensor_view(A_sharded, M, K_local, stride_am, stride_ak)
 
         # Precompute B column offsets for this output tile (constant across K iterations)
         rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -102,10 +102,10 @@ def _fused_all_gather_matmul_kernel(
                 # Create tile view for this K block
                 # Promote tile_k to tensor (TileView expects tl.tensor for pid_n)
                 tile_k = pid_m * 0 + k_offset // BLOCK_SIZE_K
-                k_tile = iris.x.TileView(pid_m, tile_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
+                k_tile = iris.TileView(pid_m, tile_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
 
                 # Pull A tile from source_rank_id using gather primitive
-                a = iris.x.gather(k_tile, src_view, source_rank_id, ctx)
+                a = ctx.gather(k_tile, src_view, source_rank_id)
 
                 # Load B tile using direct pointer arithmetic
                 # Compute global K row index for B matrix
@@ -126,10 +126,10 @@ def _fused_all_gather_matmul_kernel(
                 k_offset = loop_k_local * BLOCK_SIZE_K
                 # Promote tile_k to tensor (TileView expects tl.tensor for pid_n)
                 tile_k = pid_m * 0 + k_offset // BLOCK_SIZE_K
-                k_tile = iris.x.TileView(pid_m, tile_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
+                k_tile = iris.TileView(pid_m, tile_k, BLOCK_SIZE_M, BLOCK_SIZE_K)
 
                 # Pull A tile from source_rank_id using gather primitive
-                a = iris.x.gather(k_tile, src_view, source_rank_id, ctx)
+                a = ctx.gather(k_tile, src_view, source_rank_id)
 
                 # Load B tile with boundary handling
                 global_k_offset = source_rank_id * K_local + loop_k_local * BLOCK_SIZE_K
@@ -165,7 +165,7 @@ def all_gather_matmul_preamble(
     B: torch.Tensor,
     config: Optional[FusedConfig] = None,
 ) -> FusedWorkspace:
-    """Allocate workspace for all_gather_matmul (none needed for pull pattern)."""
+    """Allocate workspace for all_gather_matmul."""
     if config is None:
         config = FusedConfig()
 
@@ -176,13 +176,15 @@ def all_gather_matmul_preamble(
     expected_K = world_size * K_local
     assert K == expected_K, f"K ({K}) must equal world_size ({world_size}) * K_local ({K_local})"
 
-    return FusedWorkspace(
+    ws = FusedWorkspace(
         operation="all_gather_matmul",
         shape=(M, N, K),
         dtype=A_sharded.dtype,
         world_size=world_size,
         prepared=True,
     )
+
+    return ws
 
 
 def all_gather_matmul(
@@ -204,22 +206,26 @@ def all_gather_matmul(
     world_size = shmem.get_num_ranks()
     rank = shmem.get_rank()
 
+    from iris.host.logging.logging import _log_rank
+
+    _log_rank(
+        logging.DEBUG,
+        "all_gather_matmul: shape=(%d,%d,%d) dtype=%s rank=%d/%d",
+        M,
+        N,
+        K,
+        A_sharded.dtype,
+        rank,
+        world_size,
+        rank=rank,
+        num_ranks=world_size,
+    )
+
     expected_K = world_size * K_local
     assert K == expected_K, f"K ({K}) must equal world_size ({world_size}) * K_local ({K_local})"
     assert output_tensor.shape == (M, N), f"Output must be ({M}, {N}), got {output_tensor.shape}"
 
     # Validate problem size against block sizes
-    assert M >= config.block_size_m, (
-        f"M ({M}) must be >= block_size_m ({config.block_size_m}). Use smaller block sizes for small problems."
-    )
-    assert K_local >= config.block_size_k, (
-        f"K_local ({K_local}) must be >= block_size_k ({config.block_size_k}). "
-        f"Use smaller block sizes for small problems."
-    )
-    assert N >= config.block_size_n, (
-        f"N ({N}) must be >= block_size_n ({config.block_size_n}). Use smaller block sizes for small problems."
-    )
-
     if workspace is None:
         workspace = all_gather_matmul_preamble(shmem, A_sharded, B, config)
 
@@ -246,7 +252,8 @@ def all_gather_matmul(
     even_k = K_local % config.block_size_k == 0
     num_k_blocks_local = (K_local + config.block_size_k - 1) // config.block_size_k
 
-    # Launch single fused kernel
+    num_tiles_m = (M + config.block_size_m - 1) // config.block_size_m
+    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
     grid = (num_sms,)
     iris_launch(
         _fused_all_gather_matmul_kernel,

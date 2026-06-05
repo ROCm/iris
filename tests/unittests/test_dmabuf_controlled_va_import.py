@@ -8,7 +8,7 @@ Test DMA-BUF import with controlled VA (export → import → map → set_access
 import torch
 import torch.distributed as dist
 import os
-from iris.hip import (
+from iris.host.platform.hip import (
     get_allocation_granularity,
     get_address_range,
     export_dmabuf_handle,

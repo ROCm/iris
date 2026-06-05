@@ -15,7 +15,7 @@ This package provides:
 - Utility functions: do_bench
 - HIP integration for AMD GPU support
 - Logging utilities with rank information
-- iris_gluon: Gluon-based implementation with @aggregate backend (experimental)
+- Gluon backend: @aggregate-based implementation via iris.mem.gluon
 
 Quick Start (Traditional API):
     >>> import iris
@@ -27,11 +27,12 @@ Quick Start (Traditional API):
     >>>     iris.load(buffer, 0, 1, heap_bases)
 
 Quick Start (Gluon API - Experimental):
-    >>> import iris.experimental.iris_gluon as iris_gl
+    >>> import iris
+    >>> from iris.gluon import IrisDeviceCtx
     >>> from triton.experimental import gluon
     >>> from triton.experimental.gluon import language as gl
     >>>
-    >>> ctx = iris_gl.iris(heap_size=2**30)
+    >>> ctx = iris.iris(heap_size=2**30)
     >>> context_tensor = ctx.get_device_context()
     >>> tensor = ctx.zeros(1000, 1000, dtype=torch.float32)
     >>>
@@ -41,11 +42,17 @@ Quick Start (Gluon API - Experimental):
     >>>     ctx.load(buffer, 1)
 """
 
-from .iris import (
-    Iris,
-    iris,
-    DeviceContext,
-    TraceEvent,
+from iris.host.iris import Iris, iris
+from iris.mem.triton.context import Context, Context as DeviceContext
+from iris.host.tracing.events import TraceEvent
+from iris.mem.triton.types import (
+    Tile,
+    TileView,
+    TensorView,
+    AllReduceConfig,
+    make_tensor_view,
+)
+from iris.mem.triton.ops import (
     load,
     store,
     copy,
@@ -62,24 +69,24 @@ from .iris import (
     atomic_max,
 )
 
-from .util import (
+from iris.host.platform.utils import (
     do_bench,
     get_device_id_for_rank,
     is_simulation_env,
 )
 
-from .tensor_utils import (
+from iris.host.memory.tensor_utils import (
     CUDAArrayInterface,
     tensor_from_ptr,
 )
 
-from . import hip
+from iris.host.platform import hip
 from . import experimental
 from . import ops
-from . import tensor_creation
+from iris.host.memory import tensors as tensor_creation
 from . import bench
-from .tracing import kernel_artifacts  # noqa: F401  # triggers _init() at import time
-from .logging import (
+from iris.host.tracing import kernel_artifacts  # noqa: F401  # triggers _init() at import time
+from iris.host.logging.logging import (
     set_logger_level,
     logger,
     DEBUG,
@@ -92,8 +99,14 @@ __all__ = [
     "Iris",
     "iris",
     "get_device_id_for_rank",
+    "Context",
     "DeviceContext",
     "TraceEvent",
+    "Tile",
+    "TileView",
+    "TensorView",
+    "AllReduceConfig",
+    "make_tensor_view",
     "load",
     "store",
     "copy",

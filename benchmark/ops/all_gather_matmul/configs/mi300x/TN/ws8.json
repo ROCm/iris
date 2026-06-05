@@ -1,0 +1,31 @@
+{
+    "_meta": {
+        "description": "AG+MM ws=8 TN transpose on MI300X — heuristic defaults (no per-shape benchmarks yet)",
+        "source": "heuristic extrapolation from NN transpose champion data",
+        "gpu": "AMD Instinct MI300X (gfx942)",
+        "date": "2026-04-13",
+        "data_tag": "heuristic",
+        "convention": "Shapes are (M, N, K) for col-parallel (M-sharded) AG+MM, A transposed (M×K → K×M)"
+    },
+    "enabled": true,
+    "shapes": {},
+    "default_config": {
+        "block_size_m": 256,
+        "block_size_n": 256,
+        "block_size_k": 64,
+        "group_size_m": 24,
+        "num_warps": 8,
+        "num_stages": 2,
+        "num_xcds": 8,
+        "allow_tf32": true
+    },
+    "default_hbm_buffer_params": {
+        "k_per_flag": 8,
+        "num_fetch_sms": 32,
+        "num_fetch_stages": 1,
+        "first_stage_fetch_sms": 64
+    },
+    "heuristic_rules": {
+        "note": "Uses same heuristic as NN transpose. Shape-specific tuning pending."
+    }
+}

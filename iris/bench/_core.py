@@ -225,7 +225,7 @@ def register(fn: Callable) -> Callable:
 
     The function must have the signature ``fn(state, ctx)`` where *state*
     is a :class:`State` and *ctx* is an :class:`~iris.Iris` context
-    (or ``iris_gluon`` context if ``--use_gluon`` is passed).
+    (or Gluon context if ``--use_gluon`` is passed).
     """
     axes: list[AxisDef] = getattr(fn, "_bench_axes", [])
     _registry.append(BenchmarkDef(name=fn.__name__, fn=fn, axes=axes))

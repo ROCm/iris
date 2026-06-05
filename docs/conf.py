@@ -86,15 +86,15 @@ autodoc_default_options = {
 autodoc_typehints = "description"
 autodoc_typehints_format = "short"
 
-# Render objects without full module path (e.g., show "Iris" instead of "iris.iris.Iris")
+# Render objects without full module path (e.g., show "Iris" instead of "iris.host.iris.Iris")
 add_module_names = False
 
 # Mock heavy/runtime-only dependencies when building docs
 autodoc_mock_imports = [
     "torch",
     "numpy",
-    "iris._distributed_helpers",
-    "iris.hip",
+    "iris.host.distributed.helpers",
+    "iris.host.platform.hip",
     "tritonblas",
 ]
 
@@ -118,6 +118,9 @@ triton_language_mock = MagicMock()
 sys.modules["triton.language"] = triton_language_mock
 sys.modules["triton.language.core"] = MagicMock()
 sys.modules["triton.language.core"]._aggregate = lambda cls: cls  # Preserve class
+sys.modules["triton.language.extra"] = MagicMock()
+sys.modules["triton.language.extra.hip"] = MagicMock()
+sys.modules["triton.language.target_info"] = MagicMock()
 
 
 # Mock triton modules with docstring-preserving jit decorator

@@ -32,7 +32,7 @@ class FusedConfig:
 
     CCL Parameters (for operations that need collective communication):
         all_reduce_variant: All-reduce algorithm variant. Options: "atomic", "ring",
-                           "one_shot", "two_shot", "spinlock". Default: "one_shot".
+                           "one_shot", "two_shot", "spinlock". Default: "two_shot".
         all_reduce_num_rings: Number of concurrent rings (for ring variant). Default: 1.
 
     Example:

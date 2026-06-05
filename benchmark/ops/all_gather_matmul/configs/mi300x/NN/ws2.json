@@ -1,0 +1,159 @@
+{
+    "_meta": {
+        "description": "AG+MM ws=2 on MI300X \u2014 DISABLED (loses vs PyTorch on all shapes)",
+        "gpu": "AMD Instinct MI300X (gfx942)",
+        "date": "2026-04-13"
+    },
+    "enabled": false,
+    "reason": "ws=2 AG transfers from 1 peer only. GEMM dominates latency. Fetch SM overhead exceeds overlap benefit. LDS overflow forces ns=1, imposing 15-35% penalty.",
+    "shapes": {
+        "8192x8192x262144": {
+            "label": "g5",
+            "M": 8192,
+            "N": 8192,
+            "K": 262144,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 32,
+                "num_fetch_sms": 4,
+                "num_fetch_stages": 8,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 186.062
+        },
+        "16384x16384x131072": {
+            "label": "g1",
+            "M": 16384,
+            "N": 16384,
+            "K": 131072,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 16,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 16,
+                "num_fetch_sms": 8,
+                "num_fetch_stages": 8,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 153.042
+        },
+        "4096x14336x4096": {
+            "label": "mixtral_gate",
+            "M": 4096,
+            "N": 14336,
+            "K": 4096,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 8,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 2.334
+        },
+        "4096x11008x4096": {
+            "label": "llama7b_gate",
+            "M": 4096,
+            "N": 11008,
+            "K": 4096,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 8,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 1.784
+        },
+        "4096x4096x4096": {
+            "label": "pow2_4k",
+            "M": 4096,
+            "N": 4096,
+            "K": 4096,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 8,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 1.109
+        },
+        "5120x13824x5120": {
+            "label": "llama13b_gate",
+            "M": 5120,
+            "N": 13824,
+            "K": 5120,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 8,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 4.144
+        },
+        "4096x4096x11008": {
+            "label": "llama7b_down",
+            "M": 4096,
+            "N": 4096,
+            "K": 11008,
+            "params": {
+                "block_size_m": 128,
+                "block_size_n": 256,
+                "block_size_k": 64,
+                "group_size_m": 8,
+                "num_xcds": 8,
+                "allow_tf32": true,
+                "num_warps": 8,
+                "num_stages": 2,
+                "k_per_flag": 8,
+                "num_fetch_sms": 8,
+                "num_fetch_stages": 1,
+                "first_stage_fetch_sms": 52
+            },
+            "expected_iris_ms": 2.477
+        }
+    },
+    "default_params": null
+}

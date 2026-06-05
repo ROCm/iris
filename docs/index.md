@@ -135,7 +135,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.gluon import IrisDeviceCtx
 
 # Device-side APIs - context encapsulates heap_bases
 @gluon.jit
@@ -167,20 +168,20 @@ def _worker(rank, world_size):
 
     # Iris initialization
     heap_size = 2**30   # 1GiB symmetric heap
-    iris_ctx = iris_gl.iris(heap_size)
+    iris_ctx = iris.iris(heap_size)
     context_tensor = iris_ctx.get_device_context()  # Get encoded context
     cur_rank = iris_ctx.get_rank()
-    
+
     # Iris tensor allocation
     buffer_size = 4096  # 4K elements buffer
     buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
-    
+
     # Launch the kernel on rank 0
     block_size = 1024
     grid = (buffer_size + block_size - 1) // block_size
     source_rank = 0
     if cur_rank == source_rank:
-        kernel[(grid,)](iris_gl.IrisDeviceCtx, context_tensor, 
+        kernel[(grid,)](IrisDeviceCtx, context_tensor,
                        buffer, buffer_size, block_size, num_warps=1)
 
     # Synchronize all ranks
@@ -194,12 +195,13 @@ if __name__ == "__main__":
 
 For more examples, see the [Examples](reference/examples.md) page with ready-to-run scripts and usage patterns.
 
-For other setup methods, see the [Installation Guide](getting-started/installation.md).
+For other setup methods, see the [Installation Guide](getting-started/installation.md). For scheduler-managed clusters, see [Running Iris on SLURM](getting-started/slurm.md).
 
 ## Documentation Structure
 
 ### 📚 **Getting Started**
   - **[Installation](getting-started/installation.md)**: Set up Iris on your system
+  - **[SLURM](getting-started/slurm.md)**: Build and run Iris on scheduler-managed GPU clusters
   - **[Examples](reference/examples.md)**: Working code examples
   - **[Contributing](CONTRIBUTING.md)**: How to contribute
 
@@ -242,4 +244,4 @@ Want to contribute to Iris? Check out the [Contributing Guide](CONTRIBUTING.md) 
 
 ---
 
-**Ready to start your multi-GPU journey? Begin with the [Installation Guide](getting-started/installation.md)!**
+**Ready to start your multi-GPU journey? Begin with the [Installation Guide](getting-started/installation.md) or the [SLURM guide](getting-started/slurm.md)!**

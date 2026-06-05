@@ -29,6 +29,8 @@ omni*.pdf
 slurm*.out
 
 *.egg-info
+*.backup
+*.with_chunked
 
 examples/gemm/results/*
 asm/
@@ -66,3 +68,4 @@ docker/rocm-systems/
 # IntelliKit / Copilot agent artifacts
 .intellikit
 .github/agents/skills/
+docs/benchmark-results/*.png

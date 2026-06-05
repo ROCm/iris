@@ -1,0 +1,27 @@
+{
+    "_meta": {
+        "description": "Global default fallback config for AG+MM operations. Disables iris AG+MM for ws<8 (fallback to PyTorch).",
+        "source": "benchmarking on MI300X (gfx942), 3489 measured trials",
+        "date": "2026-04-13"
+    },
+    "world_size_gate": {
+        "min_world_size": 8,
+        "reason": "ws=2 best 0.89x, ws=4 best 0.86x vs PyTorch. Only ws>=8 is production-ready."
+    },
+    "config": {
+        "block_size_m": 256,
+        "block_size_n": 256,
+        "block_size_k": 64,
+        "group_size_m": 24,
+        "num_warps": 8,
+        "num_stages": 2,
+        "num_xcds": 8,
+        "allow_tf32": true
+    },
+    "hbm_buffer_params": {
+        "k_per_flag": 8,
+        "num_fetch_sms": 32,
+        "num_fetch_stages": 1,
+        "first_stage_fetch_sms": 64
+    }
+}

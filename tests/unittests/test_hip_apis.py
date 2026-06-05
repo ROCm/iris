@@ -11,7 +11,7 @@ import pytest
 
 def test_get_address_range_basic():
     """Test get_address_range with a simple tensor."""
-    from iris.hip import get_address_range
+    from iris.host.platform.hip import get_address_range
 
     # Allocate a tensor
     tensor = torch.randn(1000, 1000, device="cuda", dtype=torch.float32)
@@ -37,7 +37,7 @@ def test_get_address_range_basic():
 
 def test_get_address_range_offset_pointer():
     """Test get_address_range with offset pointers (sliced tensors)."""
-    from iris.hip import get_address_range
+    from iris.host.platform.hip import get_address_range
 
     # Allocate a large tensor
     large_tensor = torch.randn(5000, 1000, device="cuda", dtype=torch.float32)
@@ -62,7 +62,7 @@ def test_get_address_range_offset_pointer():
 
 def test_get_address_range_multiple_allocations():
     """Test get_address_range with multiple allocations (caching allocator)."""
-    from iris.hip import get_address_range
+    from iris.host.platform.hip import get_address_range
 
     # Allocate multiple small tensors
     # PyTorch's caching allocator may allocate these from the same base buffer
@@ -86,7 +86,7 @@ def test_get_address_range_multiple_allocations():
 
 def test_get_address_range_contiguous():
     """Test get_address_range with contiguous and non-contiguous tensors."""
-    from iris.hip import get_address_range
+    from iris.host.platform.hip import get_address_range
 
     # Create contiguous tensor
     contiguous = torch.randn(5000, 1000, device="cuda", dtype=torch.float32)
@@ -111,7 +111,7 @@ def test_get_address_range_contiguous():
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.int64, torch.int32])
 def test_get_address_range_dtypes(dtype):
     """Test get_address_range with different data types."""
-    from iris.hip import get_address_range
+    from iris.host.platform.hip import get_address_range
 
     # Use randint for integer types, randn for float types
     if dtype in [torch.int64, torch.int32]:
@@ -133,7 +133,7 @@ def test_get_address_range_dtypes(dtype):
 @pytest.mark.parametrize("shape", [(10,), (10, 20), (5, 10, 15), (2, 3, 4, 5)])
 def test_get_address_range_shapes(shape):
     """Test get_address_range with different tensor shapes."""
-    from iris.hip import get_address_range
+    from iris.host.platform.hip import get_address_range
 
     tensor = torch.randn(*shape, device="cuda", dtype=torch.float32)
     ptr = tensor.data_ptr()

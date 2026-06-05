@@ -12,60 +12,47 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations on AM
 
 **FOLLOW THESE INSTRUCTIONS EXACTLY. Reference these instructions first before using search or bash commands.**
 
+## GPU Environment
+
+**You have AMD GPU access.** Your runner has 8x MI325X GPUs (gfx942) with ROCm installed. Do NOT skip GPU operations or say you lack GPU access. You can and should:
+
+- Run benchmarks and post results (charts, tables) in PR comments
+- Run tests with `torchrun --nproc_per_node=N` for multi-GPU tests
+- Use `rocm-smi` to verify GPU status
+- Run `python -c "import torch; print(torch.cuda.device_count())"` to confirm GPU count
+
+When asked to run a benchmark, **run it and post the output**. Do not say you cannot.
+
+### Running multi-GPU tests and benchmarks
+
+Multi-GPU tests require `torch.distributed` initialization before pytest:
+```bash
+# Single GPU
+pytest tests/unittests/ -v --tb=short
+
+# Multi-GPU (N = number of GPUs)
+torchrun --nproc_per_node=N -m pytest tests/ -v --tb=short
+
+# Benchmarks use iris.bench framework
+torchrun --nproc_per_node=8 benchmark/ops/bench_<name>.py
+```
+
+### iris.bench framework
+
+Benchmarks use the declarative `iris.bench` framework. See existing `benchmark/ops/bench_*.py` files for examples. Output includes latency, throughput, and bandwidth tables. When posting benchmark results in PR comments, format as markdown tables.
+
 ## Prerequisites
 
-- **GPU**: AMD GPUs with ROCm compatibility (tested on MI300X, MI350X & MI355X)
-  > **Note**: See below for instructions on development without AMD GPU access
+- **GPU**: AMD GPUs with ROCm compatibility (tested on MI300X, MI325X, MI350X & MI355X)
 - **ROCm/HIP Toolkit**: Required for building C++/HIP components
 - **Docker/Apptainer**: Recommended for containerized development
 
 ## Build
 
-### Docker Development Environment (Recommended)
+iris is already installed in your environment via `pip install -e .` in the setup steps. You do not need to build or install anything. If you need to reinstall after modifying `setup.py` or C extensions:
 ```bash
-# Build and start development container (takes 45-60 minutes - NEVER CANCEL)
-docker compose up --build -d
-
-# Attach to running container
-docker attach iris-dev
-
-# Install Iris in development mode
-cd iris && pip install -e ".[dev]"
-```
-
-### Alternative Docker Setup
-```bash
-# Build Docker image manually
-./docker/build.sh <image-name>  # Takes 45-60 minutes
-
-# Run container
-./docker/run.sh <image-name>
-
-# Install Iris
-cd iris && pip install -e ".[dev]"
-```
-
-### Apptainer Setup
-```bash
-# Build and run Apptainer image
-./apptainer/build.sh
-./apptainer/run.sh
-
-# Install Iris
 pip install -e ".[dev]"
 ```
-
-### Local Development (Not Recommended)
-```bash
-# Requires ROCm/HIP toolkit installation
-pip install -e ".[dev]"
-```
-
-### Development Without AMD GPU
-If you don't have access to AMD GPUs, you can still contribute to the project:
-- **Code Editing**: Start editing code directly in your local environment
-- **CI Testing**: The project has comprehensive CI pipelines that will test your changes automatically. You can check the CI logs if your changes fail to understand what went wrong.
-- **Local Validation**: Run linting and formatting locally: `ruff check . --fix && ruff format .`
 
 ## Run
 

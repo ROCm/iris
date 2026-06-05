@@ -1,0 +1,101 @@
+{
+    "_meta": {
+        "description": "Regression test sizes for HBM buffer AG+MM kernel across ws=2/4/8",
+        "source": "28 measured shapes (12 ws=8, 9 ws=4, 7 ws=2) from 3489 trials",
+        "gpu_target": "MI300X (gfx942)",
+        "date": "2026-04-13",
+        "usage": "from iris.ops import load_regression_sizes"
+    },
+    "sizes": [
+        {
+            "name": "g2_ws8",
+            "label": "g2",
+            "description": "Llama MLP variant — balanced large (highest speedup)",
+            "M": 131072, "N": 16384, "K": 16384,
+            "tier": "champion",
+            "world_sizes": [8],
+            "expected": {"ws8_speedup": 1.343, "ws8_tflops": 420.5},
+            "regression_threshold_pct": 10
+        },
+        {
+            "name": "g15_ws8",
+            "label": "g15",
+            "description": "Llama-70B up-projection large batch — highest TFLOPS",
+            "M": 327680, "N": 28672, "K": 4096,
+            "tier": "champion",
+            "world_sizes": [8],
+            "expected": {"ws8_speedup": 1.284, "ws8_tflops": 474.7},
+            "regression_threshold_pct": 10
+        },
+        {
+            "name": "g14_ws8",
+            "label": "g14",
+            "description": "Llama-70B up-projection medium batch",
+            "M": 147456, "N": 28672, "K": 4096,
+            "tier": "champion",
+            "world_sizes": [8],
+            "expected": {"ws8_speedup": 1.288, "ws8_tflops": 466.5},
+            "regression_threshold_pct": 10
+        },
+        {
+            "name": "g16_ws8",
+            "label": "g16",
+            "description": "Llama-70B up-projection mid batch",
+            "M": 229376, "N": 28672, "K": 4096,
+            "tier": "champion",
+            "world_sizes": [8],
+            "expected": {"ws8_speedup": 1.277, "ws8_tflops": 471.5},
+            "regression_threshold_pct": 10
+        },
+        {
+            "name": "g5_ws8",
+            "label": "g5",
+            "description": "K-dominant square — M-small, needs bm=128",
+            "M": 8192, "N": 8192, "K": 262144,
+            "tier": "champion",
+            "world_sizes": [8],
+            "expected": {"ws8_speedup": 1.224, "ws8_tflops": 161.6},
+            "regression_threshold_pct": 10
+        },
+        {
+            "name": "g6_ws8",
+            "label": "g6",
+            "description": "Llama-70B MLP hidden x hidden — M-dominant",
+            "M": 262144, "N": 8192, "K": 8192,
+            "tier": "champion",
+            "world_sizes": [8],
+            "expected": {"ws8_speedup": 1.200, "ws8_tflops": 253.0},
+            "regression_threshold_pct": 10
+        },
+        {
+            "name": "g1_ws8",
+            "label": "g1",
+            "description": "K-dominant large — parity shape",
+            "M": 16384, "N": 16384, "K": 131072,
+            "tier": "champion",
+            "world_sizes": [8],
+            "expected": {"ws8_speedup": 1.136, "ws8_tflops": 314.5},
+            "regression_threshold_pct": 10
+        },
+        {
+            "name": "g5_ws2_disabled",
+            "label": "g5",
+            "description": "Best ws=2 shape — still loses vs PyTorch (0.887x). Verifies fallback.",
+            "M": 8192, "N": 8192, "K": 262144,
+            "tier": "disabled",
+            "world_sizes": [2],
+            "expected": {"ws2_speedup": 0.887, "ws2_disabled": true},
+            "regression_threshold_pct": null
+        },
+        {
+            "name": "g6_ws4_disabled",
+            "label": "g6",
+            "description": "Best ws=4 shape — still loses vs PyTorch (0.856x). Verifies fallback.",
+            "M": 262144, "N": 8192, "K": 8192,
+            "tier": "disabled",
+            "world_sizes": [4],
+            "expected": {"ws4_speedup": 0.856, "ws4_disabled": true},
+            "regression_threshold_pct": null
+        }
+    ]
+}

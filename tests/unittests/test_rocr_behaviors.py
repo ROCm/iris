@@ -24,7 +24,7 @@ def test_dmabuf_export_returns_base_allocation():
     This is critical for import_external_tensor() to work correctly.
     Uses tensor slicing to guarantee an offset.
     """
-    from iris.hip import export_dmabuf_handle, get_address_range
+    from iris.host.platform.hip import export_dmabuf_handle, get_address_range
 
     # Create a tensor and slice it to guarantee an offset
     full_tensor = torch.randn(1000, 1000, device="cuda", dtype=torch.float32)
@@ -69,7 +69,7 @@ def test_dmabuf_export_with_large_offset():
     This ensures the export returns base allocation even for pointers
     far from the allocation start.
     """
-    from iris.hip import export_dmabuf_handle, get_address_range
+    from iris.host.platform.hip import export_dmabuf_handle, get_address_range
 
     # Create a large tensor
     large_tensor = torch.randn(10000, 1000, device="cuda", dtype=torch.float32)
@@ -114,7 +114,7 @@ def test_get_address_range_consistency():
     Test that get_address_range consistently returns the same base for
     multiple pointers within the same allocation.
     """
-    from iris.hip import get_address_range
+    from iris.host.platform.hip import get_address_range
 
     # Create a large tensor
     tensor = torch.randn(1000, 1000, device="cuda", dtype=torch.float32)
@@ -147,7 +147,7 @@ def test_get_address_range_with_guaranteed_offsets():
 
     Uses tensor slicing to guarantee offsets (not dependent on caching allocator).
     """
-    from iris.hip import get_address_range
+    from iris.host.platform.hip import get_address_range
 
     # Create a large tensor
     large_tensor = torch.randn(1000, 1000, device="cuda", dtype=torch.float32)
@@ -197,7 +197,7 @@ def test_vmem_allocator_uses_cumulative_access():
     """
     import torch.distributed as dist
 
-    from iris.allocators.vmem_allocator import VMemAllocator
+    from iris.host.memory.allocators.vmem_allocator import VMemAllocator
 
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -248,7 +248,7 @@ def test_dmabuf_import_cleanup_preserves_original():
 
     Uses only HIP functions, no Iris dependency.
     """
-    from iris.hip import (
+    from iris.host.platform.hip import (
         export_dmabuf_handle,
         import_dmabuf_handle,
         destroy_external_memory,
