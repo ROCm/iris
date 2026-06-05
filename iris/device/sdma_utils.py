@@ -174,6 +174,23 @@ def submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr):
 
 
 @triton.jit
+def quiet(read_ptr, cached_write_ptr: tl.pointer_type(tl.uint64)):
+    """
+    Wait for all submitted SDMA operations to complete.
+
+    Polls the hardware read pointer until it catches up to the cached write pointer,
+    ensuring all previously submitted SDMA packets have been processed.
+
+    Args:
+        read_ptr: Pointer to hardware read pointer
+        cached_write_ptr: Pointer to cached write pointer
+    """
+    target_wptr = tl.load(cached_write_ptr, cache_modifier=".cv", volatile=True)
+    while tl.load(read_ptr, cache_modifier=".cv", volatile=True) != target_wptr:
+        pass
+
+
+@triton.jit
 def place_nop_packet(queue_ptr_u32, offset_bytes: tl.uint64, padding_bytes):
     """Place a NOP (no operation) packet for ring buffer padding."""
     num_padding_dwords = (padding_bytes // 4).to(tl.int32)
