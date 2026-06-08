@@ -54,7 +54,6 @@ from iris.host.platform.hip import (
 )
 
 from xio import sdma_ep
-from iris.device import sdma_utils
 from iris.host.memory.symmetric_heap import SymmetricHeap
 import numpy as np
 from typing import Any
