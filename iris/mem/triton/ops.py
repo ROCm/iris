@@ -290,13 +290,10 @@ def put(
     store_cache_modifier=None,
     hint: tl.constexpr = None,
     copy_engine_ctx: tl.tensor = None,
-    stride_tm: tl.constexpr = 0,
-    stride_tn: tl.constexpr = 0,
-    stride_fm: tl.constexpr = 0,
-    stride_fn: tl.constexpr = 0,
+    src_row_stride: tl.constexpr = 0,
+    dst_row_stride: tl.constexpr = 0,
     USE_COPY_ENGINE: tl.constexpr = False,
     CONTIGUOUS_COPY: tl.constexpr = False,
-    IS_2D_COPY: tl.constexpr = False,
     from_base_ptr=None,
     to_base_ptr=None,
 ):
@@ -307,8 +304,8 @@ def put(
     space to the `to_rank`'s address space, and storing the data to the `to_rank` memory location.
 
     Supports both 1D (flat/linear) and 2D (tiled) copies:
-    - 1D copies: Used when stride_tm == 0 and stride_fm == 0 (default), uses linear SDMA packets
-    - 2D copies: Used when strides are non-zero, uses sub-window SDMA packets for better performance
+    - 1D copies: Used for 1D pointer blocks, uses linear SDMA packets
+    - 2D copies: Used for 2D pointer blocks, uses sub-window SDMA packets for better performance
     The load is **always local** (reading from the current rank's own ``from_ptr``), while the
     store is **remote** when ``from_rank != to_rank`` (writing to a peer GPU).
 
@@ -319,10 +316,6 @@ def put(
         to_rank (int): The rank ID to which the data will be written.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         copy_engine_ctx (tl.tensor): Copy engine context for SDMA operations.
-        stride_tm (int, optional): Stride in M dimension for destination buffer (in elements). Default: 0 (flat copy).
-        stride_tn (int, optional): Stride in N dimension for destination buffer (in elements). Default: 0.
-        stride_fm (int, optional): Stride in M dimension for source buffer (in elements). Default: 0 (flat copy).
-        stride_fn (int, optional): Stride in N dimension for source buffer (in elements). Default: 0.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load/copy data at that index.
             When ``USE_COPY_ENGINE`` and ``CONTIGUOUS_COPY`` are true, ``mask=None`` copies the full pointer block.
             Defaults to None.
@@ -342,12 +335,12 @@ def put(
             - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
         copy_engine_ctx (tl.tensor, optional): Copy engine context for SDMA operations. Required for SDMA bulk copies.
+        src_row_stride (int, optional): Source row stride in elements for 2D SDMA copies. Defaults to 0.
+        dst_row_stride (int, optional): Destination row stride in elements for 2D SDMA copies. Defaults to 0.
         USE_COPY_ENGINE (tl.constexpr, optional): Whether to use SDMA copy engine. Defaults to False (uses regular load/store).
         CONTIGUOUS_COPY (tl.constexpr, optional): Opt-in assertion that the masked pointer block represents one contiguous
             1D span or one rectangular 2D tile. SDMA bulk copies are only used when this is True; otherwise the function
             falls back to regular load/store semantics.
-        IS_2D_COPY (tl.constexpr, optional): Deprecated compatibility flag. SDMA copy shape is inferred from
-            ``from_ptr.shape``; 2D pointer blocks use sub-window copy packets.
         from_base_ptr (triton.PointerType, optional): Base pointer of the source buffer. Required for 2D copies when USE_COPY_ENGINE is True.
         to_base_ptr (triton.PointerType, optional): Base pointer of the destination buffer. Required for 2D copies when USE_COPY_ENGINE is True.
 
@@ -372,7 +365,7 @@ def put(
         >>>     from_rank = 0
         >>>     to_rank = 1
         >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases,
-        >>>              stride_tm=1024, stride_fm=1024,
+        >>>              dst_row_stride=1024, src_row_stride=1024,
         >>>              mask=mask, copy_engine_ctx=copy_engine_ctx,
         >>>              USE_COPY_ENGINE=True, CONTIGUOUS_COPY=True,
         >>>              from_base_ptr=base_ptr, to_base_ptr=base_ptr)
@@ -471,8 +464,8 @@ def put(
                 num_elements_per_stride = tl.max(tl.sum(mask_int, axis=-1))
                 num_strides = tl.max(tl.sum(mask_int, axis=0))
             size_bytes = (num_elements_per_stride * element_size_bytes).to(tl.uint32)
-            src_stride = (stride_fm * element_size_bytes).to(tl.uint32)
-            dst_stride = (stride_tm * element_size_bytes).to(tl.uint32)
+            src_stride = (src_row_stride * element_size_bytes).to(tl.uint32)
+            dst_stride = (dst_row_stride * element_size_bytes).to(tl.uint32)
 
             # Place sub-window copy packet for 2D tiled copies
             # Calculate base addresses and offsets for sub-window copy

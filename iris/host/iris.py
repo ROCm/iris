@@ -1105,7 +1105,7 @@ class Iris:
             channel: SDMA channel to use
 
         Examples:
-            >>> import anvil
+            >>> from xio import sdma_ep
             >>> tile = sdma_ep.Tile()
             >>> tile.pid_m = 0
             >>> tile.pid_n = 0
