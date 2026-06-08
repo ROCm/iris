@@ -284,17 +284,18 @@ def put(
     from_rank,
     to_rank,
     heap_bases,
-    copy_engine_ctx: tl.tensor,
-    stride_tm: tl.constexpr = 0,
-    stride_tn: tl.constexpr = 0,
-    stride_fm: tl.constexpr = 0,
-    stride_fn: tl.constexpr = 0,
     mask=None,
     other=None,
     load_cache_modifier=None,
     store_cache_modifier=None,
     hint: tl.constexpr = None,
+    copy_engine_ctx: tl.tensor = None,
+    stride_tm: tl.constexpr = 0,
+    stride_tn: tl.constexpr = 0,
+    stride_fm: tl.constexpr = 0,
+    stride_fn: tl.constexpr = 0,
     USE_COPY_ENGINE: tl.constexpr = False,
+    CONTIGUOUS_COPY: tl.constexpr = False,
     IS_2D_COPY: tl.constexpr = False,
     from_base_ptr=None,
     to_base_ptr=None,
@@ -322,7 +323,9 @@ def put(
         stride_tn (int, optional): Stride in N dimension for destination buffer (in elements). Default: 0.
         stride_fm (int, optional): Stride in M dimension for source buffer (in elements). Default: 0 (flat copy).
         stride_fn (int, optional): Stride in N dimension for source buffer (in elements). Default: 0.
-        mask (Block of triton.int1, optional): If mask[idx] is false, do not load/copy data at that index. Defaults to None.
+        mask (Block of triton.int1, optional): If mask[idx] is false, do not load/copy data at that index.
+            When ``USE_COPY_ENGINE`` and ``CONTIGUOUS_COPY`` are true, ``mask=None`` copies the full pointer block.
+            Defaults to None.
         other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
 
         load_cache_modifier (str, optional): Controls cache behavior of the load (always local). Supported values are:
@@ -338,7 +341,13 @@ def put(
             - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
             - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
+        copy_engine_ctx (tl.tensor, optional): Copy engine context for SDMA operations. Required for SDMA bulk copies.
         USE_COPY_ENGINE (tl.constexpr, optional): Whether to use SDMA copy engine. Defaults to False (uses regular load/store).
+        CONTIGUOUS_COPY (tl.constexpr, optional): Opt-in assertion that the masked pointer block represents one contiguous
+            1D span or one rectangular 2D tile. SDMA bulk copies are only used when this is True; otherwise the function
+            falls back to regular load/store semantics.
+        IS_2D_COPY (tl.constexpr, optional): Deprecated compatibility flag. SDMA copy shape is inferred from
+            ``from_ptr.shape``; 2D pointer blocks use sub-window copy packets.
         from_base_ptr (triton.PointerType, optional): Base pointer of the source buffer. Required for 2D copies when USE_COPY_ENGINE is True.
         to_base_ptr (triton.PointerType, optional): Base pointer of the destination buffer. Required for 2D copies when USE_COPY_ENGINE is True.
 
@@ -353,22 +362,24 @@ def put(
         >>>     to_rank = 1
         >>>     offsets = tl.arange(0, 256)
         >>>     iris.put(local_ptr + offsets, remote_ptr + offsets,
-        >>>              from_rank, to_rank, heap_bases, copy_engine_ctx,
-        >>>              mask=offsets < 256, USE_COPY_ENGINE=True)
+        >>>              from_rank, to_rank, heap_bases,
+        >>>              mask=offsets < 256, copy_engine_ctx=copy_engine_ctx,
+        >>>              USE_COPY_ENGINE=True, CONTIGUOUS_COPY=True)
 
         2D (tiled) copy:
         >>> @triton.jit
         >>> def kernel(local_ptr, remote_ptr, heap_bases, copy_engine_ctx, base_ptr):
         >>>     from_rank = 0
         >>>     to_rank = 1
-        >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases, copy_engine_ctx,
+        >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases,
         >>>              stride_tm=1024, stride_fm=1024,
-        >>>              mask=mask, USE_COPY_ENGINE=True,
+        >>>              mask=mask, copy_engine_ctx=copy_engine_ctx,
+        >>>              USE_COPY_ENGINE=True, CONTIGUOUS_COPY=True,
         >>>              from_base_ptr=base_ptr, to_base_ptr=base_ptr)
     """
     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
 
-    if not USE_COPY_ENGINE:
+    if not USE_COPY_ENGINE or not CONTIGUOUS_COPY:
         data = tl.load(from_ptr, mask=mask, other=other, cache_modifier=load_cache_modifier)
 
         tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
@@ -408,12 +419,12 @@ def put(
             # Default to 4 bytes for unknown types
             element_size_bytes = 4
 
+        is_2d_copy: tl.constexpr = len(from_ptr.shape) == 2
+
         # Determine packet size based on copy type
         # Linear copy packet: 32 bytes for 1D, Sub-window copy packet: 80 bytes for 2D
-        # IS_2D_COPY is a compile-time constant for proper branch elimination
-        mask_int = mask.to(tl.int32)
         command_in_bytes = (
-            sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES if IS_2D_COPY else sdma_ep.COPY_LINEAR_COMMAND_BYTES
+            sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES if is_2d_copy else sdma_ep.COPY_LINEAR_COMMAND_BYTES
         )
 
         # Acquire space in the queue
@@ -433,10 +444,14 @@ def put(
         # Place the appropriate packet type
         packet_offset_bytes = base + offset
 
-        if not IS_2D_COPY:
-            # For 1D copies, mask is 1D, so just sum all elements
-            num_elements = tl.sum(mask_int, axis=0)
-            size_bytes = (num_elements * element_size_bytes).to(tl.uint32)
+        if not is_2d_copy:
+            if mask is None:
+                size_bytes = tl.full((), from_ptr.numel * element_size_bytes, dtype=tl.uint32)
+            else:
+                # For 1D copies, mask is 1D, so just sum all elements
+                mask_int = mask.to(tl.int32)
+                num_elements = tl.sum(mask_int, axis=0)
+                size_bytes = (num_elements * element_size_bytes).to(tl.uint32)
 
             # Place linear copy packet for 1D/flat copies
             sdma_utils.place_copy_packet(
@@ -447,9 +462,14 @@ def put(
                 dst_ptr_val,
             )
         else:
-            # For 2D copies, mask is 2D [M, N], use axis operations
-            num_elements_per_stride = tl.max(tl.sum(mask_int, axis=-1))
-            num_strides = tl.max(tl.sum(mask_int, axis=0))
+            if mask is None:
+                num_elements_per_stride = tl.full((), from_ptr.shape[1], dtype=tl.uint32)
+                num_strides = tl.full((), from_ptr.shape[0], dtype=tl.uint32)
+            else:
+                # For 2D copies, mask is 2D [M, N], use axis operations
+                mask_int = mask.to(tl.int32)
+                num_elements_per_stride = tl.max(tl.sum(mask_int, axis=-1))
+                num_strides = tl.max(tl.sum(mask_int, axis=0))
             size_bytes = (num_elements_per_stride * element_size_bytes).to(tl.uint32)
             src_stride = (stride_fm * element_size_bytes).to(tl.uint32)
             dst_stride = (stride_tm * element_size_bytes).to(tl.uint32)
@@ -956,7 +976,10 @@ def quiet(copy_engine_ctx: tl.tensor, to_rank):
         >>> @triton.jit
         >>> def kernel(src, dst, heap_bases, copy_engine_ctx):
         >>>     # Submit SDMA operations
-        >>>     iris.put(src, dst, 0, 1, heap_bases, copy_engine_ctx, USE_COPY_ENGINE=True)
+        >>>     iris.put(
+        >>>         src, dst, 0, 1, heap_bases, mask=mask,
+        >>>         copy_engine_ctx=copy_engine_ctx, USE_COPY_ENGINE=True, CONTIGUOUS_COPY=True
+        >>>     )
         >>>     # Wait for completion
         >>>     iris.quiet(copy_engine_ctx, 1)
     """

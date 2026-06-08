@@ -42,9 +42,10 @@ def producer_kernel(
         producer_rank,
         consumer_rank,
         heap_bases_ptr,
-        copy_engine_handle_ptr,
         mask=mask,
+        copy_engine_ctx=copy_engine_handle_ptr,
         USE_COPY_ENGINE=USE_COPY_ENGINE,
+        CONTIGUOUS_COPY=True,
     )
 
     # Set flag to signal completion

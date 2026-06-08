@@ -29,13 +29,41 @@ def _copy_engine_linear_kernel(
         from_rank,
         to_rank,
         heap_bases,
-        copy_engine_ctx,
         mask=mask,
+        copy_engine_ctx=copy_engine_ctx,
         USE_COPY_ENGINE=True,
+        CONTIGUOUS_COPY=True,
     )
     # Each block signals completion to force cache coherency on destination GPU
     iris.atomic_add(flag, 1, from_rank, to_rank, heap_bases, copy_engine_ctx=copy_engine_ctx, USE_COPY_ENGINE=True)
     # Wait for this block's SDMA operations to complete
+    iris.quiet(copy_engine_ctx, to_rank)
+
+
+@triton.jit
+def _copy_engine_linear_no_mask_kernel(
+    src,
+    dst,
+    flag,
+    from_rank: tl.constexpr,
+    to_rank: tl.constexpr,
+    heap_bases,
+    copy_engine_ctx,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    iris.put(
+        src + offsets,
+        dst + offsets,
+        from_rank,
+        to_rank,
+        heap_bases,
+        copy_engine_ctx=copy_engine_ctx,
+        USE_COPY_ENGINE=True,
+        CONTIGUOUS_COPY=True,
+    )
+    iris.atomic_add(flag, 1, from_rank, to_rank, heap_bases, copy_engine_ctx=copy_engine_ctx, USE_COPY_ENGINE=True)
     iris.quiet(copy_engine_ctx, to_rank)
 
 
@@ -91,6 +119,43 @@ def test_copy_engine_device_linear_put(num_elements):
     if rank == 1:
         # Verify all blocks completed (one signal per block)
         num_blocks = triton.cdiv(num_elements, 128)
+        assert completion_flag.item() == num_blocks, f"Expected {num_blocks} signals, got {completion_flag.item()}"
+        expected = _make_expected(num_elements, torch.float32, dst.device)
+        assert torch.allclose(dst, expected)
+
+    shmem.barrier()
+    del shmem
+
+
+def test_copy_engine_device_linear_put_no_mask():
+    num_elements = 512
+    block_size = 128
+    shmem = iris.iris(1 << 20)
+    _require_two_ranks(shmem)
+
+    rank = shmem.get_rank()
+    remote_rank = 1 - rank
+
+    src = _allocate_symmetric_range(shmem, num_elements, torch.float32)
+    dst = shmem.zeros(num_elements, device="cuda", dtype=torch.float32)
+    completion_flag = shmem.zeros(1, device="cuda", dtype=torch.int32)
+
+    if rank == 0:
+        _copy_engine_linear_no_mask_kernel[(num_elements // block_size,)](
+            src,
+            dst,
+            completion_flag,
+            rank,
+            remote_rank,
+            shmem.get_heap_bases(),
+            shmem.get_copy_engine_ctx(),
+            BLOCK_SIZE=block_size,
+        )
+
+    shmem.barrier()
+
+    if rank == 1:
+        num_blocks = num_elements // block_size
         assert completion_flag.item() == num_blocks, f"Expected {num_blocks} signals, got {completion_flag.item()}"
         expected = _make_expected(num_elements, torch.float32, dst.device)
         assert torch.allclose(dst, expected)
@@ -271,12 +336,50 @@ def _copy_engine_2d_kernel(
         from_rank,
         to_rank,
         heap_bases,
-        copy_engine_ctx,
         stride_fm=src_stride,
         stride_tm=dst_stride,
         mask=mask,
+        copy_engine_ctx=copy_engine_ctx,
         USE_COPY_ENGINE=True,
-        IS_2D_COPY=True,
+        CONTIGUOUS_COPY=True,
+        from_base_ptr=src_base,
+        to_base_ptr=dst_base,
+    )
+
+
+@triton.jit
+def _copy_engine_2d_no_mask_kernel(
+    src_base,
+    dst_base,
+    src_stride: tl.constexpr,
+    dst_stride: tl.constexpr,
+    from_rank: tl.constexpr,
+    to_rank: tl.constexpr,
+    heap_bases,
+    copy_engine_ctx,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    src_ptrs = src_base + offs_m[:, None] * src_stride + offs_n[None, :]
+    dst_ptrs = dst_base + offs_m[:, None] * dst_stride + offs_n[None, :]
+
+    iris.put(
+        src_ptrs,
+        dst_ptrs,
+        from_rank,
+        to_rank,
+        heap_bases,
+        stride_fm=src_stride,
+        stride_tm=dst_stride,
+        copy_engine_ctx=copy_engine_ctx,
+        USE_COPY_ENGINE=True,
+        CONTIGUOUS_COPY=True,
         from_base_ptr=src_base,
         to_base_ptr=dst_base,
     )
@@ -326,6 +429,45 @@ def test_copy_engine_2d_tiled(M, N):
     del shmem
 
 
+def test_copy_engine_2d_tiled_no_mask():
+    """Test full-tile 2D copy using shape-inferred SDMA packet size."""
+    shmem = iris.iris(1 << 20)
+    _require_two_ranks(shmem)
+
+    rank = shmem.get_rank()
+    remote_rank = 1 - rank
+
+    M, N = 16, 32
+    BLOCK_M, BLOCK_N = 8, 16
+    stride = N
+
+    src = _allocate_symmetric_range(shmem, M * N, torch.float32).view(M, N)
+    dst = shmem.zeros(M * N, device="cuda", dtype=torch.float32).view(M, N)
+
+    if rank == 0:
+        _copy_engine_2d_no_mask_kernel[(M // BLOCK_M, N // BLOCK_N)](
+            src,
+            dst,
+            stride,
+            stride,
+            rank,
+            remote_rank,
+            shmem.get_heap_bases(),
+            shmem.get_copy_engine_ctx(),
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+        )
+
+    shmem.barrier()
+
+    if rank == 1:
+        expected = _make_expected(M * N, torch.float32, dst.device).view(M, N)
+        assert torch.allclose(dst, expected)
+
+    shmem.barrier()
+    del shmem
+
+
 # ============================================================================
 # Combined Operations Tests (put + signal, wait + put)
 # ============================================================================
@@ -355,9 +497,10 @@ def _copy_engine_put_signal_kernel(
         from_rank,
         to_rank,
         heap_bases,
-        copy_engine_ctx,
         mask=mask,
+        copy_engine_ctx=copy_engine_ctx,
         USE_COPY_ENGINE=True,
+        CONTIGUOUS_COPY=True,
     )
 
     # Signal completion (last thread in block)
@@ -442,9 +585,10 @@ def _copy_engine_multi_block_kernel(
         from_rank,
         to_rank,
         heap_bases,
-        copy_engine_ctx,
         mask=mask,
+        copy_engine_ctx=copy_engine_ctx,
         USE_COPY_ENGINE=True,
+        CONTIGUOUS_COPY=True,
     )
 
     # Each block atomically increments its counter

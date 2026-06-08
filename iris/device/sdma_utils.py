@@ -265,7 +265,7 @@ def place_atomic_packet(
     tl.store(slot_ptr_u32 + 3, src_data, cache_modifier=".wt")
     # offset 4: src data 63:32
     if IS_64_BIT:
-        tl.store(slot_ptr_u32 + 4, (src_data << 32).to(tl.uint32), cache_modifier=".wt")
+        tl.store(slot_ptr_u32 + 4, (src_data >> 32).to(tl.uint32), cache_modifier=".wt")
     else:
         tl.store(slot_ptr_u32 + 4, 0, cache_modifier=".wt")
     # offset 5: compare data 31:0
