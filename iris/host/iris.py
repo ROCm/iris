@@ -119,10 +119,6 @@ class Iris:
         self.device = f"cuda:{gpu_id}"
         self.heap_bases = self.heap.get_heap_bases()
 
-        # Pre-fetch heap_bases to CPU for host-side address translation
-        # This avoids needing to copy from GPU during SDMA operations
-        self.heap_bases_cpu = self.heap_bases.cpu().numpy()
-
         if is_simulation_env():
             import json
 
@@ -958,34 +954,6 @@ class Iris:
     def get_copy_engine_ctx(self):
         return self.copy_engines_device_ctx
 
-    def translate(self, ptr: int, from_rank: int, to_rank: int) -> int:
-        """
-        Translate a pointer address from one rank's address space to another.
-
-        This is useful for host-side SDMA operations where you need to convert
-        peer-mapped addresses to the target GPU's local address space.
-
-        Args:
-            ptr (int): The pointer address in from_rank's address space
-            from_rank (int): Source rank (address space of ptr)
-            to_rank (int): Target rank (desired address space)
-
-        Returns:
-            int: Translated pointer address in to_rank's address space
-
-        Example:
-            >>> ctx = iris.iris()
-            >>> buffer = ctx.zeros(1024, dtype=torch.float32)
-            >>> # Translate buffer address from rank 0 to rank 1's address space
-            >>> remote_addr = ctx.translate(buffer.data_ptr(), 0, 1)
-            >>> ctx.copy_engines.put(0, 1, 0, src_ptr, remote_addr, size)
-        """
-        # Use pre-cached CPU copy to avoid GPU->CPU transfer on every call
-        from_base = int(self.heap_bases_cpu[from_rank])
-        to_base = int(self.heap_bases_cpu[to_rank])
-        offset = ptr - from_base
-        return to_base + offset
-
     @staticmethod
     def _dtype_to_flag_bits(dtype: torch.dtype) -> int:
         if dtype in (torch.int32, torch.int):
@@ -1015,7 +983,7 @@ class Iris:
         if translate:
             if dst_rank is None:
                 raise ValueError("dst_rank must be provided when translate=True")
-            ptr = self.translate(ptr, self.get_rank(), dst_rank)
+            ptr = self.heap.translate(ptr, self.get_rank(), dst_rank)
 
         if ptr == 0:
             return 0, 0
@@ -1073,7 +1041,7 @@ class Iris:
 
         src_rank = self.get_rank()
         src_ptr = src_tensor.data_ptr()
-        dst_ptr = self.translate(dst_tensor.data_ptr(), src_rank, dst_rank)
+        dst_ptr = self.heap.translate(dst_tensor.data_ptr(), src_rank, dst_rank)
         size = src_tensor.numel() * src_tensor.element_size()
 
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag)
