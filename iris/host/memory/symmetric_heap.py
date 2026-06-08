@@ -335,9 +335,6 @@ class SymmetricHeap:
         """
         Translate a pointer address from one rank's address space to another.
 
-        This is useful for host-side SDMA operations where you need to convert
-        peer-mapped addresses to the target GPU's local address space.
-
         Args:
             ptr (int): The pointer address in from_rank's address space
             from_rank (int): Source rank (address space of ptr)

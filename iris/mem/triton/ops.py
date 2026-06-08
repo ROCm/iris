@@ -718,8 +718,6 @@ def atomic_cas(
         pending_wptr = base + offset + command_in_bytes
         sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
-        return cmp
-
 
 @triton.jit
 def atomic_xchg(
@@ -980,10 +978,10 @@ def quiet(copy_engine_ctx: tl.tensor, to_rank):
     # Context layout: [queue_buf, rptr, wptr, doorbell, cached_wptr, committed_wptr]
     handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
     read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
-    committed_wptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
 
     # Read current committed write pointer (all submitted packets from all blocks)
-    target = tl.load(committed_wptr, cache_modifier=".cv", volatile=True)
+    target = tl.load(write_ptr, cache_modifier=".cv", volatile=True)
 
     # Poll until hardware read pointer catches up
     while tl.load(read_ptr, cache_modifier=".cv", volatile=True) < target:
