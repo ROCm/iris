@@ -23,7 +23,7 @@ def producer_kernel(
     consumer_rank: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     heap_bases_ptr: tl.tensor,  # tl.tensor: pointer to heap bases pointers
-    copy_engine_ctx,
+    copy_engine_handle_ptr,
     USE_COPY_ENGINE: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -43,7 +43,7 @@ def producer_kernel(
         consumer_rank,
         heap_bases_ptr,
         mask=mask,
-        copy_engine_ctx=copy_engine_ctx,
+        copy_engine_ctx=copy_engine_handle_ptr,
         USE_COPY_ENGINE=USE_COPY_ENGINE,
         CONTIGUOUS_COPY=True,
     )
@@ -59,7 +59,7 @@ def producer_kernel(
         sem="release",
         scope="sys",
         USE_COPY_ENGINE=USE_COPY_ENGINE,
-        copy_engine_ctx=copy_engine_ctx,
+        copy_engine_ctx=copy_engine_handle_ptr,
     )
 
 
