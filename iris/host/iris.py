@@ -1043,6 +1043,10 @@ class Iris:
         dst_ptr = self.heap.translate(dst_tensor.data_ptr(), src_rank, dst_rank)
         size = src_tensor.numel() * src_tensor.element_size()
 
+        # Early return for zero-size transfers (no-op)
+        if size == 0:
+            return
+
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag)
         signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, translate=True, dst_rank=dst_rank)
 

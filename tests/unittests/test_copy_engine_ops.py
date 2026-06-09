@@ -649,7 +649,6 @@ def test_copy_engine_multi_block_concurrent(num_blocks):
 # ============================================================================
 
 
-@pytest.mark.skip(reason="Zero-size transfers may cause SDMA queue issues - needs investigation")
 def test_copy_engine_zero_size():
     """Test copy engine with zero-size transfer (should be no-op)."""
     shmem = iris.iris(1 << 20)
