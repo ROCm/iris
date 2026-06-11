@@ -16,7 +16,6 @@ def persistent_gemm_all_scatter(
     C,
     c_global,
     bias_ptr,
-    flags,
     M,
     N,
     K,
@@ -41,8 +40,6 @@ def persistent_gemm_all_scatter(
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     COLLECT_TIMESTAMPS: tl.constexpr = False,
-    USE_COPY_ENGINE: tl.constexpr = False,
-    copy_engine_ctx: tl.tensor = None,
     mm_begin_timestamp_ptr: tl.tensor = None,
     mm_end_timestamp_ptr: tl.tensor = None,
 ):
@@ -135,64 +132,17 @@ def persistent_gemm_all_scatter(
             timestamp = read_realtime()
             tl.atomic_max(mm_end_timestamp_ptr + tile_id, timestamp)
 
-        if USE_COPY_ENGINE:
-            # Store locally first
-            tl.store(c_global + global_offset, c, mask=sub_mask, cache_modifier=".wt")
-            tl.debug_barrier()
-            for remote_rank in range(world_size):
-                if remote_rank != cur_rank:
-                    iris.put(
-                        c_global + global_offset,
-                        c_global + global_offset,
-                        cur_rank,
-                        remote_rank,
-                        heap_bases,
-                        dst_row_stride=stride_cm_global,
-                        src_row_stride=stride_cm_global,
-                        mask=sub_mask,
-                        hint=(1, BLOCK_SIZE_N),
-                        copy_engine_ctx=copy_engine_ctx,
-                        USE_COPY_ENGINE=True,
-                        CONTIGUOUS_COPY=True,
-                        from_base_ptr=c_global,
-                        to_base_ptr=c_global,
-                    )
-
-        else:
-            # Store data to the global result using puts
-            for remote_rank in range(world_size):
-                if remote_rank == cur_rank:
-                    # For the current rank, we can use store
-                    tl.store(c_global + global_offset, c, mask=sub_mask)
-                else:
-                    iris.store(
-                        c_global + global_offset,
-                        c,
-                        cur_rank,
-                        remote_rank,
-                        heap_bases,
-                        mask=sub_mask,
-                    )
-
-    # After all tiles are processed, signal and wait once per SM
-    tl.debug_barrier()
-    # Signal other ranks that all our puts/stores are complete
-    for remote_rank in range(world_size):
-        if remote_rank != cur_rank:
-            iris.atomic_add(
-                flags + (pid * world_size) + cur_rank,
-                1,
-                cur_rank,
-                remote_rank,
-                heap_bases,
-                sem="release",
-                scope="sys",
-                copy_engine_ctx=copy_engine_ctx,
-                USE_COPY_ENGINE=USE_COPY_ENGINE,
-            )
-
-    # Wait for other ranks to signal us
-    for remote_rank in range(world_size):
-        if remote_rank != cur_rank:
-            while tl.load(flags + (pid * world_size) + remote_rank, cache_modifier=".cv", volatile=True) != 1:
-                pass
+        # Store data to the global result using puts
+        for remote_rank in range(world_size):
+            if remote_rank == cur_rank:
+                # For the current rank, we can use store
+                tl.store(c_global + global_offset, c, mask=sub_mask)
+            else:
+                iris.store(
+                    c_global + global_offset,
+                    c,
+                    cur_rank,
+                    remote_rank,
+                    heap_bases,
+                    mask=sub_mask,
+                )
