@@ -41,29 +41,95 @@ DIMENSION_CONFIGS = [
     # {"m_local": 16384, "n": 16384, "k": 2048, "label": "M16384_N16384_K2048"},
     # {"m_local": 131072, "n": 2048, "k": 16384, "label": "M131072_N2048_K16384"},
     # From Paper: Design Space Exploration of DMA based finer-grain compute communication overlap
-    {"m_local": 16384, "n": 16384, "k": 131072, "label": "g1"},
-    {"m_local": 131072, "n": 16384, "k": 16384, "label": "g2"},
-    {"m_local": 53248, "n": 16384, "k": 131072, "label": "g3"},
-    {"m_local": 16384, "n": 53248, "k": 16384, "label": "g4"},
-    {"m_local": 8192, "n": 8192, "k": 262144, "label": "g5"},
-    {"m_local": 262144, "n": 8192, "k": 8192, "label": "g6"},
-    {"m_local": 28672, "n": 8192, "k": 262144, "label": "g7"},
-    {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"},
-    {"m_local": 196608, "n": 18432, "k": 16384, "label": "g9"},
-    {"m_local": 196608, "n": 106496, "k": 16384, "label": "g10"},
-    {"m_local": 1048576, "n": 10240, "k": 8192, "label": "g11"},
-    {"m_local": 1048576, "n": 57344, "k": 8192, "label": "g12"},
-    {"m_local": 1607680, "n": 57344, "k": 8192, "label": "g13"},
-    {"m_local": 147456, "n": 28672, "k": 4096, "label": "g14"},
-    {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"}, # run out of heap memory
-    {"m_local": 229376, "n": 28672, "k": 4096, "label": "g16"},
+    # {"m_local": 16384, "n": 16384, "k": 131072, "label": "g1"}, #llama 3 405B
+    # {"m_local": 131072, "n": 16384, "k": 16384, "label": "g2"},
+    # {"m_local": 53248, "n": 16384, "k": 131072, "label": "g3"},
+    # {"m_local": 16384, "n": 53248, "k": 16384, "label": "g4"},
+    # {"m_local": 8192, "n": 8192, "k": 262144, "label": "g5"}, #llama 2
+    # {"m_local": 262144, "n": 8192, "k": 8192, "label": "g6"},
+    # {"m_local": 28672, "n": 8192, "k": 262144, "label": "g7"},
+    # {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"},
+    # {"m_local": 196608, "n": 18432, "k": 16384, "label": "g9"},
+    # {"m_local": 196608, "n": 106496, "k": 16384, "label": "g10"}, # timeout
+    # {"m_local": 1048576, "n": 10240, "k": 8192, "label": "g11"},
+    # {"m_local": 1048576, "n": 57344, "k": 8192, "label": "g12"}, # run out of memory
+    # {"m_local": 1607680, "n": 57344, "k": 8192, "label": "g13"}, # run out of memory
+    # {"m_local": 147456, "n": 28672, "k": 4096, "label": "g14"},
+    # {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"},
+    # {"m_local": 229376, "n": 28672, "k": 4096, "label": "g16"},
 
-    {"m_local": 4096, "n": 14336, "k": 4096, "label": "mixtral_gate"},
-    {"m_local": 4096, "n": 11008, "k": 4096, "label": "llama7b_gate"},
-    {"m_local": 4096, "n": 4096, "k": 4096, "label": "pow2_4k"},
-    {"m_local": 1024, "n": 3584, "k": 8192, "label": "M1024_N3584_K8192"},
-    {"m_local": 4096, "n": 3584, "k": 8192, "label": "M4096_N3584_K8192"},
-    {"m_local": 16384, "n": 3584, "k": 8192, "label": "M16384_N3584_K8192"},
+    # {"m_local": 4096, "n": 14336, "k": 4096, "label": "mixtral_gate"},
+    # {"m_local": 4096, "n": 11008, "k": 4096, "label": "llama7b_gate"},
+    # {"m_local": 4096, "n": 4096, "k": 4096, "label": "pow2_4k"},
+    # {"m_local": 1024, "n": 3584, "k": 8192, "label": "M1024_N3584_K8192"},
+    # {"m_local": 4096, "n": 3584, "k": 8192, "label": "M4096_N3584_K8192"},
+    # {"m_local": 16384, "n": 3584, "k": 8192, "label": "M16384_N3584_K8192"},
+
+    # Modern LLM shapes for K-sharding TP (DeepSeek-V3, Llama 3/3.1, Llama 4)
+    # These are for row-parallel matmuls where K dimension is sharded
+    # DeepSeek-V3: hidden_size=7168, intermediate_size=18432
+    {"m_local": 16384, "n": 7168, "k": 7168, "label": "deepseek_v3_attn_out_16k"},
+    {"m_local": 16384, "n": 7168, "k": 18432, "label": "deepseek_v3_mlp_down_16k"},
+    # {"m_local": 32768, "n": 7168, "k": 7168, "label": "deepseek_v3_attn_out_32k"},
+    # {"m_local": 32768, "n": 7168, "k": 18432, "label": "deepseek_v3_mlp_down_32k"},
+    # {"m_local": 65536, "n": 7168, "k": 7168, "label": "deepseek_v3_attn_out_64k"},
+    # {"m_local": 65536, "n": 7168, "k": 18432, "label": "deepseek_v3_mlp_down_64k"},
+    # Llama 4 Scout: hidden_size=8192 (est.), intermediate_size=22016 (est.)
+    # Note: These dimensions are estimated based on Llama lineage and 17B active params
+    # {"m_local": 16384, "n": 8192, "k": 8192, "label": "llama4_scout_attn_out_16k"},
+    # {"m_local": 16384, "n": 8192, "k": 22016, "label": "llama4_scout_mlp_down_16k"},
+    # {"m_local": 32768, "n": 8192, "k": 8192, "label": "llama4_scout_attn_out_32k"},
+    # {"m_local": 32768, "n": 8192, "k": 22016, "label": "llama4_scout_mlp_down_32k"},
+    # {"m_local": 65536, "n": 8192, "k": 8192, "label": "llama4_scout_attn_out_64k"},
+    # {"m_local": 65536, "n": 8192, "k": 22016, "label": "llama4_scout_mlp_down_64k"},
+    # Llama 3/3.1 8B: hidden_size=4096, intermediate_size=14336
+    {"m_local": 16384, "n": 4096, "k": 4096, "label": "llama3_8b_attn_out_16k"},
+    {"m_local": 16384, "n": 4096, "k": 14336, "label": "llama3_8b_mlp_down_16k"},
+    # {"m_local": 32768, "n": 4096, "k": 4096, "label": "llama3_8b_attn_out_32k"},
+    # {"m_local": 32768, "n": 4096, "k": 14336, "label": "llama3_8b_mlp_down_32k"},
+    # {"m_local": 65536, "n": 4096, "k": 4096, "label": "llama3_8b_attn_out_64k"},
+    # {"m_local": 65536, "n": 4096, "k": 14336, "label": "llama3_8b_mlp_down_64k"},
+    # Llama 3/3.1 70B: hidden_size=8192, intermediate_size=28672 (same as Llama 2 70B)
+    {"m_local": 16384, "n": 8192, "k": 8192, "label": "llama3_70b_attn_out_16k"},
+    {"m_local": 16384, "n": 8192, "k": 28672, "label": "llama3_70b_mlp_down_16k"},
+    # {"m_local": 32768, "n": 8192, "k": 8192, "label": "llama3_70b_attn_out_32k"},
+    # {"m_local": 32768, "n": 8192, "k": 28672, "label": "llama3_70b_mlp_down_32k"},
+    # {"m_local": 65536, "n": 8192, "k": 8192, "label": "llama3_70b_attn_out_64k"},
+    # {"m_local": 65536, "n": 8192, "k": 28672, "label": "llama3_70b_mlp_down_64k"},
+    # Note: Llama 3.1 405B shapes already covered by g1-g4 (hidden=16384, intermediate=53248)
+    {"m_local": 16384, "n": 16384, "k": 16384, "label": "llama3_405b_attn_out_16k"},
+    {"m_local": 16384, "n": 16384, "k": 53248, "label": "llama3_405b_mlp_down_16k"},
+
+    # NOTE: The shapes below are for SEQUENCE PARALLEL (M-sharding), which is
+    # a DIFFERENT operation than all_gather_matmul (which does K-sharding for TP).
+    # These shapes are kept for reference but won't work with current all_gather_matmul.
+    # TODO: Implement separate M-sharding operation for sequence parallel.
+
+    # # DeepSeek-V3 sequence parallel (TP4, hidden_dim=7168, context=128K)
+    # {"m_local": 32768, "n": 7168, "k": 18432, "label": "deepseek_v3_sp4_mlp_up"},
+    # {"m_local": 32768, "n": 18432, "k": 7168, "label": "deepseek_v3_sp4_mlp_down"},
+    # {"m_local": 32768, "n": 7168, "k": 7168, "label": "deepseek_v3_sp4_qkv"},
+    # {"m_local": 65536, "n": 7168, "k": 18432, "label": "deepseek_v3_sp4_mlp_up_long"},
+
+    # # Llama 4 Scout sequence parallel (TP8, hidden_dim=8192, context=256K)
+    # {"m_local": 32768, "n": 8192, "k": 22016, "label": "llama4_scout_sp8_mlp_up"},
+    # {"m_local": 32768, "n": 22016, "k": 8192, "label": "llama4_scout_sp8_mlp_down"},
+    # {"m_local": 32768, "n": 8192, "k": 8192, "label": "llama4_scout_sp8_qkv"},
+
+    # # Llama 4 Maverick long context (TP8, hidden_dim=8192, context=512K)
+    # {"m_local": 64768, "n": 8192, "k": 22016, "label": "llama4_maverick_sp8_mlp_up_long"},
+    # {"m_local": 64768, "n": 22016, "k": 8192, "label": "llama4_maverick_sp8_mlp_down_long"},
+
+    # # DeepSeek-V4 ultra-long context (TP8, hidden_dim~10240, context=1M tokens)
+    # {"m_local": 131072, "n": 10240, "k": 28672, "label": "deepseek_v4_sp8_mlp_up_1m"},
+    # {"m_local": 131072, "n": 28672, "k": 10240, "label": "deepseek_v4_sp8_mlp_down_1m"},
+    # {"m_local": 131072, "n": 10240, "k": 10240, "label": "deepseek_v4_sp8_qkv_1m"},
+
+    # # Llama 4 Behemoth extreme context (TP16, hidden_dim~12288, context=10M tokens)
+    # {"m_local": 655360, "n": 12288, "k": 32768, "label": "llama4_behemoth_sp16_mlp_up_10m"},
+    # {"m_local": 655360, "n": 32768, "k": 12288, "label": "llama4_behemoth_sp16_mlp_down_10m"},
+    # {"m_local": 65536, "n": 12288, "k": 32768, "label": "llama4_behemoth_sp16_mlp_up_1m"},
+    # {"m_local": 65536, "n": 32768, "k": 12288, "label": "llama4_behemoth_sp16_mlp_down_1m"},
 ]
 
 # Benchmark configurations per operation type
@@ -200,21 +266,23 @@ def _calculate_heap_size(m: int, n: int, k: int, operation: str, num_gpus: int, 
     if operation == "all_gather_matmul":
         # All allocations from bench_all_gather_matmul.py:
         # - A_sharded: M × K_local (per rank, before gather)
-        # - A_gathered_parts: list of (M × K_local) × num_gpus
-        # - A_gathered: M × K (full gathered matrix)
+        # - Gathered buffer: M × K (allocated differently per variant)
+        #   * RCCL baseline: a_gathered_parts list + a_gathered concat (both M × K total)
+        #   * HBM buffer: workspace.aux_buffer (single M × K buffer)
         # - B: K × N
         # - C: M × N (output)
         k_local = k // num_gpus
 
         a_sharded_size = m * k_local * element_size
-        a_gathered_parts_size = m * k_local * num_gpus * element_size  # List of tensors
-        a_gathered_size = m * k * element_size
+        # RCCL allocates both a_gathered_parts AND a_gathered, but they're equal size
+        # a_gathered_parts is allocated as world_size separate buffers of K_local each
+        # a_gathered is M × K contiguous
+        # Both are M × K total, so worst case is 2 × (M × K)
+        a_gather_buffer_size = m * k * element_size * 2  # Conservative: both parts + gathered
         b_size = k * n * element_size
         c_size = m * n * element_size
 
-        # For HBM buffer variant, there's additional workspace
-        # Use conservative estimate: sum of all possible allocations
-        total_size = a_sharded_size + a_gathered_parts_size + a_gathered_size + b_size + c_size
+        total_size = a_sharded_size + a_gather_buffer_size + b_size + c_size
 
     elif operation == "matmul_all_gather":
         # All allocations from bench_matmul_all_gather.py:
@@ -223,12 +291,26 @@ def _calculate_heap_size(m: int, n: int, k: int, operation: str, num_gpus: int, 
         # - B: K × N
         # - C_local: M_local × N (for pytorch/tritonblas variants)
         # - C: M × N (FULL output on EACH GPU where M = total across all ranks)
-        m_local = m // num_gpus
 
-        a_size = m_local * k * element_size
-        b_size = k * n * element_size
-        c_local_size = m_local * n * element_size  # For pytorch/tritonblas variants
-        c_size = m * n * element_size  # Full gathered output (M total)
+        # n: hidden_size
+        # k: intermediate_size
+
+        # Figure out if attention
+        if k == n:
+            m_local = m // num_gpus
+            n_local = n // num_gpus
+            k_local = n
+
+        else:
+            m_local = m
+            n_local = k // num_gpus
+            k_local = n
+
+
+        a_size = m_local * k_local * element_size
+        b_size = k_local * n_local * element_size
+        c_local_size = m_local * n_local * element_size  # For pytorch/tritonblas variants
+        c_size = m * n_local * element_size  # Full gathered output (M total)
 
         # Conservative estimate: assume both C_local and C are allocated
         total_size = a_size + b_size + c_local_size + c_size
@@ -240,12 +322,21 @@ def _calculate_heap_size(m: int, n: int, k: int, operation: str, num_gpus: int, 
     required_size = int(total_size * safety_factor)
     heap_size = max(DEFAULT_HEAP_SIZE, required_size)
 
-    # Warn if heap size is unreasonably large (likely won't fit on GPU)
+    # Cap heap size at GPU memory limit to avoid OOM
     # MI300X has ~192 GB per GPU
     max_reasonable_heap = 180 << 30  # 180 GB to leave room for PyTorch overhead
+
+    # Check if even the base requirement (without safety factor) exceeds GPU memory
+    if total_size > max_reasonable_heap:
+        log(f"  WARNING: Required buffers ({total_size / (1<<30):.2f} GB) exceed available GPU memory (~180 GB)")
+        log("           This shape is too large for the available hardware - benchmark WILL FAIL")
+        log(f"           Breakdown: M={m}, N={n}, K={k}, num_gpus={num_gpus}")
+        # Still return the capped size so the sweep continues, but mark for expected failure
+
     if heap_size > max_reasonable_heap:
-        log(f"  WARNING: Calculated heap size ({heap_size / (1<<30):.2f} GB) exceeds typical GPU memory (~192 GB)")
-        log("           This configuration may fail with out-of-memory errors")
+        log(f"  INFO: Calculated heap size ({heap_size / (1<<30):.2f} GB) exceeds GPU memory")
+        log(f"        Capping at {max_reasonable_heap / (1<<30):.0f} GB")
+        heap_size = max_reasonable_heap
 
     return heap_size
 
@@ -272,9 +363,21 @@ def _run_bench_benchmark(
     # For matmul_all_gather, m represents total M, but the benchmark expects M_local
     # So we divide by NUM_GPUS to get the per-rank dimension
     if operation == "matmul_all_gather" and axes['m'] == "M_local":
-        m_value = m // NUM_GPUS
+        # m_value = m // NUM_GPUS
+        # if B is square (n == k) the is attention
+        if k == n:
+            m_value = m // NUM_GPUS
+            n_value = n // NUM_GPUS
+            k_value = n
+
+        else:
+            m_value = m
+            n_value = k // NUM_GPUS
+            k_value = n
     else:
         m_value = m
+        n_value = n
+        k_value = k
 
     cmd = [
         sys.executable,
@@ -284,13 +387,13 @@ def _run_bench_benchmark(
         f"--benchmark_filter={benchmark_filter}",
         f"--axis_num_ranks={NUM_GPUS}",
         f"--axis_{axes['m']}={m_value}",
-        f"--axis_{axes['n']}={n}",
-        f"--axis_{axes['k']}={k}",
+        f"--axis_{axes['n']}={n_value}",
+        f"--axis_{axes['k']}={k_value}",
         "--axis_dtype=fp16",
         f"--heap_size={heap_size}",
     ]
 
-    log(f"  Running {benchmark_name}: M={m}, N={n}, K={k}")
+    log(f"  Running {benchmark_name}: M={m_value}, N={n_value}, K={k_value}")
     log(f"    Heap size: {heap_size / (1 << 30):.2f} GB")
     log(f"    Command: {' '.join(cmd)}")
 
@@ -314,7 +417,7 @@ def _run_bench_benchmark(
             with open(error_log_file, "w") as f:
                 f.write(f"Operation: {operation}\n")
                 f.write(f"Benchmark: {benchmark_name}\n")
-                f.write(f"Dimensions: M={m}, N={n}, K={k}\n")
+                f.write(f"Dimensions: M={m_value}, N={n_value}, K={k_value}\n")
                 f.write(f"Command: {' '.join(cmd)}\n")
                 f.write(f"Return code: {result.returncode}\n\n")
                 f.write("=" * 80 + "\n")
@@ -349,9 +452,9 @@ def _run_bench_benchmark(
         data = {
             "world_size": record.get("world_size"),
             "operation": record.get("benchmark"),
-            "m": int(params.get(axes["m"], m)),
-            "n": int(params.get(axes["n"], n)),
-            "k": int(params.get(axes["k"], k)),
+            "m": int(params.get(axes["m"], m_value)),
+            "n": int(params.get(axes["n"], n_value)),
+            "k": int(params.get(axes["k"], k_value)),
             "datatype": params.get("dtype", "float16"),
             "total_ms": record.get("gpu_time_ms"),
             "gpu_time_ms": record.get("gpu_time_ms"),

@@ -10,6 +10,7 @@ import tritonblas
 import iris.bench as bench
 
 from iris.ops import FusedConfig
+from tritonblas.matmul import persistent_matmul_lt, create_counter_config
 
 
 def _register_fused_matmul_all_gather(state, ctx) -> None:
@@ -83,14 +84,13 @@ def _register_tritonblas_matmul_all_gather(state, ctx) -> None:
         C_local.dtype,
         A.device,
     )
-    config = tritonblas.matmul_preamble(selector)
 
     state.set_flops(2 * M_local * N * K)
     state.set_bytes((world_size - 1) * M_local * N * A.element_size())
 
     state.exec(
         lambda: (
-            tritonblas.matmul_lt(A, B, C_local, selector, config),
+            persistent_matmul_lt(A, B, C_local, selector, config=None, work_stealing=False),
             dist.all_gather_into_tensor(C, C_local),
         ),
     )

@@ -457,7 +457,7 @@ def matmul_all_gather_copy_engine(
         if timing_events is not None:
             timing_events["quiet_end"].record(timing_events["stream"])
         sync_wait_start = time.perf_counter() if cpu_timing is not None else None
-        shmem.barrier()
+        torch.cuda.synchronize()
         if cpu_timing is not None:
             cpu_timing["sync_wait_ms"] = (time.perf_counter() - sync_wait_start) * 1000.0
             cpu_timing["quiet_cpu_ms"] = (time.perf_counter() - wait_cpu_start) * 1000.0

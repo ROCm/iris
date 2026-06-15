@@ -89,7 +89,7 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool, host_transfer_b
     state.add_counter("device_initiated", 1.0 if device_initiated else 0.0)
     state.add_counter("host_transfer_backend_hip_memcpy", 1.0 if host_transfer_backend == "hip_memcpy" else 0.0)
 
-    state.exec(_run, preamble_fn=lambda: C.zero_())
+    state.exec(_run)
 
 
 @bench.register

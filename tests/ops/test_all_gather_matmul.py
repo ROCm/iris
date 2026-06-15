@@ -23,6 +23,18 @@ from iris.ops.all_gather_matmul_hbm_buffer import (
 from iris.ops.config import FusedConfig
 
 
+@pytest.fixture(autouse=True)
+def cleanup_gpu_memory():
+    """Fixture to clean up GPU memory before and after each test."""
+    # Cleanup before test starts
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    yield  # Run the test
+    # Cleanup after test completes (pass or fail)
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+
+
 def _param_shapes():
     if "IRIS_TEST_M" in os.environ:
         return [
@@ -42,8 +54,58 @@ def _heap_size() -> int:
     return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 1 << 34))
 
 
-def _make_reference(rank, world_size, M, K_local, N, dtype):
-    """Build a torch reference output for all_gather + matmul."""
+def _full_validation_threshold_bytes() -> int:
+    return int(os.environ.get("IRIS_TEST_FULL_VALIDATION_THRESHOLD_BYTES", 2 << 30))
+
+
+def _validation_mode() -> str:
+    return os.environ.get("IRIS_TEST_VALIDATION_MODE", "auto").lower()
+
+
+def _validation_tile_rows(M: int) -> int:
+    return max(1, min(M, int(os.environ.get("IRIS_TEST_VALIDATION_TILE_ROWS", 128))))
+
+
+def _validation_tile_cols(N: int) -> int:
+    return max(1, min(N, int(os.environ.get("IRIS_TEST_VALIDATION_TILE_COLS", 256))))
+
+
+def _validation_num_row_tiles() -> int:
+    return max(1, int(os.environ.get("IRIS_TEST_VALIDATION_NUM_ROW_TILES", 4)))
+
+
+def _validation_num_col_tiles() -> int:
+    return max(1, int(os.environ.get("IRIS_TEST_VALIDATION_NUM_COL_TILES", 4)))
+
+
+def _sample_starts(size: int, tile_size: int, num_tiles: int) -> list[int]:
+    if size <= tile_size:
+        return [0]
+
+    max_start = size - tile_size
+    if num_tiles == 1:
+        return [0]
+
+    starts = {0, max_start}
+    for tile_idx in range(1, num_tiles - 1):
+        starts.add((max_start * tile_idx) // (num_tiles - 1))
+    return sorted(starts)
+
+
+def _should_sample_validation(M: int, N: int, dtype: torch.dtype) -> bool:
+    mode = _validation_mode()
+    if mode == "full":
+        return False
+    if mode == "sampled":
+        return True
+    if mode != "auto":
+        raise ValueError(f"Unknown IRIS_TEST_VALIDATION_MODE={mode!r}; expected auto, full, or sampled")
+
+    element_size = torch.tensor([], dtype=dtype).element_size()
+    return M * N * element_size > _full_validation_threshold_bytes()
+
+
+def _make_inputs(rank, world_size, M, K_local, N, dtype):
     device = f"cuda:{rank}"
     K = K_local * world_size
 
@@ -53,12 +115,89 @@ def _make_reference(rank, world_size, M, K_local, N, dtype):
     torch.manual_seed(123)
     B = torch.randn(K, N, dtype=dtype, device=device)
 
-    A_gathered_list = [torch.zeros(M, K_local, dtype=dtype, device=device) for _ in range(world_size)]
+    return A_sharded, B
+
+
+def _make_full_reference(A_sharded, B, world_size):
+    """Build a full torch reference output for small all_gather + matmul cases."""
+    A_gathered_list = [torch.empty_like(A_sharded) for _ in range(world_size)]
     dist.all_gather(A_gathered_list, A_sharded)
     A_gathered_ref = torch.cat(A_gathered_list, dim=1)
     ref_output = torch.matmul(A_gathered_ref, B)
     torch.cuda.synchronize()
-    return A_sharded, B, ref_output
+    return ref_output
+
+
+def _assert_close_tile(output_tile, ref_tile, atol, rtol, rank, row_start, col_start, context):
+    close = torch.isclose(output_tile, ref_tile, atol=atol, rtol=rtol)
+    if torch.all(close):
+        return
+
+    mismatch_idx = torch.nonzero(~close, as_tuple=False)[0]
+    local_row = int(mismatch_idx[0].item())
+    local_col = int(mismatch_idx[1].item())
+    global_row = row_start + local_row
+    global_col = col_start + local_col
+    abs_diff = torch.abs(output_tile - ref_tile)
+    max_diff = torch.nan_to_num(abs_diff, nan=float("inf")).max().item()
+    output_val = output_tile[local_row, local_col].item()
+    ref_val = ref_tile[local_row, local_col].item()
+    pytest.fail(
+        f"Rank {rank}: sampled validation mismatch in {context} at row={global_row}, col={global_col}: "
+        f"output={output_val}, ref={ref_val}, max_diff={max_diff}, expected within atol={atol}, rtol={rtol}"
+    )
+
+
+def _assert_full_output_matches(output, ref_output, atol, rtol, rank, context):
+    if torch.allclose(output, ref_output, atol=atol, rtol=rtol):
+        return
+
+    max_diff = (output - ref_output).abs().max().item()
+    pytest.fail(f"Rank {rank}: Max diff {max_diff}, expected < {atol} ({context})")
+
+
+def _assert_sampled_output_matches(output, A_sharded, B, rank, world_size, atol, rtol, context, bias=None):
+    M, N = output.shape
+    rows_per_tile = _validation_tile_rows(M)
+    cols_per_tile = _validation_tile_cols(N)
+    row_starts = _sample_starts(M, rows_per_tile, _validation_num_row_tiles())
+    col_starts = _sample_starts(N, cols_per_tile, _validation_num_col_tiles())
+
+    for row_start in row_starts:
+        row_end = min(row_start + rows_per_tile, M)
+        local_a = A_sharded[row_start:row_end].contiguous()
+        gathered_a_parts = [torch.empty_like(local_a) for _ in range(world_size)]
+        dist.all_gather(gathered_a_parts, local_a)
+        gathered_a_rows = torch.cat(gathered_a_parts, dim=1)
+
+        for col_start in col_starts:
+            col_end = min(col_start + cols_per_tile, N)
+            ref_tile = torch.matmul(gathered_a_rows, B[:, col_start:col_end])
+            if bias is not None:
+                ref_tile = ref_tile + bias[row_start:row_end, None]
+            output_tile = output[row_start:row_end, col_start:col_end]
+            _assert_close_tile(output_tile, ref_tile, atol, rtol, rank, row_start, col_start, context)
+
+        del gathered_a_rows, gathered_a_parts, local_a
+
+    torch.cuda.synchronize()
+
+
+def _assert_output_matches_reference(output, A_sharded, B, rank, world_size, atol, rtol, context, bias=None):
+    if _should_sample_validation(output.shape[0], output.shape[1], output.dtype):
+        _assert_sampled_output_matches(output, A_sharded, B, rank, world_size, atol, rtol, context, bias=bias)
+        return
+
+    ref_output = _make_full_reference(A_sharded, B, world_size)
+    if bias is not None:
+        ref_output = ref_output + bias[:, None]
+    _assert_full_output_matches(output, ref_output, atol, rtol, rank, context)
+
+
+def _hbm_buffer_test_config(M: int, K_local: int, N: int) -> FusedConfig | None:
+    if M <= 256 or K_local <= 64 or N <= 128:
+        return FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
+    return None
 
 
 @pytest.mark.parametrize(
@@ -87,8 +226,7 @@ def test_all_gather_matmul_baseline(dtype, atol, rtol, M, K_local, N):
     if M < min_block_size or K_local < min_block_size or N < min_block_size:
         pytest.skip(f"Problem too small for min block size {min_block_size}")
 
-    A_sharded, B, ref_output = _make_reference(rank, world_size, M, K_local, N, dtype)
-    device = f"cuda:{rank}"
+    A_sharded, B = _make_inputs(rank, world_size, M, K_local, N, dtype)
 
     A_sharded_shmem = ctx.zeros((M, K_local), dtype=dtype)
     A_sharded_shmem.copy_(A_sharded)
@@ -113,10 +251,21 @@ def test_all_gather_matmul_baseline(dtype, atol, rtol, M, K_local, N):
     torch.cuda.synchronize()
     ctx.barrier()
 
-    max_diff = (output - ref_output).abs().max().item()
-    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
-        f"Rank {rank}: Max diff {max_diff}, expected < {atol}"
+    _assert_output_matches_reference(
+        output,
+        A_sharded,
+        B,
+        rank,
+        world_size,
+        atol,
+        rtol,
+        "all_gather_matmul_baseline",
     )
+
+    # Clean up to prevent OOM in subsequent tests
+    del A_sharded, B, A_sharded_shmem, B_shmem, output
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize(
@@ -138,22 +287,21 @@ def test_tritonblas_rccl_all_gather_matmul(dtype, atol, rtol, M, K_local, N):
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
-    device = f"cuda:{rank}"
+    device = torch.device(f"cuda:{rank}")
 
     K = K_local * world_size
-    A_sharded, B, ref_output = _make_reference(rank, world_size, M, K_local, N, dtype)
+    A_sharded, B = _make_inputs(rank, world_size, M, K_local, N, dtype)
 
     A_gathered_parts = [torch.empty((M, K_local), dtype=dtype, device=device) for _ in range(world_size)]
-    A_gathered = torch.empty((M, K), dtype=dtype, device=device)
     output = ctx.zeros((M, N), dtype=dtype)
     selector = tritonblas.OrigamiMatmulSelector(
         M,
         N,
         K,
-        A_gathered.dtype,
+        A_sharded.dtype,
         B.dtype,
         output.dtype,
-        A_gathered.device,
+        device,
     )
     config = tritonblas.matmul_preamble(selector)
 
@@ -163,10 +311,21 @@ def test_tritonblas_rccl_all_gather_matmul(dtype, atol, rtol, M, K_local, N):
 
     torch.cuda.synchronize()
 
-    max_diff = (output - ref_output).abs().max().item()
-    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
-        f"Rank {rank}: Max diff {max_diff}, expected < {atol} (tritonblas+rccl, M={M}, K_local={K_local}, N={N})"
+    _assert_output_matches_reference(
+        output,
+        A_sharded,
+        B,
+        rank,
+        world_size,
+        atol,
+        rtol,
+        f"tritonblas+rccl, M={M}, K_local={K_local}, N={N}",
     )
+
+    # Clean up to prevent OOM in subsequent tests
+    del A_sharded, B, output, A_gathered_parts, A_gathered
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize(
@@ -198,7 +357,7 @@ def test_all_gather_matmul_hbm_buffer(dtype, atol, rtol, M, K_local, N, staged_a
 
     K = K_local * world_size
 
-    A_sharded, B, ref_output = _make_reference(rank, world_size, M, K_local, N, dtype)
+    A_sharded, B = _make_inputs(rank, world_size, M, K_local, N, dtype)
 
     A_sharded_shmem = ctx.zeros((M, K_local), dtype=dtype)
     A_sharded_shmem.copy_(A_sharded)
@@ -208,7 +367,7 @@ def test_all_gather_matmul_hbm_buffer(dtype, atol, rtol, M, K_local, N, staged_a
 
     ctx.barrier()
 
-    config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
+    config = _hbm_buffer_test_config(M, K_local, N)
 
     workspace = all_gather_matmul_hbm_buffer_preamble(
         ctx, A_sharded_shmem, B_shmem, config=config, staged_a_layout=staged_a_layout
@@ -228,11 +387,21 @@ def test_all_gather_matmul_hbm_buffer(dtype, atol, rtol, M, K_local, N, staged_a
     torch.cuda.synchronize()
     ctx.barrier()
 
-    max_diff = (output - ref_output).abs().max().item()
-    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
-        f"Rank {rank}: Max diff {max_diff}, expected < {atol} "
-        f"(staged_a_layout={staged_a_layout}, M={M}, K_local={K_local}, N={N})"
+    _assert_output_matches_reference(
+        output,
+        A_sharded,
+        B,
+        rank,
+        world_size,
+        atol,
+        rtol,
+        f"staged_a_layout={staged_a_layout}, M={M}, K_local={K_local}, N={N}",
     )
+
+    # Clean up to prevent OOM in subsequent tests
+    del A_sharded, B, A_sharded_shmem, B_shmem, output, workspace
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
 
 
 @pytest.mark.parametrize(
@@ -257,12 +426,11 @@ def test_all_gather_matmul_hbm_buffer_with_bias(dtype, atol, rtol, M, K_local, N
 
     K = K_local * world_size
 
-    A_sharded, B, ref_output_no_bias = _make_reference(rank, world_size, M, K_local, N, dtype)
+    A_sharded, B = _make_inputs(rank, world_size, M, K_local, N, dtype)
     device = f"cuda:{rank}"
 
     torch.manual_seed(77)
     bias = torch.randn(M, dtype=dtype, device=device)
-    ref_output = ref_output_no_bias + bias[:, None]
 
     A_sharded_shmem = ctx.zeros((M, K_local), dtype=dtype)
     A_sharded_shmem.copy_(A_sharded)
@@ -274,7 +442,7 @@ def test_all_gather_matmul_hbm_buffer_with_bias(dtype, atol, rtol, M, K_local, N
 
     ctx.barrier()
 
-    config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
+    config = _hbm_buffer_test_config(M, K_local, N)
 
     all_gather_matmul_hbm_buffer(
         ctx,
@@ -289,10 +457,22 @@ def test_all_gather_matmul_hbm_buffer_with_bias(dtype, atol, rtol, M, K_local, N
     torch.cuda.synchronize()
     ctx.barrier()
 
-    max_diff = (output - ref_output).abs().max().item()
-    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol), (
-        f"Rank {rank}: Max diff {max_diff}, expected < {atol} (with bias)"
+    _assert_output_matches_reference(
+        output,
+        A_sharded,
+        B,
+        rank,
+        world_size,
+        atol,
+        rtol,
+        "with bias",
+        bias=bias,
     )
+
+    # Clean up to prevent OOM in subsequent tests
+    del A_sharded, B, bias, A_sharded_shmem, B_shmem, bias_shmem, output
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
 
 
 if __name__ == "__main__":

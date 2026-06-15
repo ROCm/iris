@@ -3,13 +3,13 @@
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Plot benchmark sweep results from benchmark_sweep_results.json.
+Plot normalized benchmark sweep results from benchmark_sweep_results.json.
 
-Creates a grouped bar chart comparing TFLOPS across different benchmark variants
-and dimension configurations.
+Creates a grouped bar chart comparing performance normalized by TritonBlas GEMM-only baseline.
+All values are shown relative to TRITON_GEMM_ONLY (which appears as 1.0).
 
 Usage:
-    python plot_sweep_results.py [--input benchmark_sweep_results.json] [--output plot.png]
+    python plot_normalized_sweep_results.py [--input benchmark_sweep_results.json] [--output plot.png]
 """
 
 import json
@@ -27,6 +27,7 @@ class BenchmarkType(Enum):
     IRIS_FUSED = "iris_fused"
     IRIS_OPTIMIZED = "iris_optimized"
     TRITONBLAS_RCCL = "tritonblas_rccl"
+    TRITON_DEVICE_TRIGGERED_SDMA = "triton_device_triggered_sdma"
     TRITON_DEVICE_SDMA = "triton_device_sdma"
     TRITON_HOST_SDMA = "triton_host_sdma"
     TRITON_HIPMEMCPY = "triton_hipmemcpy"
@@ -37,14 +38,14 @@ class BenchmarkType(Enum):
 
 # Normalize benchmark names to canonical types
 BENCHMARK_NAME_MAP = {
-    # "baseline": BenchmarkType.IRIS_FUSED,
+    "baseline": BenchmarkType.IRIS_FUSED,
     "hbm_buffer": BenchmarkType.IRIS_OPTIMIZED,
     "tritonblas_rccl": BenchmarkType.TRITONBLAS_RCCL,
     "tritonblas_rcclbaseline": BenchmarkType.TRITONBLAS_RCCL,
-    "device_copy_engine": BenchmarkType.TRITON_DEVICE_SDMA,
+    # "device_copy_engine": BenchmarkType.TRITON_DEVICE_TRIGGERED_SDMA,
     "copy_engine_device": BenchmarkType.TRITON_DEVICE_SDMA,
-    "copy_engine": BenchmarkType.TRITON_DEVICE_SDMA,
-    "host_copy_engine": BenchmarkType.TRITON_HOST_SDMA,
+    # "copy_engine": BenchmarkType.TRITON_DEVICE_SDMA,
+    "host_copy_engine": BenchmarkType.TRITON_DEVICE_TRIGGERED_SDMA,
     "copy_engine_host": BenchmarkType.TRITON_HOST_SDMA,
     # "copy_engine_host_hip_memcpy": BenchmarkType.TRITON_HIPMEMCPY,
     "matmul_only": BenchmarkType.TRITON_GEMM_ONLY,
@@ -60,37 +61,40 @@ BENCHMARK_NAME_MAP = {
 BENCHMARK_LABELS = {
     BenchmarkType.IRIS_FUSED: "Iris baseline",
     BenchmarkType.IRIS_OPTIMIZED: "Iris optimized fused kernel",
-    BenchmarkType.TRITONBLAS_RCCL: "TritonBlas + RCCL",
-    BenchmarkType.TRITON_DEVICE_SDMA: "TritonBlas + device-initiated SDMA",
-    BenchmarkType.TRITON_HOST_SDMA: "TritonBlas + host-initiated SDMA",
+    BenchmarkType.TRITONBLAS_RCCL: "TritonBLAS + RCCL",
+    BenchmarkType.TRITON_DEVICE_TRIGGERED_SDMA: "TritonBLAS w/ prepopulated device-triggered SDMA",
+    BenchmarkType.TRITON_DEVICE_SDMA: "TritonBLAS w/ device-initiated SDMA",
+    BenchmarkType.TRITON_HOST_SDMA: "TritonBLAS w/ host-initiated SDMA",
     BenchmarkType.TRITON_HIPMEMCPY: "TritonBlas + host HIP memcpy",
-    BenchmarkType.TRITON_GEMM_ONLY: "TritonBlas (GEMM only)",
+    BenchmarkType.TRITON_GEMM_ONLY: "TritonBLAS (GEMM only)",
     BenchmarkType.PYTORCH_RCCL: "Pytorch + RCCL",
     BenchmarkType.PYTORCH_GEMM_ONLY: "Pytorch (GEMM only)",
 }
 
 # Colors for each benchmark type
 BENCHMARK_COLORS = {
-    BenchmarkType.IRIS_FUSED: "#2E7D32",  # Dark Green
+    BenchmarkType.IRIS_FUSED: "#FC0000",  # Dark Green
     BenchmarkType.IRIS_OPTIMIZED: "#FC0000",  # Light Green
-    BenchmarkType.TRITONBLAS_RCCL: "#26A69A",  # Teal
+    BenchmarkType.TRITONBLAS_RCCL: "#02AA0A",  # Teal
+    BenchmarkType.TRITON_DEVICE_TRIGGERED_SDMA: "#1976D2",  # Light Blue
     BenchmarkType.TRITON_DEVICE_SDMA: "#82E8FF",  # Light Blue
     BenchmarkType.TRITON_HOST_SDMA: "#1976D2",  # Blue
     BenchmarkType.TRITON_HIPMEMCPY: "#5C6BC0",  # Indigo
     BenchmarkType.TRITON_GEMM_ONLY: "#7B1FA2",  # Purple
     BenchmarkType.PYTORCH_RCCL: "#F57C00",  # Orange
-    BenchmarkType.PYTORCH_GEMM_ONLY: "#FFB74D",  # Light Orange
+    BenchmarkType.PYTORCH_GEMM_ONLY: "#FFFB00",  # Light Orange
 }
 
 # Preferred display order
 BENCHMARK_ORDER = [
-    BenchmarkType.TRITON_GEMM_ONLY,
+    BenchmarkType.IRIS_FUSED,
+    BenchmarkType.IRIS_OPTIMIZED,
+    BenchmarkType.TRITONBLAS_RCCL,
+    BenchmarkType.TRITON_DEVICE_TRIGGERED_SDMA,
     BenchmarkType.TRITON_HOST_SDMA,
     BenchmarkType.TRITON_HIPMEMCPY,
     BenchmarkType.TRITON_DEVICE_SDMA,
-    BenchmarkType.TRITONBLAS_RCCL,
-    BenchmarkType.IRIS_OPTIMIZED,
-    BenchmarkType.IRIS_FUSED,
+    BenchmarkType.TRITON_GEMM_ONLY,
     BenchmarkType.PYTORCH_RCCL,
     BenchmarkType.PYTORCH_GEMM_ONLY,
 ]
@@ -242,7 +246,7 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
                 effective_m = m
                 effective_k = k
             return effective_m / effective_k if effective_k > 0 else 0
-        results = sorted(results, key=m_to_k_ratio)
+        results = sorted(results, key=m_to_k_ratio, reverse=True)
     # else: sort_by == "none", keep original order
 
     # Build dim_configs from the (now sorted or unsorted) results
@@ -250,7 +254,14 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
     for result in results:
         m, n, k = result["M"], result["N"], result["K"]
         label = result.get("label", f"{m}×{n}×{k}")
-        dim_label = f"{label} ({m}×{n}×{k})" if label and not label.startswith(str(m)) else f"{m}×{n}×{k}"
+        # dim_label = f"{label} ({m}×{n}×{k})" if label and not label.startswith(str(m)) else f"{m}×{n}×{k}"
+        dim_label = f"{m}×{n}×{k}"
+        if operation == "matmul_all_gather":
+            # is attention?
+            if n == k:
+                dim_label = f"{m // 8}×{n // 8}×{k}"
+            else:
+                dim_label = f"{m}×{k // 8}×{n}"
         dim_configs.append((m, n, k, dim_label))
 
     # Filter benchmark types by regex if provided
@@ -282,10 +293,26 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
 
     benchmark_types = sorted(benchmark_types, key=sort_key)
 
+    # First pass: extract baseline TFLOPS (TRITON_GEMM_ONLY) for each config
+    baseline_tflops = []
+    for result in results:
+        matching_names = [
+            name
+            for name, btype in BENCHMARK_NAME_MAP.items()
+            if btype == BenchmarkType.TRITONBLAS_RCCL and name in result["benchmarks"]
+        ]
+        if matching_names:
+            baseline = extract_tflops(result["benchmarks"][matching_names[0]], matching_names[0])
+            baseline_tflops.append(baseline if baseline is not None else 0)
+        else:
+            baseline_tflops.append(0)
+
     # Prepare data for plotting - organize by benchmark type
     data = {bench_type: [] for bench_type in benchmark_types}
 
-    for result in results:
+    # Second pass: normalize all values by baseline
+    for idx, result in enumerate(results):
+        baseline = baseline_tflops[idx]
         for bench_type in benchmark_types:
             # Find all raw benchmark names that map to this type
             matching_names = [
@@ -298,7 +325,13 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
                 # Use the first matching benchmark name
                 bench_name = matching_names[0]
                 tflops = extract_tflops(result["benchmarks"][bench_name], bench_name)
-                data[bench_type].append(tflops if tflops is not None else 0)
+
+                # Normalize: baseline becomes 1.0, faster > 1.0, slower < 1.0
+                if tflops is not None and baseline > 0:
+                    normalized = tflops / baseline
+                    data[bench_type].append(normalized)
+                else:
+                    data[bench_type].append(0)
             else:
                 data[bench_type].append(0)
 
@@ -333,7 +366,7 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
                 ax.text(
                     bar.get_x() + bar.get_width() / 2,
                     height,
-                    f"{val:.1f}",
+                    f"{val:.2f}",
                     ha="center",
                     va="bottom",
                     fontsize=7,
@@ -341,18 +374,23 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
                 )
 
     # Customize plot
-    ax.set_xlabel("Dimension Configuration (M×N×K)", fontsize=12, fontweight="bold")
-    ax.set_ylabel("TFLOPS", fontsize=12, fontweight="bold")
+    ax.set_xlabel("Local GEMM (M×N×K)", fontsize=12, fontweight="bold")
+    # ax.set_ylabel("Normalized Performance (rel. to TritonBLAS GEMM)", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Normalized Performance (rel. to TritonBLAS + RCCL)", fontsize=12, fontweight="bold")
     # Set title based on operation type
     if operation == "all_gather_matmul":
-        title = f"All-Gather-Matmul Benchmark Sweep: TFLOPS Comparison ({device})"
+        title = f"All-Gather-GEMM: Normalized Performance ({device})"
+        ax.legend(loc="upper right", fontsize=10, ncols=3)
     else:
-        title = f"Matmul-All-Gather Benchmark Sweep: TFLOPS Comparison ({device})"
+        title = f"GEMM-All-Gather: Normalized Performance ({device})"
+        ax.legend(loc="upper center", fontsize=10)
     ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
     ax.set_xticks(x)
     ax.set_xticklabels([label for _, _, _, label in dim_configs], rotation=45, ha="right")
-    ax.legend(loc="upper center", fontsize=10, ncol=2)
     ax.grid(axis="y", alpha=0.3, linestyle="--")
+
+    # Add horizontal line at y=1.0 to mark the baseline (TRITON_GEMM_ONLY)
+    ax.axhline(y=1.0, color="red", linestyle="--", linewidth=1.5, alpha=0.7, label="TritonBlas GEMM baseline")
 
     # Set y-axis to start from 0
     ax.set_ylim(bottom=0)
@@ -388,7 +426,7 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
             label = BENCHMARK_LABELS.get(bench_type, str(bench_type))
 
             if val > 0:
-                row[label] = f"{val:.2f}"
+                row[label] = f"{val:.3f}x"
             else:
                 row[label] = "FAILED"
 
@@ -418,7 +456,7 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
         if valid_values:
             best_type, best_val = max(valid_values, key=lambda x: x[1])
             best_label = BENCHMARK_LABELS.get(best_type, str(best_type))
-            row["Best"] = f"{best_label} ({best_val:.2f})"
+            row["Best"] = f"{best_label} ({best_val:.3f}x)"
         else:
             row["Best"] = "NONE"
 
@@ -475,7 +513,7 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="benchmark/ops/matmul_all_gather/sweep_results_plot.png",
+        default="benchmark/ops/matmul_all_gather/normalized_sweep_results_plot.png",
         help="Output PNG file for plot",
     )
     parser.add_argument(

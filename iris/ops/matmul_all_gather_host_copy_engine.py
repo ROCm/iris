@@ -391,7 +391,7 @@ def matmul_all_gather_host_copy_engine(
             world_size,
         )
         sdma_end_time = time.perf_counter()
-        shmem.barrier()
+        torch.cuda.synchronize()
         if verbose and rank == 0:
             post_ms = (sdma_end_post_time - sdma_start_time) * 1000.0
             quiet_ms = (sdma_end_time - sdma_end_post_time) * 1000.0
