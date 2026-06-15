@@ -31,7 +31,7 @@ from typing import List, Optional
 import torch
 
 from .base import BaseAllocator
-from iris.drivers.base import LocalAllocation, PeerMapping
+from iris.drivers.base import DriverNotSupported, LocalAllocation, PeerMapping
 from iris.drivers.factory import DriverFactory
 from iris.host.distributed.topology import (
     InterconnectLevel,
@@ -448,6 +448,15 @@ class VMemChunkedAllocator(BaseAllocator):
         """Return the number of exported heap regions."""
         return len(self._shared_regions)
 
+    def _can_return_external_tensor_alias(self) -> bool:
+        return self.num_ranks == 1 and self.driver.__class__.__name__ == "LocalCudaDriver"
+
+    def _external_tensor_alias(self, external_tensor: torch.Tensor) -> torch.Tensor:
+        logger.info(
+            "Returning a local CUDA tensor alias because this external allocation cannot be mapped into the Iris heap"
+        )
+        return external_tensor.view(external_tensor.shape)
+
     def import_external_tensor(self, external_tensor: torch.Tensor) -> torch.Tensor:
         """Import an external tensor into the symmetric heap (zero-copy).
 
@@ -457,10 +466,10 @@ class VMemChunkedAllocator(BaseAllocator):
         until allocator.close() so peer translation remains valid for RMA.
 
         Raises:
-            DriverNotSupported: This operation requires DMA-BUF support and is
-                currently AMD-only. On NVIDIA, the local driver does not
-                implement export_pointer_handle for arbitrary device pointers,
-                and this method will raise.
+            DriverNotSupported: If the active driver cannot export and remap
+                the external allocation. Single-rank local CUDA jobs may return
+                a direct tensor alias instead, because no peer VA translation is
+                needed.
             RuntimeError: If the input tensor is not on a CUDA/HIP device or
                 is not contiguous.
         """
@@ -469,10 +478,18 @@ class VMemChunkedAllocator(BaseAllocator):
                 raise RuntimeError("Can only import CUDA/HIP tensors")
             if not external_tensor.is_contiguous():
                 raise RuntimeError("Only contiguous tensors can be imported; call .contiguous() before as_symmetric()")
+            if self._can_return_external_tensor_alias():
+                return self._external_tensor_alias(external_tensor)
 
             external_ptr = external_tensor.data_ptr()
             tensor_size = external_tensor.numel() * external_tensor.element_size()
-            alloc_base, alloc_size = self.driver.get_address_range(external_ptr)
+            try:
+                alloc_base, alloc_size = self.driver.get_address_range(external_ptr)
+            except DriverNotSupported:
+                if self._can_return_external_tensor_alias():
+                    return self._external_tensor_alias(external_tensor)
+                raise
+
             offset_in_alloc = external_ptr - alloc_base
             aligned_alloc_size = (alloc_size + self.granularity - 1) & ~(self.granularity - 1)
 
@@ -485,7 +502,13 @@ class VMemChunkedAllocator(BaseAllocator):
                 )
 
             target_base_va = self.base_va + target_offset
-            handle_bytes = self.driver.export_pointer_handle(alloc_base, alloc_size)
+            try:
+                handle_bytes = self.driver.export_pointer_handle(alloc_base, alloc_size)
+            except DriverNotSupported:
+                if self._can_return_external_tensor_alias():
+                    return self._external_tensor_alias(external_tensor)
+                raise
+
             import_kwargs = {}
             if self.driver.__class__.__name__ == "LocalHipDriver":
                 import_kwargs = {
