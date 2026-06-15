@@ -22,9 +22,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-import iris
 
-from iris.tracing.events import TraceEvent
 from .workspace import FusedWorkspace
 
 # Import tritonBLAS
@@ -115,6 +113,7 @@ def _auto_m_tiles_per_batch(selector, M_local: int, N: int) -> int:
     active_cus = getattr(selector, "_ACTIVE_CU", None)
     if active_cus is None or active_cus <= 0:
         import torch
+
         active_cus = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
     tiles_per_group = max(1, selector.group_m * num_tiles_n)
     groups_per_wave = max(1, int(active_cus) // tiles_per_group)
@@ -231,9 +230,7 @@ def matmul_all_gather_host_copy_engine(
 
     # Allocate workspace if not provided
     if workspace is None:
-        workspace = matmul_all_gather_host_copy_engine_preamble(
-            shmem, A, B, trace=trace
-        )
+        workspace = matmul_all_gather_host_copy_engine_preamble(shmem, A, B, trace=trace)
 
     stride_cm, stride_cn = output_tensor.stride()
     device = A.device
@@ -268,9 +265,7 @@ def matmul_all_gather_host_copy_engine(
     if bias is not None:
         import warnings
 
-        warnings.warn(
-            "Bias is not yet supported in tritonBLAS integration. Consider adding bias manually after GEMM."
-        )
+        warnings.warn("Bias is not yet supported in tritonBLAS integration. Consider adding bias manually after GEMM.")
 
     # Launch tritonBLAS GEMM with SignalView
     persistent_matmul_lt(
@@ -354,9 +349,7 @@ def matmul_all_gather_host_copy_engine(
             if remote_rank == rank:
                 continue
 
-            dst_ptrs_remote = [
-                shmem.translate(dst_ptr_local, rank, remote_rank) for dst_ptr_local in dst_ptrs_local
-            ]
+            dst_ptrs_remote = [shmem.translate(dst_ptr_local, rank, remote_rank) for dst_ptr_local in dst_ptrs_local]
             signal_ptr_remote = None
             if is_last_wave:
                 signal_ptr_remote = shmem.translate(signal_ptr_local, rank, remote_rank)
