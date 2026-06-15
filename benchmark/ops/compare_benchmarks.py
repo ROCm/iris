@@ -83,10 +83,10 @@ def compare_benchmarks(baseline_file: str, new_file: str) -> None:
             #     status_msg = []
             #     if not baseline_success:
             #         status_msg.append("baseline failed")
-                # if not new_success:
-                #     status_msg.append("new failed")
-                # print(f"  {variant:25s} - SKIPPED ({', '.join(status_msg)})")
-                # continue
+            # if not new_success:
+            #     status_msg.append("new failed")
+            # print(f"  {variant:25s} - SKIPPED ({', '.join(status_msg)})")
+            # continue
 
             baseline_tflops = baseline_variant.get("tflops", 0)
             new_tflops = new_variant.get("tflops", 0)

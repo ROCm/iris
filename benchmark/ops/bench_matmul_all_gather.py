@@ -10,7 +10,7 @@ import tritonblas
 import iris.bench as bench
 
 from iris.ops import FusedConfig
-from tritonblas.matmul import persistent_matmul_lt, create_counter_config
+from tritonblas.matmul import persistent_matmul_lt
 
 
 def _register_fused_matmul_all_gather(state, ctx) -> None:

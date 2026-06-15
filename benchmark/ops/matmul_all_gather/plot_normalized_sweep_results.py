@@ -101,7 +101,6 @@ BENCHMARK_ORDER = [
 
 
 def extract_tflops(benchmark_data, benchmark_name):
-
     """Extract TFLOPS value from benchmark result based on benchmark type."""
     if benchmark_data.get("status") == "FAILED":
         return None
@@ -136,7 +135,9 @@ def canonical_operation_name(operation_name):
     return operation_name
 
 
-def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=False, sort_by="none", filter_regex=None):
+def plot_sweep_results(
+    input_file, output_file, device="MI300X", g_shapes_only=False, sort_by="none", filter_regex=None
+):
     """Create grouped bar chart from sweep results.
 
     Args:
@@ -166,7 +167,6 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
         print(f"Filtered to {len(results)} g-shapes")
 
     results = [r for r in results if r.get("label") not in ["g10", "g12", "g13"]]  # Exclude specific shapes
-
 
     # Detect operation type from the top-level row first, then fall back to
     # benchmark-specific operation names for older result files.
@@ -215,6 +215,7 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
             flops = 2 * m * n * k
             bytes_moved = (m * k + k * n + m * n) * 2  # fp16
             return flops / bytes_moved if bytes_moved > 0 else 0
+
         results = sorted(results, key=compute_intensity, reverse=True)
     elif sort_by == "memory-bound":
         # Sort by compute/memory ratio ascending (most memory bound first)
@@ -223,6 +224,7 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
             flops = 2 * m * n * k
             bytes_moved = (m * k + k * n + m * n) * 2  # fp16
             return flops / bytes_moved if bytes_moved > 0 else 0
+
         results = sorted(results, key=compute_intensity)
     elif sort_by == "output-size":
         # Sort by output size (M × N) ascending
@@ -246,6 +248,7 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
                 effective_m = m
                 effective_k = k
             return effective_m / effective_k if effective_k > 0 else 0
+
         results = sorted(results, key=m_to_k_ratio, reverse=True)
     # else: sort_by == "none", keep original order
 
@@ -272,7 +275,7 @@ def plot_sweep_results(input_file, output_file, device="MI300X", g_shapes_only=F
             for bench_type in benchmark_types:
                 # Match against both the enum value and display label
                 label = BENCHMARK_LABELS.get(bench_type, str(bench_type))
-                enum_value = bench_type.value if hasattr(bench_type, 'value') else str(bench_type)
+                enum_value = bench_type.value if hasattr(bench_type, "value") else str(bench_type)
                 if pattern.search(label) or pattern.search(enum_value):
                     filtered_types.append(bench_type)
             benchmark_types = set(filtered_types)
@@ -530,11 +533,20 @@ def main():
     parser.add_argument(
         "--sort",
         type=str,
-        choices=["none", "narrow-to-wide", "wide-to-narrow", "compute-intensity", "memory-bound", "output-size", "k-size", "m-to-k-ratio"],
+        choices=[
+            "none",
+            "narrow-to-wide",
+            "wide-to-narrow",
+            "compute-intensity",
+            "memory-bound",
+            "output-size",
+            "k-size",
+            "m-to-k-ratio",
+        ],
         default="none",
         help="Sort shapes by: 'narrow-to-wide' (by N ascending), 'wide-to-narrow' (by N descending), "
-             "'compute-intensity' (compute/memory ratio descending), 'memory-bound' (compute/memory ratio ascending), "
-             "'output-size' (by M×N output size ascending)",
+        "'compute-intensity' (compute/memory ratio descending), 'memory-bound' (compute/memory ratio ascending), "
+        "'output-size' (by M×N output size ascending)",
     )
     parser.add_argument(
         "--filter",
@@ -542,9 +554,9 @@ def main():
         default=None,
         metavar="REGEX",
         help="Regex pattern to filter benchmark variants (case-insensitive). "
-             "Examples: 'tritonblas' (all TritonBlas variants), 'iris|pytorch' (Iris or PyTorch), "
-             "'^Iris' (variants starting with 'Iris'), 'RCCL' (all RCCL-based variants). "
-             "Matches against benchmark display labels.",
+        "Examples: 'tritonblas' (all TritonBlas variants), 'iris|pytorch' (Iris or PyTorch), "
+        "'^Iris' (variants starting with 'Iris'), 'RCCL' (all RCCL-based variants). "
+        "Matches against benchmark display labels.",
     )
 
     args = parser.parse_args()

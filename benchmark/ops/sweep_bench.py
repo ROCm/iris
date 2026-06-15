@@ -57,14 +57,12 @@ DIMENSION_CONFIGS = [
     # {"m_local": 147456, "n": 28672, "k": 4096, "label": "g14"},
     # {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"},
     # {"m_local": 229376, "n": 28672, "k": 4096, "label": "g16"},
-
     # {"m_local": 4096, "n": 14336, "k": 4096, "label": "mixtral_gate"},
     # {"m_local": 4096, "n": 11008, "k": 4096, "label": "llama7b_gate"},
     # {"m_local": 4096, "n": 4096, "k": 4096, "label": "pow2_4k"},
     # {"m_local": 1024, "n": 3584, "k": 8192, "label": "M1024_N3584_K8192"},
     # {"m_local": 4096, "n": 3584, "k": 8192, "label": "M4096_N3584_K8192"},
     # {"m_local": 16384, "n": 3584, "k": 8192, "label": "M16384_N3584_K8192"},
-
     # Modern LLM shapes for K-sharding TP (DeepSeek-V3, Llama 3/3.1, Llama 4)
     # These are for row-parallel matmuls where K dimension is sharded
     # DeepSeek-V3: hidden_size=7168, intermediate_size=18432
@@ -99,32 +97,26 @@ DIMENSION_CONFIGS = [
     # Note: Llama 3.1 405B shapes already covered by g1-g4 (hidden=16384, intermediate=53248)
     {"m_local": 16384, "n": 16384, "k": 16384, "label": "llama3_405b_attn_out_16k"},
     {"m_local": 16384, "n": 16384, "k": 53248, "label": "llama3_405b_mlp_down_16k"},
-
     # NOTE: The shapes below are for SEQUENCE PARALLEL (M-sharding), which is
     # a DIFFERENT operation than all_gather_matmul (which does K-sharding for TP).
     # These shapes are kept for reference but won't work with current all_gather_matmul.
     # TODO: Implement separate M-sharding operation for sequence parallel.
-
     # # DeepSeek-V3 sequence parallel (TP4, hidden_dim=7168, context=128K)
     # {"m_local": 32768, "n": 7168, "k": 18432, "label": "deepseek_v3_sp4_mlp_up"},
     # {"m_local": 32768, "n": 18432, "k": 7168, "label": "deepseek_v3_sp4_mlp_down"},
     # {"m_local": 32768, "n": 7168, "k": 7168, "label": "deepseek_v3_sp4_qkv"},
     # {"m_local": 65536, "n": 7168, "k": 18432, "label": "deepseek_v3_sp4_mlp_up_long"},
-
     # # Llama 4 Scout sequence parallel (TP8, hidden_dim=8192, context=256K)
     # {"m_local": 32768, "n": 8192, "k": 22016, "label": "llama4_scout_sp8_mlp_up"},
     # {"m_local": 32768, "n": 22016, "k": 8192, "label": "llama4_scout_sp8_mlp_down"},
     # {"m_local": 32768, "n": 8192, "k": 8192, "label": "llama4_scout_sp8_qkv"},
-
     # # Llama 4 Maverick long context (TP8, hidden_dim=8192, context=512K)
     # {"m_local": 64768, "n": 8192, "k": 22016, "label": "llama4_maverick_sp8_mlp_up_long"},
     # {"m_local": 64768, "n": 22016, "k": 8192, "label": "llama4_maverick_sp8_mlp_down_long"},
-
     # # DeepSeek-V4 ultra-long context (TP8, hidden_dim~10240, context=1M tokens)
     # {"m_local": 131072, "n": 10240, "k": 28672, "label": "deepseek_v4_sp8_mlp_up_1m"},
     # {"m_local": 131072, "n": 28672, "k": 10240, "label": "deepseek_v4_sp8_mlp_down_1m"},
     # {"m_local": 131072, "n": 10240, "k": 10240, "label": "deepseek_v4_sp8_qkv_1m"},
-
     # # Llama 4 Behemoth extreme context (TP16, hidden_dim~12288, context=10M tokens)
     # {"m_local": 655360, "n": 12288, "k": 32768, "label": "llama4_behemoth_sp16_mlp_up_10m"},
     # {"m_local": 655360, "n": 32768, "k": 12288, "label": "llama4_behemoth_sp16_mlp_down_10m"},
@@ -239,7 +231,9 @@ def _dimension_label(config: Dict[str, Any]) -> str:
     return str(config.get("label") or f"M{config['m_local']}_N{config['n']}_K{config['k']}")
 
 
-def _calculate_heap_size(m: int, n: int, k: int, operation: str, num_gpus: int, safety_factor: float = HEAP_SIZE_SAFETY_FACTOR) -> int:
+def _calculate_heap_size(
+    m: int, n: int, k: int, operation: str, num_gpus: int, safety_factor: float = HEAP_SIZE_SAFETY_FACTOR
+) -> int:
     """Calculate required heap size based on matrix dimensions and operation type.
 
     The heap is used for symmetric memory buffers across GPUs for all allocations via ctx.zeros(), ctx.randn(), etc.
@@ -306,7 +300,6 @@ def _calculate_heap_size(m: int, n: int, k: int, operation: str, num_gpus: int, 
             n_local = k // num_gpus
             k_local = n
 
-
         a_size = m_local * k_local * element_size
         b_size = k_local * n_local * element_size
         c_local_size = m_local * n_local * element_size  # For pytorch/tritonblas variants
@@ -328,14 +321,14 @@ def _calculate_heap_size(m: int, n: int, k: int, operation: str, num_gpus: int, 
 
     # Check if even the base requirement (without safety factor) exceeds GPU memory
     if total_size > max_reasonable_heap:
-        log(f"  WARNING: Required buffers ({total_size / (1<<30):.2f} GB) exceed available GPU memory (~180 GB)")
+        log(f"  WARNING: Required buffers ({total_size / (1 << 30):.2f} GB) exceed available GPU memory (~180 GB)")
         log("           This shape is too large for the available hardware - benchmark WILL FAIL")
         log(f"           Breakdown: M={m}, N={n}, K={k}, num_gpus={num_gpus}")
         # Still return the capped size so the sweep continues, but mark for expected failure
 
     if heap_size > max_reasonable_heap:
-        log(f"  INFO: Calculated heap size ({heap_size / (1<<30):.2f} GB) exceeds GPU memory")
-        log(f"        Capping at {max_reasonable_heap / (1<<30):.0f} GB")
+        log(f"  INFO: Calculated heap size ({heap_size / (1 << 30):.2f} GB) exceeds GPU memory")
+        log(f"        Capping at {max_reasonable_heap / (1 << 30):.0f} GB")
         heap_size = max_reasonable_heap
 
     return heap_size
@@ -362,7 +355,7 @@ def _run_bench_benchmark(
 
     # For matmul_all_gather, m represents total M, but the benchmark expects M_local
     # So we divide by NUM_GPUS to get the per-rank dimension
-    if operation == "matmul_all_gather" and axes['m'] == "M_local":
+    if operation == "matmul_all_gather" and axes["m"] == "M_local":
         # m_value = m // NUM_GPUS
         # if B is square (n == k) the is attention
         if k == n:

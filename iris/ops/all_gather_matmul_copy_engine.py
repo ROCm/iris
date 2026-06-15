@@ -580,9 +580,7 @@ def all_gather_matmul_copy_engine(
         )
 
     if workspace is None:
-        workspace = all_gather_matmul_copy_engine_preamble(
-            shmem, A_sharded, B, staged_a_layout=staged_a_layout
-        )
+        workspace = all_gather_matmul_copy_engine_preamble(shmem, A_sharded, B, staged_a_layout=staged_a_layout)
 
     selector = workspace.selector
     m_tiles_per_batch = workspace.m_tiles_per_batch
