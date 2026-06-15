@@ -8,6 +8,7 @@ This module provides a torch-like interface for GEMM+Reduce-Scatter operations,
 automatically inferring dimensions, strides, and hardware parameters.
 """
 
+import logging
 from typing import Optional
 import torch
 import triton
@@ -18,7 +19,7 @@ from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
-import iris.x
+from iris.host.tracing.kernel_artifacts import iris_launch
 
 
 @triton.jit()
@@ -107,14 +108,14 @@ def _fused_matmul_reduce_scatter_kernel(
     tl.atomic_xchg(lock_ptr, 1, sem="release", scope="gpu")
 
     # Create tile object and context
-    tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+    tile_obj = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
     # Create tensor views for source and destination
-    src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
-    dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
+    src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
+    dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
-    iris.x.reduce_scatter(tile_obj, src_view, dst_view, locks, ctx)
+    ctx.reduce_scatter(tile_obj, src_view, dst_view, locks)
 
 
 def matmul_reduce_scatter_preamble(
@@ -228,6 +229,21 @@ def matmul_reduce_scatter(
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
+    from iris.host.logging.logging import _log_rank
+
+    _log_rank(
+        logging.DEBUG,
+        "matmul_reduce_scatter: shape=(%d,%d,%d) dtype=%s rank=%d/%d",
+        M,
+        N,
+        K,
+        A.dtype,
+        rank,
+        world_size,
+        rank=rank,
+        num_ranks=world_size,
+    )
+
     num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
     num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
     total_tiles = num_pid_m * num_pid_n
@@ -242,7 +258,9 @@ def matmul_reduce_scatter(
 
     even_k = K % config.block_size_k == 0
 
-    _fused_matmul_reduce_scatter_kernel[grid](
+    iris_launch(
+        _fused_matmul_reduce_scatter_kernel,
+        grid,
         A,
         B,
         C,
@@ -264,6 +282,9 @@ def matmul_reduce_scatter(
         config.block_size_n,
         config.block_size_k,
         even_k,
+        algorithm="matmul_reduce_scatter",
+        rank=rank,
+        dtype=A.dtype,
     )
 
     if not async_op:

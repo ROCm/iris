@@ -5,7 +5,8 @@ import torch
 import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.gluon import IrisDeviceCtx
 from itertools import product
 
 
@@ -209,7 +210,7 @@ VOLATILE_OPTIONS = [False, True]
 @pytest.mark.parametrize("cache_modifier,volatile", list(product(LOAD_CACHE_MODIFIERS, VOLATILE_OPTIONS)))
 def test_gluon_load_cache_modifiers(cache_modifier, volatile):
     """Test IrisDeviceCtx.load() with various cache modifiers and volatile settings."""
-    ctx = iris_gl.iris(1 << 20)
+    ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     context_tensor = ctx.get_device_context()
     source_rank = ctx.get_rank()
@@ -223,7 +224,7 @@ def test_gluon_load_cache_modifiers(cache_modifier, volatile):
 
     grid = (1,)
     load_cache_modifier_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         data,
         results,
@@ -257,7 +258,7 @@ def test_gluon_load_cache_modifiers(cache_modifier, volatile):
 @pytest.mark.parametrize("cache_modifier", STORE_CACHE_MODIFIERS)
 def test_gluon_store_cache_modifiers(cache_modifier):
     """Test IrisDeviceCtx.store() with various cache modifiers."""
-    ctx = iris_gl.iris(1 << 20)
+    ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     context_tensor = ctx.get_device_context()
     destination_rank = ctx.get_rank()
@@ -270,7 +271,7 @@ def test_gluon_store_cache_modifiers(cache_modifier):
 
     grid = (1,)
     store_cache_modifier_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         src,
         results,
@@ -305,7 +306,7 @@ def test_gluon_store_cache_modifiers(cache_modifier):
 )
 def test_gluon_get_cache_modifiers(load_cache_modifier, store_cache_modifier):
     """Test IrisDeviceCtx.get() with various cache modifiers."""
-    ctx = iris_gl.iris(1 << 20)
+    ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     context_tensor = ctx.get_device_context()
     cur_rank = ctx.get_rank()
@@ -318,7 +319,7 @@ def test_gluon_get_cache_modifiers(load_cache_modifier, store_cache_modifier):
 
     grid = (1,)
     get_cache_modifier_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         data,
         results,
@@ -356,7 +357,7 @@ def test_gluon_get_cache_modifiers(load_cache_modifier, store_cache_modifier):
 )
 def test_gluon_put_cache_modifiers_local(load_cache_modifier, store_cache_modifier):
     """Test IrisDeviceCtx.put() local (to_rank == cur_rank) with various cache modifiers."""
-    ctx = iris_gl.iris(1 << 20)
+    ctx = iris.iris(1 << 20)
     cur_rank = ctx.get_rank()
     context_tensor = ctx.get_device_context()
 
@@ -368,7 +369,7 @@ def test_gluon_put_cache_modifiers_local(load_cache_modifier, store_cache_modifi
 
     grid = (1,)
     put_cache_modifier_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         data,
         results,
@@ -403,7 +404,7 @@ def test_gluon_put_cache_modifiers_local(load_cache_modifier, store_cache_modifi
 )
 def test_gluon_put_cache_modifiers_remote(load_cache_modifier, store_cache_modifier):
     """Test IrisDeviceCtx.put() remote (to_rank != cur_rank) with various cache modifiers."""
-    ctx = iris_gl.iris(1 << 20)
+    ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     cur_rank = ctx.get_rank()
     context_tensor = ctx.get_device_context()
@@ -421,7 +422,7 @@ def test_gluon_put_cache_modifiers_remote(load_cache_modifier, store_cache_modif
     grid = (1,)
     if cur_rank == 0:
         put_cache_modifier_kernel[grid](
-            iris_gl.IrisDeviceCtx,
+            IrisDeviceCtx,
             context_tensor,
             data,
             results,
@@ -458,7 +459,7 @@ def test_gluon_put_cache_modifiers_remote(load_cache_modifier, store_cache_modif
 )
 def test_gluon_copy_local_read_remote_write(load_cache_modifier, store_cache_modifier):
     """Test IrisDeviceCtx.copy() local read → remote write with various cache modifiers."""
-    ctx = iris_gl.iris(1 << 20)
+    ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     context_tensor = ctx.get_device_context()
     cur_rank = ctx.get_rank()
@@ -475,7 +476,7 @@ def test_gluon_copy_local_read_remote_write(load_cache_modifier, store_cache_mod
 
     grid = (1,)
     copy_local_read_remote_write_cache_modifier_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         data,
         results,
@@ -511,7 +512,7 @@ def test_gluon_copy_local_read_remote_write(load_cache_modifier, store_cache_mod
 )
 def test_gluon_copy_remote_read_local_write(load_cache_modifier, store_cache_modifier):
     """Test IrisDeviceCtx.copy() remote read → local write with various cache modifiers."""
-    ctx = iris_gl.iris(1 << 20)
+    ctx = iris.iris(1 << 20)
     num_ranks = ctx.get_num_ranks()
     context_tensor = ctx.get_device_context()
     cur_rank = ctx.get_rank()
@@ -528,7 +529,7 @@ def test_gluon_copy_remote_read_local_write(load_cache_modifier, store_cache_mod
 
     grid = (1,)
     copy_remote_read_local_write_cache_modifier_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         data,
         results,

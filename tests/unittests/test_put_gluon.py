@@ -5,7 +5,8 @@ import torch
 import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.gluon import IrisDeviceCtx
 
 
 # TODO: Separate this kernel out in the following categories:
@@ -55,7 +56,7 @@ def put_kernel(
 )
 def test_put_api(dtype, BLOCK_SIZE):
     # TODO: Adjust heap size.
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
@@ -67,7 +68,7 @@ def test_put_api(dtype, BLOCK_SIZE):
 
     grid = (1,)
     put_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         data,
         results,

@@ -14,9 +14,8 @@ import torch
 import triton
 import triton.language as tl
 import iris
-import iris.x
 
-from iris.tracing.events import TraceEvent
+from iris.host.tracing.events import TraceEvent
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 
@@ -271,7 +270,7 @@ def _hbm_buffer_all_gather_matmul_kernel(
                 pid_n=my_stage,
             )
 
-        src_view = iris.x.make_tensor_view(A_sharded, M, K_local, stride_am, stride_ak)
+        src_view = iris.make_tensor_view(A_sharded, M, K_local, stride_am, stride_ak)
 
         tiles_per_m_group = NUM_FLAG_GROUPS_K * GROUP_SIZE_M
 
@@ -303,22 +302,20 @@ def _hbm_buffer_all_gather_matmul_kernel(
 
                         pid_m_t = zero + m_tile
                         tile_k_t = zero + k_block_local
-                        k_tile = iris.x.TileView(pid_m_t, tile_k_t, BLOCK_SIZE_M, BLOCK_SIZE_K)
+                        k_tile = iris.TileView(pid_m_t, tile_k_t, BLOCK_SIZE_M, BLOCK_SIZE_K)
 
                         rk = k_block_global * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
                         rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
-                        staged_ptrs = (
-                            staged_a + rm.to(tl.int64)[:, None] * stride_sa_m + rk.to(tl.int64)[None, :] * stride_sa_k
-                        )
+                        staged_ptrs = staged_a + rm.to(tl.int64)[:, None] * stride_sa_m + rk[None, :] * stride_sa_k
 
                         for compile_rank in range(world_size):
                             if src_rank_idx == compile_rank:
-                                a_tile = iris.x.gather(k_tile, src_view, compile_rank, ctx, hint=(1, BLOCK_SIZE_K))
+                                a_tile = ctx.gather(k_tile, src_view, compile_rank, hint=(1, BLOCK_SIZE_K))
                                 tl.store(staged_ptrs, a_tile, cache_modifier=".cg")
 
                     flag_idx = m_tile * NUM_FLAG_GROUPS_K + k_flag_group
-                    tl.debug_barrier()
-                    tl.atomic_add(flags_ptr + flag_idx, 1, sem="release", scope="gpu")
+                    tl.debug_barrier()  # ensure all per-block stores are visible before setting the flag
+                    tl.atomic_xchg(flags_ptr + flag_idx, 1, sem="release", scope="gpu")
 
         if TRACE:
             ctx.tracing.record_event_end(_trace_handle)

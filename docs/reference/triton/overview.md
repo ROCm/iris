@@ -32,9 +32,9 @@ def kernel(ptr, heap_bases, cur_rank, remote_rank, BLOCK_SIZE: tl.constexpr):
 
 Explore the API by section:
 
-- [Iris Class](class.md)
-- [Tensor Creation](tensor-creation.md)
+- [Iris Class](../host/class.md)
+- [Tensor Creation](../host/tensor-creation.md)
 - [Device Functions](device-functions.md)
-- [Collective Communication (CCL)](ccl.md)
+- [Collective Communication (CCL)](../host/ccl.md)
 - [Fused GEMM + CCL Operations](ops.md)
 

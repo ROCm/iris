@@ -5,7 +5,8 @@ import torch
 import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.gluon import IrisDeviceCtx
 
 
 @gluon.jit
@@ -66,7 +67,7 @@ def atomic_max_kernel(
 )
 def test_atomic_max_api(dtype, sem, scope, BLOCK_SIZE):
     # TODO: Adjust heap size.
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
@@ -78,7 +79,7 @@ def test_atomic_max_api(dtype, sem, scope, BLOCK_SIZE):
 
     grid = (1,)
     atomic_max_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         results,
         sem,

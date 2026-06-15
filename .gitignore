@@ -12,6 +12,7 @@ rocSHMEM/
 *.sif.checksum
 apptainer/images/
 .vscode/
+.idea/
 __pycache__/
 *.so
 *.json
@@ -60,7 +61,11 @@ logs/
 *.cap
 hsakmt_counters.csv
 core
-.intellikit/
-.github/agents/docs/benchmark-results/
-.github/agents/
+
+docker/TheRock/
+docker/rocm-systems/
+
+# IntelliKit / Copilot agent artifacts
+.intellikit
+.github/agents/skills/
 docs/benchmark-results/*.png

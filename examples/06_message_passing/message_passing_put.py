@@ -42,23 +42,24 @@ def producer_kernel(
         producer_rank,
         consumer_rank,
         heap_bases_ptr,
-        copy_engine_handle_ptr,
         mask=mask,
+        copy_engine_ctx=copy_engine_handle_ptr,
         USE_COPY_ENGINE=USE_COPY_ENGINE,
+        CONTIGUOUS_COPY=True,
     )
 
     # Set flag to signal completion
-    # iris.atomic_cas(flag + pid, 0, 1, producer_rank, consumer_rank, heap_bases_ptr, copy_engine_handle_ptr, sem="release", scope="sys")
-    iris.atomic_add(
+    iris.atomic_cas(
         flag + pid,
+        0,
         1,
         producer_rank,
         consumer_rank,
         heap_bases_ptr,
         sem="release",
         scope="sys",
-        copy_engine_ctx=copy_engine_handle_ptr,
         USE_COPY_ENGINE=USE_COPY_ENGINE,
+        copy_engine_ctx=copy_engine_handle_ptr,
     )
 
 
@@ -183,7 +184,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     flags = shmem.zeros((num_blocks,), device="cuda", dtype=torch.int32)
 
     # Get copy engine context
-    # copy_engine_ctx = shmem.get_copy_engine_handle(consumer_rank) if args["use_copy_engine"] and cur_rank == producer_rank else None
     copy_engine_ctx = shmem.get_copy_engine_ctx()
 
     if cur_rank == producer_rank:

@@ -14,7 +14,7 @@ import torch
 import torch.distributed as dist
 import os
 import pytest
-from iris.hip import (
+from iris.host.platform.hip import (
     get_address_range,
     export_dmabuf_handle,
 )

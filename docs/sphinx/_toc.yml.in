@@ -15,15 +15,13 @@ subtrees:
     - file: reference/talks-and-papers.md
     - file: reference/api-reference.md
       entries:
+      - file: reference/host/class.md
+      - file: reference/host/tensor-creation.md
+      - file: reference/host/ccl.md
       - file: reference/triton/overview.md
         entries:
-        - file: reference/triton/class.md
-        - file: reference/triton/tensor-creation.md
         - file: reference/triton/device-functions.md
-        - file: reference/triton/ccl.md
         - file: reference/triton/ops.md
       - file: reference/gluon/overview.md
         entries:
-        - file: reference/gluon/class.md
-        - file: reference/gluon/tensor-creation.md
         - file: reference/gluon/device-functions.md

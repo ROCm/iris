@@ -10,12 +10,13 @@ Then scatters C_local tiles to form the full C (M x N) where M = world_size * M_
 This is useful for tensor-parallel workloads where outputs need to be gathered.
 """
 
+import logging
 from typing import Optional
 import torch
 import triton
 import triton.language as tl
 import iris
-import iris.x
+from iris.host.tracing.kernel_artifacts import iris_launch
 
 
 from .config import FusedConfig
@@ -117,12 +118,12 @@ def _fused_matmul_all_gather_kernel(
 
         # Create DeviceContext and destination TensorView for all-gather
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
-        dst_view = iris.x.make_tensor_view(C_gathered, M, N, stride_cm_gathered, stride_cn_gathered)
-        tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+        dst_view = iris.make_tensor_view(C_gathered, M, N, stride_cm_gathered, stride_cn_gathered)
+        tile_obj = iris.Tile(out_tile.pid_m, out_tile.pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
 
-        # Scatter this tile to all ranks using iris.x.all_gather
+        # Scatter this tile to all ranks using all_gather
         # dim=0 means scatter along M dimension (rows)
-        iris.x.all_gather(tile_obj, dst_view, dim=0, ctx=ctx)
+        ctx.all_gather(tile_obj, dst_view, dim=0)
 
 
 def matmul_all_gather_preamble(
@@ -195,6 +196,21 @@ def matmul_all_gather(
     world_size = shmem.get_num_ranks()
     rank = shmem.get_rank()
 
+    from iris.host.logging.logging import _log_rank
+
+    _log_rank(
+        logging.DEBUG,
+        "matmul_all_gather: shape=(%d,%d,%d) dtype=%s rank=%d/%d",
+        M_local * world_size,
+        N,
+        K,
+        A.dtype,
+        rank,
+        world_size,
+        rank=rank,
+        num_ranks=world_size,
+    )
+
     assert K == K2, f"Inner dimensions must match: A has K={K}, B has K={K2}"
 
     M = M_local * world_size
@@ -246,7 +262,9 @@ def matmul_all_gather(
 
     # Launch single fused kernel
     grid = (num_sms,)
-    _fused_matmul_all_gather_kernel[grid](
+    iris_launch(
+        _fused_matmul_all_gather_kernel,
+        grid,
         A,
         B,
         output_tensor,
@@ -277,6 +295,9 @@ def matmul_all_gather(
         use_bias,
         even_k,
         config.allow_tf32,
+        algorithm="matmul_all_gather",
+        rank=rank,
+        dtype=A.dtype,
     )
 
     if not async_op:

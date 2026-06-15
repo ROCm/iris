@@ -42,8 +42,9 @@ import triton.language as tl
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
-import iris.experimental.iris_gluon as iris_gl
-from iris.tracing.events import TraceEvent
+import iris
+from iris.gluon import IrisDeviceCtx
+from iris.host.tracing.events import TraceEvent
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +137,7 @@ def _launch(shmem, local_buf, global_buf, context_tensor, enable_tracing: bool):
     BLOCK_SIZE = 64 * NUM_WARPS  # 256 elements per tile (1 el/thread, 64 threads/warp, 4 warps)
     grid = ((num_elements + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     all_gather_put_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         local_buf,
         global_buf,
@@ -194,7 +195,7 @@ def main():
     if not dist.is_initialized():
         dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
 
-    shmem = iris_gl.iris(args.heap_size)
+    shmem = iris.iris(args.heap_size)
     rank = shmem.get_rank()
     num_ranks = shmem.get_num_ranks()
 

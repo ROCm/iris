@@ -131,7 +131,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.gluon import IrisDeviceCtx
 
 # Device-side APIs - context encapsulates heap_bases
 @gluon.jit
@@ -163,20 +164,20 @@ def _worker(rank, world_size):
 
     # Iris initialization
     heap_size = 2**30   # 1GiB symmetric heap
-    iris_ctx = iris_gl.iris(heap_size)
+    iris_ctx = iris.iris(heap_size)
     context_tensor = iris_ctx.get_device_context()  # Get encoded context
     cur_rank = iris_ctx.get_rank()
-    
+
     # Iris tensor allocation
     buffer_size = 4096  # 4K elements buffer
     buffer = iris_ctx.zeros(buffer_size, device="cuda", dtype=torch.float32)
-    
+
     # Launch the kernel on rank 0
     block_size = 1024
     grid = (buffer_size + block_size - 1) // block_size
     source_rank = 0
     if cur_rank == source_rank:
-        kernel[(grid,)](iris_gl.IrisDeviceCtx, context_tensor, 
+        kernel[(grid,)](IrisDeviceCtx, context_tensor,
                        buffer, buffer_size, block_size, num_warps=1)
 
     # Synchronize all ranks

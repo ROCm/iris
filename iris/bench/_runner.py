@@ -336,12 +336,7 @@ def _run_benchmarks_worker(
     dist.init_process_group(backend=backend)
 
     # Create iris context
-    if use_gluon:
-        import iris.experimental.iris_gluon as iris_gluon
-
-        ctx = iris_gluon.iris(heap_size)
-    else:
-        ctx = _iris.iris(heap_size)
+    ctx = _iris.iris(heap_size)
 
     rank = ctx.get_rank()
 

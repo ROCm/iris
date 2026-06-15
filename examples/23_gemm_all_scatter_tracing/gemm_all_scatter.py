@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 
 from iris import DeviceContext, TraceEvent
-from iris.device_utils import read_realtime
+from iris.device.utils import read_realtime
 
 
 @triton.jit()

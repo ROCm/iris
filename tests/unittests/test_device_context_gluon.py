@@ -4,8 +4,9 @@
 import torch
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
-from iris.tracing.events import TraceEvent
+import iris
+from iris.gluon import IrisDeviceCtx
+from iris.host.tracing.events import TraceEvent
 
 
 @gluon.jit
@@ -39,7 +40,7 @@ def device_context_tracing_1d_address_kernel(
 
 def test_device_context_gluon_tracing_1d_address():
     """Test GluonDeviceTracing record_event_start/end with a 1D address block."""
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     shmem.tracing.enable(max_events=1000)
     context_tensor = shmem.get_device_context()
     source_rank = shmem.get_rank()
@@ -52,7 +53,7 @@ def test_device_context_gluon_tracing_1d_address():
     shmem.barrier()
 
     device_context_tracing_1d_address_kernel[(1,)](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         dummy_buffer,
         source_rank,
@@ -85,7 +86,7 @@ def test_device_context_gluon_tracing_1d_address():
 
 def test_device_context_gluon_initialize():
     """Test IrisDeviceCtx.initialize() works without tracing enabled."""
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     context_tensor = shmem.get_device_context()
 
     assert context_tensor is not None
@@ -110,7 +111,7 @@ def test_device_context_gluon_tracing_compiled_but_disabled():
     The context tensor is zero-padded so the kernel can safely decode the tracing
     layout. max_events=0 ensures record_event_start never writes to the null buffers.
     """
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     # Do NOT enable tracing on host — context tensor has trace_enabled=0
     context_tensor = shmem.get_device_context()
     source_rank = shmem.get_rank()
@@ -123,7 +124,7 @@ def test_device_context_gluon_tracing_compiled_but_disabled():
 
     # Launch kernel compiled with tracing=True against non-tracing context
     device_context_tracing_1d_address_kernel[(1,)](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         dummy_buffer,
         source_rank,
@@ -148,7 +149,7 @@ def test_device_context_gluon_tracing_compiled_but_disabled():
 
 def test_device_context_gluon_tracing_enable():
     """Test that shmem.tracing.enable() rebuilds context tensor with tracing fields."""
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
 
     # Without tracing: tensor is padded to same size as tracing-enabled layout

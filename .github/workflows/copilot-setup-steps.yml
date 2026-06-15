@@ -30,6 +30,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e . --no-cache-dir
 
+      - name: Install native build dependencies
+        run: |
+          apt-get update -qq && apt-get install -y -qq libdwarf-dev libelf-dev > /dev/null
+
       - name: Install IntelliKit Python packages
         run: |
           source "$GITHUB_WORKSPACE/.venv/bin/activate"
@@ -59,7 +63,8 @@ jobs:
       - name: Make venv default for subsequent steps
         run: |
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
-          echo "PYTHONPATH=$GITHUB_WORKSPACE/.venv/lib/python3.13/site-packages:$GITHUB_WORKSPACE${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
+          VENV_SITE_PACKAGES="$("$GITHUB_WORKSPACE/.venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+          echo "PYTHONPATH=$VENV_SITE_PACKAGES:$GITHUB_WORKSPACE${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
 
       - name: Verify ROCm and GPU visibility
         run: |

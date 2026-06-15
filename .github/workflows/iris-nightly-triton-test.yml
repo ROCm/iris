@@ -46,13 +46,13 @@ jobs:
             num_ranks: 4
           - test_dir: ccl
             num_ranks: 8
-          - test_dir: x
+          - test_dir: context
             num_ranks: 1
-          - test_dir: x
+          - test_dir: context
             num_ranks: 2
-          - test_dir: x
+          - test_dir: context
             num_ranks: 4
-          - test_dir: x
+          - test_dir: context
             num_ranks: 8
           - test_dir: ops
             num_ranks: 1
@@ -78,9 +78,28 @@ jobs:
             echo "Container runtime already available"
           fi
 
-      - name: Build Iris container
+      - name: Pull nightly iris-dev image
         run: |
-          bash .github/scripts/container_build.sh
+          # Use pre-built image from Nightly Docker Build (has Triton from main)
+          NIGHTLY_DIR="${HOME}/iris-apptainer-images/nightly"
+          NIGHTLY_SIF="${NIGHTLY_DIR}/iris-dev-nightly.sif"
+          LOCK="${NIGHTLY_DIR}/.pull.lock"
+          mkdir -p "$NIGHTLY_DIR"
+
+          # Use flock so only the first job pulls; others wait and reuse
+          (
+            flock -x 200
+            # Pull if SIF is missing or older than 3 hours
+            if [ ! -f "$NIGHTLY_SIF" ] || \
+               [ "$(( $(date +%s) - $(stat -c %Y "$NIGHTLY_SIF" 2>/dev/null || echo 0) ))" -gt 10800 ]; then
+              echo "[INFO] Pulling muhaawad/iris-dev:latest as SIF..."
+              apptainer pull --force "$NIGHTLY_SIF" docker://muhaawad/iris-dev:latest
+            else
+              echo "[INFO] Using cached nightly SIF (< 3h old)"
+            fi
+          ) 200>"$LOCK"
+
+          echo "NIGHTLY_SIF=$NIGHTLY_SIF" >> "$GITHUB_ENV"
 
       - name: Acquire GPUs
         run: |
@@ -97,14 +116,10 @@ jobs:
               GPU_ARG="--gpus $GPU_DEVICES"
           fi
 
-          # Run tests in container, reinstalling Triton from main first
-          bash .github/scripts/container_exec.sh $GPU_ARG "
+          # Run tests in pre-built nightly container (Triton from main already installed)
+          bash .github/scripts/container_exec.sh --image "$NIGHTLY_SIF" $GPU_ARG "
               set -e
 
-              # Reinstall Triton from main branch
-              echo \"Reinstalling Triton from main branch...\"
-              pip install --force-reinstall --no-deps \
-                  git+https://github.com/triton-lang/triton@main
               echo \"Triton version: \$(pip show triton 2>/dev/null | grep Version || echo unknown)\"
 
               # Install iris in editable mode

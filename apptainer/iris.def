@@ -2,7 +2,7 @@
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 Bootstrap: docker
-From: rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
+From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
 
 %post
     /bin/bash -c "
@@ -30,7 +30,7 @@ From: rocm/pytorch:rocm7.1_ubuntu24.04_py3.13_pytorch_release_2.9.1
     cd /opt
     git clone https://github.com/triton-lang/triton.git \$TRITON_PATH
     cd \$TRITON_PATH
-    git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e 
+    git checkout f7c1d69401e9f09050451f30776562954b05e850
     pip3 install -e .
 
     # Make the venv writable by all
