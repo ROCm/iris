@@ -81,9 +81,8 @@ _detected_arch: Optional[str] = None
 # TN/NT/TT would require kernel-level changes to permute strides.
 SUPPORTED_TRANSPOSES = ("NN",)
 
-# Supported GPU architectures for auto-config selection. NVIDIA currently uses
-# heuristic fallback configs rather than tuned JSON files.
-SUPPORTED_ARCHITECTURES = ("mi300x", "mi355x", "nvidia")
+# Supported GPU architectures with tuned configs
+SUPPORTED_ARCHITECTURES = ("mi300x", "mi355x")
 
 # Map gfx target IDs to architecture names used in config paths
 _GFX_TO_ARCH = {
@@ -97,8 +96,8 @@ def detect_gpu_arch() -> str:
 
     Detection order:
     1. IRIS_GPU_ARCH environment variable (override)
-    2. PyTorch CUDA-without-HIP detection for NVIDIA
-    3. rocminfo gfx target parsing for AMD
+    2. rocm-smi --showproductname parsing
+    3. rocminfo gfx target parsing
     4. Falls back to "mi300x" (most common deployment target)
 
     Returns:
@@ -114,18 +113,7 @@ def detect_gpu_arch() -> str:
         _detected_arch = env_arch
         return _detected_arch
 
-    # 2. Check for NVIDIA CUDA via PyTorch. ROCm PyTorch also exposes
-    # torch.cuda, so require CUDA availability without a HIP version.
-    try:
-        import torch
-
-        if torch.cuda.is_available() and not getattr(torch.version, "hip", None):
-            _detected_arch = "nvidia"
-            return _detected_arch
-    except ImportError:
-        pass
-
-    # 3. Try rocminfo for AMD gfx target
+    # 2. Try rocminfo for gfx target
     try:
         result = subprocess.run(
             ["rocminfo"],
@@ -144,7 +132,7 @@ def detect_gpu_arch() -> str:
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
 
-    # 4. Fallback to MI300X (most common deployment target)
+    # 3. Fallback to MI300X (most common deployment target)
     _detected_arch = "mi300x"
     return _detected_arch
 
@@ -329,25 +317,6 @@ def _apply_heuristic(M: int, N: int, K: int, arch: str = "mi300x") -> Tuple[Dict
     """
     bk = 64
     num_k_blocks = K // bk
-
-    if arch == "nvidia":
-        config_params = {
-            "block_size_m": 128,
-            "block_size_n": 128,
-            "block_size_k": bk,
-            "group_size_m": 8,
-            "num_xcds": 1,
-            "allow_tf32": True,
-        }
-        hbm_params = {
-            "k_per_flag": 8,
-            "num_fetch_sms": 16,
-            "num_fetch_stages": 1,
-            "first_stage_fetch_sms": 32,
-            "num_warps": 4,
-            "num_stages": 2,
-        }
-        return config_params, hbm_params
 
     if arch == "mi355x":
         bm = 256
@@ -541,19 +510,7 @@ def select_ag_mm_config(
                 source=f"Heuristic (no exact shape match in {arch}/{transpose}/ws{world_size}.json)",
             )
 
-    # Step 2: No config file found for this architecture. For new/untuned
-    # architectures such as NVIDIA, enable heuristic configs directly instead
-    # of applying AMD-specific global world-size gates.
-    if arch not in ("mi300x", "mi355x"):
-        heuristic_config, heuristic_hbm = _apply_heuristic(M, N, K, arch=arch)
-        return AutoConfigResult(
-            enabled=True,
-            config_params=heuristic_config,
-            hbm_buffer_params=heuristic_hbm,
-            source=f"Heuristic fallback for {arch} (no tuned configs available)",
-        )
-
-    # Step 3: No AMD config file found — check global default
+    # Step 2: No config file found — check global default
     default_data = _load_default_config()
     ws_gate = default_data.get("world_size_gate", {})
     min_ws = ws_gate.get("min_world_size", 8)

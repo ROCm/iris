@@ -49,8 +49,6 @@ _CU_MEM_LOCATION_TYPE_DEVICE = 1
 _CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 0x1
 _CU_MEM_ALLOC_GRANULARITY_MINIMUM = 0
 _CU_MEM_ACCESS_FLAGS_PROT_READWRITE = 0x3
-_CU_POINTER_ATTRIBUTE_RANGE_START_ADDR = 11
-_CU_POINTER_ATTRIBUTE_RANGE_SIZE = 12
 
 
 class LocalCudaError(DriverError):
@@ -117,8 +115,6 @@ def _configure_signatures() -> None:
     cu_mem_set_access = _get_required_cuda_symbol("cuMemSetAccess")
     cu_mem_export_to_shareable_handle = _get_required_cuda_symbol("cuMemExportToShareableHandle")
     cu_mem_import_from_shareable_handle = _get_required_cuda_symbol("cuMemImportFromShareableHandle")
-    cu_mem_get_address_range = _get_required_cuda_symbol("cuMemGetAddressRange")
-    cu_pointer_get_attribute = _get_required_cuda_symbol("cuPointerGetAttribute")
 
     cu_init.argtypes = [ctypes.c_uint]
     cu_init.restype = ctypes.c_int
@@ -192,28 +188,6 @@ def _configure_signatures() -> None:
         ctypes.c_ulonglong,
     ]
     cu_mem_export_to_shareable_handle.restype = ctypes.c_int
-
-    cu_mem_get_address_range.argtypes = [
-        ctypes.POINTER(ctypes.c_uint64),
-        ctypes.POINTER(ctypes.c_size_t),
-        ctypes.c_uint64,
-    ]
-    cu_mem_get_address_range.restype = ctypes.c_int
-
-    cu_pointer_get_attribute.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_uint64,
-    ]
-    cu_pointer_get_attribute.restype = ctypes.c_int
-
-    cu_mem_retain_allocation_handle = getattr(_cuda_driver, "cuMemRetainAllocationHandle", None)
-    if cu_mem_retain_allocation_handle is not None:
-        cu_mem_retain_allocation_handle.argtypes = [
-            ctypes.POINTER(ctypes.c_uint64),
-            ctypes.c_void_p,
-        ]
-        cu_mem_retain_allocation_handle.restype = ctypes.c_int
 
     cu_mem_import_from_shareable_handle.argtypes = [
         ctypes.POINTER(ctypes.c_uint64),
@@ -307,13 +281,10 @@ class LocalCudaDriver(BaseDriver):
         self._device_ordinal: int = 0
         self._granularity: Optional[int] = None
         self._initialized: bool = False
-        self._context: Optional[ctypes.c_void_p] = None
 
     def _check_initialized(self) -> None:
         if not self._initialized:
             raise LocalCudaError("LocalCudaDriver not initialized - call initialize() first")
-        if self._context is not None:
-            _cuda_try(_cuda_driver.cuCtxSetCurrent(self._context), "cuCtxSetCurrent")
 
     def _make_alloc_props(self) -> _MemAllocationProp:
         props = _MemAllocationProp()
@@ -368,7 +339,6 @@ class LocalCudaDriver(BaseDriver):
         _cuda_try(_cuda_driver.cuCtxSetCurrent(ctx), "cuCtxSetCurrent")
         self._device_ordinal = device_ordinal
         self._granularity = None
-        self._context = ctypes.c_void_p(ctx.value)
         self._initialized = True
         logger.info("LocalCudaDriver initialized (device %d)", device_ordinal)
 
@@ -468,43 +438,6 @@ class LocalCudaDriver(BaseDriver):
             "cuMemExportToShareableHandle",
         )
         return struct.pack(_CUDA_HANDLE_FMT, int(fd.value))
-
-    def export_pointer_handle(self, ptr: int, size: int) -> bytes:
-        """Export the VMM allocation containing ptr as a 4-byte native-endian POSIX FD."""
-        self._check_initialized()
-
-        retain_handle = getattr(_cuda_driver, "cuMemRetainAllocationHandle", None)
-        if retain_handle is None:
-            raise LocalCudaNotSupported("cuMemRetainAllocationHandle is not available in this CUDA driver")
-
-        handle = ctypes.c_uint64()
-        try:
-            _cuda_try(
-                retain_handle(ctypes.byref(handle), ctypes.c_void_p(ptr)),
-                "cuMemRetainAllocationHandle",
-            )
-        except LocalCudaError as exc:
-            raise LocalCudaNotSupported(
-                "CUDA can only export allocations backed by its virtual memory management API"
-            ) from exc
-
-        try:
-            fd = ctypes.c_int(-1)
-            try:
-                _cuda_try(
-                    _cuda_driver.cuMemExportToShareableHandle(
-                        ctypes.byref(fd),
-                        handle.value,
-                        _CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
-                        0,
-                    ),
-                    "cuMemExportToShareableHandle",
-                )
-            except LocalCudaError as exc:
-                raise LocalCudaNotSupported("CUDA could not export the retained allocation handle") from exc
-            return struct.pack(_CUDA_HANDLE_FMT, int(fd.value))
-        finally:
-            _cuda_try(_cuda_driver.cuMemRelease(handle.value), "cuMemRelease")
 
     def _import_handle(self, handle_bytes: bytes) -> int:
         handle_bytes = _normalize_handle_bytes(handle_bytes)
@@ -682,36 +615,3 @@ class LocalCudaDriver(BaseDriver):
         """Free a CUDA VA range previously returned by reserve_va."""
         self._check_initialized()
         _cuda_try(_cuda_driver.cuMemAddressFree(va, size), "cuMemAddressFree")
-
-    def get_address_range(self, ptr: int) -> tuple[int, int]:
-        """Return base address and size for the CUDA allocation containing ptr."""
-        self._check_initialized()
-        base = ctypes.c_uint64()
-        size = ctypes.c_size_t()
-        try:
-            _cuda_try(
-                _cuda_driver.cuMemGetAddressRange(
-                    ctypes.byref(base),
-                    ctypes.byref(size),
-                    ctypes.c_uint64(ptr),
-                ),
-                "cuMemGetAddressRange",
-            )
-        except LocalCudaError:
-            _cuda_try(
-                _cuda_driver.cuPointerGetAttribute(
-                    ctypes.byref(base),
-                    _CU_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-                    ctypes.c_uint64(ptr),
-                ),
-                "cuPointerGetAttribute(RANGE_START_ADDR)",
-            )
-            _cuda_try(
-                _cuda_driver.cuPointerGetAttribute(
-                    ctypes.byref(size),
-                    _CU_POINTER_ATTRIBUTE_RANGE_SIZE,
-                    ctypes.c_uint64(ptr),
-                ),
-                "cuPointerGetAttribute(RANGE_SIZE)",
-            )
-        return int(base.value), int(size.value)

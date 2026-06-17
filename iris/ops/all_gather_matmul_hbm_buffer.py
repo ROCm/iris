@@ -646,9 +646,7 @@ def all_gather_matmul_hbm_buffer(
         else:
             ctx.tracing.reset()
 
-    launch_kwargs = {}
-    if getattr(torch.version, "hip", None):
-        launch_kwargs["matrix_instr_nonkdim"] = 16
+    launch_kwargs = {"matrix_instr_nonkdim": 16}
     if num_warps is not None:
         launch_kwargs["num_warps"] = num_warps
     if num_stages is not None:

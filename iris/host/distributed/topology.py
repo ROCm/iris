@@ -8,7 +8,6 @@ import logging
 import os
 import re
 import socket
-import hashlib
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -342,111 +341,6 @@ def _get_gpu_fabric_info(gpu_id: int, vendor: str, pci_bus_id: str = "") -> Fabr
     if vendor == "amd":
         return _amd_get_gpu_fabric_info(gpu_id, pci_bus_id=pci_bus_id)
     return _nvidia_get_gpu_fabric_info(gpu_id, pci_bus_id=pci_bus_id)
-
-
-def _probe_nvidia_fabric_connectivity(gpu_id: int, rank: int, world_size: int) -> Optional[List[List[bool]]]:
-    """
-    Probe NVIDIA fabric reachability with CUDA fabric memory handles.
-
-    Some GB200/MNNVL environments expose working fabric handles while NVML
-    reports an empty GPU fabric UUID. This collective probe uses the same
-    driver interface as Iris memory sharing: each rank exports a tiny fabric
-    allocation and every other rank tries to import it. A successful symmetric
-    import means the ranks share an NVIDIA fabric memory domain.
-    """
-    if not dist.is_initialized() or world_size <= 1:
-        return None
-
-    local_record: dict[str, Any] = {
-        "rank": rank,
-        "ok": False,
-        "handle": b"",
-        "size": 0,
-    }
-    driver = None
-    allocation = None
-    imported_mappings = []
-
-    try:
-        from iris.drivers.fabric.nvidia import NvidiaFabricDriver
-
-        driver = NvidiaFabricDriver()
-        driver.initialize(gpu_id)
-        size = driver.get_minimum_granularity()
-        allocation = driver.allocate_exportable(size)
-        local_record = {
-            "rank": rank,
-            "ok": True,
-            "handle": driver.export_handle(allocation),
-            "size": allocation.size,
-        }
-    except Exception as exc:
-        logger.debug("[Rank %d] CUDA fabric handle export probe failed: %s", rank, exc)
-
-    records: List[Optional[dict[str, Any]]] = [None] * world_size
-    dist.all_gather_object(records, local_record)
-
-    local_row = [False] * world_size
-    for record in records:
-        if not record or not record.get("ok"):
-            continue
-        peer_rank = int(record["rank"])
-        if peer_rank == rank:
-            local_row[peer_rank] = True
-            continue
-        if driver is None:
-            continue
-        try:
-            mapping = driver.import_and_map(peer_rank, record["handle"], int(record["size"]))
-            imported_mappings.append(mapping)
-            local_row[peer_rank] = True
-        except Exception as exc:
-            logger.debug("[Rank %d] CUDA fabric handle import from rank %d failed: %s", rank, peer_rank, exc)
-
-    rows: List[Optional[List[bool]]] = [None] * world_size
-    dist.all_gather_object(rows, local_row)
-
-    if driver is not None:
-        for mapping in imported_mappings:
-            try:
-                driver.cleanup_import(mapping)
-            except Exception as exc:
-                logger.debug("[Rank %d] CUDA fabric probe import cleanup failed: %s", rank, exc)
-        if allocation is not None:
-            try:
-                driver.cleanup_local(allocation)
-            except Exception as exc:
-                logger.debug("[Rank %d] CUDA fabric probe local cleanup failed: %s", rank, exc)
-
-    if any(row is None for row in rows):
-        return None
-    return [list(row) for row in rows if row is not None]
-
-
-def _fabric_components_from_connectivity(connectivity: List[List[bool]]) -> List[Set[int]]:
-    """Return bidirectionally reachable components from a fabric probe matrix."""
-    world_size = len(connectivity)
-    visited: Set[int] = set()
-    components: List[Set[int]] = []
-
-    for start in range(world_size):
-        if start in visited:
-            continue
-        stack = [start]
-        component: Set[int] = set()
-        visited.add(start)
-        while stack:
-            rank = stack.pop()
-            component.add(rank)
-            for peer in range(world_size):
-                if peer in visited:
-                    continue
-                if connectivity[rank][peer] and connectivity[peer][rank]:
-                    visited.add(peer)
-                    stack.append(peer)
-        components.append(component)
-
-    return components
 
 
 def _normalize_pci_bus_id(bus_id: str) -> str:
@@ -1330,30 +1224,6 @@ class TopologyDiscovery:
         for gpu_json in all_gpu_jsons:
             info = GPUInfo.from_dict(json.loads(gpu_json))
             gpu_info_map[info.global_rank] = info
-
-        if (
-            vendor == "nvidia"
-            and self.world_size > 1
-            and any(not info.fabric_info.domain_key for info in gpu_info_map.values())
-        ):
-            connectivity = _probe_nvidia_fabric_connectivity(self.gpu_id, self.rank, self.world_size)
-            if connectivity is not None:
-                for component in _fabric_components_from_connectivity(connectivity):
-                    if len(component) <= 1:
-                        continue
-                    component_uuids = sorted(gpu_info_map[r].uuid for r in component)
-                    cluster_uuid = "cuda-probe-" + hashlib.sha1(",".join(component_uuids).encode()).hexdigest()[:16]
-                    for component_rank in component:
-                        if not gpu_info_map[component_rank].fabric_info.domain_key:
-                            gpu_info_map[component_rank].fabric_info = FabricInfo(
-                                cluster_uuid=cluster_uuid,
-                                clique_id=0,
-                            )
-                    logger.info(
-                        "Detected NVIDIA fabric domain via CUDA fabric handle probe: ranks=%s domain=%s",
-                        sorted(component),
-                        cluster_uuid,
-                    )
 
         all_node_infos = [json.loads(s) for s in all_node_jsons]
 
