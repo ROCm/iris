@@ -3,7 +3,8 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Report software and hardware versions for CI documentation.
-# Runs inside the container via container_exec.sh.
+# Collects versions from inside the container, prints to stdout,
+# and writes a GitHub Actions job summary table.
 
 set -e
 
@@ -15,63 +16,96 @@ if [ -n "$GPU_DEVICES" ]; then
     GPU_ARG="--gpus $GPU_DEVICES"
 fi
 
+# Collect versions as KEY=VALUE pairs from inside the container
 # shellcheck disable=SC2086
-"$SCRIPT_DIR/container_exec.sh" $GPU_ARG '
+VERSION_DATA=$("$SCRIPT_DIR/container_exec.sh" $GPU_ARG '
+# Driver version
+if command -v amd-smi &> /dev/null; then
+    DRIVER=$(amd-smi version 2>/dev/null | grep "Driver version" | head -1 | sed "s/.*: *//")
+    [ -z "$DRIVER" ] && DRIVER=$(amd-smi version 2>/dev/null | grep -i "driver" | head -1 | sed "s/.*: *//")
+elif command -v rocm-smi &> /dev/null; then
+    DRIVER=$(rocm-smi --showdriverversion 2>/dev/null | grep -i "driver" | head -1 | sed "s/.*: *//")
+fi
+echo "DRIVER=${DRIVER:-unknown}"
+
+# ROCm version
+if [ -f /opt/rocm/.info/version ]; then
+    echo "ROCM=$(cat /opt/rocm/.info/version)"
+elif [ -f /opt/rocm/lib/rocm_version ]; then
+    echo "ROCM=$(cat /opt/rocm/lib/rocm_version)"
+else
+    echo "ROCM=unknown"
+fi
+
+# Python
+PYVER=$(python3 --version 2>/dev/null | sed "s/Python //")
+echo "PYTHON=${PYVER:-unknown}"
+
+# PyTorch, HIP, GPU info
+python3 -c "
+import torch
+print(f\"TORCH={torch.__version__}\")
+hip = torch.version.hip if hasattr(torch.version, \"hip\") and torch.version.hip else torch.version.cuda
+print(f\"HIP={hip or \"unknown\"}\")
+print(f\"GPU_COUNT={torch.cuda.device_count()}\")
+if torch.cuda.device_count() > 0:
+    props = torch.cuda.get_device_properties(0)
+    print(f\"GPU_NAME={props.name}\")
+    print(f\"GPU_ARCH={getattr(props, \"gcnArchName\", \"N/A\")}\")
+else:
+    print(\"GPU_NAME=none\")
+    print(\"GPU_ARCH=N/A\")
+" 2>/dev/null || echo "TORCH=unavailable"
+
+# Triton
+TRITON=$(python3 -c "import triton; print(triton.__version__)" 2>/dev/null)
+echo "TRITON=${TRITON:-unavailable}"
+
+# Iris
+IRIS=$(python3 -c "import iris; print(iris.__version__)" 2>/dev/null)
+echo "IRIS=${IRIS:-not installed}"
+
+# Kernel
+echo "KERNEL=$(uname -r 2>/dev/null || echo unknown)"
+')
+
+# Parse KEY=VALUE pairs
+declare -A V
+while IFS='=' read -r key value; do
+    [[ -n "$key" && "$key" != *" "* ]] && V["$key"]="$value"
+done <<< "$VERSION_DATA"
+
+# Print to stdout
 echo "============================================"
 echo "  Iris CI — Environment Report"
 echo "============================================"
-echo ""
-
-echo "--- Driver & ROCm ---"
-if command -v amd-smi &> /dev/null; then
-    amd-smi version 2>/dev/null || true
-    echo ""
-    amd-smi static --asic 2>/dev/null | head -30 || true
-elif command -v rocm-smi &> /dev/null; then
-    rocm-smi --showdriverversion 2>/dev/null || true
-    rocm-smi --showid 2>/dev/null | head -20 || true
-else
-    echo "No amd-smi or rocm-smi found"
-fi
-
-if [ -f /opt/rocm/.info/version ]; then
-    echo "ROCm version: $(cat /opt/rocm/.info/version)"
-elif [ -f /opt/rocm/lib/rocm_version ]; then
-    echo "ROCm version: $(cat /opt/rocm/lib/rocm_version)"
-fi
-echo ""
-
-echo "--- Python ---"
-python3 --version 2>/dev/null || echo "python3 not found"
-echo ""
-
-echo "--- PyTorch ---"
-python3 -c "
-import torch
-print(f\"torch:        {torch.__version__}\")
-print(f\"CUDA/HIP:     {torch.version.hip if hasattr(torch.version, \"hip\") and torch.version.hip else torch.version.cuda}\")
-print(f\"GPU count:    {torch.cuda.device_count()}\")
-for i in range(min(torch.cuda.device_count(), 1)):
-    props = torch.cuda.get_device_properties(i)
-    print(f\"GPU 0:        {props.name} (gcnArchName={getattr(props, \"gcnArchName\", \"N/A\")})\")
-" 2>/dev/null || echo "PyTorch not available"
-echo ""
-
-echo "--- Triton ---"
-python3 -c "import triton; print(f\"triton:       {triton.__version__}\")" 2>/dev/null || echo "Triton not available"
-echo ""
-
-echo "--- Iris ---"
-python3 -c "
-try:
-    import iris
-    print(f\"iris:         {iris.__version__}\")
-except Exception:
-    print(\"iris not installed (will be installed during test)\")
-" 2>/dev/null
-echo ""
-
-echo "--- System ---"
-uname -r 2>/dev/null || true
+echo "  Driver:   ${V[DRIVER]:-unknown}"
+echo "  ROCm:     ${V[ROCM]:-unknown}"
+echo "  Python:   ${V[PYTHON]:-unknown}"
+echo "  PyTorch:  ${V[TORCH]:-unknown}"
+echo "  HIP:      ${V[HIP]:-unknown}"
+echo "  Triton:   ${V[TRITON]:-unknown}"
+echo "  Iris:     ${V[IRIS]:-unknown}"
+echo "  GPU:      ${V[GPU_NAME]:-unknown} (${V[GPU_ARCH]:-N/A}) × ${V[GPU_COUNT]:-0}"
+echo "  Kernel:   ${V[KERNEL]:-unknown}"
 echo "============================================"
-'
+
+# Write GitHub Actions job summary
+if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+    cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY
+### Environment
+
+| Component | Version |
+|-----------|---------|
+| Driver | ${V[DRIVER]:-unknown} |
+| ROCm | ${V[ROCM]:-unknown} |
+| Python | ${V[PYTHON]:-unknown} |
+| PyTorch | ${V[TORCH]:-unknown} |
+| HIP | ${V[HIP]:-unknown} |
+| Triton | ${V[TRITON]:-unknown} |
+| Iris | ${V[IRIS]:-unknown} |
+| GPU | ${V[GPU_NAME]:-unknown} (${V[GPU_ARCH]:-N/A}) × ${V[GPU_COUNT]:-0} |
+| Kernel | ${V[KERNEL]:-unknown} |
+
+SUMMARY
+fi
