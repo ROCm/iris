@@ -267,6 +267,8 @@ class TorchAllocator(BaseAllocator):
 
     def get_device(self) -> torch.device:
         """Get the torch device."""
+        if is_simulation_env():
+            return torch.device(self.device)
         return self.memory_pool.device
 
     def import_external_tensor(self, external_tensor: torch.Tensor) -> torch.Tensor:
