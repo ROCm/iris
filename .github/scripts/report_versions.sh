@@ -19,11 +19,18 @@ fi
 # Collect versions as KEY=VALUE pairs from inside the container
 # shellcheck disable=SC2086
 VERSION_DATA=$("$SCRIPT_DIR/container_exec.sh" $GPU_ARG '
-# Driver version
-if command -v amd-smi &> /dev/null; then
-    DRIVER=$(amd-smi version 2>/dev/null | grep "Driver version" | head -1 | sed "s/.*: *//")
-    [ -z "$DRIVER" ] && DRIVER=$(amd-smi version 2>/dev/null | grep -i "driver" | head -1 | sed "s/.*: *//")
-elif command -v rocm-smi &> /dev/null; then
+# Driver version — try multiple sources
+DRIVER=""
+if [ -f /sys/module/amdgpu/version ]; then
+    DRIVER=$(cat /sys/module/amdgpu/version 2>/dev/null)
+fi
+if [ -z "$DRIVER" ] && command -v modinfo &> /dev/null; then
+    DRIVER=$(modinfo amdgpu 2>/dev/null | grep "^version:" | head -1 | awk "{print \$2}")
+fi
+if [ -z "$DRIVER" ] && command -v amd-smi &> /dev/null; then
+    DRIVER=$(amd-smi version 2>/dev/null | grep -iE "driver|AMDSMI" | head -1 | sed "s/.*: *//; s/^ *//; s/ *$//")
+fi
+if [ -z "$DRIVER" ] && command -v rocm-smi &> /dev/null; then
     DRIVER=$(rocm-smi --showdriverversion 2>/dev/null | grep -i "driver" | head -1 | sed "s/.*: *//")
 fi
 echo "DRIVER=${DRIVER:-unknown}"
@@ -61,10 +68,6 @@ else:
 TRITON=$(python3 -c "import triton; print(triton.__version__)" 2>/dev/null)
 echo "TRITON=${TRITON:-unavailable}"
 
-# Iris
-IRIS=$(python3 -c "import iris; print(iris.__version__)" 2>/dev/null)
-echo "IRIS=${IRIS:-not installed}"
-
 # Kernel
 echo "KERNEL=$(uname -r 2>/dev/null || echo unknown)"
 ')
@@ -85,7 +88,6 @@ echo "  Python:   ${V[PYTHON]:-unknown}"
 echo "  PyTorch:  ${V[TORCH]:-unknown}"
 echo "  HIP:      ${V[HIP]:-unknown}"
 echo "  Triton:   ${V[TRITON]:-unknown}"
-echo "  Iris:     ${V[IRIS]:-unknown}"
 echo "  GPU:      ${V[GPU_NAME]:-unknown} (${V[GPU_ARCH]:-N/A}) × ${V[GPU_COUNT]:-0}"
 echo "  Kernel:   ${V[KERNEL]:-unknown}"
 echo "============================================"
@@ -103,7 +105,6 @@ if [ -n "$GITHUB_STEP_SUMMARY" ]; then
 | PyTorch | ${V[TORCH]:-unknown} |
 | HIP | ${V[HIP]:-unknown} |
 | Triton | ${V[TRITON]:-unknown} |
-| Iris | ${V[IRIS]:-unknown} |
 | GPU | ${V[GPU_NAME]:-unknown} (${V[GPU_ARCH]:-N/A}) × ${V[GPU_COUNT]:-0} |
 | Kernel | ${V[KERNEL]:-unknown} |
 
