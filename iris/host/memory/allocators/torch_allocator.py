@@ -79,6 +79,7 @@ class TorchAllocator(BaseAllocator):
                     if fd >= 0:
                         break
                     import time
+
                     time.sleep(0.05)
                 else:
                     raise OSError(f"shm_open failed: rank 0 never created {self._shm_name}")
