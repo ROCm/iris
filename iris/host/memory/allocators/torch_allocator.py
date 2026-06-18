@@ -90,7 +90,7 @@ class TorchAllocator(BaseAllocator):
             my_offset = cur_rank * heap_size
             buf = (ctypes.c_int8 * heap_size).from_buffer(self._shm_mmap, my_offset)
             np_arr = np.ctypeslib.as_array(buf)
-            self.memory_pool = torch.from_numpy(np_arr).to(self.device)
+            self.memory_pool = torch.from_numpy(np_arr)
 
             _log_rank(
                 logging.INFO,
@@ -182,11 +182,13 @@ class TorchAllocator(BaseAllocator):
         heap_bases_array = np.zeros(self.num_ranks, dtype=np.uint64)
 
         if is_simulation_env() and self._shm_mmap is not None:
+            self._shm_peer_views = []
             for rank in range(self.num_ranks):
                 peer_offset = rank * self.heap_size
                 peer_buf = (ctypes.c_int8 * self.heap_size).from_buffer(self._shm_mmap, peer_offset)
                 peer_np = np.ctypeslib.as_array(peer_buf)
-                peer_tensor = torch.from_numpy(peer_np).to(self.device)
+                peer_tensor = torch.from_numpy(peer_np)
+                self._shm_peer_views.append(peer_tensor)
                 heap_bases_array[rank] = peer_tensor.data_ptr()
             self.heap_bases_array = heap_bases_array
             _log_rank(
