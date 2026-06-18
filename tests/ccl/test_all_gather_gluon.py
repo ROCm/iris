@@ -5,6 +5,8 @@
 Test suite for all-gather collective operation using Gluon.
 """
 
+import os
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -77,8 +79,14 @@ def test_all_gather_gluon(impl, mode, vary, dtype, M, N, block_size_m, block_siz
     async_op = mode != "eager_barrier"
     capture = mode == "graph"
 
-    shmem = iris.iris(2**33)  # 8 GB
+    # Size heap to fit input (M*N) + output (max_ranks*M*N) with headroom
+    max_ranks = int(os.environ.get("WORLD_SIZE", 8))
+    elem_size = torch.tensor([], dtype=dtype).element_size()
+    needed = (1 + max_ranks) * M * N * elem_size
+    heap_size = max(2**30, int(needed * 2))  # 2x headroom, minimum 1GB
+    shmem = iris.iris(heap_size)
     rank, world_size = shmem.get_rank(), shmem.get_num_ranks()
+    torch.cuda.set_device(rank)
     src = torch.empty((M, N), dtype=dtype, device=f"cuda:{rank}")
     stage_buf, result, config = _make_buffers(impl, shmem, rank, world_size, M, N, dtype, block_size_m, block_size_n)
     shmem.barrier()

@@ -56,6 +56,7 @@ def test_all_to_all_gluon(impl, mode, vary, dtype, M, N):
 
     shmem = iris.iris(2**33)  # 8 GB
     rank, world_size = shmem.get_rank(), shmem.get_num_ranks()
+    torch.cuda.set_device(rank)
     width = N * world_size
     src = torch.empty((M, width), dtype=dtype, device=f"cuda:{rank}")
     stage_buf = shmem.zeros((M, width), dtype=dtype)
