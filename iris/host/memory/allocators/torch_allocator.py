@@ -87,6 +87,21 @@ class TorchAllocator(BaseAllocator):
             self._shm_fd = fd
             self._shm_mmap = mmap.mmap(fd, total_size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
 
+            # Register the entire shm region with HIP so Triton's pointer check passes
+            mmap_base = ctypes.addressof(ctypes.c_char.from_buffer(self._shm_mmap))
+            try:
+                libhip = ctypes.CDLL("libamdhip64.so", use_errno=True)
+                libhip.hipHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+                libhip.hipHostRegister.restype = ctypes.c_int
+                err = libhip.hipHostRegister(ctypes.c_void_p(mmap_base), ctypes.c_size_t(total_size), ctypes.c_uint(0))
+                if err != 0:
+                    _log_rank(logging.WARNING, "hipHostRegister returned %d", err, rank=cur_rank, num_ranks=num_ranks)
+                self._hip_registered_ptr = mmap_base
+                self._libhip = libhip
+            except Exception as e:
+                _log_rank(logging.WARNING, "hipHostRegister failed: %s", str(e), rank=cur_rank, num_ranks=num_ranks)
+                self._hip_registered_ptr = None
+
             my_offset = cur_rank * heap_size
             buf = (ctypes.c_int8 * heap_size).from_buffer(self._shm_mmap, my_offset)
             np_arr = np.ctypeslib.as_array(buf)
@@ -247,6 +262,12 @@ class TorchAllocator(BaseAllocator):
                 pass
         self._peer_ext_mem_handles.clear()
 
+        if getattr(self, '_hip_registered_ptr', None) is not None:
+            try:
+                self._libhip.hipHostUnregister(ctypes.c_void_p(self._hip_registered_ptr))
+            except Exception:
+                pass
+            self._hip_registered_ptr = None
         if self._shm_mmap is not None:
             try:
                 self._shm_mmap.close()
