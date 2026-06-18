@@ -16,7 +16,7 @@ HOST=localhost
 PORT=8000
 EVAL="${EVAL:-0}"
 PROFILE="${PROFILE:-0}"
-OUTDIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/traces"
+OUTDIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/output"
 mkdir -p "$OUTDIR"
 
 # Fixed decode-heavy operating point (in=8192, out=1024, concurrency=64).

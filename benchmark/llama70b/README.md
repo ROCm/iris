@@ -33,5 +33,5 @@ $RUN iris-repro:exp ./bench.sh         # performance
 $RUN iris-repro:exp ./test.sh          # correctness
 ```
 
-`bench.sh` writes serving metrics (TTFT/TPOT/E2EL/throughput) to `./traces/`;
+`bench.sh` writes serving metrics (TTFT/TPOT/E2EL/throughput) to `./output/`;
 add `EVAL=1` for a gsm8k accuracy pass or `PROFILE=1` for profiler traces.
