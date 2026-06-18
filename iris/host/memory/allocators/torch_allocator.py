@@ -262,7 +262,7 @@ class TorchAllocator(BaseAllocator):
                 pass
         self._peer_ext_mem_handles.clear()
 
-        if getattr(self, '_hip_registered_ptr', None) is not None:
+        if getattr(self, "_hip_registered_ptr", None) is not None:
             try:
                 self._libhip.hipHostUnregister(ctypes.c_void_p(self._hip_registered_ptr))
             except Exception:
