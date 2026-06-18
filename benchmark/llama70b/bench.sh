@@ -6,7 +6,7 @@
 # then compare the two outputs.
 #
 # Options (both off by default):
-#   TEST=1     also run a gsm8k accuracy pass against the live server (correctness gate)
+#   EVAL=1     also run a gsm8k accuracy pass against the live server (correctness gate)
 #   PROFILE=1  also capture torch profiler traces
 set -euo pipefail
 
@@ -14,7 +14,7 @@ MODEL="amd/Llama-3.3-70B-Instruct-FP8-KV"
 TP=8
 HOST=localhost
 PORT=8000
-TEST="${TEST:-0}"
+EVAL="${EVAL:-0}"
 PROFILE="${PROFILE:-0}"
 OUTDIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/traces"
 mkdir -p "$OUTDIR"
@@ -40,7 +40,7 @@ export VLLM_ENGINE_READY_TIMEOUT_S=3600
 trap 'pkill -f "vllm serve" 2>/dev/null || true; pkill -9 -f "VLLM::" 2>/dev/null || true' EXIT INT TERM
 
 echo "=========================================="
-echo "[repro] arm=$ARM  in=$INPUT_LEN out=$OUTPUT_LEN conc=$CONCURRENCY prompts=$NUM_PROMPTS test=$TEST profile=$PROFILE"
+echo "[repro] arm=$ARM  in=$INPUT_LEN out=$OUTPUT_LEN conc=$CONCURRENCY prompts=$NUM_PROMPTS eval=$EVAL profile=$PROFILE"
 echo "=========================================="
 
 # Pre-fetch the model, then go offline.
@@ -49,7 +49,7 @@ for attempt in 1 2 3; do
         --exclude "original/*" --exclude "metal/*" && break
     echo "[repro] HF download failed, retry $attempt/3"; sleep 10
 done
-if [[ "$TEST" == "1" ]]; then
+if [[ "$EVAL" == "1" ]]; then
     python3 -c "from datasets import load_dataset; load_dataset('openai/gsm8k', 'main')"
 fi
 export HF_HUB_OFFLINE=1
@@ -96,7 +96,7 @@ timeout 1200 vllm bench serve \
     "${bench_args[@]}"
 
 # Optional gsm8k accuracy gate against the same server.
-if [[ "$TEST" == "1" ]]; then
+if [[ "$EVAL" == "1" ]]; then
     echo "=========================================="
     echo "[repro] gsm8k accuracy (5-shot, 200 samples) arm=$ARM"
     echo "=========================================="
