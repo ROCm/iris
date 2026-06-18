@@ -47,11 +47,7 @@ def collect():
         import torch
 
         info["torch"] = torch.__version__
-        info["hip"] = (
-            getattr(torch.version, "hip", None)
-            or getattr(torch.version, "cuda", None)
-            or ""
-        )
+        info["hip"] = getattr(torch.version, "hip", None) or getattr(torch.version, "cuda", None) or ""
         info["gpu_count"] = torch.cuda.device_count()
         if torch.cuda.device_count() > 0:
             props = torch.cuda.get_device_properties(0)
