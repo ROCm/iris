@@ -17,7 +17,7 @@ import torch.distributed as dist
 import triton
 import triton.language as tl
 import iris
-import iris.hip as hip
+import iris.host.platform.hip as hip
 import iris.x
 from tritonblas.matmul import persistent_matmul_lt, create_wait_config
 from tritonblas.kernels.stages import (
@@ -31,16 +31,9 @@ from tritonblas.kernels.stages import (
 )
 
 
-from iris.tracing.events import TraceEvent
+from iris.host.tracing.events import TraceEvent
 from .workspace import FusedWorkspace
-
-# Import Tile class from anvil module
-try:
-    import anvil
-
-    Tile = anvil.Tile
-except (ImportError, AttributeError):
-    Tile = None  # Will raise error later if needed
+from xio import sdma_ep
 
 
 @triton.jit
@@ -636,7 +629,6 @@ def all_gather_matmul_copy_engine(
     # ======================================================================
     # Host orchestration: SDMA copy setup
     # ======================================================================
-    anvil_lib = shmem.copy_engines
     torch.cuda.current_device()  # Initialize CUDA context
 
     # SDMA queues already connected during iris init
@@ -744,9 +736,9 @@ def all_gather_matmul_copy_engine(
             for dst_rank in range(world_size):
                 flag_idx = batch_id
                 flag_addr_local = flags_base_addr + flag_idx * 4
-                flag_addr_remote = shmem.translate(flag_addr_local, rank, dst_rank)
+                flag_addr_remote = shmem.heap.translate(flag_addr_local, rank, dst_rank)
 
-                tile = Tile()
+                tile = sdma_ep.Tile()
                 tile.pid_m = 0
                 tile.pid_n = 0
                 tile.block_m = num_m_tiles_in_batch * selector.block_m
@@ -762,7 +754,7 @@ def all_gather_matmul_copy_engine(
                     m_tile_start * selector.block_m * stride_sa_m + rank * K_local * stride_sa_k
                 ) * elem_size
                 dst_ptr_local = staged_a_base_addr + dst_offset_bytes
-                dst_ptr_remote = shmem.translate(dst_ptr_local, rank, dst_rank)
+                dst_ptr_remote = shmem.heap.translate(dst_ptr_local, rank, dst_rank)
 
                 if host_transfer_backend == "hip_memcpy":
                     hip.memcpy_2d_async(
@@ -777,17 +769,16 @@ def all_gather_matmul_copy_engine(
                     # Preserve the existing readiness semantics: only signal the
                     # batch once the copy for this destination rank has completed.
                     hip.stream_synchronize(hip_copy_stream)
-                    anvil_lib.host_atomic_add_32(rank, dst_rank, 0, flag_addr_remote, 1)
+                    sdma_ep.signal(rank, dst_rank, 0, flag_addr_remote, 1, 32)
                 else:
-                    anvil_lib.host_put_tile_signal(
-                        rank,
-                        dst_rank,
-                        0,
+                    shmem.put_tile(
                         tile,
+                        dst_rank,
                         dst_ptr_remote,
                         stride_sa_m * elem_size,
-                        flag_addr_remote,
-                        1,
+                        signal_flag=flag_addr_remote,
+                        signal_value=1,
+                        async_op=True,
                     )
                 tile_transfer_count += 1
 
@@ -860,7 +851,7 @@ def all_gather_matmul_copy_engine(
         if verbose:
             # Ensure all SDMA operations complete
             for dst_rank in range(world_size):
-                anvil_lib.host_quiet(rank, dst_rank, 0)
+                sdma_ep.quiet(rank, dst_rank, 0)
             sdma_end_time = time.perf_counter()
 
             post_ms = (sdma_end_post_time - sdma_start_time) * 1000.0

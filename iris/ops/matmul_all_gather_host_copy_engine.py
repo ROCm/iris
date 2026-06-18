@@ -22,6 +22,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
+from xio import sdma_ep
 
 from .workspace import FusedWorkspace
 
@@ -30,20 +31,6 @@ from tritonblas.matmul import persistent_matmul_lt
 from tritonblas.matmul import create_counter_config
 from tritonblas.matmul import _make_matmul_selector
 from .tritonblas_launch_wave_schedule import build_launch_wave_plan
-
-# Import Tile class from anvil module
-try:
-    import anvil
-
-    Tile = anvil.Tile
-except (ImportError, AttributeError):
-    Tile = None  # Will raise error later if needed
-
-
-@triton.jit()
-def wait_cnt():
-    tl.inline_asm_elementwise("s_waitcnt vmcnt(0)", "=r", [], dtype=tl.int32, is_pure=False, pack=1)
-
 
 # Event IDs (must match iris.tracing.events.TraceEvent)
 _WG_GEMM = 15
@@ -286,7 +273,6 @@ def matmul_all_gather_host_copy_engine(
     import time
 
     element_size = output_tensor.element_size()
-    anvil_lib = shmem.copy_engines
 
     if verbose and rank == 0:
         shmem.info(
@@ -329,7 +315,7 @@ def matmul_all_gather_host_copy_engine(
             batch_height = min(transfer.m_tile_count * block_size_m, M_local - m_start)
             batch_width = min(transfer.n_tile_count * block_size_n, N - n_start)
 
-            tile_obj = Tile()
+            tile_obj = sdma_ep.Tile()
             tile_obj.pid_m = 0
             tile_obj.pid_n = 0
             tile_obj.block_m = batch_height
@@ -349,10 +335,10 @@ def matmul_all_gather_host_copy_engine(
             if remote_rank == rank:
                 continue
 
-            dst_ptrs_remote = [shmem.translate(dst_ptr_local, rank, remote_rank) for dst_ptr_local in dst_ptrs_local]
+            dst_ptrs_remote = [shmem.heap.translate(dst_ptr_local, rank, remote_rank) for dst_ptr_local in dst_ptrs_local]
             signal_ptr_remote = None
             if is_last_wave:
-                signal_ptr_remote = shmem.translate(signal_ptr_local, rank, remote_rank)
+                signal_ptr_remote = shmem.heap.translate(signal_ptr_local, rank, remote_rank)
 
             shmem.put_tiles(
                 tiles,

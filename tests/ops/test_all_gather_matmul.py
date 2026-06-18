@@ -9,6 +9,7 @@ The operation gathers A from all ranks and computes C = A_gathered @ B.
 Covers both the baseline pull kernel and the HBM-buffered kernel.
 """
 
+import os
 import pytest
 import torch
 import torch.distributed as dist
@@ -127,6 +128,13 @@ def _make_full_reference(A_sharded, B, world_size):
     ref_output = torch.matmul(A_gathered_ref, B)
     torch.cuda.synchronize()
     return ref_output
+
+
+def _make_reference(rank, world_size, M, K_local, N, dtype):
+    """Create inputs and compute reference output."""
+    A_sharded, B = _make_inputs(rank, world_size, M, K_local, N, dtype)
+    ref_output = _make_full_reference(A_sharded, B, world_size)
+    return A_sharded, B, ref_output
 
 
 def _assert_close_tile(output_tile, ref_tile, atol, rtol, rank, row_start, col_start, context):

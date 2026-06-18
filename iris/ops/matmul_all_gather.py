@@ -119,7 +119,7 @@ def _fused_matmul_all_gather_kernel(
         # Create DeviceContext and destination TensorView for all-gather
         ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
         dst_view = iris.make_tensor_view(C_gathered, M, N, stride_cm_gathered, stride_cn_gathered)
-        tile_obj = iris.Tile(out_tile.pid_m, out_tile.pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+        tile_obj = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
 
         # Scatter this tile to all ranks using all_gather
         # dim=0 means scatter along M dimension (rows)

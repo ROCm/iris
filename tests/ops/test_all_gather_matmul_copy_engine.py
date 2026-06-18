@@ -254,7 +254,6 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, host
         A_sharded_shmem,
         B_shmem,
         selector=selector,
-        k_per_flag=4,
     )
 
     ctx.barrier()
@@ -265,7 +264,6 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, host
         A_sharded_shmem,
         B_shmem,
         workspace=workspace,
-        k_per_flag=4,
         device_initiated=device_initiated,
         host_transfer_backend=host_transfer_backend,
         trace=False,

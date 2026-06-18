@@ -22,7 +22,7 @@ dependencies = [
     "requests",
     "ruff",
     "tritonblas @ git+https://github.com/ROCm/tritonBLAS.git@muhaawad/iris",
-    "rocm-xio @ git+https://github.com/ROCm/rocm-xio.git",
+    "rocm-xio @ git+https://github.com/ROCm/rocm-xio.git@dev/dasidler/sdma-ep-tile-if",
 ]
 
 [project.urls]

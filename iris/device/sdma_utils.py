@@ -226,12 +226,12 @@ def place_copy_packet(queue_ptr_u32, offset_bytes: tl.uint64, size_bytes: tl.uin
 # atomic op codes and operation
 # atomic add 32bit w/rtn: op 10, operation 15
 # atomic add 64bit w/rtn: op 10, operation: 47 -> 32 + 15
-# atomic add 32bit w/o rtn: op 10, operation: 31 -> 64 + 15
-# atomic add 64bit w/o rtn: op 10, operation: 63 -> 96 + 15
+# atomic add 32bit w/o rtn: op 10, operation: 79 -> 64 + 15
+# atomic add 64bit w/o rtn: op 10, operation: 111 -> 96 + 15
 # atomic cmp&swap 32bit w/rtn: op 10, operation: 8
 # atomic cmp&swap 64bit w/rtn: op 10, operation: -> 32 + 8
 # atomic cmp&swap 32bit w/o rtn: op 10, operation -> 64 + 8
-# atomic cmp&swap 64bit w/o rtn: op 10, operation 56 -> 06 + 8
+# atomic cmp&swap 64bit w/o rtn: op 10, operation 56 -> 96 + 8
 @triton.jit
 def place_atomic_packet(
     queue_ptr_u32,

@@ -953,6 +953,587 @@ def atomic_max(
     return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
 
+triton.jit
+def put_signal(
+    from_ptr,
+    to_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    flag_ptr,
+    flag_value,
+    stride_tm: tl.constexpr,
+    stride_fm: tl.constexpr,
+    mask=None,
+    hint: tl.constexpr = None,
+    from_base_ptr=None,
+    to_base_ptr=None,
+):
+    """
+    Combines 2D copy (put) with atomic_add signal in one SDMA submission.
+
+    This is equivalent to calling put() followed by atomic_add(), but batches both
+    operations into a single SDMA queue submission for better performance.
+
+    Args:
+        from_ptr: Source pointer in current rank's local memory
+        to_ptr: Destination pointer (will be translated to to_rank's address space)
+        from_rank: Current rank ID
+        to_rank: Remote rank ID to write to
+        heap_bases: Array of heap base addresses for all ranks
+        copy_engine_ctx: Copy engine context for SDMA operations
+        flag_ptr: Pointer to flag location for signaling
+        flag_value: Value to atomically add to flag (typically 1)
+        stride_tm: Destination row stride in elements
+        stride_fm: Source row stride in elements
+        mask: 2D mask indicating which elements to copy
+        hint: Vectorization hint for translated pointers
+        from_base_ptr: Base pointer of source buffer (required for 2D)
+        to_base_ptr: Base pointer of destination buffer (required for 2D)
+
+    Returns:
+        None
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(local_A, remote_staged_a, flags, heap_bases, ctx, base_ptr):
+        >>>     # Copy tile and signal completion
+        >>>     m_offs = tl.arange(0, 256)[:, None]
+        >>>     k_offs = tl.arange(0, 64)[None, :]
+        >>>     mask = (m_offs < 256) & (k_offs < 64)
+        >>>     iris.put_signal(local_A + offsets, remote_staged_a + offsets,
+        >>>                     from_rank=0, to_rank=1, heap_bases=heap_bases,
+        >>>                     copy_engine_ctx=ctx, flag_ptr=flags, flag_value=1,
+        >>>                     stride_tm=1024, stride_fm=64, mask=mask,
+        >>>                     from_base_ptr=base_ptr, to_base_ptr=base_ptr)
+    """
+    # Translate destination pointer
+    translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
+    translated_flag_ptr = __translate(flag_ptr, from_rank, to_rank, heap_bases, hint)
+
+    # Get copy engine context for target rank
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    # Extract addresses
+    dst_ptr_val = tl.min(translated_to_ptr.to(tl.uint64))
+    src_ptr_u64 = from_ptr.to(tl.uint64)
+    src_ptr_val = tl.min(src_ptr_u64)
+
+    # Get element size from pointer type
+    ptr_dtype = from_ptr.dtype.element_ty
+    if ptr_dtype == tl.float16 or ptr_dtype == tl.bfloat16:
+        element_size_bytes = 2
+    elif ptr_dtype == tl.float32 or ptr_dtype == tl.int32 or ptr_dtype == tl.uint32:
+        element_size_bytes = 4
+    elif ptr_dtype == tl.float64 or ptr_dtype == tl.int64 or ptr_dtype == tl.uint64:
+        element_size_bytes = 8
+    elif ptr_dtype == tl.int8 or ptr_dtype == tl.uint8:
+        element_size_bytes = 1
+    elif ptr_dtype == tl.int16 or ptr_dtype == tl.uint16:
+        element_size_bytes = 2
+    else:
+        element_size_bytes = 4
+
+    # Reserve space for BOTH packets: SUB_WINDOW_COPY (80 bytes) + ATOMIC (32 bytes) = 112 bytes
+    command_in_bytes = 112
+
+    # Acquire space in queue
+    base, offset = sdma_utils.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+
+    # Write padding NOPs if we wrapped around
+    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+
+    # Calculate 2D copy parameters from mask
+    mask_int = mask.to(tl.int32)
+    num_elements_per_stride = tl.max(tl.sum(mask_int, axis=-1))
+    num_strides = tl.max(tl.sum(mask_int, axis=0))
+    size_bytes = (num_elements_per_stride * element_size_bytes).to(tl.uint32)
+    src_stride = (stride_fm * element_size_bytes).to(tl.uint32)
+    dst_stride = (stride_tm * element_size_bytes).to(tl.uint32)
+
+    # Calculate base addresses and offsets
+    src_base = from_base_ptr.to(tl.uint64)
+    dst_base = __translate(to_base_ptr, from_rank, to_rank, heap_bases).to(tl.uint64)
+
+    tile_offset_bytes = src_ptr_val - src_base
+    src_y_val = (tile_offset_bytes // src_stride).to(tl.uint32)
+    src_x_val = (tile_offset_bytes % src_stride).to(tl.uint32)
+
+    tile_offset_bytes_dst = dst_ptr_val - dst_base
+    dst_y_val = (tile_offset_bytes_dst // dst_stride).to(tl.uint32)
+    dst_x_val = (tile_offset_bytes_dst % dst_stride).to(tl.uint32)
+
+    # Place SUB_WINDOW_COPY packet (80 bytes)
+    sdma_utils.place_sub_window_copy_packet(
+        queue_ptr_u32,
+        packet_offset_bytes,
+        src_base,
+        dst_base,
+        tile_width=size_bytes,
+        tile_height=num_strides,
+        src_buffer_pitch=src_stride,
+        dst_buffer_pitch=dst_stride,
+        src_x=src_x_val,
+        src_y=src_y_val,
+        dst_x=dst_x_val,
+        dst_y=dst_y_val,
+    )
+
+    # Place ATOMIC packet immediately after (32 bytes)
+    atomic_offset_bytes = packet_offset_bytes + 80
+    flag_dst_ptr_val = translated_flag_ptr.to(tl.uint64)
+    sdma_utils.place_atomic_add_packet(queue_ptr_u32, atomic_offset_bytes, flag_dst_ptr_val, flag_value)
+
+    # Submit both packets in one doorbell ring
+    pending_wptr = base + offset + command_in_bytes
+    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def put_signal_rect(
+    from_ptr,
+    to_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    flag_ptr,
+    flag_value,
+    width_bytes: tl.constexpr,
+    height: tl.constexpr,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    hint: tl.constexpr = None,
+):
+    """
+    Combines 2D rectangular copy (put) with atomic_add signal in one SDMA submission.
+
+    Unlike put_signal(), this function takes explicit dimensions instead of a mask,
+    allowing arbitrarily large tiles without hitting Triton's tensor size limit.
+
+    Args:
+        from_ptr: Source base pointer (scalar) in current rank's local memory
+        to_ptr: Destination base pointer (scalar) - will be translated to to_rank's address space
+        from_rank: Current rank ID
+        to_rank: Remote rank ID to write to
+        heap_bases: Array of heap base addresses for all ranks
+        copy_engine_ctx: Copy engine context for SDMA operations
+        flag_ptr: Pointer to flag location for signaling
+        flag_value: Value to atomically add to flag (typically 1)
+        width_bytes: Width of rectangle in bytes
+        height: Height of rectangle in rows
+        src_pitch: Source row stride in bytes
+        dst_pitch: Destination row stride in bytes
+        hint: Vectorization hint for translated pointers
+
+    Returns:
+        None
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(A_sharded, staged_a, flags, heap_bases, ctx):
+        >>>     # Transfer 256 rows × 1024 bytes (128 elements × 4 bytes × 2 K-blocks)
+        >>>     src_ptr = A_sharded + m_offset * stride_am + k_offset * stride_ak
+        >>>     dst_ptr = staged_a + m_offset * stride_sa_m + k_offset * stride_sa_k
+        >>>     iris.put_signal_rect(
+        >>>         src_ptr, dst_ptr, 0, 1, heap_bases, ctx, flags, 1,
+        >>>         width_bytes=1024, height=256,
+        >>>         src_pitch=stride_am * 2, dst_pitch=stride_sa_m * 2
+        >>>     )
+    """
+    # Translate destination pointers
+    translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
+    translated_flag_ptr = __translate(flag_ptr, from_rank, to_rank, heap_bases, hint)
+
+    # Get copy engine context for target rank
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    # Extract addresses (scalar pointers)
+    src_ptr_val = from_ptr.to(tl.uint64)
+    dst_ptr_val = translated_to_ptr.to(tl.uint64)
+    flag_dst_ptr_val = translated_flag_ptr.to(tl.uint64)
+
+    # Reserve space for BOTH packets: SUB_WINDOW_COPY (80 bytes) + ATOMIC (32 bytes) = 112 bytes
+    command_in_bytes = 112
+
+    # Acquire space in queue
+    base, offset = sdma_utils.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+
+    # Write padding NOPs if we wrapped around
+    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+
+    # Place SUB_WINDOW_COPY packet (80 bytes)
+    # Using base pointers directly (no offset calculation needed)
+    sdma_utils.place_sub_window_copy_packet(
+        queue_ptr_u32,
+        packet_offset_bytes,
+        src_ptr_val,
+        dst_ptr_val,
+        tile_width=width_bytes,
+        tile_height=height,
+        src_buffer_pitch=src_pitch,
+        dst_buffer_pitch=dst_pitch,
+        src_x=0,  # Offset already baked into pointers
+        src_y=0,
+        dst_x=0,
+        dst_y=0,
+    )
+
+    # Place ATOMIC packet immediately after (32 bytes)
+    atomic_offset_bytes = packet_offset_bytes + 80
+    sdma_utils.place_atomic_add_packet(queue_ptr_u32, atomic_offset_bytes, flag_dst_ptr_val, flag_value)
+
+    # Submit both packets in one doorbell ring
+    pending_wptr = base + offset + command_in_bytes
+    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def wait_then_put_rect(
+    from_ptr,
+    to_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    wait_flag_ptr,
+    wait_value,
+    width_bytes: tl.constexpr,
+    height: tl.constexpr,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    hint: tl.constexpr = None,
+):
+    """
+    Enqueue a POLL_REGMEM followed by a 2D SUB_WINDOW_COPY in one SDMA submission.
+
+    This is the device-side counterpart to the host wait-then-put-tile path.
+    The SDMA queue waits on a local flag and performs the copy autonomously
+    after the producer has completed the corresponding batch.
+    """
+    translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
+
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    poll_packet_bytes = 24
+    copy_packet_bytes = 80
+    command_in_bytes = poll_packet_bytes + copy_packet_bytes
+
+    base, offset = sdma_utils.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+    sdma_utils.place_poll_regmem_packet(
+        queue_ptr_u32,
+        packet_offset_bytes,
+        wait_flag_ptr.to(tl.uint64),
+        wait_value,
+    )
+    sdma_utils.place_sub_window_copy_packet(
+        queue_ptr_u32,
+        packet_offset_bytes + poll_packet_bytes,
+        from_ptr.to(tl.uint64),
+        translated_to_ptr.to(tl.uint64),
+        tile_width=width_bytes,
+        tile_height=height,
+        src_buffer_pitch=src_pitch,
+        dst_buffer_pitch=dst_pitch,
+        src_x=0,
+        src_y=0,
+        dst_x=0,
+        dst_y=0,
+    )
+
+    pending_wptr = base + offset + command_in_bytes
+    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def wait_then_put_rects(
+    from_base_ptr,
+    to_base_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    wait_flag_ptr,
+    wait_value,
+    transfer_row_offsets,
+    transfer_col_offsets,
+    transfer_width_bytes,
+    transfer_heights,
+    transfer_start,
+    transfer_count,
+    stride_n_bytes,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    MAX_RECTS: tl.constexpr,
+    hint: tl.constexpr = None,
+):
+    """
+    Enqueue one POLL_REGMEM followed by many 2D SUB_WINDOW_COPY packets.
+
+    The copy list is provided as flattened metadata arrays plus a per-wave
+    start/count pair so the poster can submit an entire wave with one queue
+    reservation and one doorbell ring.
+    """
+    translated_to_base_ptr = __translate(to_base_ptr, from_rank, to_rank, heap_bases, hint)
+
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    poll_packet_bytes = 24
+    copy_packet_bytes = 80
+    command_in_bytes = poll_packet_bytes + transfer_count * copy_packet_bytes
+
+    base, offset = sdma_utils.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+    sdma_utils.place_poll_regmem_packet(
+        queue_ptr_u32,
+        packet_offset_bytes,
+        wait_flag_ptr.to(tl.uint64),
+        wait_value,
+    )
+
+    from_base_val = from_base_ptr.to(tl.uint64)
+    to_base_val = translated_to_base_ptr.to(tl.uint64)
+
+    for i in range(MAX_RECTS):
+        if i < transfer_count:
+            transfer_idx = transfer_start + i
+            row_offset = tl.load(transfer_row_offsets + transfer_idx)
+            col_offset = tl.load(transfer_col_offsets + transfer_idx)
+            width_bytes = tl.load(transfer_width_bytes + transfer_idx)
+            height = tl.load(transfer_heights + transfer_idx)
+            byte_offset = (row_offset.to(tl.uint64) * src_pitch) + (col_offset.to(tl.uint64) * stride_n_bytes)
+            copy_offset_bytes = packet_offset_bytes + poll_packet_bytes + i * copy_packet_bytes
+            sdma_utils.place_sub_window_copy_packet(
+                queue_ptr_u32,
+                copy_offset_bytes,
+                from_base_val + byte_offset,
+                to_base_val + byte_offset,
+                tile_width=width_bytes,
+                tile_height=height,
+                src_buffer_pitch=src_pitch,
+                dst_buffer_pitch=dst_pitch,
+                src_x=0,
+                src_y=0,
+                dst_x=0,
+                dst_y=0,
+            )
+
+    pending_wptr = base + offset + command_in_bytes
+    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def wait_then_put_signal_rect(
+    from_ptr,
+    to_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    wait_flag_ptr,
+    wait_value,
+    signal_flag_ptr,
+    signal_value,
+    width_bytes: tl.constexpr,
+    height: tl.constexpr,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    hint: tl.constexpr = None,
+):
+    """
+    Enqueue POLL_REGMEM + 2D SUB_WINDOW_COPY + ATOMIC in one SDMA submission.
+
+    This is the device-side counterpart to host-side wait/copy/signal flows and is
+    useful for marking receiver-visible completion after the final copy in a queue.
+    """
+    translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
+    translated_signal_ptr = __translate(signal_flag_ptr, from_rank, to_rank, heap_bases, hint)
+
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    poll_packet_bytes = 24
+    copy_packet_bytes = 80
+    atomic_packet_bytes = 32
+    command_in_bytes = poll_packet_bytes + copy_packet_bytes + atomic_packet_bytes
+
+    base, offset = sdma_utils.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+    sdma_utils.place_poll_regmem_packet(
+        queue_ptr_u32,
+        packet_offset_bytes,
+        wait_flag_ptr.to(tl.uint64),
+        wait_value,
+    )
+    sdma_utils.place_sub_window_copy_packet(
+        queue_ptr_u32,
+        packet_offset_bytes + poll_packet_bytes,
+        from_ptr.to(tl.uint64),
+        translated_to_ptr.to(tl.uint64),
+        tile_width=width_bytes,
+        tile_height=height,
+        src_buffer_pitch=src_pitch,
+        dst_buffer_pitch=dst_pitch,
+        src_x=0,
+        src_y=0,
+        dst_x=0,
+        dst_y=0,
+    )
+    sdma_utils.place_atomic_add_packet(
+        queue_ptr_u32,
+        packet_offset_bytes + poll_packet_bytes + copy_packet_bytes,
+        translated_signal_ptr.to(tl.uint64),
+        signal_value,
+    )
+
+    pending_wptr = base + offset + command_in_bytes
+    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def wait_then_put_signal_rects(
+    from_base_ptr,
+    to_base_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    wait_flag_ptr,
+    wait_value,
+    signal_flag_ptr,
+    signal_value,
+    transfer_row_offsets,
+    transfer_col_offsets,
+    transfer_width_bytes,
+    transfer_heights,
+    transfer_start,
+    transfer_count,
+    stride_n_bytes,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    MAX_RECTS: tl.constexpr,
+    hint: tl.constexpr = None,
+):
+    """
+    Enqueue one POLL_REGMEM, many 2D SUB_WINDOW_COPY packets, and one ATOMIC.
+    """
+    translated_to_base_ptr = __translate(to_base_ptr, from_rank, to_rank, heap_bases, hint)
+    translated_signal_ptr = __translate(signal_flag_ptr, from_rank, to_rank, heap_bases, hint)
+
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    poll_packet_bytes = 24
+    copy_packet_bytes = 80
+    atomic_packet_bytes = 32
+    command_in_bytes = poll_packet_bytes + transfer_count * copy_packet_bytes + atomic_packet_bytes
+
+    base, offset = sdma_utils.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+    sdma_utils.place_poll_regmem_packet(
+        queue_ptr_u32,
+        packet_offset_bytes,
+        wait_flag_ptr.to(tl.uint64),
+        wait_value,
+    )
+
+    from_base_val = from_base_ptr.to(tl.uint64)
+    to_base_val = translated_to_base_ptr.to(tl.uint64)
+    for i in range(MAX_RECTS):
+        if i < transfer_count:
+            transfer_idx = transfer_start + i
+            row_offset = tl.load(transfer_row_offsets + transfer_idx)
+            col_offset = tl.load(transfer_col_offsets + transfer_idx)
+            width_bytes = tl.load(transfer_width_bytes + transfer_idx)
+            height = tl.load(transfer_heights + transfer_idx)
+            byte_offset = (row_offset.to(tl.uint64) * src_pitch) + (col_offset.to(tl.uint64) * stride_n_bytes)
+            copy_offset_bytes = packet_offset_bytes + poll_packet_bytes + i * copy_packet_bytes
+            sdma_utils.place_sub_window_copy_packet(
+                queue_ptr_u32,
+                copy_offset_bytes,
+                from_base_val + byte_offset,
+                to_base_val + byte_offset,
+                tile_width=width_bytes,
+                tile_height=height,
+                src_buffer_pitch=src_pitch,
+                dst_buffer_pitch=dst_pitch,
+                src_x=0,
+                src_y=0,
+                dst_x=0,
+                dst_y=0,
+            )
+
+    sdma_utils.place_atomic_add_packet(
+        queue_ptr_u32,
+        packet_offset_bytes + poll_packet_bytes + transfer_count * copy_packet_bytes,
+        translated_signal_ptr.to(tl.uint64),
+        signal_value,
+    )
+
+    pending_wptr = base + offset + command_in_bytes
+    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
 @triton.jit
 def quiet(copy_engine_ctx: tl.tensor, to_rank):
     """
