@@ -8,9 +8,13 @@ Uses torch.empty() to allocate a large memory pool and manages
 sub-allocations within it using bump allocation.
 """
 
+import ctypes
+import ctypes.util
 import logging
 import math
+import mmap
 import numpy as np
+import os
 import torch
 from typing import Optional, Dict
 import struct
@@ -51,27 +55,52 @@ class TorchAllocator(BaseAllocator):
             rank=cur_rank,
             num_ranks=num_ranks,
         )
+        self._shm_mmap = None
+        self._shm_fd = None
+        self._shm_name = None
+
         if is_simulation_env():
-            import json
+            self._shm_name = f"/iris-sim-heap-{os.environ.get('SLURM_JOB_ID', os.getppid())}"
+            total_size = heap_size * num_ranks
+            librt = ctypes.CDLL(ctypes.util.find_library("rt") or "librt.so.1", use_errno=True)
+            librt.shm_open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_uint]
+            librt.shm_open.restype = ctypes.c_int
+            self._librt = librt
 
-            # In simulation, each rank allocates n distinct buffers; memory_pool is a shallow view of the ith.
-            self.rank_bools = [torch.empty(heap_size, device=self.device, dtype=torch.int8) for _ in range(num_ranks)]
-            self.memory_pool = self.rank_bools[cur_rank]
+            if cur_rank == 0:
+                librt.shm_unlink(self._shm_name.encode())
+                fd = librt.shm_open(self._shm_name.encode(), os.O_CREAT | os.O_RDWR, 0o600)
+                if fd < 0:
+                    raise OSError(ctypes.get_errno(), f"shm_open create failed: {os.strerror(ctypes.get_errno())}")
+                os.ftruncate(fd, total_size)
+            else:
+                for _ in range(100):
+                    fd = librt.shm_open(self._shm_name.encode(), os.O_RDWR, 0)
+                    if fd >= 0:
+                        break
+                    import time
+                    time.sleep(0.05)
+                else:
+                    raise OSError(f"shm_open failed: rank 0 never created {self._shm_name}")
 
-            heap_views = [self.rank_bools[r].data_ptr() for r in range(num_ranks)]
-            out_path = f"iris_rank_{cur_rank}_allocator_views.json"
-            with open(out_path, "w") as f:
-                json.dump(
-                    {
-                        "rank": cur_rank,
-                        "num_ranks": num_ranks,
-                        "heap_views": [hex(b) for b in heap_views],
-                    },
-                    f,
-                    indent=2,
-                )
+            self._shm_fd = fd
+            self._shm_mmap = mmap.mmap(fd, total_size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+
+            my_offset = cur_rank * heap_size
+            buf = (ctypes.c_int8 * heap_size).from_buffer(self._shm_mmap, my_offset)
+            np_arr = np.ctypeslib.as_array(buf)
+            self.memory_pool = torch.from_numpy(np_arr).to(self.device)
+
+            _log_rank(
+                logging.INFO,
+                "TorchAllocator: sim shm_open %s, rank %d slice at offset %d",
+                self._shm_name,
+                cur_rank,
+                my_offset,
+                rank=cur_rank,
+                num_ranks=num_ranks,
+            )
         else:
-            self.rank_bools = None
             self.memory_pool = torch.empty(heap_size, device=self.device, dtype=torch.int8)
 
         self._peer_ext_mem_handles: Dict[int, object] = {}
@@ -151,6 +180,23 @@ class TorchAllocator(BaseAllocator):
         """
         heap_bases_array = np.zeros(self.num_ranks, dtype=np.uint64)
 
+        if is_simulation_env() and self._shm_mmap is not None:
+            for rank in range(self.num_ranks):
+                peer_offset = rank * self.heap_size
+                peer_buf = (ctypes.c_int8 * self.heap_size).from_buffer(self._shm_mmap, peer_offset)
+                peer_np = np.ctypeslib.as_array(peer_buf)
+                peer_tensor = torch.from_numpy(peer_np).to(self.device)
+                heap_bases_array[rank] = peer_tensor.data_ptr()
+            self.heap_bases_array = heap_bases_array
+            _log_rank(
+                logging.INFO,
+                "TorchAllocator: sim peer access via shm_open, %d ranks",
+                self.num_ranks,
+                rank=self.cur_rank,
+                num_ranks=self.num_ranks,
+            )
+            return
+
         if connections is not None:
             for handle in self._peer_ext_mem_handles.values():
                 try:
@@ -190,13 +236,31 @@ class TorchAllocator(BaseAllocator):
         self.heap_bases_array = heap_bases_array
 
     def close(self):
-        """Release peer external memory handles."""
+        """Release peer external memory handles and shm resources."""
         for handle in self._peer_ext_mem_handles.values():
             try:
                 destroy_external_memory(handle)
             except Exception:
                 pass
         self._peer_ext_mem_handles.clear()
+
+        if self._shm_mmap is not None:
+            try:
+                self._shm_mmap.close()
+            except Exception:
+                pass
+            self._shm_mmap = None
+        if self._shm_fd is not None:
+            try:
+                os.close(self._shm_fd)
+            except Exception:
+                pass
+            self._shm_fd = None
+        if self._shm_name is not None and self.cur_rank == 0:
+            try:
+                self._librt.shm_unlink(self._shm_name.encode())
+            except Exception:
+                pass
 
     def get_device(self) -> torch.device:
         """Get the torch device."""
