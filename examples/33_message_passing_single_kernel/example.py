@@ -27,7 +27,6 @@ import triton
 import triton.language as tl
 
 import iris
-from iris.host.platform.utils import is_simulation_env
 
 
 @triton.jit
@@ -106,8 +105,7 @@ def main():
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)
-    backend = "gloo" if is_simulation_env() else "nccl"
-    dist.init_process_group(backend=backend)
+    dist.init_process_group(backend="gloo")
 
     ctx = iris.iris(heap_size=args["heap_size"])
     cur_rank = ctx.get_rank()
