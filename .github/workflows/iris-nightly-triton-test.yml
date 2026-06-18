@@ -105,6 +105,10 @@ jobs:
         run: |
           bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
 
+      - name: Report environment versions
+        run: |
+          bash .github/scripts/report_versions.sh
+
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (nightly Triton)
         run: |
           set -e
