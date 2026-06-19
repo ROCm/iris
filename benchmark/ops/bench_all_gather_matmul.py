@@ -16,11 +16,11 @@ import torch
 import torch.distributed as dist
 import tritonblas
 import iris.bench as bench
-from iris.ops import FusedConfig
 from iris.ops.all_gather_matmul_hbm_buffer import (
     all_gather_matmul_hbm_buffer as _hbm_buffer,
     all_gather_matmul_hbm_buffer_preamble,
 )
+from iris.ops.all_gather_matmul import all_gather_matmul_preamble
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "all_gather_matmul"))
 from auto_config import select_ag_mm_config
@@ -49,13 +49,22 @@ def all_gather_matmul(state, ctx):
     torch.manual_seed(456)
     B = ctx.randn((K, N), dtype=dtype)
     C = ctx.zeros((M, N), dtype=dtype)
-    config = FusedConfig()
+    workspace = all_gather_matmul_preamble(ctx, A_sharded, B, out_dtype=C.dtype)
+    launch = workspace.launch_params
 
     state.set_flops(2 * M * N * K)
     state.set_bytes((world_size - 1) * M * K_local * A_sharded.element_size())
+    state.add_counter("block_m", launch["block_size_m"])
+    state.add_counter("block_n", launch["block_size_n"])
+    state.add_counter("block_k", launch["block_size_k"])
+    state.add_counter("group_size_m", launch["group_size_m"])
+    state.add_counter("num_xcds", launch["num_xcds"])
+    state.add_counter("chunk_size", launch["chunk_size"])
+    state.add_counter("grid_size", launch["num_sms"])
+    state.add_counter("total_tiles", launch["total_tiles"])
 
     state.exec(
-        lambda: ctx.ops.all_gather_matmul(C, A_sharded, B, config=config),
+        lambda: ctx.ops.all_gather_matmul(C, A_sharded, B, workspace=workspace),
     )
 
 

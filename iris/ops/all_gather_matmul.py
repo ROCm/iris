@@ -17,9 +17,9 @@ import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 
+from tritonblas.matmul import _make_matmul_selector
 from tritonblas.kernels.stages import GemmContext, ScheduleContext
 
-from .config import FusedConfig
 from .workspace import FusedWorkspace
 
 
@@ -49,6 +49,7 @@ def _fused_all_gather_matmul_kernel(
     GROUP_SIZE_M: tl.constexpr,
     NUM_SMS: tl.constexpr,
     NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
     NUM_K_BLOCKS_LOCAL: tl.constexpr,
     BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
@@ -65,6 +66,7 @@ def _fused_all_gather_matmul_kernel(
         num_sms=NUM_SMS,
         num_xcds=NUM_XCDS,
         group_size_m=GROUP_SIZE_M,
+        chunk_size=CHUNK_SIZE,
         even_k=EVEN_K,
         allow_tf32=ALLOW_TF32,
     )
@@ -163,12 +165,10 @@ def all_gather_matmul_preamble(
     shmem,
     A_sharded: torch.Tensor,
     B: torch.Tensor,
-    config: Optional[FusedConfig] = None,
+    selector=None,
+    out_dtype: Optional[torch.dtype] = None,
 ) -> FusedWorkspace:
-    """Allocate workspace for all_gather_matmul."""
-    if config is None:
-        config = FusedConfig()
-
+    """Prepare selector and launch metadata for all_gather_matmul."""
     M, K_local = A_sharded.shape
     K, N = B.shape
     world_size = shmem.get_num_ranks()
@@ -176,15 +176,98 @@ def all_gather_matmul_preamble(
     expected_K = world_size * K_local
     assert K == expected_K, f"K ({K}) must equal world_size ({world_size}) * K_local ({K_local})"
 
+    if selector is None:
+        c_dtype = A_sharded.dtype if out_dtype is None else out_dtype
+        selector = _make_matmul_selector(
+            M,
+            N,
+            K,
+            A_sharded.dtype,
+            B.dtype,
+            c_dtype,
+            A_sharded.device,
+            streamk=False,
+        )
+
     ws = FusedWorkspace(
         operation="all_gather_matmul",
         shape=(M, N, K),
         dtype=A_sharded.dtype,
         world_size=world_size,
+        variant="origami",
         prepared=True,
+    )
+    ws.selector = selector
+    ws.launch_params = _all_gather_matmul_launch_params(
+        M,
+        N,
+        K_local,
+        selector,
+        A_sharded.device,
     )
 
     return ws
+
+
+def _default_chunk_size(total_tiles: int, group_size_m: int, num_xcds: int) -> int:
+    chunk_size = group_size_m * group_size_m
+    if num_xcds > 0:
+        chunk_size = min(chunk_size, max(1, total_tiles // num_xcds))
+    return max(1, chunk_size)
+
+
+def _selector_active_cus(selector, device: torch.device) -> int:
+    active_cus = getattr(selector, "_ACTIVE_CU", None)
+    if active_cus is None or active_cus <= 0:
+        props = torch.cuda.get_device_properties(device)
+        active_cus = props.multi_processor_count
+    return int(active_cus)
+
+
+def _all_gather_matmul_launch_params(
+    M: int,
+    N: int,
+    K_local: int,
+    selector,
+    device: torch.device,
+) -> dict:
+    block_size_m = selector.block_m
+    block_size_n = selector.block_n
+    block_size_k = selector.block_k
+    group_size_m = selector.group_m
+    # Origami calls this num_sms, but it is the XCD/chiplet workgroup mapping
+    # count used by chiplet_transform_chunked, not the persistent launch grid.
+    num_xcds = selector.num_sms
+    if num_xcds <= 0:
+        num_xcds = 1
+
+    num_tiles_m = (M + block_size_m - 1) // block_size_m
+    num_tiles_n = (N + block_size_n - 1) // block_size_n
+    total_tiles = num_tiles_m * num_tiles_n
+
+    # This pull-pattern kernel is persistent. Use the active CU count as the
+    # launch grid, then compute chunking against that launch grid so XCD
+    # remapping does not degenerate to identity.
+    num_sms = min(_selector_active_cus(selector, device), total_tiles)
+    chunk_size = _default_chunk_size(num_sms, group_size_m, num_xcds)
+
+    return {
+        "block_size_m": block_size_m,
+        "block_size_n": block_size_n,
+        "block_size_k": block_size_k,
+        "group_size_m": group_size_m,
+        "num_xcds": num_xcds,
+        "num_tiles_m": num_tiles_m,
+        "num_tiles_n": num_tiles_n,
+        "total_tiles": total_tiles,
+        "num_sms": num_sms,
+        "chunk_size": chunk_size,
+        "num_k_blocks_local": (K_local + block_size_k - 1) // block_size_k,
+        "even_k": K_local % block_size_k == 0,
+        "num_warps": 8,
+        "num_stages": getattr(selector, "num_stages", 2),
+        "matrix_instr_nonkdim": 16,
+    }
 
 
 def all_gather_matmul(
@@ -194,13 +277,10 @@ def all_gather_matmul(
     B: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
     async_op: bool = False,
-    config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
+    selector=None,
 ) -> FusedWorkspace:
     """Fused all-gather and matrix multiplication using pull pattern."""
-    if config is None:
-        config = FusedConfig()
-
     M, K_local = A_sharded.shape
     K, N = B.shape
     world_size = shmem.get_num_ranks()
@@ -225,9 +305,14 @@ def all_gather_matmul(
     assert K == expected_K, f"K ({K}) must equal world_size ({world_size}) * K_local ({K_local})"
     assert output_tensor.shape == (M, N), f"Output must be ({M}, {N}), got {output_tensor.shape}"
 
-    # Validate problem size against block sizes
     if workspace is None:
-        workspace = all_gather_matmul_preamble(shmem, A_sharded, B, config)
+        workspace = all_gather_matmul_preamble(
+            shmem,
+            A_sharded,
+            B,
+            selector=selector,
+            out_dtype=output_tensor.dtype,
+        )
 
     stride_am, stride_ak = A_sharded.stride()
     stride_bk, stride_bn = B.stride()
@@ -243,18 +328,22 @@ def all_gather_matmul(
         stride_bias = 1
         use_bias = False
 
-    device = A_sharded.device
-    num_sms = config.num_sms
-    if num_sms is None:
-        props = torch.cuda.get_device_properties(device)
-        num_sms = props.multi_processor_count
-
-    even_k = K_local % config.block_size_k == 0
-    num_k_blocks_local = (K_local + config.block_size_k - 1) // config.block_size_k
-
-    num_tiles_m = (M + config.block_size_m - 1) // config.block_size_m
-    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
+    launch = workspace.launch_params
+    block_size_m = launch["block_size_m"]
+    block_size_n = launch["block_size_n"]
+    block_size_k = launch["block_size_k"]
+    group_size_m = launch["group_size_m"]
+    num_xcds = launch["num_xcds"]
+    num_sms = launch["num_sms"]
+    chunk_size = launch["chunk_size"]
     grid = (num_sms,)
+
+    launch_kwargs = {
+        "num_warps": launch["num_warps"],
+        "num_stages": launch["num_stages"],
+        "matrix_instr_nonkdim": launch["matrix_instr_nonkdim"],
+    }
+
     iris_launch(
         _fused_all_gather_matmul_kernel,
         grid,
@@ -276,19 +365,21 @@ def all_gather_matmul(
         shmem.get_device_context(),
         rank,
         world_size,
-        config.block_size_m,
-        config.block_size_n,
-        config.block_size_k,
-        config.group_size_m,
+        block_size_m,
+        block_size_n,
+        block_size_k,
+        group_size_m,
         num_sms,
-        config.num_xcds,
-        num_k_blocks_local,
+        num_xcds,
+        chunk_size,
+        launch["num_k_blocks_local"],
         use_bias,
-        even_k,
-        config.allow_tf32,
+        launch["even_k"],
+        torch.backends.cuda.matmul.allow_tf32,
         algorithm="all_gather_matmul",
         rank=rank,
         dtype=A_sharded.dtype,
+        **launch_kwargs,
     )
 
     if not async_op:

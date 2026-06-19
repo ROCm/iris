@@ -246,17 +246,7 @@ def test_all_gather_matmul_baseline(dtype, atol, rtol, M, K_local, N):
 
     ctx.barrier()
 
-    config = (
-        FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
-        if M <= 256 or K_local <= 64 or N <= 128
-        else FusedConfig()
-    )
-
-    assert M >= config.block_size_m
-    assert K_local >= config.block_size_k
-    assert N >= config.block_size_n
-
-    ctx.ops.all_gather_matmul(output, A_sharded_shmem, B_shmem, config=config)
+    ctx.ops.all_gather_matmul(output, A_sharded_shmem, B_shmem)
 
     torch.cuda.synchronize()
     ctx.barrier()

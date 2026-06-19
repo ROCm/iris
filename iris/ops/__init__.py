@@ -90,7 +90,16 @@ class OpsNamespace:
         """
         return matmul_all_reduce(self._shmem, output_tensor, A, B, async_op, config, workspace)
 
-    def all_gather_matmul(self, output_tensor, A_sharded, B, bias=None, async_op=False, config=None, workspace=None):
+    def all_gather_matmul(
+        self,
+        output_tensor,
+        A_sharded,
+        B,
+        bias=None,
+        async_op=False,
+        workspace=None,
+        selector=None,
+    ):
         """
         Fused all-gather and matrix multiplication.
 
@@ -102,8 +111,8 @@ class OpsNamespace:
             B: Input matrix B (K, N) where K = K_local * world_size
             bias: Optional bias vector (M,) or (N,)
             async_op: If False, performs barrier at end
-            config: Optional FusedConfig for tuning
             workspace: Optional pre-allocated workspace
+            selector: Optional pre-built tritonBLAS Origami selector
 
         Returns:
             workspace: Updated workspace object
@@ -114,7 +123,16 @@ class OpsNamespace:
             >>> output = shmem.zeros((M, N), dtype=torch.float16)
             >>> shmem.ops.all_gather_matmul(output, A_sharded, B)
         """
-        return all_gather_matmul(self._shmem, output_tensor, A_sharded, B, bias, async_op, config, workspace)
+        return all_gather_matmul(
+            self._shmem,
+            output_tensor,
+            A_sharded,
+            B,
+            bias,
+            async_op,
+            workspace,
+            selector=selector,
+        )
 
     def matmul_all_gather(self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None):
         """
