@@ -43,6 +43,10 @@ jobs:
         run: |
           bash .github/scripts/acquire_gpus.sh 2
 
+      - name: Report environment versions
+        run: |
+          bash .github/scripts/report_versions.sh
+
       - name: Run External Validation Test
         run: |
           set -e
@@ -91,6 +95,10 @@ jobs:
       - name: Acquire GPUs
         run: |
           bash .github/scripts/acquire_gpus.sh 2
+
+      - name: Report environment versions
+        run: |
+          bash .github/scripts/report_versions.sh
 
       - name: Run External Gluon Validation Test
         run: |
