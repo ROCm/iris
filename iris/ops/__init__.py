@@ -37,7 +37,7 @@ from .workspace import FusedWorkspace
 from .matmul_all_reduce import matmul_all_reduce, matmul_all_reduce_preamble
 from .all_gather_matmul import all_gather_matmul, all_gather_matmul_preamble
 from .all_gather_matmul_hbm_buffer import all_gather_matmul_hbm_buffer, all_gather_matmul_hbm_buffer_preamble
-from .matmul_all_gather import matmul_all_gather
+from .matmul_all_gather import matmul_all_gather, matmul_all_gather_preamble
 from .matmul_reduce_scatter import matmul_reduce_scatter, matmul_reduce_scatter_preamble
 
 
@@ -134,7 +134,17 @@ class OpsNamespace:
             selector=selector,
         )
 
-    def matmul_all_gather(self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None):
+    def matmul_all_gather(
+        self,
+        output_tensor,
+        A,
+        B,
+        bias=None,
+        async_op=False,
+        config=None,
+        workspace=None,
+        selector=None,
+    ):
         """
         Fused matrix multiplication and all-gather.
 
@@ -148,6 +158,7 @@ class OpsNamespace:
             async_op: If False, performs barrier at end
             config: Optional FusedConfig for tuning
             workspace: Optional pre-allocated workspace
+            selector: Optional pre-built tritonBLAS Origami selector
 
         Returns:
             workspace: Updated workspace object
@@ -158,7 +169,17 @@ class OpsNamespace:
             >>> output = shmem.zeros((M, N), dtype=torch.float16)
             >>> shmem.ops.matmul_all_gather(output, A, B)
         """
-        return matmul_all_gather(self._shmem, output_tensor, A, B, bias, async_op, config, workspace)
+        return matmul_all_gather(
+            self._shmem,
+            output_tensor,
+            A,
+            B,
+            bias,
+            async_op,
+            config,
+            workspace,
+            selector=selector,
+        )
 
     def matmul_reduce_scatter(self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None):
         """
@@ -202,6 +223,7 @@ __all__ = [
     "all_gather_matmul_hbm_buffer",
     "all_gather_matmul_hbm_buffer_preamble",
     "matmul_all_gather",
+    "matmul_all_gather_preamble",
     "matmul_reduce_scatter",
     "matmul_reduce_scatter_preamble",
 ]

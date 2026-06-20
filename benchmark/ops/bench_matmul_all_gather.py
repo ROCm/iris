@@ -9,7 +9,7 @@ import torch.distributed as dist
 import tritonblas
 import iris.bench as bench
 
-from iris.ops import FusedConfig
+from iris.ops.matmul_all_gather import matmul_all_gather_preamble
 from tritonblas.matmul import persistent_matmul_lt
 
 
@@ -25,13 +25,23 @@ def _register_fused_matmul_all_gather(state, ctx) -> None:
     torch.manual_seed(456)
     B = ctx.randn((K, N), dtype=dtype)
     C = ctx.zeros((M, N), dtype=dtype)
-    config = FusedConfig()
+    workspace = matmul_all_gather_preamble(ctx, A, B, out_dtype=C.dtype)
+    launch = workspace.launch_params
 
     state.set_flops(2 * M_local * N * K)
     state.set_bytes((world_size - 1) * M_local * N * A.element_size())
+    state.add_counter("selector_fallback", int(workspace.selector_fallback))
+    state.add_counter("block_m", launch["block_size_m"])
+    state.add_counter("block_n", launch["block_size_n"])
+    state.add_counter("block_k", launch["block_size_k"])
+    state.add_counter("group_size_m", launch["group_size_m"])
+    state.add_counter("num_xcds", launch["num_xcds"])
+    state.add_counter("chunk_size", launch["chunk_size"])
+    state.add_counter("grid_size", launch["num_sms"])
+    state.add_counter("total_tiles", launch["total_tiles"])
 
     state.exec(
-        lambda: ctx.ops.matmul_all_gather(C, A, B, config=config),
+        lambda: ctx.ops.matmul_all_gather(C, A, B, workspace=workspace),
     )
 
 

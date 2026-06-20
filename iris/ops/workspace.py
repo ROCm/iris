@@ -24,6 +24,9 @@ class FusedWorkspace:
         dtype: Data type of tensors
         world_size: Number of ranks in the communicator
         variant: Algorithm variant (for operations that support multiple variants)
+        selector: Optional kernel/tile selector metadata for selector-based variants
+        config: Optional config metadata for config-based variants
+        launch_params: Cached constexpr launch metadata derived during preamble
 
         # Temporary buffers
         aux_buffer: Generic auxiliary buffer for intermediate results (gathered data, temp results, etc.)
@@ -37,6 +40,10 @@ class FusedWorkspace:
     dtype: Optional[torch.dtype] = None
     world_size: int = 1
     variant: str = ""
+    selector: Optional[object] = None
+    config: Optional[object] = None
+    launch_params: Optional[dict] = None
+    selector_fallback: bool = False
 
     # Temporary buffers (allocated as needed)
     aux_buffer: Optional[torch.Tensor] = None  # Generic buffer for intermediate results
@@ -106,4 +113,8 @@ class FusedWorkspace:
         self.transfer_col_offsets = None
         self.transfer_width_bytes = None
         self.transfer_heights = None
+        self.selector = None
+        self.config = None
+        self.launch_params = None
+        self.selector_fallback = False
         self.prepared = False
