@@ -63,7 +63,7 @@ class GptOssConfig:
 
 
 def rms_norm(x: torch.Tensor, gamma: torch.Tensor, eps: float) -> torch.Tensor:
-    # x: [H] fp32. divisor = H (hidden_dim), matches cosmic + HF.
+    # x: [H] fp32. RMSNorm divisor is the hidden dim, matching HF.
     x = x.float()
     var = x.pow(2).mean(dim=-1, keepdim=True)
     return (x * torch.rsqrt(var + eps)) * gamma.float()
@@ -72,7 +72,7 @@ def rms_norm(x: torch.Tensor, gamma: torch.Tensor, eps: float) -> torch.Tensor:
 def build_yarn_rope(cfg: GptOssConfig, device="cpu") -> tuple[torch.Tensor, torch.Tensor]:
     """Return (cos, sin) tables of shape [max_seq_len, head_dim/2].
 
-    Matches cosmic build_rope_table(): NTK-by-parts (YaRN) interpolation between
+    NTK-by-parts (YaRN) interpolation between
     base and scaled frequency, with an mscale=0.1*ln(factor)+1 applied to cos/sin.
     """
     DH = cfg.head_dim
@@ -115,7 +115,7 @@ def apply_rope_neox(vec: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> 
 
 
 def swiglu_oai(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
-    # GPT-OSS / cosmic fast_swigluoai: gate one-sided clamp, up two-sided clamp.
+    # GPT-OSS SwiGLU: gate is clamped above, up is clamped both sides.
     gate = torch.clamp(gate, max=limit)
     up = torch.clamp(up, min=-limit, max=limit)
     glu = gate * torch.sigmoid(alpha * gate)

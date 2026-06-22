@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-"""De-risk: a grid-wide barrier inside ONE persistent Triton kernel on ROCm.
+"""Test the grid-wide barrier used inside the persistent megakernel.
 
-Pattern: monotonic global arrival counter. At barrier #b, every program does
-atomic_add(counter, 1) then spins until counter >= (b+1)*P. Targets are
-monotonic so no reset race. We test a 3-phase pipeline where phase n must see
-all of phase n-1's writes (cross-program), which only holds if the barrier
-actually synchronizes + makes writes visible.
+The barrier is a monotonic global arrival counter: at barrier b every program
+adds one and then spins until the counter reaches (b + 1) * num_programs. The
+targets only grow, so no reset is needed between barriers. The test runs a
+multi-phase pipeline where each phase must observe every program's writes from
+the previous phase, which holds only if the barrier both synchronizes the grid
+and makes those writes visible.
 """
 
 from __future__ import annotations

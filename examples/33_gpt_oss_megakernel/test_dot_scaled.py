@@ -5,7 +5,7 @@ Validate tl.dot_scaled (MXFP4 e2m1 weights x FP8 e4m3 activations, e8m0 per-32
 scales) for a batch-1 GEMV, against the BF16 dequant reference. Establishes the
 exact operand layout before reworking the megakernel.
 
-Problem: y[n] = sum_k W[n,k] * a[k], W is FP4 [N,K] row-major (HF/cosmic layout),
+Problem: y[n] = sum_k W[n,k] * a[k], W is FP4 [N,K] row-major (HF layout),
 a is the activation vector [K]. dot_scaled computes lhs[M,K] @ rhs[K,N] -> [M,N].
 
 We map:  lhs = activation tile  [M, K]  e4m3   (M = MFMA tile, row 0 = real token)
@@ -25,7 +25,7 @@ import triton
 import triton.language as tl
 
 
-# ---- FP8 e4m3 quant of activation (per-32 e8m0), matches cosmic amax/448 ----
+# ---- FP8 e4m3 activation quant (per-32 e8m0, amax/448) ----
 def quant_e4m3_e8m0(a: torch.Tensor, group=32):
     # a: [K] fp32 -> (fp8_uint8 [K], scale_e8m0 [K//32])
     K = a.numel()

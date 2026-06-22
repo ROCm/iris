@@ -1,43 +1,32 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 """
-GPT-OSS 120B quantized megakernel — a SINGLE persistent Triton kernel that runs
-BOTH attention AND mixture-of-experts for ALL 36 layers of GPT-OSS-120B on ONE
-GPU, for the batch-1 (decode) GEMV case.
+Single-GPU persistent megakernel for GPT-OSS-120B decode.
 
-This collapses ROCm/cosmic's multi-GPU assembly design (1 GPU attention + 4 GPUs
-MoE) into one Triton kernel. The kernel is launched once per token; internally it
-loops over all layers, synchronizing its NUM_WG persistent programs at each phase
-with a grid-wide monotonic-counter barrier. Attention and MoE are different phases
-of the same resident kernel — never separate launches, never separate GPUs.
+One Triton kernel runs both attention and the mixture-of-experts for all layers
+of GPT-OSS-120B on a single GPU. It is launched once per token and loops over the
+layers internally; its persistent programs synchronize at each phase with a
+grid-wide barrier, so attention and MoE are phases of the same resident kernel
+rather than separate launches.
 
-Precision: non-expert weights (attn/router/embed/lm_head) are BF16; the 128
-experts are MXFP4 (E2M1 + per-32 E8M0 scales). Two expert-GEMV compute paths,
-selected by QUANT:
-  - QUANT=False (default): FP4 weights dequantized to BF16 in the GEMV inner loop,
-    BF16 activations (W4A16). Bit-faithful to the BF16 reference.
-  - QUANT=True (--quant): activations dynamically quantized to FP8-E4M3 (per-32
-    E8M0) and multiplied with FP4 weights via tl.dot_scaled, which lowers to the
-    native gfx950 v_mfma_scale_f32_16x16x128_f8f6f4 tensor-core op (W4A8). ~2.8x
-    faster; not bit-identical to BF16 but the standard production regime.
+Per layer the kernel computes:
 
-Validated greedy output: "The capital of France is" -> token 12650 " Paris" in
-both paths (matches the PyTorch reference reference.py).
+    RMSNorm -> QKV + bias -> RoPE -> KV-cache append
+            -> grouped-query attention with attention sinks and a per-layer
+               sliding or full window
+            -> output projection + residual
+            -> RMSNorm -> router (top-k with softmax over the selected experts)
+            -> top-k SwiGLU experts -> gated sum + residual
 
-Architecture (per layer, all inside the persistent kernel):
-  RMSNorm -> QKV+bias -> NeoX YaRN RoPE -> KV append -> GQA flash-decode with
-  per-head attention SINK and alternating sliding(128)/full window -> O-proj+bias
-  + residual -> RMSNorm -> router top-4 (softmax-after-topk) -> 4x SwiGLU-OAI
-  experts (FP4 weights) -> gate-weighted sum + residual.
-Then: final RMSNorm -> lm_head -> argmax.
+followed once by the final RMSNorm, the language-model head, and an argmax.
 
-Performance notes:
-  - GEMVs use block-of-rows tiling (2D [BLOCK_M, BLOCK_K] weight loads) with
-    max_contiguous/multiple_of hints so the compiler emits wide (dwordx4) loads.
-  - The attention RMSNorm is fused into the QKV GEMV and the MoE RMSNorm into the
-    router GEMV (each program recomputes the tiny rms scalar from x, barrier-free).
-    RoPE is folded into attention. These remove the serial pid0 phases + their grid
-    barriers. Residual/zeroing are striped across all programs, not pid0-serial.
+The attention weights, router, embedding and LM head are stored in BF16. The
+experts are stored in MXFP4 (4-bit weights with per-32 block scales) and only the
+selected experts are read each step. Two expert compute paths are available:
+
+    default     dequantize the FP4 weights to BF16 and multiply in BF16
+    quantized   quantize the activations to FP8 and multiply FP4 x FP8 with the
+                scaled matrix-multiply instruction (enable with quant=True)
 """
 
 from __future__ import annotations
@@ -273,7 +262,7 @@ def _gemv_fp4(
 
 @triton.jit
 def _quant_act_fp8(x_ptr, fp8_ptr, scl_ptr, K, NB: tl.constexpr, pid):
-    """Dynamic FP8-E4M3 activation quant, per-32 E8M0 (amax/448), matching cosmic.
+    """Dynamic FP8-E4M3 activation quantization, per-32-element E8M0 (amax/448).
     x_ptr fp32-ish [K] -> fp8_ptr (float8e4nv) [K], scl_ptr (uint8 e8m0) [NB].
     Each program handles a strided set of 32-element blocks."""
     pos32 = tl.arange(0, 32)

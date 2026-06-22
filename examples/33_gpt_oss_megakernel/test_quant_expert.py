@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
-"""Isolate the quantized expert path: compare _gemv_fp4_scaled (dot_scaled) and the
-BF16 dequant _gemv_fp4 against a pure-torch reference, on ONE real expert GEMV
-shape (gate_up: N=2*I, K=H ; down: N=H, K=I). Pinpoints whether the bug is in the
-scaled GEMV layout or the activation quant."""
+"""Test the quantized expert GEMV against a PyTorch reference.
+
+Compares both expert paths -- the FP4 x FP8 scaled multiply and the BF16 dequant
+multiply -- on the real expert shapes (gate-up: N = 2*I, K = H; down: N = H,
+K = I), to confirm the scaled GEMV layout and the activation quantization."""
 
 from __future__ import annotations
 
