@@ -566,29 +566,28 @@ def gpt_oss_megakernel(
         bc += 1
         _barrier(bar_p, (lb + bc) * _NWG)
 
-        # ---- P6: experts (loop TOPK). QUANT: native FP4xFP8 scaled MFMA
-        # (dot_scaled); else: in-kernel FP4->BF16 dequant GEMV. ----
-        # QUANT: pre-quantize the shared MoE-normed activation to FP8 once per layer.
+        # ---- P6: experts. The top-k experts are independent until the final
+        # accumulation, so each expert phase (gate-up, SwiGLU, down) runs over all
+        # experts before the next barrier -- 3 barriers per layer instead of 3 per
+        # expert. QUANT uses the native FP4xFP8 scaled multiply; otherwise the FP4
+        # weights are dequantized to BF16 in the GEMV. ----
         if QUANT:
             _quant_act_fp8(normed_p, nfp8_p, nfp8_scl_p, H, GU_NB, pid)
+        # --- phase A: gate-up for every expert -> gu_p[slot] ---
         for slot in range(0, TOPK):
             e_id = tl.load(ids_p + slot)
-            gwv = tl.load(gw_p + slot).to(tl.float32)
             eidx = (layer * E + e_id).to(tl.int64)  # int64: expert blobs overflow int32
             gu_blk = gu_blk_p + eidx * (2 * I) * (H // 2)
             gu_scl = gu_scl_p + eidx * (2 * I) * GU_NB
             gu_b = gu_b_p + eidx * (2 * I)
-            dn_blk = dn_blk_p + eidx * H * (I // 2)
-            dn_scl = dn_scl_p + eidx * H * DN_NB
-            dn_b = dn_b_p + eidx * H
-            # --- sub-phase A: gate_up (2I rows, K=H) -> gu_p ---
+            gu_out = gu_p + slot * (2 * I)
             if QUANT:
                 _gemv_fp4_scaled(
                     gu_blk,
                     gu_scl,
                     nfp8_p,
                     nfp8_scl_p,
-                    gu_p,
+                    gu_out,
                     gu_b,
                     True,
                     2 * I,
@@ -602,19 +601,22 @@ def gpt_oss_megakernel(
                     MTILE,
                 )
             else:
-                _gemv_fp4(gu_blk, gu_scl, normed_p, gu_p, gu_b, True, 2 * I, H, GU_NB, pid, 1.0, ACCUM=False)
-            bc += 1
-            _barrier(bar_p, (lb + bc) * _NWG)
-            # --- sub-phase B: swiglu -> act_p. In QUANT mode, each program owns whole
-            # 32-elem blocks and FP8-quantizes the block it just produced (no extra
-            # barrier: producer == consumer for that block). ---
+                _gemv_fp4(gu_blk, gu_scl, normed_p, gu_out, gu_b, True, 2 * I, H, GU_NB, pid, 1.0, ACCUM=False)
+        bc += 1
+        _barrier(bar_p, (lb + bc) * _NWG)
+        # --- phase B: SwiGLU for every expert. QUANT quantizes each 32-element block
+        # in place (producer == consumer for that block, no barrier needed). ---
+        for slot in range(0, TOPK):
+            gu_out = gu_p + slot * (2 * I)
             if QUANT:
+                afp8_out = afp8_p + slot * I
+                afp8_scl_out = afp8_scl_p + slot * DN_NB
                 pos32 = tl.arange(0, 32)
                 blk = pid
                 while blk < DN_NB:
                     base_i = blk * 32 + pos32
-                    gate = tl.load(gu_p + 2 * base_i).to(tl.float32)
-                    up = tl.load(gu_p + 2 * base_i + 1).to(tl.float32)
+                    gate = tl.load(gu_out + 2 * base_i).to(tl.float32)
+                    up = tl.load(gu_out + 2 * base_i + 1).to(tl.float32)
                     gate = tl.minimum(gate, limit)
                     up = tl.maximum(tl.minimum(up, limit), -limit)
                     glu = gate * (1.0 / (1.0 + tl.exp(-alpha * gate)))
@@ -626,28 +628,40 @@ def gpt_oss_megakernel(
                     raw = raw + tl.where((u & 0x7FFFFF) != 0, 1, 0)
                     raw = tl.where(amax > 0.0, tl.minimum(tl.maximum(raw, 0), 255), 0)
                     sc = tl.where(raw > 0, tl.exp2((raw - 127).to(tl.float32)), 1.0)
-                    tl.store(afp8_p + base_i, (act / sc).to(tl.float8e4nv))
-                    tl.store(afp8_scl_p + blk, raw.to(tl.uint8))
+                    tl.store(afp8_out + base_i, (act / sc).to(tl.float8e4nv))
+                    tl.store(afp8_scl_out + blk, raw.to(tl.uint8))
                     blk += _NWG
             else:
+                act_out = act_p + slot * I
                 ii = pid
                 while ii < I:
-                    gate = tl.load(gu_p + 2 * ii).to(tl.float32)
-                    up = tl.load(gu_p + 2 * ii + 1).to(tl.float32)
+                    gate = tl.load(gu_out + 2 * ii).to(tl.float32)
+                    up = tl.load(gu_out + 2 * ii + 1).to(tl.float32)
                     gate = tl.minimum(gate, limit)
                     up = tl.maximum(tl.minimum(up, limit), -limit)
                     glu = gate * (1.0 / (1.0 + tl.exp(-alpha * gate)))
-                    tl.store(act_p + ii, ((up + 1.0) * glu).to(tl.bfloat16))
+                    tl.store(act_out + ii, ((up + 1.0) * glu).to(tl.bfloat16))
                     ii += _NWG
-            bc += 1
-            _barrier(bar_p, (lb + bc) * _NWG)
-            # --- sub-phase C: down (H rows, K=I) -> accumulate gw*ev into moe_p ---
+        bc += 1
+        _barrier(bar_p, (lb + bc) * _NWG)
+        # --- phase C: down for every expert, accumulating gate-weighted sum into moe_p.
+        # Each program owns the same output rows across all experts, so the running
+        # accumulation is program-local and needs no barrier between experts. ---
+        for slot in range(0, TOPK):
+            e_id = tl.load(ids_p + slot)
+            gwv = tl.load(gw_p + slot).to(tl.float32)
+            eidx = (layer * E + e_id).to(tl.int64)
+            dn_blk = dn_blk_p + eidx * H * (I // 2)
+            dn_scl = dn_scl_p + eidx * H * DN_NB
+            dn_b = dn_b_p + eidx * H
             if QUANT:
+                afp8_out = afp8_p + slot * I
+                afp8_scl_out = afp8_scl_p + slot * DN_NB
                 _gemv_fp4_scaled(
                     dn_blk,
                     dn_scl,
-                    afp8_p,
-                    afp8_scl_p,
+                    afp8_out,
+                    afp8_scl_out,
                     moe_p,
                     dn_b,
                     True,
@@ -662,9 +676,10 @@ def gpt_oss_megakernel(
                     MTILE,
                 )
             else:
-                _gemv_fp4(dn_blk, dn_scl, act_p, moe_p, dn_b, True, H, I, DN_NB, pid, gwv, ACCUM=(slot > 0))
-            bc += 1
-            _barrier(bar_p, (lb + bc) * _NWG)
+                act_out = act_p + slot * I
+                _gemv_fp4(dn_blk, dn_scl, act_out, moe_p, dn_b, True, H, I, DN_NB, pid, gwv, ACCUM=(slot > 0))
+        bc += 1
+        _barrier(bar_p, (lb + bc) * _NWG)
 
         # ---- P7: residual add moe -> x (program 0) ----
         if pid == 0:
@@ -833,15 +848,19 @@ class MegaModel:
         self.logits = z(E)
         self.ids = z(cfg.top_k, torch.int32)
         self.gw = z(cfg.top_k)
-        self.gu = z(2 * I)
-        self.act = z(I, torch.bfloat16)
+        K = cfg.top_k
+        # Per-expert intermediates are kept for all top-k experts at once so the
+        # expert phases (gate-up, SwiGLU, down) each run across every expert before
+        # the next grid barrier, rather than one expert at a time.
+        self.gu = z(K * 2 * I)
+        self.act = z(K * I, torch.bfloat16)
         self.moe = z(H)
         # FP8 activation-quant scratch (quantized path). nfp8 = MoE-normed activation
-        # (K=H), afp8 = SwiGLU output (K=I); scales are per-32 e8m0 bytes.
+        # (K=H), afp8 = SwiGLU output (K=I) per expert; scales are per-32 e8m0 bytes.
         self.nfp8 = z(H, torch.float8_e4m3fn)
         self.nfp8_scl = z(H // 32, torch.uint8)
-        self.afp8 = z(I, torch.float8_e4m3fn)
-        self.afp8_scl = z(I // 32, torch.uint8)
+        self.afp8 = z(K * I, torch.float8_e4m3fn)
+        self.afp8_scl = z(K * (I // 32), torch.uint8)
         self.vlogits = z(V)
         self.amax_v = z(NUM_WG)
         self.amax_i = z(NUM_WG, torch.int32)
