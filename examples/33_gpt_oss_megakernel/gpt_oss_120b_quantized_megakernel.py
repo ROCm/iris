@@ -1048,7 +1048,7 @@ class MegaModel:
             NORMK=triton.next_power_of_2(cfg.hidden_dim),
             QUANT=self.quant,
             BLOCK_NQ=32,
-            BLOCK_KQ=512,
+            BLOCK_KQ=1024,
             MTILE=16,
             num_warps=4,
         )
