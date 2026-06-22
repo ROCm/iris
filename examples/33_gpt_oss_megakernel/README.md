@@ -65,13 +65,26 @@ Two compute paths for the expert GEMVs, selected by `--quant`:
 
 | Path | TPOT | tok/s |
 | ---- | ---- | ----- |
-| BF16 (dequant + scalar dot) | 83.6 ms | 12.0 |
-| **Quantized (FP4×FP8 scaled MFMA)** | **29.4 ms** | **34.0** |
+| BF16 (dequant + scalar dot) | 80.6 ms | 12.4 |
+| **Quantized (FP4×FP8 scaled MFMA)** | **22.9 ms** | **43.6** |
 
-The quantized path is **2.8× faster** from using the native scaled-MFMA. This is a
-correctness-first Triton implementation; cosmic's hand-tuned assembly reaches 1.70 ms/tok.
-The remaining gap is kernel-level optimization (the serial program-0 phases — RMSNorm,
-RoPE, top-k, residuals — plus weight prefetch / LDS pipelining), not the architecture.
+The quantized path uses the native scaled-MFMA. After the GEMV-tiling and
+barrier-reduction passes below, quantized TPOT improved from 29.4 → 22.9 ms.
+This is a correctness-first Triton implementation; cosmic's hand-tuned assembly
+reaches 1.70 ms/tok.
+
+What was measured and fixed (see the "Optimization" section):
+- **Register spills: zero** (n_regs≈104, n_spills=0) — never the bottleneck.
+- **GEMV loads were per-element** (`buffer_load_ushort`) at ~1.6 TB/s. Block-of-rows
+  tiling + `max_contiguous`/`multiple_of` hints emit `dwordx4` (~2.5 TB/s).
+- **Grid barriers cost ~10.9 µs each**; the kernel had ~20–24/layer. Fusing RMSNorm
+  into the following GEMV, folding RoPE into attention, striping residuals across all
+  programs, and folding the FP8 activation-quant into SwiGLU removed the serial
+  single-program phases and ~6 barriers/layer.
+
+Remaining gap to cosmic: the batch-1 expert GEMVs are latency-bound (a grid-wide
+sync and an MFMA tile that uses 1 of 16 rows for the single decode token); closing
+it needs weight prefetch / LDS pipelining and batching the MFMA M-dimension.
 
 ## Files
 
@@ -142,5 +155,25 @@ The output tiles M to the MFMA's 16-row minimum (only row 0 is the real token; t
 are masked out). The reduction loops K in 128-wide blocks with masked tails (K=2880 is
 not a multiple of 128).
 
-Optimization headroom (toward cosmic's 1.70 ms/tok): parallelize the program-0 serial
-phases, prefetch weights to LDS, and pipeline the MFMA K-loop.
+## Optimization
+
+These passes were driven by ISA/timing measurement, not guesswork:
+
+- **Vectorized GEMV loads.** `_gemv_bf16_tiled` walks a 2D `[BLOCK_M, BLOCK_K]` weight
+  tile and tags the contiguous-K index with `tl.max_contiguous`/`tl.multiple_of`, so
+  the compiler coalesces into `dwordx4` loads instead of per-element `ushort`
+  (~1.6 → ~2.5 TB/s on the lm_head shape).
+- **Barrier elimination via producer/consumer co-location.** A grid barrier is only
+  required when an element is produced by one program and consumed by another. The
+  removable ones were eliminated by keeping producer and consumer in the same program:
+  RMSNorm is fused into the following GEMV (`_gemv_bf16_rmsnorm`, each program
+  recomputes the cheap rms scalar from `x`), RoPE is folded into the attention phase,
+  residual/zeroing are striped across all programs (not a single one), and the FP8
+  activation-quant is folded into SwiGLU (each program quantizes the 32-element block
+  it just wrote). The genuine cross-program barriers — QKV→attention repartition,
+  attention→O-proj, router→top-k reduction, gate_up→SwiGLU, SwiGLU→down, cross-expert
+  accumulation — are kept.
+
+Remaining headroom toward cosmic's 1.70 ms/tok: the batch-1 expert GEMVs are
+latency-bound (grid sync + an MFMA tile that uses 1 of 16 rows for one decode token);
+weight prefetch / LDS pipelining and pipelining the four expert slots are the next steps.
