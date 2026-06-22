@@ -513,6 +513,7 @@ def gpt_oss_megakernel(
     BLOCK_ND: tl.constexpr,
     BLOCK_KQ: tl.constexpr,
     MTILE: tl.constexpr,
+    BLOCK_T: tl.constexpr,
 ):
     pid = tl.program_id(0)
     HALF: tl.constexpr = DH // 2
@@ -582,21 +583,32 @@ def gpt_oss_megakernel(
             lo = 0
             if SLIDING > 0:
                 lo = tl.maximum(0, pos - SLIDING + 1)
+            # Flash-decode over the KV history in blocks of BLOCK_T positions, with an
+            # online softmax. Scores for a block are a [BLOCK_T, DH] x [DH] reduction.
             m_i = -1e30
             l_i = 0.0
             acc = tl.zeros((DH,), dtype=tl.float32)
-            t = lo
-            while t <= pos:
-                kt = tl.load(kcache + t * kv_dim + kvh * DH + d).to(tl.float32)
-                sc = tl.sum(qv * kt, axis=0) * scale
-                mn = tl.maximum(m_i, sc)
+            toff = tl.arange(0, BLOCK_T)
+            t0 = lo
+            while t0 <= pos:
+                tt = t0 + toff
+                tmask = tt <= pos
+                kblk = tl.load(
+                    kcache + tt[:, None] * kv_dim + kvh * DH + d[None, :], mask=tmask[:, None], other=0.0
+                ).to(tl.float32)
+                sc = tl.sum(kblk * qv[None, :], axis=1) * scale  # [BLOCK_T]
+                sc = tl.where(tmask, sc, -1e30)
+                blk_max = tl.max(sc, axis=0)
+                mn = tl.maximum(m_i, blk_max)
                 al = tl.exp(m_i - mn)
-                p = tl.exp(sc - mn)
-                l_i = l_i * al + p
-                vt = tl.load(vcache + t * kv_dim + kvh * DH + d).to(tl.float32)
-                acc = acc * al + p * vt
+                p = tl.exp(sc - mn)  # [BLOCK_T]
+                l_i = l_i * al + tl.sum(p, axis=0)
+                vblk = tl.load(
+                    vcache + tt[:, None] * kv_dim + kvh * DH + d[None, :], mask=tmask[:, None], other=0.0
+                ).to(tl.float32)
+                acc = acc * al + tl.sum(p[:, None] * vblk, axis=0)
                 m_i = mn
-                t += 1
+                t0 += BLOCK_T
             sink = tl.load(sinks + hh).to(tl.float32)
             mn = tl.maximum(m_i, sink)
             al = tl.exp(m_i - mn)
@@ -1052,6 +1064,7 @@ class MegaModel:
             BLOCK_ND=16,
             BLOCK_KQ=1024,
             MTILE=16,
+            BLOCK_T=64,
             num_warps=4,
         )
         torch.cuda.synchronize()
