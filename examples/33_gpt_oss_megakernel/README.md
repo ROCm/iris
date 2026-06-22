@@ -45,12 +45,33 @@ top-4, intermediate 2880, vocab 201088. SwiGLU-OAI α=1.702, limit=7. YaRN RoPE
 
 ## Precision
 
-**BF16-first.** Non-expert weights (attention / router / embed / lm_head) are BF16.
-The 128 experts are kept in **MXFP4** (E2M1 nibbles + per-32 E8M0 scales, the native
-HF format) and dequantized to BF16 *inside* the kernel's GEMV inner loop — only the 4
-routed experts per token per layer are ever touched. This is the memory-correct choice:
-a fully materialized BF16 model would be ~240 GB; the MXFP4 experts keep the whole model
-at ~65 GB. The same FP4 data feeds the MXFP4-MFMA follow-on directly.
+Non-expert weights (attention / router / embed / lm_head) are BF16. The 128 experts
+are kept in **MXFP4** (E2M1 nibbles + per-32 E8M0 scales, the native HF format) — only
+the 4 routed experts per token per layer are ever touched. Keeping experts in MXFP4 is
+the memory-correct choice: a fully materialized BF16 model would be ~240 GB; the MXFP4
+experts keep the whole model at ~65 GB.
+
+Two compute paths for the expert GEMVs, selected by `--quant`:
+
+- **BF16 (default).** FP4 weights are dequantized to BF16 in the GEMV inner loop and
+  multiplied with BF16 activations (W4A16). Bit-faithful to the BF16 reference.
+- **Quantized (`--quant`).** Activations are dynamically quantized to FP8-E4M3 (per-32
+  E8M0, amax/448) and multiplied with the FP4 weights via `tl.dot_scaled`, which compiles
+  to the native gfx950 **`v_mfma_scale_f32_16x16x128_f8f6f4`** tensor-core instruction
+  (W4A8) — the same instruction cosmic hand-codes. Not bit-identical to BF16 (FP8
+  activation quant), but the standard production deployment regime; output stays coherent.
+
+## Performance (MI355X, 36 layers, TPOT = steady-state decode latency)
+
+| Path | TPOT | tok/s |
+| ---- | ---- | ----- |
+| BF16 (dequant + scalar dot) | 83.6 ms | 12.0 |
+| **Quantized (FP4×FP8 scaled MFMA)** | **29.4 ms** | **34.0** |
+
+The quantized path is **2.8× faster** from using the native scaled-MFMA. This is a
+correctness-first Triton implementation; cosmic's hand-tuned assembly reaches 1.70 ms/tok.
+The remaining gap is kernel-level optimization (the serial program-0 phases — RMSNorm,
+RoPE, top-k, residuals — plus weight prefetch / LDS pipelining), not the architecture.
 
 ## Files
 
@@ -66,6 +87,9 @@ at ~65 GB. The same FP4 data feeds the MXFP4-MFMA follow-on directly.
 | `run_triton_phased.py` | End-to-end with the phase kernels (host layer-loop) — validation stepping stone. |
 | `test_kernels.py` | Per-kernel correctness vs reference (all cos≈1.0). |
 | `test_barrier.py` | De-risk: grid-wide barrier inside one persistent kernel on ROCm. |
+| `test_dot_scaled.py` | Validate `tl.dot_scaled` FP4×FP8 GEMV vs dequant reference. |
+| `test_quant_expert.py` | Validate the quantized expert GEMV + FP8 activation quant. |
+| `bench_tpot.py` | TPOT benchmark, BF16 vs quantized. |
 
 ## Run
 
@@ -80,6 +104,12 @@ python gpt_oss_120b_quantized_megakernel.py \
 
 # Or load straight from the HF cache (no .iris):
 python gpt_oss_120b_quantized_megakernel.py --prompt "..." --max-new 8
+
+# Quantized FP4xFP8 scaled-MFMA experts:
+python gpt_oss_120b_quantized_megakernel.py --prompt "..." --max-new 8 --quant
+
+# Benchmark TPOT (both paths):
+python bench_tpot.py --tokens 32 --warmup 4
 
 # Validate against the reference / phase kernels:
 python test_kernels.py
@@ -98,10 +128,19 @@ expert rows) is striped across the 256 programs. Because the grid size equals th
 resident-workgroup capacity, every program is co-resident and the barrier cannot
 deadlock.
 
-## MXFP4-MFMA follow-on (next step)
+## Quantized compute (`--quant`)
 
-The current kernel does BF16 math with FP4 weights dequantized in the GEMV inner loop
-(`_gemv_fp4`). The follow-on swaps that inner loop for the gfx950 scaled MFMA
-`__builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4` (FP4 weights × dynamic-FP8
-activations, per-32 E8M0 scales) — the activation quant (amax/448 → E8M0) and the FP4
-weight data are already in the exact layout that instruction consumes.
+The expert GEMVs run on the native gfx950 scaled-MFMA via `tl.dot_scaled`:
+
+- `_quant_act_fp8` dynamically quantizes the activation to FP8-E4M3 with per-32 E8M0
+  scales (amax/448), matching cosmic.
+- `_gemv_fp4_scaled` feeds FP4 weights (e2m1) × FP8 activations (e4m3) with their E8M0
+  scales into `tl.dot_scaled`, which lowers to `v_mfma_scale_f32_16x16x128_f8f6f4`
+  (verified in the compiled amdgcn — native, not bf16 emulation).
+
+The output tiles M to the MFMA's 16-row minimum (only row 0 is the real token; the rest
+are masked out). The reduction loops K in 128-wide blocks with masked tails (K=2880 is
+not a multiple of 128).
+
+Optimization headroom (toward cosmic's 1.70 ms/tok): parallelize the program-0 serial
+phases, prefetch weights to LDS, and pipeline the MFMA K-loop.

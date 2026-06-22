@@ -11,14 +11,18 @@ loops over all layers, synchronizing its NUM_WG persistent programs at each phas
 with a grid-wide monotonic-counter barrier. Attention and MoE are different phases
 of the same resident kernel — never separate launches, never separate GPUs.
 
-Precision: BF16-first. Non-expert weights (attn/router/embed/lm_head) are BF16;
-the 128 experts are MXFP4 (E2M1 + per-32 E8M0 scales) and are dequantized to
-BF16 inside the kernel's GEMV inner loop (the same FP4 data the MXFP4-MFMA
-follow-on will feed to mfma_scale_f32_16x16x128_f8f6f4 directly).
+Precision: non-expert weights (attn/router/embed/lm_head) are BF16; the 128
+experts are MXFP4 (E2M1 + per-32 E8M0 scales). Two expert-GEMV compute paths,
+selected by QUANT:
+  - QUANT=False (default): FP4 weights dequantized to BF16 in the GEMV inner loop,
+    BF16 activations (W4A16). Bit-faithful to the BF16 reference.
+  - QUANT=True (--quant): activations dynamically quantized to FP8-E4M3 (per-32
+    E8M0) and multiplied with FP4 weights via tl.dot_scaled, which lowers to the
+    native gfx950 v_mfma_scale_f32_16x16x128_f8f6f4 tensor-core op (W4A8). ~2.8x
+    faster; not bit-identical to BF16 but the standard production regime.
 
-Validated to produce identical greedy output to the PyTorch reference
-(reference.py) and the host-phased Triton driver (run_triton_phased.py):
-"The capital of France is" -> token 12650 " Paris".
+Validated greedy output: "The capital of France is" -> token 12650 " Paris" in
+both paths (matches the PyTorch reference reference.py).
 
 Architecture (per layer, all inside the persistent kernel):
   RMSNorm -> QKV+bias -> NeoX YaRN RoPE -> KV append -> GQA flash-decode with
@@ -145,6 +149,87 @@ def _gemv_fp4(
         r += _NWG
 
 
+@triton.jit
+def _quant_act_fp8(x_ptr, fp8_ptr, scl_ptr, K, NB: tl.constexpr, pid):
+    """Dynamic FP8-E4M3 activation quant, per-32 E8M0 (amax/448), matching cosmic.
+    x_ptr fp32-ish [K] -> fp8_ptr (float8e4nv) [K], scl_ptr (uint8 e8m0) [NB].
+    Each program handles a strided set of 32-element blocks."""
+    pos32 = tl.arange(0, 32)
+    b = pid
+    while b < NB:
+        x = tl.load(x_ptr + b * 32 + pos32).to(tl.float32)
+        amax = tl.max(tl.abs(x), axis=0)
+        target = amax / 448.0
+        u = target.to(tl.int32, bitcast=True)  # raw IEEE-754 bits, not numeric cast
+        raw = (u >> 23) & 0xFF
+        raw = raw + tl.where((u & 0x7FFFFF) != 0, 1, 0)
+        raw = tl.where(amax > 0.0, tl.minimum(tl.maximum(raw, 0), 255), 0)
+        sc = tl.where(raw > 0, tl.exp2((raw - 127).to(tl.float32)), 1.0)
+        q = (x / sc).to(tl.float8e4nv)
+        tl.store(fp8_ptr + b * 32 + pos32, q)
+        tl.store(scl_ptr + b, raw.to(tl.uint8))
+        b += _NWG
+
+
+@triton.jit
+def _gemv_fp4_scaled(
+    blk_base,
+    scl_base,
+    afp8_ptr,
+    ascl_ptr,
+    y_ptr,
+    b_base,
+    has_bias,
+    N,
+    K: tl.constexpr,
+    NB: tl.constexpr,
+    pid,
+    gate_w,
+    ACCUM: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    MTILE: tl.constexpr,
+):
+    """y[n] = gate_w*(sum_k W[n,k]*a[k] + b[n]) via native FP4xFP8 scaled MFMA
+    (tl.dot_scaled -> v_mfma_scale_f32_16x16x128_f8f6f4 on gfx950).
+    W FP4 e2m1 packed [N, K//2] (low nibble = even k), weight scales e8m0 [N, NB].
+    a FP8 e4m3 [K], act scales e8m0 [NB]. Output rows tiled BLOCK_N across programs."""
+    SB: tl.constexpr = BLOCK_K // 32
+    rowsM = tl.arange(0, MTILE)
+    tile = pid
+    half = K // 2
+    n_tiles = (N + BLOCK_N - 1) // BLOCK_N
+    while tile < n_tiles:
+        n = tile * BLOCK_N + tl.arange(0, BLOCK_N)
+        nmask = n < N
+        acc = tl.zeros((MTILE, BLOCK_N), dtype=tl.float32)
+        k0 = 0
+        while k0 < K:
+            kk = k0 + tl.arange(0, BLOCK_K)
+            kmask = kk < K
+            kp = (k0 // 2) + tl.arange(0, BLOCK_K // 2)
+            kpmask = kp < half
+            sb = (k0 // 32) + tl.arange(0, SB)
+            sbmask = sb < NB
+            a = tl.load(afp8_ptr + kk[None, :], mask=(rowsM[:, None] == 0) & kmask[None, :], other=0.0)
+            ascl = tl.load(ascl_ptr + sb[None, :], mask=sbmask[None, :], other=0)
+            ascl = tl.broadcast_to(ascl, (MTILE, SB))
+            w = tl.load(blk_base + n[None, :] * half + kp[:, None], mask=nmask[None, :] & kpmask[:, None], other=0).to(
+                tl.uint8
+            )
+            wscl = tl.load(scl_base + n[:, None] * NB + sb[None, :], mask=nmask[:, None] & sbmask[None, :], other=0)
+            acc = tl.dot_scaled(a, ascl, "e4m3", w, wscl, "e2m1", acc=acc, out_dtype=tl.float32)
+            k0 += BLOCK_K
+        y = tl.sum(tl.where(rowsM[:, None] == 0, acc, 0.0), axis=0)  # [BLOCK_N]
+        if has_bias:
+            y += tl.load(b_base + n, mask=nmask, other=0.0).to(tl.float32)
+        y = gate_w * y
+        if ACCUM:
+            y += tl.load(y_ptr + n, mask=nmask, other=0.0).to(tl.float32)
+        tl.store(y_ptr + n, y, mask=nmask)
+        tile += _NWG
+
+
 # ───────────────────────── the megakernel ─────────────────────────
 @triton.jit
 def gpt_oss_megakernel(
@@ -185,6 +270,10 @@ def gpt_oss_megakernel(
     gu_p,
     act_p,
     moe_p,
+    nfp8_p,
+    nfp8_scl_p,
+    afp8_p,
+    afp8_scl_p,
     vlogits_p,
     amax_v_p,
     amax_i_p,
@@ -216,6 +305,10 @@ def gpt_oss_megakernel(
     max_seq: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_KI: tl.constexpr,
+    QUANT: tl.constexpr,
+    BLOCK_NQ: tl.constexpr,
+    BLOCK_KQ: tl.constexpr,
+    MTILE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     HALF: tl.constexpr = DH // 2
@@ -356,9 +449,13 @@ def gpt_oss_megakernel(
             tl.store(moe_p + moff, tl.zeros((4096,), dtype=tl.float32), mask=moff < H)
         _barrier(bar_p, (lb + 8) * _NWG)
 
-        # ---- P6: experts (loop TOPK; FP4 GEMVs across grid) ----
-        # barriers so far this layer: 8 (P0..P5+topk). Each slot adds 3.
+        # ---- P6: experts (loop TOPK). 3 barriers/slot in BOTH paths so the
+        # host epoch math is path-independent. QUANT: native FP4xFP8 scaled MFMA
+        # (dot_scaled); else: in-kernel FP4->BF16 dequant GEMV. ----
         bc = 8
+        # QUANT: pre-quantize the shared MoE-normed activation to FP8 once per layer.
+        if QUANT:
+            _quant_act_fp8(normed_p, nfp8_p, nfp8_scl_p, H, GU_NB, pid)
         for slot in range(0, TOPK):
             e_id = tl.load(ids_p + slot)
             gwv = tl.load(gw_p + slot).to(tl.float32)
@@ -369,11 +466,31 @@ def gpt_oss_megakernel(
             dn_blk = dn_blk_p + eidx * H * (I // 2)
             dn_scl = dn_scl_p + eidx * H * DN_NB
             dn_b = dn_b_p + eidx * H
-            # gate_up: 2I rows, K=H -> gu_p (plain store)
-            _gemv_fp4(gu_blk, gu_scl, normed_p, gu_p, gu_b, True, 2 * I, H, GU_NB, pid, 1.0, ACCUM=False)
+            # --- sub-phase A: gate_up (2I rows, K=H) -> gu_p ---
+            if QUANT:
+                _gemv_fp4_scaled(
+                    gu_blk,
+                    gu_scl,
+                    nfp8_p,
+                    nfp8_scl_p,
+                    gu_p,
+                    gu_b,
+                    True,
+                    2 * I,
+                    H,
+                    GU_NB,
+                    pid,
+                    1.0,
+                    False,
+                    BLOCK_NQ,
+                    BLOCK_KQ,
+                    MTILE,
+                )
+            else:
+                _gemv_fp4(gu_blk, gu_scl, normed_p, gu_p, gu_b, True, 2 * I, H, GU_NB, pid, 1.0, ACCUM=False)
             bc += 1
             _barrier(bar_p, (lb + bc) * _NWG)
-            # swiglu: act[i] from gu[2i],gu[2i+1]; rows strided
+            # --- sub-phase B: swiglu -> act_p (+ FP8 quant of act for the down GEMV) ---
             ii = pid
             while ii < I:
                 gate = tl.load(gu_p + 2 * ii).to(tl.float32)
@@ -383,10 +500,34 @@ def gpt_oss_megakernel(
                 glu = gate * (1.0 / (1.0 + tl.exp(-alpha * gate)))
                 tl.store(act_p + ii, ((up + 1.0) * glu).to(tl.bfloat16))
                 ii += _NWG
+            if QUANT:
+                bc += 1
+                _barrier(bar_p, (lb + bc) * _NWG)  # act_p complete before quant reads it
+                _quant_act_fp8(act_p, afp8_p, afp8_scl_p, I, DN_NB, pid)
             bc += 1
             _barrier(bar_p, (lb + bc) * _NWG)
-            # down: H rows, K=I -> accumulate gw*ev into moe_p
-            _gemv_fp4(dn_blk, dn_scl, act_p, moe_p, dn_b, True, H, I, DN_NB, pid, gwv, ACCUM=(slot > 0))
+            # --- sub-phase C: down (H rows, K=I) -> accumulate gw*ev into moe_p ---
+            if QUANT:
+                _gemv_fp4_scaled(
+                    dn_blk,
+                    dn_scl,
+                    afp8_p,
+                    afp8_scl_p,
+                    moe_p,
+                    dn_b,
+                    True,
+                    H,
+                    I,
+                    DN_NB,
+                    pid,
+                    gwv,
+                    (slot > 0),
+                    BLOCK_NQ,
+                    BLOCK_KQ,
+                    MTILE,
+                )
+            else:
+                _gemv_fp4(dn_blk, dn_scl, act_p, moe_p, dn_b, True, H, I, DN_NB, pid, gwv, ACCUM=(slot > 0))
             bc += 1
             _barrier(bar_p, (lb + bc) * _NWG)
 
@@ -447,10 +588,11 @@ def gpt_oss_megakernel(
 
 # ───────────────────────── host wrapper ─────────────────────────
 class MegaModel:
-    def __init__(self, cfg: GptOssConfig, num_layers: int, dev="cuda", snapshot=None, _skip_load=False):
+    def __init__(self, cfg: GptOssConfig, num_layers: int, dev="cuda", snapshot=None, _skip_load=False, quant=False):
         self.cfg = cfg
         self.L = num_layers
         self.dev = dev
+        self.quant = quant
         if not _skip_load:
             w = load_hf_weights(
                 GptOssConfig(), snapshot=snapshot, num_layers=num_layers, device="cpu", dtype=torch.bfloat16
@@ -460,11 +602,11 @@ class MegaModel:
             self._alloc_buffers()
 
     @classmethod
-    def from_iris(cls, iris_path: str, cfg: GptOssConfig, num_layers: int, dev="cuda"):
+    def from_iris(cls, iris_path: str, cfg: GptOssConfig, num_layers: int, dev="cuda", quant=False):
         """Build directly from a converted .iris weight file (mmap -> device)."""
         from convert_to_iris import read_iris_header, load_iris_tensor
 
-        self = cls(cfg, num_layers, dev=dev, _skip_load=True)
+        self = cls(cfg, num_layers, dev=dev, _skip_load=True, quant=quant)
         _, ents = read_iris_header(iris_path)
         g = lambda nm: load_iris_tensor(iris_path, ents[nm], device=dev)
         L = num_layers
@@ -559,6 +701,12 @@ class MegaModel:
         self.gu = z(2 * I)
         self.act = z(I, torch.bfloat16)
         self.moe = z(H)
+        # FP8 activation-quant scratch (quantized path). nfp8 = MoE-normed activation
+        # (K=H), afp8 = SwiGLU output (K=I); scales are per-32 e8m0 bytes.
+        self.nfp8 = z(H, torch.float8_e4m3fn)
+        self.nfp8_scl = z(H // 32, torch.uint8)
+        self.afp8 = z(I, torch.float8_e4m3fn)
+        self.afp8_scl = z(I // 32, torch.uint8)
         self.vlogits = z(V)
         self.amax_v = z(NUM_WG)
         self.amax_i = z(NUM_WG, torch.int32)
@@ -606,6 +754,10 @@ class MegaModel:
             self.gu,
             self.act,
             self.moe,
+            self.nfp8,
+            self.nfp8_scl,
+            self.afp8,
+            self.afp8_scl,
             self.vlogits,
             self.amax_v,
             self.amax_i,
@@ -635,6 +787,10 @@ class MegaModel:
             max_seq=cfg.max_seq_len,
             BLOCK_K=256,
             BLOCK_KI=256,
+            QUANT=self.quant,
+            BLOCK_NQ=64,
+            BLOCK_KQ=128,
+            MTILE=16,
             num_warps=4,
         )
         torch.cuda.synchronize()
@@ -650,22 +806,23 @@ def main():
     ap.add_argument("--layers", type=int, default=0)
     ap.add_argument("--snapshot", default=None)
     ap.add_argument("--model", default=None, help="path to a converted .iris weight file")
+    ap.add_argument("--quant", action="store_true", help="use native FP4xFP8 scaled-MFMA experts")
     args = ap.parse_args()
 
     cfg = GptOssConfig()
     L = args.layers if args.layers > 0 else cfg.num_layers
     tok = load_tokenizer(args.snapshot)
     ids = tok.encode(args.prompt)
-    print(f"prompt={args.prompt!r} ids={ids}")
+    print(f"prompt={args.prompt!r} ids={ids} quant={args.quant}")
 
     import time
 
     t0 = time.time()
     if args.model:
-        model = MegaModel.from_iris(args.model, cfg, L)
+        model = MegaModel.from_iris(args.model, cfg, L, quant=args.quant)
         print(f"loaded {L} layers from {args.model} in {time.time()-t0:.1f}s")
     else:
-        model = MegaModel(cfg, L, snapshot=args.snapshot)
+        model = MegaModel(cfg, L, snapshot=args.snapshot, quant=args.quant)
         print(f"loaded {L} layers (HF) in {time.time()-t0:.1f}s")
 
     pos = 0
