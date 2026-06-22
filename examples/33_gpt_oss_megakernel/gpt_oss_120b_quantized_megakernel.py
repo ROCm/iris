@@ -510,6 +510,7 @@ def gpt_oss_megakernel(
     NORMK: tl.constexpr,
     QUANT: tl.constexpr,
     BLOCK_NQ: tl.constexpr,
+    BLOCK_ND: tl.constexpr,
     BLOCK_KQ: tl.constexpr,
     MTILE: tl.constexpr,
 ):
@@ -753,7 +754,7 @@ def gpt_oss_megakernel(
                     pid,
                     gwv,
                     (slot > 0),
-                    BLOCK_NQ,
+                    BLOCK_ND,
                     BLOCK_KQ,
                     MTILE,
                 )
@@ -1048,6 +1049,7 @@ class MegaModel:
             NORMK=triton.next_power_of_2(cfg.hidden_dim),
             QUANT=self.quant,
             BLOCK_NQ=32,
+            BLOCK_ND=16,
             BLOCK_KQ=1024,
             MTILE=16,
             num_warps=4,
