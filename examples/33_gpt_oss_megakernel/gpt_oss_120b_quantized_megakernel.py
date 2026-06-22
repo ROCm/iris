@@ -30,6 +30,14 @@ Architecture (per layer, all inside the persistent kernel):
   + residual -> RMSNorm -> router top-4 (softmax-after-topk) -> 4x SwiGLU-OAI
   experts (FP4 weights) -> gate-weighted sum + residual.
 Then: final RMSNorm -> lm_head -> argmax.
+
+Performance notes:
+  - GEMVs use block-of-rows tiling (2D [BLOCK_M, BLOCK_K] weight loads) with
+    max_contiguous/multiple_of hints so the compiler emits wide (dwordx4) loads.
+  - The attention RMSNorm is fused into the QKV GEMV and the MoE RMSNorm into the
+    router GEMV (each program recomputes the tiny rms scalar from x, barrier-free).
+    RoPE is folded into attention. These remove the serial pid0 phases + their grid
+    barriers. Residual/zeroing are striped across all programs, not pid0-serial.
 """
 
 from __future__ import annotations
@@ -80,8 +88,122 @@ def _fp4_lut(mag_idx):
 
 
 @triton.jit
+def _gemv_bf16_tiled(
+    w_base, x_ptr, y_ptr, has_bias, b_base, M, K: tl.constexpr, pid, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr
+):
+    """y[r] = sum_k w[r,k]*x[k] (+b[r]) for a batch-1 GEMV.
+
+    Each program owns a tile of BLOCK_M contiguous output rows and walks K in
+    BLOCK_K-wide steps, loading a 2D [BLOCK_M, BLOCK_K] weight tile so the inner
+    (contiguous-K) dimension vectorizes to dwordx4. max_contiguous/multiple_of tell
+    the compiler the K index is contiguous and aligned, enabling wide loads. Tiles
+    are strided across the grid by num programs."""
+    npid = tl.num_programs(0)
+    mo = tl.arange(0, BLOCK_M)
+    ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
+    n_tiles = (M + BLOCK_M - 1) // BLOCK_M
+    tile = pid
+    while tile < n_tiles:
+        rows = tile * BLOCK_M + mo
+        rmask = rows < M
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        k0 = 0
+        while k0 < K:
+            kk = k0 + ko
+            kmask = kk < K
+            w = tl.load(w_base + rows[:, None] * K + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0).to(
+                tl.float32
+            )
+            x = tl.load(x_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
+            acc += w * x[None, :]
+            k0 += BLOCK_K
+        s = tl.sum(acc, axis=1)  # [BLOCK_M]
+        if has_bias:
+            s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        tl.store(y_ptr + rows, s, mask=rmask)
+        tile += npid
+
+
+@triton.jit
+def _store_rmsnorm(x_ptr, g_ptr, out_ptr, H: tl.constexpr, pid, eps, BLOCK_M: tl.constexpr, NORMK: tl.constexpr):
+    """Materialize normed = rmsnorm(x)*g into out_ptr (bf16), striped across WGs.
+    Each program computes the rms scalar from the full x (cheap), then writes its
+    row slices. Replaces the pid0-serial RMSNorm; needs a barrier after (callers add)."""
+    noff = tl.arange(0, NORMK)
+    nmask = noff < H
+    xall = tl.load(x_ptr + noff, mask=nmask, other=0.0).to(tl.float32)
+    ss = tl.sum(xall * xall, axis=0)
+    rms = 1.0 / tl.sqrt(ss / H + eps)
+    base = pid * BLOCK_M
+    step = tl.num_programs(0) * BLOCK_M
+    while base < H:
+        off = base + tl.arange(0, BLOCK_M)
+        m = off < H
+        xv = tl.load(x_ptr + off, mask=m, other=0.0).to(tl.float32)
+        g = tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32)
+        tl.store(out_ptr + off, (xv * rms * g).to(tl.bfloat16), mask=m)
+        base += step
+
+
+@triton.jit
+def _gemv_bf16_rmsnorm(
+    w_base,
+    x_ptr,
+    g_ptr,
+    y_ptr,
+    has_bias,
+    b_base,
+    M,
+    H: tl.constexpr,
+    pid,
+    eps,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    NORMK: tl.constexpr,
+):
+    """Fused RMSNorm + GEMV: y[r] = sum_k (rmsnorm(x)*g)[k] * w[r,k] (+b[r]).
+
+    Each program computes the RMSNorm scale from x_ptr once (redundant across WGs,
+    but cheap and barrier-free: x is stable since the previous barrier), then runs
+    the tiled GEMV applying norm*gamma inline. Removes the separate pid0 RMSNorm
+    phase AND its grid barrier. NORMK = round_up_pow2(H)."""
+    noff = tl.arange(0, NORMK)
+    nmask = noff < H
+    xall = tl.load(x_ptr + noff, mask=nmask, other=0.0).to(tl.float32)
+    ss = tl.sum(xall * xall, axis=0)
+    rms = 1.0 / tl.sqrt(ss / H + eps)
+    npid = tl.num_programs(0)
+    mo = tl.arange(0, BLOCK_M)
+    ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
+    n_tiles = (M + BLOCK_M - 1) // BLOCK_M
+    tile = pid
+    while tile < n_tiles:
+        rows = tile * BLOCK_M + mo
+        rmask = rows < M
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        k0 = 0
+        while k0 < H:
+            kk = k0 + ko
+            kmask = kk < H
+            xk = tl.load(x_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
+            gk = tl.load(g_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
+            nk = xk * rms * gk  # normed activation chunk
+            w = tl.load(w_base + rows[:, None] * H + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0).to(
+                tl.float32
+            )
+            acc += w * nk[None, :]
+            k0 += BLOCK_K
+        s = tl.sum(acc, axis=1)
+        if has_bias:
+            s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        tl.store(y_ptr + rows, s, mask=rmask)
+        tile += npid
+
+
+@triton.jit
 def _gemv_bf16(w_base, x_ptr, y_ptr, has_bias, b_base, M, K: tl.constexpr, pid, BLOCK_K: tl.constexpr):
-    """y[r] = sum_k w[r,k]*x[k] (+b[r]); rows strided across programs by pid."""
+    """y[r] = sum_k w[r,k]*x[k] (+b[r]); rows strided across programs by pid. Legacy
+    scalar path kept for reference/fallback; _gemv_bf16_tiled is the fast one."""
     koff = tl.arange(0, BLOCK_K)
     r = pid
     while r < M:
@@ -305,6 +427,8 @@ def gpt_oss_megakernel(
     max_seq: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_KI: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    NORMK: tl.constexpr,
     QUANT: tl.constexpr,
     BLOCK_NQ: tl.constexpr,
     BLOCK_KQ: tl.constexpr,
@@ -335,51 +459,46 @@ def gpt_oss_megakernel(
         kcache = kcache_p + layer * max_seq * kv_dim
         vcache = vcache_p + layer * max_seq * kv_dim
 
-        # ---- P0: RMSNorm(attn) -> normed (program 0) ----
-        if pid == 0:
-            off = tl.arange(0, 4096)
-            m = off < H
-            xv = tl.load(x_p + off, mask=m, other=0.0).to(tl.float32)
-            ss = tl.sum(xv * xv, axis=0)
-            rms = 1.0 / tl.sqrt(ss / H + eps)
-            g = tl.load(na + off, mask=m, other=0.0).to(tl.float32)
-            tl.store(normed_p + off, (xv * rms * g).to(tl.bfloat16), mask=m)
+        # ---- P0+P1 FUSED: RMSNorm(attn) folded into QKV GEMV (no separate norm
+        # phase / barrier). Each WG recomputes the norm scale from x_p (stable since
+        # the prev-layer barrier) and applies it inline. ----
+        _gemv_bf16_rmsnorm(wq, x_p, na, q_p, True, bq, q_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+        _gemv_bf16_rmsnorm(wk, x_p, na, k_p, True, bk, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+        _gemv_bf16_rmsnorm(wv, x_p, na, v_p, True, bv, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
         _barrier(bar_p, (lb + 1) * _NWG)
-        lb_inc = 1
 
-        # ---- P1: QKV ----
-        _gemv_bf16(wq, normed_p, q_p, True, bq, q_dim, H, pid, BLOCK_K)
-        _gemv_bf16(wk, normed_p, k_p, True, bk, kv_dim, H, pid, BLOCK_K)
-        _gemv_bf16(wv, normed_p, v_p, True, bv, kv_dim, H, pid, BLOCK_K)
-        _barrier(bar_p, (lb + 2) * _NWG)
-
-        # ---- P2: RoPE q,k + KV append (program 0) ----
-        if pid == 0:
+        # ---- P2+P3 FUSED: RoPE folded into attention. KV-cache append done by the
+        # KV-head owners (pid < NKV); each attention head RoPEs its own q in-register.
+        # No separate RoPE phase / barrier. ----
+        if pid < NKV:
+            # this program owns kv-head `pid`: RoPE k + append k,v to cache at pos
             h = tl.arange(0, HALF)
             cosv = tl.load(cos_p + h).to(tl.float32)
             sinv = tl.load(sin_p + h).to(tl.float32)
-            for hd in range(0, NH):
-                bidx = hd * DH
-                x1 = tl.load(q_p + bidx + h).to(tl.float32)
-                x2 = tl.load(q_p + bidx + HALF + h).to(tl.float32)
-                tl.store(q_p + bidx + h, x1 * cosv - x2 * sinv)
-                tl.store(q_p + bidx + HALF + h, x2 * cosv + x1 * sinv)
-            for hd in range(0, NKV):
-                bidx = hd * DH
-                x1 = tl.load(k_p + bidx + h).to(tl.float32)
-                x2 = tl.load(k_p + bidx + HALF + h).to(tl.float32)
-                tl.store(kcache + pos * kv_dim + bidx + h, x1 * cosv - x2 * sinv)
-                tl.store(kcache + pos * kv_dim + bidx + HALF + h, x2 * cosv + x1 * sinv)
-            vo = tl.arange(0, kv_dim)
-            tl.store(vcache + pos * kv_dim + vo, tl.load(v_p + vo).to(tl.float32))
-        _barrier(bar_p, (lb + 3) * _NWG)
+            bidx = pid * DH
+            k1 = tl.load(k_p + bidx + h).to(tl.float32)
+            k2 = tl.load(k_p + bidx + HALF + h).to(tl.float32)
+            tl.store(kcache + pos * kv_dim + bidx + h, k1 * cosv - k2 * sinv)
+            tl.store(kcache + pos * kv_dim + bidx + HALF + h, k2 * cosv + k1 * sinv)
+            vd = tl.arange(0, DH)
+            tl.store(vcache + pos * kv_dim + bidx + vd, tl.load(v_p + bidx + vd).to(tl.float32))
+        _barrier(bar_p, (lb + 2) * _NWG)
 
         # ---- P3: attention (one head per program, heads 0..NH-1) ----
         if pid < NH:
             hh = pid
             kvh = hh // GROUP
             d = tl.arange(0, DH)
-            qv = tl.load(q_p + hh * DH + d).to(tl.float32)
+            # RoPE this head's q in-register (NeoX half-split), full-width form:
+            #   d <  HALF: qr[d] = q[d]*cos[d]      - q[d+HALF]*sin[d]
+            #   d >= HALF: qr[d] = q[d]*cos[d-HALF] + q[d-HALF]*sin[d-HALF]
+            dlo = d % HALF  # angle index for both halves
+            cosd = tl.load(cos_p + dlo).to(tl.float32)
+            sind = tl.load(sin_p + dlo).to(tl.float32)
+            q_self = tl.load(q_p + hh * DH + d).to(tl.float32)
+            partner = tl.where(d < HALF, d + HALF, d - HALF)
+            q_part = tl.load(q_p + hh * DH + partner).to(tl.float32)
+            qv = tl.where(d < HALF, q_self * cosd - q_part * sind, q_self * cosd + q_part * sind)
             lo = 0
             if SLIDING > 0:
                 lo = tl.maximum(0, pos - SLIDING + 1)
@@ -404,29 +523,31 @@ def gpt_oss_megakernel(
             l_i = l_i * al + tl.exp(sink - mn)
             acc = acc * al / l_i
             tl.store(attn_p + hh * DH + d, acc.to(tl.bfloat16))
-        _barrier(bar_p, (lb + 4) * _NWG)
+        bc = 2  # barriers used so far this layer: QKV(1), KV-append(2)
+        bc += 1
+        _barrier(bar_p, (lb + bc) * _NWG)
 
-        # ---- P4: O-proj + residual (write into x_p), via moe_p as temp ----
-        _gemv_bf16(wo, attn_p, moe_p, True, bo, H, q_dim, pid, BLOCK_K)
-        _barrier(bar_p, (lb + 5) * _NWG)
-        # add residual: x += o  (program 0 over H)
-        if pid == 0:
-            off = tl.arange(0, 4096)
-            m = off < H
-            xv = tl.load(x_p + off, mask=m, other=0.0).to(tl.float32)
-            ov = tl.load(moe_p + off, mask=m, other=0.0).to(tl.float32)
-            tl.store(x_p + off, xv + ov, mask=m)
-            # RMSNorm(moe)
-            xv = xv + ov
-            ss = tl.sum(xv * xv, axis=0)
-            rms = 1.0 / tl.sqrt(ss / H + eps)
-            g = tl.load(nm + off, mask=m, other=0.0).to(tl.float32)
-            tl.store(normed_p + off, (xv * rms * g).to(tl.bfloat16), mask=m)
-        _barrier(bar_p, (lb + 6) * _NWG)
+        # ---- P4: O-proj (striped) -> moe_p, then striped residual into x_p ----
+        _gemv_bf16_tiled(wo, attn_p, moe_p, True, bo, H, q_dim, pid, BLOCK_M, BLOCK_K)
+        bc += 1
+        _barrier(bar_p, (lb + bc) * _NWG)
+        # residual x += o, striped across all WGs (no pid0 serial bottleneck)
+        rstep = _NWG * BLOCK_M
+        base_r = pid * BLOCK_M
+        while base_r < H:
+            roff = base_r + tl.arange(0, BLOCK_M)
+            rm = roff < H
+            xo = tl.load(x_p + roff, mask=rm, other=0.0).to(tl.float32)
+            oo = tl.load(moe_p + roff, mask=rm, other=0.0).to(tl.float32)
+            tl.store(x_p + roff, xo + oo, mask=rm)
+            base_r += rstep
+        bc += 1
+        _barrier(bar_p, (lb + bc) * _NWG)
 
-        # ---- P5: router GEMV + top-4 softmax (program 0) ----
-        _gemv_bf16(rw, normed_p, logits_p, True, rb, E, H, pid, BLOCK_K)
-        _barrier(bar_p, (lb + 7) * _NWG)
+        # ---- P5: router GEMV with FUSED MoE-RMSNorm (no separate norm phase) ----
+        _gemv_bf16_rmsnorm(rw, x_p, nm, logits_p, True, rb, E, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+        bc += 1
+        _barrier(bar_p, (lb + bc) * _NWG)
         if pid == 0:
             eoff = tl.arange(0, E)
             work = tl.load(logits_p + eoff).to(tl.float32)
@@ -444,15 +565,20 @@ def gpt_oss_megakernel(
             ex = tl.exp(tv - tmax)
             sm = tl.sum(ex, axis=0)
             tl.store(gw_p + tl.arange(0, TOPK), ex / sm)
-            # zero moe accumulator
-            moff = tl.arange(0, 4096)
-            tl.store(moe_p + moff, tl.zeros((4096,), dtype=tl.float32), mask=moff < H)
-        _barrier(bar_p, (lb + 8) * _NWG)
+        # zero moe accumulator, striped across all WGs
+        base_z = pid * BLOCK_M
+        while base_z < H:
+            zoff = base_z + tl.arange(0, BLOCK_M)
+            tl.store(moe_p + zoff, tl.zeros((BLOCK_M,), dtype=tl.float32), mask=zoff < H)
+            base_z += rstep
+        # MoE-normed activation needed by ALL experts: materialize striped into
+        # normed_p (each WG computes the rms scalar from x_p, stores its row slice).
+        _store_rmsnorm(x_p, nm, normed_p, H, pid, eps, BLOCK_M, NORMK)
+        bc += 1
+        _barrier(bar_p, (lb + bc) * _NWG)
 
-        # ---- P6: experts (loop TOPK). 3 barriers/slot in BOTH paths so the
-        # host epoch math is path-independent. QUANT: native FP4xFP8 scaled MFMA
+        # ---- P6: experts (loop TOPK). QUANT: native FP4xFP8 scaled MFMA
         # (dot_scaled); else: in-kernel FP4->BF16 dequant GEMV. ----
-        bc = 8
         # QUANT: pre-quantize the shared MoE-normed activation to FP8 once per layer.
         if QUANT:
             _quant_act_fp8(normed_p, nfp8_p, nfp8_scl_p, H, GU_NB, pid)
@@ -555,7 +681,7 @@ def gpt_oss_megakernel(
     _barrier(bar_p, base * _NWG)
 
     # lm_head GEMV: V rows -> vlogits ; then per-prog argmax slice
-    _gemv_bf16(lm_head_p, normed_p, vlogits_p, False, lm_head_p, V, H, pid, BLOCK_K)
+    _gemv_bf16_tiled(lm_head_p, normed_p, vlogits_p, False, lm_head_p, V, H, pid, BLOCK_M, BLOCK_K)
     base = base + 1
     _barrier(bar_p, base * _NWG)
 
@@ -785,8 +911,10 @@ class MegaModel:
             GU_NB=self.gu_nb,
             DN_NB=self.dn_nb,
             max_seq=cfg.max_seq_len,
-            BLOCK_K=256,
+            BLOCK_K=512,
             BLOCK_KI=256,
+            BLOCK_M=8,
+            NORMK=triton.next_power_of_2(cfg.hidden_dim),
             QUANT=self.quant,
             BLOCK_NQ=64,
             BLOCK_KQ=128,
