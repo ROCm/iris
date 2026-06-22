@@ -304,34 +304,39 @@ def _gemv_fp4_scaled(
     """y[n] = gate_w*(sum_k W[n,k]*a[k] + b[n]) via native FP4xFP8 scaled MFMA
     (tl.dot_scaled -> v_mfma_scale_f32_16x16x128_f8f6f4 on gfx950).
     W FP4 e2m1 packed [N, K//2] (low nibble = even k), weight scales e8m0 [N, NB].
-    a FP8 e4m3 [K], act scales e8m0 [NB]. Output rows tiled BLOCK_N across programs."""
+    a FP8 e4m3 [K], act scales e8m0 [NB]. Output rows tiled BLOCK_N across programs.
+
+    The weight is the dot_scaled lhs ([BLOCK_N, K]) so its contiguous-K bytes
+    coalesce into wide loads; the single-token activation is the broadcast rhs
+    ([K, MTILE], only column 0 is real)."""
     SB: tl.constexpr = BLOCK_K // 32
-    rowsM = tl.arange(0, MTILE)
+    colsN = tl.arange(0, MTILE)
     tile = pid
     half = K // 2
     n_tiles = (N + BLOCK_N - 1) // BLOCK_N
     while tile < n_tiles:
         n = tile * BLOCK_N + tl.arange(0, BLOCK_N)
         nmask = n < N
-        acc = tl.zeros((MTILE, BLOCK_N), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_N, MTILE), dtype=tl.float32)
         k0 = 0
         while k0 < K:
             kk = k0 + tl.arange(0, BLOCK_K)
-            kmask = kk < K
             kp = (k0 // 2) + tl.arange(0, BLOCK_K // 2)
             kpmask = kp < half
             sb = (k0 // 32) + tl.arange(0, SB)
             sbmask = sb < NB
-            a = tl.load(afp8_ptr + kk[None, :], mask=(rowsM[:, None] == 0) & kmask[None, :], other=0.0)
-            ascl = tl.load(ascl_ptr + sb[None, :], mask=sbmask[None, :], other=0)
-            ascl = tl.broadcast_to(ascl, (MTILE, SB))
-            w = tl.load(blk_base + n[None, :] * half + kp[:, None], mask=nmask[None, :] & kpmask[:, None], other=0).to(
+            # lhs = weight [BLOCK_N, BLOCK_K] e2m1 (packed K, contiguous -> coalesced)
+            w = tl.load(blk_base + n[:, None] * half + kp[None, :], mask=nmask[:, None] & kpmask[None, :], other=0).to(
                 tl.uint8
             )
             wscl = tl.load(scl_base + n[:, None] * NB + sb[None, :], mask=nmask[:, None] & sbmask[None, :], other=0)
-            acc = tl.dot_scaled(a, ascl, "e4m3", w, wscl, "e2m1", acc=acc, out_dtype=tl.float32)
+            # rhs = activation [BLOCK_K, MTILE] e4m3, only column 0 carries the token
+            a = tl.load(afp8_ptr + kk[:, None], mask=(colsN[None, :] == 0) & (kk[:, None] < K), other=0.0)
+            ascl = tl.load(ascl_ptr + sb[None, :], mask=sbmask[None, :], other=0)
+            ascl = tl.broadcast_to(ascl, (MTILE, SB))
+            acc = tl.dot_scaled(w, wscl, "e2m1", a, ascl, "e4m3", acc=acc, out_dtype=tl.float32)
             k0 += BLOCK_K
-        y = tl.sum(tl.where(rowsM[:, None] == 0, acc, 0.0), axis=0)  # [BLOCK_N]
+        y = tl.sum(tl.where(colsN[None, :] == 0, acc, 0.0), axis=1)  # [BLOCK_N]
         if has_bias:
             y += tl.load(b_base + n, mask=nmask, other=0.0).to(tl.float32)
         y = gate_w * y
@@ -944,8 +949,8 @@ class MegaModel:
             BLOCK_M=8,
             NORMK=triton.next_power_of_2(cfg.hidden_dim),
             QUANT=self.quant,
-            BLOCK_NQ=64,
-            BLOCK_KQ=128,
+            BLOCK_NQ=32,
+            BLOCK_KQ=512,
             MTILE=16,
             num_warps=4,
         )
