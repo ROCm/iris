@@ -1,0 +1,686 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+"""
+GPT-OSS 120B quantized megakernel — a SINGLE persistent Triton kernel that runs
+BOTH attention AND mixture-of-experts for ALL 36 layers of GPT-OSS-120B on ONE
+GPU, for the batch-1 (decode) GEMV case.
+
+This collapses ROCm/cosmic's multi-GPU assembly design (1 GPU attention + 4 GPUs
+MoE) into one Triton kernel. The kernel is launched once per token; internally it
+loops over all layers, synchronizing its NUM_WG persistent programs at each phase
+with a grid-wide monotonic-counter barrier. Attention and MoE are different phases
+of the same resident kernel — never separate launches, never separate GPUs.
+
+Precision: BF16-first. Non-expert weights (attn/router/embed/lm_head) are BF16;
+the 128 experts are MXFP4 (E2M1 + per-32 E8M0 scales) and are dequantized to
+BF16 inside the kernel's GEMV inner loop (the same FP4 data the MXFP4-MFMA
+follow-on will feed to mfma_scale_f32_16x16x128_f8f6f4 directly).
+
+Validated to produce identical greedy output to the PyTorch reference
+(reference.py) and the host-phased Triton driver (run_triton_phased.py):
+"The capital of France is" -> token 12650 " Paris".
+
+Architecture (per layer, all inside the persistent kernel):
+  RMSNorm -> QKV+bias -> NeoX YaRN RoPE -> KV append -> GQA flash-decode with
+  per-head attention SINK and alternating sliding(128)/full window -> O-proj+bias
+  + residual -> RMSNorm -> router top-4 (softmax-after-topk) -> 4x SwiGLU-OAI
+  experts (FP4 weights) -> gate-weighted sum + residual.
+Then: final RMSNorm -> lm_head -> argmax.
+"""
+
+from __future__ import annotations
+
+import torch
+import triton
+import triton.language as tl
+
+from reference import GptOssConfig, build_yarn_rope
+from load_hf import load_hf_weights
+from tokenizer_util import load_tokenizer
+
+NUM_WG = 256  # one persistent program per CU on MI355X
+_NWG = tl.constexpr(NUM_WG)
+
+
+# ───────────────────────── device helpers ─────────────────────────
+@triton.jit
+def _barrier(bar_ptr, target):
+    tl.debug_barrier()
+    tl.atomic_add(bar_ptr, 1, sem="release")
+    done = 0
+    while done == 0:
+        cur = tl.atomic_add(bar_ptr, 0, sem="acquire")
+        if cur >= target:
+            done = 1
+
+
+@triton.jit
+def _fp4_lut(mag_idx):
+    return tl.where(
+        mag_idx == 0,
+        0.0,
+        tl.where(
+            mag_idx == 1,
+            0.5,
+            tl.where(
+                mag_idx == 2,
+                1.0,
+                tl.where(
+                    mag_idx == 3,
+                    1.5,
+                    tl.where(mag_idx == 4, 2.0, tl.where(mag_idx == 5, 3.0, tl.where(mag_idx == 6, 4.0, 6.0))),
+                ),
+            ),
+        ),
+    )
+
+
+@triton.jit
+def _gemv_bf16(w_base, x_ptr, y_ptr, has_bias, b_base, M, K: tl.constexpr, pid, BLOCK_K: tl.constexpr):
+    """y[r] = sum_k w[r,k]*x[k] (+b[r]); rows strided across programs by pid."""
+    koff = tl.arange(0, BLOCK_K)
+    r = pid
+    while r < M:
+        acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
+        k0 = 0
+        while k0 < K:
+            kk = k0 + koff
+            kmask = kk < K
+            w = tl.load(w_base + r * K + kk, mask=kmask, other=0.0).to(tl.float32)
+            x = tl.load(x_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
+            acc += w * x
+            k0 += BLOCK_K
+        s = tl.sum(acc, axis=0)
+        if has_bias:
+            s += tl.load(b_base + r).to(tl.float32)
+        tl.store(y_ptr + r, s)
+        r += _NWG
+
+
+@triton.jit
+def _gemv_fp4(
+    blk_base,
+    scl_base,
+    x_ptr,
+    y_ptr,
+    b_base,
+    has_bias,
+    M,
+    K: tl.constexpr,
+    NB: tl.constexpr,
+    pid,
+    gate_w,
+    ACCUM: tl.constexpr,
+):
+    """FP4 weight GEMV. weight row r: blk_base + r*(K//2) bytes (K/2), scales
+    scl_base + r*NB. Rows strided by pid -> each row owned by one program, so
+    plain store / load-add-store (no atomics). ACCUM: y[r]+=gate_w*(s+b) else
+    y[r]=gate_w*(s+b). Processes one 32-wide scale block at a time."""
+    pos32 = tl.arange(0, 32)
+    byte_idx = pos32 // 2
+    hi = (pos32 % 2) == 1
+    r = pid
+    half = K // 2
+    while r < M:
+        acc = tl.zeros((32,), dtype=tl.float32)
+        kb = 0
+        while kb < NB:
+            raw = tl.load(blk_base + r * half + kb * 16 + byte_idx).to(tl.int32)
+            nib = tl.where(hi, (raw >> 4) & 0xF, raw & 0xF)
+            sign = (nib & 0x8) != 0
+            mag = _fp4_lut(nib & 0x7)
+            val = tl.where(sign, -mag, mag)
+            se = tl.load(scl_base + r * NB + kb).to(tl.int32)
+            sc = tl.where(se > 0, tl.exp2((se - 127).to(tl.float32)), 0.0)
+            xk = tl.load(x_ptr + kb * 32 + pos32).to(tl.float32)
+            acc += val * sc * xk
+            kb += 1
+        s = tl.sum(acc, axis=0)
+        if has_bias:
+            s += tl.load(b_base + r).to(tl.float32)
+        s = gate_w * s
+        if ACCUM:
+            s += tl.load(y_ptr + r).to(tl.float32)
+        tl.store(y_ptr + r, s)
+        r += _NWG
+
+
+# ───────────────────────── the megakernel ─────────────────────────
+@triton.jit
+def gpt_oss_megakernel(
+    # weights (per-layer contiguous)
+    norm_attn_p,
+    norm_moe_p,
+    wq_p,
+    bq_p,
+    wk_p,
+    bk_p,
+    wv_p,
+    bv_p,
+    wo_p,
+    bo_p,
+    sinks_p,
+    router_w_p,
+    router_b_p,
+    gu_blk_p,
+    gu_scl_p,
+    gu_b_p,
+    dn_blk_p,
+    dn_scl_p,
+    dn_b_p,
+    final_norm_p,
+    lm_head_p,
+    # runtime buffers
+    x_p,
+    normed_p,
+    q_p,
+    k_p,
+    v_p,
+    kcache_p,
+    vcache_p,
+    attn_p,
+    logits_p,
+    ids_p,
+    gw_p,
+    gu_p,
+    act_p,
+    moe_p,
+    vlogits_p,
+    amax_v_p,
+    amax_i_p,
+    next_tok_p,
+    cos_p,
+    sin_p,
+    bar_p,
+    # scalars
+    pos,
+    scale,
+    eps,
+    alpha,
+    limit,
+    # constexpr dims
+    L: tl.constexpr,
+    H: tl.constexpr,
+    q_dim: tl.constexpr,
+    kv_dim: tl.constexpr,
+    NH: tl.constexpr,
+    NKV: tl.constexpr,
+    DH: tl.constexpr,
+    E: tl.constexpr,
+    TOPK: tl.constexpr,
+    I: tl.constexpr,
+    V: tl.constexpr,
+    SLIDING: tl.constexpr,
+    GU_NB: tl.constexpr,
+    DN_NB: tl.constexpr,
+    max_seq: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BLOCK_KI: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    HALF: tl.constexpr = DH // 2
+    GROUP: tl.constexpr = NH // NKV
+    bars_per_layer = 11  # number of _barrier calls per layer
+    base = 0
+
+    for layer in range(L):
+        lb = base
+        # weight bases for this layer
+        na = norm_attn_p + layer * H
+        nm = norm_moe_p + layer * H
+        wq = wq_p + layer * q_dim * H
+        wk = wk_p + layer * kv_dim * H
+        wv = wv_p + layer * kv_dim * H
+        wo = wo_p + layer * H * q_dim
+        bq = bq_p + layer * q_dim
+        bk = bk_p + layer * kv_dim
+        bv = bv_p + layer * kv_dim
+        bo = bo_p + layer * H
+        sinks = sinks_p + layer * NH
+        rw = router_w_p + layer * E * H
+        rb = router_b_p + layer * E
+        kcache = kcache_p + layer * max_seq * kv_dim
+        vcache = vcache_p + layer * max_seq * kv_dim
+
+        # ---- P0: RMSNorm(attn) -> normed (program 0) ----
+        if pid == 0:
+            off = tl.arange(0, 4096)
+            m = off < H
+            xv = tl.load(x_p + off, mask=m, other=0.0).to(tl.float32)
+            ss = tl.sum(xv * xv, axis=0)
+            rms = 1.0 / tl.sqrt(ss / H + eps)
+            g = tl.load(na + off, mask=m, other=0.0).to(tl.float32)
+            tl.store(normed_p + off, (xv * rms * g).to(tl.bfloat16), mask=m)
+        _barrier(bar_p, (lb + 1) * _NWG)
+        lb_inc = 1
+
+        # ---- P1: QKV ----
+        _gemv_bf16(wq, normed_p, q_p, True, bq, q_dim, H, pid, BLOCK_K)
+        _gemv_bf16(wk, normed_p, k_p, True, bk, kv_dim, H, pid, BLOCK_K)
+        _gemv_bf16(wv, normed_p, v_p, True, bv, kv_dim, H, pid, BLOCK_K)
+        _barrier(bar_p, (lb + 2) * _NWG)
+
+        # ---- P2: RoPE q,k + KV append (program 0) ----
+        if pid == 0:
+            h = tl.arange(0, HALF)
+            cosv = tl.load(cos_p + h).to(tl.float32)
+            sinv = tl.load(sin_p + h).to(tl.float32)
+            for hd in range(0, NH):
+                bidx = hd * DH
+                x1 = tl.load(q_p + bidx + h).to(tl.float32)
+                x2 = tl.load(q_p + bidx + HALF + h).to(tl.float32)
+                tl.store(q_p + bidx + h, x1 * cosv - x2 * sinv)
+                tl.store(q_p + bidx + HALF + h, x2 * cosv + x1 * sinv)
+            for hd in range(0, NKV):
+                bidx = hd * DH
+                x1 = tl.load(k_p + bidx + h).to(tl.float32)
+                x2 = tl.load(k_p + bidx + HALF + h).to(tl.float32)
+                tl.store(kcache + pos * kv_dim + bidx + h, x1 * cosv - x2 * sinv)
+                tl.store(kcache + pos * kv_dim + bidx + HALF + h, x2 * cosv + x1 * sinv)
+            vo = tl.arange(0, kv_dim)
+            tl.store(vcache + pos * kv_dim + vo, tl.load(v_p + vo).to(tl.float32))
+        _barrier(bar_p, (lb + 3) * _NWG)
+
+        # ---- P3: attention (one head per program, heads 0..NH-1) ----
+        if pid < NH:
+            hh = pid
+            kvh = hh // GROUP
+            d = tl.arange(0, DH)
+            qv = tl.load(q_p + hh * DH + d).to(tl.float32)
+            lo = 0
+            if SLIDING > 0:
+                lo = tl.maximum(0, pos - SLIDING + 1)
+            m_i = -1e30
+            l_i = 0.0
+            acc = tl.zeros((DH,), dtype=tl.float32)
+            t = lo
+            while t <= pos:
+                kt = tl.load(kcache + t * kv_dim + kvh * DH + d).to(tl.float32)
+                sc = tl.sum(qv * kt, axis=0) * scale
+                mn = tl.maximum(m_i, sc)
+                al = tl.exp(m_i - mn)
+                p = tl.exp(sc - mn)
+                l_i = l_i * al + p
+                vt = tl.load(vcache + t * kv_dim + kvh * DH + d).to(tl.float32)
+                acc = acc * al + p * vt
+                m_i = mn
+                t += 1
+            sink = tl.load(sinks + hh).to(tl.float32)
+            mn = tl.maximum(m_i, sink)
+            al = tl.exp(m_i - mn)
+            l_i = l_i * al + tl.exp(sink - mn)
+            acc = acc * al / l_i
+            tl.store(attn_p + hh * DH + d, acc.to(tl.bfloat16))
+        _barrier(bar_p, (lb + 4) * _NWG)
+
+        # ---- P4: O-proj + residual (write into x_p), via moe_p as temp ----
+        _gemv_bf16(wo, attn_p, moe_p, True, bo, H, q_dim, pid, BLOCK_K)
+        _barrier(bar_p, (lb + 5) * _NWG)
+        # add residual: x += o  (program 0 over H)
+        if pid == 0:
+            off = tl.arange(0, 4096)
+            m = off < H
+            xv = tl.load(x_p + off, mask=m, other=0.0).to(tl.float32)
+            ov = tl.load(moe_p + off, mask=m, other=0.0).to(tl.float32)
+            tl.store(x_p + off, xv + ov, mask=m)
+            # RMSNorm(moe)
+            xv = xv + ov
+            ss = tl.sum(xv * xv, axis=0)
+            rms = 1.0 / tl.sqrt(ss / H + eps)
+            g = tl.load(nm + off, mask=m, other=0.0).to(tl.float32)
+            tl.store(normed_p + off, (xv * rms * g).to(tl.bfloat16), mask=m)
+        _barrier(bar_p, (lb + 6) * _NWG)
+
+        # ---- P5: router GEMV + top-4 softmax (program 0) ----
+        _gemv_bf16(rw, normed_p, logits_p, True, rb, E, H, pid, BLOCK_K)
+        _barrier(bar_p, (lb + 7) * _NWG)
+        if pid == 0:
+            eoff = tl.arange(0, E)
+            work = tl.load(logits_p + eoff).to(tl.float32)
+            # top-K extraction
+            for kk in range(0, TOPK):
+                mval = tl.max(work, axis=0)
+                ismax = work == mval
+                idx = tl.min(tl.where(ismax, eoff, E), axis=0)
+                tl.store(ids_p + kk, idx)
+                tl.store(gw_p + kk, mval)
+                work = tl.where(eoff == idx, -1e30, work)
+            # softmax over the TOPK stored logits
+            tv = tl.load(gw_p + tl.arange(0, TOPK)).to(tl.float32)
+            tmax = tl.max(tv, axis=0)
+            ex = tl.exp(tv - tmax)
+            sm = tl.sum(ex, axis=0)
+            tl.store(gw_p + tl.arange(0, TOPK), ex / sm)
+            # zero moe accumulator
+            moff = tl.arange(0, 4096)
+            tl.store(moe_p + moff, tl.zeros((4096,), dtype=tl.float32), mask=moff < H)
+        _barrier(bar_p, (lb + 8) * _NWG)
+
+        # ---- P6: experts (loop TOPK; FP4 GEMVs across grid) ----
+        # barriers so far this layer: 8 (P0..P5+topk). Each slot adds 3.
+        bc = 8
+        for slot in range(0, TOPK):
+            e_id = tl.load(ids_p + slot)
+            gwv = tl.load(gw_p + slot).to(tl.float32)
+            eidx = (layer * E + e_id).to(tl.int64)  # int64: expert blobs overflow int32
+            gu_blk = gu_blk_p + eidx * (2 * I) * (H // 2)
+            gu_scl = gu_scl_p + eidx * (2 * I) * GU_NB
+            gu_b = gu_b_p + eidx * (2 * I)
+            dn_blk = dn_blk_p + eidx * H * (I // 2)
+            dn_scl = dn_scl_p + eidx * H * DN_NB
+            dn_b = dn_b_p + eidx * H
+            # gate_up: 2I rows, K=H -> gu_p (plain store)
+            _gemv_fp4(gu_blk, gu_scl, normed_p, gu_p, gu_b, True, 2 * I, H, GU_NB, pid, 1.0, ACCUM=False)
+            bc += 1
+            _barrier(bar_p, (lb + bc) * _NWG)
+            # swiglu: act[i] from gu[2i],gu[2i+1]; rows strided
+            ii = pid
+            while ii < I:
+                gate = tl.load(gu_p + 2 * ii).to(tl.float32)
+                up = tl.load(gu_p + 2 * ii + 1).to(tl.float32)
+                gate = tl.minimum(gate, limit)
+                up = tl.maximum(tl.minimum(up, limit), -limit)
+                glu = gate * (1.0 / (1.0 + tl.exp(-alpha * gate)))
+                tl.store(act_p + ii, ((up + 1.0) * glu).to(tl.bfloat16))
+                ii += _NWG
+            bc += 1
+            _barrier(bar_p, (lb + bc) * _NWG)
+            # down: H rows, K=I -> accumulate gw*ev into moe_p
+            _gemv_fp4(dn_blk, dn_scl, act_p, moe_p, dn_b, True, H, I, DN_NB, pid, gwv, ACCUM=(slot > 0))
+            bc += 1
+            _barrier(bar_p, (lb + bc) * _NWG)
+
+        # ---- P7: residual add moe -> x (program 0) ----
+        if pid == 0:
+            off = tl.arange(0, 4096)
+            m = off < H
+            xv = tl.load(x_p + off, mask=m, other=0.0).to(tl.float32)
+            mv = tl.load(moe_p + off, mask=m, other=0.0).to(tl.float32)
+            tl.store(x_p + off, xv + mv, mask=m)
+        bc += 1
+        base = lb + bc
+        _barrier(bar_p, base * _NWG)
+
+    # ===== final norm + lm_head + argmax =====
+    if pid == 0:
+        off = tl.arange(0, 4096)
+        m = off < H
+        xv = tl.load(x_p + off, mask=m, other=0.0).to(tl.float32)
+        ss = tl.sum(xv * xv, axis=0)
+        rms = 1.0 / tl.sqrt(ss / H + eps)
+        g = tl.load(final_norm_p + off, mask=m, other=0.0).to(tl.float32)
+        tl.store(normed_p + off, (xv * rms * g).to(tl.bfloat16), mask=m)
+    base = base + 1
+    _barrier(bar_p, base * _NWG)
+
+    # lm_head GEMV: V rows -> vlogits ; then per-prog argmax slice
+    _gemv_bf16(lm_head_p, normed_p, vlogits_p, False, lm_head_p, V, H, pid, BLOCK_K)
+    base = base + 1
+    _barrier(bar_p, base * _NWG)
+
+    # argmax: each program reduces its strided slice, writes (val,idx); prog0 reduces
+    best_v = -1e30
+    best_i = 0
+    r = pid
+    while r < V:
+        val = tl.load(vlogits_p + r).to(tl.float32)
+        if val > best_v:
+            best_v = val
+            best_i = r
+        r += _NWG
+    tl.store(amax_v_p + pid, best_v)
+    tl.store(amax_i_p + pid, best_i)
+    base = base + 1
+    _barrier(bar_p, base * _NWG)
+    if pid == 0:
+        bv = -1e30
+        bi = 0
+        j = 0
+        while j < _NWG:
+            vv = tl.load(amax_v_p + j)
+            if vv > bv:
+                bv = vv
+                bi = tl.load(amax_i_p + j)
+            j += 1
+        tl.store(next_tok_p, bi)
+
+
+# ───────────────────────── host wrapper ─────────────────────────
+class MegaModel:
+    def __init__(self, cfg: GptOssConfig, num_layers: int, dev="cuda", snapshot=None, _skip_load=False):
+        self.cfg = cfg
+        self.L = num_layers
+        self.dev = dev
+        if not _skip_load:
+            w = load_hf_weights(
+                GptOssConfig(), snapshot=snapshot, num_layers=num_layers, device="cpu", dtype=torch.bfloat16
+            )
+            self._pack(w)
+            self.cos, self.sin = build_yarn_rope(GptOssConfig(), device=dev)
+            self._alloc_buffers()
+
+    @classmethod
+    def from_iris(cls, iris_path: str, cfg: GptOssConfig, num_layers: int, dev="cuda"):
+        """Build directly from a converted .iris weight file (mmap -> device)."""
+        from convert_to_iris import read_iris_header, load_iris_tensor
+
+        self = cls(cfg, num_layers, dev=dev, _skip_load=True)
+        _, ents = read_iris_header(iris_path)
+        g = lambda nm: load_iris_tensor(iris_path, ents[nm], device=dev)
+        L = num_layers
+        st = lambda key: torch.stack([g(f"L{l}.{key}") for l in range(L)]).contiguous()
+        self.norm_attn = st("norm_attn")
+        self.norm_moe = st("norm_moe")
+        self.wq = st("w_q")
+        self.bq = st("b_q")
+        self.wk = st("w_k")
+        self.bk = st("b_k")
+        self.wv = st("w_v")
+        self.bv = st("b_v")
+        self.wo = st("w_o")
+        self.bo = st("b_o")
+        self.sinks = st("sinks")
+        self.router_w = st("router_w")
+        self.router_b = st("router_b")
+        self.gu_blk = st("gate_up_blocks")
+        self.gu_scl = st("gate_up_scales")
+        self.gu_b = st("gate_up_b")
+        self.dn_blk = st("down_blocks")
+        self.dn_scl = st("down_scales")
+        self.dn_b = st("down_b")
+        self.gu_nb = self.gu_blk.shape[3]
+        self.dn_nb = self.dn_blk.shape[3]
+        self.embed = g("embed")
+        self.final_norm = g("final_norm")
+        self.lm_head = g("lm_head")
+        self.cos, self.sin = build_yarn_rope(GptOssConfig(), device=dev)
+        self._alloc_buffers()
+        return self
+
+    def _pack(self, w):
+        cfg, L, dev = self.cfg, self.L, self.dev
+        H, qd, kvd, NH, E, I = (
+            cfg.hidden_dim,
+            cfg.q_dim,
+            cfg.kv_dim,
+            cfg.num_heads,
+            cfg.num_experts,
+            cfg.intermediate_dim,
+        )
+        st = lambda key, dt: torch.stack([w.layers[l][key] for l in range(L)]).to(dev).to(dt).contiguous()
+        self.norm_attn = st("norm_attn", torch.float32)
+        self.norm_moe = st("norm_moe", torch.float32)
+        self.wq = st("w_q", torch.bfloat16)
+        self.bq = st("b_q", torch.bfloat16)
+        self.wk = st("w_k", torch.bfloat16)
+        self.bk = st("b_k", torch.bfloat16)
+        self.wv = st("w_v", torch.bfloat16)
+        self.bv = st("b_v", torch.bfloat16)
+        self.wo = st("w_o", torch.bfloat16)
+        self.bo = st("b_o", torch.bfloat16)
+        self.sinks = st("sinks", torch.float32)
+        self.router_w = st("router_w", torch.bfloat16)
+        self.router_b = st("router_b", torch.bfloat16)
+        # experts FP4 stay uint8; reshape to [L,E,...] flattened block dim
+        self.gu_blk = torch.stack([w.layers[l]["gate_up_blocks"] for l in range(L)]).to(dev).contiguous()
+        self.gu_scl = torch.stack([w.layers[l]["gate_up_scales"] for l in range(L)]).to(dev).contiguous()
+        self.gu_b = torch.stack([w.layers[l]["gate_up_b"] for l in range(L)]).to(dev).to(torch.bfloat16).contiguous()
+        self.dn_blk = torch.stack([w.layers[l]["down_blocks"] for l in range(L)]).to(dev).contiguous()
+        self.dn_scl = torch.stack([w.layers[l]["down_scales"] for l in range(L)]).to(dev).contiguous()
+        self.dn_b = torch.stack([w.layers[l]["down_b"] for l in range(L)]).to(dev).to(torch.bfloat16).contiguous()
+        self.gu_nb = w.layers[0]["gate_up_blocks"].shape[2]  # n_blocks for K=H
+        self.dn_nb = w.layers[0]["down_blocks"].shape[2]  # n_blocks for K=I
+        self.embed = w.embed.to(dev)
+        self.final_norm = w.final_norm.to(dev)
+        self.lm_head = w.lm_head.to(dev)
+
+    def _alloc_buffers(self):
+        cfg, dev = self.cfg, self.dev
+        H, qd, kvd, E, I, V = (
+            cfg.hidden_dim,
+            cfg.q_dim,
+            cfg.kv_dim,
+            cfg.num_experts,
+            cfg.intermediate_dim,
+            cfg.vocab_size,
+        )
+        z = lambda n, dt=torch.float32: torch.zeros(n, dtype=dt, device=dev)
+        self.x = z(H)
+        self.normed = z(H, torch.bfloat16)
+        self.q = z(qd)
+        self.k = z(kvd)
+        self.v = z(kvd)
+        self.kcache = torch.zeros(self.L, cfg.max_seq_len, kvd, device=dev)
+        self.vcache = torch.zeros(self.L, cfg.max_seq_len, kvd, device=dev)
+        self.attn = z(qd, torch.bfloat16)
+        self.logits = z(E)
+        self.ids = z(cfg.top_k, torch.int32)
+        self.gw = z(cfg.top_k)
+        self.gu = z(2 * I)
+        self.act = z(I, torch.bfloat16)
+        self.moe = z(H)
+        self.vlogits = z(V)
+        self.amax_v = z(NUM_WG)
+        self.amax_i = z(NUM_WG, torch.int32)
+        self.next_tok = z(1, torch.int32)
+        self.bar = z(1, torch.int32)
+
+    @torch.no_grad()
+    def step(self, token_id: int, pos: int) -> int:
+        cfg = self.cfg
+        self.x.copy_(self.embed[token_id].float())
+        self.bar.zero_()
+        gpt_oss_megakernel[(NUM_WG,)](
+            self.norm_attn,
+            self.norm_moe,
+            self.wq,
+            self.bq,
+            self.wk,
+            self.bk,
+            self.wv,
+            self.bv,
+            self.wo,
+            self.bo,
+            self.sinks,
+            self.router_w,
+            self.router_b,
+            self.gu_blk,
+            self.gu_scl,
+            self.gu_b,
+            self.dn_blk,
+            self.dn_scl,
+            self.dn_b,
+            self.final_norm,
+            self.lm_head,
+            self.x,
+            self.normed,
+            self.q,
+            self.k,
+            self.v,
+            self.kcache,
+            self.vcache,
+            self.attn,
+            self.logits,
+            self.ids,
+            self.gw,
+            self.gu,
+            self.act,
+            self.moe,
+            self.vlogits,
+            self.amax_v,
+            self.amax_i,
+            self.next_tok,
+            self.cos[pos],
+            self.sin[pos],
+            self.bar,
+            pos,
+            1.0 / (cfg.head_dim**0.5),
+            cfg.rms_eps,
+            cfg.swiglu_alpha,
+            cfg.swiglu_limit,
+            L=self.L,
+            H=cfg.hidden_dim,
+            q_dim=cfg.q_dim,
+            kv_dim=cfg.kv_dim,
+            NH=cfg.num_heads,
+            NKV=cfg.num_kv_heads,
+            DH=cfg.head_dim,
+            E=cfg.num_experts,
+            TOPK=cfg.top_k,
+            I=cfg.intermediate_dim,
+            V=cfg.vocab_size,
+            SLIDING=cfg.sliding_window,
+            GU_NB=self.gu_nb,
+            DN_NB=self.dn_nb,
+            max_seq=cfg.max_seq_len,
+            BLOCK_K=256,
+            BLOCK_KI=256,
+            num_warps=4,
+        )
+        torch.cuda.synchronize()
+        return int(self.next_tok.item())
+
+
+def main():
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--prompt", default="The capital of France is")
+    ap.add_argument("--max-new", type=int, default=5)
+    ap.add_argument("--layers", type=int, default=0)
+    ap.add_argument("--snapshot", default=None)
+    ap.add_argument("--model", default=None, help="path to a converted .iris weight file")
+    args = ap.parse_args()
+
+    cfg = GptOssConfig()
+    L = args.layers if args.layers > 0 else cfg.num_layers
+    tok = load_tokenizer(args.snapshot)
+    ids = tok.encode(args.prompt)
+    print(f"prompt={args.prompt!r} ids={ids}")
+
+    import time
+
+    t0 = time.time()
+    if args.model:
+        model = MegaModel.from_iris(args.model, cfg, L)
+        print(f"loaded {L} layers from {args.model} in {time.time()-t0:.1f}s")
+    else:
+        model = MegaModel(cfg, L, snapshot=args.snapshot)
+        print(f"loaded {L} layers (HF) in {time.time()-t0:.1f}s")
+
+    pos = 0
+    nxt = None
+    for tid in ids:
+        nxt = model.step(tid, pos)
+        pos += 1
+    out = [nxt]
+    for _ in range(args.max_new - 1):
+        nxt = model.step(nxt, pos)
+        pos += 1
+        out.append(nxt)
+    print("generated ids:", out)
+    print("generated text:", repr(tok.decode(out)))
+
+
+if __name__ == "__main__":
+    main()
