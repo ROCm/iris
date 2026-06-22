@@ -616,20 +616,40 @@ def gpt_oss_megakernel(
                 _gemv_fp4(gu_blk, gu_scl, normed_p, gu_p, gu_b, True, 2 * I, H, GU_NB, pid, 1.0, ACCUM=False)
             bc += 1
             _barrier(bar_p, (lb + bc) * _NWG)
-            # --- sub-phase B: swiglu -> act_p (+ FP8 quant of act for the down GEMV) ---
-            ii = pid
-            while ii < I:
-                gate = tl.load(gu_p + 2 * ii).to(tl.float32)
-                up = tl.load(gu_p + 2 * ii + 1).to(tl.float32)
-                gate = tl.minimum(gate, limit)
-                up = tl.maximum(tl.minimum(up, limit), -limit)
-                glu = gate * (1.0 / (1.0 + tl.exp(-alpha * gate)))
-                tl.store(act_p + ii, ((up + 1.0) * glu).to(tl.bfloat16))
-                ii += _NWG
+            # --- sub-phase B: swiglu -> act_p. In QUANT mode, each program owns whole
+            # 32-elem blocks and FP8-quantizes the block it just produced (no extra
+            # barrier: producer == consumer for that block). ---
             if QUANT:
-                bc += 1
-                _barrier(bar_p, (lb + bc) * _NWG)  # act_p complete before quant reads it
-                _quant_act_fp8(act_p, afp8_p, afp8_scl_p, I, DN_NB, pid)
+                pos32 = tl.arange(0, 32)
+                blk = pid
+                while blk < DN_NB:
+                    base_i = blk * 32 + pos32
+                    gate = tl.load(gu_p + 2 * base_i).to(tl.float32)
+                    up = tl.load(gu_p + 2 * base_i + 1).to(tl.float32)
+                    gate = tl.minimum(gate, limit)
+                    up = tl.maximum(tl.minimum(up, limit), -limit)
+                    glu = gate * (1.0 / (1.0 + tl.exp(-alpha * gate)))
+                    act = (up + 1.0) * glu  # [32]
+                    amax = tl.max(tl.abs(act), axis=0)
+                    target = amax / 448.0
+                    u = target.to(tl.int32, bitcast=True)
+                    raw = (u >> 23) & 0xFF
+                    raw = raw + tl.where((u & 0x7FFFFF) != 0, 1, 0)
+                    raw = tl.where(amax > 0.0, tl.minimum(tl.maximum(raw, 0), 255), 0)
+                    sc = tl.where(raw > 0, tl.exp2((raw - 127).to(tl.float32)), 1.0)
+                    tl.store(afp8_p + base_i, (act / sc).to(tl.float8e4nv))
+                    tl.store(afp8_scl_p + blk, raw.to(tl.uint8))
+                    blk += _NWG
+            else:
+                ii = pid
+                while ii < I:
+                    gate = tl.load(gu_p + 2 * ii).to(tl.float32)
+                    up = tl.load(gu_p + 2 * ii + 1).to(tl.float32)
+                    gate = tl.minimum(gate, limit)
+                    up = tl.maximum(tl.minimum(up, limit), -limit)
+                    glu = gate * (1.0 / (1.0 + tl.exp(-alpha * gate)))
+                    tl.store(act_p + ii, ((up + 1.0) * glu).to(tl.bfloat16))
+                    ii += _NWG
             bc += 1
             _barrier(bar_p, (lb + bc) * _NWG)
             # --- sub-phase C: down (H rows, K=I) -> accumulate gw*ev into moe_p ---
