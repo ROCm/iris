@@ -55,7 +55,7 @@ python examples/33_gpt_oss_megakernel/bench_tpot.py --tokens 32 --warmup 4
 ```
 
 Reported as time per output token (TPOT). On MI355X the quantized path runs at
-roughly 23 ms/token; the default BF16 path is slower but bit-faithful to the
+roughly 9.4 ms/token; the default BF16 path is slower but bit-faithful to the
 reference.
 
 ## Files
