@@ -114,13 +114,17 @@ def _gemv_bf16_tiled(
 
 
 @triton.jit
-def _store_rmsnorm(x_ptr, g_ptr, out_ptr, H: tl.constexpr, pid, eps, BLOCK_M: tl.constexpr, NORMK: tl.constexpr):
-    """Materialize normed = rmsnorm(x)*g into out_ptr (bf16), striped across WGs.
-    Each program computes the rms scalar from the full x (cheap), then writes its
-    row slices. Replaces the pid0-serial RMSNorm; needs a barrier after (callers add)."""
+def _store_resid_rmsnorm(
+    x_ptr, o_ptr, g_ptr, out_ptr, H: tl.constexpr, pid, eps, BLOCK_M: tl.constexpr, NORMK: tl.constexpr
+):
+    """Materialize normed = rmsnorm(x + o)*g into out_ptr (bf16), striped across WGs.
+    Each program computes the rms scalar from the full (x + o), then writes its row
+    slices. Used for the non-quantized expert input; needs a barrier after."""
     noff = tl.arange(0, NORMK)
     nmask = noff < H
-    xall = tl.load(x_ptr + noff, mask=nmask, other=0.0).to(tl.float32)
+    xall = tl.load(x_ptr + noff, mask=nmask, other=0.0).to(tl.float32) + tl.load(
+        o_ptr + noff, mask=nmask, other=0.0
+    ).to(tl.float32)
     ss = tl.sum(xall * xall, axis=0)
     rms = 1.0 / tl.sqrt(ss / H + eps)
     base = pid * BLOCK_M
@@ -128,10 +132,76 @@ def _store_rmsnorm(x_ptr, g_ptr, out_ptr, H: tl.constexpr, pid, eps, BLOCK_M: tl
     while base < H:
         off = base + tl.arange(0, BLOCK_M)
         m = off < H
-        xv = tl.load(x_ptr + off, mask=m, other=0.0).to(tl.float32)
+        xv = tl.load(x_ptr + off, mask=m, other=0.0).to(tl.float32) + tl.load(o_ptr + off, mask=m, other=0.0).to(
+            tl.float32
+        )
         g = tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32)
         tl.store(out_ptr + off, (xv * rms * g).to(tl.bfloat16), mask=m)
         base += step
+
+
+@triton.jit
+def _gemv_bf16_resid_rmsnorm(
+    w_base,
+    x_ptr,
+    o_ptr,
+    g_ptr,
+    y_ptr,
+    has_bias,
+    b_base,
+    M,
+    H: tl.constexpr,
+    pid,
+    eps,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    NORMK: tl.constexpr,
+):
+    """Fused residual + RMSNorm + GEMV: y = GEMV(rmsnorm(x + o) * g).
+
+    Reads the attention output o and the residual x and uses (x + o) as the norm
+    input, without writing it back. This folds the post-attention residual add and
+    its RMSNorm (and the grid barrier between them) into the router GEMV. The single
+    residual write x += o happens later in the layer's final accumulation. Each
+    program derives the rms scalar from the full (x + o); both inputs are stable
+    since the previous barrier, so no barrier is needed here."""
+    noff = tl.arange(0, NORMK)
+    nmask = noff < H
+    xall = tl.load(x_ptr + noff, mask=nmask, other=0.0).to(tl.float32) + tl.load(
+        o_ptr + noff, mask=nmask, other=0.0
+    ).to(tl.float32)
+    ss = tl.sum(xall * xall, axis=0)
+    rms = 1.0 / tl.sqrt(ss / H + eps)
+    npid = tl.num_programs(0)
+    mo = tl.arange(0, BLOCK_M)
+    ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
+    n_tiles = (M + BLOCK_M - 1) // BLOCK_M
+    tile = pid
+    while tile < n_tiles:
+        rows = tile * BLOCK_M + mo
+        rmask = rows < M
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        k0 = 0
+        while k0 < H:
+            kk = k0 + ko
+            kmask = kk < H
+            # recompute xnew = x + o inline (avoids depending on other programs'
+            # persisted x_ptr writes -- no barrier needed before this read)
+            xk = tl.load(x_ptr + kk, mask=kmask, other=0.0).to(tl.float32) + tl.load(
+                o_ptr + kk, mask=kmask, other=0.0
+            ).to(tl.float32)
+            gk = tl.load(g_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
+            nk = xk * rms * gk
+            w = tl.load(w_base + rows[:, None] * H + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0).to(
+                tl.float32
+            )
+            acc += w * nk[None, :]
+            k0 += BLOCK_K
+        s = tl.sum(acc, axis=1)
+        if has_bias:
+            s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        tl.store(y_ptr + rows, s, mask=rmask)
+        tile += npid
 
 
 @triton.jit
@@ -261,23 +331,37 @@ def _gemv_fp4(
 
 
 @triton.jit
-def _quant_act_fp8(x_ptr, fp8_ptr, scl_ptr, K, NB: tl.constexpr, pid):
-    """Dynamic FP8-E4M3 activation quantization, per-32-element E8M0 (amax/448).
-    x_ptr fp32-ish [K] -> fp8_ptr (float8e4nv) [K], scl_ptr (uint8 e8m0) [NB].
-    Each program handles a strided set of 32-element blocks."""
+def _quant_norm_fp8(
+    x_ptr, o_ptr, g_ptr, fp8_ptr, scl_ptr, H: tl.constexpr, NB: tl.constexpr, pid, eps, NORMK: tl.constexpr
+):
+    """Fused residual + RMSNorm + FP8-E4M3 quantization, per-32-element E8M0.
+
+    Reads the residual x and attention output o, applies RMSNorm(x + o) * g, and
+    quantizes to FP8 in one pass, so the experts' shared input never has to be
+    written to HBM as BF16 first. Each program computes the rms scalar from the full
+    (x + o), then quantizes its 32-element blocks."""
+    noff = tl.arange(0, NORMK)
+    nmask = noff < H
+    xall = tl.load(x_ptr + noff, mask=nmask, other=0.0).to(tl.float32) + tl.load(
+        o_ptr + noff, mask=nmask, other=0.0
+    ).to(tl.float32)
+    ss = tl.sum(xall * xall, axis=0)
+    rms = 1.0 / tl.sqrt(ss / H + eps)
     pos32 = tl.arange(0, 32)
     b = pid
     while b < NB:
-        x = tl.load(x_ptr + b * 32 + pos32).to(tl.float32)
+        off = b * 32 + pos32
+        xv = tl.load(x_ptr + off).to(tl.float32) + tl.load(o_ptr + off).to(tl.float32)
+        gv = tl.load(g_ptr + off).to(tl.float32)
+        x = xv * rms * gv
         amax = tl.max(tl.abs(x), axis=0)
         target = amax / 448.0
-        u = target.to(tl.int32, bitcast=True)  # raw IEEE-754 bits, not numeric cast
+        u = target.to(tl.int32, bitcast=True)
         raw = (u >> 23) & 0xFF
         raw = raw + tl.where((u & 0x7FFFFF) != 0, 1, 0)
         raw = tl.where(amax > 0.0, tl.minimum(tl.maximum(raw, 0), 255), 0)
         sc = tl.where(raw > 0, tl.exp2((raw - 127).to(tl.float32)), 1.0)
-        q = (x / sc).to(tl.float8e4nv)
-        tl.store(fp8_ptr + b * 32 + pos32, q)
+        tl.store(fp8_ptr + off, (x / sc).to(tl.float8e4nv))
         tl.store(scl_ptr + b, raw.to(tl.uint8))
         b += _NWG
 
@@ -380,6 +464,7 @@ def gpt_oss_megakernel(
     kcache_p,
     vcache_p,
     attn_p,
+    o_p,
     logits_p,
     ids_p,
     gw_p,
@@ -521,25 +606,16 @@ def gpt_oss_megakernel(
         bc += 1
         _barrier(bar_p, (lb + bc) * _NWG)
 
-        # ---- P4: O-proj (striped) -> moe_p, then striped residual into x_p ----
-        _gemv_bf16_tiled(wo, attn_p, moe_p, True, bo, H, q_dim, pid, BLOCK_M, BLOCK_K)
-        bc += 1
-        _barrier(bar_p, (lb + bc) * _NWG)
-        # residual x += o, striped across all WGs (no pid0 serial bottleneck)
+        # ---- P4: O-proj -> o_p (the post-attention output). The residual add is
+        # deferred to the layer's final accumulation, so there is no separate
+        # residual phase or barrier. ----
+        _gemv_bf16_tiled(wo, attn_p, o_p, True, bo, H, q_dim, pid, BLOCK_M, BLOCK_K)
         rstep = _NWG * BLOCK_M
-        base_r = pid * BLOCK_M
-        while base_r < H:
-            roff = base_r + tl.arange(0, BLOCK_M)
-            rm = roff < H
-            xo = tl.load(x_p + roff, mask=rm, other=0.0).to(tl.float32)
-            oo = tl.load(moe_p + roff, mask=rm, other=0.0).to(tl.float32)
-            tl.store(x_p + roff, xo + oo, mask=rm)
-            base_r += rstep
         bc += 1
         _barrier(bar_p, (lb + bc) * _NWG)
 
-        # ---- P5: router GEMV with FUSED MoE-RMSNorm (no separate norm phase) ----
-        _gemv_bf16_rmsnorm(rw, x_p, nm, logits_p, True, rb, E, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+        # ---- P5: router GEMV over rmsnorm(x + o), folding the residual + norm in ----
+        _gemv_bf16_resid_rmsnorm(rw, x_p, o_p, nm, logits_p, True, rb, E, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
         bc += 1
         _barrier(bar_p, (lb + bc) * _NWG)
         if pid == 0:
@@ -565,9 +641,12 @@ def gpt_oss_megakernel(
             zoff = base_z + tl.arange(0, BLOCK_M)
             tl.store(moe_p + zoff, tl.zeros((BLOCK_M,), dtype=tl.float32), mask=zoff < H)
             base_z += rstep
-        # MoE-normed activation needed by ALL experts: materialize striped into
-        # normed_p (each WG computes the rms scalar from x_p, stores its row slice).
-        _store_rmsnorm(x_p, nm, normed_p, H, pid, eps, BLOCK_M, NORMK)
+        # Materialize the shared expert input rmsnorm(x + o). QUANT fuses the norm
+        # into the FP8 quantization; otherwise store the BF16 normed activation.
+        if QUANT:
+            _quant_norm_fp8(x_p, o_p, nm, nfp8_p, nfp8_scl_p, H, GU_NB, pid, eps, NORMK)
+        else:
+            _store_resid_rmsnorm(x_p, o_p, nm, normed_p, H, pid, eps, BLOCK_M, NORMK)
         bc += 1
         _barrier(bar_p, (lb + bc) * _NWG)
 
@@ -576,8 +655,6 @@ def gpt_oss_megakernel(
         # experts before the next barrier -- 3 barriers per layer instead of 3 per
         # expert. QUANT uses the native FP4xFP8 scaled multiply; otherwise the FP4
         # weights are dequantized to BF16 in the GEMV. ----
-        if QUANT:
-            _quant_act_fp8(normed_p, nfp8_p, nfp8_scl_p, H, GU_NB, pid)
         # --- phase A: gate-up for every expert -> gu_p[slot] ---
         for slot in range(0, TOPK):
             e_id = tl.load(ids_p + slot)
@@ -686,13 +763,16 @@ def gpt_oss_megakernel(
         bc += 1
         _barrier(bar_p, (lb + bc) * _NWG)
 
-        # ---- P7: residual add moe -> x (program 0) ----
-        if pid == 0:
-            off = tl.arange(0, 4096)
-            m = off < H
-            xv = tl.load(x_p + off, mask=m, other=0.0).to(tl.float32)
-            mv = tl.load(moe_p + off, mask=m, other=0.0).to(tl.float32)
-            tl.store(x_p + off, xv + mv, mask=m)
+        # ---- P7: final residual x = x + o + moe, striped across all programs ----
+        base_w = pid * BLOCK_M
+        while base_w < H:
+            woff = base_w + tl.arange(0, BLOCK_M)
+            wm = woff < H
+            xv = tl.load(x_p + woff, mask=wm, other=0.0).to(tl.float32)
+            ov = tl.load(o_p + woff, mask=wm, other=0.0).to(tl.float32)
+            mv = tl.load(moe_p + woff, mask=wm, other=0.0).to(tl.float32)
+            tl.store(x_p + woff, xv + ov + mv, mask=wm)
+            base_w += rstep
         bc += 1
         base = lb + bc
         _barrier(bar_p, base * _NWG)
@@ -850,6 +930,7 @@ class MegaModel:
         self.kcache = torch.zeros(self.L, cfg.max_seq_len, kvd, device=dev)
         self.vcache = torch.zeros(self.L, cfg.max_seq_len, kvd, device=dev)
         self.attn = z(qd, torch.bfloat16)
+        self.o = z(H)  # post-attention output; residual deferred to the layer end
         self.logits = z(E)
         self.ids = z(cfg.top_k, torch.int32)
         self.gw = z(cfg.top_k)
@@ -907,6 +988,7 @@ class MegaModel:
             self.kcache,
             self.vcache,
             self.attn,
+            self.o,
             self.logits,
             self.ids,
             self.gw,
