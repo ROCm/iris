@@ -946,7 +946,7 @@ class MegaModel:
             max_seq=cfg.max_seq_len,
             BLOCK_K=512,
             BLOCK_KI=256,
-            BLOCK_M=8,
+            BLOCK_M=16,
             NORMK=triton.next_power_of_2(cfg.hidden_dim),
             QUANT=self.quant,
             BLOCK_NQ=32,
