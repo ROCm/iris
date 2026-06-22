@@ -789,21 +789,37 @@ def gpt_oss_megakernel(
     base = base + 1
     _barrier(bar_p, base * _NWG)
 
-    # lm_head GEMV: V rows -> vlogits ; then per-prog argmax slice
-    _gemv_bf16_tiled(lm_head_p, normed_p, vlogits_p, False, lm_head_p, V, H, pid, BLOCK_M, BLOCK_K)
-    base = base + 1
-    _barrier(bar_p, base * _NWG)
-
-    # argmax: each program reduces its strided slice, writes (val,idx); prog0 reduces
+    # lm_head + argmax fused: each program computes the logits for its row tiles and
+    # tracks a running (max, index) instead of writing all V logits to HBM and reading
+    # them back. Saves the full logits write + re-read.
+    mo = tl.arange(0, BLOCK_M)
+    ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
+    n_tiles = (V + BLOCK_M - 1) // BLOCK_M
     best_v = -1e30
     best_i = 0
-    r = pid
-    while r < V:
-        val = tl.load(vlogits_p + r).to(tl.float32)
-        if val > best_v:
-            best_v = val
-            best_i = r
-        r += _NWG
+    tile = pid
+    while tile < n_tiles:
+        rows = tile * BLOCK_M + mo
+        rmask = rows < V
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        k0 = 0
+        while k0 < H:
+            kk = k0 + ko
+            kmask = kk < H
+            w = tl.load(
+                lm_head_p + rows[:, None] * H + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0
+            ).to(tl.float32)
+            xk = tl.load(normed_p + kk, mask=kmask, other=0.0).to(tl.float32)
+            acc += w * xk[None, :]
+            k0 += BLOCK_K
+        logit = tl.sum(acc, axis=1)  # [BLOCK_M]
+        logit = tl.where(rmask, logit, -1e30)
+        tmax = tl.max(logit, axis=0)
+        if tmax > best_v:
+            ismax = logit == tmax
+            best_i = tl.min(tl.where(ismax, rows, V), axis=0)
+            best_v = tmax
+        tile += _NWG
     tl.store(amax_v_p + pid, best_v)
     tl.store(amax_i_p + pid, best_i)
     base = base + 1
