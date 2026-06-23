@@ -41,8 +41,8 @@ from tokenizer_util import load_tokenizer
 
 # Number of persistent programs. Fewer than the 256 CUs on MI355X: with a grid-wide
 # barrier between phases, a smaller grid makes each barrier cheaper while still
-# keeping every phase's GEMV well filled. 192 measured fastest for this model.
-NUM_WG = 192
+# keeping every phase's GEMV well filled. 184 measured fastest for this model.
+NUM_WG = 184
 _NWG = tl.constexpr(NUM_WG)
 
 
