@@ -823,21 +823,16 @@ def gpt_oss_megakernel(
             _barrier(bar_p, (lb + bc) * _NWG)
         base = lb + bc
 
-    # ===== final norm + lm_head + argmax =====
-    if pid == 0:
-        off = tl.arange(0, 4096)
-        m = off < H
-        xv = tl.load(x_p + off, mask=m, other=0.0).to(tl.float32)
-        ss = tl.sum(xv * xv, axis=0)
-        rms = 1.0 / tl.sqrt(ss / H + eps)
-        g = tl.load(final_norm_p + off, mask=m, other=0.0).to(tl.float32)
-        tl.store(normed_p + off, (xv * rms * g).to(tl.bfloat16), mask=m)
-    base = base + 1
-    _barrier(bar_p, base * _NWG)
-
-    # lm_head + argmax fused: each program computes the logits for its row tiles and
-    # tracks a running (max, index) instead of writing all V logits to HBM and reading
-    # them back. Saves the full logits write + re-read.
+    # ===== final norm (fused) + lm_head + argmax =====
+    # The final RMSNorm is folded into the LM-head GEMV: every program computes the
+    # rms scalar from x once and applies norm*gamma inline, so there is no separate
+    # final-norm phase or barrier. Each program computes the logits for its row tiles
+    # and tracks a running (max, index) instead of writing all V logits to HBM.
+    fnoff = tl.arange(0, NORMK)
+    fnmask = fnoff < H
+    fxall = tl.load(x_p + fnoff, mask=fnmask, other=0.0).to(tl.float32)
+    fss = tl.sum(fxall * fxall, axis=0)
+    frms = 1.0 / tl.sqrt(fss / H + eps)
     mo = tl.arange(0, BLOCK_M)
     ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
     n_tiles = (V + BLOCK_M - 1) // BLOCK_M
@@ -855,8 +850,9 @@ def gpt_oss_megakernel(
             w = tl.load(
                 lm_head_p + rows[:, None] * H + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0
             ).to(tl.float32)
-            xk = tl.load(normed_p + kk, mask=kmask, other=0.0).to(tl.float32)
-            acc += w * xk[None, :]
+            xk = tl.load(x_p + kk, mask=kmask, other=0.0).to(tl.float32)
+            gk = tl.load(final_norm_p + kk, mask=kmask, other=0.0).to(tl.float32)
+            acc += w * (xk * frms * gk)[None, :]
             k0 += BLOCK_K
         logit = tl.sum(acc, axis=1)  # [BLOCK_M]
         logit = tl.where(rmask, logit, -1e30)
