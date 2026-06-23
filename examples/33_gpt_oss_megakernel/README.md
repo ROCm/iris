@@ -57,17 +57,17 @@ python examples/33_gpt_oss_megakernel/bench_islosl.py --configs 100:100,1024:102
 
 `bench_tpot.py` reports steady-state time per output token (TPOT);
 `bench_islosl.py` sweeps input/output length pairs and reports prefill and decode
-latency separately. The quantized path runs at about 5.9 ms/token on MI355X; the
+latency separately. The quantized path runs at about 5.3 ms/token on MI355X; the
 default BF16 path is slower but bit-faithful to the reference.
 
 Measured on a single MI355X (quantized path, `max_seq_len = 4096`):
 
 | ISL | OSL | TTFT (ms) | TPOT (ms) | End-to-end (ms) | Decode (tok/s) |
 | --- | --- | --------- | --------- | --------------- | -------------- |
-| 100 | 100 | 590 | 5.87 | 1172 | 170 |
-| 1024 | 100 | 6002 | 5.87 | 6583 | 170 |
-| 1024 | 1024 | 5999 | 5.86 | 11994 | 171 |
-| 2048 | 2048 | 11990 | 5.87 | 23997 | 170 |
+| 100 | 100 | 531 | 5.28 | 1053 | 189 |
+| 1024 | 100 | 5397 | 5.28 | 5919 | 189 |
+| 1024 | 1024 | 5399 | 5.28 | 10802 | 189 |
+| 2048 | 2048 | 10803 | 5.28 | 21604 | 190 |
 
 TPOT stays flat across context lengths because the decode attention is computed
 with a blocked flash-decode. TTFT grows linearly with the input length: prefill
