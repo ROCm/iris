@@ -641,41 +641,41 @@ def gpt_oss_megakernel(
         bc += 1
         _barrier(bar_p, (lb + bc) * _NWG)
 
-        # ---- P5: router GEMV over rmsnorm(x + o), folding the residual + norm in ----
+        # ---- P5: router GEMV, expert-input quant, and accumulator reset all run in
+        # one phase -- they only depend on x + o, available since the O-proj barrier.
+        # The router writes logits; the quant writes the FP8 expert input; the moe
+        # accumulator is zeroed. ----
         _gemv_bf16_resid_rmsnorm(rw, x_p, o_p, nm, logits_p, True, rb, E, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
-        bc += 1
-        _barrier(bar_p, (lb + bc) * _NWG)
-        if pid == 0:
-            eoff = tl.arange(0, E)
-            work = tl.load(logits_p + eoff).to(tl.float32)
-            # top-K extraction
-            for kk in range(0, TOPK):
-                mval = tl.max(work, axis=0)
-                ismax = work == mval
-                idx = tl.min(tl.where(ismax, eoff, E), axis=0)
-                tl.store(ids_p + kk, idx)
-                tl.store(gw_p + kk, mval)
-                work = tl.where(eoff == idx, -1e30, work)
-            # softmax over the TOPK stored logits
-            tv = tl.load(gw_p + tl.arange(0, TOPK)).to(tl.float32)
-            tmax = tl.max(tv, axis=0)
-            ex = tl.exp(tv - tmax)
-            sm = tl.sum(ex, axis=0)
-            tl.store(gw_p + tl.arange(0, TOPK), ex / sm)
-        # zero moe accumulator, striped across all WGs
         base_z = pid * BLOCK_M
         while base_z < H:
             zoff = base_z + tl.arange(0, BLOCK_M)
             tl.store(moe_p + zoff, tl.zeros((BLOCK_M,), dtype=tl.float32), mask=zoff < H)
             base_z += rstep
-        # Materialize the shared expert input rmsnorm(x + o). QUANT fuses the norm
-        # into the FP8 quantization; otherwise store the BF16 normed activation.
         if QUANT:
             _quant_norm_fp8(x_p, o_p, nm, nfp8_p, nfp8_scl_p, H, GU_NB, pid, eps, NORMK)
         else:
             _store_resid_rmsnorm(x_p, o_p, nm, normed_p, H, pid, eps, BLOCK_M, NORMK)
         bc += 1
         _barrier(bar_p, (lb + bc) * _NWG)
+
+        # Every program does the top-k + softmax over the E router logits redundantly
+        # in registers (E is tiny) and writes ids_p/gw_p. The writes are identical
+        # across programs and each program reads back only what it wrote, so the
+        # experts proceed without a separate top-k barrier.
+        eoff = tl.arange(0, E)
+        work = tl.load(logits_p + eoff).to(tl.float32)
+        for kk in range(0, TOPK):
+            mval = tl.max(work, axis=0)
+            ismax = work == mval
+            idx = tl.min(tl.where(ismax, eoff, E), axis=0)
+            tl.store(ids_p + kk, idx)
+            tl.store(gw_p + kk, mval)
+            work = tl.where(eoff == idx, -1e30, work)
+        tv = tl.load(gw_p + tl.arange(0, TOPK)).to(tl.float32)
+        tmax = tl.max(tv, axis=0)
+        ex = tl.exp(tv - tmax)
+        sm = tl.sum(ex, axis=0)
+        tl.store(gw_p + tl.arange(0, TOPK), ex / sm)
 
         # ---- P6: experts. The top-k experts are independent until the final
         # accumulation, so each expert phase (gate-up, SwiGLU, down) runs over all
