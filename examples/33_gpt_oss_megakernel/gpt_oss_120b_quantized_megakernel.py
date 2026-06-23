@@ -387,6 +387,9 @@ def _gemv_fp4_scaled(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     MTILE: tl.constexpr,
+    FINALIZE: tl.constexpr = False,
+    x_ptr=None,
+    o_ptr=None,
 ):
     """y[n] = gate_w*(sum_k W[n,k]*a[k] + b[n]) via native FP4xFP8 scaled MFMA
     (tl.dot_scaled -> v_mfma_scale_f32_16x16x128_f8f6f4 on gfx950).
@@ -430,6 +433,13 @@ def _gemv_fp4_scaled(
         if ACCUM:
             y += tl.load(y_ptr + n, mask=nmask, other=0.0).to(tl.float32)
         tl.store(y_ptr + n, y, mask=nmask)
+        if FINALIZE:
+            # this program owns rows n of the MoE output; finalize the residual
+            # x[n] += o[n] + moe[n] here (same program wrote moe[n]) to fold the
+            # final residual into the down phase and drop its barrier
+            xv = tl.load(x_ptr + n, mask=nmask, other=0.0).to(tl.float32)
+            ov = tl.load(o_ptr + n, mask=nmask, other=0.0).to(tl.float32)
+            tl.store(x_ptr + n, xv + ov + y, mask=nmask)
         tile += _NWG
 
 
@@ -763,6 +773,10 @@ def gpt_oss_megakernel(
             dn_blk = dn_blk_p + eidx * H * (I // 2)
             dn_scl = dn_scl_p + eidx * H * DN_NB
             dn_b = dn_b_p + eidx * H
+            # The last expert's down GEMV finalizes the residual x[n] += o[n] + moe[n]
+            # for the rows it owns (QUANT path), folding the final residual into this
+            # phase and dropping its barrier.
+            finalize = QUANT and (slot == TOPK - 1)
             if QUANT:
                 afp8_out = afp8_p + slot * I
                 afp8_scl_out = afp8_scl_p + slot * DN_NB
@@ -783,6 +797,9 @@ def gpt_oss_megakernel(
                     BLOCK_ND,
                     BLOCK_KQ,
                     MTILE,
+                    finalize,
+                    x_p,
+                    o_p,
                 )
             else:
                 act_out = act_p + slot * I
@@ -790,19 +807,21 @@ def gpt_oss_megakernel(
         bc += 1
         _barrier(bar_p, (lb + bc) * _NWG)
 
-        # ---- P7: final residual x = x + o + moe, striped across all programs ----
-        base_w = pid * BLOCK_M
-        while base_w < H:
-            woff = base_w + tl.arange(0, BLOCK_M)
-            wm = woff < H
-            xv = tl.load(x_p + woff, mask=wm, other=0.0).to(tl.float32)
-            ov = tl.load(o_p + woff, mask=wm, other=0.0).to(tl.float32)
-            mv = tl.load(moe_p + woff, mask=wm, other=0.0).to(tl.float32)
-            tl.store(x_p + woff, xv + ov + mv, mask=wm)
-            base_w += rstep
-        bc += 1
+        # ---- P7 (BF16 path only): final residual x = x + o + moe, striped. The
+        # QUANT path folds this into the last down GEMV above. ----
+        if not QUANT:
+            base_w = pid * BLOCK_M
+            while base_w < H:
+                woff = base_w + tl.arange(0, BLOCK_M)
+                wm = woff < H
+                xv = tl.load(x_p + woff, mask=wm, other=0.0).to(tl.float32)
+                ov = tl.load(o_p + woff, mask=wm, other=0.0).to(tl.float32)
+                mv = tl.load(moe_p + woff, mask=wm, other=0.0).to(tl.float32)
+                tl.store(x_p + woff, xv + ov + mv, mask=wm)
+                base_w += rstep
+            bc += 1
+            _barrier(bar_p, (lb + bc) * _NWG)
         base = lb + bc
-        _barrier(bar_p, base * _NWG)
 
     # ===== final norm + lm_head + argmax =====
     if pid == 0:
