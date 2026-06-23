@@ -520,6 +520,7 @@ def gpt_oss_megakernel(
     BLOCK_K: tl.constexpr,
     BLOCK_KI: tl.constexpr,
     BLOCK_M: tl.constexpr,
+    BLOCK_M_LM: tl.constexpr,
     NORMK: tl.constexpr,
     QUANT: tl.constexpr,
     BLOCK_NQ: tl.constexpr,
@@ -833,16 +834,16 @@ def gpt_oss_megakernel(
     fxall = tl.load(x_p + fnoff, mask=fnmask, other=0.0).to(tl.float32)
     fss = tl.sum(fxall * fxall, axis=0)
     frms = 1.0 / tl.sqrt(fss / H + eps)
-    mo = tl.arange(0, BLOCK_M)
+    mo = tl.arange(0, BLOCK_M_LM)
     ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
-    n_tiles = (V + BLOCK_M - 1) // BLOCK_M
+    n_tiles = (V + BLOCK_M_LM - 1) // BLOCK_M_LM
     best_v = -1e30
     best_i = 0
     tile = pid
     while tile < n_tiles:
-        rows = tile * BLOCK_M + mo
+        rows = tile * BLOCK_M_LM + mo
         rmask = rows < V
-        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_M_LM, BLOCK_K), dtype=tl.float32)
         k0 = 0
         while k0 < H:
             kk = k0 + ko
@@ -1087,6 +1088,7 @@ class MegaModel:
             BLOCK_K=1024,
             BLOCK_KI=256,
             BLOCK_M=8,
+            BLOCK_M_LM=16,
             NORMK=triton.next_power_of_2(cfg.hidden_dim),
             QUANT=self.quant,
             BLOCK_NQ=32,
