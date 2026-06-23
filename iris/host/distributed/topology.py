@@ -368,6 +368,7 @@ def _probe_nvidia_fabric_connectivity(gpu_id: int, rank: int, world_size: int) -
     imported_mappings = []
 
     try:
+        from iris.drivers.base import ExportableMemory
         from iris.drivers.fabric.nvidia import NvidiaFabricDriver
 
         driver = NvidiaFabricDriver()
@@ -377,7 +378,7 @@ def _probe_nvidia_fabric_connectivity(gpu_id: int, rank: int, world_size: int) -
         local_record = {
             "rank": rank,
             "ok": True,
-            "handle": driver.export_handle(allocation),
+            "handle": driver.export_handle(ExportableMemory(allocation.va, allocation.size, allocation)),
             "size": allocation.size,
         }
     except Exception as exc:
@@ -409,12 +410,12 @@ def _probe_nvidia_fabric_connectivity(gpu_id: int, rank: int, world_size: int) -
     if driver is not None:
         for mapping in imported_mappings:
             try:
-                driver.cleanup_import(mapping)
+                driver.cleanup(mapping)
             except Exception as exc:
                 logger.debug("[Rank %d] CUDA fabric probe import cleanup failed: %s", rank, exc)
         if allocation is not None:
             try:
-                driver.cleanup_local(allocation)
+                driver.cleanup(allocation)
             except Exception as exc:
                 logger.debug("[Rank %d] CUDA fabric probe local cleanup failed: %s", rank, exc)
 

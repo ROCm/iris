@@ -17,7 +17,7 @@ import torch
 
 from iris.host.logging.logging import _log_rank
 from iris.host.memory.allocators import TorchAllocator, VMemAllocator, VMemChunkedAllocator
-from iris.drivers.base import PeerMapping
+from iris.drivers.base import MappingPlacement, PeerMapping
 from iris.host.distributed.fd_passing import setup_fd_infrastructure
 from iris.host.distributed.helpers import distributed_allgather
 from iris.host.platform.utils import is_simulation_env
@@ -522,18 +522,12 @@ class SymmetricHeap:
                     # cleanup path below only closes never-consumed FDs.
                     pending_cloned_fds.pop(0)
                     reconstructed_handle = _replace_fd_in_local_handle(peer_handle_bytes, cloned_fd)
-                    import_kwargs = {}
-                    if len(peer_handle_bytes) == _LOCAL_HIP_HANDLE_BYTES:
-                        import_kwargs = {
-                            "access_va": peer_va_base,
-                            "access_size": peer_offset + peer_size,
-                        }
+                    placement = MappingPlacement(peer_va_base + peer_offset, arena_base=peer_va_base)
                     mapping = self.allocator.driver.import_and_map(
                         peer,
                         reconstructed_handle,
                         peer_size,
-                        va=peer_va_base + peer_offset,
-                        **import_kwargs,
+                        placement,
                     )
                     self._peer_imported_mappings[peer].append(mapping)
 
@@ -638,7 +632,7 @@ class SymmetricHeap:
                     peer,
                     handle_bytes,
                     chunk_size,
-                    va=peer_va_base + chunk_offset,
+                    MappingPlacement(peer_va_base + chunk_offset, arena_base=peer_va_base),
                 )
                 self._peer_imported_mappings[peer].append(mapping)
 
@@ -796,7 +790,7 @@ class SymmetricHeap:
                 for entry in mappings:
                     try:
                         if has_driver and isinstance(entry, PeerMapping):
-                            self.allocator.driver.cleanup_import(entry)
+                            self.allocator.driver.cleanup(entry)
                         else:
                             from iris.host.platform.hip import mem_release, mem_unmap
 

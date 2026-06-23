@@ -15,6 +15,7 @@ import torch
 from iris.drivers.base import (
     DriverError,
     DriverNotSupported,
+    ExportableMemory,
     LocalAllocation,
     PeerMapping,
 )
@@ -94,10 +95,10 @@ class TestNvidiaFabricDriver:
         ("method_name", "args"),
         [
             ("allocate_exportable", (4096,)),
-            ("export_handle", (LocalAllocation(va=0, size=0, handle=0),)),
+            ("export_handle", (ExportableMemory(va=0, size=0, allocation=LocalAllocation(va=0, size=0, handle=0)),)),
             ("import_and_map", (0, b"\x00" * FABRIC_HANDLE_BYTES, 4096)),
             (
-                "cleanup_import",
+                "cleanup",
                 (
                     PeerMapping(
                         peer_rank=0,
@@ -107,7 +108,7 @@ class TestNvidiaFabricDriver:
                     ),
                 ),
             ),
-            ("cleanup_local", (LocalAllocation(va=0, size=0, handle=0),)),
+            ("cleanup", (LocalAllocation(va=0, size=0, handle=0),)),
         ],
     )
     def test_public_methods_require_initialize(self, method_name, args):
@@ -131,7 +132,7 @@ class TestNvidiaFabricDriver:
         with pytest.raises(CudaFabricNotSupported, match="missing required VMM symbol: cuInit"):
             driver.initialize(0)
 
-    def test_cleanup_import_attempts_all_cleanup_steps(self, monkeypatch):
+    def test_cleanup_import_target_attempts_all_cleanup_steps(self, monkeypatch):
         calls = []
 
         class FakeCudaDriver:
@@ -159,7 +160,7 @@ class TestNvidiaFabricDriver:
         )
 
         with pytest.raises(CudaFabricError, match="cuMemUnmap"):
-            driver.cleanup_import(mapping)
+            driver.cleanup(mapping)
 
         assert calls == [
             ("unmap", 0x2000, 4096),
@@ -167,7 +168,7 @@ class TestNvidiaFabricDriver:
             ("free", 0x2000, 4096),
         ]
 
-    def test_cleanup_local_attempts_all_cleanup_steps(self, monkeypatch):
+    def test_cleanup_local_target_attempts_all_cleanup_steps(self, monkeypatch):
         calls = []
 
         class FakeCudaDriver:
@@ -189,7 +190,7 @@ class TestNvidiaFabricDriver:
         allocation = LocalAllocation(va=0x1000, size=8192, handle=77)
 
         with pytest.raises(CudaFabricError, match="cuMemUnmap"):
-            driver.cleanup_local(allocation)
+            driver.cleanup(allocation)
 
         assert calls == [
             ("unmap", 0x1000, 8192),

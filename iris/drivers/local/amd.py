@@ -16,7 +16,9 @@ from iris.drivers.base import (
     BaseDriver,
     DriverError,
     DriverNotSupported,
+    ExportableMemory,
     LocalAllocation,
+    MappingPlacement,
     PeerMapping,
 )
 from iris.host.distributed.topology import InterconnectLevel
@@ -368,26 +370,22 @@ class LocalHipDriver(BaseDriver):
     def allocate_exportable(
         self,
         size: int,
-        va: Optional[int] = None,
-        *,
-        access_va: Optional[int] = None,
-        access_size: Optional[int] = None,
+        placement: Optional[MappingPlacement] = None,
     ) -> LocalAllocation:
         """
         Allocate HIP VMem exportable as a DMA-BUF.
 
-        If va is supplied, the caller must already own a sufficiently large,
-        granularity-aligned VA range containing [va, va + size).
+        If placement is supplied, the caller must already own a sufficiently
+        large, granularity-aligned VA range containing [placement.va,
+        placement.va + size).
         """
         self._check_initialized()
-        if (access_va is None) != (access_size is None):
-            raise LocalHipError("access_va and access_size must be provided together")
         props = self._make_alloc_props()
         granularity = self._get_granularity()
         alloc_size = _round_up(size, granularity)
 
-        reserved_va = va is None
-        mapped_va = int(va) if va is not None else 0
+        reserved_va = placement is None
+        mapped_va = int(placement.va) if placement is not None else 0
         handle = hipMemGenericAllocationHandle_t()
         mapped = False
 
@@ -409,10 +407,12 @@ class LocalHipDriver(BaseDriver):
                 "hipMemMap",
             )
             mapped = True
-            self._mem_set_access(
-                int(access_va) if access_va is not None else mapped_va,
-                int(access_size) if access_size is not None else alloc_size,
+            access_base, access_bytes = (
+                placement.access_range(alloc_size, cumulative=True)
+                if placement is not None
+                else (mapped_va, alloc_size)
             )
+            self._mem_set_access(access_base, access_bytes)
             return LocalAllocation(
                 va=mapped_va,
                 size=alloc_size,
@@ -489,25 +489,20 @@ class LocalHipDriver(BaseDriver):
                 pass
             raise
 
-    def export_handle(self, allocation: LocalAllocation) -> bytes:
-        """Export a 20-byte DMA-BUF descriptor for a local HIP allocation."""
+    def export_handle(self, memory: ExportableMemory) -> bytes:
+        """Export a 20-byte DMA-BUF descriptor for a local HIP memory range."""
         self._check_initialized()
-        return self._export_range(allocation.va, allocation.size)
+        return self._export_range(memory.va, memory.size)
 
     def import_and_map(
         self,
         peer_rank: int,
         handle_bytes: bytes,
         size: int,
-        va: Optional[int] = None,
-        *,
-        access_va: Optional[int] = None,
-        access_size: Optional[int] = None,
+        placement: Optional[MappingPlacement] = None,
     ) -> PeerMapping:
         """Import a DMA-BUF descriptor and map it into local GPU address space."""
         self._check_initialized()
-        if (access_va is None) != (access_size is None):
-            raise LocalHipError("access_va and access_size must be provided together")
         if len(handle_bytes) != _AMD_HANDLE_BYTES:
             raise LocalHipError(f"AMD local handle must be {_AMD_HANDLE_BYTES} bytes, got {len(handle_bytes)}")
 
@@ -515,8 +510,8 @@ class LocalHipDriver(BaseDriver):
         if size > base_size - offset:
             raise LocalHipError(f"Requested map size {size} exceeds imported base range {base_size} at offset {offset}")
 
-        if va is not None:
-            mapped_va = int(va)
+        if placement is not None:
+            mapped_va = int(placement.va)
             imported_handle = hipMemGenericAllocationHandle_t()
             mapped = False
             fd_open = True
@@ -537,10 +532,8 @@ class LocalHipDriver(BaseDriver):
                     "hipMemMap",
                 )
                 mapped = True
-                self._mem_set_access(
-                    int(access_va) if access_va is not None else mapped_va,
-                    int(access_size) if access_size is not None else size,
-                )
+                access_base, access_bytes = placement.access_range(size, cumulative=True)
+                self._mem_set_access(access_base, access_bytes)
                 return PeerMapping(
                     peer_rank=peer_rank,
                     transport=InterconnectLevel.INTRA_NODE,
@@ -628,7 +621,17 @@ class LocalHipDriver(BaseDriver):
                 )
             raise
 
-    def cleanup_import(self, mapping: PeerMapping) -> None:
+    def cleanup(self, target: LocalAllocation | PeerMapping) -> None:
+        """Release a local HIP allocation or imported HIP mapping."""
+        if isinstance(target, LocalAllocation):
+            self._cleanup_local(target)
+            return
+        if isinstance(target, PeerMapping):
+            self._cleanup_import(target)
+            return
+        raise LocalHipError(f"Unsupported cleanup target: {type(target).__name__}")
+
+    def _cleanup_import(self, mapping: PeerMapping) -> None:
         """Release an imported HIP external-memory mapping."""
         self._check_initialized()
         if (
@@ -662,7 +665,7 @@ class LocalHipDriver(BaseDriver):
             logger.warning("hipDestroyExternalMemory failed during import cleanup", exc_info=True)
             raise
 
-    def cleanup_local(self, allocation: LocalAllocation) -> None:
+    def _cleanup_local(self, allocation: LocalAllocation) -> None:
         """Unmap, release, and free a local HIP VMem allocation."""
         self._check_initialized()
         steps = [
@@ -734,8 +737,3 @@ class LocalHipDriver(BaseDriver):
         if base_ptr.value is None:
             raise LocalHipError("hipMemGetAddressRange returned a null base pointer")
         return int(base_ptr.value), int(base_size.value)
-
-    def export_pointer_handle(self, ptr: int, size: int) -> bytes:
-        """Export a DMA-BUF descriptor for an arbitrary HIP device pointer range."""
-        self._check_initialized()
-        return self._export_range(int(ptr), int(size))

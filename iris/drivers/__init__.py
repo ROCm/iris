@@ -10,9 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from iris.drivers.base import BaseDriver
+from iris.drivers.base import BaseDriver, CleanupTarget, ExportableMemory, MappingPlacement
 
-__all__ = ["DriverStack"]
+__all__ = ["DriverStack", "CleanupTarget", "ExportableMemory", "MappingPlacement"]
 
 
 @dataclass
