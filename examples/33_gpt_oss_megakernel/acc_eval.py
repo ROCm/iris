@@ -58,6 +58,10 @@ def main():
     ap.add_argument("--tokens", type=int, default=48, help="decode steps per prompt")
     ap.add_argument("--mode", default="fp8attn", choices=["fp8attn","fp4experts"],
                     help="fp8attn: FP8 vs BF16 attn (FP4 experts both); fp4experts: FP4 vs BF16 experts (BF16 attn both)")
+    ap.add_argument("--components", default=None,
+                    help="comma list of FP8 components for the TEST model in fp8attn mode: qkv,o,router")
+    ap.add_argument("--fp8-scale-blk", type=int, default=0,
+                    help="FP8 weight scale block size along K (0=per-row, 32=MXFP8)")
     args = ap.parse_args()
 
     cfg = GptOssConfig()
@@ -66,9 +70,11 @@ def main():
     tok = load_tokenizer()
 
     if args.mode == "fp8attn":
-        print("ref = BF16-attn + FP4-experts; test = FP8-attn + FP4-experts")
+        comps = set(args.components.split(",")) if args.components else {"qkv", "o", "router"}
+        blk = args.fp8_scale_blk
+        print(f"ref = BF16-attn + FP4-experts; test = FP8 {sorted(comps)} scale_blk={blk or 'per-row'} + FP4-experts")
         ref = MegaModel.from_iris(args.model, cfg, cfg.num_layers, quant=True, fp8_attn=False)
-        test = MegaModel.from_iris(args.model, cfg, cfg.num_layers, quant=True, fp8_attn=True)
+        test = MegaModel.from_iris(args.model, cfg, cfg.num_layers, quant=True, fp8_components=comps, fp8_scale_blk=blk)
     else:
         print("ref = BF16-attn + BF16-experts; test = BF16-attn + FP4-experts")
         ref = MegaModel.from_iris(args.model, cfg, cfg.num_layers, quant=False, fp8_attn=False)

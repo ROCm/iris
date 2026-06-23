@@ -319,13 +319,15 @@ def _gemv_fp8_rmsnorm(
     BLOCK_K: tl.constexpr,
     NORMK: tl.constexpr,
     NSTAGES: tl.constexpr = 3,
+    SCALE_BLK: tl.constexpr = 1 << 30,
 ):
-    """FP8-weight fused RMSNorm + GEMV: y[r] = ws[r]*sum_k W8[r,k]*(rmsnorm(x)*g)[k].
+    """FP8-weight fused RMSNorm + GEMV: y[r] = sum_k ws[r,blk(k)]*W8[r,k]*(rmsnorm(x)*g)[k].
 
-    W is FP8-e4m3 [M,H] with a per-row scale ws[M] (W = W8*ws). The activation stays
-    in fp32 (the win is halving the weight bytes); each program recomputes the norm
-    scale from the stable x_ptr (no barrier). Scalar-FMA over a [BLOCK_M, BLOCK_K]
-    weight tile, like _gemv_bf16_tiled but loading FP8 and applying ws after."""
+    W is FP8-e4m3 [M,H]; ws is a weight scale of granularity SCALE_BLK along K (one
+    scale per [row, k-block of SCALE_BLK]). SCALE_BLK>=H is per-row (ws shape [M,1]);
+    SCALE_BLK=32 is MXFP8-style 1x32 blocks ([M, H/32]). Activation stays fp32; each
+    program recomputes the norm scale from the stable x_ptr (no barrier). BLOCK_K must
+    be a multiple of SCALE_BLK (or >=H for per-row)."""
     noff = tl.arange(0, NORMK)
     nmask = noff < H
     xall = tl.load(x_ptr + noff, mask=nmask, other=0.0).to(tl.float32)
@@ -335,11 +337,15 @@ def _gemv_fp8_rmsnorm(
     ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
     n_tiles = (M + BLOCK_M - 1) // BLOCK_M
     NK: tl.constexpr = (H + BLOCK_K - 1) // BLOCK_K
+    PERROW: tl.constexpr = SCALE_BLK >= H
+    NSB: tl.constexpr = (H + SCALE_BLK - 1) // SCALE_BLK  # scale blocks along K (per matrix row)
+    SBT: tl.constexpr = BLOCK_K // SCALE_BLK if not PERROW else 1  # scale blocks per K-tile
     tile = pid
     while tile < n_tiles:
         rows = tile * BLOCK_M + tl.arange(0, BLOCK_M)
         rmask = rows < M
-        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)  # per-row path (no inner scale)
+        bacc = tl.zeros((BLOCK_M,), dtype=tl.float32)  # per-block path (scale folded in K-loop)
         for ki in tl.range(0, NK, num_stages=NSTAGES):
             kk = ki * BLOCK_K + ko
             kmask = kk < H
@@ -349,9 +355,24 @@ def _gemv_fp8_rmsnorm(
             w = tl.load(
                 w_base + rows[:, None] * H + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0
             ).to(tl.float32)
-            acc += w * nk[None, :]
-        s = tl.sum(acc, axis=1)
-        s = s * tl.load(ws_base + rows, mask=rmask, other=0.0).to(tl.float32)
+            if PERROW:
+                acc += w * nk[None, :]
+            else:
+                # per-block dequant: psum[m,blk] = sum_{k in blk} W8*nk; then *= scale[m,blk]
+                part = (w * nk[None, :]).reshape(BLOCK_M, SBT, SCALE_BLK)
+                psum = tl.sum(part, axis=2)  # [BLOCK_M, SBT]
+                sbk = ki * SBT + tl.arange(0, SBT)
+                sc = tl.load(
+                    ws_base + rows[:, None] * NSB + sbk[None, :],
+                    mask=rmask[:, None] & (sbk[None, :] < NSB),
+                    other=0.0,
+                ).to(tl.float32)
+                bacc += tl.sum(psum * sc, axis=1)  # [BLOCK_M]
+        if PERROW:
+            s = tl.sum(acc, axis=1)
+            s = s * tl.load(ws_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        else:
+            s = bacc
         if has_bias:
             s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
         tl.store(y_ptr + rows, s, mask=rmask)
@@ -372,18 +393,23 @@ def _gemv_fp8_tiled(
     BLOCK_M: tl.constexpr,
     BLOCK_K: tl.constexpr,
     NSTAGES: tl.constexpr = 3,
+    SCALE_BLK: tl.constexpr = 1 << 30,
 ):
-    """FP8-weight GEMV (no norm): y[r] = ws[r]*sum_k W8[r,k]*x[k] (+b[r]). Activation
-    stays fp32; scalar-FMA over a [BLOCK_M, BLOCK_K] FP8 weight tile."""
+    """FP8-weight GEMV (no norm): y[r] = sum_k ws[r,blk(k)]*W8[r,k]*x[k] (+b[r]).
+    Activation stays fp32. SCALE_BLK>=K is per-row; SCALE_BLK=32 is MXFP8 1x32 blocks."""
     npid = tl.num_programs(0)
     ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
     n_tiles = (M + BLOCK_M - 1) // BLOCK_M
     NK: tl.constexpr = (K + BLOCK_K - 1) // BLOCK_K
+    PERROW: tl.constexpr = SCALE_BLK >= K
+    NSB: tl.constexpr = (K + SCALE_BLK - 1) // SCALE_BLK
+    SBT: tl.constexpr = BLOCK_K // SCALE_BLK if not PERROW else 1
     tile = pid
     while tile < n_tiles:
         rows = tile * BLOCK_M + tl.arange(0, BLOCK_M)
         rmask = rows < M
         acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        bacc = tl.zeros((BLOCK_M,), dtype=tl.float32)
         for ki in tl.range(0, NK, num_stages=NSTAGES):
             kk = ki * BLOCK_K + ko
             kmask = kk < K
@@ -391,9 +417,23 @@ def _gemv_fp8_tiled(
             w = tl.load(
                 w_base + rows[:, None] * K + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0
             ).to(tl.float32)
-            acc += w * x[None, :]
-        s = tl.sum(acc, axis=1)
-        s = s * tl.load(ws_base + rows, mask=rmask, other=0.0).to(tl.float32)
+            if PERROW:
+                acc += w * x[None, :]
+            else:
+                part = (w * x[None, :]).reshape(BLOCK_M, SBT, SCALE_BLK)
+                psum = tl.sum(part, axis=2)
+                sbk = ki * SBT + tl.arange(0, SBT)
+                sc = tl.load(
+                    ws_base + rows[:, None] * NSB + sbk[None, :],
+                    mask=rmask[:, None] & (sbk[None, :] < NSB),
+                    other=0.0,
+                ).to(tl.float32)
+                bacc += tl.sum(psum * sc, axis=1)
+        if PERROW:
+            s = tl.sum(acc, axis=1)
+            s = s * tl.load(ws_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        else:
+            s = bacc
         if has_bias:
             s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
         tl.store(y_ptr + rows, s, mask=rmask)
@@ -418,10 +458,11 @@ def _gemv_fp8_resid_rmsnorm(
     BLOCK_K: tl.constexpr,
     NORMK: tl.constexpr,
     NSTAGES: tl.constexpr = 3,
+    SCALE_BLK: tl.constexpr = 1 << 30,
 ):
-    """FP8-weight fused residual + RMSNorm + GEMV: y = ws*GEMV8(rmsnorm(x + o) * g).
-    Mirrors _gemv_bf16_resid_rmsnorm with FP8 weight (per-row scale ws); activation
-    stays fp32."""
+    """FP8-weight fused residual + RMSNorm + GEMV: y = GEMV8(rmsnorm(x + o) * g) with
+    weight scale of granularity SCALE_BLK along K. SCALE_BLK>=H is per-row; 32 is
+    MXFP8. Activation stays fp32."""
     noff = tl.arange(0, NORMK)
     nmask = noff < H
     xall = tl.load(x_ptr + noff, mask=nmask, other=0.0).to(tl.float32) + tl.load(
@@ -433,11 +474,15 @@ def _gemv_fp8_resid_rmsnorm(
     ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
     n_tiles = (M + BLOCK_M - 1) // BLOCK_M
     NK: tl.constexpr = (H + BLOCK_K - 1) // BLOCK_K
+    PERROW: tl.constexpr = SCALE_BLK >= H
+    NSB: tl.constexpr = (H + SCALE_BLK - 1) // SCALE_BLK
+    SBT: tl.constexpr = BLOCK_K // SCALE_BLK if not PERROW else 1
     tile = pid
     while tile < n_tiles:
         rows = tile * BLOCK_M + tl.arange(0, BLOCK_M)
         rmask = rows < M
         acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        bacc = tl.zeros((BLOCK_M,), dtype=tl.float32)
         for ki in tl.range(0, NK, num_stages=NSTAGES):
             kk = ki * BLOCK_K + ko
             kmask = kk < H
@@ -449,9 +494,23 @@ def _gemv_fp8_resid_rmsnorm(
             w = tl.load(
                 w_base + rows[:, None] * H + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0
             ).to(tl.float32)
-            acc += w * nk[None, :]
-        s = tl.sum(acc, axis=1)
-        s = s * tl.load(ws_base + rows, mask=rmask, other=0.0).to(tl.float32)
+            if PERROW:
+                acc += w * nk[None, :]
+            else:
+                part = (w * nk[None, :]).reshape(BLOCK_M, SBT, SCALE_BLK)
+                psum = tl.sum(part, axis=2)
+                sbk = ki * SBT + tl.arange(0, SBT)
+                sc = tl.load(
+                    ws_base + rows[:, None] * NSB + sbk[None, :],
+                    mask=rmask[:, None] & (sbk[None, :] < NSB),
+                    other=0.0,
+                ).to(tl.float32)
+                bacc += tl.sum(psum * sc, axis=1)
+        if PERROW:
+            s = tl.sum(acc, axis=1)
+            s = s * tl.load(ws_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        else:
+            s = bacc
         if has_bias:
             s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
         tl.store(y_ptr + rows, s, mask=rmask)
@@ -711,7 +770,10 @@ def gpt_oss_megakernel(
     MTILE: tl.constexpr,
     BLOCK_T: tl.constexpr,
     NSTAGES: tl.constexpr,
-    FP8_ATTN: tl.constexpr,
+    FP8_QKV: tl.constexpr,
+    FP8_O: tl.constexpr,
+    FP8_ROUTER: tl.constexpr,
+    MXFP8_BLK: tl.constexpr,
     DUMP_LOGITS: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -736,21 +798,25 @@ def gpt_oss_megakernel(
         sinks = sinks_p + layer * NH
         rw = router_w_p + layer * E * H
         rb = router_b_p + layer * E
-        wq_s = wq_s_p + layer * q_dim
-        wk_s = wk_s_p + layer * kv_dim
-        wv_s = wv_s_p + layer * kv_dim
-        wo_s = wo_s_p + layer * H
-        rw_s = router_w_s_p + layer * E
+        # scale stride per layer = N_rows * (#K-blocks). #K-blocks is 1 for per-row,
+        # or K/MXFP8_BLK for block scales (qkv/router contract over H, o-proj over q_dim).
+        NSB_H: tl.constexpr = (H + MXFP8_BLK - 1) // MXFP8_BLK if MXFP8_BLK < H else 1
+        NSB_Q: tl.constexpr = (q_dim + MXFP8_BLK - 1) // MXFP8_BLK if MXFP8_BLK < q_dim else 1
+        wq_s = wq_s_p + layer * q_dim * NSB_H
+        wk_s = wk_s_p + layer * kv_dim * NSB_H
+        wv_s = wv_s_p + layer * kv_dim * NSB_H
+        wo_s = wo_s_p + layer * H * NSB_Q
+        rw_s = router_w_s_p + layer * E * NSB_H
         kcache = kcache_p + layer * max_seq * kv_dim
         vcache = vcache_p + layer * max_seq * kv_dim
 
         # ---- P0+P1 FUSED: RMSNorm(attn) folded into QKV GEMV (no separate norm
         # phase / barrier). Each WG recomputes the norm scale from x_p (stable since
         # the prev-layer barrier) and applies it inline. ----
-        if FP8_ATTN:
-            _gemv_fp8_rmsnorm(wq, wq_s, x_p, na, q_p, True, bq, q_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
-            _gemv_fp8_rmsnorm(wk, wk_s, x_p, na, k_p, True, bk, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
-            _gemv_fp8_rmsnorm(wv, wv_s, x_p, na, v_p, True, bv, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+        if FP8_QKV:
+            _gemv_fp8_rmsnorm(wq, wq_s, x_p, na, q_p, True, bq, q_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK, NSTAGES, MXFP8_BLK)
+            _gemv_fp8_rmsnorm(wk, wk_s, x_p, na, k_p, True, bk, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK, NSTAGES, MXFP8_BLK)
+            _gemv_fp8_rmsnorm(wv, wv_s, x_p, na, v_p, True, bv, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK, NSTAGES, MXFP8_BLK)
         else:
             _gemv_bf16_rmsnorm(wq, x_p, na, q_p, True, bq, q_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
             _gemv_bf16_rmsnorm(wk, x_p, na, k_p, True, bk, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
@@ -842,8 +908,8 @@ def gpt_oss_megakernel(
         # ---- P4: O-proj -> o_p (the post-attention output). The residual add is
         # deferred to the layer's final accumulation, so there is no separate
         # residual phase or barrier. ----
-        if FP8_ATTN:
-            _gemv_fp8_tiled(wo, wo_s, attn_p, o_p, True, bo, H, q_dim, pid, BLOCK_M, BLOCK_K)
+        if FP8_O:
+            _gemv_fp8_tiled(wo, wo_s, attn_p, o_p, True, bo, H, q_dim, pid, BLOCK_M, BLOCK_K, NSTAGES, MXFP8_BLK)
         else:
             _gemv_bf16_tiled(wo, attn_p, o_p, True, bo, H, q_dim, pid, BLOCK_M, BLOCK_K)
         rstep = _NWG * BLOCK_M
@@ -854,9 +920,9 @@ def gpt_oss_megakernel(
         # one phase -- they only depend on x + o, available since the O-proj barrier.
         # The router writes logits; the quant writes the FP8 expert input; the moe
         # accumulator is zeroed. ----
-        if FP8_ATTN:
+        if FP8_ROUTER:
             _gemv_fp8_resid_rmsnorm(
-                rw, rw_s, x_p, o_p, nm, logits_p, True, rb, E, H, pid, eps, BLOCK_M, BLOCK_K, NORMK
+                rw, rw_s, x_p, o_p, nm, logits_p, True, rb, E, H, pid, eps, BLOCK_M, BLOCK_K, NORMK, NSTAGES, MXFP8_BLK
             )
         else:
             _gemv_bf16_resid_rmsnorm(rw, x_p, o_p, nm, logits_p, True, rb, E, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
@@ -1096,12 +1162,23 @@ class MegaModel:
         _skip_load=False,
         quant=False,
         fp8_attn=False,
+        fp8_components=None,
+        fp8_scale_blk=0,
     ):
         self.cfg = cfg
         self.L = num_layers
         self.dev = dev
         self.quant = quant
-        self.fp8_attn = fp8_attn
+        # fp8_components: subset of {"qkv","o","router"} to store in FP8. fp8_attn=True
+        # is shorthand for all three; an explicit set overrides it (e.g. {"qkv","o"}
+        # keeps the router in BF16, the DeepSeek recipe).
+        if fp8_components is None:
+            fp8_components = {"qkv", "o", "router"} if fp8_attn else set()
+        self.fp8_components = set(fp8_components)
+        self.fp8_attn = bool(self.fp8_components)
+        # FP8 weight-scale granularity along K: 0 = per-row (one scale per output row);
+        # 32 = MXFP8-style 1x32 blocks. Block scaling tracks per-block dynamic range.
+        self.fp8_scale_blk = fp8_scale_blk if fp8_scale_blk else (1 << 30)
         if not _skip_load:
             w = load_hf_weights(
                 GptOssConfig(), snapshot=snapshot, num_layers=num_layers, device="cpu", dtype=torch.bfloat16
@@ -1111,11 +1188,24 @@ class MegaModel:
             self._alloc_buffers()
 
     @classmethod
-    def from_iris(cls, iris_path: str, cfg: GptOssConfig, num_layers: int, dev="cuda", quant=False, fp8_attn=False):
+    def from_iris(
+        cls,
+        iris_path: str,
+        cfg: GptOssConfig,
+        num_layers: int,
+        dev="cuda",
+        quant=False,
+        fp8_attn=False,
+        fp8_components=None,
+        fp8_scale_blk=0,
+    ):
         """Build directly from a converted .iris weight file (mmap -> device)."""
         from convert_to_iris import read_iris_header, load_iris_tensor
 
-        self = cls(cfg, num_layers, dev=dev, _skip_load=True, quant=quant, fp8_attn=fp8_attn)
+        self = cls(
+            cfg, num_layers, dev=dev, _skip_load=True, quant=quant, fp8_attn=fp8_attn,
+            fp8_components=fp8_components, fp8_scale_blk=fp8_scale_blk,
+        )
         _, ents = read_iris_header(iris_path)
         g = lambda nm: load_iris_tensor(iris_path, ents[nm], device=dev)
         L = num_layers
@@ -1187,31 +1277,44 @@ class MegaModel:
 
     def _quant_attn_fp8(self):
         """Convert the BF16 attention/router weights (wq, wk, wv, wo, router_w) to
-        FP8-e4m3 with a per-row scale (amax/448), kept in <name>_s. Always builds the
-        scale tensors so the kernel signature is uniform; only replaces the weights
-        with FP8 when fp8_attn is set."""
+        FP8-e4m3. Weight scale granularity along K is set by fp8_scale_blk: per-row
+        (default, scale shape [L,N]) or 1xB blocks (B=32 -> MXFP8, scale [L,N,K/B]).
+        Always builds scale tensors so the kernel signature is uniform; only replaces
+        the weights with FP8 for the selected components."""
         dev = self.dev
+        B = self.fp8_scale_blk
 
-        def q(W):  # W [L, N, K] bf16 -> (fp8 [L,N,K], scale [L,N] f32)
+        def q(W):  # W [L, N, K] bf16 -> (fp8 [L,N,K], scale)
             Wf = W.float()
-            s = Wf.abs().amax(dim=2, keepdim=True) / 448.0
+            Lc, N, K = Wf.shape
+            if B >= K:  # per-row: one scale per output row
+                s = Wf.abs().amax(dim=2, keepdim=True) / 448.0
+                s = torch.where(s > 0, s, torch.ones_like(s))
+                return (Wf / s).to(torch.float8_e4m3fn).contiguous(), s.squeeze(2).contiguous()
+            # 1xB blocks along K (K assumed divisible by B; attn dims are 2880/4096)
+            nsb = K // B
+            Wb = Wf.reshape(Lc, N, nsb, B)
+            s = Wb.abs().amax(dim=3, keepdim=True) / 448.0
             s = torch.where(s > 0, s, torch.ones_like(s))
-            return (Wf / s).to(torch.float8_e4m3fn).contiguous(), s.squeeze(2).contiguous()
+            Wq = (Wb / s).to(torch.float8_e4m3fn).reshape(Lc, N, K)
+            return Wq.contiguous(), s.squeeze(3).contiguous()  # scale [L, N, nsb]
 
-        if self.fp8_attn:
+        # placeholder scales (used only for components left in BF16, so the kernel
+        # signature stays uniform)
+        z1 = lambda n: torch.ones(self.L, n, dtype=torch.float32, device=dev)
+        self.wq_s = z1(self.cfg.q_dim)
+        self.wk_s = z1(self.cfg.kv_dim)
+        self.wv_s = z1(self.cfg.kv_dim)
+        self.wo_s = z1(self.cfg.hidden_dim)
+        self.router_w_s = z1(self.cfg.num_experts)
+        if "qkv" in self.fp8_components:
             self.wq, self.wq_s = q(self.wq)
             self.wk, self.wk_s = q(self.wk)
             self.wv, self.wv_s = q(self.wv)
+        if "o" in self.fp8_components:
             self.wo, self.wo_s = q(self.wo)
+        if "router" in self.fp8_components:
             self.router_w, self.router_w_s = q(self.router_w)
-        else:
-            # placeholders (unused by the kernel when FP8_ATTN is False)
-            z1 = lambda n: torch.ones(self.L, n, dtype=torch.float32, device=dev)
-            self.wq_s = z1(self.cfg.q_dim)
-            self.wk_s = z1(self.cfg.kv_dim)
-            self.wv_s = z1(self.cfg.kv_dim)
-            self.wo_s = z1(self.cfg.hidden_dim)
-            self.router_w_s = z1(self.cfg.num_experts)
 
     def _alloc_buffers(self):
         cfg, dev = self.cfg, self.dev
@@ -1346,7 +1449,10 @@ class MegaModel:
             MTILE=16,
             BLOCK_T=64,
             NSTAGES=3,
-            FP8_ATTN=self.fp8_attn,
+            FP8_QKV=("qkv" in self.fp8_components),
+            FP8_O=("o" in self.fp8_components),
+            FP8_ROUTER=("router" in self.fp8_components),
+            MXFP8_BLK=self.fp8_scale_blk,
             DUMP_LOGITS=dump_logits,
             num_warps=4,
         )
