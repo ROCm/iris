@@ -39,7 +39,10 @@ from reference import GptOssConfig, build_yarn_rope
 from load_hf import load_hf_weights
 from tokenizer_util import load_tokenizer
 
-NUM_WG = 256  # one persistent program per CU on MI355X
+# Number of persistent programs. Fewer than the 256 CUs on MI355X: with a grid-wide
+# barrier between phases, a smaller grid makes each barrier cheaper while still
+# keeping every phase's GEMV well filled. 192 measured fastest for this model.
+NUM_WG = 192
 _NWG = tl.constexpr(NUM_WG)
 
 
