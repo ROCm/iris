@@ -303,6 +303,162 @@ def _gemv_bf16(w_base, x_ptr, y_ptr, has_bias, b_base, M, K: tl.constexpr, pid, 
 
 
 @triton.jit
+def _gemv_fp8_rmsnorm(
+    w_base,
+    ws_base,
+    x_ptr,
+    g_ptr,
+    y_ptr,
+    has_bias,
+    b_base,
+    M,
+    H: tl.constexpr,
+    pid,
+    eps,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    NORMK: tl.constexpr,
+    NSTAGES: tl.constexpr = 3,
+):
+    """FP8-weight fused RMSNorm + GEMV: y[r] = ws[r]*sum_k W8[r,k]*(rmsnorm(x)*g)[k].
+
+    W is FP8-e4m3 [M,H] with a per-row scale ws[M] (W = W8*ws). The activation stays
+    in fp32 (the win is halving the weight bytes); each program recomputes the norm
+    scale from the stable x_ptr (no barrier). Scalar-FMA over a [BLOCK_M, BLOCK_K]
+    weight tile, like _gemv_bf16_tiled but loading FP8 and applying ws after."""
+    noff = tl.arange(0, NORMK)
+    nmask = noff < H
+    xall = tl.load(x_ptr + noff, mask=nmask, other=0.0).to(tl.float32)
+    ss = tl.sum(xall * xall, axis=0)
+    rms = 1.0 / tl.sqrt(ss / H + eps)
+    npid = tl.num_programs(0)
+    ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
+    n_tiles = (M + BLOCK_M - 1) // BLOCK_M
+    NK: tl.constexpr = (H + BLOCK_K - 1) // BLOCK_K
+    tile = pid
+    while tile < n_tiles:
+        rows = tile * BLOCK_M + tl.arange(0, BLOCK_M)
+        rmask = rows < M
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        for ki in tl.range(0, NK, num_stages=NSTAGES):
+            kk = ki * BLOCK_K + ko
+            kmask = kk < H
+            xk = tl.load(x_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
+            gk = tl.load(g_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
+            nk = xk * rms * gk
+            w = tl.load(
+                w_base + rows[:, None] * H + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0
+            ).to(tl.float32)
+            acc += w * nk[None, :]
+        s = tl.sum(acc, axis=1)
+        s = s * tl.load(ws_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        if has_bias:
+            s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        tl.store(y_ptr + rows, s, mask=rmask)
+        tile += npid
+
+
+@triton.jit
+def _gemv_fp8_tiled(
+    w_base,
+    ws_base,
+    x_ptr,
+    y_ptr,
+    has_bias,
+    b_base,
+    M,
+    K: tl.constexpr,
+    pid,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    NSTAGES: tl.constexpr = 3,
+):
+    """FP8-weight GEMV (no norm): y[r] = ws[r]*sum_k W8[r,k]*x[k] (+b[r]). Activation
+    stays fp32; scalar-FMA over a [BLOCK_M, BLOCK_K] FP8 weight tile."""
+    npid = tl.num_programs(0)
+    ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
+    n_tiles = (M + BLOCK_M - 1) // BLOCK_M
+    NK: tl.constexpr = (K + BLOCK_K - 1) // BLOCK_K
+    tile = pid
+    while tile < n_tiles:
+        rows = tile * BLOCK_M + tl.arange(0, BLOCK_M)
+        rmask = rows < M
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        for ki in tl.range(0, NK, num_stages=NSTAGES):
+            kk = ki * BLOCK_K + ko
+            kmask = kk < K
+            x = tl.load(x_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
+            w = tl.load(
+                w_base + rows[:, None] * K + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0
+            ).to(tl.float32)
+            acc += w * x[None, :]
+        s = tl.sum(acc, axis=1)
+        s = s * tl.load(ws_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        if has_bias:
+            s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        tl.store(y_ptr + rows, s, mask=rmask)
+        tile += npid
+
+
+@triton.jit
+def _gemv_fp8_resid_rmsnorm(
+    w_base,
+    ws_base,
+    x_ptr,
+    o_ptr,
+    g_ptr,
+    y_ptr,
+    has_bias,
+    b_base,
+    M,
+    H: tl.constexpr,
+    pid,
+    eps,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    NORMK: tl.constexpr,
+    NSTAGES: tl.constexpr = 3,
+):
+    """FP8-weight fused residual + RMSNorm + GEMV: y = ws*GEMV8(rmsnorm(x + o) * g).
+    Mirrors _gemv_bf16_resid_rmsnorm with FP8 weight (per-row scale ws); activation
+    stays fp32."""
+    noff = tl.arange(0, NORMK)
+    nmask = noff < H
+    xall = tl.load(x_ptr + noff, mask=nmask, other=0.0).to(tl.float32) + tl.load(
+        o_ptr + noff, mask=nmask, other=0.0
+    ).to(tl.float32)
+    ss = tl.sum(xall * xall, axis=0)
+    rms = 1.0 / tl.sqrt(ss / H + eps)
+    npid = tl.num_programs(0)
+    ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
+    n_tiles = (M + BLOCK_M - 1) // BLOCK_M
+    NK: tl.constexpr = (H + BLOCK_K - 1) // BLOCK_K
+    tile = pid
+    while tile < n_tiles:
+        rows = tile * BLOCK_M + tl.arange(0, BLOCK_M)
+        rmask = rows < M
+        acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+        for ki in tl.range(0, NK, num_stages=NSTAGES):
+            kk = ki * BLOCK_K + ko
+            kmask = kk < H
+            xk = tl.load(x_ptr + kk, mask=kmask, other=0.0).to(tl.float32) + tl.load(
+                o_ptr + kk, mask=kmask, other=0.0
+            ).to(tl.float32)
+            gk = tl.load(g_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
+            nk = xk * rms * gk
+            w = tl.load(
+                w_base + rows[:, None] * H + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0
+            ).to(tl.float32)
+            acc += w * nk[None, :]
+        s = tl.sum(acc, axis=1)
+        s = s * tl.load(ws_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        if has_bias:
+            s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
+        tl.store(y_ptr + rows, s, mask=rmask)
+        tile += npid
+
+
+@triton.jit
 def _gemv_fp4(
     blk_base,
     scl_base,
@@ -480,6 +636,12 @@ def gpt_oss_megakernel(
     sinks_p,
     router_w_p,
     router_b_p,
+    # FP8 attn per-row weight scales (unused when FP8_ATTN is False)
+    wq_s_p,
+    wk_s_p,
+    wv_s_p,
+    wo_s_p,
+    router_w_s_p,
     gu_blk_p,
     gu_scl_p,
     gu_b_p,
@@ -549,6 +711,7 @@ def gpt_oss_megakernel(
     MTILE: tl.constexpr,
     BLOCK_T: tl.constexpr,
     NSTAGES: tl.constexpr,
+    FP8_ATTN: tl.constexpr,
 ):
     pid = tl.program_id(0)
     HALF: tl.constexpr = DH // 2
@@ -572,15 +735,25 @@ def gpt_oss_megakernel(
         sinks = sinks_p + layer * NH
         rw = router_w_p + layer * E * H
         rb = router_b_p + layer * E
+        wq_s = wq_s_p + layer * q_dim
+        wk_s = wk_s_p + layer * kv_dim
+        wv_s = wv_s_p + layer * kv_dim
+        wo_s = wo_s_p + layer * H
+        rw_s = router_w_s_p + layer * E
         kcache = kcache_p + layer * max_seq * kv_dim
         vcache = vcache_p + layer * max_seq * kv_dim
 
         # ---- P0+P1 FUSED: RMSNorm(attn) folded into QKV GEMV (no separate norm
         # phase / barrier). Each WG recomputes the norm scale from x_p (stable since
         # the prev-layer barrier) and applies it inline. ----
-        _gemv_bf16_rmsnorm(wq, x_p, na, q_p, True, bq, q_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
-        _gemv_bf16_rmsnorm(wk, x_p, na, k_p, True, bk, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
-        _gemv_bf16_rmsnorm(wv, x_p, na, v_p, True, bv, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+        if FP8_ATTN:
+            _gemv_fp8_rmsnorm(wq, wq_s, x_p, na, q_p, True, bq, q_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+            _gemv_fp8_rmsnorm(wk, wk_s, x_p, na, k_p, True, bk, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+            _gemv_fp8_rmsnorm(wv, wv_s, x_p, na, v_p, True, bv, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+        else:
+            _gemv_bf16_rmsnorm(wq, x_p, na, q_p, True, bq, q_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+            _gemv_bf16_rmsnorm(wk, x_p, na, k_p, True, bk, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+            _gemv_bf16_rmsnorm(wv, x_p, na, v_p, True, bv, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
         _barrier(bar_p, (lb + 1) * _NWG)
 
         # ---- P2+P3 FUSED: RoPE, KV-cache append, and attention in one phase (no
@@ -668,7 +841,10 @@ def gpt_oss_megakernel(
         # ---- P4: O-proj -> o_p (the post-attention output). The residual add is
         # deferred to the layer's final accumulation, so there is no separate
         # residual phase or barrier. ----
-        _gemv_bf16_tiled(wo, attn_p, o_p, True, bo, H, q_dim, pid, BLOCK_M, BLOCK_K)
+        if FP8_ATTN:
+            _gemv_fp8_tiled(wo, wo_s, attn_p, o_p, True, bo, H, q_dim, pid, BLOCK_M, BLOCK_K)
+        else:
+            _gemv_bf16_tiled(wo, attn_p, o_p, True, bo, H, q_dim, pid, BLOCK_M, BLOCK_K)
         rstep = _NWG * BLOCK_M
         bc += 1
         _barrier(bar_p, (lb + bc) * _NWG)
@@ -677,7 +853,12 @@ def gpt_oss_megakernel(
         # one phase -- they only depend on x + o, available since the O-proj barrier.
         # The router writes logits; the quant writes the FP8 expert input; the moe
         # accumulator is zeroed. ----
-        _gemv_bf16_resid_rmsnorm(rw, x_p, o_p, nm, logits_p, True, rb, E, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
+        if FP8_ATTN:
+            _gemv_fp8_resid_rmsnorm(
+                rw, rw_s, x_p, o_p, nm, logits_p, True, rb, E, H, pid, eps, BLOCK_M, BLOCK_K, NORMK
+            )
+        else:
+            _gemv_bf16_resid_rmsnorm(rw, x_p, o_p, nm, logits_p, True, rb, E, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
         base_z = pid * BLOCK_M
         while base_z < H:
             zoff = base_z + tl.arange(0, BLOCK_M)
@@ -903,11 +1084,21 @@ def gpt_oss_megakernel(
 
 # ───────────────────────── host wrapper ─────────────────────────
 class MegaModel:
-    def __init__(self, cfg: GptOssConfig, num_layers: int, dev="cuda", snapshot=None, _skip_load=False, quant=False):
+    def __init__(
+        self,
+        cfg: GptOssConfig,
+        num_layers: int,
+        dev="cuda",
+        snapshot=None,
+        _skip_load=False,
+        quant=False,
+        fp8_attn=False,
+    ):
         self.cfg = cfg
         self.L = num_layers
         self.dev = dev
         self.quant = quant
+        self.fp8_attn = fp8_attn
         if not _skip_load:
             w = load_hf_weights(
                 GptOssConfig(), snapshot=snapshot, num_layers=num_layers, device="cpu", dtype=torch.bfloat16
@@ -917,11 +1108,11 @@ class MegaModel:
             self._alloc_buffers()
 
     @classmethod
-    def from_iris(cls, iris_path: str, cfg: GptOssConfig, num_layers: int, dev="cuda", quant=False):
+    def from_iris(cls, iris_path: str, cfg: GptOssConfig, num_layers: int, dev="cuda", quant=False, fp8_attn=False):
         """Build directly from a converted .iris weight file (mmap -> device)."""
         from convert_to_iris import read_iris_header, load_iris_tensor
 
-        self = cls(cfg, num_layers, dev=dev, _skip_load=True, quant=quant)
+        self = cls(cfg, num_layers, dev=dev, _skip_load=True, quant=quant, fp8_attn=fp8_attn)
         _, ents = read_iris_header(iris_path)
         g = lambda nm: load_iris_tensor(iris_path, ents[nm], device=dev)
         L = num_layers
@@ -991,8 +1182,37 @@ class MegaModel:
         self.final_norm = w.final_norm.to(dev)
         self.lm_head = w.lm_head.to(dev)
 
+    def _quant_attn_fp8(self):
+        """Convert the BF16 attention/router weights (wq, wk, wv, wo, router_w) to
+        FP8-e4m3 with a per-row scale (amax/448), kept in <name>_s. Always builds the
+        scale tensors so the kernel signature is uniform; only replaces the weights
+        with FP8 when fp8_attn is set."""
+        dev = self.dev
+
+        def q(W):  # W [L, N, K] bf16 -> (fp8 [L,N,K], scale [L,N] f32)
+            Wf = W.float()
+            s = Wf.abs().amax(dim=2, keepdim=True) / 448.0
+            s = torch.where(s > 0, s, torch.ones_like(s))
+            return (Wf / s).to(torch.float8_e4m3fn).contiguous(), s.squeeze(2).contiguous()
+
+        if self.fp8_attn:
+            self.wq, self.wq_s = q(self.wq)
+            self.wk, self.wk_s = q(self.wk)
+            self.wv, self.wv_s = q(self.wv)
+            self.wo, self.wo_s = q(self.wo)
+            self.router_w, self.router_w_s = q(self.router_w)
+        else:
+            # placeholders (unused by the kernel when FP8_ATTN is False)
+            z1 = lambda n: torch.ones(self.L, n, dtype=torch.float32, device=dev)
+            self.wq_s = z1(self.cfg.q_dim)
+            self.wk_s = z1(self.cfg.kv_dim)
+            self.wv_s = z1(self.cfg.kv_dim)
+            self.wo_s = z1(self.cfg.hidden_dim)
+            self.router_w_s = z1(self.cfg.num_experts)
+
     def _alloc_buffers(self):
         cfg, dev = self.cfg, self.dev
+        self._quant_attn_fp8()
         H, qd, kvd, E, I, V = (
             cfg.hidden_dim,
             cfg.q_dim,
@@ -1052,6 +1272,11 @@ class MegaModel:
             self.sinks,
             self.router_w,
             self.router_b,
+            self.wq_s,
+            self.wk_s,
+            self.wv_s,
+            self.wo_s,
+            self.router_w_s,
             self.gu_blk,
             self.gu_scl,
             self.gu_b,
@@ -1118,6 +1343,7 @@ class MegaModel:
             MTILE=16,
             BLOCK_T=64,
             NSTAGES=3,
+            FP8_ATTN=self.fp8_attn,
             num_warps=4,
         )
         torch.cuda.synchronize()
@@ -1134,6 +1360,7 @@ def main():
     ap.add_argument("--snapshot", default=None)
     ap.add_argument("--model", default=None, help="path to a converted .iris weight file")
     ap.add_argument("--quant", action="store_true", help="use native FP4xFP8 scaled-MFMA experts")
+    ap.add_argument("--fp8-attn", action="store_true", help="store attention/router weights in FP8 (W8A8)")
     args = ap.parse_args()
 
     cfg = GptOssConfig()
@@ -1146,10 +1373,10 @@ def main():
 
     t0 = time.time()
     if args.model:
-        model = MegaModel.from_iris(args.model, cfg, L, quant=args.quant)
+        model = MegaModel.from_iris(args.model, cfg, L, quant=args.quant, fp8_attn=args.fp8_attn)
         print(f"loaded {L} layers from {args.model} in {time.time()-t0:.1f}s")
     else:
-        model = MegaModel(cfg, L, snapshot=args.snapshot, quant=args.quant)
+        model = MegaModel(cfg, L, snapshot=args.snapshot, quant=args.quant, fp8_attn=args.fp8_attn)
         print(f"loaded {L} layers (HF) in {time.time()-t0:.1f}s")
 
     pos = 0

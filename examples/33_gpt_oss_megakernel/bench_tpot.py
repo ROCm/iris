@@ -58,6 +58,7 @@ def main():
     ap.add_argument("--warmup", type=int, default=4)
     ap.add_argument("--snapshot", default=None)
     ap.add_argument("--modes", default="bf16,quant", help="comma list: bf16,quant")
+    ap.add_argument("--fp8-attn", action="store_true", help="store attention/router weights in FP8")
     args = ap.parse_args()
 
     cfg = GptOssConfig()
@@ -69,9 +70,9 @@ def main():
         quant = mode == "quant"
         t0 = time.time()
         if args.model:
-            model = MegaModel.from_iris(args.model, cfg, L, quant=quant)
+            model = MegaModel.from_iris(args.model, cfg, L, quant=quant, fp8_attn=args.fp8_attn)
         else:
-            model = MegaModel(cfg, L, snapshot=args.snapshot, quant=quant)
+            model = MegaModel(cfg, L, snapshot=args.snapshot, quant=quant, fp8_attn=args.fp8_attn)
         load_s = time.time() - t0
         mean, p50, p99, best = bench(model, ids, args.tokens, args.warmup)
         print(
