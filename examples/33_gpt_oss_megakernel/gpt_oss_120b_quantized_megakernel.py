@@ -712,6 +712,7 @@ def gpt_oss_megakernel(
     BLOCK_T: tl.constexpr,
     NSTAGES: tl.constexpr,
     FP8_ATTN: tl.constexpr,
+    DUMP_LOGITS: tl.constexpr,
 ):
     pid = tl.program_id(0)
     HALF: tl.constexpr = DH // 2
@@ -1059,6 +1060,8 @@ def gpt_oss_megakernel(
             acc += w * (xk * frms * gk)[None, :]
         logit = tl.sum(acc, axis=1)  # [BLOCK_M]
         logit = tl.where(rmask, logit, -1e30)
+        if DUMP_LOGITS:
+            tl.store(vlogits_p + rows, logit, mask=rmask)
         tmax = tl.max(logit, axis=0)
         if tmax > best_v:
             ismax = logit == tmax
@@ -1254,7 +1257,7 @@ class MegaModel:
         self.bar = z(1, torch.int32)
 
     @torch.no_grad()
-    def step(self, token_id: int, pos: int) -> int:
+    def step(self, token_id: int, pos: int, dump_logits: bool = False) -> int:
         cfg = self.cfg
         self.x.copy_(self.embed[token_id].float())
         self.bar.zero_()
@@ -1344,9 +1347,12 @@ class MegaModel:
             BLOCK_T=64,
             NSTAGES=3,
             FP8_ATTN=self.fp8_attn,
+            DUMP_LOGITS=dump_logits,
             num_warps=4,
         )
         torch.cuda.synchronize()
+        if dump_logits:
+            return int(self.next_tok.item()), self.vlogits.clone()
         return int(self.next_tok.item())
 
 
