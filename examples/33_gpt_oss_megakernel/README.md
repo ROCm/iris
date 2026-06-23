@@ -52,11 +52,28 @@ python examples/33_gpt_oss_megakernel/run_reference.py --prompt "The capital of 
 
 ```terminal
 python examples/33_gpt_oss_megakernel/bench_tpot.py --tokens 32 --warmup 4
+python examples/33_gpt_oss_megakernel/bench_islosl.py --configs 100:100,1024:1024,2048:2048
 ```
 
-Reported as time per output token (TPOT). On MI355X the quantized path runs at
-roughly 9.4 ms/token; the default BF16 path is slower but bit-faithful to the
-reference.
+`bench_tpot.py` reports steady-state time per output token (TPOT);
+`bench_islosl.py` sweeps input/output length pairs and reports prefill and decode
+latency separately. The quantized path runs at about 5.9 ms/token on MI355X; the
+default BF16 path is slower but bit-faithful to the reference.
+
+Measured on a single MI355X (quantized path, `max_seq_len = 4096`):
+
+| ISL | OSL | TTFT (ms) | TPOT (ms) | End-to-end (ms) | Decode (tok/s) |
+| --- | --- | --------- | --------- | --------------- | -------------- |
+| 100 | 100 | 590 | 5.87 | 1172 | 170 |
+| 1024 | 100 | 6002 | 5.87 | 6583 | 170 |
+| 1024 | 1024 | 5999 | 5.86 | 11994 | 171 |
+| 2048 | 2048 | 11990 | 5.87 | 23997 | 170 |
+
+TPOT stays flat across context lengths because the decode attention is computed
+with a blocked flash-decode. TTFT grows linearly with the input length: prefill
+reuses the single-token decode kernel one prompt token at a time, so there is no
+batched-prefill speedup (a batched prefill kernel would cut TTFT substantially).
+The largest pair is bounded by `ISL + OSL <= max_seq_len`.
 
 ## Files
 
@@ -70,6 +87,7 @@ reference.
 | `tokenizer_util.py` | Tokenizer wrapper. |
 | `run_reference.py`, `run_triton_phased.py` | End-to-end drivers. |
 | `bench_tpot.py` | Decode-latency benchmark. |
+| `bench_islosl.py` | Prefill/decode benchmark across input/output length pairs. |
 | `test_*.py` | Correctness tests. |
 
 Developed on AMD MI355X (gfx950, ROCm 7.2, Triton 3.6).
