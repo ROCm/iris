@@ -551,11 +551,15 @@ def gpt_oss_megakernel(
         _gemv_bf16_rmsnorm(wv, x_p, na, v_p, True, bv, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
         _barrier(bar_p, (lb + 1) * _NWG)
 
-        # ---- P2+P3 FUSED: RoPE folded into attention. KV-cache append done by the
-        # KV-head owners (pid < NKV); each attention head RoPEs its own q in-register.
-        # No separate RoPE phase / barrier. ----
+        # ---- P2+P3 FUSED: RoPE, KV-cache append, and attention in one phase (no
+        # separate KV-append barrier). The current position's key/value are RoPE'd and
+        # used in-register for its own attention term, and also written to the cache
+        # for future tokens; the history [lo, pos-1] is read from the cache. Since no
+        # attention head reads the just-written cache[pos], the append and the
+        # attention can share a phase. ----
+        d = tl.arange(0, DH)
+        # the KV-head owners append the current k,v (RoPE'd) to the cache for next time
         if pid < NKV:
-            # this program owns kv-head `pid`: RoPE k + append k,v to cache at pos
             h = tl.arange(0, HALF)
             cosv = tl.load(cos_p + h).to(tl.float32)
             sinv = tl.load(sin_p + h).to(tl.float32)
@@ -564,15 +568,10 @@ def gpt_oss_megakernel(
             k2 = tl.load(k_p + bidx + HALF + h).to(tl.float32)
             tl.store(kcache + pos * kv_dim + bidx + h, k1 * cosv - k2 * sinv)
             tl.store(kcache + pos * kv_dim + bidx + HALF + h, k2 * cosv + k1 * sinv)
-            vd = tl.arange(0, DH)
-            tl.store(vcache + pos * kv_dim + bidx + vd, tl.load(v_p + bidx + vd).to(tl.float32))
-        _barrier(bar_p, (lb + 2) * _NWG)
-
-        # ---- P3: attention (one head per program, heads 0..NH-1) ----
+            tl.store(vcache + pos * kv_dim + bidx + d, tl.load(v_p + bidx + d).to(tl.float32))
         if pid < NH:
             hh = pid
             kvh = hh // GROUP
-            d = tl.arange(0, DH)
             # RoPE this head's q in-register (NeoX half-split), full-width form:
             #   d <  HALF: qr[d] = q[d]*cos[d]      - q[d+HALF]*sin[d]
             #   d >= HALF: qr[d] = q[d]*cos[d-HALF] + q[d-HALF]*sin[d-HALF]
@@ -586,16 +585,15 @@ def gpt_oss_megakernel(
             lo = 0
             if SLIDING > 0:
                 lo = tl.maximum(0, pos - SLIDING + 1)
-            # Flash-decode over the KV history in blocks of BLOCK_T positions, with an
-            # online softmax. Scores for a block are a [BLOCK_T, DH] x [DH] reduction.
+            # Flash-decode over the KV history [lo, pos-1] from the cache, online softmax.
             m_i = -1e30
             l_i = 0.0
             acc = tl.zeros((DH,), dtype=tl.float32)
             toff = tl.arange(0, BLOCK_T)
             t0 = lo
-            while t0 <= pos:
+            while t0 < pos:
                 tt = t0 + toff
-                tmask = tt <= pos
+                tmask = tt < pos
                 kblk = tl.load(
                     kcache + tt[:, None] * kv_dim + kvh * DH + d[None, :], mask=tmask[:, None], other=0.0
                 ).to(tl.float32)
@@ -612,13 +610,26 @@ def gpt_oss_megakernel(
                 acc = acc * al + tl.sum(p[:, None] * vblk, axis=0)
                 m_i = mn
                 t0 += BLOCK_T
+            # current position pos: RoPE this kv-head's k in-register from k_p, which
+            # avoids reading the just-written cache entry and the append barrier.
+            kself = tl.load(k_p + kvh * DH + d).to(tl.float32)
+            kpart = tl.load(k_p + kvh * DH + partner).to(tl.float32)
+            k_pos = tl.where(d < HALF, kself * cosd - kpart * sind, kself * cosd + kpart * sind)
+            sc_pos = tl.sum(qv * k_pos, axis=0) * scale
+            mn = tl.maximum(m_i, sc_pos)
+            al = tl.exp(m_i - mn)
+            p_pos = tl.exp(sc_pos - mn)
+            l_i = l_i * al + p_pos
+            v_pos = tl.load(v_p + kvh * DH + d).to(tl.float32)
+            acc = acc * al + p_pos * v_pos
+            m_i = mn
             sink = tl.load(sinks + hh).to(tl.float32)
             mn = tl.maximum(m_i, sink)
             al = tl.exp(m_i - mn)
             l_i = l_i * al + tl.exp(sink - mn)
             acc = acc * al / l_i
             tl.store(attn_p + hh * DH + d, acc.to(tl.bfloat16))
-        bc = 2  # barriers used so far this layer: QKV(1), KV-append(2)
+        bc = 1  # barriers used so far this layer: QKV(1); KV-append fused into attention
         bc += 1
         _barrier(bar_p, (lb + bc) * _NWG)
 
