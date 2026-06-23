@@ -1084,7 +1084,7 @@ class MegaModel:
             GU_NB=self.gu_nb,
             DN_NB=self.dn_nb,
             max_seq=cfg.max_seq_len,
-            BLOCK_K=512,
+            BLOCK_K=1024,
             BLOCK_KI=256,
             BLOCK_M=8,
             NORMK=triton.next_power_of_2(cfg.hidden_dim),
