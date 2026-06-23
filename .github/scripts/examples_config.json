@@ -1,5 +1,8 @@
 {
   "31_message_passing": {
     "required_ranks": 2
+  },
+  "33_message_passing_single_kernel": {
+    "required_ranks": 2
   }
 }
