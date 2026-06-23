@@ -81,7 +81,17 @@ def _fp4_lut(mag_idx):
 
 @triton.jit
 def _gemv_bf16_tiled(
-    w_base, x_ptr, y_ptr, has_bias, b_base, M, K: tl.constexpr, pid, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr
+    w_base,
+    x_ptr,
+    y_ptr,
+    has_bias,
+    b_base,
+    M,
+    K: tl.constexpr,
+    pid,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    NSTAGES: tl.constexpr = 3,
 ):
     """y[r] = sum_k w[r,k]*x[k] (+b[r]) for a batch-1 GEMV.
 
@@ -94,21 +104,20 @@ def _gemv_bf16_tiled(
     mo = tl.arange(0, BLOCK_M)
     ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
     n_tiles = (M + BLOCK_M - 1) // BLOCK_M
+    NK: tl.constexpr = (K + BLOCK_K - 1) // BLOCK_K
     tile = pid
     while tile < n_tiles:
         rows = tile * BLOCK_M + mo
         rmask = rows < M
         acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
-        k0 = 0
-        while k0 < K:
-            kk = k0 + ko
+        for ki in tl.range(0, NK, num_stages=NSTAGES):
+            kk = ki * BLOCK_K + ko
             kmask = kk < K
             w = tl.load(w_base + rows[:, None] * K + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0).to(
                 tl.float32
             )
             x = tl.load(x_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
             acc += w * x[None, :]
-            k0 += BLOCK_K
         s = tl.sum(acc, axis=1)  # [BLOCK_M]
         if has_bias:
             s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
@@ -159,6 +168,7 @@ def _gemv_bf16_resid_rmsnorm(
     BLOCK_M: tl.constexpr,
     BLOCK_K: tl.constexpr,
     NORMK: tl.constexpr,
+    NSTAGES: tl.constexpr = 3,
 ):
     """Fused residual + RMSNorm + GEMV: y = GEMV(rmsnorm(x + o) * g).
 
@@ -179,14 +189,14 @@ def _gemv_bf16_resid_rmsnorm(
     mo = tl.arange(0, BLOCK_M)
     ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
     n_tiles = (M + BLOCK_M - 1) // BLOCK_M
+    NK: tl.constexpr = (H + BLOCK_K - 1) // BLOCK_K
     tile = pid
     while tile < n_tiles:
         rows = tile * BLOCK_M + mo
         rmask = rows < M
         acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
-        k0 = 0
-        while k0 < H:
-            kk = k0 + ko
+        for ki in tl.range(0, NK, num_stages=NSTAGES):
+            kk = ki * BLOCK_K + ko
             kmask = kk < H
             # recompute xnew = x + o inline (avoids depending on other programs'
             # persisted x_ptr writes -- no barrier needed before this read)
@@ -199,7 +209,6 @@ def _gemv_bf16_resid_rmsnorm(
                 tl.float32
             )
             acc += w * nk[None, :]
-            k0 += BLOCK_K
         s = tl.sum(acc, axis=1)
         if has_bias:
             s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
@@ -222,6 +231,7 @@ def _gemv_bf16_rmsnorm(
     BLOCK_M: tl.constexpr,
     BLOCK_K: tl.constexpr,
     NORMK: tl.constexpr,
+    NSTAGES: tl.constexpr = 3,
 ):
     """Fused RMSNorm + GEMV: y[r] = sum_k (rmsnorm(x)*g)[k] * w[r,k] (+b[r]).
 
@@ -238,14 +248,14 @@ def _gemv_bf16_rmsnorm(
     mo = tl.arange(0, BLOCK_M)
     ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
     n_tiles = (M + BLOCK_M - 1) // BLOCK_M
+    NK: tl.constexpr = (H + BLOCK_K - 1) // BLOCK_K
     tile = pid
     while tile < n_tiles:
         rows = tile * BLOCK_M + mo
         rmask = rows < M
         acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
-        k0 = 0
-        while k0 < H:
-            kk = k0 + ko
+        for ki in tl.range(0, NK, num_stages=NSTAGES):
+            kk = ki * BLOCK_K + ko
             kmask = kk < H
             xk = tl.load(x_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
             gk = tl.load(g_ptr + kk, mask=kmask, other=0.0).to(tl.float32)
@@ -254,7 +264,6 @@ def _gemv_bf16_rmsnorm(
                 tl.float32
             )
             acc += w * nk[None, :]
-            k0 += BLOCK_K
         s = tl.sum(acc, axis=1)
         if has_bias:
             s += tl.load(b_base + rows, mask=rmask, other=0.0).to(tl.float32)
@@ -387,6 +396,7 @@ def _gemv_fp4_scaled(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     MTILE: tl.constexpr,
+    NSTAGES: tl.constexpr = 3,
     FINALIZE: tl.constexpr = False,
     x_ptr=None,
     o_ptr=None,
@@ -400,6 +410,7 @@ def _gemv_fp4_scaled(
     coalesce into wide loads; the single-token activation is the broadcast rhs
     ([K, MTILE], only column 0 is real)."""
     SB: tl.constexpr = BLOCK_K // 32
+    NK: tl.constexpr = (K + BLOCK_K - 1) // BLOCK_K
     colsN = tl.arange(0, MTILE)
     tile = pid
     half = K // 2
@@ -408,8 +419,10 @@ def _gemv_fp4_scaled(
         n = tile * BLOCK_N + tl.arange(0, BLOCK_N)
         nmask = n < N
         acc = tl.zeros((BLOCK_N, MTILE), dtype=tl.float32)
-        k0 = 0
-        while k0 < K:
+        # pipelined K-loop: tl.range(num_stages) overlaps the next tile's loads with
+        # the current dot, which the plain while-loop did not do
+        for ki in tl.range(0, NK, num_stages=NSTAGES):
+            k0 = ki * BLOCK_K
             kk = k0 + tl.arange(0, BLOCK_K)
             kp = (k0 // 2) + tl.arange(0, BLOCK_K // 2)
             kpmask = kp < half
@@ -425,7 +438,6 @@ def _gemv_fp4_scaled(
             ascl = tl.load(ascl_ptr + sb[None, :], mask=sbmask[None, :], other=0)
             ascl = tl.broadcast_to(ascl, (MTILE, SB))
             acc = tl.dot_scaled(w, wscl, "e2m1", a, ascl, "e4m3", acc=acc, out_dtype=tl.float32)
-            k0 += BLOCK_K
         y = tl.sum(tl.where(colsN[None, :] == 0, acc, 0.0), axis=1)  # [BLOCK_N]
         if has_bias:
             y += tl.load(b_base + n, mask=nmask, other=0.0).to(tl.float32)
@@ -528,6 +540,7 @@ def gpt_oss_megakernel(
     BLOCK_KQ: tl.constexpr,
     MTILE: tl.constexpr,
     BLOCK_T: tl.constexpr,
+    NSTAGES: tl.constexpr,
 ):
     pid = tl.program_id(0)
     HALF: tl.constexpr = DH // 2
@@ -798,9 +811,10 @@ def gpt_oss_megakernel(
                     BLOCK_ND,
                     BLOCK_KQ,
                     MTILE,
-                    finalize,
-                    x_p,
-                    o_p,
+                    NSTAGES,
+                    FINALIZE=finalize,
+                    x_ptr=x_p,
+                    o_ptr=o_p,
                 )
             else:
                 act_out = act_p + slot * I
@@ -837,6 +851,7 @@ def gpt_oss_megakernel(
     mo = tl.arange(0, BLOCK_M_LM)
     ko = tl.max_contiguous(tl.multiple_of(tl.arange(0, BLOCK_K), BLOCK_K), BLOCK_K)
     n_tiles = (V + BLOCK_M_LM - 1) // BLOCK_M_LM
+    NK_LM: tl.constexpr = (H + BLOCK_K - 1) // BLOCK_K
     best_v = -1e30
     best_i = 0
     tile = pid
@@ -844,9 +859,8 @@ def gpt_oss_megakernel(
         rows = tile * BLOCK_M_LM + mo
         rmask = rows < V
         acc = tl.zeros((BLOCK_M_LM, BLOCK_K), dtype=tl.float32)
-        k0 = 0
-        while k0 < H:
-            kk = k0 + ko
+        for ki in tl.range(0, NK_LM, num_stages=NSTAGES):
+            kk = ki * BLOCK_K + ko
             kmask = kk < H
             w = tl.load(
                 lm_head_p + rows[:, None] * H + kk[None, :], mask=rmask[:, None] & kmask[None, :], other=0.0
@@ -854,7 +868,6 @@ def gpt_oss_megakernel(
             xk = tl.load(x_p + kk, mask=kmask, other=0.0).to(tl.float32)
             gk = tl.load(final_norm_p + kk, mask=kmask, other=0.0).to(tl.float32)
             acc += w * (xk * frms * gk)[None, :]
-            k0 += BLOCK_K
         logit = tl.sum(acc, axis=1)  # [BLOCK_M]
         logit = tl.where(rmask, logit, -1e30)
         tmax = tl.max(logit, axis=0)
@@ -1096,6 +1109,7 @@ class MegaModel:
             BLOCK_KQ=1024,
             MTILE=16,
             BLOCK_T=64,
+            NSTAGES=3,
             num_warps=4,
         )
         torch.cuda.synchronize()
