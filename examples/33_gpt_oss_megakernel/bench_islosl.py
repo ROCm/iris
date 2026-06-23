@@ -73,14 +73,15 @@ def main():
     ap.add_argument("--model", default=None, help="path to a .iris weight file")
     ap.add_argument("--snapshot", default=None)
     ap.add_argument("--configs", default="100:100,1024:100,1024:1024,2048:2048", help="comma list of ISL:OSL pairs")
+    ap.add_argument("--fp8-attn", action="store_true", help="store attention/router weights in FP8")
     args = ap.parse_args()
 
     cfg = GptOssConfig()
     t0 = time.time()
     if args.model:
-        model = MegaModel.from_iris(args.model, cfg, cfg.num_layers, quant=True)
+        model = MegaModel.from_iris(args.model, cfg, cfg.num_layers, quant=True, fp8_attn=args.fp8_attn)
     else:
-        model = MegaModel(cfg, cfg.num_layers, snapshot=args.snapshot, quant=True)
+        model = MegaModel(cfg, cfg.num_layers, snapshot=args.snapshot, quant=True, fp8_attn=args.fp8_attn)
     print(f"loaded model in {time.time() - t0:.1f}s (max_seq_len={cfg.max_seq_len})")
 
     rows = []

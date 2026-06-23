@@ -37,7 +37,8 @@ python examples/33_gpt_oss_megakernel/gpt_oss_120b_quantized_megakernel.py \
 
 The weights can also be read straight from the HuggingFace cache by omitting
 `--model`. Pass `--quant` to run the experts with the FP4 x FP8 scaled
-matrix-multiply path instead of dequantizing to BF16.
+matrix-multiply path instead of dequantizing to BF16. Add `--fp8-attn` to also
+store the attention and router weights in FP8 (faster, slightly less accurate).
 
 ## Validation
 
@@ -58,7 +59,9 @@ python examples/33_gpt_oss_megakernel/bench_islosl.py --configs 100:100,1024:102
 `bench_tpot.py` reports steady-state time per output token (TPOT);
 `bench_islosl.py` sweeps input/output length pairs and reports prefill and decode
 latency separately. The quantized path runs at about 4.9 ms/token on MI355X; the
-default BF16 path is slower but bit-faithful to the reference.
+default BF16 path is slower but bit-faithful to the reference. Passing `--fp8-attn`
+additionally stores the attention and router weights in FP8 (about 4.8 ms/token);
+this halves the attention weight traffic at a small accuracy cost.
 
 Measured on a single MI355X (quantized path, `max_seq_len = 4096`):
 
@@ -68,6 +71,15 @@ Measured on a single MI355X (quantized path, `max_seq_len = 4096`):
 | 1024 | 100 | 5154 | 5.04 | 5653 | 198 |
 | 1024 | 1024 | 5271 | 5.04 | 10429 | 198 |
 | 2048 | 2048 | 10305 | 5.03 | 20608 | 199 |
+
+With `--fp8-attn` (FP8 attention/router weights):
+
+| ISL | OSL | TTFT (ms) | TPOT (ms) | End-to-end (ms) | Decode (tok/s) |
+| --- | --- | --------- | --------- | --------------- | -------------- |
+| 100 | 100 | 484 | 4.80 | 960 | 208 |
+| 1024 | 100 | 4907 | 4.80 | 5382 | 208 |
+| 1024 | 1024 | 4906 | 4.80 | 9816 | 208 |
+| 2048 | 2048 | 9823 | 4.80 | 19644 | 208 |
 
 TPOT stays flat across context lengths because the decode attention is computed
 with a blocked flash-decode. TTFT grows linearly with the input length: prefill
