@@ -20,13 +20,20 @@ Per layer the kernel computes:
 
 followed once by the final RMSNorm, the language-model head, and an argmax.
 
-The attention weights, router, embedding and LM head are stored in BF16. The
-experts are stored in MXFP4 (4-bit weights with per-32 block scales) and only the
-selected experts are read each step. Two expert compute paths are available:
+The attention weights, router, embedding and LM head are stored in BF16 by
+default. The experts are stored in MXFP4 (4-bit weights with per-32 block scales)
+and only the selected experts are read each step. Two expert compute paths are
+available:
 
     default     dequantize the FP4 weights to BF16 and multiply in BF16
     quantized   quantize the activations to FP8 and multiply FP4 x FP8 with the
                 scaled matrix-multiply instruction (enable with quant=True)
+
+The attention/router weights can optionally be stored in a smaller dtype with
+fp8_attn=True (or --fp8-attn): the weights become FP8-e4m3 (a per-row or, with
+fp8_scale_blk=32, a 1x32-block scale) while the activations stay in fp32. This
+halves the attention weight traffic for a small accuracy cost; BF16 (the default)
+is more accurate. See acc_eval.py for the measured accuracy tradeoff.
 """
 
 from __future__ import annotations
@@ -1472,7 +1479,12 @@ def main():
     ap.add_argument("--snapshot", default=None)
     ap.add_argument("--model", default=None, help="path to a converted .iris weight file")
     ap.add_argument("--quant", action="store_true", help="use native FP4xFP8 scaled-MFMA experts")
-    ap.add_argument("--fp8-attn", action="store_true", help="store attention/router weights in FP8 (W8A8)")
+    ap.add_argument(
+        "--fp8-attn",
+        action="store_true",
+        help="store attention/router weights in FP8 (weight-only; activations stay fp32). "
+        "BF16 is the default and is more accurate.",
+    )
     args = ap.parse_args()
 
     cfg = GptOssConfig()

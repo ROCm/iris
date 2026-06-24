@@ -21,9 +21,11 @@ building blocks are in `kernels.py`.
 GPT-OSS-120B is a sparse mixture-of-experts model: 36 layers, hidden size 2880,
 64 query / 8 key-value heads, 128 experts with top-4 routing, SwiGLU experts,
 grouped-query attention with attention sinks, and alternating sliding / full
-attention windows. Attention, router, embedding and LM-head weights are BF16; the
-experts are stored in MXFP4 (4-bit) and only the routed experts are read per step,
-which keeps the resident model near 65 GB.
+attention windows. Attention, router, embedding and LM-head weights are BF16 by
+default; the experts are stored in MXFP4 (4-bit) and only the routed experts are
+read per step, which keeps the resident model near 65 GB. The attention and router
+weights can optionally be stored in FP8 (`--fp8-attn`) for a smaller, faster path
+at a small accuracy cost (see [Accuracy](#accuracy)).
 
 ## Usage
 
@@ -87,6 +89,29 @@ reuses the single-token decode kernel one prompt token at a time, so there is no
 batched-prefill speedup (a batched prefill kernel would cut TTFT substantially).
 The largest pair is bounded by `ISL + OSL <= max_seq_len`.
 
+## Accuracy
+
+BF16 attention is the default and the higher-accuracy choice. `--fp8-attn` is the
+smaller, faster mode: it stores the attention/router weights in FP8-e4m3 (the
+activations stay fp32). `acc_eval.py` measures the tradeoff by teacher-forcing the
+FP8 and BF16 variants on the same token streams (16 prompts x 48 decode steps) and
+comparing the next-token distributions:
+
+| variant | top-1 agreement vs BF16 | logit cosine |
+| ------- | ----------------------- | ------------ |
+| FP8 attention (per-row scale) | 0.91 | 0.988 |
+| FP8 attention (1x32 block scale) | 0.89 | 0.988 |
+
+FP8 agrees with BF16 on 98% of high-confidence tokens; the disagreements are
+concentrated on tokens the model was already uncertain about. Finer (1x32 block)
+weight scales do not help here because the residual error is the FP8 mantissa
+itself, not the per-row dynamic range. Use BF16 (the default) when accuracy
+matters and `--fp8-attn` when the ~5% decode speedup is worth the small drift.
+
+```terminal
+python examples/33_gpt_oss_megakernel/acc_eval.py --model gptoss_120b.iris --tokens 48
+```
+
 ## Files
 
 | File | Purpose |
@@ -100,6 +125,8 @@ The largest pair is bounded by `ISL + OSL <= max_seq_len`.
 | `run_reference.py`, `run_triton_phased.py` | End-to-end drivers. |
 | `bench_tpot.py` | Decode-latency benchmark. |
 | `bench_islosl.py` | Prefill/decode benchmark across input/output length pairs. |
+| `acc_eval.py` | Accuracy comparison (FP8 vs BF16 attention, teacher-forced). |
+| `tie_analysis.py` | Bucket FP8/BF16 token disagreements by prediction confidence. |
 | `test_*.py` | Correctness tests. |
 
 Developed on AMD MI355X (gfx950, ROCm 7.2, Triton 3.6).
