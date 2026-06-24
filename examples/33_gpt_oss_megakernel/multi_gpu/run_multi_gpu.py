@@ -59,6 +59,7 @@ from tokenizer_util import load_tokenizer  # noqa: E402
 from multi_gpu.protocol import ATTN_RANK, moe_rank  # noqa: E402
 from multi_gpu import attn_kernels as ak  # noqa: E402
 from multi_gpu import moe_kernels as mk  # noqa: E402
+from multi_gpu import persistent_kernels as pk  # noqa: E402
 
 NWG = 180
 LP = dict(BLOCK_K=1024, BLOCK_M=8, BLOCK_M_LM=16, BLOCK_NQ=32, BLOCK_ND=16,
@@ -112,6 +113,10 @@ def worker(local_rank, world_size, init_url, args):
     gu = sym(2 * I); afp8 = sym(I, dt=torch.float8_e4m3fn); afp8_scl = sym(DN_NB, dt=torch.uint8)
     amax_v = sym(NWG); amax_i = sym(NWG, dt=torch.int32); next_tok = sym(1, dt=torch.int32)
     bar = sym(1, dt=torch.int32)
+    # device-side rendezvous flags (persistent path): in_flag[L] per MoE rank,
+    # out_flag[L*TOPK] on attn rank. Allocated on every rank for symmetric offsets.
+    in_flag = sym(L, dt=torch.int32)
+    out_flag = sym(L * TOPK, dt=torch.int32)
 
     # ---- weights (role-specific; loaded into regular torch memory, never remotely
     # addressed, so their allocation order does not affect the symmetric offsets) ----
@@ -194,6 +199,49 @@ def worker(local_rank, world_size, init_url, args):
         torch.cuda.synchronize()
         return int(next_tok.item()) if is_attn else None
 
+    def decode_step_persistent(token_id, pos):
+        """One persistent kernel per rank per token: loops all L layers internally,
+        attn<->MoE rendezvous via device-side iris flags. One host barrier per token."""
+        if is_attn:
+            x.copy_(W["embed"][token_id].float())
+        bar.zero_()
+        in_flag.zero_()
+        out_flag.zero_()
+        shmem.barrier()  # the single per-token all-rank sync: buffers/flags ready
+        if is_attn:
+            pk.attn_persistent_kernel[(NWG,)](
+                W["norm_attn"], W["norm_moe"],
+                W["w_q"], W["b_q"], W["w_k"], W["b_k"], W["w_v"], W["b_v"], W["w_o"], W["b_o"],
+                W["sinks"], W["router_w"], W["router_b"],
+                W["wq_s"], W["wk_s"], W["wv_s"], W["wo_s"], W["rw_s"],
+                W["final_norm"], W["lm_head"],
+                x, q, kk, vv, kcache, vcache, attn, o, logits, ids, gw, nfp8, nfp8_scl, res,
+                amax_v, amax_i, next_tok,
+                nfp8, nfp8_scl, meta, gw1, in_flag,  # remote inboxes (symmetric offsets)
+                out_flag, cos[pos], sin[pos], bar, pos, scale, eps, heap,
+                NWG=NWG, L=L, H=H, q_dim=qd, kv_dim=kvd, NH=NH, NKV=NKV, DH=DH,
+                E=E, TOPK=TOPK, V=V, SLIDING=cfg.sliding_window, GU_NB=GU_NB, max_seq=max_seq,
+                BLOCK_K=LP["BLOCK_K"], BLOCK_M=LP["BLOCK_M"], BLOCK_M_LM=LP["BLOCK_M_LM"], NORMK=NORMK,
+                BLOCK_T=LP["BLOCK_T"], NSTAGES=LP["NSTAGES"],
+                FP8_QKV=False, FP8_O=False, FP8_ROUTER=False, MXFP8_BLK=(1 << 30),
+                ATTN_RANK=ATTN_RANK, BLOCK=1024, num_warps=4,
+            )
+        else:
+            pk.moe_persistent_kernel[(NWG,)](
+                W["gate_up_blocks"], W["gate_up_scales"], W["gu_b"],
+                W["down_blocks"], W["down_scales"], W["dn_b"],
+                nfp8, nfp8_scl, meta, gw1, gu, afp8, afp8_scl, out, in_flag,
+                res, out_flag, bar, alpha, limit, heap,
+                NWG=NWG, L=L, E=E, H=H, I=I, GU_NB=GU_NB, DN_NB=DN_NB,
+                BLOCK_NQ=LP["BLOCK_NQ"], BLOCK_ND=LP["BLOCK_ND"], BLOCK_KQ=LP["BLOCK_KQ"],
+                MTILE=LP["MTILE"], NSTAGES=LP["NSTAGES"],
+                TOPK=TOPK, SLOT=rank - 1, MOE_RANK=rank, ATTN_RANK=ATTN_RANK, BLOCK=1024, num_warps=4,
+            )
+        torch.cuda.synchronize()
+        return int(next_tok.item()) if is_attn else None
+
+    step = decode_step_persistent if args["persistent"] else decode_step
+
     tok = load_tokenizer()
     enc = tok.encode(args["prompt"])
     ids_in = enc.ids if hasattr(enc, "ids") else enc
@@ -203,15 +251,15 @@ def worker(local_rank, world_size, init_url, args):
         pos = 0
         nxt = None
         for t in ids_in:
-            nxt = decode_step(t, pos); pos += 1
+            nxt = step(t, pos); pos += 1
         shmem.barrier()
         # warmup
         for _ in range(4):
-            nxt = decode_step(nxt if is_attn else 0, pos); pos += 1
+            nxt = step(nxt if is_attn else 0, pos); pos += 1
         shmem.barrier()
         t0 = time.perf_counter()
         for _ in range(args["tokens"]):
-            nxt = decode_step(nxt if is_attn else 0, pos); pos += 1
+            nxt = step(nxt if is_attn else 0, pos); pos += 1
         shmem.barrier()
         dt = (time.perf_counter() - t0) / args["tokens"] * 1e3
         if is_attn:
@@ -220,14 +268,14 @@ def worker(local_rank, world_size, init_url, args):
         pos = 0
         nxt = None
         for t in ids_in:
-            nxt = decode_step(t, pos); pos += 1
+            nxt = step(t, pos); pos += 1
         out_ids = [nxt]
         for _ in range(args["max_new"] - 1):
             # broadcast the attn rank's chosen token to all ranks so they step in lockstep
             tok_t = torch.tensor([nxt if is_attn else 0], device=dev, dtype=torch.int32)
             dist.broadcast(tok_t, src=ATTN_RANK)
             nxt = int(tok_t.item())
-            nxt = decode_step(nxt, pos); pos += 1
+            nxt = step(nxt, pos); pos += 1
             out_ids.append(nxt)
         if is_attn:
             shmem.info(f"generated ids: {out_ids}")
@@ -247,6 +295,7 @@ def main():
     ap.add_argument("--heap-size", type=int, default=1 << 34)
     ap.add_argument("--num-ranks", type=int, default=5)
     ap.add_argument("--port", type=int, default=0, help="rendezvous port (0 = pick a free one)")
+    ap.add_argument("--persistent", action="store_true", help="one persistent kernel/token (device-flag sync)")
     args = vars(ap.parse_args())
     port = args["port"]
     if port == 0:
