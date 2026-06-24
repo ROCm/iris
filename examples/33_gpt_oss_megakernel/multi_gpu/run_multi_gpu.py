@@ -224,7 +224,7 @@ def worker(local_rank, world_size, init_url, args):
                 BLOCK_K=LP["BLOCK_K"], BLOCK_M=LP["BLOCK_M"], BLOCK_M_LM=LP["BLOCK_M_LM"], NORMK=NORMK,
                 BLOCK_T=LP["BLOCK_T"], NSTAGES=LP["NSTAGES"],
                 FP8_QKV=False, FP8_O=False, FP8_ROUTER=False, MXFP8_BLK=(1 << 30),
-                ATTN_RANK=ATTN_RANK, BLOCK=1024, num_warps=4,
+                ATTN_RANK=ATTN_RANK, BLOCK=1024, MEASURE_NOEXCH=args["measure_noexch"], num_warps=4,
             )
         else:
             pk.moe_persistent_kernel[(NWG,)](
@@ -296,6 +296,7 @@ def main():
     ap.add_argument("--num-ranks", type=int, default=5)
     ap.add_argument("--port", type=int, default=0, help="rendezvous port (0 = pick a free one)")
     ap.add_argument("--persistent", action="store_true", help="one persistent kernel/token (device-flag sync)")
+    ap.add_argument("--measure-noexch", action="store_true", help="PROFILE: rank0 skips MoE wait (garbage output, measures attn+lm_head floor)")
     args = vars(ap.parse_args())
     port = args["port"]
     if port == 0:
