@@ -145,15 +145,16 @@ def attn_persistent_kernel(
         bc += 1
         _barrier(bar_p, bc * NWG)  # all scatter stores issued
 
-        # ---- raise per-MoE input-ready flags (pid 0 only) ----
+        # ---- raise per-MoE input-ready flags (pid 0 only), then everyone waits for
+        # results. No barrier between: barrier(scatter) already flushed the inputs to
+        # L2; only pid0 raises input flags; the result wait below is gated by its own
+        # out_flag acquires, so non-pid0 programs simply spin until results land. ----
         if pid == 0:
             for slot in tl.static_range(TOPK):
                 dst = 1 + slot
                 iris.store(r_meta_p, tl.load(ids_p + slot), ATTN_RANK, dst, heap_bases)
                 iris.store(r_gw_p, tl.load(gw_p + slot), ATTN_RANK, dst, heap_bases)
                 iris.atomic_xchg(r_in_flag_p + layer, layer + 1, ATTN_RANK, dst, heap_bases, sem="release", scope="sys")
-        bc += 1
-        _barrier(bar_p, bc * NWG)
         # ---- wait for all TOPK results. EVERY program acquires each out_flag so the
         # remotely-delivered res[] is coherent for the program that will read it. ----
         for slot in tl.static_range(TOPK):
