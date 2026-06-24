@@ -61,7 +61,7 @@ from multi_gpu import attn_kernels as ak  # noqa: E402
 from multi_gpu import moe_kernels as mk  # noqa: E402
 from multi_gpu import persistent_kernels as pk  # noqa: E402
 
-NWG = 180
+NWG = 120
 LP = dict(BLOCK_K=1024, BLOCK_M=8, BLOCK_M_LM=16, BLOCK_NQ=32, BLOCK_ND=16,
           BLOCK_KQ=1024, MTILE=16, BLOCK_T=64, NSTAGES=3)
 
