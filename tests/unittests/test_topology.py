@@ -11,6 +11,7 @@ gracefully if the environment isn't set up.
 
 import json
 import builtins
+import ctypes
 import logging
 import socket
 import sys
@@ -365,11 +366,64 @@ class TestVendorLibraryLifecycle:
         fake_pynvml = _make_fake_pynvml()
         monkeypatch.setitem(sys.modules, "pynvml", fake_pynvml)
 
+        class FakeNvmlFunction:
+            def __init__(self):
+                self.restype = None
+                self.argtypes = None
+
+            def __call__(self, handle, info_ptr):
+                assert handle == "gpu0"
+                info = info_ptr._obj
+                for idx, value in enumerate(bytes.fromhex("01" * 16)):
+                    info.clusterUuid[idx] = value
+                info.status = 0
+                info.cliqueId = 7
+                info.state = 3
+                return 0
+
+        class FakeNvmlLib:
+            def __init__(self):
+                self.nvmlDeviceGetGpuFabricInfoV = FakeNvmlFunction()
+
+        monkeypatch.setattr(topology.ctypes.util, "find_library", lambda name: "fake-nvml")
+        monkeypatch.setattr(topology.ctypes, "CDLL", lambda path: FakeNvmlLib())
+
         fabric = topology._get_gpu_fabric_info(0, "nvidia", pci_bus_id="0000:41:00.0")
 
         assert fabric.domain_key == f"{'01' * 16}:7"
         assert fake_pynvml.init_calls == 0
         assert fake_pynvml.shutdown_calls == 0
+
+    def test_nvidia_fabric_info_uses_direct_nvml_byref(self, monkeypatch):
+        fake_pynvml = _make_fake_pynvml()
+        monkeypatch.setitem(sys.modules, "pynvml", fake_pynvml)
+
+        class FakeNvmlFunction:
+            def __init__(self):
+                self.restype = None
+                self.argtypes = None
+
+            def __call__(self, handle, info_ptr):
+                assert handle == "gpu0"
+                assert self.argtypes[0] is ctypes.c_void_p
+                info = info_ptr._obj
+                for idx, value in enumerate(bytes.fromhex("ab" * 16)):
+                    info.clusterUuid[idx] = value
+                info.status = 0
+                info.cliqueId = 32766
+                info.state = 3
+                return 0
+
+        class FakeNvmlLib:
+            def __init__(self):
+                self.nvmlDeviceGetGpuFabricInfoV = FakeNvmlFunction()
+
+        monkeypatch.setattr(topology.ctypes.util, "find_library", lambda name: "fake-nvml")
+        monkeypatch.setattr(topology.ctypes, "CDLL", lambda path: FakeNvmlLib())
+
+        fabric = topology._get_gpu_fabric_info(0, "nvidia", pci_bus_id="0000:41:00.0")
+
+        assert fabric.domain_key == f"{'ab' * 16}:32766"
 
     def test_missing_library_fallbacks_preserve_logs(self, monkeypatch, caplog):
         caplog.set_level(logging.DEBUG, logger="iris.topology")

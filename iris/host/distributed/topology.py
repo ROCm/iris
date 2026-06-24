@@ -8,7 +8,8 @@ import logging
 import os
 import re
 import socket
-import hashlib
+import ctypes
+import ctypes.util
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -242,6 +243,72 @@ def _amd_get_gpu_fabric_info(gpu_id: int, pci_bus_id: str = "") -> FabricInfo:
     return FabricInfo()
 
 
+class _NvmlGpuFabricInfoV2(ctypes.Structure):
+    _fields_ = [
+        ("version", ctypes.c_uint),
+        ("clusterUuid", ctypes.c_ubyte * 16),
+        ("status", ctypes.c_int),
+        ("cliqueId", ctypes.c_uint),
+        ("state", ctypes.c_ubyte),
+        ("healthMask", ctypes.c_uint),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.version = (2 << 24) | ctypes.sizeof(type(self))
+
+
+class _NvmlGpuFabricInfoV3(ctypes.Structure):
+    _fields_ = [
+        ("version", ctypes.c_uint),
+        ("clusterUuid", ctypes.c_ubyte * 16),
+        ("status", ctypes.c_int),
+        ("cliqueId", ctypes.c_uint),
+        ("state", ctypes.c_ubyte),
+        ("healthMask", ctypes.c_uint),
+        ("healthSummary", ctypes.c_ubyte),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.version = (3 << 24) | ctypes.sizeof(type(self))
+
+
+def _fabric_info_from_nvml_struct(fabric_info) -> FabricInfo:
+    # Check registration state — must be COMPLETED (value 3)
+    state = getattr(fabric_info, "state", None)
+    if state is not None and int(state) != 3:
+        return FabricInfo()
+
+    # Check status — must be SUCCESS (value 0)
+    status = getattr(fabric_info, "status", None)
+    if status is not None and int(status) != 0:
+        return FabricInfo()
+
+    cluster_uuid_raw = getattr(fabric_info, "clusterUuid", None)
+    if cluster_uuid_raw is None:
+        return FabricInfo()
+
+    if isinstance(cluster_uuid_raw, bytes):
+        cluster_uuid_hex = cluster_uuid_raw.hex()
+    elif isinstance(cluster_uuid_raw, (list, tuple)):
+        cluster_uuid_hex = bytes(cluster_uuid_raw).hex()
+    else:
+        try:
+            cluster_uuid_hex = bytes(cluster_uuid_raw).hex()
+        except TypeError:
+            cluster_uuid_hex = str(cluster_uuid_raw)
+
+    if all(c == "0" for c in cluster_uuid_hex):
+        return FabricInfo()
+
+    clique_id = getattr(fabric_info, "cliqueId", 0)
+    return FabricInfo(
+        cluster_uuid=cluster_uuid_hex,
+        clique_id=int(clique_id),
+    )
+
+
 def _nvidia_get_gpu_fabric_info(gpu_id: int, pci_bus_id: str = "") -> FabricInfo:
     """
     Get GPU fabric info from NVIDIA's NVML library.
@@ -266,49 +333,20 @@ def _nvidia_get_gpu_fabric_info(gpu_id: int, pci_bus_id: str = "") -> FabricInfo
             physical_idx = _logical_to_physical_gpu_index(gpu_id, "nvidia")
             handle = pynvml.nvmlDeviceGetHandleByIndex(physical_idx)
 
-        fabric_info = None
-        try:
-            info_struct = pynvml.c_nvmlGpuFabricInfo_v2_t()
-            pynvml.nvmlDeviceGetGpuFabricInfoV(handle, info_struct)
-            fabric_info = info_struct
-        except (AttributeError, TypeError, pynvml.NVMLError):
-            # GPU doesn't support fabric
-            return FabricInfo()
+        nvml_path = ctypes.util.find_library("nvidia-ml") or "libnvidia-ml.so.1"
+        nvml = ctypes.CDLL(nvml_path)
+        get_fabric_info = nvml.nvmlDeviceGetGpuFabricInfoV
+        get_fabric_info.restype = ctypes.c_int
 
-        if fabric_info is None:
-            return FabricInfo()
-
-        # Check registration state — must be COMPLETED (value 3)
-        state = getattr(fabric_info, "state", None)
-        if state is not None and state != 3:
-            return FabricInfo()
-
-        # Check status — must be SUCCESS (value 0)
-        status = getattr(fabric_info, "status", None)
-        if status is not None and status != 0:
-            return FabricInfo()
-
-        # Extract clusterUuid
-        cluster_uuid_raw = getattr(fabric_info, "clusterUuid", None)
-        if cluster_uuid_raw is None:
-            return FabricInfo()
-
-        if isinstance(cluster_uuid_raw, bytes):
-            cluster_uuid_hex = cluster_uuid_raw.hex()
-        elif isinstance(cluster_uuid_raw, (list, tuple)):
-            cluster_uuid_hex = bytes(cluster_uuid_raw).hex()
-        else:
-            cluster_uuid_hex = str(cluster_uuid_raw)
-
-        if all(c == "0" for c in cluster_uuid_hex):
-            return FabricInfo()
-
-        clique_id = getattr(fabric_info, "cliqueId", 0)
-
-        return FabricInfo(
-            cluster_uuid=cluster_uuid_hex,
-            clique_id=int(clique_id),
-        )
+        for info_type in (_NvmlGpuFabricInfoV3, _NvmlGpuFabricInfoV2):
+            info = info_type()
+            get_fabric_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(info_type)]
+            ret = get_fabric_info(handle, ctypes.byref(info))
+            if ret != 0:
+                continue
+            fabric_info = _fabric_info_from_nvml_struct(info)
+            if fabric_info.is_valid:
+                return fabric_info
     except ImportError:
         logger.debug("pynvml not available, skipping NVML fabric info")
     except Exception as e:
@@ -342,112 +380,6 @@ def _get_gpu_fabric_info(gpu_id: int, vendor: str, pci_bus_id: str = "") -> Fabr
     if vendor == "amd":
         return _amd_get_gpu_fabric_info(gpu_id, pci_bus_id=pci_bus_id)
     return _nvidia_get_gpu_fabric_info(gpu_id, pci_bus_id=pci_bus_id)
-
-
-def _probe_nvidia_fabric_connectivity(gpu_id: int, rank: int, world_size: int) -> Optional[List[List[bool]]]:
-    """
-    Probe NVIDIA fabric reachability with CUDA fabric memory handles.
-
-    Some GB200/MNNVL environments expose working fabric handles while NVML
-    reports an empty GPU fabric UUID. This collective probe uses the same
-    driver interface as Iris memory sharing: each rank exports a tiny fabric
-    allocation and every other rank tries to import it. A successful symmetric
-    import means the ranks share an NVIDIA fabric memory domain.
-    """
-    if not dist.is_initialized() or world_size <= 1:
-        return None
-
-    local_record: dict[str, Any] = {
-        "rank": rank,
-        "ok": False,
-        "handle": b"",
-        "size": 0,
-    }
-    driver = None
-    allocation = None
-    imported_mappings = []
-
-    try:
-        from iris.drivers.base import ExportableMemory
-        from iris.drivers.fabric.nvidia import NvidiaFabricDriver
-
-        driver = NvidiaFabricDriver()
-        driver.initialize(gpu_id)
-        size = driver.get_minimum_granularity()
-        allocation = driver.allocate_exportable(size)
-        local_record = {
-            "rank": rank,
-            "ok": True,
-            "handle": driver.export_handle(ExportableMemory(allocation.va, allocation.size, allocation)),
-            "size": allocation.size,
-        }
-    except Exception as exc:
-        logger.debug("[Rank %d] CUDA fabric handle export probe failed: %s", rank, exc)
-
-    records: List[Optional[dict[str, Any]]] = [None] * world_size
-    dist.all_gather_object(records, local_record)
-
-    local_row = [False] * world_size
-    for record in records:
-        if not record or not record.get("ok"):
-            continue
-        peer_rank = int(record["rank"])
-        if peer_rank == rank:
-            local_row[peer_rank] = True
-            continue
-        if driver is None:
-            continue
-        try:
-            mapping = driver.import_and_map(peer_rank, record["handle"], int(record["size"]))
-            imported_mappings.append(mapping)
-            local_row[peer_rank] = True
-        except Exception as exc:
-            logger.debug("[Rank %d] CUDA fabric handle import from rank %d failed: %s", rank, peer_rank, exc)
-
-    rows: List[Optional[List[bool]]] = [None] * world_size
-    dist.all_gather_object(rows, local_row)
-
-    if driver is not None:
-        for mapping in imported_mappings:
-            try:
-                driver.cleanup(mapping)
-            except Exception as exc:
-                logger.debug("[Rank %d] CUDA fabric probe import cleanup failed: %s", rank, exc)
-        if allocation is not None:
-            try:
-                driver.cleanup(allocation)
-            except Exception as exc:
-                logger.debug("[Rank %d] CUDA fabric probe local cleanup failed: %s", rank, exc)
-
-    if any(row is None for row in rows):
-        return None
-    return [list(row) for row in rows if row is not None]
-
-
-def _fabric_components_from_connectivity(connectivity: List[List[bool]]) -> List[Set[int]]:
-    """Return bidirectionally reachable components from a fabric probe matrix."""
-    world_size = len(connectivity)
-    visited: Set[int] = set()
-    components: List[Set[int]] = []
-
-    for start in range(world_size):
-        if start in visited:
-            continue
-        stack = [start]
-        component: Set[int] = set()
-        visited.add(start)
-        while stack:
-            rank = stack.pop()
-            component.add(rank)
-            for peer in range(world_size):
-                if peer in visited:
-                    continue
-                if connectivity[rank][peer] and connectivity[peer][rank]:
-                    visited.add(peer)
-                    stack.append(peer)
-        components.append(component)
-
-    return components
 
 
 def _normalize_pci_bus_id(bus_id: str) -> str:
@@ -1331,30 +1263,6 @@ class TopologyDiscovery:
         for gpu_json in all_gpu_jsons:
             info = GPUInfo.from_dict(json.loads(gpu_json))
             gpu_info_map[info.global_rank] = info
-
-        if (
-            vendor == "nvidia"
-            and self.world_size > 1
-            and any(not info.fabric_info.domain_key for info in gpu_info_map.values())
-        ):
-            connectivity = _probe_nvidia_fabric_connectivity(self.gpu_id, self.rank, self.world_size)
-            if connectivity is not None:
-                for component in _fabric_components_from_connectivity(connectivity):
-                    if len(component) <= 1:
-                        continue
-                    component_uuids = sorted(gpu_info_map[r].uuid for r in component)
-                    cluster_uuid = "cuda-probe-" + hashlib.sha1(",".join(component_uuids).encode()).hexdigest()[:16]
-                    for component_rank in component:
-                        if not gpu_info_map[component_rank].fabric_info.domain_key:
-                            gpu_info_map[component_rank].fabric_info = FabricInfo(
-                                cluster_uuid=cluster_uuid,
-                                clique_id=0,
-                            )
-                    logger.info(
-                        "Detected NVIDIA fabric domain via CUDA fabric handle probe: ranks=%s domain=%s",
-                        sorted(component),
-                        cluster_uuid,
-                    )
 
         all_node_infos = [json.loads(s) for s in all_node_jsons]
 
