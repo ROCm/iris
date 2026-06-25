@@ -16,7 +16,9 @@ from iris.drivers.base import (
     BaseDriver,
     DriverError,
     DriverNotSupported,
+    ExportableMemory,
     LocalAllocation,
+    MappingPlacement,
     PeerMapping,
 )
 from iris.host.distributed.topology import InterconnectLevel
@@ -375,26 +377,22 @@ class LocalCudaDriver(BaseDriver):
     def allocate_exportable(
         self,
         size: int,
-        va: Optional[int] = None,
-        *,
-        access_va: Optional[int] = None,
-        access_size: Optional[int] = None,
+        placement: Optional[MappingPlacement] = None,
     ) -> LocalAllocation:
         """
         Allocate CUDA VMM memory exportable as a POSIX FD.
 
-        If va is supplied, the caller must already own a sufficiently large,
-        granularity-aligned VA range containing [va, va + size).
+        If placement is supplied, the caller must already own a sufficiently
+        large, granularity-aligned VA range containing [placement.va,
+        placement.va + size).
         """
         self._check_initialized()
-        if (access_va is None) != (access_size is None):
-            raise LocalCudaError("access_va and access_size must be provided together")
         props = self._make_alloc_props()
         granularity = self._get_granularity()
         alloc_size = _round_up(size, granularity)
 
-        reserved_va = va is None
-        mapped_va = int(va) if va is not None else 0
+        reserved_va = placement is None
+        mapped_va = int(placement.va) if placement is not None else 0
         handle = ctypes.c_uint64()
         mapped = False
 
@@ -415,10 +413,10 @@ class LocalCudaDriver(BaseDriver):
                 "cuMemMap",
             )
             mapped = True
-            self._mem_set_access(
-                int(access_va) if access_va is not None else mapped_va,
-                int(access_size) if access_size is not None else alloc_size,
+            access_base, access_bytes = (
+                placement.access_range(alloc_size) if placement is not None else (mapped_va, alloc_size)
             )
+            self._mem_set_access(access_base, access_bytes)
             return LocalAllocation(
                 va=mapped_va,
                 size=alloc_size,
@@ -454,14 +452,12 @@ class LocalCudaDriver(BaseDriver):
             _cleanup_after_failure(*steps)
             raise
 
-    def export_handle(self, allocation: LocalAllocation) -> bytes:
-        """Export a 4-byte native-endian POSIX-FD descriptor for a local allocation."""
-        self._check_initialized()
+    def _export_allocation_handle(self, handle: int) -> bytes:
         fd = ctypes.c_int(-1)
         _cuda_try(
             _cuda_driver.cuMemExportToShareableHandle(
                 ctypes.byref(fd),
-                int(allocation.handle),
+                int(handle),
                 _CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
                 0,
             ),
@@ -469,9 +465,11 @@ class LocalCudaDriver(BaseDriver):
         )
         return struct.pack(_CUDA_HANDLE_FMT, int(fd.value))
 
-    def export_pointer_handle(self, ptr: int, size: int) -> bytes:
-        """Export the VMM allocation containing ptr as a 4-byte native-endian POSIX FD."""
+    def export_handle(self, memory: ExportableMemory) -> bytes:
+        """Export a 4-byte native-endian POSIX-FD descriptor for a local memory range."""
         self._check_initialized()
+        if memory.allocation is not None:
+            return self._export_allocation_handle(int(memory.allocation.handle))
 
         retain_handle = getattr(_cuda_driver, "cuMemRetainAllocationHandle", None)
         if retain_handle is None:
@@ -480,7 +478,7 @@ class LocalCudaDriver(BaseDriver):
         handle = ctypes.c_uint64()
         try:
             _cuda_try(
-                retain_handle(ctypes.byref(handle), ctypes.c_void_p(ptr)),
+                retain_handle(ctypes.byref(handle), ctypes.c_void_p(memory.va)),
                 "cuMemRetainAllocationHandle",
             )
         except LocalCudaError as exc:
@@ -489,20 +487,10 @@ class LocalCudaDriver(BaseDriver):
             ) from exc
 
         try:
-            fd = ctypes.c_int(-1)
             try:
-                _cuda_try(
-                    _cuda_driver.cuMemExportToShareableHandle(
-                        ctypes.byref(fd),
-                        handle.value,
-                        _CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
-                        0,
-                    ),
-                    "cuMemExportToShareableHandle",
-                )
+                return self._export_allocation_handle(handle.value)
             except LocalCudaError as exc:
                 raise LocalCudaNotSupported("CUDA could not export the retained allocation handle") from exc
-            return struct.pack(_CUDA_HANDLE_FMT, int(fd.value))
         finally:
             _cuda_try(_cuda_driver.cuMemRelease(handle.value), "cuMemRelease")
 
@@ -529,20 +517,15 @@ class LocalCudaDriver(BaseDriver):
         peer_rank: int,
         handle_bytes: bytes,
         size: int,
-        va: Optional[int] = None,
-        *,
-        access_va: Optional[int] = None,
-        access_size: Optional[int] = None,
+        placement: Optional[MappingPlacement] = None,
     ) -> PeerMapping:
         """Import a POSIX-FD handle and map it into local CUDA VMM VA space."""
         self._check_initialized()
-        if (access_va is None) != (access_size is None):
-            raise LocalCudaError("access_va and access_size must be provided together")
         imported_handle = self._import_handle(handle_bytes)
 
         granularity = self._get_granularity()
-        va_owned = va is None
-        mapped_va = int(va) if va is not None else 0
+        va_owned = placement is None
+        mapped_va = int(placement.va) if placement is not None else 0
         mapped = False
         try:
             if va_owned:
@@ -557,10 +540,8 @@ class LocalCudaDriver(BaseDriver):
                 "cuMemMap",
             )
             mapped = True
-            self._mem_set_access(
-                int(access_va) if access_va is not None else mapped_va,
-                int(access_size) if access_size is not None else size,
-            )
+            access_base, access_bytes = placement.access_range(size) if placement is not None else (mapped_va, size)
+            self._mem_set_access(access_base, access_bytes)
         except Exception:
             steps: list[tuple[str, Callable[[], None]]] = []
             if mapped:
@@ -598,7 +579,17 @@ class LocalCudaDriver(BaseDriver):
             _driver_handle=(tag, imported_handle),
         )
 
-    def cleanup_import(self, mapping: PeerMapping) -> None:
+    def cleanup(self, target: LocalAllocation | PeerMapping) -> None:
+        """Release a local CUDA allocation or imported CUDA mapping."""
+        if isinstance(target, LocalAllocation):
+            self._cleanup_local(target)
+            return
+        if isinstance(target, PeerMapping):
+            self._cleanup_import(target)
+            return
+        raise LocalCudaError(f"Unsupported cleanup target: {type(target).__name__}")
+
+    def _cleanup_import(self, mapping: PeerMapping) -> None:
         """Unmap, release, and free an imported CUDA VMM mapping."""
         self._check_initialized()
         if isinstance(mapping._driver_handle, tuple) and len(mapping._driver_handle) == 2:
@@ -632,7 +623,7 @@ class LocalCudaDriver(BaseDriver):
             )
         _run_cleanup_steps(*steps)
 
-    def cleanup_local(self, allocation: LocalAllocation) -> None:
+    def _cleanup_local(self, allocation: LocalAllocation) -> None:
         """Unmap, release, and conditionally free a local CUDA VMM allocation."""
         self._check_initialized()
         steps = [

@@ -18,7 +18,9 @@ from iris.drivers.base import (
     BaseDriver,
     DriverError,
     DriverNotSupported,
+    ExportableMemory,
     LocalAllocation,
+    MappingPlacement,
     PeerMapping,
 )
 from iris.host.distributed.topology import InterconnectLevel
@@ -339,20 +341,15 @@ class NvidiaFabricDriver(BaseDriver):
     def allocate_exportable(
         self,
         size: int,
-        va: Optional[int] = None,
-        *,
-        access_va: Optional[int] = None,
-        access_size: Optional[int] = None,
+        placement: Optional[MappingPlacement] = None,
     ) -> LocalAllocation:
         self._check_initialized()
-        if (access_va is None) != (access_size is None):
-            raise CudaFabricError("access_va and access_size must be provided together")
         props = self._make_alloc_props()
         granularity = self._get_granularity()
         alloc_size = _round_up(size, granularity)
 
-        reserved_va = va is None
-        mapped_va = int(va) if va is not None else 0
+        reserved_va = placement is None
+        mapped_va = int(placement.va) if placement is not None else 0
         handle = ctypes.c_uint64()
         mapped = False
 
@@ -373,10 +370,10 @@ class NvidiaFabricDriver(BaseDriver):
                 "cuMemMap",
             )
             mapped = True
-            self._mem_set_access(
-                int(access_va) if access_va is not None else mapped_va,
-                int(access_size) if access_size is not None else alloc_size,
+            access_base, access_bytes = (
+                placement.access_range(alloc_size) if placement is not None else (mapped_va, alloc_size)
             )
+            self._mem_set_access(access_base, access_bytes)
             return LocalAllocation(
                 va=mapped_va,
                 size=alloc_size,
@@ -404,13 +401,16 @@ class NvidiaFabricDriver(BaseDriver):
                     pass
             raise
 
-    def export_handle(self, allocation: LocalAllocation) -> bytes:
+    def export_handle(self, memory: ExportableMemory) -> bytes:
         self._check_initialized()
+        if memory.allocation is None:
+            raise CudaFabricNotSupported("NVIDIA fabric driver can only export driver-created VMM allocations")
+
         raw = (ctypes.c_ubyte * FABRIC_HANDLE_BYTES)()
         _cuda_try(
             _cuda_driver.cuMemExportToShareableHandle(
                 ctypes.byref(raw),
-                int(allocation.handle),
+                int(memory.allocation.handle),
                 _CU_MEM_HANDLE_TYPE_FABRIC,
                 0,
             ),
@@ -437,19 +437,14 @@ class NvidiaFabricDriver(BaseDriver):
         peer_rank: int,
         handle_bytes: bytes,
         size: int,
-        va: Optional[int] = None,
-        *,
-        access_va: Optional[int] = None,
-        access_size: Optional[int] = None,
+        placement: Optional[MappingPlacement] = None,
     ) -> PeerMapping:
         self._check_initialized()
-        if (access_va is None) != (access_size is None):
-            raise CudaFabricError("access_va and access_size must be provided together")
         imported_handle = self._import_handle(handle_bytes)
 
         granularity = self._get_granularity()
-        va_owned = va is None
-        mapped_va = int(va) if va is not None else 0
+        va_owned = placement is None
+        mapped_va = int(placement.va) if placement is not None else 0
         mapped = False
         try:
             if va_owned:
@@ -464,10 +459,8 @@ class NvidiaFabricDriver(BaseDriver):
                 "cuMemMap",
             )
             mapped = True
-            self._mem_set_access(
-                int(access_va) if access_va is not None else mapped_va,
-                int(access_size) if access_size is not None else size,
-            )
+            access_base, access_bytes = placement.access_range(size) if placement is not None else (mapped_va, size)
+            self._mem_set_access(access_base, access_bytes)
         except Exception:
             if mapped:
                 try:
@@ -497,7 +490,16 @@ class NvidiaFabricDriver(BaseDriver):
             _driver_handle=(tag, imported_handle),
         )
 
-    def cleanup_import(self, mapping: PeerMapping) -> None:
+    def cleanup(self, target: LocalAllocation | PeerMapping) -> None:
+        if isinstance(target, LocalAllocation):
+            self._cleanup_local(target)
+            return
+        if isinstance(target, PeerMapping):
+            self._cleanup_import(target)
+            return
+        raise CudaFabricError(f"Unsupported cleanup target: {type(target).__name__}")
+
+    def _cleanup_import(self, mapping: PeerMapping) -> None:
         self._check_initialized()
         if isinstance(mapping._driver_handle, tuple) and len(mapping._driver_handle) == 2:
             tag, imported_handle = mapping._driver_handle
@@ -533,7 +535,7 @@ class NvidiaFabricDriver(BaseDriver):
             )
         _run_cleanup_steps(*steps)
 
-    def cleanup_local(self, allocation: LocalAllocation) -> None:
+    def _cleanup_local(self, allocation: LocalAllocation) -> None:
         self._check_initialized()
         steps = [
             (

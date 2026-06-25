@@ -12,7 +12,9 @@ from typing import Optional
 from iris.drivers.base import (
     BaseDriver,
     DriverNotSupported,
+    ExportableMemory,
     LocalAllocation,
+    MappingPlacement,
     PeerMapping,
 )
 
@@ -30,14 +32,11 @@ class AmdFabricDriver(BaseDriver):
     def allocate_exportable(
         self,
         size: int,
-        va: Optional[int] = None,
-        *,
-        access_va: Optional[int] = None,
-        access_size: Optional[int] = None,
+        placement: Optional[MappingPlacement] = None,
     ) -> LocalAllocation:
         raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
 
-    def export_handle(self, allocation: LocalAllocation) -> bytes:
+    def export_handle(self, memory: ExportableMemory) -> bytes:
         raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
 
     def import_and_map(
@@ -45,17 +44,11 @@ class AmdFabricDriver(BaseDriver):
         peer_rank: int,
         handle_bytes: bytes,
         size: int,
-        va: Optional[int] = None,
-        *,
-        access_va: Optional[int] = None,
-        access_size: Optional[int] = None,
+        placement: Optional[MappingPlacement] = None,
     ) -> PeerMapping:
         raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
 
-    def cleanup_import(self, mapping: PeerMapping) -> None:
-        raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
-
-    def cleanup_local(self, allocation: LocalAllocation) -> None:
+    def cleanup(self, target: LocalAllocation | PeerMapping) -> None:
         raise DriverNotSupported(_NOT_IMPLEMENTED_MESSAGE)
 
     def get_minimum_granularity(self) -> int:

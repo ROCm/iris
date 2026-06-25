@@ -16,6 +16,9 @@ from iris.host.distributed.topology import InterconnectLevel
 __all__ = [
     "PeerMapping",
     "LocalAllocation",
+    "CleanupTarget",
+    "ExportableMemory",
+    "MappingPlacement",
     "BaseDriver",
     "DriverError",
     "DriverNotSupported",
@@ -43,6 +46,40 @@ class LocalAllocation:
     _va_owned: bool = True
 
 
+CleanupTarget = LocalAllocation | PeerMapping
+
+
+@dataclass(frozen=True)
+class ExportableMemory:
+    """A local memory range that can be exported to peers."""
+
+    va: int
+    size: int
+    allocation: Optional[LocalAllocation] = None
+
+
+@dataclass(frozen=True)
+class MappingPlacement:
+    """Caller-reserved virtual address placement for a VMM mapping.
+
+    If arena_base is set, the mapping belongs to a larger reserved VA arena.
+    Drivers that need cumulative access programming can use that arena context
+    without exposing access-range details in the public API.
+    """
+
+    va: int
+    arena_base: Optional[int] = None
+
+    def access_range(self, mapped_size: int, cumulative: bool = False) -> tuple[int, int]:
+        if not cumulative or self.arena_base is None:
+            return int(self.va), int(mapped_size)
+
+        offset = int(self.va) - int(self.arena_base)
+        if offset < 0:
+            raise ValueError(f"placement va {self.va} is below arena base {self.arena_base}")
+        return int(self.arena_base), offset + int(mapped_size)
+
+
 class DriverError(RuntimeError):
     """Base exception for driver operations."""
 
@@ -62,16 +99,13 @@ class BaseDriver(ABC):
     def allocate_exportable(
         self,
         size: int,
-        va: Optional[int] = None,
-        *,
-        access_va: Optional[int] = None,
-        access_size: Optional[int] = None,
+        placement: Optional[MappingPlacement] = None,
     ) -> LocalAllocation:
         """Allocate exportable memory, optionally mapping it at a caller-reserved VA."""
 
     @abstractmethod
-    def export_handle(self, allocation: LocalAllocation) -> bytes:
-        """Export a transport-specific handle for a local allocation."""
+    def export_handle(self, memory: ExportableMemory) -> bytes:
+        """Export a transport-specific handle for a local memory range."""
 
     @abstractmethod
     def import_and_map(
@@ -79,20 +113,13 @@ class BaseDriver(ABC):
         peer_rank: int,
         handle_bytes: bytes,
         size: int,
-        va: Optional[int] = None,
-        *,
-        access_va: Optional[int] = None,
-        access_size: Optional[int] = None,
+        placement: Optional[MappingPlacement] = None,
     ) -> PeerMapping:
         """Import a peer handle and map it into the local virtual address space."""
 
     @abstractmethod
-    def cleanup_import(self, mapping: PeerMapping) -> None:
-        """Release a mapped peer allocation."""
-
-    @abstractmethod
-    def cleanup_local(self, allocation: LocalAllocation) -> None:
-        """Release a locally-exported allocation."""
+    def cleanup(self, target: CleanupTarget) -> None:
+        """Release a local allocation or imported peer mapping."""
 
     @abstractmethod
     def get_minimum_granularity(self) -> int:
@@ -109,7 +136,3 @@ class BaseDriver(ABC):
     def get_address_range(self, ptr: int) -> tuple[int, int]:
         """Return the base VA and size of the allocation containing ptr."""
         raise DriverNotSupported(f"{type(self).__name__} does not support get_address_range")
-
-    def export_pointer_handle(self, ptr: int, size: int) -> bytes:
-        """Export a peer handle for an arbitrary device pointer."""
-        raise DriverNotSupported(f"{type(self).__name__} does not support export_pointer_handle")
