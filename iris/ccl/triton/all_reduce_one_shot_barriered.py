@@ -23,26 +23,19 @@ def _barrier_precomputed(
     group_rank: tl.constexpr,
     world_size: tl.constexpr,
 ):
-    """vLLM-style barrier using pre-computed translated pointers.
-
-    peer_sync_ptrs: [world_size] int64 tensor of pre-translated base pointers
-    self_sync_ptr: our own sync array (regular triton pointer)
-    flag_counter_ptr: persistent per-block flag counter
-    """
     pid = tl.program_id(0)
 
-    # Read persistent flag and increment
-    flag = tl.load(flag_counter_ptr + pid) + 1
+    # Atomic increment — survives graph replay (not baked)
+    flag = tl.atomic_add(flag_counter_ptr + pid, 1) + 1
 
     # Write flag to each peer's sync slot
     for i in range(world_size):
         if i != group_rank:
-            # Get pre-translated pointer for peer i
             peer_base = tl.load(peer_sync_ptrs + i).to(tl.pointer_type(tl.int32))
             peer_slot = peer_base + pid * world_size + group_rank
             tl.store(peer_slot, flag)
 
-    # Poll own sync slots
+    # Poll own sync slots with system-scope acquire
     for i in range(world_size):
         if i != group_rank:
             my_slot = self_sync_ptr + pid * world_size + i
@@ -50,9 +43,6 @@ def _barrier_precomputed(
                 pass
 
     tl.debug_barrier()
-
-    # Persist flag counter
-    tl.store(flag_counter_ptr + pid, flag)
 
 
 @triton.jit()
