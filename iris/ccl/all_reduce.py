@@ -70,7 +70,7 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         config.all_reduce_variant = "one_shot_gluon"
 
     variant = config.all_reduce_variant.lower()
-    valid_variants = ["atomic", "spinlock", "ring", "two_shot", "one_shot", "one_shot_legacy", "one_shot_gluon"]
+    valid_variants = ["atomic", "spinlock", "ring", "two_shot", "one_shot", "one_shot_legacy", "one_shot_gluon", "one_shot_barriered"]
     if variant not in valid_variants:
         raise ValueError(f"Invalid all_reduce_variant: {variant}. Must be one of: {', '.join(valid_variants)}")
 
@@ -81,7 +81,23 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
         _cached_group_info[group_key] = (rank_in_group, rank_global, world_size, rank_start, rank_stride)
 
-    if variant == "one_shot_gluon":
+    if variant == "one_shot_barriered":
+        from iris.ccl.triton.all_reduce_one_shot_barriered import launch as barriered_launch
+
+        workspace = barriered_launch(
+            output_tensor,
+            input_tensor,
+            ctx,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config,
+            workspace=workspace,
+            group=group,
+        )
+    elif variant == "one_shot_gluon":
         from iris.ccl.gluon.all_reduce import launch as gluon_launch
 
         workspace = gluon_launch(

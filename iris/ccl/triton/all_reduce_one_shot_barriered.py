@@ -172,3 +172,72 @@ def one_shot_all_reduce_triton_barriered(
             rank_start,
             rank_stride,
         )
+
+
+class _BarrieredWorkspace:
+    def __init__(self, ctx, world_size):
+        self.start_flags = ctx.zeros((world_size,), dtype=torch.int32)
+        self.end_flags = ctx.zeros((world_size,), dtype=torch.int32)
+        self.prepared = True
+
+
+def launch(
+    output_tensor,
+    input_tensor,
+    ctx,
+    rank_in_group,
+    rank_global,
+    world_size,
+    rank_start,
+    rank_stride,
+    config,
+    workspace=None,
+    group=None,
+):
+    """Launch the triton one-shot allreduce with in-kernel barriers."""
+    numel = input_tensor.numel()
+    flat_input = input_tensor.contiguous().view(-1)
+    flat_output = output_tensor.contiguous().view(-1)
+
+    block_size = 2048
+    num_sms = min(16, (numel + block_size - 1) // block_size)
+    if numel <= 8192:
+        num_sms = 1
+    elif numel <= 32768:
+        num_sms = min(4, num_sms)
+
+    if workspace is None or not hasattr(workspace, 'start_flags'):
+        workspace = _BarrieredWorkspace(ctx, world_size)
+
+    capturing = torch.cuda.is_current_stream_capturing()
+    if not capturing:
+        workspace.start_flags.zero_()
+        workspace.end_flags.zero_()
+
+    heap_bases = ctx.get_heap_bases()
+
+    one_shot_all_reduce_triton_barriered[(num_sms,)](
+        flat_input,
+        flat_output,
+        numel,
+        heap_bases,
+        rank_in_group,
+        rank_global,
+        world_size,
+        rank_start,
+        rank_stride,
+        workspace.start_flags,
+        workspace.end_flags,
+        block_size,
+        num_sms,
+        capturing,
+    )
+
+    return workspace
+
+
+def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
+    world_size = ctx.get_num_ranks()
+    if workspace is None or not hasattr(workspace, 'start_flags'):
+        workspace = _BarrieredWorkspace(ctx, world_size)
+    return workspace
