@@ -145,10 +145,10 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         )
 
     if workspace is not None:
-        if variant not in ("one_shot", "one_shot_gluon"):
+        if variant not in ("one_shot", "one_shot_gluon", "one_shot_barriered"):
             workspace.prepared = False
 
-    if not async_op and variant not in ("one_shot", "one_shot_gluon"):
+    if not async_op and variant not in ("one_shot", "one_shot_gluon", "one_shot_barriered"):
         ctx.barrier()
 
     return workspace
