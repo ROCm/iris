@@ -12,9 +12,10 @@ This is the graph-capture-safe version: the poll load has acquire
 semantics so it reads fresh flag values from remote GPUs.
 """
 
+import torch
 import triton
 import triton.language as tl
-from iris.ccl.triton import iris
+import iris
 
 
 @triton.jit
