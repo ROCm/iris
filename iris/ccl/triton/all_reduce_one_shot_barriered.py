@@ -12,11 +12,9 @@ This is the graph-capture-safe version: the poll load has acquire
 semantics so it reads fresh flag values from remote GPUs.
 """
 
-import torch
 import triton
 import triton.language as tl
 from iris.ccl.triton import iris
-from iris.host.tracing.kernel_artifacts import iris_launch
 
 
 @triton.jit
@@ -51,9 +49,13 @@ def _triton_barrier(
 
     # Atomic add on own flag (release)
     old = iris.atomic_add(
-        flags_ptr + group_rank, 1,
-        iris_rank, iris_rank, heap_bases,
-        sem="release", scope="sys",
+        flags_ptr + group_rank,
+        1,
+        iris_rank,
+        iris_rank,
+        heap_bases,
+        sem="release",
+        scope="sys",
     )
     target = old + 1
 
@@ -62,20 +64,29 @@ def _triton_barrier(
         remote_rank = rank_start + i * rank_stride
         if remote_rank != iris_rank:
             iris.atomic_add(
-                flags_ptr + group_rank, 1,
-                iris_rank, remote_rank, heap_bases,
-                sem="relaxed", scope="sys",
+                flags_ptr + group_rank,
+                1,
+                iris_rank,
+                remote_rank,
+                heap_bases,
+                sem="relaxed",
+                scope="sys",
             )
 
     # Poll peer flags with acquire semantics (.cv → sc0 sc1)
     for i in range(world_size):
         remote_rank = rank_start + i * rank_stride
         if remote_rank != iris_rank:
-            while iris.load(
-                flags_ptr + i,
-                iris_rank, iris_rank, heap_bases,
-                cache_modifier=".cv",
-            ) < target:
+            while (
+                iris.load(
+                    flags_ptr + i,
+                    iris_rank,
+                    iris_rank,
+                    heap_bases,
+                    cache_modifier=".cv",
+                )
+                < target
+            ):
                 pass
 
     # Invalidate L2 after barrier
@@ -115,9 +126,13 @@ def one_shot_all_reduce_triton_barriered(
 
     # Start barrier: all ranks must have written their input
     _triton_barrier(
-        start_flags_ptr, heap_bases,
-        group_rank, iris_rank, world_size,
-        rank_start, rank_stride,
+        start_flags_ptr,
+        heap_bases,
+        group_rank,
+        iris_rank,
+        world_size,
+        rank_start,
+        rank_stride,
     )
 
     # Reduction: read all peers, accumulate in FP32
@@ -133,7 +148,9 @@ def one_shot_all_reduce_triton_barriered(
             remote_rank = rank_start + i * rank_stride
             partial = iris.load(
                 input_ptr + offsets,
-                iris_rank, remote_rank, heap_bases,
+                iris_rank,
+                remote_rank,
+                heap_bases,
                 mask=mask,
             )
             acc += partial.to(tl.float32)
@@ -147,7 +164,11 @@ def one_shot_all_reduce_triton_barriered(
     # Optional end barrier
     if not SINGLE_BARRIER:
         _triton_barrier(
-            end_flags_ptr, heap_bases,
-            group_rank, iris_rank, world_size,
-            rank_start, rank_stride,
+            end_flags_ptr,
+            heap_bases,
+            group_rank,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
         )
