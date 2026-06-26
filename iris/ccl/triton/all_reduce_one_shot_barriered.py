@@ -156,7 +156,6 @@ def launch(
     if workspace is None or not hasattr(workspace, "flag_counter"):
         workspace = _BarrieredWorkspace(ctx, world_size, rank_global)
 
-    capturing = torch.cuda.is_current_stream_capturing()
     heap_bases = workspace.heap_bases  # cached from init, no HIP call
 
     one_shot_all_reduce_triton_barriered[(num_sms,)](
@@ -176,7 +175,7 @@ def launch(
         workspace.end_sync,
         block_size,
         num_sms,
-        capturing,
+        False,  # always use both barriers
     )
     return workspace
 
