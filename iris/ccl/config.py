@@ -125,10 +125,11 @@ class Config:
             "one_shot",
             "one_shot_legacy",
             "one_shot_gluon",
+            "one_shot_barriered",
             "spinlock",
         ]:
             raise ValueError(
-                f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'one_shot_legacy', 'one_shot_gluon', 'spinlock', got {self.all_reduce_variant}"
+                f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'one_shot_legacy', 'one_shot_gluon', 'one_shot_barriered', 'spinlock', got {self.all_reduce_variant}"
             )
         if self.all_reduce_distribution not in [0, 1]:
             raise ValueError(
