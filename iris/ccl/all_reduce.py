@@ -19,6 +19,11 @@ def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace
         config = Config(all_reduce_variant="one_shot_gluon", use_gluon=True)
 
     variant = config.all_reduce_variant.lower()
+    if variant == "one_shot_barriered":
+        from iris.ccl.triton.all_reduce_one_shot_barriered import all_reduce_preamble as _barriered_preamble
+
+        return _barriered_preamble(output_tensor, input_tensor, ctx, config=config, workspace=workspace)
+
     if variant == "one_shot_gluon" or config.use_gluon:
         from iris.ccl.gluon.all_reduce import all_reduce_preamble as _gluon_preamble
 
