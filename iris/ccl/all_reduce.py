@@ -75,7 +75,16 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         config.all_reduce_variant = "one_shot_gluon"
 
     variant = config.all_reduce_variant.lower()
-    valid_variants = ["atomic", "spinlock", "ring", "two_shot", "one_shot", "one_shot_legacy", "one_shot_gluon", "one_shot_barriered"]
+    valid_variants = [
+        "atomic",
+        "spinlock",
+        "ring",
+        "two_shot",
+        "one_shot",
+        "one_shot_legacy",
+        "one_shot_gluon",
+        "one_shot_barriered",
+    ]
     if variant not in valid_variants:
         raise ValueError(f"Invalid all_reduce_variant: {variant}. Must be one of: {', '.join(valid_variants)}")
 

@@ -79,8 +79,11 @@ def one_shot_all_reduce_triton_barriered(
     pid = tl.program_id(0)
 
     _barrier_precomputed(
-        start_peer_ptrs, start_self_ptr, flag_counter_ptr,
-        group_rank, world_size,
+        start_peer_ptrs,
+        start_self_ptr,
+        flag_counter_ptr,
+        group_rank,
+        world_size,
     )
 
     total_tiles = tl.cdiv(N_ELEMENTS, BLOCK_SIZE)
@@ -99,8 +102,11 @@ def one_shot_all_reduce_triton_barriered(
 
     if not SINGLE_BARRIER:
         _barrier_precomputed(
-            end_peer_ptrs, end_self_ptr, flag_counter_ptr,
-            group_rank, world_size,
+            end_peer_ptrs,
+            end_self_ptr,
+            flag_counter_ptr,
+            group_rank,
+            world_size,
         )
 
 
@@ -134,10 +140,17 @@ class _BarrieredWorkspace:
 
 
 def launch(
-    output_tensor, input_tensor, ctx,
-    rank_in_group, rank_global, world_size,
-    rank_start, rank_stride, config,
-    workspace=None, group=None,
+    output_tensor,
+    input_tensor,
+    ctx,
+    rank_in_group,
+    rank_global,
+    world_size,
+    rank_start,
+    rank_stride,
+    config,
+    workspace=None,
+    group=None,
 ):
     numel = input_tensor.numel()
     flat_input = input_tensor.contiguous().view(-1)
@@ -150,22 +163,30 @@ def launch(
     elif numel <= 32768:
         num_sms = min(4, num_sms)
 
-    if workspace is None or not hasattr(workspace, 'flag_counter'):
+    if workspace is None or not hasattr(workspace, "flag_counter"):
         workspace = _BarrieredWorkspace(ctx, world_size, rank_global)
 
     capturing = torch.cuda.is_current_stream_capturing()
     heap_bases = workspace.heap_bases  # cached from init, no HIP call
 
     one_shot_all_reduce_triton_barriered[(num_sms,)](
-        flat_input, flat_output, numel, heap_bases,
-        rank_in_group, rank_global, world_size,
-        rank_start, rank_stride,
+        flat_input,
+        flat_output,
+        numel,
+        heap_bases,
+        rank_in_group,
+        rank_global,
+        world_size,
+        rank_start,
+        rank_stride,
         workspace.flag_counter,
         workspace.start_peer_ptrs,
         workspace.start_sync,
         workspace.end_peer_ptrs,
         workspace.end_sync,
-        block_size, num_sms, capturing,
+        block_size,
+        num_sms,
+        capturing,
     )
     return workspace
 
@@ -173,6 +194,6 @@ def launch(
 def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
     world_size = ctx.get_num_ranks()
     rank = ctx.get_rank()
-    if workspace is None or not hasattr(workspace, 'flag_counter'):
+    if workspace is None or not hasattr(workspace, "flag_counter"):
         workspace = _BarrieredWorkspace(ctx, world_size, rank)
     return workspace
