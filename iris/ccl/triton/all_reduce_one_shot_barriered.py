@@ -129,6 +129,7 @@ class _BarrieredWorkspace:
 
         self.start_peer_ptrs = torch.tensor(start_ptrs, dtype=torch.int64, device=f"cuda:{rank}")
         self.end_peer_ptrs = torch.tensor(end_ptrs, dtype=torch.int64, device=f"cuda:{rank}")
+        self.heap_bases = heap_bases
         self.prepared = True
 
 
@@ -153,7 +154,7 @@ def launch(
         workspace = _BarrieredWorkspace(ctx, world_size, rank_global)
 
     capturing = torch.cuda.is_current_stream_capturing()
-    heap_bases = ctx.get_heap_bases()
+    heap_bases = workspace.heap_bases  # cached from init, no HIP call
 
     one_shot_all_reduce_triton_barriered[(num_sms,)](
         flat_input, flat_output, numel, heap_bases,
