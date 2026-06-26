@@ -55,6 +55,16 @@ def _gluon_barrier(
 
     my_flag = flags_ptr + group_rank
 
+    # Explicit L2 writeback before signaling peers (matches triton/vLLM pattern)
+    tl.inline_asm_elementwise(
+        "buffer_wbl2 sc0 sc1",
+        "=r",
+        args=[],
+        dtype=tl.int32,
+        is_pure=False,
+        pack=1,
+    )
+
     old = ctx_obj.atomic_add(my_flag, 1, to_rank=cur_rank, sem="release", scope="sys")
     target = old + 1
 
@@ -68,11 +78,24 @@ def _gluon_barrier(
         if remote_rank != cur_rank:
             poll_ptr = flags_ptr + i
             poll_translated = ctx_obj._translate(poll_ptr, cur_rank, cur_rank)
-            while gl.load(poll_translated, cache_modifier=".cv") < target:
-                pass
+            # Poll with invalidation before each read to force fresh load.
+            # gluon drops .cv on gl.load, so we manually invalidate L2.
+            while True:
+                tl.inline_asm_elementwise(
+                    "buffer_inv sc0 sc1",
+                    "=r",
+                    args=[],
+                    dtype=tl.int32,
+                    is_pure=False,
+                    pack=1,
+                )
+                poll_val = gl.load(poll_translated, cache_modifier=".cv")
+                if poll_val >= target:
+                    break
 
+    # Invalidate L2 after barrier (both scopes)
     tl.inline_asm_elementwise(
-        "buffer_inv sc1",
+        "buffer_inv sc0 sc1",
         "=r",
         args=[],
         dtype=tl.int32,
