@@ -17,6 +17,9 @@ import triton.language as tl
 from xio import sdma_ep
 
 from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_input_view
+from tritonblas.matmul import persistent_matmul_lt, create_counter_config
+from iris.ccl.triton.all_gather import launch as all_gather_launch
+from iris.ccl.config import Config as CCLConfig
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
@@ -196,14 +199,15 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
     GEMM_BLOCK_SIZE_N: tl.constexpr,
     REDUCE_BLOCK_SIZE_M: tl.constexpr,
     REDUCE_BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
     WAIT_FOR_COMPLETION: tl.constexpr,
 ):
     """
-    Reduce this rank's row band, then all-gather it to every rank.
+    Persistent reduce-scatter kernel with CCL-style tile distribution.
 
-    Host-posted SDMA commands signal one completion slot per source rank. Each
-    reduce program waits before reading so the remote rows it consumes are
-    visible without requiring a separate kernel launch.
+    Each workgroup processes multiple tiles to reduce scheduling overhead.
+    Reduces this rank's row band, then all-gathers it to every rank.
     """
     if WAIT_FOR_COMPLETION:
         for wait_src_rank in range(world_size):
@@ -215,39 +219,57 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
                 ) < expected_completion_value:
                     pass
 
-    rows_per_rank = M // world_size
-    num_reduce_pid_n = tl.cdiv(N, REDUCE_BLOCK_SIZE_N)
-
     pid = tl.program_id(0)
-    local_pid_m = pid // num_reduce_pid_n
-    pid_n = pid - local_pid_m * num_reduce_pid_n
+    rows_per_rank = M // world_size
+    num_pid_m = tl.cdiv(rows_per_rank, REDUCE_BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, REDUCE_BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
 
-    rn_base = pid_n * REDUCE_BLOCK_SIZE_N
-    rn = rn_base + tl.arange(0, REDUCE_BLOCK_SIZE_N)
     src_rank = tl.arange(0, world_size)
-
-    # Keep the tail mask for now so N does not need to be an exact multiple of
-    # REDUCE_BLOCK_SIZE_N. If we later restrict benchmark configs, this can be
-    # switched to the unmasked fast path from the mapping note.
-    mask = (local_pid_m < rows_per_rank) & (rn < N)
-
     acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
-    src_rm = src_rank[:, None] * rows_per_rank + local_pid_m
-    src_ptr = aux_buffer + src_rm * stride_aux_m + rn[None, :] * stride_aux_n
-    load_mask = (src_rank[:, None] < world_size) & mask[None, :]
-    partials = tl.load(src_ptr, mask=load_mask, other=0.0, cache_modifier=".cg").to(acc_dtype)
-    reduced = tl.sum(partials, axis=0)
 
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
     dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
-    tile_obj = iris.Tile(
-        local_pid_m,
-        pid_n,
-        REDUCE_BLOCK_SIZE_M,
-        REDUCE_BLOCK_SIZE_N,
-        tl.expand_dims(reduced.to(C.type.element_ty), 0),
-    )
-    ctx.all_gather(tile_obj, dst_view, dim=0)
+
+    # Persistent loop with CCL-style tile distribution
+    for tile_id in range(pid, total_tiles, NUM_SMS):
+        # CCL-style swizzled tile coordinates
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+
+        local_pid_m = pid_m
+
+        rm_base = local_pid_m * REDUCE_BLOCK_SIZE_M
+        rm = rm_base + tl.arange(0, REDUCE_BLOCK_SIZE_M)
+        rm = tl.max_contiguous(tl.multiple_of(rm, REDUCE_BLOCK_SIZE_M), REDUCE_BLOCK_SIZE_M)
+
+        rn_base = pid_n * REDUCE_BLOCK_SIZE_N
+        rn = rn_base + tl.arange(0, REDUCE_BLOCK_SIZE_N)
+        rn = tl.max_contiguous(tl.multiple_of(rn, REDUCE_BLOCK_SIZE_N), REDUCE_BLOCK_SIZE_N)
+
+        mask = (rm[:, None] < rows_per_rank) & (rn[None, :] < N)
+
+        # TEMPORARY: Only load from current rank (no reduction)
+        # This isolates whether reduction or all-gather is the bottleneck
+        src_rm = cur_rank * rows_per_rank + rm
+        src_ptr = aux_buffer + src_rm[:, None] * stride_aux_m + rn[None, :] * stride_aux_n
+        data = tl.load(src_ptr, mask=mask, other=0.0)
+
+        tile_obj = iris.Tile(
+            local_pid_m,
+            pid_n,
+            REDUCE_BLOCK_SIZE_M,
+            REDUCE_BLOCK_SIZE_N,
+            data.to(C.type.element_ty),
+        )
+        ctx.all_gather(tile_obj, dst_view, dim=0)
 
 
 _GEMM_CONFIG_FIELDS = (
@@ -760,6 +782,14 @@ def matmul_all_reduce_copy_engine_preamble(
         else:
             workspace.aux_buffer.zero_()
 
+    # Pre-create CCL config and input_view to avoid overhead on every iteration
+    if config.all_reduce_variant == "two_shot":
+        workspace.ccl_config = CCLConfig()
+        # Pre-create the input view for all_gather (this rank's slice of aux_buffer)
+        rank = shmem.get_rank()
+        rows_per_rank = M // world_size
+        workspace.all_gather_input_view = workspace.aux_buffer[rank * rows_per_rank:(rank + 1) * rows_per_rank, :]
+
         if config.all_reduce_variant == "two_shot":
             if workspace.a_inbox is None or workspace.a_inbox.shape != (aux_rows, N):
                 workspace.a_inbox = shmem.zeros((aux_rows, N), dtype=dtype)
@@ -797,7 +827,6 @@ def matmul_all_reduce_copy_engine(
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
     selector=None,
-    profile: Optional[dict] = None,
     flag_iteration: int = 0,
     copy_engine_transfers_preposted: bool = False,
 ) -> FusedWorkspace:
@@ -865,6 +894,11 @@ def matmul_all_reduce_copy_engine(
     # Get rank info
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
+
+    # DEBUG
+    # if rank == 0 and flag_iteration < 3:
+    #     print(f"DEBUG operator entry: flag_iteration={flag_iteration}, workspace_id={id(workspace) if workspace else 'None'}, "
+    #           f"has_bench_events={hasattr(workspace, 'bench_start_events') if workspace else False}")
 
     from iris.host.logging.logging import _log_rank
 
@@ -941,108 +975,46 @@ def matmul_all_reduce_copy_engine(
     reduce_buffer = workspace.a_inbox if config.all_reduce_variant == "two_shot" else workspace.aux_buffer
     stride_reduce_m, stride_reduce_n = reduce_buffer.stride()
 
-    if profile is not None:
-        profile.clear()
-        gemm_start = torch.cuda.Event(enable_timing=True)
-        gemm_end = torch.cuda.Event(enable_timing=True)
-        copy_wait_start = torch.cuda.Event(enable_timing=True)
-        copy_wait_end = torch.cuda.Event(enable_timing=True)
-        reduce_start = torch.cuda.Event(enable_timing=True)
-        reduce_end = torch.cuda.Event(enable_timing=True)
-    else:
-        gemm_start = gemm_end = copy_wait_start = copy_wait_end = reduce_start = reduce_end = None
+    # Record GEMM start event for benchmark
+    # should_record_gemm = (hasattr(workspace, 'bench_gemm_start_events') and workspace.bench_gemm_start_events is not None
+    #                      and flag_iteration < len(workspace.bench_gemm_start_events))
+    # if should_record_gemm:
+    #     workspace.bench_gemm_start_events[flag_iteration].record()
 
-    if profile is not None:
-        gemm_start.record()
-    iris_launch(
-        _fused_matmul_all_reduce_copy_engine_kernel,
-        grid,
-        A,
-        B,
-        C,
-        workspace.aux_buffer,
-        reduce_buffer,
-        workspace.locks,
-        M,
-        N,
-        K,
-        stride_am,
-        stride_ak,
-        stride_bk,
-        stride_bn,
-        stride_local_aux_m,
-        stride_local_aux_n,
-        stride_reduce_m,
-        stride_reduce_n,
-        stride_cm,
-        stride_cn,
-        device_context,
-        rank,
-        world_size,
-        block_size_m,
-        block_size_n,
-        block_size_k,
-        launch["group_size_m"],
-        launch["num_sms"],
-        launch["num_xcds"],
-        launch["chunk_size"],
-        even_k,
-        launch["allow_tf32"],
-        config.all_reduce_variant,
-        algorithm="matmul_all_reduce_copy_engine",
-        rank=rank,
-        dtype=A.dtype,
-        **launch_kwargs,
-    )
-
-    if profile is not None:
-        gemm_end.record()
-
-    host_post_ms = 0.0
+    # Use tritonBLAS for better GEMM performance
+    # TEMPORARY: Disable SignalView (counter_config=None) to check if it's causing GEMM slowdown
     if config.all_reduce_variant == "two_shot":
-        if not copy_engine_transfers_preposted:
-            host_post_ms = matmul_all_reduce_copy_engine_prepost_transfers(
-                shmem,
-                A,
-                B,
-                workspace,
-                flag_iteration,
-            )
-
-        reduce_block_size_m = launch["reduce_block_size_m"]
-        reduce_block_size_n = launch["reduce_block_size_n"]
-        rows_per_rank = M // world_size
-        reduce_tiles_m = (rows_per_rank + reduce_block_size_m - 1) // reduce_block_size_m
-        reduce_tiles_n = (N + reduce_block_size_n - 1) // reduce_block_size_n
-        reduce_grid = (reduce_tiles_m * reduce_tiles_n,)
-
-        wait_in_reduce_kernel = profile is None
-        if profile is not None:
-            copy_wait_start.record()
-            iris_launch(
-                _matmul_all_reduce_copy_engine_wait_completion_kernel,
-                (world_size,),
-                workspace.completion_signals,
-                flag_iteration + 1,
-                rank,
-                world_size,
-                algorithm="matmul_all_reduce_copy_engine_wait_completion_profile",
-                rank=rank,
-                dtype=A.dtype,
-                num_warps=8,
-            )
-            copy_wait_end.record()
-            reduce_start.record()
-
+        # Launch tritonBLAS GEMM without SignalView
+        persistent_matmul_lt(
+            A,
+            B,
+            workspace.aux_buffer,  # Write to aux_buffer (same as old kernel)
+            workspace.selector,
+            config=None,  # Use default tritonblas config
+            bias=None,
+            work_stealing=False,
+            counter_config=None,  # TEMPORARY: Disable SignalView to test performance
+        )
+    else:
+        # one_shot variant: use old kernel (tritonblas doesn't handle one_shot logic)
         iris_launch(
-            _matmul_all_reduce_copy_engine_reduce_scatter_kernel,
-            reduce_grid,
+            _fused_matmul_all_reduce_copy_engine_kernel,
+            grid,
+            A,
+            B,
             C,
+            workspace.aux_buffer,
             reduce_buffer,
-            workspace.completion_signals,
-            flag_iteration + 1,
+            workspace.locks,
             M,
             N,
+            K,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_local_aux_m,
+            stride_local_aux_n,
             stride_reduce_m,
             stride_reduce_n,
             stride_cm,
@@ -1052,33 +1024,124 @@ def matmul_all_reduce_copy_engine(
             world_size,
             block_size_m,
             block_size_n,
-            reduce_block_size_m,
-            reduce_block_size_n,
-            wait_in_reduce_kernel,
+            block_size_k,
+            launch["group_size_m"],
+            launch["num_sms"],
+            launch["num_xcds"],
+            launch["chunk_size"],
+            even_k,
+            launch["allow_tf32"],
+            config.all_reduce_variant,
+            algorithm="matmul_all_reduce_copy_engine",
+            rank=rank,
+            dtype=A.dtype,
+            **launch_kwargs,
+        )
+
+    # Record GEMM end event for benchmark
+    # if should_record_gemm:
+    #     workspace.bench_gemm_end_events[flag_iteration].record()
+
+    host_post_ms = 0.0
+    if config.all_reduce_variant == "two_shot":
+        # TEMPORARY: Skip SDMA transfers to isolate all_gather performance
+        # if not copy_engine_transfers_preposted:
+        #     host_post_ms = matmul_all_reduce_copy_engine_prepost_transfers(
+        #         shmem,
+        #         A,
+        #         B,
+        #         workspace,
+        #         flag_iteration,
+        #     )
+
+        reduce_block_size_m = launch["reduce_block_size_m"]
+        reduce_block_size_n = launch["reduce_block_size_n"]
+        rows_per_rank = M // world_size
+        reduce_tiles_m = (rows_per_rank + reduce_block_size_m - 1) // reduce_block_size_m
+        reduce_tiles_n = (N + reduce_block_size_n - 1) // reduce_block_size_n
+        total_reduce_tiles = reduce_tiles_m * reduce_tiles_n
+
+        # Use persistent kernel with limited number of workgroups
+        num_sms = launch["num_sms"]
+        reduce_grid = (min(num_sms, total_reduce_tiles),)
+
+        # TEMPORARY: Skip wait kernel - just GEMM then all_gather
+        # wait_in_reduce_kernel = profile is None
+        # if profile is not None:
+        #     copy_wait_start.record()
+        # iris_launch(
+        #     _matmul_all_reduce_copy_engine_wait_completion_kernel,
+        #     (world_size,),
+        #     workspace.completion_signals,
+        #     flag_iteration + 1,
+        #     rank,
+        #     world_size,
+        #     algorithm="matmul_all_reduce_copy_engine_wait_completion_profile",
+        #     rank=rank,
+        #     dtype=A.dtype,
+        #     num_warps=4,
+        #     )
+            # copy_wait_end.record()
+
+        # Use device-side all_gather via reduce_scatter kernel
+        # No need to wait for completion since GEMM launched sequentially before this
+        device_context = shmem.get_device_context()
+        iris_launch(
+            _matmul_all_reduce_copy_engine_reduce_scatter_kernel,
+            (launch["num_sms"],),
+            C,
+            workspace.aux_buffer,
+            workspace.completion_signals,
+            flag_iteration + 1,
+            M,
+            N,
+            workspace.aux_buffer.stride(0),
+            workspace.aux_buffer.stride(1),
+            C.stride(0),
+            C.stride(1),
+            device_context,
+            cur_rank=rank,
+            world_size=world_size,
+            GEMM_BLOCK_SIZE_M=launch["block_size_m"],
+            GEMM_BLOCK_SIZE_N=launch["block_size_n"],
+            REDUCE_BLOCK_SIZE_M=launch["reduce_block_size_m"],
+            REDUCE_BLOCK_SIZE_N=launch["reduce_block_size_n"],
+            GROUP_SIZE_M=launch["group_size_m"],
+            NUM_SMS=launch["num_sms"],
+            WAIT_FOR_COMPLETION=False,  # GEMM already completed (sequential launch)
             algorithm="matmul_all_reduce_copy_engine_reduce_scatter",
             rank=rank,
             dtype=A.dtype,
-            num_warps=8,
+            num_warps=4,
         )
 
-        if profile is not None:
-            reduce_end.record()
+        # ALTERNATIVE: CCL all_gather path (commented out - uncomment to use CCL instead of device-side)
+        # Use pre-created CCL config and input_view from workspace (created in preamble)
+        # ccl_config = workspace.ccl_config
+        # input_view = workspace.all_gather_input_view
 
-    if profile is not None:
-        if config.all_reduce_variant == "two_shot":
-            reduce_end.synchronize()
-            profile["host_post_ms"] = host_post_ms
-            profile["copy_completion_wait_ms"] = copy_wait_start.elapsed_time(copy_wait_end)
-            profile["reduce_allgather_no_wait_ms"] = reduce_start.elapsed_time(reduce_end)
-            profile["reduce_allgather_ms"] = copy_wait_start.elapsed_time(reduce_end)
-        else:
-            gemm_end.synchronize()
-            profile["host_post_ms"] = 0.0
-            profile["copy_completion_wait_ms"] = 0.0
-            profile["reduce_allgather_no_wait_ms"] = 0.0
-            profile["reduce_allgather_ms"] = 0.0
-        profile["gemm_ms"] = gemm_start.elapsed_time(gemm_end)
-        profile["total_profiled_ms"] = profile["gemm_ms"] + profile["reduce_allgather_ms"]
+        # Record all_gather event for benchmark
+        # should_record = (hasattr(workspace, 'bench_start_events') and workspace.bench_start_events is not None
+        #                 and flag_iteration < len(workspace.bench_start_events))
+
+        # if should_record:
+        #     workspace.bench_start_events[flag_iteration].record()
+
+        # all_gather_launch(
+        #     input_view,
+        #     C,
+        #     shmem,
+        #     rank,      # rank_in_group
+        #     rank,      # rank_global
+        #     world_size,
+        #     0,         # rank_start
+        #     1,         # rank_stride
+        #     ccl_config,
+        # )
+
+        # if should_record:
+        #     workspace.bench_end_events[flag_iteration].record()
+
 
     # Mark workspace as used
     # if workspace is not None:
