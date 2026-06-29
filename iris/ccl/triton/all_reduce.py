@@ -15,13 +15,15 @@ import torch
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from ..utils import chiplet_transform_chunked
+from iris.host.distributed.helpers import _translate_ptr
 
 # Variant types
 VARIANT_ATOMIC = "atomic"
 VARIANT_RING = "ring"
 VARIANT_TWO_SHOT = "two_shot"
-VARIANT_ONE_SHOT = "one_shot"
+VARIANT_ONE_SHOT_LEGACY = "one_shot_legacy"
 VARIANT_SPINLOCK = "spinlock"
+VARIANT_ONE_SHOT = "one_shot"
 
 
 @dataclass
@@ -47,6 +49,8 @@ class AllReduceWorkspace:
     locks: Optional[torch.Tensor] = None
     num_rings: int = 1
     flags_per_tile: int = 0
+    start_flags: Optional[torch.Tensor] = None
+    end_flags: Optional[torch.Tensor] = None
     prepared: bool = False
 
 
@@ -69,9 +73,9 @@ def all_reduce_preamble(
         config = Config()
 
     variant = config.all_reduce_variant.lower()
-    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT, VARIANT_SPINLOCK]:
+    if variant not in [VARIANT_ATOMIC, VARIANT_RING, VARIANT_TWO_SHOT, VARIANT_ONE_SHOT_LEGACY, VARIANT_SPINLOCK, VARIANT_ONE_SHOT]:
         raise ValueError(
-            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT}, {VARIANT_SPINLOCK}"
+            f"Invalid all_reduce_variant: {variant}. Must be one of: {VARIANT_ATOMIC}, {VARIANT_RING}, {VARIANT_TWO_SHOT}, {VARIANT_ONE_SHOT_LEGACY}, {VARIANT_SPINLOCK}, {VARIANT_ONE_SHOT}"
         )
 
     M, N = input_tensor.shape[:2]
@@ -86,7 +90,7 @@ def all_reduce_preamble(
     workspace.num_rings = getattr(config, "all_reduce_num_rings", 1)
     workspace.prepared = False
 
-    if variant in (VARIANT_ATOMIC, VARIANT_SPINLOCK, VARIANT_ONE_SHOT):
+    if variant in (VARIANT_ATOMIC, VARIANT_SPINLOCK, VARIANT_ONE_SHOT_LEGACY):
         output_tensor.zero_()
         ctx.barrier()
 
@@ -115,6 +119,15 @@ def all_reduce_preamble(
 
     elif variant == VARIANT_TWO_SHOT:
         pass
+
+    elif variant == VARIANT_ONE_SHOT:
+        num_ranks = ctx.get_num_ranks()
+        max_blocks = min(16, config.comm_sms)
+        needed = max_blocks * num_ranks
+        if workspace.start_flags is None or workspace.start_flags.numel() < needed:
+            workspace.start_flags = ctx.zeros((needed,), dtype=torch.int32)
+        if workspace.end_flags is None or workspace.end_flags.numel() < needed:
+            workspace.end_flags = ctx.zeros((needed,), dtype=torch.int32)
 
     if variant == VARIANT_SPINLOCK:
         num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
@@ -344,7 +357,7 @@ def persistent_all_reduce_spinlock(
 
 
 @triton.jit()
-def persistent_all_reduce_one_shot(
+def persistent_all_reduce_one_shot_legacy(
     input_ptr,
     output_ptr,
     M,
@@ -706,6 +719,96 @@ def persistent_all_reduce_two_shot(
                     )
 
 
+@triton.jit()
+def _per_block_barrier(
+    pid,
+    flags_ptr,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+):
+    """Per-block cross-rank barrier. Each CTA signals all remote ranks and
+    polls until all have signaled. flags layout: (max_blocks, world_size)
+    int32 on symmetric heap. Monotonic counters — never zeroed."""
+    tl.debug_barrier()
+
+    my_flag_ptr = flags_ptr + pid * world_size + group_rank
+    my_local = _translate_ptr(my_flag_ptr, iris_rank, iris_rank, heap_bases)
+    old = tl.atomic_add(my_local, 1, sem="release", scope="sys")
+    target = old + 1
+
+    for i in tl.static_range(0, world_size):
+        remote_rank = rank_start + i * rank_stride
+        if remote_rank != iris_rank:
+            remote_translated = _translate_ptr(my_flag_ptr, iris_rank, remote_rank, heap_bases)
+            tl.atomic_add(remote_translated, 1, sem="release", scope="sys")
+
+    for i in tl.static_range(0, world_size):
+        remote_rank = rank_start + i * rank_stride
+        if remote_rank != iris_rank:
+            poll_ptr = flags_ptr + pid * world_size + i
+            poll_local = _translate_ptr(poll_ptr, iris_rank, iris_rank, heap_bases)
+            while tl.atomic_cas(poll_local, target, target, sem="acquire", scope="sys") < target:
+                pass
+
+
+@triton.jit()
+def persistent_all_reduce_one_shot(
+    input_ptr,
+    output_ptr,
+    N_ELEMENTS,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    start_flags_ptr,
+    end_flags_ptr,
+    BLOCK_SIZE: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+):
+    """Graph-capturable one-shot all-reduce with in-kernel barriers.
+    1D layout, unmasked fast path for vectorized loads, optimized for small messages."""
+    pid = tl.program_id(0)
+
+    _per_block_barrier(
+        pid, start_flags_ptr, heap_bases,
+        group_rank, iris_rank, world_size, rank_start, rank_stride,
+    )
+
+    acc_dtype = tl.float32 if output_ptr.type.element_ty != tl.int8 else tl.int32
+    total_tiles = tl.cdiv(N_ELEMENTS, BLOCK_SIZE)
+
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        base_offset = tile_id * BLOCK_SIZE
+        offsets = base_offset + tl.arange(0, BLOCK_SIZE)
+        is_full = base_offset + BLOCK_SIZE <= N_ELEMENTS
+
+        if is_full:
+            offsets = tl.max_contiguous(tl.multiple_of(offsets, BLOCK_SIZE), BLOCK_SIZE)
+            acc = iris.load(input_ptr + offsets, iris_rank, rank_start, heap_bases).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = rank_start + i * rank_stride
+                acc += iris.load(input_ptr + offsets, iris_rank, remote_rank, heap_bases).to(acc_dtype)
+            tl.store(output_ptr + offsets, acc.to(output_ptr.type.element_ty))
+        else:
+            mask = offsets < N_ELEMENTS
+            acc = iris.load(input_ptr + offsets, iris_rank, rank_start, heap_bases, mask=mask).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                remote_rank = rank_start + i * rank_stride
+                acc += iris.load(input_ptr + offsets, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
+            tl.store(output_ptr + offsets, acc.to(output_ptr.type.element_ty), mask=mask)
+
+    _per_block_barrier(
+        pid, end_flags_ptr, heap_bases,
+        group_rank, iris_rank, world_size, rank_start, rank_stride,
+    )
+
+
 def launch(
     output_tensor,
     input_tensor,
@@ -746,6 +849,7 @@ def launch(
         or (variant == VARIANT_RING and workspace.num_rings != config.all_reduce_num_rings)
         or (variant == VARIANT_RING and workspace.flags_per_tile != 1)
         or (variant == VARIANT_SPINLOCK and (workspace.locks is None))
+        or (variant == VARIANT_ONE_SHOT and (workspace.start_flags is None or workspace.end_flags is None))
     )
 
     if needs_prepare:
@@ -927,9 +1031,9 @@ def launch(
             rank=rank_global,
             dtype=input_tensor.dtype,
         )
-    elif variant == VARIANT_ONE_SHOT:
+    elif variant == VARIANT_ONE_SHOT_LEGACY:
         iris_launch(
-            persistent_all_reduce_one_shot,
+            persistent_all_reduce_one_shot_legacy,
             (config.comm_sms,),
             input_tensor,
             output_tensor,
@@ -951,6 +1055,37 @@ def launch(
             config.comm_sms,
             config.num_xcds,
             config.chunk_size,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
+        )
+
+    elif variant == VARIANT_ONE_SHOT:
+        N_ELEMENTS = M * N
+        BLOCK_SIZE = 2048
+        total_tiles = (N_ELEMENTS + BLOCK_SIZE - 1) // BLOCK_SIZE
+        vllm_sms = max(1, min(total_tiles, 16))
+        flat_input = input_tensor.contiguous().view(-1)
+        flat_output = output_tensor.contiguous().view(-1)
+        iris_launch(
+            persistent_all_reduce_one_shot,
+            (vllm_sms,),
+            flat_input,
+            flat_output,
+            N_ELEMENTS,
+            heap_bases,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            workspace.start_flags,
+            workspace.end_flags,
+            BLOCK_SIZE,
+            vllm_sms,
+            num_warps=8,
+            num_stages=1,
+            waves_per_eu=1,
             algorithm="all_reduce",
             rank=rank_global,
             dtype=input_tensor.dtype,
