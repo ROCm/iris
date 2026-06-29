@@ -262,3 +262,78 @@ def test_all_reduce_ring_flags_too_small():
     import gc
 
     gc.collect()
+
+
+@pytest.mark.parametrize("numel", [1024, 4096, 16384, 65536, 131072])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_all_reduce_one_shot_graph_capture(numel, dtype):
+    """Test one_shot all-reduce with in-kernel barriers in graph capture mode.
+
+    Validates correctness across 50 graph replays with varying input values.
+    The one_shot variant uses _per_block_barrier with monotonic atomic counters
+    that survive graph replay without being reset.
+    """
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33
+    shmem = iris.iris(heap_size)
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+
+    buf_in = shmem.zeros((1, numel), dtype=dtype)
+    buf_out = shmem.zeros((1, numel), dtype=dtype)
+    src = torch.empty((1, numel), dtype=dtype, device=f"cuda:{rank}")
+
+    config = Config(all_reduce_variant="one_shot")
+    workspace = shmem.ccl.all_reduce_preamble(buf_out, buf_in, config=config)
+    shmem.barrier()
+
+    # Eager warmup
+    src.fill_(float(1 + rank))
+    buf_in.copy_(src)
+    shmem.ccl.all_reduce(buf_out, buf_in, config=config, workspace=workspace)
+    torch.cuda.synchronize()
+
+    got = buf_out.flatten()[0].item()
+    expected = float(sum(1 + r for r in range(world_size)))
+    assert abs(got - expected) < 0.5, f"Eager failed: got={got}, expected={expected}"
+
+    shmem.barrier()
+
+    # Graph capture
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        buf_in.copy_(src)
+        shmem.ccl.all_reduce(buf_out, buf_in, config=config, workspace=workspace)
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        buf_in.copy_(src)
+        shmem.ccl.all_reduce(buf_out, buf_in, config=config, workspace=workspace)
+
+    # Replay with varying input
+    num_replays = 50
+    failures = []
+    for i in range(num_replays):
+        val = float(1 + rank + (i % 16))
+        src.fill_(val)
+        graph.replay()
+        torch.cuda.synchronize()
+        got = buf_out.flatten()[0].item()
+        expected = sum(1 + r + (i % 16) for r in range(world_size))
+        if abs(got - expected) > 0.5:
+            failures.append((i, got, expected))
+
+    try:
+        assert len(failures) == 0, (
+            f"Graph capture failed {len(failures)}/{num_replays} replays. "
+            f"First failures: {failures[:5]}"
+        )
+    finally:
+        shmem.barrier()
+        del shmem
+        import gc
+        gc.collect()
