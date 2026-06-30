@@ -11,7 +11,7 @@ from iris.ops.matmul import matmul as _matmul
 from iris.ops.matmul import matmul_preamble as _matmul_preamble
 
 
-def _register_local_matmul(state, ctx, *, m_key: str, pytorch: bool) -> None:
+def _register_local_matmul(state, ctx, *, m_key: str, pytorch: bool, work_stealing: bool = False, enable_streamk: bool = False) -> None:
     M, N, K = state[m_key], state["N"], state["K"]
     dtype = state["dtype"]
     rank = ctx.get_rank()
@@ -38,7 +38,7 @@ def _register_local_matmul(state, ctx, *, m_key: str, pytorch: bool) -> None:
         workspace = _matmul_preamble(ctx, A, B)
         # Using async_op=True to match torch
         state.exec(
-            lambda: _matmul(ctx, C, A, B, workspace=workspace, async_op=True),
+            lambda: _matmul(ctx, C, A, B, workspace=workspace, async_op=True, work_stealing=work_stealing, enable_streamk=enable_streamk),
         )
 
 
@@ -69,7 +69,27 @@ def pytorch_matmul_only_local(state, ctx):
 @bench.axis("K", [8192])
 @bench.axis("dtype", [torch.float16])
 def matmul_only(state, ctx):
-    _register_local_matmul(state, ctx, m_key="M", pytorch=False)
+    _register_local_matmul(state, ctx, m_key="M", pytorch=False, work_stealing=False)
+
+
+@bench.register
+@bench.axis("num_ranks", [8])
+@bench.axis("M", [1024, 4096, 16384])
+@bench.axis("N", [3584])
+@bench.axis("K", [8192])
+@bench.axis("dtype", [torch.float16])
+def matmul_work_stealing(state, ctx):
+    _register_local_matmul(state, ctx, m_key="M", pytorch=False, work_stealing=True)
+
+
+@bench.register
+@bench.axis("num_ranks", [8])
+@bench.axis("M", [1024, 4096, 16384])
+@bench.axis("N", [3584])
+@bench.axis("K", [8192])
+@bench.axis("dtype", [torch.float16])
+def matmul_streamk(state, ctx):
+    _register_local_matmul(state, ctx, m_key="M", pytorch=False, enable_streamk=True)
 
 
 @bench.register

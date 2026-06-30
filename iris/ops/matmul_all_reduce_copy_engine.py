@@ -16,8 +16,7 @@ import triton
 import triton.language as tl
 from xio import sdma_ep
 
-from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_input_view
-from tritonblas.matmul import persistent_matmul_lt, create_counter_config
+from tritonblas.kernels.stages import GemmContext, ScheduleContext, Tile, make_input_view
 from iris.ccl.triton.all_gather import launch as all_gather_launch
 from iris.ccl.config import Config as CCLConfig
 
@@ -26,6 +25,131 @@ from .workspace import FusedWorkspace
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from .tritonblas_launch_wave_schedule import chiplet_transform_chunked, grouped_tile_coords
+
+
+@triton.jit()
+def _partitioned_xcd_matmul_kernel(
+    A,
+    B,
+    local_aux_buffer,
+    reduce_buffer,
+    locks,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_local_aux_m,
+    stride_local_aux_n,
+    stride_reduce_m,
+    stride_reduce_n,
+    cur_rank: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    OUTPUT_PARTITIONS: tl.constexpr,
+    MAX_BATCHES_PER_PARTITION: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+):
+    """
+    Persistent GEMM that pins reduce-scatter row partitions to XCD-local work.
+
+    Program ids are interpreted as interleaved XCD lanes: pid % NUM_XCDS is the
+    XCD lane, and each output row partition is assigned to partition % NUM_XCDS.
+    For the target 8-rank reduce-scatter on MI300 this gives one row shard per
+    XCD while keeping the GEMM epilogue as a plain store into the aux buffer.
+    """
+    acc_dtype = tl.int32 if local_aux_buffer.type.element_ty == tl.int8 else tl.float32
+    gemm_ctx = GemmContext(
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=NUM_SMS,
+        num_xcds=NUM_XCDS,
+        group_size_m=GROUP_SIZE_M,
+        chunk_size=CHUNK_SIZE,
+        cache_modifier_a=None,
+        cache_modifier_b=None,
+        acc_dtype=acc_dtype,
+        even_k=EVEN_K,
+        allow_tf32=ALLOW_TF32,
+    )
+    tensorA = make_input_view(A, M, K, stride_am, stride_ak)
+    tensorB = make_input_view(B, K, N, stride_bk, stride_bn)
+
+    launch_pid = tl.program_id(0)
+    xcd_id = launch_pid % NUM_XCDS
+    local_pid = launch_pid // NUM_XCDS
+    sms_per_xcd = NUM_SMS // NUM_XCDS
+
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    partition_rows = tl.cdiv(M, OUTPUT_PARTITIONS)
+    rows_per_rank = M // OUTPUT_PARTITIONS
+
+    for partition_id in range(OUTPUT_PARTITIONS):
+        if partition_id % NUM_XCDS == xcd_id:
+            partition_m_start = partition_id * partition_rows
+            partition_m_end = tl.minimum(partition_m_start + partition_rows, M)
+            first_pid_m = partition_m_start // BLOCK_SIZE_M
+            last_pid_m = tl.cdiv(partition_m_end, BLOCK_SIZE_M)
+            partition_tiles_m = last_pid_m - first_pid_m
+            partition_tiles = partition_tiles_m * num_pid_n
+
+            for local_tile_id in range(local_pid, partition_tiles, sms_per_xcd):
+                batch_iter = local_tile_id // sms_per_xcd
+                num_pid_in_group = GROUP_SIZE_M * num_pid_n
+                group_id = local_tile_id // num_pid_in_group
+                first_group_pid_m = group_id * GROUP_SIZE_M
+                group_size_m = tl.minimum(partition_tiles_m - first_group_pid_m, GROUP_SIZE_M)
+
+                local_pid_m = first_group_pid_m + ((local_tile_id % num_pid_in_group) % group_size_m)
+                pid_m = first_pid_m + local_pid_m
+                pid_n_forward = (local_tile_id % num_pid_in_group) // group_size_m
+
+                if CHUNK_SIZE > 0 and num_pid_n > 1:
+                    # Keep neighboring partition-local M groups walking N in
+                    # opposite directions, mirroring the existing XCD-aware
+                    # B-cache reuse heuristic without crossing shard ownership.
+                    if group_id % 2 == 1:
+                        pid_n = num_pid_n - 1 - pid_n_forward
+                    else:
+                        pid_n = pid_n_forward
+                else:
+                    pid_n = pid_n_forward
+
+                tl.assume(pid_m >= 0)
+                tl.assume(pid_n >= 0)
+
+                out_tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+                acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
+                rm, rn = out_tile.indices()
+                mask = (
+                    (rm[:, None] >= partition_m_start)
+                    & (rm[:, None] < partition_m_end)
+                    & (rm[:, None] < M)
+                    & (rn[None, :] < N)
+                )
+                c = acc.to(local_aux_buffer.type.element_ty)
+                aux_ptr = local_aux_buffer + rm[:, None] * stride_local_aux_m + rn[None, :] * stride_local_aux_n
+                tl.store(aux_ptr, c, mask=mask, cache_modifier=".wt")
+
+                if partition_id == cur_rank:
+                    local_rm = rm - partition_m_start
+                    owner_row_mask = (rm >= partition_m_start) & (rm < partition_m_end)
+                    staged_rm = cur_rank * rows_per_rank + tl.where(owner_row_mask, local_rm, 0)
+                    reduce_ptr = reduce_buffer + staged_rm[:, None] * stride_reduce_m + rn[None, :] * stride_reduce_n
+                    tl.store(reduce_ptr, c, mask=mask & owner_row_mask[:, None], cache_modifier=".wt")
+
+                tl.debug_barrier()
+                batch_id = partition_id * MAX_BATCHES_PER_PARTITION + batch_iter
+                tl.atomic_add(locks + batch_id, 1, sem="release", scope="sys")
 
 
 @triton.jit()
@@ -183,13 +307,13 @@ def _matmul_all_reduce_copy_engine_wait_completion_kernel(
 @triton.jit()
 def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
     C,
-    aux_buffer,
+    reduce_buffer,
     completion_signals,
     expected_completion_value,
     M,
     N,
-    stride_aux_m,
-    stride_aux_n,
+    stride_reduce_m,
+    stride_reduce_n,
     stride_cm,
     stride_cn,
     context_tensor: tl.tensor,
@@ -225,7 +349,6 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
     num_pid_n = tl.cdiv(N, REDUCE_BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
 
-    src_rank = tl.arange(0, world_size)
     acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
 
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
@@ -256,18 +379,19 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
 
         mask = (rm[:, None] < rows_per_rank) & (rn[None, :] < N)
 
-        # TEMPORARY: Only load from current rank (no reduction)
-        # This isolates whether reduction or all-gather is the bottleneck
-        src_rm = cur_rank * rows_per_rank + rm
-        src_ptr = aux_buffer + src_rm[:, None] * stride_aux_m + rn[None, :] * stride_aux_n
-        data = tl.load(src_ptr, mask=mask, other=0.0)
+        acc = tl.zeros((REDUCE_BLOCK_SIZE_M, REDUCE_BLOCK_SIZE_N), dtype=acc_dtype)
+        for reduce_src_rank in range(world_size):
+            src_rm = reduce_src_rank * rows_per_rank + rm
+            src_ptr = reduce_buffer + src_rm[:, None] * stride_reduce_m + rn[None, :] * stride_reduce_n
+            data = tl.load(src_ptr, mask=mask, other=0.0)
+            acc += data.to(acc_dtype)
 
         tile_obj = iris.Tile(
             local_pid_m,
             pid_n,
             REDUCE_BLOCK_SIZE_M,
             REDUCE_BLOCK_SIZE_N,
-            data.to(C.type.element_ty),
+            acc.to(C.type.element_ty),
         )
         ctx.all_gather(tile_obj, dst_view, dim=0)
 
@@ -296,6 +420,24 @@ def _default_chunk_size(total_tiles: int, group_size_m: int, num_xcds: int) -> i
     if num_xcds > 0:
         chunk_size = min(chunk_size, max(1, total_tiles // num_xcds))
     return max(1, chunk_size)
+
+
+def _round_up_to_multiple(value: int, multiple: int) -> int:
+    if multiple <= 1:
+        return max(1, value)
+    return ((max(1, value) + multiple - 1) // multiple) * multiple
+
+
+def _ceil_div(value: int, divisor: int) -> int:
+    return (value + divisor - 1) // divisor
+
+
+def _partitioned_xcd_gemm_num_sms(launch: dict, world_size: int) -> int:
+    cached = launch.get("gemm_num_sms")
+    if cached is not None:
+        return int(cached)
+    num_xcds = max(1, launch["num_xcds"])
+    return _round_up_to_multiple(max(launch["num_sms"], min(num_xcds, world_size)), num_xcds)
 
 
 def _reduce_block_size_n(N: int) -> int:
@@ -412,6 +554,125 @@ def _build_transfer_plan(M: int, N: int, world_size: int, launch: dict, element_
     }
 
 
+def _build_partitioned_xcd_transfer_plan(M: int, N: int, world_size: int, launch: dict, element_size: int) -> dict:
+    block_size_m = launch["block_size_m"]
+    block_size_n = launch["block_size_n"]
+    group_size_m = launch["group_size_m"]
+    num_xcds = max(1, launch["num_xcds"])
+    gemm_num_sms = _partitioned_xcd_gemm_num_sms(launch, world_size)
+    sms_per_xcd = max(1, gemm_num_sms // num_xcds)
+    num_pid_n = _ceil_div(N, block_size_n)
+    partition_rows = _ceil_div(M, world_size)
+
+    transfers_by_owner_wave = []
+    batch_tile_counts_by_owner = []
+    owner_last_wave = []
+    max_batches_per_partition = 0
+
+    for owner_rank in range(world_size):
+        partition_m_start = owner_rank * partition_rows
+        partition_m_end = min(partition_m_start + partition_rows, M)
+        first_pid_m = partition_m_start // block_size_m
+        last_pid_m = _ceil_div(partition_m_end, block_size_m)
+        partition_tiles_m = max(0, last_pid_m - first_pid_m)
+        partition_tiles = partition_tiles_m * num_pid_n
+        num_batches = _ceil_div(partition_tiles, sms_per_xcd) if partition_tiles > 0 else 0
+        max_batches_per_partition = max(max_batches_per_partition, num_batches)
+
+        owner_batches = []
+        owner_counts = []
+        last_wave = -1
+        for batch_iter in range(num_batches):
+            batch_transfers = []
+            for local_pid in range(sms_per_xcd):
+                local_tile_id = batch_iter * sms_per_xcd + local_pid
+                if local_tile_id >= partition_tiles:
+                    continue
+
+                num_pid_in_group = group_size_m * num_pid_n
+                group_id = local_tile_id // num_pid_in_group
+                first_group_pid_m = group_id * group_size_m
+                group_size = min(partition_tiles_m - first_group_pid_m, group_size_m)
+                local_pid_m = first_group_pid_m + ((local_tile_id % num_pid_in_group) % group_size)
+                pid_m = first_pid_m + local_pid_m
+                pid_n_forward = (local_tile_id % num_pid_in_group) // group_size
+                if launch["chunk_size"] > 0 and num_pid_n > 1 and group_id % 2 == 1:
+                    pid_n = num_pid_n - 1 - pid_n_forward
+                else:
+                    pid_n = pid_n_forward
+
+                tile_m_start = pid_m * block_size_m
+                tile_m_end = min(tile_m_start + block_size_m, M)
+                seg_start = max(tile_m_start, partition_m_start)
+                seg_end = min(tile_m_end, partition_m_end)
+                if seg_start >= seg_end:
+                    continue
+
+                col = pid_n * block_size_n
+                width = min(block_size_n, N - col)
+                local_m = seg_start - partition_m_start
+                batch_transfers.append((local_m, col, width * element_size, seg_end - seg_start))
+
+            owner_batches.append(batch_transfers)
+            owner_counts.append(len(batch_transfers))
+            if batch_transfers:
+                last_wave = batch_iter
+
+        transfers_by_owner_wave.append(owner_batches)
+        batch_tile_counts_by_owner.append(owner_counts)
+        owner_last_wave.append(last_wave)
+
+    max_batches_per_partition = max(1, max_batches_per_partition)
+
+    wave_transfer_offsets = []
+    wave_transfer_counts = []
+    transfer_row_offsets = []
+    transfer_col_offsets = []
+    transfer_width_bytes = []
+    transfer_heights = []
+    flat_batch_tile_counts = []
+    max_rects_per_owner_wave = 0
+    running_offset = 0
+
+    for owner_rank in range(world_size):
+        owner_batches = transfers_by_owner_wave[owner_rank]
+        owner_counts = batch_tile_counts_by_owner[owner_rank]
+        while len(owner_batches) < max_batches_per_partition:
+            owner_batches.append([])
+            owner_counts.append(0)
+
+        for batch_transfers, tile_count in zip(owner_batches, owner_counts):
+            wave_transfer_offsets.append(running_offset)
+            wave_transfer_counts.append(len(batch_transfers))
+            flat_batch_tile_counts.append(tile_count)
+            max_rects_per_owner_wave = max(max_rects_per_owner_wave, len(batch_transfers))
+            for row, col, width_bytes, height in batch_transfers:
+                transfer_row_offsets.append(row)
+                transfer_col_offsets.append(col)
+                transfer_width_bytes.append(width_bytes)
+                transfer_heights.append(height)
+            running_offset += len(batch_transfers)
+
+    return {
+        "gemm_num_sms": gemm_num_sms,
+        "sms_per_xcd": sms_per_xcd,
+        "max_batches_per_partition": max_batches_per_partition,
+        "num_transfer_flags": world_size * max_batches_per_partition,
+        "transfers_by_owner_wave": transfers_by_owner_wave,
+        "wave_tile_counts": batch_tile_counts_by_owner,
+        "flat_wave_tile_counts": flat_batch_tile_counts,
+        "wave_transfer_offsets": wave_transfer_offsets,
+        "wave_transfer_counts": wave_transfer_counts,
+        "owner_last_wave": owner_last_wave,
+        "transfer_row_offsets": transfer_row_offsets,
+        "transfer_col_offsets": transfer_col_offsets,
+        "transfer_width_bytes": transfer_width_bytes,
+        "transfer_heights": transfer_heights,
+        "max_rects_per_owner_wave": max(1, max_rects_per_owner_wave),
+        "num_transfers": running_offset,
+    }
+
+
 def _ensure_transfer_workspace(
     shmem,
     workspace: FusedWorkspace,
@@ -422,114 +683,42 @@ def _ensure_transfer_workspace(
     element_size: int,
     device: torch.device,
 ):
-    # Build unified launch wave plan for both GEMM (SignalView) and SDMA transfers
-    from .tritonblas_launch_wave_schedule import build_launch_wave_plan
-
-    num_tiles_m = launch["num_tiles_m"]
-    num_tiles_n = launch["num_tiles_n"]
-    total_tiles = launch["total_tiles"]
-    group_size_m = launch["group_size_m"]
-    num_xcds = launch["num_xcds"]
-    num_sms = launch["num_sms"]
-    chunk_size = launch["chunk_size"]
-
-    # wave_size determines wave count: num_waves = ceildiv(num_sms, wave_size)
-    # Use num_sms as wave_size so we get one wave per persistent kernel iteration
-    wave_size = num_sms
-
-    plan_key = (num_tiles_m, num_tiles_n, group_size_m, total_tiles, wave_size, num_xcds, chunk_size, world_size)
-
+    gemm_num_sms = _partitioned_xcd_gemm_num_sms(launch, world_size)
+    plan_key = (
+        "partitioned_xcd",
+        M,
+        N,
+        launch["block_size_m"],
+        launch["block_size_n"],
+        launch["group_size_m"],
+        gemm_num_sms,
+        launch["num_xcds"],
+        launch["chunk_size"],
+        world_size,
+        element_size,
+    )
     if getattr(workspace, "transfer_plan_key", None) != plan_key:
-        # Build unified wave plan
-        # wave_size=num_sms gives us num_waves = ceildiv(num_sms, num_sms) = 1 wave initially,
-        # but the plan iterates through total_tiles, creating one wave per persistent iteration
-        wave_plan = build_launch_wave_plan(
-            num_tiles_m=num_tiles_m,
-            num_tiles_n=num_tiles_n,
-            group_size_m=group_size_m,
-            launch_grid=num_sms,  # Launch num_sms workgroups
-            wave_size=wave_size,
-            num_xcds=num_xcds,
-            chunk_size=chunk_size,
-        )
-
-        # Build transfer metadata from wave_plan
-        # For reduce-scatter: each rank only needs transfers for its row shard
-        block_size_m = launch["block_size_m"]
-        block_size_n = launch["block_size_n"]
-        rows_per_rank = M // world_size
-
-        # Group transfers by (owner_rank, wave_id) for reduce-scatter
-        transfers_by_owner_wave = [[[] for _ in range(wave_plan.num_waves)] for _ in range(world_size)]
-        owner_last_wave = [-1 for _ in range(world_size)]
-
-        for transfer in wave_plan.transfers:
-            # Each transfer represents a rectangular group of tiles
-            # Iterate through the tiles in this transfer
-            for tile_m_idx in range(transfer.m_tile_count):
-                for tile_n_idx in range(transfer.n_tile_count):
-                    pid_m = transfer.m_tile_start + tile_m_idx
-                    pid_n = transfer.n_tile_start + tile_n_idx
-
-                    tile_m_start = pid_m * block_size_m
-                    tile_m_end = min(tile_m_start + block_size_m, M)
-                    col = pid_n * block_size_n
-                    width = min(block_size_n, N - col)
-
-                    # Determine which rank owns each segment of this tile
-                    for owner_rank in range(world_size):
-                        owner_start = owner_rank * rows_per_rank
-                        owner_end = owner_start + rows_per_rank
-                        seg_start = max(tile_m_start, owner_start)
-                        seg_end = min(tile_m_end, owner_end)
-                        if seg_start < seg_end:
-                            local_m = seg_start - owner_start
-                            transfers_by_owner_wave[owner_rank][transfer.wave_id].append(
-                                (local_m, col, width * element_size, seg_end - seg_start)
-                            )
-                            owner_last_wave[owner_rank] = max(owner_last_wave[owner_rank], transfer.wave_id)
-
-        # Flatten transfers for SDMA posting
-        wave_transfer_offsets = []
-        wave_transfer_counts = []
-        transfer_row_offsets = []
-        transfer_col_offsets = []
-        transfer_width_bytes = []
-        transfer_heights = []
-        max_rects_per_owner_wave = 0
-        running_offset = 0
-
-        for owner_rank in range(world_size):
-            for wave_transfers in transfers_by_owner_wave[owner_rank]:
-                wave_transfer_offsets.append(running_offset)
-                wave_transfer_counts.append(len(wave_transfers))
-                max_rects_per_owner_wave = max(max_rects_per_owner_wave, len(wave_transfers))
-                for row, col, width_bytes, height in wave_transfers:
-                    transfer_row_offsets.append(row)
-                    transfer_col_offsets.append(col)
-                    transfer_width_bytes.append(width_bytes)
-                    transfer_heights.append(height)
-                running_offset += len(wave_transfers)
-
+        plan = _build_partitioned_xcd_transfer_plan(M, N, world_size, launch, element_size)
         workspace.transfer_plan_key = plan_key
-        workspace.launch_wave_plan = wave_plan
-        workspace.num_transfer_waves = wave_plan.num_waves
-        workspace.max_rects_per_owner_wave = max(1, max_rects_per_owner_wave)
-        workspace.num_transfers = running_offset
-        workspace.transfers_by_owner_wave = transfers_by_owner_wave
-        workspace.wave_tile_counts_host = wave_plan.wave_tile_counts
-        workspace.owner_last_wave_host = owner_last_wave
-        workspace.wave_tile_counts = torch.tensor(wave_plan.wave_tile_counts, device=device, dtype=torch.int32)
-        workspace.wave_transfer_offsets = torch.tensor(wave_transfer_offsets, device=device, dtype=torch.int32)
-        workspace.wave_transfer_counts = torch.tensor(wave_transfer_counts, device=device, dtype=torch.int32)
-        workspace.owner_last_wave = torch.tensor(owner_last_wave, device=device, dtype=torch.int32)
-        workspace.transfer_row_offsets = torch.tensor(transfer_row_offsets, device=device, dtype=torch.int32)
-        workspace.transfer_col_offsets = torch.tensor(transfer_col_offsets, device=device, dtype=torch.int32)
-        workspace.transfer_width_bytes = torch.tensor(transfer_width_bytes, device=device, dtype=torch.int32)
-        workspace.transfer_heights = torch.tensor(transfer_heights, device=device, dtype=torch.int32)
+        workspace.launch_wave_plan = None
+        workspace.num_transfer_waves = plan["max_batches_per_partition"]
+        workspace.num_transfer_flags = plan["num_transfer_flags"]
+        workspace.batch_tiles_per_xcd = plan["sms_per_xcd"]
+        workspace.max_rects_per_owner_wave = plan["max_rects_per_owner_wave"]
+        workspace.num_transfers = plan["num_transfers"]
+        workspace.transfers_by_owner_wave = plan["transfers_by_owner_wave"]
+        workspace.wave_tile_counts_host = plan["wave_tile_counts"]
+        workspace.owner_last_wave_host = plan["owner_last_wave"]
+        workspace.wave_tile_counts = torch.tensor(plan["flat_wave_tile_counts"], device=device, dtype=torch.int32)
+        workspace.wave_transfer_offsets = torch.tensor(plan["wave_transfer_offsets"], device=device, dtype=torch.int32)
+        workspace.wave_transfer_counts = torch.tensor(plan["wave_transfer_counts"], device=device, dtype=torch.int32)
+        workspace.owner_last_wave = torch.tensor(plan["owner_last_wave"], device=device, dtype=torch.int32)
+        workspace.transfer_row_offsets = torch.tensor(plan["transfer_row_offsets"], device=device, dtype=torch.int32)
+        workspace.transfer_col_offsets = torch.tensor(plan["transfer_col_offsets"], device=device, dtype=torch.int32)
+        workspace.transfer_width_bytes = torch.tensor(plan["transfer_width_bytes"], device=device, dtype=torch.int32)
+        workspace.transfer_heights = torch.tensor(plan["transfer_heights"], device=device, dtype=torch.int32)
 
-        # Allocate locks sized for the unified wave plan
-        workspace.locks = shmem.zeros((wave_plan.num_waves,), dtype=torch.int32)
+        workspace.locks = shmem.zeros((plan["num_transfer_flags"],), dtype=torch.int32)
 
     if getattr(workspace, "completion_signals", None) is None or workspace.completion_signals.numel() != world_size:
         workspace.completion_signals = shmem.zeros((world_size,), dtype=torch.int32)
@@ -554,6 +743,7 @@ def _post_host_copy_engine_transfers(
     transfers_by_owner_wave = workspace.transfers_by_owner_wave
     wave_tile_counts = workspace.wave_tile_counts_host
     owner_last_wave = workspace.owner_last_wave_host
+    max_batches_per_partition = workspace.num_transfer_waves
 
     local_aux_base = local_aux_buffer.data_ptr()
     reduce_base = reduce_buffer.data_ptr()
@@ -568,8 +758,9 @@ def _post_host_copy_engine_transfers(
             if not wave_transfers:
                 continue
 
-            wait_value = (flag_iteration + 1) * wave_tile_counts[wave_id]
-            wait_flag = workspace.locks.data_ptr() + wave_id * workspace.locks.element_size()
+            wait_value = (flag_iteration + 1) * wave_tile_counts[dst_rank][wave_id]
+            flag_id = dst_rank * max_batches_per_partition + wave_id
+            wait_flag = workspace.locks.data_ptr() + flag_id * workspace.locks.element_size()
             signal_flag = None
             if wave_id == owner_last_wave[dst_rank]:
                 signal_flag = shmem.heap.translate(signal_ptr_local, rank, dst_rank)
@@ -609,7 +800,7 @@ def _post_host_copy_engine_transfers(
                 wait_flag=wait_flag,
                 wait_value=wait_value,
                 signal_flag=signal_flag,
-                signal_value=1,
+                signal_value=flag_iteration + 1,
                 async_op=True,
                 channel=0,
             )
@@ -832,6 +1023,9 @@ def matmul_all_reduce_copy_engine_preamble(
     else:
         launch = _config_launch_params(M, N, config, A.device)
 
+    if config.all_reduce_variant == "two_shot":
+        launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
+
     if workspace is None:
         workspace = FusedWorkspace()
 
@@ -872,13 +1066,6 @@ def matmul_all_reduce_copy_engine_preamble(
             _ensure_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
             workspace.locks.zero_()
             workspace.completion_signals.zero_()
-
-            # Pre-create counter_config for SignalView (avoid overhead on every iteration)
-            workspace.counter_config = create_counter_config(
-                workspace.locks,
-                map_type="launch_wave",
-                block_group_m=workspace.launch_wave_plan.wave_size,
-            )
         else:
             workspace.a_inbox = None
             if workspace.locks is None or workspace.locks.numel() != launch["total_tiles"]:
@@ -1030,13 +1217,13 @@ def matmul_all_reduce_copy_engine(
 
     if config.all_reduce_variant == "two_shot":
         _ensure_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
-        required_locks = workspace.num_transfer_waves
+        required_locks = workspace.num_transfer_flags
     else:
         required_locks = total_tiles
 
     # Validate that the pre-allocated lock array is large enough for the current
     # synchronization scheme. The two_shot copy-engine path uses one flag per
-    # persistent GEMM wave; the legacy paths use one flag per output tile.
+    # owner-rank/XCD batch; the legacy paths use one flag per output tile.
     if workspace.locks is not None and workspace.locks.numel() < required_locks:
         raise ValueError(
             f"Lock array too small: have {workspace.locks.numel()} but need {required_locks}. "
@@ -1062,19 +1249,46 @@ def matmul_all_reduce_copy_engine(
     # if should_record_gemm:
     #     workspace.bench_gemm_start_events[flag_iteration].record()
 
-    # Use tritonBLAS for better GEMM performance
     if config.all_reduce_variant == "two_shot":
-        # Use pre-created counter_config from preamble (avoids overhead on every iteration)
-        # Launch tritonBLAS GEMM with SignalView
-        persistent_matmul_lt(
+        gemm_num_sms = launch.get("gemm_num_sms")
+        if gemm_num_sms is None:
+            gemm_num_sms = _partitioned_xcd_gemm_num_sms(launch, world_size)
+            launch["gemm_num_sms"] = gemm_num_sms
+        iris_launch(
+            _partitioned_xcd_matmul_kernel,
+            (gemm_num_sms,),
             A,
             B,
-            workspace.aux_buffer,  # Write to aux_buffer (same as old kernel)
-            workspace.selector,
-            config=None,  # Use default tritonblas config
-            bias=None,
-            work_stealing=False,
-            counter_config=workspace.counter_config,  # SignalView signals workspace.locks
+            workspace.aux_buffer,
+            reduce_buffer,
+            workspace.locks,
+            M,
+            N,
+            K,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_local_aux_m,
+            stride_local_aux_n,
+            stride_reduce_m,
+            stride_reduce_n,
+            rank,
+            block_size_m,
+            block_size_n,
+            block_size_k,
+            launch["group_size_m"],
+            gemm_num_sms,
+            launch["num_xcds"],
+            launch["chunk_size"],
+            world_size,
+            workspace.num_transfer_waves,
+            even_k,
+            launch["allow_tf32"],
+            algorithm="matmul_all_reduce_copy_engine_partitioned_xcd_gemm",
+            rank=rank,
+            dtype=A.dtype,
+            **launch_kwargs,
         )
     else:
         # one_shot variant: use old kernel (tritonblas doesn't handle one_shot logic)
@@ -1125,15 +1339,14 @@ def matmul_all_reduce_copy_engine(
 
     host_post_ms = 0.0
     if config.all_reduce_variant == "two_shot":
-        # TEMPORARY: Skip SDMA transfers to isolate all_gather performance
-        # if not copy_engine_transfers_preposted:
-        #     host_post_ms = matmul_all_reduce_copy_engine_prepost_transfers(
-        #         shmem,
-        #         A,
-        #         B,
-        #         workspace,
-        #         flag_iteration,
-        #     )
+        if not copy_engine_transfers_preposted:
+            host_post_ms = matmul_all_reduce_copy_engine_prepost_transfers(
+                shmem,
+                A,
+                B,
+                workspace,
+                flag_iteration,
+            )
 
         reduce_block_size_m = launch["reduce_block_size_m"]
         reduce_block_size_n = launch["reduce_block_size_n"]
@@ -1147,38 +1360,34 @@ def matmul_all_reduce_copy_engine(
         reduce_grid = (min(num_sms, total_reduce_tiles),)
 
         # Wait for SDMA transfers to complete on all ranks
-        # SDMA monitors gemm_wave_signals and updates completion_signals when done
-        # wait_in_reduce_kernel = profile is None
-        # if profile is not None:
-        #     copy_wait_start.record()
-        # iris_launch(
-        #     _matmul_all_reduce_copy_engine_wait_completion_kernel,
-        #     (world_size,),
-        #     workspace.completion_signals,
-        #     flag_iteration + 1,
-        #     rank,
-        #     world_size,
-        #     algorithm="matmul_all_reduce_copy_engine_wait_completion_profile",
-        #     rank=rank,
-        #     dtype=A.dtype,
-        #     num_warps=4,
-        # )
-        # copy_wait_end.record()
+        # SDMA monitors GEMM batch flags and updates completion_signals when done.
+        iris_launch(
+            _matmul_all_reduce_copy_engine_wait_completion_kernel,
+            (world_size,),
+            workspace.completion_signals,
+            flag_iteration + 1,
+            rank,
+            world_size,
+            algorithm="matmul_all_reduce_copy_engine_wait_completion",
+            rank=rank,
+            dtype=A.dtype,
+            num_warps=4,
+        )
 
-        # Use device-side all_gather via reduce_scatter kernel
-        # No need to wait for completion since GEMM launched sequentially before this
+        # Reduce this rank's owner shard after the SDMA batches have landed,
+        # then all-gather the reduced shard to every rank.
         device_context = shmem.get_device_context()
         iris_launch(
             _matmul_all_reduce_copy_engine_reduce_scatter_kernel,
-            (launch["num_sms"],),
+            reduce_grid,
             C,
-            workspace.aux_buffer,
+            workspace.a_inbox,
             workspace.completion_signals,
             flag_iteration + 1,
             M,
             N,
-            workspace.aux_buffer.stride(0),
-            workspace.aux_buffer.stride(1),
+            workspace.a_inbox.stride(0),
+            workspace.a_inbox.stride(1),
             C.stride(0),
             C.stride(1),
             device_context,
@@ -1190,7 +1399,7 @@ def matmul_all_reduce_copy_engine(
             REDUCE_BLOCK_SIZE_N=launch["reduce_block_size_n"],
             GROUP_SIZE_M=launch["group_size_m"],
             NUM_SMS=launch["num_sms"],
-            WAIT_FOR_COMPLETION=False,  # GEMM already completed (sequential launch)
+            WAIT_FOR_COMPLETION=False,
             algorithm="matmul_all_reduce_copy_engine_reduce_scatter",
             rank=rank,
             dtype=A.dtype,

@@ -14,7 +14,7 @@ import torch
 import triton
 import triton.language as tl
 
-from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
+from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_input_view
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
@@ -44,7 +44,12 @@ def _fused_matmul_all_reduce_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
     EVEN_K: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
     VARIANT: tl.constexpr,
 ):
     """
@@ -83,65 +88,224 @@ def _fused_matmul_all_reduce_kernel(
         BLOCK_SIZE_K: Block size for K dimension
         EVEN_K: Whether K is evenly divisible by BLOCK_SIZE_K
     """
-    # Get program ID and compute which tile this program handles
-    pid = tl.program_id(axis=0)
-    num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
-    pid_m = pid // num_tiles_n
-    pid_n = pid % num_tiles_n
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # GEMM using tritonblas stages
-    # ═══════════════════════════════════════════════════════════════════════
-    tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
-    tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
+    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
     gemm_ctx = GemmContext(
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
         BLOCK_SIZE_K,
-        num_sms=1,
+        num_sms=NUM_SMS,
+        num_xcds=NUM_XCDS,
+        group_size_m=GROUP_SIZE_M,
+        chunk_size=CHUNK_SIZE,
+        acc_dtype=acc_dtype,
         even_k=EVEN_K,
+        allow_tf32=ALLOW_TF32,
     )
-    out_tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-    acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
-
-    # Get row and column indices from tile (needed for one_shot/two_shot variants)
-    rm, rn = out_tile.indices()
-
-    # Convert to output dtype
-    c = acc.to(C.type.element_ty)
+    sched = ScheduleContext(M, N, K, gemm_ctx)
+    tensorA = make_input_view(A, M, K, stride_am, stride_ak)
+    tensorB = make_input_view(B, K, N, stride_bk, stride_bn)
 
     # Create views and context
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
     dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
-    # Create tile object once for all variants
-    tile_obj = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+    start, total, stride = sched.persistent_tile_range()
+    for tile_idx in range(start, total, stride):
+        out_tile = sched.get_tile_from_idx(tile_idx)
+        acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
 
-    # Dispatch to appropriate all-reduce variant
-    if VARIANT == "atomic":
-        ctx.all_reduce_atomic(tile_obj, dst_view)
-    elif VARIANT == "spinlock":
-        ctx.all_reduce_spinlock(tile_obj, dst_view, locks)
-    elif VARIANT == "one_shot" or VARIANT == "two_shot":
-        # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock
-        # Store GEMM result to aux_buffer (avoid race condition with final output)
-        temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
-        tl.debug_barrier()  # Ensures all stores are visible before the atomic_xchg
+        # Get row and column indices from tile (needed for one_shot/two_shot variants)
+        rm, rn = out_tile.indices()
 
-        # Signal tile is ready by unlocking (set lock to 1)
-        # Use atomic_xchg with release semantics to ensure memory ordering
-        tile_id = pid_m * num_tiles_n + pid_n
-        lock_ptr = locks + tile_id
-        tl.atomic_xchg(lock_ptr, 1, sem="release", scope="sys")  # Release ensures prior stores visible to remote GPUs
+        # Convert to output dtype
+        c = acc.to(C.type.element_ty)
+        tile_obj = iris.Tile(out_tile.pid_m, out_tile.pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
 
-        # Create source view only when needed (aux_buffer is not None)
-        src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
+        # Dispatch to appropriate all-reduce variant
+        if VARIANT == "atomic":
+            ctx.all_reduce_atomic(tile_obj, dst_view)
+        elif VARIANT == "spinlock":
+            ctx.all_reduce_spinlock(tile_obj, dst_view, locks)
+        elif VARIANT == "one_shot" or VARIANT == "two_shot":
+            # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock.
+            temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+            tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
+            tl.debug_barrier()
 
-        if VARIANT == "one_shot":
-            ctx.all_reduce_one_shot(tile_obj, src_view, dst_view, locks)
-        elif VARIANT == "two_shot":
-            ctx.all_reduce_two_shot(tile_obj, src_view, dst_view, locks)
+            # Locks are indexed by canonical tile coordinates so the protocol
+            # stays independent of ScheduleContext's swizzled/persistent order.
+            num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
+            tile_id = out_tile.pid_m * num_tiles_n + out_tile.pid_n
+            lock_ptr = locks + tile_id
+            tl.atomic_xchg(lock_ptr, 1, sem="release", scope="sys")
+
+            src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
+            if VARIANT == "one_shot":
+                ctx.all_reduce_one_shot(tile_obj, src_view, dst_view, locks)
+            elif VARIANT == "two_shot":
+                ctx.all_reduce_two_shot(tile_obj, src_view, dst_view, locks)
+
+
+_GEMM_CONFIG_FIELDS = (
+    "block_size_m",
+    "block_size_n",
+    "block_size_k",
+    "group_size_m",
+    "num_sms",
+    "num_xcds",
+    "chunk_size",
+    "cache_modifier_a",
+    "cache_modifier_b",
+    "allow_tf32",
+)
+
+
+def _config_uses_default_gemm_tuning(config: FusedConfig) -> bool:
+    default = FusedConfig()
+    return all(getattr(config, field) == getattr(default, field) for field in _GEMM_CONFIG_FIELDS)
+
+
+def _default_chunk_size(total_tiles: int, group_size_m: int, num_xcds: int) -> int:
+    chunk_size = group_size_m * group_size_m
+    if num_xcds > 0:
+        chunk_size = min(chunk_size, max(1, total_tiles // num_xcds))
+    return max(1, chunk_size)
+
+
+def _make_origami_selector(M: int, N: int, K: int, A: torch.Tensor, B: torch.Tensor, C):
+    from tritonblas.matmul import _make_matmul_selector
+
+    c_dtype = C.dtype if hasattr(C, "dtype") else C
+    return _make_matmul_selector(
+        M,
+        N,
+        K,
+        A.dtype,
+        B.dtype,
+        c_dtype,
+        A.device,
+        streamk=False,
+    )
+
+
+def _selector_active_cus(selector, device: torch.device) -> int:
+    active_cus = getattr(selector, "_ACTIVE_CU", None)
+    if active_cus is None or active_cus <= 0:
+        props = torch.cuda.get_device_properties(device)
+        active_cus = props.multi_processor_count
+    return int(active_cus)
+
+
+def _matmul_all_reduce_launch_params(
+    M: int,
+    N: int,
+    K: int,
+    selector,
+    device: torch.device,
+    element_size: int,
+    variant: str,
+) -> dict:
+    block_size_m = selector.block_m
+    block_size_n = selector.block_n
+    block_size_k = selector.block_k
+    group_size_m = selector.group_m
+    num_stages = getattr(selector, "num_stages", 2)
+    selector_fallback = False
+
+    # Origami's 256x256 tile is great when GEMM dominates, but one_shot also
+    # does a full remote-rank reduction per output tile. For shallow K shapes,
+    # keeping the old narrow-N tile avoids making each reduction work item too
+    # large while still allowing the selector path for deeper GEMMs.
+    if (
+        variant == "one_shot"
+        and K < 16 * 1024
+        and block_size_m == 256
+        and block_size_n == 256
+        and block_size_k == 64
+    ):
+        block_size_n = 64
+        group_size_m = 1
+        num_stages = None
+        selector_fallback = True
+
+    # Atomic/spinlock variants can exceed the MI300 64 KiB LDS cap with the
+    # common 256x256x64 Origami tile. Prefer the old narrow-N tile first; only
+    # shrink M if a single-stage 256x64 tile still cannot fit.
+    estimated_stage_count = num_stages if num_stages is not None else 2
+    stage_bytes = (block_size_m * block_size_k + block_size_k * block_size_n) * element_size
+    if variant in ("atomic", "spinlock") and stage_bytes * estimated_stage_count > 64 * 1024:
+        block_size_n = min(block_size_n, 64)
+        block_size_k = min(block_size_k, 64)
+        group_size_m = 1
+        num_stages = 1
+        stage_bytes = (block_size_m * block_size_k + block_size_k * block_size_n) * element_size
+        if stage_bytes > 64 * 1024:
+            block_size_m = min(block_size_m, 128)
+        selector_fallback = True
+
+    # Origami calls this num_sms, but it is the XCD/chiplet workgroup mapping
+    # count used by chiplet_transform_chunked, not the persistent launch grid.
+    num_xcds = selector.num_sms
+    if num_xcds <= 0:
+        num_xcds = 1
+
+    num_tiles_m = (M + block_size_m - 1) // block_size_m
+    num_tiles_n = (N + block_size_n - 1) // block_size_n
+    total_tiles = num_tiles_m * num_tiles_n
+    num_sms = min(_selector_active_cus(selector, device), total_tiles)
+    chunk_size = _default_chunk_size(num_sms, group_size_m, num_xcds)
+
+    return {
+        "block_size_m": block_size_m,
+        "block_size_n": block_size_n,
+        "block_size_k": block_size_k,
+        "group_size_m": group_size_m,
+        "num_xcds": num_xcds,
+        "num_tiles_m": num_tiles_m,
+        "num_tiles_n": num_tiles_n,
+        "total_tiles": total_tiles,
+        "num_sms": num_sms,
+        "chunk_size": chunk_size,
+        "num_warps": 8,
+        "num_stages": num_stages,
+        "matrix_instr_nonkdim": 16,
+        "allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "selector_fallback": selector_fallback,
+    }
+
+
+def _config_launch_params(M: int, N: int, config: FusedConfig, device: torch.device) -> dict:
+    num_tiles_m = (M + config.block_size_m - 1) // config.block_size_m
+    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
+    total_tiles = num_tiles_m * num_tiles_n
+
+    num_sms = config.num_sms
+    if num_sms is None:
+        props = torch.cuda.get_device_properties(device)
+        num_sms = props.multi_processor_count
+    num_sms = min(int(num_sms), total_tiles)
+
+    num_xcds = config.num_xcds
+    if num_xcds <= 0:
+        num_xcds = 1
+
+    return {
+        "block_size_m": config.block_size_m,
+        "block_size_n": config.block_size_n,
+        "block_size_k": config.block_size_k,
+        "group_size_m": config.group_size_m,
+        "num_xcds": num_xcds,
+        "num_tiles_m": num_tiles_m,
+        "num_tiles_n": num_tiles_n,
+        "total_tiles": total_tiles,
+        "num_sms": num_sms,
+        "chunk_size": max(1, config.chunk_size),
+        "num_warps": 8,
+        "num_stages": None,
+        "matrix_instr_nonkdim": 16,
+        "allow_tf32": config.allow_tf32,
+        "selector_fallback": False,
+    }
 
 
 def matmul_all_reduce_preamble(
@@ -151,6 +315,8 @@ def matmul_all_reduce_preamble(
     B: torch.Tensor,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
+    selector=None,
+    out_dtype: Optional[torch.dtype] = None,
 ) -> FusedWorkspace:
     """
     Allocate and reset temporary buffers for matmul_all_reduce.
@@ -162,6 +328,8 @@ def matmul_all_reduce_preamble(
         B: Input matrix B (K, N)
         config: Optional FusedConfig. If None, uses defaults.
         workspace: Optional existing workspace to reuse. If None, creates new one.
+        selector: Optional pre-built tritonBLAS Origami selector.
+        out_dtype: Optional output dtype for selector construction.
 
     Returns:
         FusedWorkspace instance ready for kernel launch.
@@ -177,6 +345,19 @@ def matmul_all_reduce_preamble(
     # Validate config
     config.validate(world_size=world_size)
 
+    if selector is not None:
+        launch = _matmul_all_reduce_launch_params(
+            M, N, K, selector, A.device, A.element_size(), config.all_reduce_variant
+        )
+    elif _config_uses_default_gemm_tuning(config):
+        c_dtype = dtype if out_dtype is None else out_dtype
+        selector = _make_origami_selector(M, N, K, A, B, c_dtype)
+        launch = _matmul_all_reduce_launch_params(
+            M, N, K, selector, A.device, A.element_size(), config.all_reduce_variant
+        )
+    else:
+        launch = _config_launch_params(M, N, config, A.device)
+
     if workspace is None:
         workspace = FusedWorkspace()
 
@@ -185,12 +366,14 @@ def matmul_all_reduce_preamble(
     workspace.dtype = dtype
     workspace.world_size = world_size
     workspace.variant = config.all_reduce_variant
+    workspace.selector = selector
+    workspace.config = config
+    workspace.launch_params = launch
+    workspace.selector_fallback = launch["selector_fallback"]
     workspace.prepared = False
 
     # Allocate locks for spinlock-based all-reduce
-    num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
-    num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    total_tiles = num_pid_m * num_pid_n
+    total_tiles = launch["total_tiles"]
 
     # Allocate locks for spinlock, one_shot, and two_shot variants
     if config.all_reduce_variant in ["spinlock", "one_shot", "two_shot"]:
@@ -227,6 +410,7 @@ def matmul_all_reduce(
     async_op: bool = False,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
+    selector=None,
 ) -> FusedWorkspace:
     """
     Fused matrix multiplication and all-reduce using atomic operations.
@@ -241,6 +425,7 @@ def matmul_all_reduce(
         async_op: If False, performs barrier at end. Default: False.
         config: Optional FusedConfig for tuning. If None, uses defaults.
         workspace: Optional pre-allocated workspace. If None, creates new one.
+        selector: Optional pre-built tritonBLAS Origami selector.
 
     Returns:
         workspace: Updated workspace object (can be reused for subsequent calls)
@@ -273,11 +458,6 @@ def matmul_all_reduce(
     if A.dtype != B.dtype or A.dtype != C.dtype:
         raise ValueError(f"All tensors must have same dtype, got A:{A.dtype}, B:{B.dtype}, C:{C.dtype}")
 
-    # Validate block sizes match problem dimensions
-    assert M >= config.block_size_m, f"M={M} too small for block_size_m={config.block_size_m}"
-    assert K >= config.block_size_k, f"K={K} too small for block_size_k={config.block_size_k}"
-    assert N >= config.block_size_n, f"N={N} too small for block_size_n={config.block_size_n}"
-
     # Extract strides
     stride_am, stride_ak = A.stride()
     stride_bk, stride_bn = B.stride()
@@ -303,22 +483,47 @@ def matmul_all_reduce(
         num_ranks=world_size,
     )
 
+    config.validate(world_size=world_size)
+
     # Prepare workspace if needed
-    needs_prepare = workspace is None or not workspace.matches(
-        "matmul_all_reduce", (M, N, K), A.dtype, world_size, config.all_reduce_variant
+    needs_prepare = (
+        workspace is None
+        or selector is not None
+        or getattr(workspace, "launch_params", None) is None
+        or not workspace.matches("matmul_all_reduce", (M, N, K), A.dtype, world_size, config.all_reduce_variant)
     )
 
     if needs_prepare:
-        workspace = matmul_all_reduce_preamble(shmem, C, A, B, config=config, workspace=workspace)
+        workspace = matmul_all_reduce_preamble(
+            shmem,
+            C,
+            A,
+            B,
+            config=config,
+            workspace=workspace,
+            selector=selector,
+            out_dtype=C.dtype,
+        )
 
     # Get device context for RMA
     device_context = shmem.get_device_context()
 
-    # Launch kernel
-    num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
-    num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    total_tiles = num_pid_m * num_pid_n
-    grid = (total_tiles,)
+    config_launch_override = selector is None and config is not None and not _config_uses_default_gemm_tuning(config)
+    if config_launch_override and not needs_prepare:
+        launch = _config_launch_params(M, N, config, A.device)
+    else:
+        launch = workspace.launch_params
+
+    block_size_m = launch["block_size_m"]
+    block_size_n = launch["block_size_n"]
+    block_size_k = launch["block_size_k"]
+    total_tiles = launch["total_tiles"]
+
+    if config_launch_override or getattr(workspace, "selector", None) is None:
+        # Validate problem size against explicit FusedConfig block sizes.
+        assert M >= block_size_m, f"M={M} too small for block_size_m={block_size_m}"
+        assert K >= block_size_k, f"K={K} too small for block_size_k={block_size_k}"
+        assert N >= block_size_n, f"N={N} too small for block_size_n={block_size_n}"
 
     # Validate that the pre-allocated lock array is large enough for the current tile count.
     # This can occur when the workspace was prepared with larger block sizes (fewer tiles)
@@ -329,7 +534,14 @@ def matmul_all_reduce(
             f"Pre-allocate workspace with the smallest block sizes you intend to use."
         )
 
-    even_k = K % config.block_size_k == 0
+    even_k = K % block_size_k == 0
+    grid = (launch["num_sms"],)
+    launch_kwargs = {
+        "num_warps": launch["num_warps"],
+        "matrix_instr_nonkdim": launch["matrix_instr_nonkdim"],
+    }
+    if launch["num_stages"] is not None:
+        launch_kwargs["num_stages"] = launch["num_stages"]
 
     iris_launch(
         _fused_matmul_all_reduce_kernel,
@@ -351,14 +563,20 @@ def matmul_all_reduce(
         device_context,
         rank,
         world_size,
-        config.block_size_m,
-        config.block_size_n,
-        config.block_size_k,
+        block_size_m,
+        block_size_n,
+        block_size_k,
+        launch["group_size_m"],
+        launch["num_sms"],
+        launch["num_xcds"],
+        launch["chunk_size"],
         even_k,
+        launch["allow_tf32"],
         config.all_reduce_variant,
         algorithm="matmul_all_reduce",
         rank=rank,
         dtype=A.dtype,
+        **launch_kwargs,
     )
 
     # Mark workspace as used

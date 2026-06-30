@@ -50,7 +50,7 @@ class FusedWorkspace:
     locks: Optional[torch.Tensor] = None  # Synchronization primitives
 
     # Push variant workspace
-    a_inbox: Optional[torch.Tensor] = None  # (world_size, M, K_local) inbox buffer
+    a_inbox: Optional[torch.Tensor] = None  # Receiver-side inbox/reduction buffer
     signal_flags: Optional[torch.Tensor] = None  # (world_size, world_size, m_tiles, k_tiles)
     completion_signals: Optional[torch.Tensor] = None  # (world_size,) sender-completion slots
 
@@ -58,10 +58,20 @@ class FusedWorkspace:
     wave_tile_counts: Optional[torch.Tensor] = None
     wave_transfer_offsets: Optional[torch.Tensor] = None
     wave_transfer_counts: Optional[torch.Tensor] = None
+    owner_last_wave: Optional[torch.Tensor] = None
     transfer_row_offsets: Optional[torch.Tensor] = None
     transfer_col_offsets: Optional[torch.Tensor] = None
     transfer_width_bytes: Optional[torch.Tensor] = None
     transfer_heights: Optional[torch.Tensor] = None
+    transfer_plan_key: Optional[tuple] = None
+    transfers_by_owner_wave: Optional[object] = None
+    wave_tile_counts_host: Optional[object] = None
+    owner_last_wave_host: Optional[object] = None
+    num_transfer_waves: int = 0
+    num_transfer_flags: int = 0
+    batch_tiles_per_xcd: int = 0
+    max_rects_per_owner_wave: int = 0
+    num_transfers: int = 0
 
     prepared: bool = False
 
@@ -109,10 +119,20 @@ class FusedWorkspace:
         self.wave_tile_counts = None
         self.wave_transfer_offsets = None
         self.wave_transfer_counts = None
+        self.owner_last_wave = None
         self.transfer_row_offsets = None
         self.transfer_col_offsets = None
         self.transfer_width_bytes = None
         self.transfer_heights = None
+        self.transfer_plan_key = None
+        self.transfers_by_owner_wave = None
+        self.wave_tile_counts_host = None
+        self.owner_last_wave_host = None
+        self.num_transfer_waves = 0
+        self.num_transfer_flags = 0
+        self.batch_tiles_per_xcd = 0
+        self.max_rects_per_owner_wave = 0
+        self.num_transfers = 0
         self.selector = None
         self.config = None
         self.launch_params = None

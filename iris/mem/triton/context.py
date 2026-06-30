@@ -860,7 +860,7 @@ class Context:
         else:
             dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_n=self.rank * N_local, src_mask=None)
 
-        for dest_rank in range(self.world_size):
+        for dest_rank in tl.static_range(self.world_size):
             self.store(dst_ptr, tile.data, to_rank=dest_rank, mask=combined_mask, hint=(1, tile.block_n))
 
     @triton.jit

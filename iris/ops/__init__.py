@@ -66,7 +66,17 @@ class OpsNamespace:
         """
         self._shmem = shmem
 
-    def matmul_all_reduce(self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None):
+    def matmul_all_reduce(
+        self,
+        output_tensor,
+        A,
+        B,
+        bias=None,
+        async_op=False,
+        config=None,
+        workspace=None,
+        selector=None,
+    ):
         """
         Fused matrix multiplication and all-reduce.
 
@@ -80,6 +90,7 @@ class OpsNamespace:
             async_op: If False, performs barrier at end
             config: Optional FusedConfig for tuning
             workspace: Optional pre-allocated workspace
+            selector: Optional pre-built tritonBLAS Origami selector
 
         Returns:
             workspace: Updated workspace object
@@ -88,7 +99,7 @@ class OpsNamespace:
             >>> output = shmem.zeros((M, N), dtype=torch.float16)
             >>> shmem.ops.matmul_all_reduce(output, A, B)
         """
-        return matmul_all_reduce(self._shmem, output_tensor, A, B, async_op, config, workspace)
+        return matmul_all_reduce(self._shmem, output_tensor, A, B, async_op, config, workspace, selector=selector)
 
     def all_gather_matmul(
         self,

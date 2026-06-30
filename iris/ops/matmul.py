@@ -13,8 +13,9 @@ import torch
 
 # Use tritonBLAS for optimized GEMM
 # Import tritonBLAS
-from tritonblas.matmul import persistent_matmul_lt
+from tritonblas.matmul import persistent_matmul_lt, streamk_matmul_lt
 from tritonblas.matmul import _make_matmul_selector
+from tritonblas.config import matmul_preamble as tritonblas_matmul_preamble
 from .workspace import FusedWorkspace
 
 
@@ -75,6 +76,8 @@ def matmul(
     bias: Optional[torch.Tensor] = None,
     async_op: bool = False,
     workspace: Optional[FusedWorkspace] = None,
+    work_stealing: bool = False,
+    enable_streamk: bool = False,
 ) -> FusedWorkspace:
     """
     Local matrix multiplication using tritonBLAS.
@@ -124,15 +127,32 @@ def matmul(
         )
         bias = None
 
-    persistent_matmul_lt(
-        A,
-        B,
-        output_tensor,
-        selector,
-        config=None,
-        bias=bias,
-        work_stealing=False,
-    )
+    # Allocate work-stealing config if needed (or for streamk)
+    config = None
+    if work_stealing or enable_streamk:
+        config = tritonblas_matmul_preamble(selector, device=A.device)
+
+    # Choose kernel based on enable_streamk
+    if enable_streamk:
+        streamk_matmul_lt(
+            A,
+            B,
+            output_tensor,
+            selector,
+            config=config,
+            bias=bias,
+            work_stealing=work_stealing,
+        )
+    else:
+        persistent_matmul_lt(
+            A,
+            B,
+            output_tensor,
+            selector,
+            config=config,
+            bias=bias,
+            work_stealing=work_stealing,
+        )
 
     if not async_op:
         shmem.barrier()
