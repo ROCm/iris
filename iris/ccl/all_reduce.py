@@ -9,7 +9,6 @@ copies to symmetric heap internally if the input is not already
 on the heap.
 """
 
-import torch
 from iris.ccl.utils import extract_group_info
 
 _buf_cache = {}
