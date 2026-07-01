@@ -5,7 +5,6 @@ Usage:
     torchrun --nproc_per_node=8 tests/ccl/bench_user_ar.py
 """
 
-import os
 import torch
 import torch.distributed as dist
 
@@ -45,12 +44,12 @@ def main():
     user_ar = UserAllReduce(ctx, max_numel, dtype)
 
     sizes = [
-        (1, 1024),      # 1K
-        (4, 1024),      # 4K
-        (16, 1024),     # 16K
-        (64, 1024),     # 64K
-        (128, 1024),    # 128K
-        (256, 1024),    # 256K
+        (1, 1024),  # 1K
+        (4, 1024),  # 4K
+        (16, 1024),  # 16K
+        (64, 1024),  # 64K
+        (128, 1024),  # 128K
+        (256, 1024),  # 256K
     ]
 
     if rank == 0:
