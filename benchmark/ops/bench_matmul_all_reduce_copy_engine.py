@@ -77,7 +77,7 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
             C,
             A,
             B,
-            async_op=False,  # TEMPORARY: Match matmul_only to test if async_op matters
+            async_op=True,
             config=config,
             workspace=workspace,
             flag_iteration=flag_iteration[0],
@@ -180,6 +180,7 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
     state.add_counter("transfer_rects", getattr(workspace, "num_transfers", 0))
     state.add_counter("reduce_block_m", launch["reduce_block_size_m"])
     state.add_counter("reduce_block_n", launch["reduce_block_size_n"])
+    state.add_counter("reduce_num_sms", launch.get("reduce_num_sms", 0))
     state.add_counter("variant_one_shot", 1.0 if variant == "one_shot" else 0.0)
     state.add_counter("variant_two_shot", 1.0 if variant == "two_shot" else 0.0)
 

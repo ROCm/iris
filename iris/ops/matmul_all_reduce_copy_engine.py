@@ -111,18 +111,7 @@ def _partitioned_xcd_matmul_kernel(
 
                 local_pid_m = first_group_pid_m + ((local_tile_id % num_pid_in_group) % group_size_m)
                 pid_m = first_pid_m + local_pid_m
-                pid_n_forward = (local_tile_id % num_pid_in_group) // group_size_m
-
-                if CHUNK_SIZE > 0 and num_pid_n > 1:
-                    # Keep neighboring partition-local M groups walking N in
-                    # opposite directions, mirroring the existing XCD-aware
-                    # B-cache reuse heuristic without crossing shard ownership.
-                    if group_id % 2 == 1:
-                        pid_n = num_pid_n - 1 - pid_n_forward
-                    else:
-                        pid_n = pid_n_forward
-                else:
-                    pid_n = pid_n_forward
+                pid_n = (local_tile_id % num_pid_in_group) // group_size_m
 
                 tl.assume(pid_m >= 0)
                 tl.assume(pid_n >= 0)
@@ -440,6 +429,10 @@ def _partitioned_xcd_gemm_num_sms(launch: dict, world_size: int) -> int:
     return _round_up_to_multiple(max(launch["num_sms"], min(num_xcds, world_size)), num_xcds)
 
 
+def _default_reduce_num_sms() -> int:
+    return 64  # CCL default comm_sms
+
+
 def _reduce_block_size_n(N: int) -> int:
     # Match CCL default tile size for better performance
     return 64  # CCL default block_size_n
@@ -595,11 +588,7 @@ def _build_partitioned_xcd_transfer_plan(M: int, N: int, world_size: int, launch
                 group_size = min(partition_tiles_m - first_group_pid_m, group_size_m)
                 local_pid_m = first_group_pid_m + ((local_tile_id % num_pid_in_group) % group_size)
                 pid_m = first_pid_m + local_pid_m
-                pid_n_forward = (local_tile_id % num_pid_in_group) // group_size
-                if launch["chunk_size"] > 0 and num_pid_n > 1 and group_id % 2 == 1:
-                    pid_n = num_pid_n - 1 - pid_n_forward
-                else:
-                    pid_n = pid_n_forward
+                pid_n = (local_tile_id % num_pid_in_group) // group_size
 
                 tile_m_start = pid_m * block_size_m
                 tile_m_end = min(tile_m_start + block_size_m, M)
@@ -928,6 +917,7 @@ def _matmul_all_reduce_copy_engine_launch_params(
         "selector_fallback": selector_fallback,
         "reduce_block_size_m": 32,  # Match CCL default block_size_m
         "reduce_block_size_n": _reduce_block_size_n(N),
+        "reduce_num_sms": _default_reduce_num_sms(),
     }
 
 
@@ -964,6 +954,7 @@ def _config_launch_params(M: int, N: int, config: FusedConfig, device: torch.dev
         "selector_fallback": False,
         "reduce_block_size_m": 32,  # Match CCL default block_size_m
         "reduce_block_size_n": _reduce_block_size_n(N),
+        "reduce_num_sms": config.reduce_num_sms,
     }
 
 
@@ -1025,6 +1016,7 @@ def matmul_all_reduce_copy_engine_preamble(
 
     if config.all_reduce_variant == "two_shot":
         launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
+        launch["reduce_num_sms"] = _default_reduce_num_sms()
 
     if workspace is None:
         workspace = FusedWorkspace()
@@ -1356,7 +1348,7 @@ def matmul_all_reduce_copy_engine(
         total_reduce_tiles = reduce_tiles_m * reduce_tiles_n
 
         # Use persistent kernel with limited number of workgroups
-        num_sms = launch["num_sms"]
+        num_sms = launch["reduce_num_sms"]
         reduce_grid = (min(num_sms, total_reduce_tiles),)
 
         # Reduce-scatter waits for the same completion condition as
@@ -1384,7 +1376,7 @@ def matmul_all_reduce_copy_engine(
             REDUCE_BLOCK_SIZE_M=launch["reduce_block_size_m"],
             REDUCE_BLOCK_SIZE_N=launch["reduce_block_size_n"],
             GROUP_SIZE_M=launch["group_size_m"],
-            NUM_SMS=launch["num_sms"],
+            NUM_SMS=num_sms,
             WAIT_FOR_COMPLETION=True,
             algorithm="matmul_all_reduce_copy_engine_reduce_scatter",
             rank=rank,
