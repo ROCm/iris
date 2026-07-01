@@ -37,11 +37,9 @@ def main():
     dtype = torch.bfloat16
 
     import iris
-    from iris.ccl.user_all_reduce import UserAllReduce
+    from iris.ccl.all_reduce import all_reduce
 
     ctx = iris.iris(heap_size=1 << 30)
-    max_numel = 1 << 20  # 1M elements
-    user_ar = UserAllReduce(ctx, max_numel, dtype)
 
     sizes = [
         (1, 1024),  # 1K
@@ -63,8 +61,9 @@ def main():
         # RCCL in-place
         rccl_us = bench(lambda: dist.all_reduce(rccl_tensor))
 
-        # iris user-facing (copy_in + two_shot async + return heap buf)
-        iris_us = bench(lambda: user_ar.all_reduce(user_tensor))
+        # iris (copy_in baked into all_reduce + two_shot async)
+        out_buf = torch.empty(shape, dtype=dtype, device="cuda")
+        iris_us = bench(lambda: all_reduce(out_buf, user_tensor, ctx, async_op=True))
 
         speedup = rccl_us / iris_us if iris_us > 0 else 0
 
