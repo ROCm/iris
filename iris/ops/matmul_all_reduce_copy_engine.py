@@ -1359,23 +1359,9 @@ def matmul_all_reduce_copy_engine(
         num_sms = launch["num_sms"]
         reduce_grid = (min(num_sms, total_reduce_tiles),)
 
-        # Wait for SDMA transfers to complete on all ranks
-        # SDMA monitors GEMM batch flags and updates completion_signals when done.
-        iris_launch(
-            _matmul_all_reduce_copy_engine_wait_completion_kernel,
-            (world_size,),
-            workspace.completion_signals,
-            flag_iteration + 1,
-            rank,
-            world_size,
-            algorithm="matmul_all_reduce_copy_engine_wait_completion",
-            rank=rank,
-            dtype=A.dtype,
-            num_warps=4,
-        )
-
-        # Reduce this rank's owner shard after the SDMA batches have landed,
-        # then all-gather the reduced shard to every rank.
+        # Reduce-scatter waits for the same completion condition as
+        # _matmul_all_reduce_copy_engine_wait_completion_kernel: every remote
+        # rank's completion slot must reach flag_iteration + 1.
         device_context = shmem.get_device_context()
         iris_launch(
             _matmul_all_reduce_copy_engine_reduce_scatter_kernel,
@@ -1399,7 +1385,7 @@ def matmul_all_reduce_copy_engine(
             REDUCE_BLOCK_SIZE_N=launch["reduce_block_size_n"],
             GROUP_SIZE_M=launch["group_size_m"],
             NUM_SMS=launch["num_sms"],
-            WAIT_FOR_COMPLETION=False,
+            WAIT_FOR_COMPLETION=True,
             algorithm="matmul_all_reduce_copy_engine_reduce_scatter",
             rank=rank,
             dtype=A.dtype,
