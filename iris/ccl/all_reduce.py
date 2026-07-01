@@ -114,7 +114,7 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
 
     _ws_cache[ws_key] = ws
 
-    if ws is not None:
+    if ws is not None and variant not in ("one_shot", "two_shot"):
         ws.prepared = False
 
     if not async_op:
