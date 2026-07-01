@@ -6,8 +6,8 @@ FROM rocm/vllm-dev:nightly_main_20260612
 ENV MAX_JOBS=32
 ARG GPU_ARCHS="gfx950"                                          # MI350
 ARG TRITON_COMMIT="6898a3288c28d50d1f4e1f91aa5867ca0d1f3c3b"
-ARG VLLM_COMMIT="880341fa9e0909f847d8644a838dce5f2152d65d"     # micmelesse/vllm allreduce_only
-ARG AITER_COMMIT="d0002d20185e9e4656f746e56ce2e766cea1c1d8"   # ROCm/aiter micmelesse/allreduce_only
+ARG VLLM_COMMIT="4e61409d254f761994b7498b20c78c3b5ecff8ae"     # micmelesse/vllm allreduce_only (make_communicator gets both cpu+device groups)
+ARG AITER_COMMIT="51f6c3197f775bdf93272f94335a96f534334ed4"   # ROCm/aiter micmelesse/allreduce_only (make_communicator(cpu_group, device_group, ...))
 ARG IRIS_COMMIT="04ad32409251c7a7b55a39c8bae4629154e89c2c"    # ROCm/iris muhaawad/one-shot-vllm
 
 RUN git clone https://github.com/micmelesse/vllm.git /src/vllm \
@@ -45,6 +45,21 @@ RUN printf '%s\n' \
 > /tmp/prebuild_aiter.py \
     && GPU_ARCHS="${GPU_ARCHS}" python3 /tmp/prebuild_aiter.py
 
+# Server env, baked into the image (the scripts export nothing - the image IS the
+# environment). Shared block is IDENTICAL to Dockerfile.baseline: the AMD production
+# config (aiter MHA off, QuickReduce INT4) plus operational settings.
+ENV VLLM_ROCM_USE_AITER_MHA=0
+ENV VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+ENV NCCL_DEBUG=INFO
+ENV VLLM_RPC_TIMEOUT=1800000
+ENV VLLM_ENGINE_READY_TIMEOUT_S=3600
+
+# The per-arm behavior - the only env that differs from baseline. All three are
+# required: vLLM gates the comms backend on is_comms_enabled() = USE_AITER and
+# USE_AITER_COMMS, so without the master toggle iris silently falls back to
+# QuickReduce; and make_communicator has no default, so the backend must be declared.
+ENV VLLM_ROCM_USE_AITER=1
 ENV VLLM_ROCM_USE_AITER_COMMS=1
+ENV AITER_COMMS_BACKEND=iris
 
 CMD ["/bin/bash"]

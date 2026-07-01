@@ -1,6 +1,9 @@
-# Baseline: vLLM on current upstream main with the iris all-reduce path off.
-# Each repo is cloned at a fixed commit and installed; aiter's runtime kernels are
-# prebuilt into the image. The container only runs the workload.
+# Baseline: the AMD production config. VLLM_ROCM_USE_AITER is left unset (vLLM
+# default False), so broad aiter compute is off and the all-reduce is the
+# QuickReduce-INT4 path (baked below via VLLM_ROCM_QUICK_REDUCE_QUANTIZATION). The
+# exp image flips to the iris one-shot all-reduce; the A/B isolates that. Each repo
+# is cloned at a fixed commit and installed; aiter's runtime kernels are prebuilt
+# into the image. The container only runs the workload.
 FROM rocm/vllm-dev:nightly_main_20260612
 
 ENV MAX_JOBS=32
@@ -44,5 +47,16 @@ RUN printf '%s\n' \
 "    print('[prebuild] built', w, flush=True)" \
 > /tmp/prebuild_aiter.py \
     && GPU_ARCHS="${GPU_ARCHS}" python3 /tmp/prebuild_aiter.py
+
+# Server env, baked into the image (the scripts export nothing - the image IS the
+# environment). Shared by both arms: the AMD production config (aiter MHA off,
+# QuickReduce INT4 all-reduce) plus operational settings (NCCL logging, RPC/ready
+# timeouts). baseline bakes NO per-arm behavior flag: VLLM_ROCM_USE_AITER stays
+# unset (vLLM default False) = broad aiter off, QuickReduce all-reduce.
+ENV VLLM_ROCM_USE_AITER_MHA=0
+ENV VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+ENV NCCL_DEBUG=INFO
+ENV VLLM_RPC_TIMEOUT=1800000
+ENV VLLM_ENGINE_READY_TIMEOUT_S=3600
 
 CMD ["/bin/bash"]
