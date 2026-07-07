@@ -608,6 +608,8 @@ def persistent_all_reduce_two_shot(
     stride_out_m,
     stride_out_n,
     heap_bases: tl.tensor,
+    start_flags_ptr,
+    end_flags_ptr,
     group_rank: tl.constexpr,
     iris_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -620,12 +622,10 @@ def persistent_all_reduce_two_shot(
     NUM_XCDS: tl.constexpr,  # unused here but kept for signature compatibility
     CHUNK_SIZE: tl.constexpr,  # unused here but kept for signature compatibility
     DISTRIBUTION: tl.constexpr,
-    start_flags_ptr=None,
-    end_flags_ptr=None,
 ):
     """Reduce assigned tiles for a rank and broadcast the result to all peers.
     Single kernel: unmasked fast path for full tiles, masked slow path for tails.
-    Graph-capturable when start_flags_ptr and end_flags_ptr are provided.
+    Graph-capturable with in-kernel barriers via start_flags_ptr and end_flags_ptr.
     """
     pid = tl.program_id(0)
 
@@ -1064,6 +1064,8 @@ def launch(
             stride_out_m,
             stride_out_n,
             heap_bases,
+            workspace.start_flags,
+            workspace.end_flags,
             rank_in_group,
             rank_global,
             world_size,
@@ -1076,8 +1078,6 @@ def launch(
             config.num_xcds,
             config.chunk_size,
             config.all_reduce_distribution,
-            workspace.start_flags,
-            workspace.end_flags,
             num_warps=8,
             num_stages=1,
             waves_per_eu=1,
