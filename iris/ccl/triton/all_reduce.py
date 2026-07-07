@@ -125,7 +125,13 @@ def all_reduce_preamble(
         ctx.barrier()
 
     elif variant == VARIANT_TWO_SHOT:
-        pass
+        num_ranks = ctx.get_num_ranks()
+        max_blocks = min(16, config.comm_sms)
+        needed = max_blocks * num_ranks
+        if workspace.start_flags is None or workspace.start_flags.numel() < needed:
+            workspace.start_flags = ctx.zeros((needed,), dtype=torch.int32)
+        if workspace.end_flags is None or workspace.end_flags.numel() < needed:
+            workspace.end_flags = ctx.zeros((needed,), dtype=torch.int32)
 
     elif variant == VARIANT_ONE_SHOT:
         num_ranks = ctx.get_num_ranks()
@@ -614,11 +620,20 @@ def persistent_all_reduce_two_shot(
     NUM_XCDS: tl.constexpr,  # unused here but kept for signature compatibility
     CHUNK_SIZE: tl.constexpr,  # unused here but kept for signature compatibility
     DISTRIBUTION: tl.constexpr,
+    start_flags_ptr=None,
+    end_flags_ptr=None,
 ):
     """Reduce assigned tiles for a rank and broadcast the result to all peers.
     Single kernel: unmasked fast path for full tiles, masked slow path for tails.
+    Graph-capturable when start_flags_ptr and end_flags_ptr are provided.
     """
     pid = tl.program_id(0)
+
+    if start_flags_ptr is not None:
+        _per_block_barrier(
+            pid, start_flags_ptr, heap_bases,
+            group_rank, iris_rank, world_size, rank_start, rank_stride,
+        )
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -724,6 +739,12 @@ def persistent_all_reduce_two_shot(
                         mask=mask,
                         hint=(1, BLOCK_SIZE_N),
                     )
+
+    if end_flags_ptr is not None:
+        _per_block_barrier(
+            pid, end_flags_ptr, heap_bases,
+            group_rank, iris_rank, world_size, rank_start, rank_stride,
+        )
 
 
 @triton.jit()
@@ -1043,6 +1064,8 @@ def launch(
             config.num_xcds,
             config.chunk_size,
             config.all_reduce_distribution,
+            workspace.start_flags,
+            workspace.end_flags,
             num_warps=8,
             num_stages=1,
             waves_per_eu=1,
