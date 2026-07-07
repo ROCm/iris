@@ -631,8 +631,14 @@ def persistent_all_reduce_two_shot(
 
     if start_flags_ptr is not None:
         _per_block_barrier(
-            pid, start_flags_ptr, heap_bases,
-            group_rank, iris_rank, world_size, rank_start, rank_stride,
+            pid,
+            start_flags_ptr,
+            heap_bases,
+            group_rank,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
         )
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
@@ -742,8 +748,14 @@ def persistent_all_reduce_two_shot(
 
     if end_flags_ptr is not None:
         _per_block_barrier(
-            pid, end_flags_ptr, heap_bases,
-            group_rank, iris_rank, world_size, rank_start, rank_stride,
+            pid,
+            end_flags_ptr,
+            heap_bases,
+            group_rank,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
         )
 
 
