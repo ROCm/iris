@@ -116,7 +116,6 @@ def matmul_all_reduce(state, ctx):
     state.set_flops(2 * M * N * K)
     state.set_bytes((world_size - 1) * M * N * C.element_size())
     state.add_counter("uses_selector", int(workspace.selector is not None))
-    state.add_counter("selector_fallback", int(workspace.selector_fallback))
     state.add_counter("block_m", launch["block_size_m"])
     state.add_counter("block_n", launch["block_size_n"])
     state.add_counter("block_k", launch["block_size_k"])

@@ -81,9 +81,6 @@ def test_matmul_all_reduce_copy_engine(M, N, K, dtype, variant):
     """Test matmul_all_reduce_copy_engine against tritonBLAS matmul + fp32 all-reduce."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
-    if variant != "two_shot":
-        pytest.skip("copy-engine one_shot is currently a matmul-only aux publish stub")
-
     heap_size = _heap_size()
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()

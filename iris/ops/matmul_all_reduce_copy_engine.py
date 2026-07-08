@@ -8,7 +8,6 @@ This module provides a torch-like interface for GEMM+All-Reduce operations,
 automatically inferring dimensions, strides, and hardware parameters.
 """
 
-import logging
 import time
 from typing import Optional
 import torch
@@ -16,15 +15,14 @@ import triton
 import triton.language as tl
 from xio import sdma_ep
 
-from tritonblas.kernels.stages import GemmContext, ScheduleContext, Tile, make_input_view
-from iris.ccl.triton.all_gather import launch as all_gather_launch
-from iris.ccl.config import Config as CCLConfig
+from tritonblas.kernels.stages import GemmContext, Tile, make_input_view
+from tritonblas.matmul import _make_matmul_selector
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
-from .tritonblas_launch_wave_schedule import chiplet_transform_chunked, grouped_tile_coords
+from .tritonblas_launch_wave_schedule import build_launch_wave_plan
 
 
 @triton.jit()
@@ -55,16 +53,17 @@ def _partitioned_xcd_matmul_kernel(
     CHUNK_SIZE: tl.constexpr,
     OUTPUT_PARTITIONS: tl.constexpr,
     MAX_BATCHES_PER_PARTITION: tl.constexpr,
+    STORE_LOCAL_REDUCE_SHARD: tl.constexpr,
     EVEN_K: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
 ):
     """
-    Persistent GEMM that pins reduce-scatter row partitions to XCD-local work.
+    Persistent GEMM that pins output row partitions to XCD-local work.
 
     Program ids are interpreted as interleaved XCD lanes: pid % NUM_XCDS is the
     XCD lane, and each output row partition is assigned to partition % NUM_XCDS.
-    For the target 8-rank reduce-scatter on MI300 this gives one row shard per
-    XCD while keeping the GEMM epilogue as a plain store into the aux buffer.
+    On MI300 this keeps each rank/partition shard local to one XCD while the
+    GEMM epilogue publishes batch flags for SDMA.
     """
     acc_dtype = tl.int32 if local_aux_buffer.type.element_ty == tl.int8 else tl.float32
     gemm_ctx = GemmContext(
@@ -91,7 +90,6 @@ def _partitioned_xcd_matmul_kernel(
 
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     partition_rows = tl.cdiv(M, OUTPUT_PARTITIONS)
-    rows_per_rank = M // OUTPUT_PARTITIONS
 
     for partition_id in range(OUTPUT_PARTITIONS):
         if partition_id % NUM_XCDS == xcd_id:
@@ -126,157 +124,21 @@ def _partitioned_xcd_matmul_kernel(
                     & (rn[None, :] < N)
                 )
                 c = acc.to(local_aux_buffer.type.element_ty)
-                aux_ptr = local_aux_buffer + rm[:, None] * stride_local_aux_m + rn[None, :] * stride_local_aux_n
-                tl.store(aux_ptr, c, mask=mask, cache_modifier=".wt")
 
-                if partition_id == cur_rank:
+                if STORE_LOCAL_REDUCE_SHARD and partition_id == cur_rank:
+                    rows_per_rank = M // OUTPUT_PARTITIONS
                     local_rm = rm - partition_m_start
                     owner_row_mask = (rm >= partition_m_start) & (rm < partition_m_end)
                     staged_rm = cur_rank * rows_per_rank + tl.where(owner_row_mask, local_rm, 0)
                     reduce_ptr = reduce_buffer + staged_rm[:, None] * stride_reduce_m + rn[None, :] * stride_reduce_n
                     tl.store(reduce_ptr, c, mask=mask & owner_row_mask[:, None], cache_modifier=".wt")
+                else:
+                    aux_ptr = local_aux_buffer + rm[:, None] * stride_local_aux_m + rn[None, :] * stride_local_aux_n
+                    tl.store(aux_ptr, c, mask=mask, cache_modifier=".wt")
 
                 tl.debug_barrier()
                 batch_id = partition_id * MAX_BATCHES_PER_PARTITION + batch_iter
                 tl.atomic_add(locks + batch_id, 1, sem="release", scope="sys")
-
-
-@triton.jit()
-def _fused_matmul_all_reduce_copy_engine_kernel(
-    A,
-    B,
-    C,
-    local_aux_buffer,
-    reduce_buffer,
-    locks,
-    M,
-    N,
-    K,
-    stride_am,
-    stride_ak,
-    stride_bk,
-    stride_bn,
-    stride_local_aux_m,
-    stride_local_aux_n,
-    stride_reduce_m,
-    stride_reduce_n,
-    stride_cm,
-    stride_cn,
-    context_tensor: tl.tensor,
-    cur_rank: tl.constexpr,
-    world_size: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    NUM_SMS: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
-    CHUNK_SIZE: tl.constexpr,
-    EVEN_K: tl.constexpr,
-    ALLOW_TF32: tl.constexpr,
-    VARIANT: tl.constexpr,
-):
-    """
-    Fused GEMM + All-Reduce kernel with configurable all-reduce variant.
-
-    Computes C = A @ B and then performs all-reduce on the result using the specified variant.
-    This is useful for data-parallel distributed training where each rank computes
-    a partial result over different data, and then reduces across all ranks.
-
-    Supported variants:
-    - 'atomic': Fast, lock-free atomic accumulation
-    - 'spinlock': Mutex-based serialized read-modify-write
-    - 'one_shot': Each rank reduces all tiles (duplicated work, no remote stores)
-    - 'two_shot': Work distribution with reduce-scatter then all-gather pattern
-
-    The kernel for each output tile:
-    1. Computes GEMM using tritonblas GemmContext
-    2. Uses the specified variant for all-reduce across ranks
-
-    Args:
-        A: Pointer to input matrix A of shape (M, K) - local rank's data
-        B: Pointer to input matrix B of shape (K, N) - replicated across ranks
-        C: Pointer to output matrix C of shape (M, N) - will contain reduced result
-        locks: Pointer to locks array (one lock per tile)
-        M: Number of rows in A and C
-        N: Number of columns in B and C
-        K: Number of columns in A and rows in B
-        stride_am, stride_ak: Strides for A tensor
-        stride_bk, stride_bn: Strides for B tensor
-        stride_cm, stride_cn: Strides for C tensor
-        context_tensor: Device context tensor for RMA operations
-        cur_rank: Current rank
-        world_size: Total number of ranks
-        BLOCK_SIZE_M: Block size for M dimension
-        BLOCK_SIZE_N: Block size for N dimension
-        BLOCK_SIZE_K: Block size for K dimension
-        EVEN_K: Whether K is evenly divisible by BLOCK_SIZE_K
-    """
-    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
-    gemm_ctx = GemmContext(
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        BLOCK_SIZE_K,
-        num_sms=NUM_SMS,
-        num_xcds=NUM_XCDS,
-        group_size_m=GROUP_SIZE_M,
-        chunk_size=CHUNK_SIZE,
-        cache_modifier_a=None,
-        cache_modifier_b=None,
-        acc_dtype=acc_dtype,
-        even_k=EVEN_K,
-        allow_tf32=ALLOW_TF32,
-    )
-    sched = ScheduleContext(M, N, K, gemm_ctx)
-    tensorA = make_input_view(A, M, K, stride_am, stride_ak)
-    tensorB = make_input_view(B, K, N, stride_bk, stride_bn)
-
-    start, total, stride = sched.persistent_tile_range()
-    for tile_idx in range(start, total, stride):
-        out_tile = sched.get_tile_from_idx(tile_idx)
-        acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
-        rm, rn = out_tile.indices()
-        c = acc.to(C.type.element_ty)
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
-
-        if VARIANT == "two_shot":
-            # Row-shard reduce-scatter phase. Split the GEMM tile by row shard
-            # so the follow-up kernel can use ctx.all_gather(dim=0), which
-            # assumes each rank owns dst_view.M // world_size rows.
-            rows_per_rank = M // world_size
-            local_ptr = local_aux_buffer + rm[:, None] * stride_local_aux_m + rn[None, :] * stride_local_aux_n
-            tl.store(local_ptr, c, mask=mask, cache_modifier=".wt")
-
-            for owner_rank in range(world_size):
-                owner_start_m = owner_rank * rows_per_rank
-                owner_end_m = owner_start_m + rows_per_rank
-                owner_row_mask = (rm >= owner_start_m) & (rm < owner_end_m)
-                if tl.max(owner_row_mask & (rm < M)):
-                    local_rm = rm - owner_start_m
-                    staged_rm = cur_rank * rows_per_rank + tl.where(owner_row_mask, local_rm, 0)
-                    owner_mask = mask & owner_row_mask[:, None]
-
-                    # The owner rank does not enqueue an SDMA self-copy. Put
-                    # its local contribution directly into the receiver-side
-                    # reduction buffer.
-                    reduce_ptr = (
-                        reduce_buffer
-                        + staged_rm[:, None] * stride_reduce_m
-                        + rn[None, :] * stride_reduce_n
-                    )
-                    tl.store(reduce_ptr, c, mask=owner_mask & (owner_rank == cur_rank), cache_modifier=".wt")
-
-            # Release the persistent-wave flag after the local aux writes are
-            # visible. Host-enqueued SDMA commands poll these flags, so the
-            # copy engine can move completed waves without waiting for the
-            # whole GEMM kernel to finish.
-            tl.debug_barrier()
-            wave_id = (tile_idx - start) // stride
-            tl.atomic_add(locks + wave_id, 1, sem="release", scope="sys")
-        else:
-            # Matmul + aux publish stub for one_shot experiments.
-            temp_ptr = local_aux_buffer + rm[:, None] * stride_local_aux_m + rn[None, :] * stride_local_aux_n
-            tl.store(temp_ptr, c, mask=mask, cache_modifier=".wt")
 
 
 @triton.jit()
@@ -385,24 +247,224 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
         ctx.all_gather(tile_obj, dst_view, dim=0)
 
 
-_GEMM_CONFIG_FIELDS = (
-    "block_size_m",
-    "block_size_n",
-    "block_size_k",
-    "group_size_m",
-    "num_sms",
-    "num_xcds",
-    "chunk_size",
-    "cache_modifier_a",
-    "cache_modifier_b",
-    "allow_tf32",
-)
+@triton.jit()
+def _matmul_all_reduce_copy_engine_local_reduce_kernel(
+    C,
+    local_aux_buffer,
+    remote_inbox,
+    completion_signals,
+    expected_completion_value,
+    M,
+    N,
+    stride_local_aux_m,
+    stride_local_aux_n,
+    stride_remote_m,
+    stride_remote_n,
+    stride_cm,
+    stride_cn,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    REDUCE_BLOCK_SIZE_M: tl.constexpr,
+    REDUCE_BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    WAIT_FOR_COMPLETION: tl.constexpr,
+):
+    """Local one-shot reduction after SDMA has gathered every peer's full partial output."""
+    if WAIT_FOR_COMPLETION:
+        for wait_src_rank in tl.static_range(0, world_size):
+            if wait_src_rank != cur_rank:
+                while tl.load(
+                    completion_signals + wait_src_rank,
+                    cache_modifier=".cv",
+                    volatile=True,
+                ) < expected_completion_value:
+                    pass
+
+    pid = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, REDUCE_BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, REDUCE_BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+
+    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
+
+    for tile_id in range(pid, total_tiles, NUM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+
+        rm_base = pid_m * REDUCE_BLOCK_SIZE_M
+        rn_base = pid_n * REDUCE_BLOCK_SIZE_N
+        is_full = (rm_base + REDUCE_BLOCK_SIZE_M <= M) & (rn_base + REDUCE_BLOCK_SIZE_N <= N)
+
+        rm = rm_base + tl.arange(0, REDUCE_BLOCK_SIZE_M)
+        rm = tl.max_contiguous(tl.multiple_of(rm, REDUCE_BLOCK_SIZE_M), REDUCE_BLOCK_SIZE_M)
+
+        rn = rn_base + tl.arange(0, REDUCE_BLOCK_SIZE_N)
+        rn = tl.max_contiguous(tl.multiple_of(rn, REDUCE_BLOCK_SIZE_N), REDUCE_BLOCK_SIZE_N)
+
+        local_ptr = local_aux_buffer + rm[:, None] * stride_local_aux_m + rn[None, :] * stride_local_aux_n
+        out_ptr = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+
+        if is_full:
+            fast_local_ptr = tl.max_contiguous(
+                tl.multiple_of(local_ptr, (1, REDUCE_BLOCK_SIZE_N)),
+                (1, REDUCE_BLOCK_SIZE_N),
+            )
+            acc = tl.load(fast_local_ptr).to(acc_dtype)
+            for reduce_src_rank in tl.static_range(0, world_size):
+                if reduce_src_rank != cur_rank:
+                    src_rm = reduce_src_rank * M + rm
+                    src_ptr = remote_inbox + src_rm[:, None] * stride_remote_m + rn[None, :] * stride_remote_n
+                    fast_src_ptr = tl.max_contiguous(
+                        tl.multiple_of(src_ptr, (1, REDUCE_BLOCK_SIZE_N)),
+                        (1, REDUCE_BLOCK_SIZE_N),
+                    )
+                    data = tl.load(fast_src_ptr)
+                    acc += data.to(acc_dtype)
+
+            fast_out_ptr = tl.max_contiguous(
+                tl.multiple_of(out_ptr, (1, REDUCE_BLOCK_SIZE_N)),
+                (1, REDUCE_BLOCK_SIZE_N),
+            )
+            tl.store(fast_out_ptr, acc.to(C.type.element_ty))
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            acc = tl.load(local_ptr, mask=mask, other=0.0).to(acc_dtype)
+
+            for reduce_src_rank in tl.static_range(0, world_size):
+                if reduce_src_rank != cur_rank:
+                    src_rm = reduce_src_rank * M + rm
+                    src_ptr = remote_inbox + src_rm[:, None] * stride_remote_m + rn[None, :] * stride_remote_n
+                    data = tl.load(src_ptr, mask=mask, other=0.0)
+                    acc += data.to(acc_dtype)
+
+            tl.store(out_ptr, acc.to(C.type.element_ty), mask=mask)
 
 
-def _config_uses_default_gemm_tuning(config: FusedConfig) -> bool:
-    default = FusedConfig()
-    return all(getattr(config, field) == getattr(default, field) for field in _GEMM_CONFIG_FIELDS)
+@triton.jit()
+def _matmul_all_reduce_copy_engine_local_reduce_flat_kernel(
+    C,
+    local_aux_buffer,
+    remote_inbox,
+    completion_signals,
+    expected_completion_value,
+    total_elements,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    WAIT_FOR_COMPLETION: tl.constexpr,
+):
+    """Fast one-shot local reduction for contiguous rank-major buffers."""
+    if WAIT_FOR_COMPLETION:
+        for wait_src_rank in tl.static_range(0, world_size):
+            if wait_src_rank != cur_rank:
+                while tl.load(
+                    completion_signals + wait_src_rank,
+                    cache_modifier=".cv",
+                    volatile=True,
+                ) < expected_completion_value:
+                    pass
 
+    pid = tl.program_id(0)
+    total_blocks = total_elements // BLOCK_SIZE
+    block_offsets = tl.arange(0, BLOCK_SIZE)
+    block_offsets = tl.max_contiguous(tl.multiple_of(block_offsets, BLOCK_SIZE), BLOCK_SIZE)
+
+    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
+
+    for block_id in range(pid, total_blocks, NUM_SMS):
+        linear_base = block_id * BLOCK_SIZE
+        linear_offsets = linear_base + block_offsets
+
+        local_ptr = local_aux_buffer + linear_offsets
+        local_ptr = tl.max_contiguous(tl.multiple_of(local_ptr, BLOCK_SIZE), BLOCK_SIZE)
+
+        if world_size == 8:
+            if cur_rank == 0:
+                data0 = tl.load(local_ptr).to(acc_dtype)
+            else:
+                src_offsets = linear_offsets
+                src_ptr = remote_inbox + src_offsets
+                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
+                data0 = tl.load(src_ptr).to(acc_dtype)
+
+            if cur_rank == 1:
+                data1 = tl.load(local_ptr).to(acc_dtype)
+            else:
+                src_offsets = total_elements + linear_offsets
+                src_ptr = remote_inbox + src_offsets
+                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
+                data1 = tl.load(src_ptr).to(acc_dtype)
+
+            if cur_rank == 2:
+                data2 = tl.load(local_ptr).to(acc_dtype)
+            else:
+                src_offsets = 2 * total_elements + linear_offsets
+                src_ptr = remote_inbox + src_offsets
+                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
+                data2 = tl.load(src_ptr).to(acc_dtype)
+
+            if cur_rank == 3:
+                data3 = tl.load(local_ptr).to(acc_dtype)
+            else:
+                src_offsets = 3 * total_elements + linear_offsets
+                src_ptr = remote_inbox + src_offsets
+                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
+                data3 = tl.load(src_ptr).to(acc_dtype)
+
+            if cur_rank == 4:
+                data4 = tl.load(local_ptr).to(acc_dtype)
+            else:
+                src_offsets = 4 * total_elements + linear_offsets
+                src_ptr = remote_inbox + src_offsets
+                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
+                data4 = tl.load(src_ptr).to(acc_dtype)
+
+            if cur_rank == 5:
+                data5 = tl.load(local_ptr).to(acc_dtype)
+            else:
+                src_offsets = 5 * total_elements + linear_offsets
+                src_ptr = remote_inbox + src_offsets
+                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
+                data5 = tl.load(src_ptr).to(acc_dtype)
+
+            if cur_rank == 6:
+                data6 = tl.load(local_ptr).to(acc_dtype)
+            else:
+                src_offsets = 6 * total_elements + linear_offsets
+                src_ptr = remote_inbox + src_offsets
+                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
+                data6 = tl.load(src_ptr).to(acc_dtype)
+
+            if cur_rank == 7:
+                data7 = tl.load(local_ptr).to(acc_dtype)
+            else:
+                src_offsets = 7 * total_elements + linear_offsets
+                src_ptr = remote_inbox + src_offsets
+                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
+                data7 = tl.load(src_ptr).to(acc_dtype)
+
+            acc = ((data0 + data1) + (data2 + data3)) + ((data4 + data5) + (data6 + data7))
+        else:
+            acc = tl.load(local_ptr).to(acc_dtype)
+            for reduce_src_rank in tl.static_range(0, world_size):
+                if reduce_src_rank != cur_rank:
+                    src_offsets = reduce_src_rank * total_elements + linear_offsets
+                    src_ptr = remote_inbox + src_offsets
+                    src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
+                    acc += tl.load(src_ptr).to(acc_dtype)
+
+        out_ptr = C + linear_offsets
+        out_ptr = tl.max_contiguous(tl.multiple_of(out_ptr, BLOCK_SIZE), BLOCK_SIZE)
+        tl.store(out_ptr, acc.to(C.type.element_ty))
 
 def _default_chunk_size(total_tiles: int, group_size_m: int, num_xcds: int) -> int:
     chunk_size = group_size_m * group_size_m
@@ -439,7 +501,6 @@ def _reduce_block_size_n(N: int) -> int:
 
 
 def _make_origami_selector(M: int, N: int, K: int, A: torch.Tensor, B: torch.Tensor, C):
-    from tritonblas.matmul import _make_matmul_selector
 
     c_dtype = C.dtype if hasattr(C, "dtype") else C
     return _make_matmul_selector(
@@ -452,99 +513,6 @@ def _make_origami_selector(M: int, N: int, K: int, A: torch.Tensor, B: torch.Ten
         A.device,
         streamk=False,
     )
-
-
-def _build_transfer_plan(M: int, N: int, world_size: int, launch: dict, element_size: int, wave_plan) -> dict:
-    block_size_m = launch["block_size_m"]
-    block_size_n = launch["block_size_n"]
-    rows_per_rank = M // world_size
-    num_sms = launch["num_sms"]
-    num_xcds = launch["num_xcds"]
-    chunk_size = launch["chunk_size"]
-    num_tiles_m = launch["num_tiles_m"]
-    num_tiles_n = launch["num_tiles_n"]
-    total_tiles = launch["total_tiles"]
-    group_size_m = launch["group_size_m"]
-
-    # Use wave plan's wave count instead of calculating our own
-    num_waves = wave_plan.num_waves
-
-    transfers_by_owner_wave = [[[] for _ in range(num_waves)] for _ in range(world_size)]
-    wave_tile_counts = [0 for _ in range(num_waves)]
-
-    for launch_pid in range(num_sms):
-        tile_id = chiplet_transform_chunked(launch_pid, num_sms, num_xcds, chunk_size)
-        wave_id = 0
-        while tile_id < total_tiles:
-            pid_m, pid_n, _ = grouped_tile_coords(
-                tile_id,
-                num_tiles_m,
-                num_tiles_n,
-                group_size_m,
-                num_xcds,
-                chunk_size,
-            )
-            tile_m_start = pid_m * block_size_m
-            tile_m_end = min(tile_m_start + block_size_m, M)
-            col = pid_n * block_size_n
-            width = min(block_size_n, N - col)
-            wave_tile_counts[wave_id] += 1
-
-            for owner_rank in range(world_size):
-                owner_start = owner_rank * rows_per_rank
-                owner_end = owner_start + rows_per_rank
-                seg_start = max(tile_m_start, owner_start)
-                seg_end = min(tile_m_end, owner_end)
-                if seg_start < seg_end:
-                    local_m = seg_start - owner_start
-                    transfers_by_owner_wave[owner_rank][wave_id].append(
-                        (local_m, col, width * element_size, seg_end - seg_start)
-                    )
-            tile_id += num_sms
-            wave_id += 1
-
-    wave_transfer_offsets = []
-    wave_transfer_counts = []
-    owner_last_wave = []
-    transfer_row_offsets = []
-    transfer_col_offsets = []
-    transfer_width_bytes = []
-    transfer_heights = []
-    max_rects_per_owner_wave = 0
-    running_offset = 0
-
-    for owner_rank in range(world_size):
-        last_wave = -1
-        for wave_id, transfers in enumerate(transfers_by_owner_wave[owner_rank]):
-            if transfers:
-                last_wave = wave_id
-        owner_last_wave.append(last_wave)
-
-        for transfers in transfers_by_owner_wave[owner_rank]:
-            wave_transfer_offsets.append(running_offset)
-            wave_transfer_counts.append(len(transfers))
-            max_rects_per_owner_wave = max(max_rects_per_owner_wave, len(transfers))
-            for row, col, width_bytes, height in transfers:
-                transfer_row_offsets.append(row)
-                transfer_col_offsets.append(col)
-                transfer_width_bytes.append(width_bytes)
-                transfer_heights.append(height)
-            running_offset += len(transfers)
-
-    return {
-        "num_transfer_waves": num_waves,
-        "transfers_by_owner_wave": transfers_by_owner_wave,
-        "wave_tile_counts": wave_tile_counts,
-        "wave_transfer_offsets": wave_transfer_offsets,
-        "wave_transfer_counts": wave_transfer_counts,
-        "owner_last_wave": owner_last_wave,
-        "transfer_row_offsets": transfer_row_offsets,
-        "transfer_col_offsets": transfer_col_offsets,
-        "transfer_width_bytes": transfer_width_bytes,
-        "transfer_heights": transfer_heights,
-        "max_rects_per_owner_wave": max(1, max_rects_per_owner_wave),
-        "num_transfers": running_offset,
-    }
 
 
 def _build_partitioned_xcd_transfer_plan(M: int, N: int, world_size: int, launch: dict, element_size: int) -> dict:
@@ -568,44 +536,39 @@ def _build_partitioned_xcd_transfer_plan(M: int, N: int, world_size: int, launch
         first_pid_m = partition_m_start // block_size_m
         last_pid_m = _ceil_div(partition_m_end, block_size_m)
         partition_tiles_m = max(0, last_pid_m - first_pid_m)
-        partition_tiles = partition_tiles_m * num_pid_n
-        num_batches = _ceil_div(partition_tiles, sms_per_xcd) if partition_tiles > 0 else 0
-        max_batches_per_partition = max(max_batches_per_partition, num_batches)
-
         owner_batches = []
-        owner_counts = []
         last_wave = -1
-        for batch_iter in range(num_batches):
-            batch_transfers = []
-            for local_pid in range(sms_per_xcd):
-                local_tile_id = batch_iter * sms_per_xcd + local_pid
-                if local_tile_id >= partition_tiles:
-                    continue
 
-                num_pid_in_group = group_size_m * num_pid_n
-                group_id = local_tile_id // num_pid_in_group
-                first_group_pid_m = group_id * group_size_m
-                group_size = min(partition_tiles_m - first_group_pid_m, group_size_m)
-                local_pid_m = first_group_pid_m + ((local_tile_id % num_pid_in_group) % group_size)
-                pid_m = first_pid_m + local_pid_m
-                pid_n = (local_tile_id % num_pid_in_group) // group_size
+        partition_tiles = partition_tiles_m * num_pid_n
+        if partition_tiles > 0:
+            plan = build_launch_wave_plan(
+                num_tiles_m=partition_tiles_m,
+                num_tiles_n=num_pid_n,
+                group_size_m=group_size_m,
+                launch_grid=partition_tiles,
+                wave_size=sms_per_xcd,
+                num_xcds=1,
+                chunk_size=1,
+            )
+            max_batches_per_partition = max(max_batches_per_partition, plan.num_waves)
+            owner_batches = [[] for _ in range(plan.num_waves)]
+            owner_counts = list(plan.wave_tile_counts)
+            last_wave = max((wave_id for wave_id, count in enumerate(owner_counts) if count), default=-1)
 
-                tile_m_start = pid_m * block_size_m
-                tile_m_end = min(tile_m_start + block_size_m, M)
+            for transfer in plan.transfers:
+                tile_m_start = (first_pid_m + transfer.m_tile_start) * block_size_m
+                tile_m_end = min(tile_m_start + transfer.m_tile_count * block_size_m, M)
                 seg_start = max(tile_m_start, partition_m_start)
                 seg_end = min(tile_m_end, partition_m_end)
                 if seg_start >= seg_end:
                     continue
 
-                col = pid_n * block_size_n
-                width = min(block_size_n, N - col)
+                col = transfer.n_tile_start * block_size_n
+                width = min(transfer.n_tile_count * block_size_n, N - col)
                 local_m = seg_start - partition_m_start
-                batch_transfers.append((local_m, col, width * element_size, seg_end - seg_start))
-
-            owner_batches.append(batch_transfers)
-            owner_counts.append(len(batch_transfers))
-            if batch_transfers:
-                last_wave = batch_iter
+                owner_batches[transfer.wave_id].append((local_m, col, width * element_size, seg_end - seg_start))
+        else:
+            owner_counts = []
 
         transfers_by_owner_wave.append(owner_batches)
         batch_tile_counts_by_owner.append(owner_counts)
@@ -797,6 +760,91 @@ def _post_host_copy_engine_transfers(
     return (time.perf_counter() - start) * 1000.0
 
 
+def _post_host_copy_engine_broadcast_transfers(
+    shmem,
+    workspace: FusedWorkspace,
+    local_aux_buffer: torch.Tensor,
+    remote_inbox: torch.Tensor,
+    rank: int,
+    world_size: int,
+    M: int,
+    flag_iteration: int,
+) -> float:
+    """Queue host-side SDMA wait+copy packets for the one-shot all-gather of GEMM partials."""
+    start = time.perf_counter()
+    element_size = local_aux_buffer.element_size()
+    stride_local_aux_m, stride_local_aux_n = local_aux_buffer.stride()
+    stride_remote_m, stride_remote_n = remote_inbox.stride()
+
+    transfers_by_partition_wave = workspace.transfers_by_owner_wave
+    wave_tile_counts = workspace.wave_tile_counts_host
+    max_batches_per_partition = workspace.num_transfer_waves
+    partition_rows = _ceil_div(M, world_size)
+
+    local_aux_base = local_aux_buffer.data_ptr()
+    remote_base = remote_inbox.data_ptr()
+    signal_ptr_local = workspace.completion_signals.data_ptr() + rank * workspace.completion_signals.element_size()
+
+    transfer_work = []
+    for partition_id, partition_waves in enumerate(transfers_by_partition_wave):
+        partition_m_start = partition_id * partition_rows
+        for wave_id, wave_transfers in enumerate(partition_waves):
+            if wave_transfers:
+                transfer_work.append((partition_id, partition_m_start, wave_id, wave_transfers))
+
+    for dst_rank in range(world_size):
+        if dst_rank == rank:
+            continue
+
+        for work_idx, (partition_id, partition_m_start, wave_id, wave_transfers) in enumerate(transfer_work):
+            wait_value = (flag_iteration + 1) * wave_tile_counts[partition_id][wave_id]
+            flag_id = partition_id * max_batches_per_partition + wave_id
+            wait_flag = workspace.locks.data_ptr() + flag_id * workspace.locks.element_size()
+            signal_flag = None
+            if work_idx == len(transfer_work) - 1:
+                signal_flag = shmem.heap.translate(signal_ptr_local, rank, dst_rank)
+
+            tiles = []
+            dst_ptrs = []
+            dst_strides = []
+            for row_offset, col_offset, width_bytes, height in wave_transfers:
+                width_elems = width_bytes // element_size
+                global_row = partition_m_start + row_offset
+
+                tile = sdma_ep.Tile()
+                tile.pid_m = 0
+                tile.pid_n = 0
+                tile.block_m = height
+                tile.block_n = width_elems
+                tile.elem_size = element_size
+                tile.src_stride = stride_local_aux_m * element_size
+
+                src_offset = global_row * stride_local_aux_m + col_offset * stride_local_aux_n
+                tile.data = local_aux_base + src_offset * element_size
+
+                dst_offset = (rank * M + global_row) * stride_remote_m + col_offset * stride_remote_n
+                dst_ptr_local = remote_base + dst_offset * element_size
+
+                tiles.append(tile)
+                dst_ptrs.append(shmem.heap.translate(dst_ptr_local, rank, dst_rank))
+                dst_strides.append(stride_remote_m * element_size)
+
+            shmem.put_tiles(
+                tiles,
+                dst_rank=dst_rank,
+                dst_ptrs=dst_ptrs,
+                dst_strides=dst_strides,
+                wait_flag=wait_flag,
+                wait_value=wait_value,
+                signal_flag=signal_flag,
+                signal_value=flag_iteration + 1,
+                async_op=True,
+                channel=0,
+            )
+
+    return (time.perf_counter() - start) * 1000.0
+
+
 def matmul_all_reduce_copy_engine_prepost_transfers(
     shmem,
     A: torch.Tensor,
@@ -804,13 +852,15 @@ def matmul_all_reduce_copy_engine_prepost_transfers(
     workspace: FusedWorkspace,
     flag_iteration: int = 0,
 ) -> float:
-    """Queue two_shot SDMA wait+copy packets before the timed GEMM launch."""
+    """Queue SDMA wait+copy packets before the timed GEMM launch."""
     if workspace is None:
         raise ValueError("workspace is required when preposting copy-engine transfers")
-    if workspace.variant != "two_shot":
+    if workspace.variant not in ("one_shot", "two_shot"):
         return 0.0
-    if workspace.aux_buffer is None or workspace.a_inbox is None:
-        raise ValueError("two_shot workspace must have aux_buffer and a_inbox before preposting")
+    if workspace.a_inbox is None:
+        raise ValueError("copy-engine workspace must have a_inbox before preposting")
+    if workspace.variant == "two_shot" and workspace.aux_buffer is None:
+        raise ValueError("two_shot copy-engine workspace must have aux_buffer before preposting")
 
     M, _ = A.shape
     N = B.shape[1]
@@ -820,6 +870,20 @@ def matmul_all_reduce_copy_engine_prepost_transfers(
         raise ValueError("workspace.launch_params must be initialized before preposting")
 
     _ensure_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
+    if workspace.variant == "one_shot":
+        rank = shmem.get_rank()
+        local_inbox_slice = workspace.a_inbox[rank * M : (rank + 1) * M, :]
+        return _post_host_copy_engine_broadcast_transfers(
+            shmem,
+            workspace,
+            local_inbox_slice,
+            workspace.a_inbox,
+            rank,
+            world_size,
+            M,
+            flag_iteration,
+        )
+
     return _post_host_copy_engine_transfers(
         shmem,
         workspace,
@@ -843,49 +907,14 @@ def _selector_active_cus(selector, device: torch.device) -> int:
 def _matmul_all_reduce_copy_engine_launch_params(
     M: int,
     N: int,
-    K: int,
     selector,
     device: torch.device,
-    element_size: int,
-    variant: str,
 ) -> dict:
     block_size_m = selector.block_m
     block_size_n = selector.block_n
     block_size_k = selector.block_k
     group_size_m = selector.group_m
     num_stages = getattr(selector, "num_stages", 2)
-    selector_fallback = False
-
-    # Origami's 256x256 tile is great when GEMM dominates, but one_shot also
-    # does a full remote-rank reduction per output tile. For shallow K shapes,
-    # keeping the old narrow-N tile avoids making each reduction work item too
-    # large while still allowing the selector path for deeper GEMMs.
-    if (
-        variant == "one_shot"
-        and K < 16 * 1024
-        and block_size_m == 256
-        and block_size_n == 256
-        and block_size_k == 64
-    ):
-        block_size_n = 64
-        group_size_m = 1
-        num_stages = None
-        selector_fallback = True
-
-    # Atomic/spinlock variants can exceed the MI300 64 KiB LDS cap with the
-    # common 256x256x64 Origami tile. Prefer the old narrow-N tile first; only
-    # shrink M if a single-stage 256x64 tile still cannot fit.
-    estimated_stage_count = num_stages if num_stages is not None else 2
-    stage_bytes = (block_size_m * block_size_k + block_size_k * block_size_n) * element_size
-    if variant in ("atomic", "spinlock") and stage_bytes * estimated_stage_count > 64 * 1024:
-        block_size_n = min(block_size_n, 64)
-        block_size_k = min(block_size_k, 64)
-        group_size_m = 1
-        num_stages = 1
-        stage_bytes = (block_size_m * block_size_k + block_size_k * block_size_n) * element_size
-        if stage_bytes > 64 * 1024:
-            block_size_m = min(block_size_m, 128)
-        selector_fallback = True
 
     # Origami calls this num_sms, but it is the XCD/chiplet workgroup mapping
     # count used by chiplet_transform_chunked, not the persistent launch grid.
@@ -914,47 +943,9 @@ def _matmul_all_reduce_copy_engine_launch_params(
         "num_stages": num_stages,
         "matrix_instr_nonkdim": 16,
         "allow_tf32": torch.backends.cuda.matmul.allow_tf32,
-        "selector_fallback": selector_fallback,
         "reduce_block_size_m": 32,  # Match CCL default block_size_m
         "reduce_block_size_n": _reduce_block_size_n(N),
         "reduce_num_sms": _default_reduce_num_sms(),
-    }
-
-
-def _config_launch_params(M: int, N: int, config: FusedConfig, device: torch.device) -> dict:
-    num_tiles_m = (M + config.block_size_m - 1) // config.block_size_m
-    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
-    total_tiles = num_tiles_m * num_tiles_n
-
-    num_sms = config.num_sms
-    if num_sms is None:
-        props = torch.cuda.get_device_properties(device)
-        num_sms = props.multi_processor_count
-    num_sms = min(int(num_sms), total_tiles)
-
-    num_xcds = config.num_xcds
-    if num_xcds <= 0:
-        num_xcds = 1
-
-    return {
-        "block_size_m": config.block_size_m,
-        "block_size_n": config.block_size_n,
-        "block_size_k": config.block_size_k,
-        "group_size_m": config.group_size_m,
-        "num_xcds": num_xcds,
-        "num_tiles_m": num_tiles_m,
-        "num_tiles_n": num_tiles_n,
-        "total_tiles": total_tiles,
-        "num_sms": num_sms,
-        "chunk_size": max(1, config.chunk_size),
-        "num_warps": 8,
-        "num_stages": None,
-        "matrix_instr_nonkdim": 16,
-        "allow_tf32": config.allow_tf32,
-        "selector_fallback": False,
-        "reduce_block_size_m": 32,  # Match CCL default block_size_m
-        "reduce_block_size_n": _reduce_block_size_n(N),
-        "reduce_num_sms": config.reduce_num_sms,
     }
 
 
@@ -1001,22 +992,17 @@ def matmul_all_reduce_copy_engine_preamble(
             "because the final all-gather uses equal row shards."
         )
 
-    if selector is not None:
-        launch = _matmul_all_reduce_copy_engine_launch_params(
-            M, N, K, selector, A.device, A.element_size(), config.all_reduce_variant
-        )
-    elif _config_uses_default_gemm_tuning(config):
+    if selector is None:
         c_dtype = dtype if out_dtype is None else out_dtype
         selector = _make_origami_selector(M, N, K, A, B, c_dtype)
-        launch = _matmul_all_reduce_copy_engine_launch_params(
-            M, N, K, selector, A.device, A.element_size(), config.all_reduce_variant
-        )
-    else:
-        launch = _config_launch_params(M, N, config, A.device)
 
+    launch = _matmul_all_reduce_copy_engine_launch_params(M, N, selector, A.device)
+
+    launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
     if config.all_reduce_variant == "two_shot":
-        launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
         launch["reduce_num_sms"] = _default_reduce_num_sms()
+    else:
+        launch["reduce_num_sms"] = launch["num_sms"]
 
     if workspace is None:
         workspace = FusedWorkspace()
@@ -1029,52 +1015,31 @@ def matmul_all_reduce_copy_engine_preamble(
     workspace.selector = selector
     workspace.config = config
     workspace.launch_params = launch
-    workspace.selector_fallback = launch["selector_fallback"]
-    # workspace.prepared = False
 
-    # Allocate auxiliary buffer for one_shot and two_shot to avoid race conditions
-    # (GEMM results stored here, then reduced to final output)
-    if config.all_reduce_variant in ["one_shot", "two_shot"]:
-        aux_rows = M
+    aux_rows = M
 
+    if config.all_reduce_variant == "two_shot":
         if workspace.aux_buffer is None or workspace.aux_buffer.shape != (aux_rows, N):
             workspace.aux_buffer = shmem.zeros((aux_rows, N), dtype=dtype)
         else:
             workspace.aux_buffer.zero_()
-
-    # Pre-create CCL config and input_view to avoid overhead on every iteration
-    if config.all_reduce_variant == "two_shot":
-        workspace.ccl_config = CCLConfig()
-        # Pre-create the input view for all_gather (this rank's slice of aux_buffer)
-        rank = shmem.get_rank()
-        rows_per_rank = M // world_size
-        workspace.all_gather_input_view = workspace.aux_buffer[rank * rows_per_rank:(rank + 1) * rows_per_rank, :]
-
-        if config.all_reduce_variant == "two_shot":
-            if workspace.a_inbox is None or workspace.a_inbox.shape != (aux_rows, N):
-                workspace.a_inbox = shmem.zeros((aux_rows, N), dtype=dtype)
-            else:
-                workspace.a_inbox.zero_()
-            _ensure_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
-            workspace.locks.zero_()
-            workspace.completion_signals.zero_()
-        else:
-            workspace.a_inbox = None
-            if workspace.locks is None or workspace.locks.numel() != launch["total_tiles"]:
-                workspace.locks = shmem.zeros((launch["total_tiles"],), dtype=torch.int32)
-            else:
-                workspace.locks.zero_()
+        inbox_rows = aux_rows
     else:
         workspace.aux_buffer = None
-        workspace.a_inbox = None
-        workspace.locks = None
-        workspace.completion_signals = None
+        inbox_rows = aux_rows * world_size
+
+    if workspace.a_inbox is None or workspace.a_inbox.shape != (inbox_rows, N):
+        workspace.a_inbox = shmem.zeros((inbox_rows, N), dtype=dtype)
+    else:
+        workspace.a_inbox.zero_()
+    _ensure_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
+    workspace.locks.zero_()
+    workspace.completion_signals.zero_()
 
     # Zero output tensor
     C.zero_()
     shmem.barrier()
 
-    # workspace.prepared = True
     return workspace
 
 
@@ -1089,11 +1054,15 @@ def matmul_all_reduce_copy_engine(
     selector=None,
     flag_iteration: int = 0,
     copy_engine_transfers_preposted: bool = False,
+    split_completion_wait: bool = False,
 ) -> FusedWorkspace:
     """
-    Fused matrix multiplication and all-reduce using atomic operations.
+    Fused matrix multiplication and all-reduce using SDMA copy-engine transfers.
 
-    Computes: C = all_reduce(A @ B) across all ranks using atomic adds.
+    Computes: C = all_reduce(A @ B) across all ranks. The one_shot variant
+    broadcasts every rank's GEMM output to all peers and reduces locally; the
+    two_shot variant copies row shards to owner ranks, reduces them, then
+    all-gathers the reduced shards.
 
     Args:
         shmem: Iris shmem context
@@ -1104,16 +1073,16 @@ def matmul_all_reduce_copy_engine(
         config: Optional FusedConfig for tuning. If None, uses defaults.
         workspace: Optional pre-allocated workspace. If None, creates new one.
         selector: Optional pre-built tritonBLAS Origami selector.
-        profile: Optional dict populated with GEMM and reduce/all-gather CUDA
-            event timings plus host SDMA posting wall time. Enabling this forces
-            event synchronization and is intended for instrumentation, not the
-            hot benchmark path.
         flag_iteration: Launch generation for cumulative copy-engine wait and
             completion counters. Increment this when reusing a workspace without
             zeroing its synchronization buffers.
-        copy_engine_transfers_preposted: If True, the two_shot SDMA wait+copy
+        copy_engine_transfers_preposted: If True, the SDMA wait+copy
             packets for this flag_iteration were already queued by the caller,
             usually from a benchmark preamble_fn outside the timed region.
+        split_completion_wait: If True, launch a separate completion-wait
+            kernel and run the reduce kernel with its inline completion wait
+            disabled. This is intended for profiling wait time, not the hot
+            benchmark path.
 
     Returns:
         workspace: Updated workspace object (can be reused for subsequent calls)
@@ -1155,27 +1124,6 @@ def matmul_all_reduce_copy_engine(
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
-    # DEBUG
-    # if rank == 0 and flag_iteration < 3:
-    #     print(f"DEBUG operator entry: flag_iteration={flag_iteration}, workspace_id={id(workspace) if workspace else 'None'}, "
-    #           f"has_bench_events={hasattr(workspace, 'bench_start_events') if workspace else False}")
-
-    from iris.host.logging.logging import _log_rank
-
-    _log_rank(
-        logging.DEBUG,
-        "matmul_all_reduce_copy_engine: shape=(%d,%d,%d) dtype=%s variant=%s rank=%d/%d",
-        M,
-        N,
-        K,
-        A.dtype,
-        config.all_reduce_variant,
-        rank,
-        world_size,
-        rank=rank,
-        num_ranks=world_size,
-    )
-
     config.validate(world_size=world_size)
 
     # Prepare workspace if needed
@@ -1191,39 +1139,15 @@ def matmul_all_reduce_copy_engine(
             out_dtype=C.dtype,
         )
 
-    # Get device context for RMA
-    device_context = shmem.get_device_context()
-
     launch = workspace.launch_params
 
     block_size_m = launch["block_size_m"]
     block_size_n = launch["block_size_n"]
     block_size_k = launch["block_size_k"]
-    total_tiles = launch["total_tiles"]
 
-    # if config_launch_override or getattr(workspace, "selector", None) is None:
-    #     # Validate problem size against explicit FusedConfig block sizes.
-    #     assert M >= block_size_m, f"M={M} too small for block_size_m={block_size_m}"
-    #     assert K >= block_size_k, f"K={K} too small for block_size_k={block_size_k}"
-    #     assert N >= block_size_n, f"N={N} too small for block_size_n={block_size_n}"
-
-    if config.all_reduce_variant == "two_shot":
-        _ensure_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
-        required_locks = workspace.num_transfer_flags
-    else:
-        required_locks = total_tiles
-
-    # Validate that the pre-allocated lock array is large enough for the current
-    # synchronization scheme. The two_shot copy-engine path uses one flag per
-    # owner-rank/XCD batch; the legacy paths use one flag per output tile.
-    if workspace.locks is not None and workspace.locks.numel() < required_locks:
-        raise ValueError(
-            f"Lock array too small: have {workspace.locks.numel()} but need {required_locks}. "
-            f"Pre-allocate workspace with the smallest block sizes you intend to use."
-        )
+    _ensure_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
 
     even_k = K % block_size_k == 0
-    grid = (launch["num_sms"],)
     launch_kwargs = {
         "num_warps": launch["num_warps"],
         "matrix_instr_nonkdim": launch["matrix_instr_nonkdim"],
@@ -1231,115 +1155,154 @@ def matmul_all_reduce_copy_engine(
     if launch["num_stages"] is not None:
         launch_kwargs["num_stages"] = launch["num_stages"]
 
-    stride_local_aux_m, stride_local_aux_n = workspace.aux_buffer.stride()
-    reduce_buffer = workspace.a_inbox if config.all_reduce_variant == "two_shot" else workspace.aux_buffer
+    if config.all_reduce_variant == "one_shot":
+        # Rank-major all-inbox layout:
+        # a_inbox[src_rank * M + row, col] holds src_rank's GEMM partial.
+        gemm_output_buffer = workspace.a_inbox[rank * M : (rank + 1) * M, :]
+    else:
+        gemm_output_buffer = workspace.aux_buffer
+    stride_local_aux_m, stride_local_aux_n = gemm_output_buffer.stride()
+    reduce_buffer = workspace.a_inbox
     stride_reduce_m, stride_reduce_n = reduce_buffer.stride()
 
-    # Record GEMM start event for benchmark
-    # should_record_gemm = (hasattr(workspace, 'bench_gemm_start_events') and workspace.bench_gemm_start_events is not None
-    #                      and flag_iteration < len(workspace.bench_gemm_start_events))
-    # if should_record_gemm:
-    #     workspace.bench_gemm_start_events[flag_iteration].record()
+    gemm_num_sms = launch.get("gemm_num_sms")
+    if gemm_num_sms is None:
+        gemm_num_sms = _partitioned_xcd_gemm_num_sms(launch, world_size)
+        launch["gemm_num_sms"] = gemm_num_sms
+    iris_launch(
+        _partitioned_xcd_matmul_kernel,
+        (gemm_num_sms,),
+        A,
+        B,
+        gemm_output_buffer,
+        reduce_buffer,
+        workspace.locks,
+        M,
+        N,
+        K,
+        stride_am,
+        stride_ak,
+        stride_bk,
+        stride_bn,
+        stride_local_aux_m,
+        stride_local_aux_n,
+        stride_reduce_m,
+        stride_reduce_n,
+        rank,
+        block_size_m,
+        block_size_n,
+        block_size_k,
+        launch["group_size_m"],
+        gemm_num_sms,
+        launch["num_xcds"],
+        launch["chunk_size"],
+        world_size,
+        workspace.num_transfer_waves,
+        config.all_reduce_variant == "two_shot",
+        even_k,
+        launch["allow_tf32"],
+        algorithm="matmul_all_reduce_copy_engine_partitioned_xcd_gemm",
+        rank=rank,
+        dtype=A.dtype,
+        **launch_kwargs,
+    )
 
-    if config.all_reduce_variant == "two_shot":
-        gemm_num_sms = launch.get("gemm_num_sms")
-        if gemm_num_sms is None:
-            gemm_num_sms = _partitioned_xcd_gemm_num_sms(launch, world_size)
-            launch["gemm_num_sms"] = gemm_num_sms
-        iris_launch(
-            _partitioned_xcd_matmul_kernel,
-            (gemm_num_sms,),
+    if not copy_engine_transfers_preposted:
+        matmul_all_reduce_copy_engine_prepost_transfers(
+            shmem,
             A,
             B,
-            workspace.aux_buffer,
-            reduce_buffer,
-            workspace.locks,
-            M,
-            N,
-            K,
-            stride_am,
-            stride_ak,
-            stride_bk,
-            stride_bn,
-            stride_local_aux_m,
-            stride_local_aux_n,
-            stride_reduce_m,
-            stride_reduce_n,
-            rank,
-            block_size_m,
-            block_size_n,
-            block_size_k,
-            launch["group_size_m"],
-            gemm_num_sms,
-            launch["num_xcds"],
-            launch["chunk_size"],
-            world_size,
-            workspace.num_transfer_waves,
-            even_k,
-            launch["allow_tf32"],
-            algorithm="matmul_all_reduce_copy_engine_partitioned_xcd_gemm",
-            rank=rank,
-            dtype=A.dtype,
-            **launch_kwargs,
-        )
-    else:
-        # one_shot variant: use old kernel (tritonblas doesn't handle one_shot logic)
-        iris_launch(
-            _fused_matmul_all_reduce_copy_engine_kernel,
-            grid,
-            A,
-            B,
-            C,
-            workspace.aux_buffer,
-            reduce_buffer,
-            workspace.locks,
-            M,
-            N,
-            K,
-            stride_am,
-            stride_ak,
-            stride_bk,
-            stride_bn,
-            stride_local_aux_m,
-            stride_local_aux_n,
-            stride_reduce_m,
-            stride_reduce_n,
-            stride_cm,
-            stride_cn,
-            device_context,
-            rank,
-            world_size,
-            block_size_m,
-            block_size_n,
-            block_size_k,
-            launch["group_size_m"],
-            launch["num_sms"],
-            launch["num_xcds"],
-            launch["chunk_size"],
-            even_k,
-            launch["allow_tf32"],
-            config.all_reduce_variant,
-            algorithm="matmul_all_reduce_copy_engine",
-            rank=rank,
-            dtype=A.dtype,
-            **launch_kwargs,
+            workspace,
+            flag_iteration,
         )
 
-    # Record GEMM end event for benchmark
-    # if should_record_gemm:
-    #     workspace.bench_gemm_end_events[flag_iteration].record()
+    if config.all_reduce_variant == "one_shot":
+        reduce_block_size_m = 1
+        reduce_block_size_n = 512
+        num_sms = max(launch["reduce_num_sms"], launch["num_sms"] * 3)
+        wait_for_completion = True
+        if split_completion_wait:
+            iris_launch(
+                _matmul_all_reduce_copy_engine_wait_completion_kernel,
+                (world_size,),
+                workspace.completion_signals,
+                flag_iteration + 1,
+                cur_rank=rank,
+                world_size=world_size,
+                algorithm="matmul_all_reduce_copy_engine_wait_completion",
+                rank=rank,
+                dtype=A.dtype,
+                num_warps=1,
+            )
+            wait_for_completion = False
 
-    host_post_ms = 0.0
-    if config.all_reduce_variant == "two_shot":
-        if not copy_engine_transfers_preposted:
-            host_post_ms = matmul_all_reduce_copy_engine_prepost_transfers(
-                shmem,
-                A,
-                B,
-                workspace,
-                flag_iteration,
+        total_reduce_elements = M * N
+        use_flat_local_reduce = (
+            C.is_contiguous()
+            and gemm_output_buffer.is_contiguous()
+            and workspace.a_inbox.is_contiguous()
+            and total_reduce_elements % reduce_block_size_n == 0
+        )
+
+        if use_flat_local_reduce:
+            total_reduce_blocks = total_reduce_elements // reduce_block_size_n
+            reduce_grid = (min(num_sms, total_reduce_blocks),)
+            iris_launch(
+                _matmul_all_reduce_copy_engine_local_reduce_flat_kernel,
+                reduce_grid,
+                C,
+                gemm_output_buffer,
+                workspace.a_inbox,
+                workspace.completion_signals,
+                flag_iteration + 1,
+                total_reduce_elements,
+                cur_rank=rank,
+                world_size=world_size,
+                BLOCK_SIZE=reduce_block_size_n,
+                NUM_SMS=num_sms,
+                WAIT_FOR_COMPLETION=wait_for_completion,
+                algorithm="matmul_all_reduce_copy_engine_local_reduce_flat",
+                rank=rank,
+                dtype=A.dtype,
+                num_warps=4,
+                num_stages=2,
+            )
+        else:
+            reduce_tiles_m = (M + reduce_block_size_m - 1) // reduce_block_size_m
+            reduce_tiles_n = (N + reduce_block_size_n - 1) // reduce_block_size_n
+            total_reduce_tiles = reduce_tiles_m * reduce_tiles_n
+            reduce_grid = (min(num_sms, total_reduce_tiles),)
+            iris_launch(
+                _matmul_all_reduce_copy_engine_local_reduce_kernel,
+                reduce_grid,
+                C,
+                gemm_output_buffer,
+                workspace.a_inbox,
+                workspace.completion_signals,
+                flag_iteration + 1,
+                M,
+                N,
+                gemm_output_buffer.stride(0),
+                gemm_output_buffer.stride(1),
+                workspace.a_inbox.stride(0),
+                workspace.a_inbox.stride(1),
+                C.stride(0),
+                C.stride(1),
+                cur_rank=rank,
+                world_size=world_size,
+                REDUCE_BLOCK_SIZE_M=reduce_block_size_m,
+                REDUCE_BLOCK_SIZE_N=reduce_block_size_n,
+                GROUP_SIZE_M=launch["group_size_m"],
+                NUM_SMS=num_sms,
+                WAIT_FOR_COMPLETION=wait_for_completion,
+                algorithm="matmul_all_reduce_copy_engine_local_reduce",
+                rank=rank,
+                dtype=A.dtype,
+                num_warps=4,
+                num_stages=1,
             )
 
+    if config.all_reduce_variant == "two_shot":
         reduce_block_size_m = launch["reduce_block_size_m"]
         reduce_block_size_n = launch["reduce_block_size_n"]
         rows_per_rank = M // world_size
@@ -1383,38 +1346,6 @@ def matmul_all_reduce_copy_engine(
             dtype=A.dtype,
             num_warps=4,
         )
-
-        # ALTERNATIVE: CCL all_gather path (commented out - uncomment to use CCL instead of device-side)
-        # Use pre-created CCL config and input_view from workspace (created in preamble)
-        # ccl_config = workspace.ccl_config
-        # input_view = workspace.all_gather_input_view
-
-        # Record all_gather event for benchmark
-        # should_record = (hasattr(workspace, 'bench_start_events') and workspace.bench_start_events is not None
-        #                 and flag_iteration < len(workspace.bench_start_events))
-
-        # if should_record:
-        #     workspace.bench_start_events[flag_iteration].record()
-
-        # all_gather_launch(
-        #     input_view,
-        #     C,
-        #     shmem,
-        #     rank,      # rank_in_group
-        #     rank,      # rank_global
-        #     world_size,
-        #     0,         # rank_start
-        #     1,         # rank_stride
-        #     ccl_config,
-        # )
-
-        # if should_record:
-        #     workspace.bench_end_events[flag_iteration].record()
-
-
-    # Mark workspace as used
-    # if workspace is not None:
-    #     workspace.prepared = False
 
     # Barrier unless async
     if not async_op:

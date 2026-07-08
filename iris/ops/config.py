@@ -34,6 +34,7 @@ class FusedConfig:
         all_reduce_variant: All-reduce algorithm variant. Options: "atomic", "ring",
                            "one_shot", "two_shot", "spinlock". Default: "two_shot".
         all_reduce_num_rings: Number of concurrent rings (for ring variant). Default: 1.
+        reduce_num_sms: Maximum number of SMs to use for reduce-scatter style communication kernels. Default: 64.
 
     Example:
         >>> # Use defaults
@@ -61,6 +62,7 @@ class FusedConfig:
     # CCL-specific parameters
     all_reduce_variant: str = "two_shot"  # atomic, ring, one_shot, two_shot, spinlock
     all_reduce_num_rings: int = 1
+    reduce_num_sms: int = 64
 
     def validate(self, world_size: Optional[int] = None):
         """
@@ -102,3 +104,5 @@ class FusedConfig:
 
         if self.all_reduce_num_rings <= 0:
             raise ValueError(f"all_reduce_num_rings must be positive, got {self.all_reduce_num_rings}")
+        if self.reduce_num_sms <= 0:
+            raise ValueError(f"reduce_num_sms must be positive, got {self.reduce_num_sms}")

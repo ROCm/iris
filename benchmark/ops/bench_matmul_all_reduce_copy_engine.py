@@ -4,8 +4,6 @@
 
 """Benchmarks for matmul + all-reduce copy-engine variants."""
 
-import os
-import statistics
 import torch
 import iris.bench as bench
 
@@ -65,13 +63,9 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
     )
 
     flag_iteration = [0]
-    # TEMPORARY: Disable SDMA transfers to isolate all_gather performance
-    prepost_transfers = False  # variant == "two_shot"
-    last_host_post_ms = [0.0]
+    prepost_transfers = variant in ("one_shot") #, "two_shot")
 
     def _run_copy_engine():
-        # if ctx.get_rank() == 0 and flag_iteration[0] < 3:
-        #     print(f"DEBUG _run_copy_engine: flag_iteration={flag_iteration[0]}")
         _copy_engine(
             ctx,
             C,
@@ -84,87 +78,25 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
             copy_engine_transfers_preposted=prepost_transfers,
         )
         flag_iteration[0] += 1
-        # if ctx.get_rank() == 0 and flag_iteration[0] <= 3:
-        #     print(f"DEBUG _run_copy_engine done: flag_iteration={flag_iteration[0]}")
 
     def _preamble():
-        pass
-
-    # Benchmark runs: 1 initial + n_warmup + n_repeat iterations
-    # Allocate +1 event for iteration 0 so we can use flag_iteration directly as index
-    n_warmup = state._n_warmup
-    n_repeat = state._n_repeat
-    n_total = 1 + n_warmup + n_repeat  # +1 for iteration 0
-
-    # Create event arrays
-    # gemm_start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_total)]
-    # gemm_end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_total)]
-    # allgather_start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_total)]
-    # allgather_end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_total)]
-
-    # # Store events and iteration info in workspace
-    # workspace.bench_gemm_start_events = gemm_start_events
-    # workspace.bench_gemm_end_events = gemm_end_events
-    # workspace.bench_start_events = allgather_start_events
-    # workspace.bench_end_events = allgather_end_events
-    # workspace.bench_n_warmup = n_warmup
-    # workspace.bench_n_repeat = n_repeat
+        if prepost_transfers:
+            matmul_all_reduce_copy_engine_prepost_transfers(
+                ctx,
+                A,
+                B,
+                workspace,
+                flag_iteration[0],
+            )
 
     def _run():
         _run_copy_engine()
 
-        # After the last iteration, calculate timing from recorded events
-        # DISABLED: Event recording adds overhead to e2e time
-        # if flag_iteration[0] == n_total:
-        #     torch.cuda.synchronize()
-
-        #     # Only use events from the timed iterations (skip iteration 0 and warmup)
-        #     timed_start = 1 + n_warmup
-        #     timed_end = n_total  # All iterations completed
-        #     actual_timed = timed_end - timed_start
-
-        #     if ctx.get_rank() == 0:
-        #         print(f"DEBUG: Calculating timings: timed_start={timed_start}, timed_end={timed_end}, actual_timed={actual_timed}")
-
-        #     if actual_timed > 0:
-        #         gemm_times = [gemm_start_events[i].elapsed_time(gemm_end_events[i])
-        #                       for i in range(timed_start, timed_end)]
-        #         allgather_times = [allgather_start_events[i].elapsed_time(allgather_end_events[i])
-        #                           for i in range(timed_start, timed_end)]
-
-        #         avg_gemm_ms = statistics.mean(gemm_times)
-        #         avg_allgather_ms = statistics.mean(allgather_times)
-
-        #         state.add_counter("gemm_ms_profile", avg_gemm_ms)
-        #         state.add_counter("gemm_ms_profile_min", min(gemm_times))
-        #         state.add_counter("gemm_ms_profile_max", max(gemm_times))
-        #         state.add_counter("reduce_allgather_no_wait_ms_profile", avg_allgather_ms)
-        #         state.add_counter("reduce_allgather_no_wait_ms_profile_min", min(allgather_times))
-        #         state.add_counter("reduce_allgather_no_wait_ms_profile_max", max(allgather_times))
-        #         state.add_counter("reduce_allgather_ms_profile", avg_allgather_ms)
-        #         state.add_counter("copy_completion_wait_ms_profile", 0.0)
-        #         state.add_counter("profile_samples", actual_timed)
-        #     else:
-        #         state.add_counter("reduce_allgather_no_wait_ms_profile", 0.0)
-        #         state.add_counter("reduce_allgather_ms_profile", 0.0)
-        #         state.add_counter("copy_completion_wait_ms_profile", 0.0)
-        #         state.add_counter("gemm_ms_profile", 0.0)
-        #         state.add_counter("profile_samples", 0)
-
     state.set_flops(2 * M * N * K)
     state.exec(_run, preamble_fn=_preamble)
 
-    # Don't clear events - they'll be garbage collected and clearing them causes issues
-    # if the workspace is reused across benchmark invocations
-    # workspace.bench_gemm_start_events = None
-    # workspace.bench_gemm_end_events = None
-    # workspace.bench_start_events = None
-    # workspace.bench_end_events = None
-    # workspace.bench_event_count = None
     state.set_bytes((world_size - 1) * M * N * C.element_size())
     launch = workspace.launch_params
-    state.add_counter("uses_selector", int(workspace.selector is not None))
-    state.add_counter("selector_fallback", int(workspace.selector_fallback))
     state.add_counter("block_m", launch["block_size_m"])
     state.add_counter("block_n", launch["block_size_n"])
     state.add_counter("block_k", launch["block_size_k"])
@@ -174,10 +106,13 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
     state.add_counter("grid_size", launch["num_sms"])
     state.add_counter("total_tiles", launch["total_tiles"])
     state.add_counter("num_stages", launch["num_stages"] or 0)
-    state.add_counter("aux_rows", workspace.aux_buffer.shape[0])
+    state.add_counter("aux_rows", workspace.aux_buffer.shape[0] if workspace.aux_buffer is not None else 0)
     state.add_counter("reduce_rows", workspace.a_inbox.shape[0] if workspace.a_inbox is not None else 0)
     state.add_counter("transfer_waves", getattr(workspace, "num_transfer_waves", 0))
-    state.add_counter("transfer_rects", getattr(workspace, "num_transfers", 0))
+    transfer_rects = getattr(workspace, "num_transfers", 0)
+    if variant == "one_shot":
+        transfer_rects *= world_size - 1
+    state.add_counter("transfer_rects", transfer_rects)
     state.add_counter("reduce_block_m", launch["reduce_block_size_m"])
     state.add_counter("reduce_block_n", launch["reduce_block_size_n"])
     state.add_counter("reduce_num_sms", launch.get("reduce_num_sms", 0))
