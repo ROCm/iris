@@ -1,69 +1,35 @@
-# iris all-reduce reproducer
+# llama70b reproducer
 
-Correctness and performance for the iris one-shot collectives on
-Llama-3.3-70B-FP8 at TP=8. Two arms, each a baked image (vllm, aiter, iris pinned):
-
-- **baseline** (`Dockerfile.baseline`) - AMD production config: broad aiter off,
-  the all-reduce is QuickReduce INT4.
-- **exp** (`Dockerfile.exp`) - the iris one-shot all-reduce (`AITER_COMMS_BACKEND=iris`).
-
-The A/B isolates the all-reduce path. All vLLM behavior env is baked into the images;
-the scripts only run the workload against the server.
+Self-contained reproducer. `./run.sh` builds each arm's image, runs its workload,
+then extracts a flat `data.csv` and renders `report.ipynb`. It runs standalone:
+`./run.sh` is exactly what produced these numbers.
 
 ## Requirements
 
-- 8x MI350 (gfx950)
-- Docker with ROCm device access
-
-```sh
-RUN="docker run --rm -it \
-  --device /dev/kfd --device /dev/dri --group-add video \
-  --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
-  --ipc host --network host --shm-size 16g \
-  -v $(pwd):/repro -w /repro"
-```
+- Docker with ROCm device access (the run mounts /dev/kfd, /dev/dri, video group).
+- python3 with pandas, matplotlib, and perfetto (for `preprocess.py` + the notebook).
 
 ## Run
 
-Build each image once, then run the commands you need against it. The A/B is the
-baseline image vs the exp image; compare their outputs.
-
 ```sh
-docker build -f Dockerfile.baseline -t iris-repro:baseline .
-docker build -f Dockerfile.exp      -t iris-repro:exp      .
-
-$RUN iris-repro:baseline ./bench.sh     # perf: serving metrics (TTFT/TPOT/E2EL/throughput)
-$RUN iris-repro:exp      ./bench.sh
-
-$RUN iris-repro:baseline ./profile.sh   # traces + per-kernel tables (what data.csv needs)
-$RUN iris-repro:exp      ./profile.sh
-
-$RUN iris-repro:baseline ./eval.sh      # gsm8k accuracy gate (correctness)
-$RUN iris-repro:exp      ./eval.sh
-
-$RUN iris-repro:exp      ./test.sh      # iris collective correctness (exp stack, no server)
+./run.sh       # build images, run every arm -> raw output in data/
+./analyze.sh   # preprocess data/ -> data.csv, render report.ipynb (re-runnable)
 ```
 
-The four commands share one server config (`_serve.sh`) so perf, traces, and the
-correctness gate all describe the same server. Each writes RAW artifacts under
-`output/<arm>/`: `results/` (the workload result JSON), `profile/{summary,traces,ir}/`
-(profiling run), and `arm.json` (the resolved operating point + installed code SHAs).
+## Arms
 
-Default operating point is `decode64` (8192 in / 1024 out, concurrency 64), warm
-(`WARMUP=64`, warmup requests excluded from the metrics). Knobs: `WORKLOAD=confluence`
-(the guide's 1024/1024/conc-4 example), `WARMUP=0` (cold), `DATA=real` (ShareGPT).
+- `decode64-baseline-profile-traces-warm`: build `docker/Dockerfile.baseline`, run `./scripts/profile.sh` (PROFILE=summary,traces, WARMUP=64, WORKLOAD=decode64)
+- `decode64-aiter-profile-traces-warm`: build `docker/Dockerfile.aiter`, run `./scripts/profile.sh` (PROFILE=summary,traces, WARMUP=64, WORKLOAD=decode64)
+- `decode64-exp-profile-traces-warm`: build `docker/Dockerfile.exp`, run `./scripts/profile.sh` (GPU_MEM_UTIL=0.90, PROFILE=summary,traces, WARMUP=64, WORKLOAD=decode64)
+- `decode64-baseline-eval`: build `docker/Dockerfile.baseline`, run `./scripts/eval.sh` (WORKLOAD=decode64)
+- `decode64-aiter-eval`: build `docker/Dockerfile.aiter`, run `./scripts/eval.sh` (WORKLOAD=decode64)
+- `decode64-exp-eval`: build `docker/Dockerfile.exp`, run `./scripts/eval.sh` (GPU_MEM_UTIL=0.90, WORKLOAD=decode64)
+- `decode64-baseline-bench-warm`: build `docker/Dockerfile.baseline`, run `./scripts/bench.sh` (WARMUP=64, WORKLOAD=decode64)
+- `decode64-aiter-bench-warm`: build `docker/Dockerfile.aiter`, run `./scripts/bench.sh` (WARMUP=64, WORKLOAD=decode64)
+- `decode64-exp-bench-warm`: build `docker/Dockerfile.exp`, run `./scripts/bench.sh` (GPU_MEM_UTIL=0.90, WARMUP=64, WORKLOAD=decode64)
 
-## Analysis
+## Output
 
-`data.csv` is the flat, long-format extract of every arm's raw artifacts (one row per
-fact: e2e metrics, profiler-table per-kernel times, trace per-kernel times). `report.ipynb`
-renders the A/B from it (pandas + matplotlib only). It ships pre-built, so you can open the
-notebook directly.
-
-To rebuild it from arms you ran yourself, point `preprocess.py` at their output dirs (each
-`output/<arm>-<command>/` holds `arm.json` + `results/` + `profile/`):
-
-```sh
-python preprocess.py output/*     # parses each arm dir -> data.csv (reads arm.json for the labels)
-jupyter nbconvert --to notebook --execute report.ipynb   # or just open report.ipynb
-```
+- `data/<arm>/` - raw per-arm output (results JSONs, profiler tables, traces).
+- `data.csv` - flat long-format extract, one row per fact (built by `preprocess.py data/*`).
+- `report.ipynb` - the A/B analysis rendered from `data.csv`.

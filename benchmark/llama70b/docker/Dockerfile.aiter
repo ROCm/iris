@@ -1,0 +1,82 @@
+# Dockerfile.aiter — AITER reference arm: identical to Dockerfile.baseline, plus
+# the master toggle VLLM_ROCM_USE_AITER=1 baked at the bottom. So broad aiter
+# compute (linear/moe/rmsnorm/attn) and aiter's all-reduce path are ON, but no
+# communicator backend (comms off). This is the arm we had been mislabeling
+# "baseline" before EXPERIMENT.md became the source of truth. Its purpose is the
+# clean reference for the comms arms: iris/torch/dummy all require USE_AITER=1, so
+# iris-minus-aiter isolates exactly the all-reduce swap (same compute on both
+# sides), while baseline (EXPERIMENT.md, USE_AITER off) is the production headline.
+# The build steps below are byte-identical to Dockerfile.baseline so Docker's
+# layer cache reuses every expensive layer; the only added layer is the ENV.
+FROM rocm/vllm-dev:nightly_main_20260612
+
+ENV MAX_JOBS=32
+ARG GPU_ARCHS="gfx950"                                          # MI350
+ARG TRITON_COMMIT="6898a3288c28d50d1f4e1f91aa5867ca0d1f3c3b"   # gluon-capable
+ARG VLLM_COMMIT="17ee5b1ac5dd61fa89bc4321ef54b0a790a45db3"
+ARG AITER_COMMIT="706861590abd821e2390d5fa7fb875ae057dade8"
+ARG IRIS_COMMIT="ff072037adf7a80532807fc25e0d090874c30075"
+
+RUN git clone https://github.com/vllm-project/vllm.git /src/vllm \
+    && cd /src/vllm && git checkout ${VLLM_COMMIT} \
+    && pip install -r requirements/rocm.txt \
+    && pip install . --no-build-isolation
+
+RUN pip install "triton @ git+https://github.com/triton-lang/triton.git@${TRITON_COMMIT}"
+
+# aiter: editable install (deps + base extension). No JIT kernels here — they're
+# warmed in a separate step at the end.
+RUN git clone --recursive https://github.com/ROCm/aiter.git /src/aiter \
+    && cd /src/aiter && git checkout ${AITER_COMMIT} \
+    && git submodule update --init --recursive \
+    && pip install -e . --no-build-isolation
+
+RUN git clone https://github.com/ROCm/iris.git /src/iris \
+    && cd /src/iris && git checkout ${IRIS_COMMIT} \
+    && pip install . --no-build-isolation
+
+RUN pip install pytest ray tblib hf_transfer hf_xet "lm_eval[api]"
+
+# Warm the JIT: prebuild ONLY the modules vLLM-dense (Llama-70B FP8) loads, so the
+# server never JIT-compiles at runtime — not PREBUILD_KERNELS=2's full ~50-module
+# set (MoE/MLA/Mamba, ~2h, none used here). Kept LAST so re-scoping the module list
+# doesn't rebuild the installs above. core.build_module is aiter's own build path
+# (the same calls setup.py's PREBUILD makes), scoped to the loaded set; imported
+# via sys.path so aiter/__init__ (gluon attn → needs a live GPU/jax) isn't pulled.
+# Asserts loudly if a module name drifts.
+RUN printf '%s\n' \
+"import sys" \
+"sys.path.insert(0, '/src/aiter/aiter')" \
+"from jit import core" \
+"WANT=['module_aiter_core','module_quant','module_rmsnorm','module_rmsnorm_quant','module_custom_all_reduce']" \
+"by={m['md_name']:m for m in core.get_args_of_build('all')[0]}" \
+"miss=[w for w in WANT if w not in by]" \
+"assert not miss, 'aiter prebuild: modules not in build set: %s' % miss" \
+"for w in WANT:" \
+"    x=by[w]" \
+"    core.build_module(md_name=w, srcs=x['srcs'], flags_extra_cc=list(x['flags_extra_cc'])+['-DPREBUILD_KERNELS=2'], flags_extra_hip=list(x['flags_extra_hip'])+['-DPREBUILD_KERNELS=2'], blob_gen_cmd=x['blob_gen_cmd'], extra_include=x['extra_include'], extra_ldflags=None, verbose=False, is_python_module=True, is_standalone=False, torch_exclude=False, third_party=x['third_party'])" \
+"    print('[prebuild] built', w, flush=True)" \
+> /tmp/prebuild_aiter.py \
+    && GPU_ARCHS="${GPU_ARCHS}" python3 /tmp/prebuild_aiter.py
+
+# aiter's prebuilt tuned-gemm configs land in /tmp/aiter_configs owned by root
+# (the prebuild above runs as root at build time). The container now runs as the
+# non-root HOST user (docker.RunAs), and aiter writes new tuned configs + .lock
+# files there at runtime — so make the baked dir world-writable (keeps the configs,
+# just lets the runtime user write). Best-effort: absent on a non-aiter base is fine.
+RUN chmod -R a+rwX /tmp/aiter_configs 2>/dev/null || true
+
+# Server env, baked at the end (the only runtime behavior is running). Shared by
+# every arm: EXPERIMENT.md Workload 1 production config (aiter MHA off; QuickReduce INT4)
+# + operational (NCCL logging, RPC/ready timeouts).
+ENV VLLM_ROCM_USE_AITER_MHA=0
+ENV VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+ENV NCCL_DEBUG=INFO
+ENV VLLM_RPC_TIMEOUT=1800000
+ENV VLLM_ENGINE_READY_TIMEOUT_S=3600
+
+# The arm: broad aiter ON (no communicator backend — comms off). This single ENV
+# is the only behavior layer beyond Dockerfile.baseline.
+ENV VLLM_ROCM_USE_AITER=1
+
+CMD ["/bin/bash"]
