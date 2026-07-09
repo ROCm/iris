@@ -144,6 +144,9 @@ class Iris:
         # Device-side barrier state, keyed by process group (None = all ranks).
         self._device_barrier_state: dict[Any, torch.Tensor] = {}
 
+        # CCL barrier state, keyed by process group (None = all ranks).
+        self._ccl_barrier_state: dict[Any, torch.Tensor] = {}
+
         # Initialize tracing
         self.tracing = Tracing(self)
 
@@ -1273,6 +1276,73 @@ class Iris:
                 output_tensor,
                 input_tensor,
                 self._iris,
+                op=op,
+                group=group,
+                async_op=async_op,
+                config=config,
+                workspace=workspace,
+            )
+
+        def barrier(self, group=None, async_op=False):
+            """
+            Barrier synchronization across all ranks in the group.
+
+            Uses device-side atomic flags on the symmetric heap,
+            making it CUDA graph capturable.
+
+            Args:
+                group: ProcessGroup or None. If None, uses all ranks.
+                async_op: If True, skip trailing host barrier.
+            """
+            from iris.ccl.barrier import barrier
+
+            barrier(self._iris, group=group, async_op=async_op)
+
+        def broadcast(self, output_tensor, input_tensor, src=0, group=None, async_op=False, config=None):
+            """
+            Broadcast: root rank sends its data to all ranks.
+
+            Args:
+                output_tensor: Shape (M, N)
+                input_tensor: Shape (M, N)
+                src: Source rank within the group (default: 0)
+                group: ProcessGroup or None
+                async_op: If True, skip trailing barrier
+                config: Config with kernel parameters
+            """
+            from iris.ccl.broadcast import broadcast
+
+            broadcast(
+                output_tensor,
+                input_tensor,
+                self._iris,
+                src=src,
+                group=group,
+                async_op=async_op,
+                config=config,
+            )
+
+        def reduce(self, output_tensor, input_tensor, root=0, op=None, group=None, async_op=False, config=None, workspace=None):
+            """
+            Reduce: sum inputs across all ranks, result only on root rank.
+
+            Args:
+                output_tensor: Shape (M, N)
+                input_tensor: Shape (M, N)
+                root: Root rank (receives the result). Default: 0.
+                op: ReduceOp (only SUM supported)
+                group: ProcessGroup or None
+                async_op: If True, skip trailing barrier
+                config: Config with kernel parameters
+                workspace: Reusable workspace from reduce_preamble
+            """
+            from iris.ccl.reduce import reduce
+
+            return reduce(
+                output_tensor,
+                input_tensor,
+                self._iris,
+                root=root,
                 op=op,
                 group=group,
                 async_op=async_op,

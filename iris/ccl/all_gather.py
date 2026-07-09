@@ -10,7 +10,7 @@ Routes to triton/ or gluon/ based on config.use_gluon.
 from iris.ccl.utils import extract_group_info
 
 
-def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None):
+def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None, workspace=None):
     """
     All-gather: each rank sends its input to all ranks.
 
@@ -23,6 +23,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         group: ProcessGroup or None
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
+        workspace: Optional AllGatherWorkspace for ring variant
     """
     from iris.ccl.config import Config
 
@@ -44,7 +45,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     else:
         from iris.ccl.triton.all_gather import launch
 
-    launch(
+    workspace = launch(
         input_tensor,
         output_tensor,
         ctx,
@@ -54,7 +55,11 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         rank_start,
         rank_stride,
         config,
+        workspace=workspace,
+        group=group,
     )
 
     if not async_op:
         ctx.barrier()
+
+    return workspace
