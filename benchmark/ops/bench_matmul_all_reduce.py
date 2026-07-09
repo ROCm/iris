@@ -94,7 +94,7 @@ def tritonblas_rccl_matmul_all_reduce(state, ctx):
 @bench.axis("N", [3584])
 @bench.axis("K", [8192])
 @bench.axis("dtype", [torch.float16])
-@bench.axis("variant", ["spinlock", "one_shot", "two_shot"])
+@bench.axis("variant", ["one_shot", "two_shot"])
 def matmul_all_reduce(state, ctx):
     """Fused GEMM + all-reduce with configurable variant."""
     M, N, K = state["M"], state["N"], state["K"]
@@ -125,16 +125,20 @@ def matmul_all_reduce(state, ctx):
     state.add_counter("grid_size", launch["num_sms"])
     state.add_counter("total_tiles", launch["total_tiles"])
     state.add_counter("num_stages", launch["num_stages"] or 0)
+    state.add_counter("selector_fallback", int(launch.get("selector_fallback", False)))
+    state.add_counter("publish_tiles", launch.get("publish_tiles", launch["total_tiles"]))
+    state.add_counter("publish_programs", launch.get("publish_programs", launch.get("publish_tiles", 0)))
 
     def _run():
         ctx.ops.matmul_all_reduce(C, A, B, config=config, workspace=workspace)
 
     def _preamble():
         C.zero_()
+        if workspace.a_inbox is not None:
+            workspace.a_inbox.zero_()
         if workspace.locks is not None:
             workspace.locks.zero_()
-        if workspace.aux_buffer is not None:
-            workspace.aux_buffer.zero_()
+        workspace.generation = 0
         workspace.prepared = True
 
     state.exec(_run, preamble_fn=_preamble)

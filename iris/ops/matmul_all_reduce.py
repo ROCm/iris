@@ -8,26 +8,28 @@ This module provides a torch-like interface for GEMM+All-Reduce operations,
 automatically inferring dimensions, strides, and hardware parameters.
 """
 
-import logging
 from typing import Optional
 import torch
 import triton
 import triton.language as tl
 
-from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_input_view
+import iris
+from iris.host.tracing.kernel_artifacts import iris_launch
+from tritonblas.kernels.stages import GemmContext, Tile, make_input_view
+from tritonblas.matmul import _make_matmul_selector
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
-import iris
-from iris.host.tracing.kernel_artifacts import iris_launch
+
+
+_SUPPORTED_VARIANTS = ("one_shot", "two_shot")
 
 
 @triton.jit()
-def _fused_matmul_all_reduce_kernel(
+def _matmul_all_reduce_gemm_publish_kernel(
     A,
     B,
-    C,
-    aux_buffer,
+    a_inbox,
     locks,
     M,
     N,
@@ -36,8 +38,8 @@ def _fused_matmul_all_reduce_kernel(
     stride_ak,
     stride_bk,
     stride_bn,
-    stride_cm,
-    stride_cn,
+    stride_inbox_m,
+    stride_inbox_n,
     context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -53,42 +55,15 @@ def _fused_matmul_all_reduce_kernel(
     VARIANT: tl.constexpr,
 ):
     """
-    Fused GEMM + All-Reduce kernel with configurable all-reduce variant.
+    Partitioned-XCD GEMM that publishes partials directly into the rank-major inbox.
 
-    Computes C = A @ B and then performs all-reduce on the result using the specified variant.
-    This is useful for data-parallel distributed training where each rank computes
-    a partial result over different data, and then reduces across all ranks.
+    one_shot:
+      a_inbox[src_rank * M + row, col] on every rank.
 
-    Supported variants:
-    - 'atomic': Fast, lock-free atomic accumulation
-    - 'spinlock': Mutex-based serialized read-modify-write
-    - 'one_shot': Each rank reduces all tiles (duplicated work, no remote stores)
-    - 'two_shot': Work distribution with reduce-scatter then all-gather pattern
-
-    The kernel for each output tile:
-    1. Computes GEMM using tritonblas GemmContext
-    2. Uses the specified variant for all-reduce across ranks
-
-    Args:
-        A: Pointer to input matrix A of shape (M, K) - local rank's data
-        B: Pointer to input matrix B of shape (K, N) - replicated across ranks
-        C: Pointer to output matrix C of shape (M, N) - will contain reduced result
-        locks: Pointer to locks array (one lock per tile)
-        M: Number of rows in A and C
-        N: Number of columns in B and C
-        K: Number of columns in A and rows in B
-        stride_am, stride_ak: Strides for A tensor
-        stride_bk, stride_bn: Strides for B tensor
-        stride_cm, stride_cn: Strides for C tensor
-        context_tensor: Device context tensor for RMA operations
-        cur_rank: Current rank
-        world_size: Total number of ranks
-        BLOCK_SIZE_M: Block size for M dimension
-        BLOCK_SIZE_N: Block size for N dimension
-        BLOCK_SIZE_K: Block size for K dimension
-        EVEN_K: Whether K is evenly divisible by BLOCK_SIZE_K
+    two_shot:
+      on owner rank, a_inbox[src_rank * rows_per_rank + owner_local_row, col].
     """
-    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
+    acc_dtype = tl.int32 if a_inbox.type.element_ty == tl.int8 else tl.float32
     gemm_ctx = GemmContext(
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
@@ -97,72 +72,289 @@ def _fused_matmul_all_reduce_kernel(
         num_xcds=NUM_XCDS,
         group_size_m=GROUP_SIZE_M,
         chunk_size=CHUNK_SIZE,
+        cache_modifier_a=None,
+        cache_modifier_b=None,
         acc_dtype=acc_dtype,
         even_k=EVEN_K,
         allow_tf32=ALLOW_TF32,
     )
-    sched = ScheduleContext(M, N, K, gemm_ctx)
     tensorA = make_input_view(A, M, K, stride_am, stride_ak)
     tensorB = make_input_view(B, K, N, stride_bk, stride_bn)
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
-    # Create views and context
+    if VARIANT == "one_shot":
+        inbox_view = iris.make_tensor_view(a_inbox, M * world_size, N, stride_inbox_m, stride_inbox_n)
+
+    launch_pid = tl.program_id(0)
+    xcd_id = launch_pid % NUM_XCDS
+    local_pid = launch_pid // NUM_XCDS
+    sms_per_xcd = NUM_SMS // NUM_XCDS
+
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    partition_rows = tl.cdiv(M, world_size)
+
+    for partition_id in range(world_size):
+        if partition_id % NUM_XCDS == xcd_id:
+            partition_m_start = partition_id * partition_rows
+            partition_m_end = tl.minimum(partition_m_start + partition_rows, M)
+            first_pid_m = partition_m_start // BLOCK_SIZE_M
+            last_pid_m = tl.cdiv(partition_m_end, BLOCK_SIZE_M)
+            partition_tiles_m = last_pid_m - first_pid_m
+            partition_tiles = partition_tiles_m * num_pid_n
+
+            for local_tile_id in range(local_pid, partition_tiles, sms_per_xcd):
+                num_pid_in_group = GROUP_SIZE_M * num_pid_n
+                group_id = local_tile_id // num_pid_in_group
+                first_group_pid_m = group_id * GROUP_SIZE_M
+                group_size_m = tl.minimum(partition_tiles_m - first_group_pid_m, GROUP_SIZE_M)
+
+                local_pid_m = first_group_pid_m + ((local_tile_id % num_pid_in_group) % group_size_m)
+                pid_m = first_pid_m + local_pid_m
+                pid_n = (local_tile_id % num_pid_in_group) // group_size_m
+
+                tl.assume(pid_m >= 0)
+                tl.assume(pid_n >= 0)
+
+                out_tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+                acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
+                rm, rn = out_tile.indices()
+                mask = (
+                    (rm[:, None] >= partition_m_start)
+                    & (rm[:, None] < partition_m_end)
+                    & (rm[:, None] < M)
+                    & (rn[None, :] < N)
+                )
+                c = acc.to(a_inbox.type.element_ty)
+
+                if VARIANT == "one_shot":
+                    tile_obj = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+                    ctx.all_gather(tile_obj, inbox_view, dim=0)
+                else:
+                    rows_per_rank = M // world_size
+                    local_rm = rm - partition_m_start
+                    owner_row_mask = (rm >= partition_m_start) & (rm < partition_m_end)
+                    inbox_rm = cur_rank * rows_per_rank + tl.where(owner_row_mask, local_rm, 0)
+                    inbox_ptr = a_inbox + inbox_rm[:, None] * stride_inbox_m + rn[None, :] * stride_inbox_n
+                    ctx.store(
+                        inbox_ptr,
+                        c,
+                        to_rank=partition_id,
+                        mask=mask & owner_row_mask[:, None],
+                        hint=(1, BLOCK_SIZE_N),
+                    )
+
+            if local_pid < partition_tiles:
+                tl.debug_barrier()
+                if VARIANT == "one_shot":
+                    for signal_rank in tl.static_range(0, world_size):
+                        ctx.atomic_add(
+                            locks,
+                            1,
+                            to_rank=signal_rank,
+                            sem="release",
+                            scope="sys",
+                        )
+                else:
+                    ctx.atomic_add(
+                        locks,
+                        1,
+                        to_rank=partition_id,
+                        sem="release",
+                        scope="sys",
+                    )
+
+
+@triton.jit()
+def _matmul_all_reduce_reduce_scatter_kernel(
+    C,
+    a_inbox,
+    locks,
+    expected_completion_value,
+    M,
+    N,
+    stride_inbox_m,
+    stride_inbox_n,
+    stride_cm,
+    stride_cn,
+    context_tensor: tl.tensor,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    REDUCE_BLOCK_SIZE_M: tl.constexpr,
+    REDUCE_BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+):
+    """Reduce this rank's row shard, then all-gather it to every rank."""
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
     dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
-    start, total, stride = sched.persistent_tile_range()
-    for tile_idx in range(start, total, stride):
-        out_tile = sched.get_tile_from_idx(tile_idx)
-        acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
+    while tl.load(locks, cache_modifier=".cv", volatile=True) < expected_completion_value:
+        pass
 
-        # Get row and column indices from tile (needed for one_shot/two_shot variants)
-        rm, rn = out_tile.indices()
+    pid = tl.program_id(0)
+    rows_per_rank = M // world_size
+    num_pid_m = tl.cdiv(rows_per_rank, REDUCE_BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, REDUCE_BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
 
-        # Convert to output dtype
-        c = acc.to(C.type.element_ty)
-        tile_obj = iris.Tile(out_tile.pid_m, out_tile.pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+    for tile_id in range(pid, total_tiles, NUM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        # Dispatch to appropriate all-reduce variant
-        if VARIANT == "atomic":
-            ctx.all_reduce_atomic(tile_obj, dst_view)
-        elif VARIANT == "spinlock":
-            ctx.all_reduce_spinlock(tile_obj, dst_view, locks)
-        elif VARIANT == "one_shot" or VARIANT == "two_shot":
-            # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock.
-            temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-            tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
-            tl.debug_barrier()
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
 
-            # Locks are indexed by canonical tile coordinates so the protocol
-            # stays independent of ScheduleContext's swizzled/persistent order.
-            num_tiles_n = tl.cdiv(N, BLOCK_SIZE_N)
-            tile_id = out_tile.pid_m * num_tiles_n + out_tile.pid_n
-            lock_ptr = locks + tile_id
-            tl.atomic_xchg(lock_ptr, 1, sem="release", scope="sys")
+        rm_base = pid_m * REDUCE_BLOCK_SIZE_M
+        rn_base = pid_n * REDUCE_BLOCK_SIZE_N
 
-            src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
-            if VARIANT == "one_shot":
-                ctx.all_reduce_one_shot(tile_obj, src_view, dst_view, locks)
-            elif VARIANT == "two_shot":
-                ctx.all_reduce_two_shot(tile_obj, src_view, dst_view, locks)
+        rm = rm_base + tl.arange(0, REDUCE_BLOCK_SIZE_M)
+        rm = tl.max_contiguous(tl.multiple_of(rm, REDUCE_BLOCK_SIZE_M), REDUCE_BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, REDUCE_BLOCK_SIZE_N)
+        rn = tl.max_contiguous(tl.multiple_of(rn, REDUCE_BLOCK_SIZE_N), REDUCE_BLOCK_SIZE_N)
+        mask = (rm[:, None] < rows_per_rank) & (rn[None, :] < N)
 
+        acc = tl.zeros((REDUCE_BLOCK_SIZE_M, REDUCE_BLOCK_SIZE_N), dtype=acc_dtype)
+        for reduce_src_rank in tl.static_range(0, world_size):
+            src_rm = reduce_src_rank * rows_per_rank + rm
+            src_ptr = a_inbox + src_rm[:, None] * stride_inbox_m + rn[None, :] * stride_inbox_n
+            acc += tl.load(src_ptr, mask=mask, other=0.0).to(acc_dtype)
 
-_GEMM_CONFIG_FIELDS = (
-    "block_size_m",
-    "block_size_n",
-    "block_size_k",
-    "group_size_m",
-    "num_sms",
-    "num_xcds",
-    "chunk_size",
-    "cache_modifier_a",
-    "cache_modifier_b",
-    "allow_tf32",
-)
+        tile_obj = iris.Tile(
+            pid_m,
+            pid_n,
+            REDUCE_BLOCK_SIZE_M,
+            REDUCE_BLOCK_SIZE_N,
+            acc.to(C.type.element_ty),
+        )
+        ctx.all_gather(tile_obj, dst_view, dim=0)
 
 
-def _config_uses_default_gemm_tuning(config: FusedConfig) -> bool:
-    default = FusedConfig()
-    return all(getattr(config, field) == getattr(default, field) for field in _GEMM_CONFIG_FIELDS)
+@triton.jit()
+def _matmul_all_reduce_local_reduce_kernel(
+    C,
+    a_inbox,
+    locks,
+    expected_publish_count,
+    M,
+    N,
+    stride_inbox_m,
+    stride_inbox_n,
+    stride_cm,
+    stride_cn,
+    context_tensor: tl.tensor,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    REDUCE_BLOCK_SIZE_M: tl.constexpr,
+    REDUCE_BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+):
+    """Local one-shot reduction after every rank has published its full partial output."""
+    while tl.load(locks, cache_modifier=".cv", volatile=True) < expected_publish_count:
+        pass
+
+    pid = tl.program_id(0)
+    num_pid_m = tl.cdiv(M, REDUCE_BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, REDUCE_BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
+
+    for tile_id in range(pid, total_tiles, NUM_SMS):
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = tile_id // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+        pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+
+        rm_base = pid_m * REDUCE_BLOCK_SIZE_M
+        rn_base = pid_n * REDUCE_BLOCK_SIZE_N
+        is_full = (rm_base + REDUCE_BLOCK_SIZE_M <= M) & (rn_base + REDUCE_BLOCK_SIZE_N <= N)
+
+        rm = rm_base + tl.arange(0, REDUCE_BLOCK_SIZE_M)
+        rm = tl.max_contiguous(tl.multiple_of(rm, REDUCE_BLOCK_SIZE_M), REDUCE_BLOCK_SIZE_M)
+        rn = rn_base + tl.arange(0, REDUCE_BLOCK_SIZE_N)
+        rn = tl.max_contiguous(tl.multiple_of(rn, REDUCE_BLOCK_SIZE_N), REDUCE_BLOCK_SIZE_N)
+
+        out_ptr = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+
+        if is_full:
+            acc = tl.zeros((REDUCE_BLOCK_SIZE_M, REDUCE_BLOCK_SIZE_N), dtype=acc_dtype)
+            for reduce_src_rank in tl.static_range(0, world_size):
+                src_rm = reduce_src_rank * M + rm
+                src_ptr = a_inbox + src_rm[:, None] * stride_inbox_m + rn[None, :] * stride_inbox_n
+                fast_src_ptr = tl.max_contiguous(
+                    tl.multiple_of(src_ptr, (1, REDUCE_BLOCK_SIZE_N)),
+                    (1, REDUCE_BLOCK_SIZE_N),
+                )
+                acc += tl.load(fast_src_ptr).to(acc_dtype)
+
+            fast_out_ptr = tl.max_contiguous(
+                tl.multiple_of(out_ptr, (1, REDUCE_BLOCK_SIZE_N)),
+                (1, REDUCE_BLOCK_SIZE_N),
+            )
+            tl.store(fast_out_ptr, acc.to(C.type.element_ty))
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            acc = tl.zeros((REDUCE_BLOCK_SIZE_M, REDUCE_BLOCK_SIZE_N), dtype=acc_dtype)
+            for reduce_src_rank in tl.static_range(0, world_size):
+                src_rm = reduce_src_rank * M + rm
+                src_ptr = a_inbox + src_rm[:, None] * stride_inbox_m + rn[None, :] * stride_inbox_n
+                acc += tl.load(src_ptr, mask=mask, other=0.0).to(acc_dtype)
+
+            tl.store(out_ptr, acc.to(C.type.element_ty), mask=mask)
+
+
+@triton.jit()
+def _matmul_all_reduce_local_reduce_flat_kernel(
+    C,
+    a_inbox,
+    locks,
+    expected_publish_count,
+    total_elements,
+    context_tensor: tl.tensor,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+):
+    """Fast one-shot local reduction for contiguous rank-major inbox buffers."""
+    while tl.load(locks, cache_modifier=".cv", volatile=True) < expected_publish_count:
+        pass
+
+    pid = tl.program_id(0)
+    total_blocks = total_elements // BLOCK_SIZE
+    block_offsets = tl.arange(0, BLOCK_SIZE)
+    block_offsets = tl.max_contiguous(tl.multiple_of(block_offsets, BLOCK_SIZE), BLOCK_SIZE)
+    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
+
+    for block_id in range(pid, total_blocks, NUM_SMS):
+        linear_base = block_id * BLOCK_SIZE
+        linear_offsets = linear_base + block_offsets
+        acc = tl.zeros((BLOCK_SIZE,), dtype=acc_dtype)
+
+        for reduce_src_rank in tl.static_range(0, world_size):
+            src_offsets = reduce_src_rank * total_elements + linear_offsets
+            src_ptr = a_inbox + src_offsets
+            src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
+            acc += tl.load(src_ptr).to(acc_dtype)
+
+        out_ptr = C + linear_offsets
+        out_ptr = tl.max_contiguous(tl.multiple_of(out_ptr, BLOCK_SIZE), BLOCK_SIZE)
+        tl.store(out_ptr, acc.to(C.type.element_ty))
+
+
+def _validate_variant(variant: str):
+    if variant not in _SUPPORTED_VARIANTS:
+        raise ValueError(f"matmul_all_reduce supports only {_SUPPORTED_VARIANTS}, got {variant!r}")
 
 
 def _default_chunk_size(total_tiles: int, group_size_m: int, num_xcds: int) -> int:
@@ -172,9 +364,61 @@ def _default_chunk_size(total_tiles: int, group_size_m: int, num_xcds: int) -> i
     return max(1, chunk_size)
 
 
-def _make_origami_selector(M: int, N: int, K: int, A: torch.Tensor, B: torch.Tensor, C):
-    from tritonblas.matmul import _make_matmul_selector
+def _round_up_to_multiple(value: int, multiple: int) -> int:
+    if multiple <= 1:
+        return max(1, value)
+    return ((max(1, value) + multiple - 1) // multiple) * multiple
 
+
+def _ceil_div(value: int, divisor: int) -> int:
+    return (value + divisor - 1) // divisor
+
+
+def _partitioned_xcd_gemm_num_sms(launch: dict, world_size: int) -> int:
+    cached = launch.get("gemm_num_sms")
+    if cached is not None:
+        return int(cached)
+    num_xcds = max(1, launch["num_xcds"])
+    return _round_up_to_multiple(max(launch["num_sms"], min(num_xcds, world_size)), num_xcds)
+
+
+def _partitioned_xcd_publish_counts(M: int, N: int, world_size: int, launch: dict) -> dict:
+    block_size_m = launch["block_size_m"]
+    block_size_n = launch["block_size_n"]
+    num_xcds = max(1, launch["num_xcds"])
+    gemm_num_sms = _partitioned_xcd_gemm_num_sms(launch, world_size)
+    sms_per_xcd = max(1, gemm_num_sms // num_xcds)
+    num_pid_n = _ceil_div(N, block_size_n)
+    partition_rows = _ceil_div(M, world_size)
+
+    publish_tiles = 0
+    publish_programs_by_partition = []
+    for partition_id in range(world_size):
+        partition_m_start = partition_id * partition_rows
+        partition_m_end = min(partition_m_start + partition_rows, M)
+        first_pid_m = partition_m_start // block_size_m
+        last_pid_m = _ceil_div(partition_m_end, block_size_m)
+        partition_tiles_m = max(0, last_pid_m - first_pid_m)
+        partition_tiles = partition_tiles_m * num_pid_n
+        publish_tiles += partition_tiles
+        publish_programs_by_partition.append(min(sms_per_xcd, partition_tiles))
+
+    return {
+        "tiles": publish_tiles,
+        "programs": sum(publish_programs_by_partition),
+        "programs_by_partition": publish_programs_by_partition,
+    }
+
+
+def _default_reduce_num_sms() -> int:
+    return 64
+
+
+def _reduce_block_size_n(N: int) -> int:
+    return 64
+
+
+def _make_origami_selector(M: int, N: int, K: int, A: torch.Tensor, B: torch.Tensor, C):
     c_dtype = C.dtype if hasattr(C, "dtype") else C
     return _make_matmul_selector(
         M,
@@ -196,15 +440,7 @@ def _selector_active_cus(selector, device: torch.device) -> int:
     return int(active_cus)
 
 
-def _matmul_all_reduce_launch_params(
-    M: int,
-    N: int,
-    K: int,
-    selector,
-    device: torch.device,
-    element_size: int,
-    variant: str,
-) -> dict:
+def _matmul_all_reduce_launch_params(M: int, N: int, K: int, selector, device: torch.device, variant: str) -> dict:
     block_size_m = selector.block_m
     block_size_n = selector.block_n
     block_size_k = selector.block_k
@@ -212,10 +448,9 @@ def _matmul_all_reduce_launch_params(
     num_stages = getattr(selector, "num_stages", 2)
     selector_fallback = False
 
-    # Origami's 256x256 tile is great when GEMM dominates, but one_shot also
-    # does a full remote-rank reduction per output tile. For shallow K shapes,
-    # keeping the old narrow-N tile avoids making each reduction work item too
-    # large while still allowing the selector path for deeper GEMMs.
+    # Origami's 256x256 tile is good when GEMM dominates, but one_shot also
+    # reduces every rank's full output. For shallow-K shapes, narrower N tiles
+    # keep each reduction work item closer to the pre-refactor behavior.
     if (
         variant == "one_shot"
         and K < 16 * 1024
@@ -228,23 +463,6 @@ def _matmul_all_reduce_launch_params(
         num_stages = None
         selector_fallback = True
 
-    # Atomic/spinlock variants can exceed the MI300 64 KiB LDS cap with the
-    # common 256x256x64 Origami tile. Prefer the old narrow-N tile first; only
-    # shrink M if a single-stage 256x64 tile still cannot fit.
-    estimated_stage_count = num_stages if num_stages is not None else 2
-    stage_bytes = (block_size_m * block_size_k + block_size_k * block_size_n) * element_size
-    if variant in ("atomic", "spinlock") and stage_bytes * estimated_stage_count > 64 * 1024:
-        block_size_n = min(block_size_n, 64)
-        block_size_k = min(block_size_k, 64)
-        group_size_m = 1
-        num_stages = 1
-        stage_bytes = (block_size_m * block_size_k + block_size_k * block_size_n) * element_size
-        if stage_bytes > 64 * 1024:
-            block_size_m = min(block_size_m, 128)
-        selector_fallback = True
-
-    # Origami calls this num_sms, but it is the XCD/chiplet workgroup mapping
-    # count used by chiplet_transform_chunked, not the persistent launch grid.
     num_xcds = selector.num_sms
     if num_xcds <= 0:
         num_xcds = 1
@@ -270,41 +488,10 @@ def _matmul_all_reduce_launch_params(
         "num_stages": num_stages,
         "matrix_instr_nonkdim": 16,
         "allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "reduce_block_size_m": 32,
+        "reduce_block_size_n": _reduce_block_size_n(N),
+        "reduce_num_sms": _default_reduce_num_sms(),
         "selector_fallback": selector_fallback,
-    }
-
-
-def _config_launch_params(M: int, N: int, config: FusedConfig, device: torch.device) -> dict:
-    num_tiles_m = (M + config.block_size_m - 1) // config.block_size_m
-    num_tiles_n = (N + config.block_size_n - 1) // config.block_size_n
-    total_tiles = num_tiles_m * num_tiles_n
-
-    num_sms = config.num_sms
-    if num_sms is None:
-        props = torch.cuda.get_device_properties(device)
-        num_sms = props.multi_processor_count
-    num_sms = min(int(num_sms), total_tiles)
-
-    num_xcds = config.num_xcds
-    if num_xcds <= 0:
-        num_xcds = 1
-
-    return {
-        "block_size_m": config.block_size_m,
-        "block_size_n": config.block_size_n,
-        "block_size_k": config.block_size_k,
-        "group_size_m": config.group_size_m,
-        "num_xcds": num_xcds,
-        "num_tiles_m": num_tiles_m,
-        "num_tiles_n": num_tiles_n,
-        "total_tiles": total_tiles,
-        "num_sms": num_sms,
-        "chunk_size": max(1, config.chunk_size),
-        "num_warps": 8,
-        "num_stages": None,
-        "matrix_instr_nonkdim": 16,
-        "allow_tf32": config.allow_tf32,
-        "selector_fallback": False,
     }
 
 
@@ -318,22 +505,7 @@ def matmul_all_reduce_preamble(
     selector=None,
     out_dtype: Optional[torch.dtype] = None,
 ) -> FusedWorkspace:
-    """
-    Allocate and reset temporary buffers for matmul_all_reduce.
-
-    Args:
-        shmem: Iris shmem context
-        C: Output tensor (M, N)
-        A: Input matrix A (M, K)
-        B: Input matrix B (K, N)
-        config: Optional FusedConfig. If None, uses defaults.
-        workspace: Optional existing workspace to reuse. If None, creates new one.
-        selector: Optional pre-built tritonBLAS Origami selector.
-        out_dtype: Optional output dtype for selector construction.
-
-    Returns:
-        FusedWorkspace instance ready for kernel launch.
-    """
+    """Allocate and reset temporary buffers for matmul_all_reduce."""
     if config is None:
         config = FusedConfig()
 
@@ -345,18 +517,25 @@ def matmul_all_reduce_preamble(
     # Validate config
     config.validate(world_size=world_size)
 
-    if selector is not None:
-        launch = _matmul_all_reduce_launch_params(
-            M, N, K, selector, A.device, A.element_size(), config.all_reduce_variant
+    if config.all_reduce_variant == "two_shot" and M % world_size != 0:
+        raise ValueError(
+            "matmul_all_reduce two_shot requires M to be divisible by world_size "
+            "because the final all-gather uses equal row shards."
         )
-    elif _config_uses_default_gemm_tuning(config):
+
+    if selector is None:
         c_dtype = dtype if out_dtype is None else out_dtype
         selector = _make_origami_selector(M, N, K, A, B, c_dtype)
-        launch = _matmul_all_reduce_launch_params(
-            M, N, K, selector, A.device, A.element_size(), config.all_reduce_variant
-        )
+    launch = _matmul_all_reduce_launch_params(M, N, K, selector, A.device, config.all_reduce_variant)
+    launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
+    publish_counts = _partitioned_xcd_publish_counts(M, N, world_size, launch)
+    launch["publish_tiles"] = publish_counts["tiles"]
+    launch["publish_programs"] = publish_counts["programs"]
+    launch["publish_programs_by_partition"] = publish_counts["programs_by_partition"]
+    if config.all_reduce_variant == "two_shot":
+        launch["reduce_num_sms"] = _default_reduce_num_sms()
     else:
-        launch = _config_launch_params(M, N, config, A.device)
+        launch["reduce_num_sms"] = launch["num_sms"]
 
     if workspace is None:
         workspace = FusedWorkspace()
@@ -369,36 +548,23 @@ def matmul_all_reduce_preamble(
     workspace.selector = selector
     workspace.config = config
     workspace.launch_params = launch
-    workspace.selector_fallback = launch["selector_fallback"]
-    workspace.prepared = False
+    workspace.aux_buffer = None
 
-    # Allocate locks for spinlock-based all-reduce
-    total_tiles = launch["total_tiles"]
-
-    # Allocate locks for spinlock, one_shot, and two_shot variants
-    if config.all_reduce_variant in ["spinlock", "one_shot", "two_shot"]:
-        if workspace.locks is None or workspace.locks.numel() != total_tiles:
-            workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
-        else:
-            workspace.locks.zero_()
+    inbox_rows = M * world_size if config.all_reduce_variant == "one_shot" else M
+    if workspace.a_inbox is None or workspace.a_inbox.shape != (inbox_rows, N):
+        workspace.a_inbox = shmem.zeros((inbox_rows, N), dtype=dtype)
     else:
-        workspace.locks = None
+        workspace.a_inbox.zero_()
 
-    # Allocate auxiliary buffer for one_shot and two_shot to avoid race conditions
-    # (GEMM results stored here, then reduced to final output)
-    if config.all_reduce_variant in ["one_shot", "two_shot"]:
-        if workspace.aux_buffer is None or workspace.aux_buffer.shape != (M, N):
-            workspace.aux_buffer = shmem.zeros((M, N), dtype=dtype)
-        else:
-            workspace.aux_buffer.zero_()
+    if workspace.locks is None or workspace.locks.numel() != 1:
+        workspace.locks = shmem.zeros((1,), dtype=torch.int32)
     else:
-        workspace.aux_buffer = None
+        workspace.locks.zero_()
 
-    # Zero output tensor
+    workspace.completion_signals = None
+
+    workspace.generation = 0
     C.zero_()
-    shmem.barrier()
-
-    workspace.prepared = True
     return workspace
 
 
@@ -413,28 +579,12 @@ def matmul_all_reduce(
     selector=None,
 ) -> FusedWorkspace:
     """
-    Fused matrix multiplication and all-reduce using atomic operations.
+    Fused matrix multiplication and all-reduce.
 
-    Computes: C = all_reduce(A @ B) across all ranks using atomic adds.
-
-    Args:
-        shmem: Iris shmem context
-        C: Output tensor (M, N) - will contain reduced result on all ranks
-        A: Input matrix A (M, K) - each rank has different data (data-parallel)
-        B: Input matrix B (K, N) - replicated across ranks
-        async_op: If False, performs barrier at end. Default: False.
-        config: Optional FusedConfig for tuning. If None, uses defaults.
-        workspace: Optional pre-allocated workspace. If None, creates new one.
-        selector: Optional pre-built tritonBLAS Origami selector.
-
-    Returns:
-        workspace: Updated workspace object (can be reused for subsequent calls)
-
-    Example:
-        >>> A = shmem.randn((1024, 512), dtype=torch.float16)
-        >>> B = shmem.randn((512, 2048), dtype=torch.float16)
-        >>> C = shmem.zeros((1024, 2048), dtype=torch.float16)
-        >>> shmem.ops.matmul_all_reduce(C, A, B)
+    Computes C = all_reduce(A @ B) across all ranks. The one_shot variant
+    publishes every rank's partial GEMM result to every rank and reduces
+    locally. The two_shot variant stores row shards to owner ranks, reduces
+    those shards, and stores the reduced result to every rank.
     """
     if config is None:
         config = FusedConfig()
@@ -458,42 +608,13 @@ def matmul_all_reduce(
     if A.dtype != B.dtype or A.dtype != C.dtype:
         raise ValueError(f"All tensors must have same dtype, got A:{A.dtype}, B:{B.dtype}, C:{C.dtype}")
 
-    # Extract strides
-    stride_am, stride_ak = A.stride()
-    stride_bk, stride_bn = B.stride()
-    stride_cm, stride_cn = C.stride()
-
-    # Get rank info
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
-    from iris.host.logging.logging import _log_rank
-
-    _log_rank(
-        logging.DEBUG,
-        "matmul_all_reduce: shape=(%d,%d,%d) dtype=%s variant=%s rank=%d/%d",
-        M,
-        N,
-        K,
-        A.dtype,
-        config.all_reduce_variant,
-        rank,
-        world_size,
-        rank=rank,
-        num_ranks=world_size,
-    )
-
     config.validate(world_size=world_size)
+    _validate_variant(config.all_reduce_variant)
 
-    # Prepare workspace if needed
-    needs_prepare = (
-        workspace is None
-        or selector is not None
-        or getattr(workspace, "launch_params", None) is None
-        or not workspace.matches("matmul_all_reduce", (M, N, K), A.dtype, world_size, config.all_reduce_variant)
-    )
-
-    if needs_prepare:
+    if workspace is None:
         workspace = matmul_all_reduce_preamble(
             shmem,
             C,
@@ -505,37 +626,47 @@ def matmul_all_reduce(
             out_dtype=C.dtype,
         )
 
-    # Get device context for RMA
-    device_context = shmem.get_device_context()
-
-    config_launch_override = selector is None and config is not None and not _config_uses_default_gemm_tuning(config)
-    if config_launch_override and not needs_prepare:
-        launch = _config_launch_params(M, N, config, A.device)
-    else:
-        launch = workspace.launch_params
-
+    launch = workspace.launch_params
     block_size_m = launch["block_size_m"]
     block_size_n = launch["block_size_n"]
     block_size_k = launch["block_size_k"]
-    total_tiles = launch["total_tiles"]
 
-    if config_launch_override or getattr(workspace, "selector", None) is None:
-        # Validate problem size against explicit FusedConfig block sizes.
+    if getattr(workspace, "selector", None) is None:
         assert M >= block_size_m, f"M={M} too small for block_size_m={block_size_m}"
         assert K >= block_size_k, f"K={K} too small for block_size_k={block_size_k}"
         assert N >= block_size_n, f"N={N} too small for block_size_n={block_size_n}"
 
-    # Validate that the pre-allocated lock array is large enough for the current tile count.
-    # This can occur when the workspace was prepared with larger block sizes (fewer tiles)
-    # and is then reused with smaller block sizes (more tiles).
-    if workspace.locks is not None and workspace.locks.numel() < total_tiles:
+    if config.all_reduce_variant == "two_shot" and M % world_size != 0:
         raise ValueError(
-            f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
-            f"Pre-allocate workspace with the smallest block sizes you intend to use."
+            "matmul_all_reduce two_shot requires M to be divisible by world_size "
+            "because the final all-gather uses equal row shards."
         )
+    generation = int(getattr(workspace, "generation", 0)) + 1
+    workspace.generation = generation
+    gemm_num_sms = _partitioned_xcd_gemm_num_sms(launch, world_size)
+    launch["gemm_num_sms"] = gemm_num_sms
+    if config.all_reduce_variant == "one_shot":
+        if "publish_programs" not in launch:
+            publish_counts = _partitioned_xcd_publish_counts(M, N, world_size, launch)
+            launch["publish_tiles"] = publish_counts["tiles"]
+            launch["publish_programs"] = publish_counts["programs"]
+            launch["publish_programs_by_partition"] = publish_counts["programs_by_partition"]
+        signals_per_generation = world_size * launch["publish_programs"]
+    else:
+        if "publish_programs_by_partition" not in launch:
+            publish_counts = _partitioned_xcd_publish_counts(M, N, world_size, launch)
+            launch["publish_tiles"] = publish_counts["tiles"]
+            launch["publish_programs"] = publish_counts["programs"]
+            launch["publish_programs_by_partition"] = publish_counts["programs_by_partition"]
+        signals_per_generation = world_size * launch["publish_programs_by_partition"][rank]
+    expected_publish_count = generation * signals_per_generation
+
+    stride_am, stride_ak = A.stride()
+    stride_bk, stride_bn = B.stride()
+    stride_cm, stride_cn = C.stride()
+    stride_inbox_m, stride_inbox_n = workspace.a_inbox.stride()
 
     even_k = K % block_size_k == 0
-    grid = (launch["num_sms"],)
     launch_kwargs = {
         "num_warps": launch["num_warps"],
         "matrix_instr_nonkdim": launch["matrix_instr_nonkdim"],
@@ -544,12 +675,11 @@ def matmul_all_reduce(
         launch_kwargs["num_stages"] = launch["num_stages"]
 
     iris_launch(
-        _fused_matmul_all_reduce_kernel,
-        grid,
+        _matmul_all_reduce_gemm_publish_kernel,
+        (gemm_num_sms,),
         A,
         B,
-        C,
-        workspace.aux_buffer,
+        workspace.a_inbox,
         workspace.locks,
         M,
         N,
@@ -558,30 +688,124 @@ def matmul_all_reduce(
         stride_ak,
         stride_bk,
         stride_bn,
-        stride_cm,
-        stride_cn,
-        device_context,
+        stride_inbox_m,
+        stride_inbox_n,
+        shmem.get_device_context(),
         rank,
         world_size,
         block_size_m,
         block_size_n,
         block_size_k,
         launch["group_size_m"],
-        launch["num_sms"],
+        gemm_num_sms,
         launch["num_xcds"],
         launch["chunk_size"],
         even_k,
         launch["allow_tf32"],
         config.all_reduce_variant,
-        algorithm="matmul_all_reduce",
+        algorithm="matmul_all_reduce_gemm_publish",
         rank=rank,
         dtype=A.dtype,
         **launch_kwargs,
     )
 
-    # Mark workspace as used
-    if workspace is not None:
-        workspace.prepared = False
+    if config.all_reduce_variant == "one_shot":
+        reduce_block_size_m = 1
+        reduce_block_size_n = 512
+        num_sms = max(launch["reduce_num_sms"], launch["num_sms"] * 3)
+        total_reduce_elements = M * N
+        use_flat_local_reduce = (
+            C.is_contiguous() and workspace.a_inbox.is_contiguous() and total_reduce_elements % reduce_block_size_n == 0
+        )
+
+        if use_flat_local_reduce:
+            total_reduce_blocks = total_reduce_elements // reduce_block_size_n
+            reduce_grid = (min(num_sms, total_reduce_blocks),)
+            iris_launch(
+                _matmul_all_reduce_local_reduce_flat_kernel,
+                reduce_grid,
+                C,
+                workspace.a_inbox,
+                workspace.locks,
+                expected_publish_count,
+                total_reduce_elements,
+                shmem.get_device_context(),
+                cur_rank=rank,
+                world_size=world_size,
+                BLOCK_SIZE=reduce_block_size_n,
+                NUM_SMS=num_sms,
+                algorithm="matmul_all_reduce_local_reduce_flat",
+                rank=rank,
+                dtype=A.dtype,
+                num_warps=4,
+                num_stages=2,
+            )
+        else:
+            reduce_tiles_m = (M + reduce_block_size_m - 1) // reduce_block_size_m
+            reduce_tiles_n = (N + reduce_block_size_n - 1) // reduce_block_size_n
+            total_reduce_tiles = reduce_tiles_m * reduce_tiles_n
+            reduce_grid = (min(num_sms, total_reduce_tiles),)
+            iris_launch(
+                _matmul_all_reduce_local_reduce_kernel,
+                reduce_grid,
+                C,
+                workspace.a_inbox,
+                workspace.locks,
+                expected_publish_count,
+                M,
+                N,
+                stride_inbox_m,
+                stride_inbox_n,
+                stride_cm,
+                stride_cn,
+                shmem.get_device_context(),
+                cur_rank=rank,
+                world_size=world_size,
+                REDUCE_BLOCK_SIZE_M=reduce_block_size_m,
+                REDUCE_BLOCK_SIZE_N=reduce_block_size_n,
+                GROUP_SIZE_M=launch["group_size_m"],
+                NUM_SMS=num_sms,
+                algorithm="matmul_all_reduce_local_reduce",
+                rank=rank,
+                dtype=A.dtype,
+                num_warps=4,
+                num_stages=1,
+            )
+    else:
+        rows_per_rank = M // world_size
+        reduce_block_size_m = launch["reduce_block_size_m"]
+        reduce_block_size_n = launch["reduce_block_size_n"]
+        reduce_tiles_m = (rows_per_rank + reduce_block_size_m - 1) // reduce_block_size_m
+        reduce_tiles_n = (N + reduce_block_size_n - 1) // reduce_block_size_n
+        total_reduce_tiles = reduce_tiles_m * reduce_tiles_n
+        num_sms = launch["reduce_num_sms"]
+        reduce_grid = (min(num_sms, total_reduce_tiles),)
+
+        iris_launch(
+            _matmul_all_reduce_reduce_scatter_kernel,
+            reduce_grid,
+            C,
+            workspace.a_inbox,
+            workspace.locks,
+            expected_publish_count,
+            M,
+            N,
+            stride_inbox_m,
+            stride_inbox_n,
+            stride_cm,
+            stride_cn,
+            shmem.get_device_context(),
+            cur_rank=rank,
+            world_size=world_size,
+            REDUCE_BLOCK_SIZE_M=reduce_block_size_m,
+            REDUCE_BLOCK_SIZE_N=reduce_block_size_n,
+            GROUP_SIZE_M=launch["group_size_m"],
+            NUM_SMS=num_sms,
+            algorithm="matmul_all_reduce_reduce_scatter",
+            rank=rank,
+            dtype=A.dtype,
+            num_warps=4,
+        )
 
     # Barrier unless async
     if not async_op:

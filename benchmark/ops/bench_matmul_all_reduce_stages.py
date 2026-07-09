@@ -5,7 +5,7 @@
 """
 Stage profiler for fused GEMM + All-Reduce.
 
-Sweeps optimization stages (atomic → two_shot → one_shot) across
+Sweeps optimization stages (two_shot → one_shot) across
 vLLM-shaped workloads (decode / hybrid / prefill) and compares
 against the unfused baseline (torch.mm + dist.all_reduce).
 
@@ -53,7 +53,7 @@ def unfused_mm_allreduce(state, ctx):
 @bench.axis("N", [2880])
 @bench.axis("K", [4096])
 @bench.axis("dtype", [torch.float16])
-@bench.axis("variant", ["atomic", "two_shot", "one_shot"])
+@bench.axis("variant", ["two_shot", "one_shot"])
 @bench.axis("bm", [32, 64, 128])
 @bench.axis("bn", [64, 128])
 def fused_gemm_allreduce(state, ctx):
@@ -89,15 +89,17 @@ def fused_gemm_allreduce(state, ctx):
     state.set_flops(2 * M * N * K_local)
 
     def _run():
-        workspace.prepared = False
         ctx.ops.matmul_all_reduce(C, A, B, config=config, workspace=workspace)
 
     def _preamble():
         C.zero_()
+        if workspace.a_inbox is not None:
+            workspace.a_inbox.zero_()
         if workspace.locks is not None:
             workspace.locks.zero_()
-        if workspace.aux_buffer is not None:
-            workspace.aux_buffer.zero_()
+        if workspace.completion_signals is not None:
+            workspace.completion_signals.zero_()
+        workspace.generation = 0
         workspace.prepared = True
 
     state.exec(_run, preamble_fn=_preamble)

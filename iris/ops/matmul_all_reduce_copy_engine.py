@@ -8,7 +8,6 @@ This module provides a torch-like interface for GEMM+All-Reduce operations,
 automatically inferring dimensions, strides, and hardware parameters.
 """
 
-import time
 from typing import Optional
 import torch
 import triton
@@ -170,8 +169,6 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
     context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
-    GEMM_BLOCK_SIZE_M: tl.constexpr,
-    GEMM_BLOCK_SIZE_N: tl.constexpr,
     REDUCE_BLOCK_SIZE_M: tl.constexpr,
     REDUCE_BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
@@ -184,8 +181,11 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
     Each workgroup processes multiple tiles to reduce scheduling overhead.
     Reduces this rank's row band, then all-gathers it to every rank.
     """
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+    dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
+
     if WAIT_FOR_COMPLETION:
-        for wait_src_rank in range(world_size):
+        for wait_src_rank in tl.static_range(0, world_size):
             if wait_src_rank != cur_rank:
                 while tl.load(
                     completion_signals + wait_src_rank,
@@ -199,11 +199,7 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
     num_pid_m = tl.cdiv(rows_per_rank, REDUCE_BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, REDUCE_BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
-
     acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
-
-    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
-    dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
     # Persistent loop with CCL-style tile distribution
     for tile_id in range(pid, total_tiles, NUM_SMS):
@@ -687,7 +683,6 @@ def _post_host_copy_engine_transfers(
     flag_iteration: int,
 ) -> float:
     """Queue host-side SDMA wait+copy packets for the two-shot reduce-scatter."""
-    start = time.perf_counter()
     element_size = local_aux_buffer.element_size()
     stride_local_aux_m, stride_local_aux_n = local_aux_buffer.stride()
     stride_reduce_m, stride_reduce_n = reduce_buffer.stride()
@@ -757,7 +752,6 @@ def _post_host_copy_engine_transfers(
                 channel=0,
             )
 
-    return (time.perf_counter() - start) * 1000.0
 
 
 def _post_host_copy_engine_broadcast_transfers(
@@ -771,7 +765,6 @@ def _post_host_copy_engine_broadcast_transfers(
     flag_iteration: int,
 ) -> float:
     """Queue host-side SDMA wait+copy packets for the one-shot all-gather of GEMM partials."""
-    start = time.perf_counter()
     element_size = local_aux_buffer.element_size()
     stride_local_aux_m, stride_local_aux_n = local_aux_buffer.stride()
     stride_remote_m, stride_remote_n = remote_inbox.stride()
@@ -842,7 +835,6 @@ def _post_host_copy_engine_broadcast_transfers(
                 channel=0,
             )
 
-    return (time.perf_counter() - start) * 1000.0
 
 
 def matmul_all_reduce_copy_engine_prepost_transfers(
@@ -1038,7 +1030,6 @@ def matmul_all_reduce_copy_engine_preamble(
 
     # Zero output tensor
     C.zero_()
-    shmem.barrier()
 
     return workspace
 
@@ -1334,8 +1325,6 @@ def matmul_all_reduce_copy_engine(
             device_context,
             cur_rank=rank,
             world_size=world_size,
-            GEMM_BLOCK_SIZE_M=launch["block_size_m"],
-            GEMM_BLOCK_SIZE_N=launch["block_size_n"],
             REDUCE_BLOCK_SIZE_M=launch["reduce_block_size_m"],
             REDUCE_BLOCK_SIZE_N=launch["reduce_block_size_n"],
             GROUP_SIZE_M=launch["group_size_m"],
