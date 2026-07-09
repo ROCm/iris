@@ -746,17 +746,19 @@ def persistent_all_reduce_two_shot(
                         hint=(1, BLOCK_SIZE_N),
                     )
 
-    if end_flags_ptr is not None:
-        _per_block_barrier(
-            pid,
-            end_flags_ptr,
-            heap_bases,
-            group_rank,
-            iris_rank,
-            world_size,
-            rank_start,
-            rank_stride,
-        )
+    # End barrier skipped — start barrier of next call provides ordering.
+    # Matches async_op=True semantics (skip trailing barrier).
+    # if end_flags_ptr is not None:
+    #     _per_block_barrier(
+    #         pid,
+    #         end_flags_ptr,
+    #         heap_bases,
+    #         group_rank,
+    #         iris_rank,
+    #         world_size,
+    #         rank_start,
+    #         rank_stride,
+    #     )
 
 
 @triton.jit()
