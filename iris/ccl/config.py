@@ -142,7 +142,9 @@ class Config:
 
         # Validate reduce_scatter_variant
         if self.reduce_scatter_variant not in ["two_shot", "inreg", "twophase", "auto"]:
-            raise ValueError(f"reduce_scatter_variant must be one of: 'two_shot', 'inreg', 'twophase', 'auto', got '{self.reduce_scatter_variant}'")
+            raise ValueError(
+                f"reduce_scatter_variant must be one of: 'two_shot', 'inreg', 'twophase', 'auto', got '{self.reduce_scatter_variant}'"
+            )
 
         if self.threads_per_warp not in (32, 64):
             raise ValueError(f"threads_per_warp must be 32 (NVIDIA) or 64 (AMD), got {self.threads_per_warp}")

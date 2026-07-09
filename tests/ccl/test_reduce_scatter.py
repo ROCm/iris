@@ -105,8 +105,7 @@ def test_reduce_scatter(variant, dtype, M, N):
             ref_chunk = pytorch_ref.view(-1)[chunk_offset : chunk_offset + chunk_per_rank]
             max_diff = torch.abs(iris_chunk - ref_chunk).max().item()
             assert torch.allclose(iris_chunk, ref_chunk, atol=atol), (
-                f"Rank {rank}, variant={variant}: max diff={max_diff}, "
-                f"expected < {atol}"
+                f"Rank {rank}, variant={variant}: max diff={max_diff}, expected < {atol}"
             )
         else:
             # two_shot variant: check assigned tiles based on distribution
@@ -125,8 +124,7 @@ def test_reduce_scatter(variant, dtype, M, N):
                 ref_tile = pytorch_ref[m_start:m_end, n_start:n_end]
                 max_diff = torch.abs(iris_tile - ref_tile).max().item()
                 assert torch.allclose(iris_tile, ref_tile, atol=atol), (
-                    f"Rank {rank}, tile {tile_id}: max diff={max_diff}, "
-                    f"expected < {atol}"
+                    f"Rank {rank}, tile {tile_id}: max diff={max_diff}, expected < {atol}"
                 )
     finally:
         shmem.barrier()

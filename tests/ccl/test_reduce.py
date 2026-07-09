@@ -88,12 +88,14 @@ def test_reduce(variant, dtype, M, N, block_size_m, block_size_n):
             shmem.barrier()
             del shmem
             import gc
+
             gc.collect()
     else:
         # Non-root ranks: no check on output (RCCL semantics: undefined)
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()
 
 
@@ -112,6 +114,7 @@ def test_reduce_different_roots(root, dtype=torch.float32, M=1024, N=256):
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()
         pytest.skip(f"root={root} >= world_size={world_size}")
 
@@ -150,11 +153,13 @@ def test_reduce_different_roots(root, dtype=torch.float32, M=1024, N=256):
             shmem.barrier()
             del shmem
             import gc
+
             gc.collect()
     else:
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()
 
 
@@ -210,9 +215,11 @@ def test_reduce_two_shot_distribution(distribution, dtype=torch.float32, M=1024,
             shmem.barrier()
             del shmem
             import gc
+
             gc.collect()
     else:
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()

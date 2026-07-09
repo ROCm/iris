@@ -11,7 +11,7 @@ Three variants:
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import triton
@@ -251,8 +251,12 @@ def rs_readall_kernel(
         remote_rank = rank_start + peer_idx * rank_stride
         base_ptr = input_ptr + (chunk_offset + rn)
         data = iris.load(
-            base_ptr, iris_rank, remote_rank, heap_bases,
-            mask=mask, hint=(BLOCK_SIZE_N,),
+            base_ptr,
+            iris_rank,
+            remote_rank,
+            heap_bases,
+            mask=mask,
+            hint=(BLOCK_SIZE_N,),
         )
 
         scratch_offset = peer_idx * chunk_per_rank + rn

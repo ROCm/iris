@@ -877,9 +877,7 @@ def launch(
 
     elif variant == VARIANT_RS_AG:
         if workspace is None or workspace.ring_buffer is None:
-            raise RuntimeError(
-                "rs_ag variant requires workspace preparation. Call reduce_preamble before reduce."
-            )
+            raise RuntimeError("rs_ag variant requires workspace preparation. Call reduce_preamble before reduce.")
         scatter_buf = workspace.ring_buffer
         stride_sb_m, stride_sb_n = scatter_buf.stride(0), scatter_buf.stride(1)
 
@@ -922,9 +920,7 @@ def launch(
 
     elif variant == VARIANT_RING:
         if workspace is None or workspace.ring_buffer is None or workspace.flags is None:
-            raise RuntimeError(
-                "Ring variant requires workspace preparation. Call reduce_preamble before reduce."
-            )
+            raise RuntimeError("Ring variant requires workspace preparation. Call reduce_preamble before reduce.")
 
         # Build ring topology for reduce toward root
         # Ring order: root+1 → root+2 → ... → root-1 → root
@@ -936,6 +932,7 @@ def launch(
             prev_rank = prev_rank_in_group
         else:
             import torch.distributed as dist
+
             group_ranks = dist.get_process_group_ranks(group)
             next_rank_in_group = (rank_in_group + 1) % world_size
             prev_rank_in_group = (rank_in_group - 1) % world_size

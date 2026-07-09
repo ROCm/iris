@@ -329,11 +329,11 @@ def test_all_reduce_one_shot_graph_capture(numel, dtype):
 
     try:
         assert len(failures) == 0, (
-            f"Graph capture failed {len(failures)}/{num_replays} replays. "
-            f"First failures: {failures[:5]}"
+            f"Graph capture failed {len(failures)}/{num_replays} replays. First failures: {failures[:5]}"
         )
     finally:
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()
