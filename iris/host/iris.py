@@ -1178,7 +1178,13 @@ class Iris:
 
             all_to_all(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
-        def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None):
+        def all_gather_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
+            """Prepare workspace for ring all-gather variant."""
+            from iris.ccl.triton.all_gather import all_gather_preamble
+
+            return all_gather_preamble(output_tensor, input_tensor, self._iris, config=config, workspace=workspace)
+
+        def all_gather(self, output_tensor, input_tensor, group=None, async_op=False, config=None, workspace=None):
             """
             All-gather collective operation.
 
@@ -1195,23 +1201,11 @@ class Iris:
                           Default: False.
                 config: Config instance with kernel parameters (default: None).
                         If None, uses default Config values.
-
-            Example:
-                >>> ctx = iris.iris()
-                >>> # Input: (M, N), Output: (world_size * M, N)
-                >>> ctx.ccl.all_gather(output_tensor, input_tensor)
-
-                >>> # Custom configuration
-                >>> from iris.ccl import Config
-                >>> config = Config(block_size_m=128, block_size_n=32)
-                >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
-
-                >>> # Async operation (no barrier)
-                >>> ctx.ccl.all_gather(output_tensor, input_tensor, async_op=True)
+                workspace: Optional workspace from all_gather_preamble (ring variant).
             """
             from iris.ccl.all_gather import all_gather
 
-            all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
+            return all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config, workspace=workspace)
 
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
