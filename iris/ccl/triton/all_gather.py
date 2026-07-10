@@ -180,7 +180,7 @@ def persistent_all_gather_ring(
         # Write to my own output buffer (local copy to my slot)
         rm_my_slot = rm + group_rank * M
         my_slot_offset = rm_my_slot[:, None] * stride_out_m + rn[None, :] * stride_out_n
-        tl.store(output_ptr + my_slot_offset, data, mask=tile_mask, cache_modifier=".wt")
+        tl.store(output_ptr + my_slot_offset, data, mask=tile_mask)
 
         # For world_size == 1, AllGather is just a local copy (already done above).
         # Skip all ring communication to avoid self-targeted remote atomics which
@@ -417,7 +417,7 @@ def persistent_all_gather(
 
             if i == group_rank:
                 # Local destination (i == group_rank): use direct store
-                tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
+                tl.store(output_ptr_target, data, mask=combined_mask)
             else:
                 # Remote destination: use iris.store to send data to remote destination
                 # Use iris_rank for iris RMA operations (heap_bases indexing)
@@ -556,7 +556,7 @@ def persistent_all_gather_partitioned(
         # Send to the assigned destination rank
         if dest_rank_idx == group_rank:
             # Local destination: use direct store
-            tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
+            tl.store(output_ptr_target, data, mask=combined_mask)
         else:
             # Remote destination: use iris.store to send data to remote destination
             iris.store(

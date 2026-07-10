@@ -119,7 +119,7 @@ def broadcast_kernel(
         output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
         output_ptrs = output_ptr + output_offset
         output_ptrs = tl.multiple_of(output_ptrs, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        tl.store(output_ptrs, data, mask=mask, cache_modifier=".wt")
+        tl.store(output_ptrs, data, mask=mask)
 
 
 def launch(

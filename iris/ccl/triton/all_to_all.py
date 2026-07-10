@@ -123,7 +123,7 @@ def persistent_all_to_all(
             output_ptr_local = tl.multiple_of(output_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
             data = tl.load(input_ptr_local)
-            tl.store(output_ptr_local, data, cache_modifier=".wt")
+            tl.store(output_ptr_local, data)
 
             # Process all remote ranks in ring order: (group_rank+1)%ws, (group_rank+2)%ws, ...
             # This staggered ordering reduces contention on XGMI links by ensuring
@@ -165,7 +165,7 @@ def persistent_all_to_all(
             output_ptr_local = tl.multiple_of(output_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
             data = tl.load(input_ptr_local, mask=mask)
-            tl.store(output_ptr_local, data, mask=mask, cache_modifier=".wt")
+            tl.store(output_ptr_local, data, mask=mask)
 
             # Process all remote ranks in ring order
             for hop in range(1, world_size):
@@ -282,7 +282,7 @@ def persistent_all_to_all_v(
 
                 if hop == 0:
                     # Local copy
-                    tl.store(out_ptrs, data, mask=mask, cache_modifier=".wt")
+                    tl.store(out_ptrs, data, mask=mask)
                 else:
                     iris.store(
                         out_ptrs,
