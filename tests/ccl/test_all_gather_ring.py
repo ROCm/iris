@@ -41,7 +41,7 @@ def test_all_gather_ring(dtype, M, N, block_size_m, block_size_n):
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
-    # PyTorch reference — SPEC pattern: arange(size) * rank_id + rank_id
+    # PyTorch reference: arange(size) * rank_id + rank_id
     # Use float32 intermediate to avoid float16 overflow (max 65504) for large tensors
     arange_vals = torch.arange(M * N, dtype=torch.float32, device=f"cuda:{rank}").reshape(M, N)
     pytorch_input_tensor = ((arange_vals % 1000) * rank + rank).to(dtype)
@@ -103,7 +103,7 @@ def test_all_gather_ring(dtype, M, N, block_size_m, block_size_n):
     ],
 )
 def test_all_gather_ring_sizes(dtype, size_bytes):
-    """Test ring all-gather across benchmark message sizes with SPEC pattern."""
+    """Test ring all-gather across message sizes."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
@@ -121,7 +121,7 @@ def test_all_gather_ring_sizes(dtype, size_bytes):
         M = 1
         N = num_elements
 
-    # SPEC pattern: arange(size) * rank_id + rank_id — ensures each element is unique
+    # Each element is unique: arange(size) * rank_id + rank_id
     # Use float32 intermediate with modular arithmetic to avoid float16 overflow (max 65504)
     arange_vals = torch.arange(M * N, dtype=torch.float32, device=f"cuda:{rank}").reshape(M, N)
     pytorch_input = ((arange_vals % 1000) * rank + rank).to(dtype)
@@ -146,7 +146,7 @@ def test_all_gather_ring_sizes(dtype, size_bytes):
     shmem.ccl.all_gather(iris_output, iris_input, config=config, workspace=workspace)
     torch.cuda.synchronize()
 
-    # Bit-exact comparison as required by SPEC
+    # Bit-exact comparison (AllGather is pure data movement)
     match = torch.equal(iris_output, pytorch_output)
 
     try:

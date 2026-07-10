@@ -44,7 +44,7 @@ def _compute_M_N(total_bytes, dtype, world_size):
     return M, N
 
 
-# Test sizes from SPEC.md: 1KB, 4KB, 16KB, 64KB, 256KB, 1MB, 4MB, 16MB, 64MB, 256MB, 1GB
+# Test sizes: 1KB through 1GB
 ALL_SIZES = [
     1024,  # 1KB
     4 * 1024,  # 4KB
@@ -128,7 +128,7 @@ def test_all_to_all_correctness_ci(dtype, total_bytes):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("total_bytes", ALL_SIZES)
 def test_all_to_all_correctness(dtype, total_bytes):
-    """Test AllToAll correctness for ALL SPEC sizes including 256MB and 1GB.
+    """Test AllToAll correctness for all sizes including 256MB and 1GB.
 
     Marked @pytest.mark.slow — skipped in CI by default, run with:
         pytest -m slow tests/ccl/test_all_to_all_correctness.py
