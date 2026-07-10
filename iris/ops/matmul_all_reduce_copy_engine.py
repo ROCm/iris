@@ -379,84 +379,16 @@ def _matmul_all_reduce_copy_engine_local_reduce_flat_kernel(
     for block_id in range(pid, total_blocks, NUM_SMS):
         linear_base = block_id * BLOCK_SIZE
         linear_offsets = linear_base + block_offsets
+        acc = tl.zeros((BLOCK_SIZE,), dtype=acc_dtype)
 
-        local_ptr = local_aux_buffer + linear_offsets
-        local_ptr = tl.max_contiguous(tl.multiple_of(local_ptr, BLOCK_SIZE), BLOCK_SIZE)
-
-        if world_size == 8:
-            if cur_rank == 0:
-                data0 = tl.load(local_ptr).to(acc_dtype)
+        for reduce_src_rank in tl.static_range(0, world_size):
+            if reduce_src_rank == cur_rank:
+                src_ptr = local_aux_buffer + linear_offsets
             else:
-                src_offsets = linear_offsets
+                src_offsets = reduce_src_rank * total_elements + linear_offsets
                 src_ptr = remote_inbox + src_offsets
-                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
-                data0 = tl.load(src_ptr).to(acc_dtype)
-
-            if cur_rank == 1:
-                data1 = tl.load(local_ptr).to(acc_dtype)
-            else:
-                src_offsets = total_elements + linear_offsets
-                src_ptr = remote_inbox + src_offsets
-                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
-                data1 = tl.load(src_ptr).to(acc_dtype)
-
-            if cur_rank == 2:
-                data2 = tl.load(local_ptr).to(acc_dtype)
-            else:
-                src_offsets = 2 * total_elements + linear_offsets
-                src_ptr = remote_inbox + src_offsets
-                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
-                data2 = tl.load(src_ptr).to(acc_dtype)
-
-            if cur_rank == 3:
-                data3 = tl.load(local_ptr).to(acc_dtype)
-            else:
-                src_offsets = 3 * total_elements + linear_offsets
-                src_ptr = remote_inbox + src_offsets
-                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
-                data3 = tl.load(src_ptr).to(acc_dtype)
-
-            if cur_rank == 4:
-                data4 = tl.load(local_ptr).to(acc_dtype)
-            else:
-                src_offsets = 4 * total_elements + linear_offsets
-                src_ptr = remote_inbox + src_offsets
-                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
-                data4 = tl.load(src_ptr).to(acc_dtype)
-
-            if cur_rank == 5:
-                data5 = tl.load(local_ptr).to(acc_dtype)
-            else:
-                src_offsets = 5 * total_elements + linear_offsets
-                src_ptr = remote_inbox + src_offsets
-                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
-                data5 = tl.load(src_ptr).to(acc_dtype)
-
-            if cur_rank == 6:
-                data6 = tl.load(local_ptr).to(acc_dtype)
-            else:
-                src_offsets = 6 * total_elements + linear_offsets
-                src_ptr = remote_inbox + src_offsets
-                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
-                data6 = tl.load(src_ptr).to(acc_dtype)
-
-            if cur_rank == 7:
-                data7 = tl.load(local_ptr).to(acc_dtype)
-            else:
-                src_offsets = 7 * total_elements + linear_offsets
-                src_ptr = remote_inbox + src_offsets
-                src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
-                data7 = tl.load(src_ptr).to(acc_dtype)
-
-            acc = ((data0 + data1) + (data2 + data3)) + ((data4 + data5) + (data6 + data7))
-        else:
-            acc = tl.load(local_ptr).to(acc_dtype)
-            for reduce_src_rank in tl.static_range(0, world_size):
-                if reduce_src_rank != cur_rank:
-                    src_offsets = reduce_src_rank * total_elements + linear_offsets
-                    src_ptr = remote_inbox + src_offsets
-                    src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
-                    acc += tl.load(src_ptr).to(acc_dtype)
+            src_ptr = tl.max_contiguous(tl.multiple_of(src_ptr, BLOCK_SIZE), BLOCK_SIZE)
+            acc += tl.load(src_ptr).to(acc_dtype)
 
         out_ptr = C + linear_offsets
         out_ptr = tl.max_contiguous(tl.multiple_of(out_ptr, BLOCK_SIZE), BLOCK_SIZE)
