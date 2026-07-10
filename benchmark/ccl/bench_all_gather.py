@@ -11,7 +11,7 @@ from iris.ccl import Config
 
 @bench.register
 @bench.axis("num_ranks", [2, 4, 8])
-@bench.axis("M", bench.power_of_two(10, 14))
+@bench.axis("M", bench.power_of_two(10, 12))
 @bench.axis("N", bench.power_of_two(10, 14))
 @bench.axis("dtype", [torch.float16, torch.bfloat16])
 def all_gather(state, ctx):

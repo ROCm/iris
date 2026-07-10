@@ -26,7 +26,7 @@ def reduce(state, ctx):
     # Reduce bus bandwidth: (W-1)/W * data_size
     state.set_bytes(int(M * N * inp.element_size() * (world_size - 1) / world_size))
 
-    config = Config(reduce_variant="two_shot")
+    config = Config()
     workspace = ctx.ccl.reduce_preamble(out, inp, root=root, config=config)
 
     def preamble():
