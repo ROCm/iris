@@ -26,169 +26,42 @@ from ..utils import chiplet_transform_chunked
 def persistent_all_to_all(
     input_ptr,
     output_ptr,
-    M,
-    N,
-    stride_in_m,
-    stride_in_n,
-    stride_out_m,
-    stride_out_n,
+    N_PER_RANK,
+    N_TOTAL,
     heap_bases: tl.tensor,
     group_rank: tl.constexpr,
     iris_rank: tl.constexpr,
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
     COMM_SMS: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
-    CHUNK_SIZE: tl.constexpr,
 ):
-    """
-    Persistent all-to-all kernel using direct P2P writes.
-
-    Each rank reads its local input buffer
-    and writes (iris.store) to remote ranks' output buffers. Remote ranks are
-    visited in ring order (offset by group_rank) to reduce XGMI link contention,
-    for contention avoidance.
-
-    Data layout:
-      input[M, N*world_size]:  input[:, i*N:(i+1)*N] -> data destined for rank i
-      output[M, N*world_size]: output[:, i*N:(i+1)*N] <- data received from rank i
-
-    Algorithm:
-      For each rank r in [0, world_size):
-        Send input[:, r*N:(r+1)*N] to rank r's output[:, group_rank*N:(group_rank+1)*N]
-
-    Ring ordering for contention avoidance:
-      Instead of iterating ranks 0,1,...,world_size-1, we iterate as:
-        (group_rank+1)%ws, (group_rank+2)%ws, ..., group_rank (local last)
-      This staggers traffic across XGMI links.
-    """
+    """All-to-all with flat 1D tiling. Minimal constexprs for clean codegen."""
     pid = tl.program_id(0)
-
-    if NUM_XCDS != 1:
-        pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
-
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
+    total_tiles = tl.cdiv(N_PER_RANK, BLOCK_SIZE)
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tile_id // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-        pid_n = (tile_id % num_pid_in_group) // group_size_m
+        base = tile_id * BLOCK_SIZE
+        offsets = base + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < N_PER_RANK
 
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
+        # Local copy
+        local_in = input_ptr + group_rank * N_PER_RANK + offsets
+        local_out = output_ptr + group_rank * N_PER_RANK + offsets
+        data = tl.load(local_in, mask=mask)
+        tl.store(local_out, data, mask=mask)
 
-        # Compute base indices for this tile
-        rm_base = pid_m * BLOCK_SIZE_M
-        rn_base = pid_n * BLOCK_SIZE_N
+        # Remote ranks in ring order
+        for hop in tl.static_range(1, world_size):
+            i = (group_rank + hop) % world_size
+            target_rank = rank_start + i * rank_stride
 
-        # Check if this tile is fully within bounds (no edge cases)
-        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+            remote_in = input_ptr + i * N_PER_RANK + offsets
+            remote_out = output_ptr + group_rank * N_PER_RANK + offsets
 
-        # Build indices (used by both paths)
-        rm = rm_base + tl.arange(0, BLOCK_SIZE_M)
-        rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-        # Pre-compute base offsets for better memory access patterns and vectorization
-        input_base_m = rm[:, None] * stride_in_m
-        output_base_m = rm[:, None] * stride_out_m
-        input_base_n = rn[None, :] * stride_in_n
-        output_base_n = rn[None, :] * stride_out_n
-
-        # Fast path: NO MASKS (full tiles)
-        # The masking is problem size dependent, and the compiler does not recognize it can have two paths
-        # (one with masks and one without). Separate unmasked paths allow the compiler to generate
-        # more efficient vectorized instructions.
-        if is_full:
-            # Ring ordering: visit remote ranks in staggered order
-            # to spread traffic across XGMI links (for contention avoidance).
-            # Local rank is handled first for cache locality.
-            #
-            # Process local rank first (direct copy, no iris RMA needed)
-            input_offset_local = input_base_m + (input_base_n + group_rank * N * stride_in_n)
-            output_offset_local = output_base_m + (output_base_n + group_rank * N * stride_out_n)
-            input_ptr_local = input_ptr + input_offset_local
-            output_ptr_local = output_ptr + output_offset_local
-            input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-            output_ptr_local = tl.multiple_of(output_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-
-            data = tl.load(input_ptr_local)
-            tl.store(output_ptr_local, data)
-
-            # Process all remote ranks in ring order: (group_rank+1)%ws, (group_rank+2)%ws, ...
-            # This staggered ordering reduces contention on XGMI links by ensuring
-            # different ranks target different remote ranks at the same time.
-            for hop in range(1, world_size):
-                i = (group_rank + hop) % world_size
-                target_rank = rank_start + i * rank_stride
-
-                # Read chunk destined for rank i from local input
-                input_offset_remote = input_base_m + (input_base_n + i * N * stride_in_n)
-                # Write to rank i's output at position group_rank
-                output_offset_remote = output_base_m + (output_base_n + group_rank * N * stride_out_n)
-                input_ptr_remote = input_ptr + input_offset_remote
-                output_ptr_remote = output_ptr + output_offset_remote
-                input_ptr_remote = tl.multiple_of(input_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-                output_ptr_remote = tl.multiple_of(output_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-
-                remote_data = tl.load(input_ptr_remote)
-                iris.store(
-                    output_ptr_remote,
-                    remote_data,
-                    iris_rank,
-                    target_rank,
-                    heap_bases,
-                    hint=(1, BLOCK_SIZE_N),
-                )
-
-        # Slow path: MASKED (only boundary tiles land here)
-        # This path handles tiles at tensor boundaries where not all elements are valid.
-        else:
-            mask = (rm[:, None] < M) & (rn[None, :] < N)
-
-            # Process local rank first for better cache locality
-            input_offset_local = input_base_m + (input_base_n + group_rank * N * stride_in_n)
-            output_offset_local = output_base_m + (output_base_n + group_rank * N * stride_out_n)
-            input_ptr_local = input_ptr + input_offset_local
-            output_ptr_local = output_ptr + output_offset_local
-            input_ptr_local = tl.multiple_of(input_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-            output_ptr_local = tl.multiple_of(output_ptr_local, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-
-            data = tl.load(input_ptr_local, mask=mask)
-            tl.store(output_ptr_local, data, mask=mask)
-
-            # Process all remote ranks in ring order
-            for hop in range(1, world_size):
-                i = (group_rank + hop) % world_size
-                target_rank = rank_start + i * rank_stride
-
-                input_offset_remote = input_base_m + (input_base_n + i * N * stride_in_n)
-                output_offset_remote = output_base_m + (output_base_n + group_rank * N * stride_out_n)
-                input_ptr_remote = input_ptr + input_offset_remote
-                output_ptr_remote = output_ptr + output_offset_remote
-                input_ptr_remote = tl.multiple_of(input_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-                output_ptr_remote = tl.multiple_of(output_ptr_remote, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-
-                remote_data = tl.load(input_ptr_remote, mask=mask)
-                iris.store(
-                    output_ptr_remote,
-                    remote_data,
-                    iris_rank,
-                    target_rank,
-                    heap_bases,
-                    mask=mask,
-                    hint=(1, BLOCK_SIZE_N),
-                )
+            remote_data = tl.load(remote_in, mask=mask)
+            iris.store(remote_out, remote_data, iris_rank, target_rank, heap_bases, mask=mask)
 
 
 @triton.jit()
@@ -307,38 +180,35 @@ def launch(
     config,
 ):
     """Launch the Triton all-to-all kernel."""
-    M, total_N = input_tensor.shape[:2]
-    N = total_N // world_size
+    numel = input_tensor.numel()
+    n_per_rank = numel // world_size
+    n_total = numel
 
-    stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
-    stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
+    flat_input = input_tensor.contiguous().view(-1)
+    flat_output = output_tensor.contiguous().view(-1)
+
+    BLOCK_SIZE = 2048
+    total_tiles = (n_per_rank + BLOCK_SIZE - 1) // BLOCK_SIZE
+    num_sms = max(1, min(total_tiles, 16))
 
     iris_launch(
         persistent_all_to_all,
-        (config.comm_sms,),
-        input_tensor,
-        output_tensor,
-        M,
-        N,
-        stride_in_m,
-        stride_in_n,
-        stride_out_m,
-        stride_out_n,
+        (num_sms,),
+        flat_input,
+        flat_output,
+        n_per_rank,
+        n_total,
         ctx.get_heap_bases(),
         rank_in_group,
         rank_global,
         world_size,
         rank_start,
         rank_stride,
-        config.block_size_m,
-        config.block_size_n,
-        config.swizzle_size,
-        config.comm_sms,
-        config.num_xcds,
-        config.chunk_size,
-        num_stages=config.num_stages,
-        num_warps=config.num_warps,
-        waves_per_eu=config.waves_per_eu,
+        BLOCK_SIZE,
+        num_sms,
+        num_warps=8,
+        num_stages=1,
+        waves_per_eu=1,
         algorithm="all_to_all",
         rank=rank_global,
         dtype=input_tensor.dtype,
