@@ -35,7 +35,7 @@ class Config:
                            Options: "persistent", "partitioned", "ring"
                            - "persistent": Each PID handles multiple tiles and sends to all ranks
                            - "partitioned": PIDs partitioned across ranks, eliminates inner loop
-                           - "ring": Ring-based algorithm ported from RCCL with pipelined data flow
+                           - "ring": Ring-based algorithm with pipelined data flow
         all_reduce_variant: Variant for all-reduce operation (default: "atomic")
                            Options: "atomic", "ring", "two_shot", "one_shot", "spinlock"
         all_reduce_distribution: Distribution for two-shot all-reduce (default: 0)

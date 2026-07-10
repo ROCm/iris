@@ -3,26 +3,11 @@
 
 """
 Triton kernels for reduce collective communication.
-Ports RCCL's ring-based Reduce algorithm to iris/Triton.
 
-RCCL Reference:
-  - src/collectives/reduce.cc  (entry point, ncclReduce_impl)
-  - src/device/reduce.h        (device kernel, runRing with 3-phase logic)
-  - src/device/prims_simple.h  (primitives: send, recvReduceSend, recvReduceCopy)
-
-RCCL's Reduce uses a ring topology with unidirectional data flow toward root.
-Three rank roles:
-  1. prevRank == root (first sender): just sends its data
-  2. rank == root:  receives and reduces (recvReduceCopy)
-  3. intermediate:  receives, reduces with local data, and forwards (recvReduceSend)
-
-This port provides two variants:
+Two variants:
   - "one_shot": Gathers all inputs to root via iris.load (good for small messages)
   - "two_shot": Each rank reduces its tile partition, then sends result to root
                  (good for large messages, leverages symmetric heap)
-
-Chunking: RCCL uses REDUCE_CHUNKSTEPS=1, REDUCE_SLICESTEPS=1 (minimal).
-We match this simplicity in our port.
 """
 
 from dataclasses import dataclass
@@ -175,9 +160,8 @@ def persistent_reduce_one_shot(
     One-shot reduce for small/latency-bound buffers.
 
     Only root rank gathers all partials via iris.load and writes the reduced result.
-    Non-root ranks do nothing — matching RCCL's semantics where only root receives the result.
+    Non-root ranks do nothing — where only root receives the result.
 
-    RCCL Reference: src/device/reduce.h — this is the simplified case where
     root gathers all data directly (similar to recvReduceCopy for each peer).
     """
     # Only root rank does work
@@ -275,7 +259,7 @@ def persistent_reduce_two_shot(
     Two-shot reduce: each rank reduces its assigned tiles from all ranks, then
     sends the result to root.
 
-    This is modeled after RCCL's ring reduce (src/device/reduce.h) but leverages
+    Leverages
     iris's symmetric heap for direct remote reads instead of ring forwarding.
 
     Phase 1 (Reduce): Each rank reads its assigned tiles from all other ranks
@@ -284,7 +268,6 @@ def persistent_reduce_two_shot(
     Phase 2 (Send to root): Non-root ranks send their reduced tiles to root
     via iris.store. Root writes its own tiles locally.
 
-    RCCL uses ring topology for this; we use direct gather which is more efficient
     with iris's symmetric heap (no sequential forwarding through ring).
     """
     pid = tl.program_id(0)
@@ -431,7 +414,7 @@ def persistent_reduce_scatter_then_gather(
     vs two_shot: data + (W-1)/W × data (writes) = same total but writes cause
     contention at root, while this approach uses reads which are pull-based.
 
-    This matches RCCL's ring reduce approach (reduce-scatter + gather) but uses
+    Ring reduce approach (reduce-scatter + gather) but uses
     iris's symmetric heap for direct RMA instead of ring forwarding.
     """
     pid = tl.program_id(0)
@@ -587,7 +570,7 @@ def persistent_reduce_ring(
     """
     Ring-based reduce kernel that streams tiles around the ring toward root.
 
-    Direct port of RCCL's ring reduce (src/device/reduce.h):
+    Ring reduce kernel:
     - prevRank == root: just sends its data to next rank
     - rank == root: receives and reduces (recvReduceCopy)
     - intermediate: receives, reduces with local data, and forwards (recvReduceSend)
@@ -596,7 +579,7 @@ def persistent_reduce_ring(
     Each hop reduces one more rank's contribution.
 
     Uses flag-based producer/consumer handshake for synchronization,
-    matching RCCL's step-based flow control (prims_simple.h).
+    with step-based flow control.
     """
     pid_raw = tl.program_id(0)
 
@@ -641,13 +624,13 @@ def persistent_reduce_ring(
             remote_flag_ptr = flags + flag_offset
             local_flag_ptr = flags + flag_offset
 
-            # RCCL 3-phase logic (src/device/reduce.h):
+            # 3-phase logic:
             # Phase 1: prevRank == root → just send
             # Phase 2: rank == root → recvReduceCopy
             # Phase 3: intermediate → recvReduceSend
 
             # Determine rank's role in the ring
-            # In RCCL, prevRank is the rank that sends TO this rank
+            # prevRank is the rank that sends TO this rank
             # The ring flows: ... → prev_rank → this_rank → next_rank → ...
             # Data converges on root
 
@@ -656,7 +639,7 @@ def persistent_reduce_ring(
                 # Root's predecessor just sends its own data.
                 # But here, WE are prev_rank==root's successor, meaning
                 # we need to send our data and it eventually reaches root.
-                # Actually in RCCL: "if prevRank == root" means the previous
+                # "if prevRank == root" means the previous
                 # rank in the ring is root, so THIS rank is the first sender.
                 # It just sends its data without receiving anything.
                 # Send local data to next rank

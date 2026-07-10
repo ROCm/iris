@@ -21,7 +21,6 @@ def reduce(output_tensor, input_tensor, ctx, root=0, op=None, group=None, async_
     """
     Reduce: sum inputs across all ranks, result only on root rank.
 
-    This is a port of RCCL's Reduce collective (src/collectives/reduce.cc).
     Unlike AllReduce, only the root rank receives the reduced result.
 
     Args:

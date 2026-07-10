@@ -11,7 +11,7 @@ delegates to ``distributed_device_barrier()`` in
 ``_device_barrier_kernel`` Triton kernel.
 
 No new kernel is defined here. The underlying kernel uses a 2-phase
-arrive-wait pattern with atomic epoch counters (matching RCCL's
+arrive-wait pattern with atomic epoch counters (
 device-side LSA barrier design):
   1. Each rank atomically increments its own flag (release semantics)
   2. Each rank polls every remote rank's flag until it reaches the

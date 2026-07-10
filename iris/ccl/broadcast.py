@@ -4,8 +4,7 @@
 """
 Broadcast collective operation — public API.
 
-Routes to triton/ based on config. Ported from RCCL's ring broadcast
-(src/device/broadcast.h, src/collectives/broadcast.cc).
+Routes to triton/ based on config.
 """
 
 from iris.ccl.utils import extract_group_info
@@ -18,7 +17,7 @@ def broadcast(output_tensor, input_tensor, ctx, src=0, group=None, async_op=Fals
     The source rank's input_tensor is copied to output_tensor on ALL ranks.
     Non-root ranks' input_tensor values are ignored.
 
-    This is a port of RCCL's broadcast (ring algorithm) adapted for
+    Pull-based broadcast adapted for
     iris's symmetric heap. Instead of passing data around a ring, we
     leverage direct XGMI writes for better performance.
 

@@ -4,10 +4,6 @@
 """
 Triton kernels for all-gather collective communication.
 Supports multiple variants: persistent, partitioned, and ring.
-
-The ring variant is ported from RCCL's ring AllGather algorithm
-(see rccl/src/device/all_gather.h) and leverages iris's symmetric heap
-for zero-copy remote stores.
 """
 
 from dataclasses import dataclass
@@ -110,26 +106,19 @@ def persistent_all_gather_ring(
     CHUNK_SIZE: tl.constexpr,
 ):
     """
-    Ring-based all-gather kernel ported from RCCL's ring AllGather algorithm
-    (rccl/src/device/all_gather.h).
+    Ring-based all-gather kernel.
 
-    Algorithm (from RCCL):
-        For N ranks in a ring, AllGather completes in N-1 steps:
-        - Step 0: Each rank sends its own data chunk to the next rank in the ring
-                  (RCCL: directCopySend). The data is written directly to the
-                  correct slot in the next rank's output buffer.
-        - Steps 1..N-2: Each rank receives data (written by prev rank into its
-                        output buffer), reads it, and forwards to next rank.
-                        (RCCL: directRecvCopyDirectSend).
-        - Step N-1: Final receive — no forwarding needed (RCCL: directRecv).
+    For N ranks in a ring, AllGather completes in N-1 steps:
+    - Step 0: Each rank sends its own data chunk to the next rank in the ring,
+              written directly to the correct slot in the next rank's output buffer.
+    - Steps 1..N-2: Each rank receives data, reads it, and forwards to next rank.
+    - Step N-1: Final receive — no forwarding needed.
 
-    Iris advantage over RCCL:
-        With iris's symmetric heap, we perform zero-copy remote stores directly
-        into the destination rank's output buffer. RCCL uses intermediate ring
-        buffers that require extra copies; iris eliminates these entirely.
+    Uses zero-copy remote stores via iris symmetric heap directly into the
+    destination rank's output buffer.
 
     Synchronization (producer/consumer handshake):
-        Uses per-tile flags following iris's ring all-reduce pattern:
+        Uses per-tile flags:
         - Before writing: check next rank's flag is 0 (ready) via remote atomic CAS
         - After writing: set next rank's flag to 1 via remote atomic XCHG
         - To receive: wait for local flag == 1 via local atomic CAS
@@ -180,7 +169,7 @@ def persistent_all_gather_ring(
         remote_flag_ptr = flags + tile_id
 
         # ---------------------------------------------------------------
-        # RCCL Ring AllGather (N-1 steps)
+        # Ring AllGather (N-1 steps)
         # Output layout: [Rank0_data | Rank1_data | ... | RankN-1_data]
         # At each step, data for one rank propagates one hop around the ring.
         # ---------------------------------------------------------------
@@ -197,7 +186,7 @@ def persistent_all_gather_ring(
         # Skip all ring communication to avoid self-targeted remote atomics which
         # may hang on some symmetric heap implementations.
         if world_size > 1:
-            # --- Step 0: Send my data to next rank (RCCL directCopySend) ---
+            # --- Step 0: Send my data to next rank ---
             # Check next rank is ready (flag == 0)
             while (
                 iris.atomic_cas(
@@ -238,7 +227,7 @@ def persistent_all_gather_ring(
             )
 
             # --- Steps 1 to world_size-2: Receive, read, forward ---
-            # (RCCL directRecvCopyDirectSend)
+            # (receive, copy, forward)
             for _step in range(1, world_size - 1):
                 # Wait for prev rank to deliver data (local flag becomes 1)
                 while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
@@ -305,7 +294,7 @@ def persistent_all_gather_ring(
                 tl.debug_barrier()
                 tl.atomic_xchg(local_flag_ptr, 0, sem="release", scope="sys")
 
-            # --- Step world_size-1: Final receive (RCCL directRecv) ---
+            # --- Step world_size-1: Final receive ---
             # Wait for last piece of data
             while tl.atomic_cas(local_flag_ptr, 0, 0, sem="acquire", scope="sys") != 1:
                 pass

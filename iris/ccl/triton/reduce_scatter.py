@@ -300,7 +300,7 @@ def _select_variant(size_bytes, world_size):
     """Auto-select best RS variant based on message size.
 
     Based on benchmarks on 8x MI300X:
-    - two_shot: Best at all standalone RS sizes (2.37-2.74x vs RCCL at <=1MB).
+    - two_shot: Best at all standalone RS sizes (2.37-2.74x at <=1MB).
       Benefits from 2D tiling and unmasked fast path.
     - inreg: Best when used as RS phase of RS+AG all-reduce decomposition.
       Independent loads hide XGMI latency at <=2MB.

@@ -8,7 +8,7 @@ Provides ``barrier()`` as a CCL entry point that delegates to the
 pre-existing ``distributed_device_barrier()`` kernel in
 ``iris.host.distributed.helpers``. The underlying kernel uses
 device-side atomic epoch counters on the symmetric heap, following
-the same arrive-wait pattern as RCCL's LSA barrier.
+an arrive-wait pattern with device-side atomic epoch counters.
 """
 
 

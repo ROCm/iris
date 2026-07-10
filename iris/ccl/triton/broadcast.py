@@ -4,31 +4,9 @@
 """
 Triton kernels for broadcast collective communication.
 
-Ported from RCCL's broadcast implementation (src/device/broadcast.h).
-RCCL uses a ring-only algorithm for broadcast with multi-channel pipelining
-(src/graph/tuning.cc:653 enforces RING-only for broadcast/reduce).
-
-In iris, we leverage the symmetric heap for a pull-based broadcast:
-all ranks read directly from root's input buffer via iris.load(), then
-store to their own local output buffer. Root does a simple local copy.
-
-This approach is analogous to RCCL's broadcast but replaces the sequential
-ring pipeline with parallel direct reads via XGMI. Each non-root rank
-independently reads from root via its own XGMI link.
-
-Performance characteristics:
-- Small messages (< 1MB): iris matches or beats RCCL due to lower latency
-  (no ring pipeline startup, no multi-hop traversal)
-- Medium messages (1-4MB): iris is competitive with RCCL
-- Large messages (> 4MB): RCCL wins due to multi-channel ring pipelining
-  which distributes bandwidth across all XGMI links. iris is limited
-  to root's aggregate outbound bandwidth (~50 GB/s per destination).
-
-Key RCCL source files referenced:
-- src/collectives/broadcast.cc: entry point (ncclBroadcast_impl)
-- src/device/broadcast.h: ring broadcast kernel (runRing)
-- src/graph/tuning.cc:653: algorithm selection (RING only for broadcast)
-- src/device/prims_simple.h: send/recv primitives (directSend, directRecv)
+Pull-based broadcast using iris symmetric heap: all ranks read directly
+from root's input buffer via XGMI, then store to their local output.
+Root does a simple local copy.
 """
 
 import triton
@@ -65,22 +43,10 @@ def broadcast_kernel(
     """
     Pull-based broadcast kernel: all ranks read from root's input buffer.
 
-    Translation of RCCL's ring broadcast to iris's symmetric heap model.
-    Instead of passing data sequentially around a ring (root -> rank1 ->
-    rank2 -> ... -> last), every rank directly reads from root's input
-    buffer via XGMI using iris.load().
+    Pull-based broadcast: all ranks read from root's input buffer via XGMI.
 
-    RCCL equivalent (src/device/broadcast.h runRing):
-    - Root: directCopySend() — copies input to output, sends to next
-    - Middle ranks: directRecvCopyDirectSend() — receive, copy, forward
-    - Last rank: directRecv() — receive only
-
-    Iris implementation:
-    - Root: local load from input, local store to output
-    - All other ranks: iris.load from root's input via XGMI, local store
-
-    Each non-root rank independently reads via its own XGMI link,
-    achieving parallel bandwidth utilization across all XGMI links.
+    Root does a local copy. All other ranks use iris.load from root's
+    input buffer, achieving parallel bandwidth across all XGMI links.
 
     Args:
         input_ptr: Pointer to input tensor (M, N) — only root's matters

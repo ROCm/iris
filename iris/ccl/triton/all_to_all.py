@@ -4,12 +4,12 @@
 """
 Triton kernel for all-to-all collective communication.
 
-Implements RCCL-style AllToAll using direct P2P writes via iris symmetric heap.
-The algorithm mirrors RCCL's send/recv pair approach (src/enqueue.cc lines 2992-2996)
+Direct P2P writes via iris symmetric heap.
+Direct P2P writes via iris symmetric heap.
 where each rank sends a different chunk to every other rank using independent P2P
 operations. For contention reduction on XGMI links, remote ranks are visited in
-ring order (offset by group_rank) inspired by RCCL's AllToAllPivot
-(src/device/alltoall_pivot.h).
+ring order (offset by group_rank) for contention avoidance
+.
 
 Additionally provides AllToAllv for variable-size per-rank chunks, matching
 torch.distributed.all_to_all_single with split_sizes.
@@ -46,18 +46,18 @@ def persistent_all_to_all(
     CHUNK_SIZE: tl.constexpr,
 ):
     """
-    Persistent all-to-all kernel using RCCL-style direct P2P writes.
+    Persistent all-to-all kernel using direct P2P writes.
 
-    Port of RCCL's AllToAll algorithm: each rank reads its local input buffer
+    Each rank reads its local input buffer
     and writes (iris.store) to remote ranks' output buffers. Remote ranks are
     visited in ring order (offset by group_rank) to reduce XGMI link contention,
-    inspired by RCCL's AllToAllPivot (alltoall_pivot.h).
+    for contention avoidance.
 
     Data layout:
       input[M, N*world_size]:  input[:, i*N:(i+1)*N] -> data destined for rank i
       output[M, N*world_size]: output[:, i*N:(i+1)*N] <- data received from rank i
 
-    Algorithm (matching RCCL src/enqueue.cc):
+    Algorithm:
       For each rank r in [0, world_size):
         Send input[:, r*N:(r+1)*N] to rank r's output[:, group_rank*N:(group_rank+1)*N]
 
@@ -110,8 +110,8 @@ def persistent_all_to_all(
         # (one with masks and one without). Separate unmasked paths allow the compiler to generate
         # more efficient vectorized instructions.
         if is_full:
-            # RCCL-style ring ordering: visit remote ranks in staggered order
-            # to spread traffic across XGMI links (inspired by alltoall_pivot.h).
+            # Ring ordering: visit remote ranks in staggered order
+            # to spread traffic across XGMI links (for contention avoidance).
             # Local rank is handled first for cache locality.
             #
             # Process local rank first (direct copy, no iris RMA needed)
