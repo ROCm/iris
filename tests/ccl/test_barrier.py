@@ -128,9 +128,7 @@ def test_barrier_data_visibility(N, rounds):
             shmem.ccl.barrier()
 
             # Read from neighbor — should see neighbor's value
-            _read_remote_kernel[(1,)](
-                buf, result, rank, neighbor, N, heap_bases
-            )
+            _read_remote_kernel[(1,)](buf, result, rank, neighbor, N, heap_bases)
             torch.cuda.synchronize()
 
             expected_val = float(neighbor + i * 100)
@@ -168,7 +166,7 @@ def test_barrier_with_allreduce_correctness(dtype, M, N):
 
     from iris.ccl import Config
 
-    heap_size = 2 ** 33
+    heap_size = 2**33
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
 
@@ -198,8 +196,7 @@ def test_barrier_with_allreduce_correctness(dtype, M, N):
         atol = 1e-3 if dtype in (torch.float16, torch.bfloat16) else 1e-5
         max_diff = torch.abs(out - ref_out).max().item()
         assert torch.allclose(out, ref_out, atol=atol), (
-            f"Barrier+AllReduce mismatch: max_diff={max_diff}, "
-            f"rank={rank}, dtype={dtype}, shape=({M},{N})"
+            f"Barrier+AllReduce mismatch: max_diff={max_diff}, rank={rank}, dtype={dtype}, shape=({M},{N})"
         )
     finally:
         shmem.barrier()
@@ -216,7 +213,7 @@ def test_barrier_state_reuse():
     try:
         # First call creates the state
         shmem.ccl.barrier()
-        assert hasattr(shmem, '_ccl_barrier_state')
+        assert hasattr(shmem, "_ccl_barrier_state")
         assert None in shmem._ccl_barrier_state
         flags = shmem._ccl_barrier_state[None]
         flags_ptr = flags.data_ptr()
@@ -275,10 +272,7 @@ def test_barrier_graph_capturable():
             capture_stream.synchronize()
             shmem.barrier()
 
-            expected = torch.full(
-                (N,), float(neighbor + (i + 1) * 10),
-                dtype=torch.float32, device="cuda"
-            )
+            expected = torch.full((N,), float(neighbor + (i + 1) * 10), dtype=torch.float32, device="cuda")
             torch.testing.assert_close(result, expected, rtol=0, atol=0)
     finally:
         shmem.barrier()

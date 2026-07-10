@@ -11,6 +11,7 @@ device-side atomic epoch counters on the symmetric heap, following
 the same arrive-wait pattern as RCCL's LSA barrier.
 """
 
+
 def barrier(ctx, group=None, async_op=False, config=None):
     """
     Barrier synchronization across all ranks in the group.

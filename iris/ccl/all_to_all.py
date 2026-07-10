@@ -126,7 +126,7 @@ def all_to_all_v(
     # output_split_offsets[j] is where rank j's data lands in OUR output buffer
     # So rank j needs output_split_offsets[j] from us.
     # We send our output_split_offsets, each rank picks slot group_rank from what it receives.
-    send_list = [output_split_offsets_t[i:i + 1].clone() for i in range(world_size)]
+    send_list = [output_split_offsets_t[i : i + 1].clone() for i in range(world_size)]
     recv_list = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)]
     dist.all_to_all(recv_list, send_list, group=group)
     for i in range(world_size):

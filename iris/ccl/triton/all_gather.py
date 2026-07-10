@@ -201,10 +201,16 @@ def persistent_all_gather_ring(
             # Check next rank is ready (flag == 0)
             while (
                 iris.atomic_cas(
-                    remote_flag_ptr, 0, 0,
-                    iris_rank, next_rank, heap_bases,
-                    sem="acquire", scope="sys",
-                ) != 0
+                    remote_flag_ptr,
+                    0,
+                    0,
+                    iris_rank,
+                    next_rank,
+                    heap_bases,
+                    sem="acquire",
+                    scope="sys",
+                )
+                != 0
             ):
                 pass
 
@@ -222,9 +228,13 @@ def persistent_all_gather_ring(
             # Signal next rank: data for step 0 is ready
             tl.debug_barrier()
             iris.atomic_xchg(
-                remote_flag_ptr, 1,
-                iris_rank, next_rank, heap_bases,
-                sem="release", scope="sys",
+                remote_flag_ptr,
+                1,
+                iris_rank,
+                next_rank,
+                heap_bases,
+                sem="release",
+                scope="sys",
             )
 
             # --- Steps 1 to world_size-2: Receive, read, forward ---
@@ -247,16 +257,21 @@ def persistent_all_gather_ring(
                 # necessary because we read from the same output buffer that
                 # remote ranks write into (unlike all-reduce which uses a
                 # separate ring_buffer for data transfer).
-                recv_data = tl.load(output_ptr + slot_offset, mask=tile_mask, other=0.0,
-                                    cache_modifier=".cv")
+                recv_data = tl.load(output_ptr + slot_offset, mask=tile_mask, other=0.0, cache_modifier=".cv")
 
                 # Forward to next rank: check it's ready
                 while (
                     iris.atomic_cas(
-                        remote_flag_ptr, 0, 0,
-                        iris_rank, next_rank, heap_bases,
-                        sem="acquire", scope="sys",
-                    ) != 0
+                        remote_flag_ptr,
+                        0,
+                        0,
+                        iris_rank,
+                        next_rank,
+                        heap_bases,
+                        sem="acquire",
+                        scope="sys",
+                    )
+                    != 0
                 ):
                     pass
 
@@ -274,9 +289,13 @@ def persistent_all_gather_ring(
                 # Signal next rank
                 tl.debug_barrier()
                 iris.atomic_xchg(
-                    remote_flag_ptr, 1,
-                    iris_rank, next_rank, heap_bases,
-                    sem="release", scope="sys",
+                    remote_flag_ptr,
+                    1,
+                    iris_rank,
+                    next_rank,
+                    heap_bases,
+                    sem="release",
+                    scope="sys",
                 )
 
                 # Reset our flag to 0 AFTER forwarding data, so prev rank
@@ -615,6 +634,7 @@ def launch(
             next_rank = rank_start + next_group_rank * rank_stride
         else:
             import torch.distributed as dist
+
             group_ranks = dist.get_process_group_ranks(group)
             next_group_rank = (rank_in_group + 1) % world_size
             next_rank = group_ranks[next_group_rank]

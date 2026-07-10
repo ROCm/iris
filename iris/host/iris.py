@@ -1205,7 +1205,15 @@ class Iris:
             """
             from iris.ccl.all_gather import all_gather
 
-            return all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config, workspace=workspace)
+            return all_gather(
+                output_tensor,
+                input_tensor,
+                self._iris,
+                group=group,
+                async_op=async_op,
+                config=config,
+                workspace=workspace,
+            )
 
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
@@ -1316,7 +1324,9 @@ class Iris:
                 config=config,
             )
 
-        def reduce(self, output_tensor, input_tensor, root=0, op=None, group=None, async_op=False, config=None, workspace=None):
+        def reduce(
+            self, output_tensor, input_tensor, root=0, op=None, group=None, async_op=False, config=None, workspace=None
+        ):
             """
             Reduce: sum inputs across all ranks, result only on root rank.
 

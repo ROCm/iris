@@ -46,17 +46,17 @@ def _compute_M_N(total_bytes, dtype, world_size):
 
 # Test sizes from SPEC.md: 1KB, 4KB, 16KB, 64KB, 256KB, 1MB, 4MB, 16MB, 64MB, 256MB, 1GB
 ALL_SIZES = [
-    1024,           # 1KB
-    4 * 1024,       # 4KB
-    16 * 1024,      # 16KB
-    64 * 1024,      # 64KB
-    256 * 1024,     # 256KB
-    1024 * 1024,    # 1MB
-    4 * 1024 * 1024,    # 4MB
-    16 * 1024 * 1024,   # 16MB
-    64 * 1024 * 1024,   # 64MB
+    1024,  # 1KB
+    4 * 1024,  # 4KB
+    16 * 1024,  # 16KB
+    64 * 1024,  # 64KB
+    256 * 1024,  # 256KB
+    1024 * 1024,  # 1MB
+    4 * 1024 * 1024,  # 4MB
+    16 * 1024 * 1024,  # 16MB
+    64 * 1024 * 1024,  # 64MB
     256 * 1024 * 1024,  # 256MB
-    1024 * 1024 * 1024, # 1GB
+    1024 * 1024 * 1024,  # 1GB
 ]
 
 # Reduced sizes for CI (skip very large ones)
@@ -120,6 +120,7 @@ def test_all_to_all_correctness_ci(dtype, total_bytes):
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()
 
 
@@ -185,6 +186,7 @@ def test_all_to_all_correctness(dtype, total_bytes):
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()
 
 
@@ -192,10 +194,10 @@ def test_all_to_all_correctness(dtype, total_bytes):
 @pytest.mark.parametrize(
     "M, N, block_size_m, block_size_n",
     [
-        (128, 64, 32, 64),      # Small
-        (128, 128, 32, 32),     # BLOCK_N < N/world_size
-        (256, 128, 32, 16),     # Minimum BLOCK_N=16
-        (1024, 256, 32, 64),    # Medium
+        (128, 64, 32, 64),  # Small
+        (128, 128, 32, 32),  # BLOCK_N < N/world_size
+        (256, 128, 32, 16),  # Minimum BLOCK_N=16
+        (1024, 256, 32, 64),  # Medium
     ],
 )
 def test_all_to_all_shapes(dtype, M, N, block_size_m, block_size_n):
@@ -230,13 +232,12 @@ def test_all_to_all_shapes(dtype, M, N, block_size_m, block_size_n):
     max_diff = (iris_output - torch_ref).abs().max().item()
 
     try:
-        assert torch.allclose(iris_output, torch_ref, atol=atol), (
-            f"Max diff: {max_diff}, expected < {atol}"
-        )
+        assert torch.allclose(iris_output, torch_ref, atol=atol), f"Max diff: {max_diff}, expected < {atol}"
     finally:
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()
 
 
@@ -278,13 +279,12 @@ def test_all_to_all_v_equal_splits(dtype):
     max_diff = (iris_output - torch_ref).abs().max().item()
 
     try:
-        assert torch.allclose(iris_output, torch_ref, atol=1e-5), (
-            f"AllToAllv with equal splits: max_diff={max_diff}"
-        )
+        assert torch.allclose(iris_output, torch_ref, atol=1e-5), f"AllToAllv with equal splits: max_diff={max_diff}"
     finally:
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()
 
 
@@ -316,7 +316,7 @@ def test_all_to_all_v_variable_splits(dtype):
     offset = 0
     for t in range(world_size):
         size = input_split_sizes[t]
-        iris_input[:, offset:offset + size] = float(rank * 100 + t)
+        iris_input[:, offset : offset + size] = float(rank * 100 + t)
         offset += size
 
     # Reference
@@ -324,7 +324,7 @@ def test_all_to_all_v_variable_splits(dtype):
     offset = 0
     for t in range(world_size):
         size = input_split_sizes[t]
-        torch_input_list.append(iris_input[:, offset:offset + size].clone())
+        torch_input_list.append(iris_input[:, offset : offset + size].clone())
         offset += size
 
     torch_output_list = []
@@ -341,8 +341,11 @@ def test_all_to_all_v_variable_splits(dtype):
     shmem.barrier()
     config = Config(block_size_m=32, block_size_n=16)
     shmem.ccl.all_to_all_v(
-        iris_output, iris_input_buf[:, :total_input_cols],
-        output_split_sizes, input_split_sizes, config=config,
+        iris_output,
+        iris_input_buf[:, :total_input_cols],
+        output_split_sizes,
+        input_split_sizes,
+        config=config,
     )
     torch.cuda.synchronize()
 
@@ -357,4 +360,5 @@ def test_all_to_all_v_variable_splits(dtype):
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()

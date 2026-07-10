@@ -61,13 +61,9 @@ def test_all_gather_ring(dtype, M, N, block_size_m, block_size_n):
         block_size_n=block_size_n,
         all_gather_variant="ring",
     )
-    workspace = shmem.ccl.all_gather_preamble(
-        iris_output_tensor, iris_input_tensor, config=config
-    )
+    workspace = shmem.ccl.all_gather_preamble(iris_output_tensor, iris_input_tensor, config=config)
     shmem.barrier()
-    shmem.ccl.all_gather(
-        iris_output_tensor, iris_input_tensor, config=config, workspace=workspace
-    )
+    shmem.ccl.all_gather(iris_output_tensor, iris_input_tensor, config=config, workspace=workspace)
     torch.cuda.synchronize()
 
     # Bit-exact comparison: AllGather is pure data movement with zero arithmetic,
@@ -80,14 +76,14 @@ def test_all_gather_ring(dtype, M, N, block_size_m, block_size_n):
             mismatches = (iris_output_tensor != pytorch_output_tensor).sum().item()
             total = iris_output_tensor.numel()
             pytest.fail(
-                f"Rank {rank}: {mismatches}/{total} mismatches, max_diff={max_diff} "
-                f"for dtype={dtype}, M={M}, N={N}"
+                f"Rank {rank}: {mismatches}/{total} mismatches, max_diff={max_diff} for dtype={dtype}, M={M}, N={N}"
             )
         assert match
     finally:
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()
 
 
@@ -95,15 +91,15 @@ def test_all_gather_ring(dtype, M, N, block_size_m, block_size_n):
 @pytest.mark.parametrize(
     "size_bytes",
     [
-        1024,         # 1 KB
-        4096,         # 4 KB
-        16384,        # 16 KB
-        65536,        # 64 KB
-        262144,       # 256 KB
-        1048576,      # 1 MB
-        4194304,      # 4 MB
-        16777216,     # 16 MB
-        67108864,     # 64 MB
+        1024,  # 1 KB
+        4096,  # 4 KB
+        16384,  # 16 KB
+        65536,  # 64 KB
+        262144,  # 256 KB
+        1048576,  # 1 MB
+        4194304,  # 4 MB
+        16777216,  # 16 MB
+        67108864,  # 64 MB
     ],
 )
 def test_all_gather_ring_sizes(dtype, size_bytes):
@@ -145,9 +141,7 @@ def test_all_gather_ring_sizes(dtype, size_bytes):
         block_size_n=min(64, N),
         all_gather_variant="ring",
     )
-    workspace = shmem.ccl.all_gather_preamble(
-        iris_output, iris_input, config=config
-    )
+    workspace = shmem.ccl.all_gather_preamble(iris_output, iris_input, config=config)
     shmem.barrier()
     shmem.ccl.all_gather(iris_output, iris_input, config=config, workspace=workspace)
     torch.cuda.synchronize()
@@ -169,4 +163,5 @@ def test_all_gather_ring_sizes(dtype, size_bytes):
         shmem.barrier()
         del shmem
         import gc
+
         gc.collect()
