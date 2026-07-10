@@ -96,10 +96,14 @@ class Config:
     threads_per_warp: int = 64
     waves_per_eu: int = 0
 
+    _cached_num_xcc = None
+
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
         if self.num_xcds is None:
-            self.num_xcds = iris.hip.get_num_xcc()
+            if Config._cached_num_xcc is None:
+                Config._cached_num_xcc = iris.hip.get_num_xcc()
+            self.num_xcds = Config._cached_num_xcc
 
         if self.chunk_size is None:
             self.chunk_size = self.swizzle_size * self.swizzle_size
