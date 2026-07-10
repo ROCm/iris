@@ -215,7 +215,7 @@ def persistent_reduce_one_shot(
                 remote_rank = rank_start + i * rank_stride
                 acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
 
-            tl.store(out_ptr, acc.to(output_ptr.type.element_ty), cache_modifier=".wt")
+            tl.store(out_ptr, acc.to(output_ptr.type.element_ty))
         else:
             # Slow path: masked for boundary tiles
             mask = (rm[:, None] < M) & (rn[None, :] < N)
@@ -226,7 +226,7 @@ def persistent_reduce_one_shot(
                 remote_rank = rank_start + i * rank_stride
                 acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
 
-            tl.store(out_ptr, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt")
+            tl.store(out_ptr, acc.to(output_ptr.type.element_ty), mask=mask)
 
 
 @triton.jit()
@@ -337,7 +337,7 @@ def persistent_reduce_two_shot(
             # Phase 2: Send to root only
             if group_rank == ROOT:
                 # Root: write locally
-                tl.store(out_ptr, reduced, cache_modifier=".wt")
+                tl.store(out_ptr, reduced)
             else:
                 # Non-root: send to root via RMA
                 iris.store(out_ptr, reduced, iris_rank, ROOT_GLOBAL, heap_bases, hint=(1, BLOCK_SIZE_N))
@@ -357,7 +357,7 @@ def persistent_reduce_two_shot(
             reduced = acc.to(output_ptr.type.element_ty)
 
             if group_rank == ROOT:
-                tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
+                tl.store(out_ptr, reduced, mask=mask)
             else:
                 iris.store(
                     out_ptr,
@@ -475,7 +475,7 @@ def persistent_reduce_scatter_then_gather(
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
                 acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases).to(acc_dtype)
-            tl.store(sb_ptr, acc.to(output_ptr.type.element_ty), cache_modifier=".wt")
+            tl.store(sb_ptr, acc.to(output_ptr.type.element_ty))
         else:
             mask = (rm[:, None] < M) & (rn[None, :] < N)
             start_rank_idx = pid % world_size
@@ -485,7 +485,7 @@ def persistent_reduce_scatter_then_gather(
                 remote_rank_idx = (start_rank_idx + i) % world_size
                 remote_rank = rank_start + remote_rank_idx * rank_stride
                 acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
-            tl.store(sb_ptr, acc.to(output_ptr.type.element_ty), mask=mask, cache_modifier=".wt")
+            tl.store(sb_ptr, acc.to(output_ptr.type.element_ty), mask=mask)
 
     # ========== Phase 2: Gather to root ==========
     # Only root rank gathers all partitions
@@ -528,14 +528,14 @@ def persistent_reduce_scatter_then_gather(
                 else:
                     # Read from remote rank's scatter_buf
                     tile_data = iris.load(scatter_buf + sb_offset, iris_rank, owner_global, heap_bases)
-                tl.store(output_ptr + out_offset, tile_data, cache_modifier=".wt")
+                tl.store(output_ptr + out_offset, tile_data)
             else:
                 mask = (rm[:, None] < M) & (rn[None, :] < N)
                 if owner_rank == ROOT:
                     tile_data = tl.load(scatter_buf + sb_offset, mask=mask, other=0)
                 else:
                     tile_data = iris.load(scatter_buf + sb_offset, iris_rank, owner_global, heap_bases, mask=mask)
-                tl.store(output_ptr + out_offset, tile_data, mask=mask, cache_modifier=".wt")
+                tl.store(output_ptr + out_offset, tile_data, mask=mask)
 
 
 @triton.jit()
