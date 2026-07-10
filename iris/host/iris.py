@@ -1324,6 +1324,12 @@ class Iris:
                 config=config,
             )
 
+        def reduce_preamble(self, output_tensor, input_tensor, root=0, config=None, workspace=None):
+            """Prepare workspace for reduce variants."""
+            from iris.ccl.reduce import reduce_preamble
+
+            return reduce_preamble(output_tensor, input_tensor, self._iris, root=root, config=config, workspace=workspace)
+
         def reduce(
             self, output_tensor, input_tensor, root=0, op=None, group=None, async_op=False, config=None, workspace=None
         ):
