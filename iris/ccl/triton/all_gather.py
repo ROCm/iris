@@ -15,6 +15,7 @@ import torch
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from ..utils import chiplet_transform_chunked
+from .barriers import per_block_barrier
 
 
 @dataclass
@@ -34,6 +35,8 @@ class AllGatherWorkspace:
     shape: Tuple[int, int] = ()
     dtype: Optional[torch.dtype] = None
     flags: Optional[torch.Tensor] = None
+    start_flags: Optional[torch.Tensor] = None
+    end_flags: Optional[torch.Tensor] = None
     prepared: bool = False
 
 
@@ -313,6 +316,8 @@ def persistent_all_gather(
     stride_m,
     stride_n,
     heap_bases: tl.tensor,
+    start_flags_ptr,
+    end_flags_ptr,
     group_rank: tl.constexpr,
     iris_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -323,6 +328,9 @@ def persistent_all_gather(
     COMM_SMS: tl.constexpr,
 ):
     pid = tl.program_id(0)
+
+    per_block_barrier(pid, start_flags_ptr, heap_bases, group_rank, iris_rank, world_size, rank_start, rank_stride)
+
     num_m = tl.cdiv(M, BLOCK_M)
     num_n = tl.cdiv(N, BLOCK_N)
     total = num_m * num_n
@@ -346,6 +354,8 @@ def persistent_all_gather(
                 tl.store(output_ptr + out_off, data, mask=mask)
             else:
                 iris.store(output_ptr + out_off, data, iris_rank, target_rank, heap_bases, mask=mask)
+
+    per_block_barrier(pid, end_flags_ptr, heap_bases, group_rank, iris_rank, world_size, rank_start, rank_stride)
 
 
 @triton.jit()
@@ -591,6 +601,14 @@ def launch(
 
     stride_m, stride_n = input_tensor.stride(0), input_tensor.stride(1)
 
+    if workspace is None:
+        workspace = AllGatherWorkspace()
+    needed = config.comm_sms * world_size
+    if workspace.start_flags is None or workspace.start_flags.numel() < needed:
+        workspace.start_flags = ctx.zeros((needed,), dtype=torch.int32)
+    if workspace.end_flags is None or workspace.end_flags.numel() < needed:
+        workspace.end_flags = ctx.zeros((needed,), dtype=torch.int32)
+
     iris_launch(
         kernel_fn,
         (config.comm_sms,),
@@ -601,6 +619,8 @@ def launch(
         stride_m,
         stride_n,
         heap_bases,
+        workspace.start_flags,
+        workspace.end_flags,
         rank_in_group,
         rank_global,
         world_size,

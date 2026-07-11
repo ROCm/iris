@@ -4,7 +4,8 @@
 """
 Triton kernels for broadcast collective communication.
 
-Pull-based broadcast with in-kernel barriers for graph capture safety.
+Pull-based broadcast using iris symmetric heap with in-kernel barriers.
+Graph-capture safe.
 """
 
 import torch
@@ -12,7 +13,7 @@ import triton
 import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
-from iris.ccl.triton.all_reduce import _per_block_barrier
+from .barriers import per_block_barrier
 
 
 @triton.jit()
@@ -24,29 +25,21 @@ def broadcast_kernel(
     stride_m,
     stride_n,
     heap_bases: tl.tensor,
+    start_flags_ptr,
+    end_flags_ptr,
+    group_rank: tl.constexpr,
     iris_rank: tl.constexpr,
     src_iris_rank: tl.constexpr,
     world_size: tl.constexpr,
     rank_start: tl.constexpr,
     rank_stride: tl.constexpr,
-    start_flags_ptr,
-    end_flags_ptr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     COMM_SMS: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
-    _per_block_barrier(
-        pid,
-        start_flags_ptr,
-        heap_bases,
-        iris_rank,
-        iris_rank,
-        world_size,
-        rank_start,
-        rank_stride,
-    )
+    per_block_barrier(pid, start_flags_ptr, heap_bases, group_rank, iris_rank, world_size, rank_start, rank_stride)
 
     num_m = tl.cdiv(M, BLOCK_M)
     num_n = tl.cdiv(N, BLOCK_N)
@@ -67,26 +60,10 @@ def broadcast_kernel(
 
         tl.store(output_ptr + off, data, mask=mask)
 
-    _per_block_barrier(
-        pid,
-        end_flags_ptr,
-        heap_bases,
-        iris_rank,
-        iris_rank,
-        world_size,
-        rank_start,
-        rank_stride,
-    )
+    per_block_barrier(pid, end_flags_ptr, heap_bases, group_rank, iris_rank, world_size, rank_start, rank_stride)
 
 
-class _BroadcastWorkspace:
-    def __init__(self, ctx, world_size, max_blocks=16):
-        needed = max_blocks * world_size
-        self.start_flags = ctx.zeros((needed,), dtype=torch.int32)
-        self.end_flags = ctx.zeros((needed,), dtype=torch.int32)
-
-
-_workspace_cache = {}
+_workspace = {"start_flags": None, "end_flags": None}
 
 
 def launch(
@@ -101,16 +78,18 @@ def launch(
     src_rank,
     config,
 ):
-    """Launch the Triton broadcast kernel with in-kernel barriers."""
+    """Launch the Triton broadcast kernel."""
     M, N = input_tensor.shape[:2]
     stride_m, stride_n = input_tensor.stride(0), input_tensor.stride(1)
 
     heap_bases = ctx.get_heap_bases()
     src_iris_rank = rank_start + src_rank * rank_stride
 
-    if "broadcast" not in _workspace_cache:
-        _workspace_cache["broadcast"] = _BroadcastWorkspace(ctx, world_size, max_blocks=config.comm_sms)
-    ws = _workspace_cache["broadcast"]
+    needed = config.comm_sms * world_size
+    if _workspace["start_flags"] is None or _workspace["start_flags"].numel() < needed:
+        _workspace["start_flags"] = ctx.zeros((needed,), dtype=torch.int32)
+    if _workspace["end_flags"] is None or _workspace["end_flags"].numel() < needed:
+        _workspace["end_flags"] = ctx.zeros((needed,), dtype=torch.int32)
 
     iris_launch(
         broadcast_kernel,
@@ -122,13 +101,14 @@ def launch(
         stride_m,
         stride_n,
         heap_bases,
+        _workspace["start_flags"],
+        _workspace["end_flags"],
+        rank_in_group,
         rank_global,
         src_iris_rank,
         world_size,
         rank_start,
         rank_stride,
-        ws.start_flags,
-        ws.end_flags,
         config.block_size_m,
         config.block_size_n,
         config.comm_sms,

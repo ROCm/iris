@@ -5,7 +5,7 @@
 All-gather collective operation — public API.
 
 Drop-in replacement for torch.distributed.all_gather_into_tensor.
-Accepts regular CUDA tensors, handles heap copy via as_symmetric.
+Accepts regular CUDA tensors, graph-capture safe (in-kernel barriers).
 """
 
 from iris.ccl.utils import extract_group_info
@@ -16,7 +16,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     All-gather: each rank sends its input to all ranks.
 
     Output is (world_size * M, N) — inputs concatenated along dim 0.
-    Accepts regular CUDA tensors — copies to/from symmetric heap via as_symmetric.
+    Accepts regular CUDA tensors. Graph-capture safe.
     """
     from iris.ccl.config import Config
 
@@ -33,8 +33,8 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
             f"{expected_output_shape}. Expected (world_size * M, N) = ({world_size * M}, {N})"
         )
 
-    heap_in = ctx.as_symmetric(input_tensor)
-    heap_out = ctx.as_symmetric(output_tensor)
+    heap_in = ctx.as_symmetric(input_tensor, tag="ag_inp")
+    heap_out = ctx.as_symmetric(output_tensor, tag="ag_out")
 
     if config.use_gluon:
         from iris.ccl.gluon.all_gather import launch
@@ -57,8 +57,5 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
 
     if not ctx.is_symmetric(output_tensor):
         output_tensor.copy_(heap_out)
-
-    if not async_op:
-        ctx.barrier()
 
     return workspace
