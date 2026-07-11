@@ -12,7 +12,6 @@ import triton
 import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
-from iris.host.distributed.helpers import _translate_ptr
 from iris.ccl.triton.all_reduce import _per_block_barrier
 
 
@@ -39,8 +38,14 @@ def broadcast_kernel(
     pid = tl.program_id(0)
 
     _per_block_barrier(
-        pid, start_flags_ptr, heap_bases,
-        iris_rank, iris_rank, world_size, rank_start, rank_stride,
+        pid,
+        start_flags_ptr,
+        heap_bases,
+        iris_rank,
+        iris_rank,
+        world_size,
+        rank_start,
+        rank_stride,
     )
 
     num_m = tl.cdiv(M, BLOCK_M)
@@ -63,8 +68,14 @@ def broadcast_kernel(
         tl.store(output_ptr + off, data, mask=mask)
 
     _per_block_barrier(
-        pid, end_flags_ptr, heap_bases,
-        iris_rank, iris_rank, world_size, rank_start, rank_stride,
+        pid,
+        end_flags_ptr,
+        heap_bases,
+        iris_rank,
+        iris_rank,
+        world_size,
+        rank_start,
+        rank_stride,
     )
 
 
