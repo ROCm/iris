@@ -96,8 +96,10 @@ class TestReduceScatterGraphCapture:
             ctx.ccl.reduce_scatter(out, inp)
 
         def reference(out, inp):
-            big = inp.expand(ws, -1).contiguous().view(ws * M, N)
-            dist.reduce_scatter_tensor(out, big)
+            # iris RS: all ranks have same-shaped (M,N) input, each rank reduces
+            # its assigned tiles. Equivalent to all_reduce (sum all inputs).
+            out.copy_(inp)
+            dist.all_reduce(out)
 
         _graph_capture_test(ctx, collective, reference, (M, N), (M, N))
 
