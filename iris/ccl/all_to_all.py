@@ -47,6 +47,3 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
 
     if not ctx.is_symmetric(output_tensor):
         output_tensor.copy_(heap_out)
-
-    if not async_op:
-        ctx.barrier()

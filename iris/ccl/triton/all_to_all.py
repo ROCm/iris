@@ -20,6 +20,7 @@ import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from ..utils import chiplet_transform_chunked
+from .barriers import per_block_barrier
 
 
 @triton.jit()
@@ -29,6 +30,8 @@ def persistent_all_to_all(
     N_PER_RANK,
     N_TOTAL,
     heap_bases: tl.tensor,
+    start_flags_ptr,
+    end_flags_ptr,
     group_rank: tl.constexpr,
     iris_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -37,8 +40,10 @@ def persistent_all_to_all(
     BLOCK_SIZE: tl.constexpr,
     COMM_SMS: tl.constexpr,
 ):
-    """All-to-all with flat 1D tiling. Minimal constexprs for clean codegen."""
     pid = tl.program_id(0)
+
+    per_block_barrier(pid, start_flags_ptr, heap_bases, group_rank, iris_rank, world_size, rank_start, rank_stride)
+
     total_tiles = tl.cdiv(N_PER_RANK, BLOCK_SIZE)
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
@@ -46,13 +51,11 @@ def persistent_all_to_all(
         offsets = base + tl.arange(0, BLOCK_SIZE)
         mask = offsets < N_PER_RANK
 
-        # Local copy
         local_in = input_ptr + group_rank * N_PER_RANK + offsets
         local_out = output_ptr + group_rank * N_PER_RANK + offsets
         data = tl.load(local_in, mask=mask)
         tl.store(local_out, data, mask=mask)
 
-        # Remote ranks in ring order
         for hop in tl.static_range(1, world_size):
             i = (group_rank + hop) % world_size
             target_rank = rank_start + i * rank_stride
@@ -62,6 +65,8 @@ def persistent_all_to_all(
 
             remote_data = tl.load(remote_in, mask=mask)
             iris.store(remote_out, remote_data, iris_rank, target_rank, heap_bases, mask=mask)
+
+    per_block_barrier(pid, end_flags_ptr, heap_bases, group_rank, iris_rank, world_size, rank_start, rank_stride)
 
 
 @triton.jit()
@@ -180,6 +185,8 @@ def launch(
     config,
 ):
     """Launch the Triton all-to-all kernel."""
+    import torch
+
     numel = input_tensor.numel()
     n_per_rank = numel // world_size
     n_total = numel
@@ -191,6 +198,12 @@ def launch(
     total_tiles = (n_per_rank + BLOCK_SIZE - 1) // BLOCK_SIZE
     num_sms = max(1, min(total_tiles, 16))
 
+    needed = num_sms * world_size
+    if not hasattr(launch, "_start_flags") or launch._start_flags is None or launch._start_flags.numel() < needed:
+        launch._start_flags = ctx.zeros((needed,), dtype=torch.int32)
+    if not hasattr(launch, "_end_flags") or launch._end_flags is None or launch._end_flags.numel() < needed:
+        launch._end_flags = ctx.zeros((needed,), dtype=torch.int32)
+
     iris_launch(
         persistent_all_to_all,
         (num_sms,),
@@ -199,6 +212,8 @@ def launch(
         n_per_rank,
         n_total,
         ctx.get_heap_bases(),
+        launch._start_flags,
+        launch._end_flags,
         rank_in_group,
         rank_global,
         world_size,

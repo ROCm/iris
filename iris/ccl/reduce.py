@@ -41,8 +41,8 @@ def reduce(output_tensor, input_tensor, ctx, root=0, op=None, group=None, async_
     if root < 0 or root >= world_size:
         raise ValueError(f"root must be in [0, {world_size}), got {root}")
 
-    heap_inp = ctx.as_symmetric(input_tensor)
-    heap_out = ctx.as_symmetric(output_tensor)
+    heap_inp = ctx.as_symmetric(input_tensor, tag="red_inp")
+    heap_out = ctx.as_symmetric(output_tensor, tag="red_out")
 
     from iris.ccl.triton.reduce import launch
 
@@ -63,9 +63,6 @@ def reduce(output_tensor, input_tensor, ctx, root=0, op=None, group=None, async_
 
     if workspace is not None:
         workspace.prepared = False
-
-    if not async_op:
-        ctx.barrier()
 
     if not ctx.is_symmetric(output_tensor):
         output_tensor.copy_(heap_out)

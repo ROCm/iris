@@ -19,6 +19,7 @@ import torch
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 from ..utils import chiplet_transform_chunked
+from .barriers import per_block_barrier
 
 # Variant types
 VARIANT_ONE_SHOT = "one_shot"
@@ -47,6 +48,8 @@ class ReduceWorkspace:
     dtype: Optional[torch.dtype] = None
     ring_buffer: Optional[torch.Tensor] = None
     flags: Optional[torch.Tensor] = None
+    start_flags: Optional[torch.Tensor] = None
+    end_flags: Optional[torch.Tensor] = None
     root: int = 0
     flags_per_tile: int = 0
     prepared: bool = False
@@ -143,6 +146,8 @@ def persistent_reduce_one_shot(
     stride_out_m,
     stride_out_n,
     heap_bases: tl.tensor,
+    start_flags_ptr,
+    end_flags_ptr,
     group_rank: tl.constexpr,
     iris_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -156,19 +161,13 @@ def persistent_reduce_one_shot(
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
 ):
-    """
-    One-shot reduce for small/latency-bound buffers.
-
-    Only root rank gathers all partials via iris.load and writes the reduced result.
-    Non-root ranks do nothing — where only root receives the result.
-
-    root gathers all data directly (similar to recvReduceCopy for each peer).
-    """
-    # Only root rank does work
-    if group_rank != ROOT:
-        return
-
     pid = tl.program_id(0)
+
+    per_block_barrier(pid, start_flags_ptr, heap_bases, group_rank, iris_rank, world_size, rank_start, rank_stride)
+
+    if group_rank != ROOT:
+        per_block_barrier(pid, end_flags_ptr, heap_bases, group_rank, iris_rank, world_size, rank_start, rank_stride)
+        return
 
     if NUM_XCDS != 1:
         pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
@@ -227,6 +226,8 @@ def persistent_reduce_one_shot(
                 acc += iris.load(base_ptr, iris_rank, remote_rank, heap_bases, mask=mask).to(acc_dtype)
 
             tl.store(out_ptr, acc.to(output_ptr.type.element_ty), mask=mask)
+
+    per_block_barrier(pid, end_flags_ptr, heap_bases, group_rank, iris_rank, world_size, rank_start, rank_stride)
 
 
 @triton.jit()
@@ -794,6 +795,12 @@ def launch(
     root_global = rank_start + root * rank_stride
 
     if variant == VARIANT_ONE_SHOT:
+        needed = config.comm_sms * world_size
+        if workspace.start_flags is None or workspace.start_flags.numel() < needed:
+            workspace.start_flags = ctx.zeros((needed,), dtype=torch.int32)
+        if workspace.end_flags is None or workspace.end_flags.numel() < needed:
+            workspace.end_flags = ctx.zeros((needed,), dtype=torch.int32)
+
         iris_launch(
             persistent_reduce_one_shot,
             (config.comm_sms,),
@@ -806,6 +813,8 @@ def launch(
             stride_out_m,
             stride_out_n,
             heap_bases,
+            workspace.start_flags,
+            workspace.end_flags,
             rank_in_group,
             rank_global,
             world_size,
