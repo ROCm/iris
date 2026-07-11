@@ -96,7 +96,8 @@ class TestReduceScatterGraphCapture:
             ctx.ccl.reduce_scatter(out, inp)
 
         def reference(out, inp):
-            dist.reduce_scatter_tensor(out, inp)
+            big = inp.expand(ws, -1).contiguous().view(ws * M, N)
+            dist.reduce_scatter_tensor(out, big)
 
         _graph_capture_test(ctx, collective, reference, (M, N), (M, N))
 
