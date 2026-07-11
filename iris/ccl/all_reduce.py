@@ -11,6 +11,8 @@ Graph-capture safe with in-kernel barriers (one_shot variant).
 
 from iris.ccl.utils import extract_group_info
 
+_ws_cache = {}
+
 
 def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
     """Prepare reusable workspace for all-reduce."""
@@ -51,6 +53,11 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
     heap_in = ctx.as_symmetric(input_tensor, tag="ar_inp")
     heap_out = ctx.as_symmetric(output_tensor, tag="ar_out")
 
+    # Cache workspace so graph capture never triggers allocation
+    ws_key = (heap_in.shape, heap_in.dtype, variant)
+    if workspace is None:
+        workspace = _ws_cache.get(ws_key)
+
     from iris.ccl.triton.all_reduce import launch
 
     workspace = launch(
@@ -66,6 +73,8 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         workspace,
         group=group,
     )
+
+    _ws_cache[ws_key] = workspace
 
     if not ctx.is_symmetric(output_tensor):
         output_tensor.copy_(heap_out)
