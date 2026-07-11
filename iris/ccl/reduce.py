@@ -30,9 +30,7 @@ def reduce(output_tensor, input_tensor, ctx, root=0, op=None, group=None, async_
     if op is None:
         op = ReduceOp.SUM
     if op != ReduceOp.SUM:
-        raise ValueError(
-            f"Only ReduceOp.SUM is currently supported, got {op}."
-        )
+        raise ValueError(f"Only ReduceOp.SUM is currently supported, got {op}.")
     if config is None:
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
 

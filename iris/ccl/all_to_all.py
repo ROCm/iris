@@ -7,7 +7,6 @@ All-to-all collective operations — public API.
 Accepts regular CUDA tensors. Internally copies to/from symmetric heap.
 """
 
-import torch
 from iris.ccl.utils import extract_group_info
 from iris.ccl.dispatch import get_heap_buffer
 

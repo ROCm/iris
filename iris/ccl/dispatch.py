@@ -8,10 +8,6 @@ Provides heap buffer caching for stable graph capture addresses
 and automatic copy between user tensors and symmetric heap.
 """
 
-import torch
-from functools import lru_cache
-
-
 _buf_cache = {}
 
 
