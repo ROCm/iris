@@ -5,10 +5,12 @@
 All-gather collective operation — public API.
 
 Drop-in replacement for torch.distributed.all_gather_into_tensor.
-Accepts regular CUDA tensors, graph-capture safe (in-kernel barriers).
+Graph-capture safe with in-kernel barriers and cached workspace.
 """
 
 from iris.ccl.utils import extract_group_info
+
+_cached_workspace = None
 
 
 def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None, workspace=None):
@@ -18,6 +20,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     Output is (world_size * M, N) — inputs concatenated along dim 0.
     Accepts regular CUDA tensors. Graph-capture safe.
     """
+    global _cached_workspace
     from iris.ccl.config import Config
 
     if config is None:
@@ -35,6 +38,9 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
 
     heap_in = ctx.as_symmetric(input_tensor, tag="ag_inp")
     heap_out = ctx.as_symmetric(output_tensor, tag="ag_out")
+
+    if workspace is None:
+        workspace = _cached_workspace
 
     if config.use_gluon:
         from iris.ccl.gluon.all_gather import launch
@@ -54,6 +60,8 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         workspace=workspace,
         group=group,
     )
+
+    _cached_workspace = workspace
 
     if not ctx.is_symmetric(output_tensor):
         output_tensor.copy_(heap_out)

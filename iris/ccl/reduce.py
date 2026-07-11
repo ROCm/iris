@@ -4,10 +4,12 @@
 """
 Reduce collective operation — public API.
 
-Accepts regular CUDA tensors. Internally copies to/from symmetric heap.
+Graph-capture safe with cached workspace and in-kernel barriers.
 """
 
 from iris.ccl.utils import extract_group_info
+
+_cached_workspace = None
 
 
 def reduce_preamble(output_tensor, input_tensor, ctx, root=0, config=None, workspace=None):
@@ -21,8 +23,9 @@ def reduce(output_tensor, input_tensor, ctx, root=0, op=None, group=None, async_
     """
     Reduce: sum inputs across all ranks, result only on root rank.
 
-    Accepts regular CUDA tensors — copies to heap internally.
+    Accepts regular CUDA tensors. Graph-capture safe.
     """
+    global _cached_workspace
     from iris.ccl.config import Config
     from iris.ccl.utils import ReduceOp
 
@@ -44,6 +47,9 @@ def reduce(output_tensor, input_tensor, ctx, root=0, op=None, group=None, async_
     heap_inp = ctx.as_symmetric(input_tensor, tag="red_inp")
     heap_out = ctx.as_symmetric(output_tensor, tag="red_out")
 
+    if workspace is None:
+        workspace = _cached_workspace
+
     from iris.ccl.triton.reduce import launch
 
     workspace = launch(
@@ -60,6 +66,8 @@ def reduce(output_tensor, input_tensor, ctx, root=0, op=None, group=None, async_
         workspace,
         group=group,
     )
+
+    _cached_workspace = workspace
 
     if workspace is not None:
         workspace.prepared = False
