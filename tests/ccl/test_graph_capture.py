@@ -69,9 +69,7 @@ def _graph_capture_test(ctx, collective_fn, ref_fn, input_shape, output_shape, d
 
         if not torch.allclose(user_output, ref_output, atol=1e-2, rtol=1e-2):
             max_diff = (user_output - ref_output).abs().max().item()
-            pytest.fail(
-                f"Rank {rank}: graph replay {i} mismatch, max_diff={max_diff}"
-            )
+            pytest.fail(f"Rank {rank}: graph replay {i} mismatch, max_diff={max_diff}")
 
 
 class TestAllReduceGraphCapture:
