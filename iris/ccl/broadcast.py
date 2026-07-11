@@ -54,6 +54,3 @@ def broadcast(output_tensor, input_tensor, ctx, src=0, group=None, async_op=Fals
 
     if not ctx.is_symmetric(output_tensor):
         output_tensor.copy_(heap_out)
-
-    if not async_op:
-        ctx.barrier()
