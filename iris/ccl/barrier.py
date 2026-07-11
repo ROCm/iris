@@ -35,6 +35,3 @@ def barrier(ctx, group=None, async_op=False, config=None):
     from iris.ccl.triton.barrier import launch
 
     launch(ctx, group=group)
-
-    if not async_op:
-        ctx.barrier()
