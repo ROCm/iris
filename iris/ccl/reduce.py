@@ -4,10 +4,11 @@
 """
 Reduce collective operation — public API.
 
-Triton only (no gluon support).
+Accepts regular CUDA tensors. Internally copies to/from symmetric heap.
 """
 
 from iris.ccl.utils import extract_group_info
+from iris.ccl.dispatch import get_heap_buffer
 
 
 def reduce_preamble(output_tensor, input_tensor, ctx, root=0, config=None, workspace=None):
@@ -21,18 +22,7 @@ def reduce(output_tensor, input_tensor, ctx, root=0, op=None, group=None, async_
     """
     Reduce: sum inputs across all ranks, result only on root rank.
 
-    Unlike AllReduce, only the root rank receives the reduced result.
-
-    Args:
-        output_tensor: Shape (M, N) — on root, receives the reduced result
-        input_tensor: Shape (M, N) — local rank's partial data
-        ctx: Iris instance
-        root: Root rank (receives the result). Default: 0.
-        op: ReduceOp (only SUM supported)
-        group: ProcessGroup or None
-        async_op: If True, skip trailing barrier
-        config: Config with kernel parameters
-        workspace: Reusable workspace from reduce_preamble
+    Accepts regular CUDA tensors — copies to heap internally.
     """
     from iris.ccl.config import Config
     from iris.ccl.utils import ReduceOp
@@ -41,13 +31,11 @@ def reduce(output_tensor, input_tensor, ctx, root=0, op=None, group=None, async_
         op = ReduceOp.SUM
     if op != ReduceOp.SUM:
         raise ValueError(
-            f"Only ReduceOp.SUM is currently supported, got {op}. "
-            "Support for other operations will be added in a future release."
+            f"Only ReduceOp.SUM is currently supported, got {op}."
         )
     if config is None:
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
 
-    # Set default reduce variant if not set
     if not hasattr(config, "reduce_variant"):
         config.reduce_variant = "two_shot"
 
@@ -56,11 +44,17 @@ def reduce(output_tensor, input_tensor, ctx, root=0, op=None, group=None, async_
     if root < 0 or root >= world_size:
         raise ValueError(f"root must be in [0, {world_size}), got {root}")
 
+    M, N = input_tensor.shape[:2]
+    heap_inp = get_heap_buffer(ctx, (M, N), input_tensor.dtype, "red_inp")
+    heap_out = get_heap_buffer(ctx, (M, N), input_tensor.dtype, "red_out")
+
+    heap_inp.copy_(input_tensor)
+
     from iris.ccl.triton.reduce import launch
 
     workspace = launch(
-        output_tensor,
-        input_tensor,
+        heap_out,
+        heap_inp,
         ctx,
         rank_in_group,
         rank_global,
@@ -78,5 +72,7 @@ def reduce(output_tensor, input_tensor, ctx, root=0, op=None, group=None, async_
 
     if not async_op:
         ctx.barrier()
+
+    output_tensor.copy_(heap_out)
 
     return workspace

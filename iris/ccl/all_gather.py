@@ -4,10 +4,11 @@
 """
 All-gather collective operation — public API.
 
-Routes to triton/ or gluon/ based on config.use_gluon.
+Accepts regular CUDA tensors. Internally copies to/from symmetric heap.
 """
 
 from iris.ccl.utils import extract_group_info
+from iris.ccl.dispatch import get_heap_buffer
 
 
 def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None, workspace=None):
@@ -15,6 +16,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     All-gather: each rank sends its input to all ranks.
 
     Output is (world_size * M, N) — inputs concatenated along dim 0.
+    Accepts regular CUDA tensors — copies to heap internally.
 
     Args:
         output_tensor: Shape (world_size * M, N)
@@ -23,7 +25,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         group: ProcessGroup or None
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
-        workspace: Optional AllGatherWorkspace for ring variant
+        workspace: Optional workspace for ring variant
     """
     from iris.ccl.config import Config
 
@@ -40,14 +42,19 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
             f"{expected_output_shape}. Expected (world_size * M, N) = ({world_size * M}, {N})"
         )
 
+    heap_inp = get_heap_buffer(ctx, (M, N), input_tensor.dtype, "ag_inp")
+    heap_out = get_heap_buffer(ctx, (world_size * M, N), input_tensor.dtype, "ag_out")
+
+    heap_inp.copy_(input_tensor)
+
     if config.use_gluon:
         from iris.ccl.gluon.all_gather import launch
     else:
         from iris.ccl.triton.all_gather import launch
 
     workspace = launch(
-        input_tensor,
-        output_tensor,
+        heap_inp,
+        heap_out,
         ctx,
         rank_in_group,
         rank_global,
@@ -61,5 +68,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
 
     if not async_op:
         ctx.barrier()
+
+    output_tensor.copy_(heap_out)
 
     return workspace
