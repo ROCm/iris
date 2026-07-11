@@ -748,23 +748,38 @@ class SymmetricHeap:
         if dist.is_initialized():
             dist.barrier()
 
+    _symmetric_cache: dict = None
+
     def as_symmetric(self, external_tensor: torch.Tensor) -> torch.Tensor:
         """
         Place an external PyTorch tensor on the symmetric heap.
 
-        With the torch allocator: allocates on the heap and copies the data;
-        the returned tensor is independent of the input. With the vmem
-        allocator: imports the memory so both tensors share the same storage.
+        Caches heap buffers by (shape, dtype) for stable addresses across
+        calls. First call allocates on the heap and copies data. Subsequent
+        calls with the same (shape, dtype) reuse the cached buffer and only
+        copy data. This makes as_symmetric graph-capture safe — addresses
+        are stable across replays.
+
+        If the tensor is already on the symmetric heap, returns it directly.
 
         Args:
             external_tensor: External PyTorch tensor (must be CUDA, contiguous)
 
         Returns:
-            Tensor on the symmetric heap (same shape/dtype; copy or shared per allocator)
-
-        Raises:
-            RuntimeError: If allocator doesn't support imports or import fails
+            Tensor on the symmetric heap (same shape/dtype)
         """
+        if self.is_symmetric(external_tensor):
+            return external_tensor
+
+        if self._symmetric_cache is None:
+            self._symmetric_cache = {}
+
+        key = (external_tensor.shape, external_tensor.dtype)
+        if key in self._symmetric_cache:
+            buf = self._symmetric_cache[key]
+            buf.copy_(external_tensor)
+            return buf
+
         self._ensure_peer_refresh_healthy()
 
         if not hasattr(self.allocator, "import_external_tensor"):
@@ -772,6 +787,7 @@ class SymmetricHeap:
 
         imported = self.allocator.import_external_tensor(external_tensor)
         self.refresh_peer_access()
+        self._symmetric_cache[key] = imported
         return imported
 
     def close(self):

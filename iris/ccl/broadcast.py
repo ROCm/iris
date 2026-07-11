@@ -5,49 +5,17 @@
 Broadcast collective operation — public API.
 
 Drop-in replacement for torch.distributed.broadcast.
-Accepts regular CUDA tensors, handles heap copy internally.
+Accepts regular CUDA tensors, handles heap copy via as_symmetric.
 """
 
 from iris.ccl.utils import extract_group_info
-
-_buf_cache = {}
-
-
-def _get_heap_bufs(ctx, shape, dtype):
-    key = ("bc", shape, dtype)
-    if key not in _buf_cache:
-        _buf_cache[key] = {
-            "inp": ctx.zeros(shape, dtype=dtype),
-            "out": ctx.zeros(shape, dtype=dtype),
-        }
-    return _buf_cache[key]["inp"], _buf_cache[key]["out"]
-
-
-def _is_on_heap(tensor, ctx):
-    try:
-        heap = ctx.heap
-        ptr = tensor.data_ptr()
-        base = heap.base_addr
-        size = heap.heap_size
-        return base <= ptr < base + size
-    except Exception:
-        return False
 
 
 def broadcast(output_tensor, input_tensor, ctx, src=0, group=None, async_op=False, config=None):
     """
     Broadcast: root rank sends its data to all ranks.
 
-    Accepts regular CUDA tensors — copies to/from symmetric heap internally.
-
-    Args:
-        output_tensor: Shape (M, N) — will contain src's data on all ranks
-        input_tensor: Shape (M, N) — only src rank's data is used
-        ctx: Iris instance
-        src: Source rank within the group (default: 0)
-        group: ProcessGroup or None
-        async_op: If True, skip trailing barrier
-        config: Config with kernel parameters
+    Accepts regular CUDA tensors — copies to/from symmetric heap via as_symmetric.
     """
     from iris.ccl.config import Config
 
@@ -66,19 +34,14 @@ def broadcast(output_tensor, input_tensor, ctx, src=0, group=None, async_op=Fals
     if src < 0 or src >= world_size:
         raise ValueError(f"src rank {src} is out of range [0, {world_size})")
 
-    needs_copy = not _is_on_heap(input_tensor, ctx)
-    if needs_copy:
-        heap_inp, heap_out = _get_heap_bufs(ctx, input_tensor.shape, input_tensor.dtype)
-        heap_inp.copy_(input_tensor)
-        kernel_in, kernel_out = heap_inp, heap_out
-    else:
-        kernel_in, kernel_out = input_tensor, output_tensor
+    heap_in = ctx.as_symmetric(input_tensor)
+    heap_out = ctx.as_symmetric(output_tensor)
 
     from iris.ccl.triton.broadcast import launch
 
     launch(
-        kernel_in,
-        kernel_out,
+        heap_in,
+        heap_out,
         ctx,
         rank_in_group,
         rank_global,
@@ -89,8 +52,8 @@ def broadcast(output_tensor, input_tensor, ctx, src=0, group=None, async_op=Fals
         config,
     )
 
-    if needs_copy:
-        output_tensor.copy_(kernel_out)
+    if not ctx.is_symmetric(output_tensor):
+        output_tensor.copy_(heap_out)
 
     if not async_op:
         ctx.barrier()
