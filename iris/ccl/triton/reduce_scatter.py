@@ -18,6 +18,7 @@ import triton
 import triton.language as tl
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
+from iris.ccl.triton.barriers import per_block_barrier
 from ..utils import chiplet_transform_chunked
 
 # Variant constants
@@ -59,14 +60,19 @@ def persistent_reduce_scatter_two_shot(
     NUM_XCDS: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
     DISTRIBUTION: tl.constexpr,
+    start_flags_ptr=None,
+    end_flags_ptr=None,
 ):
     """
-    Reduce-scatter using two-shot approach.
-
-    Each rank reduces its assigned tiles from all ranks and stores the result
-    only to its own output (no broadcast to other ranks).
+    Reduce-scatter using two-shot approach with optional in-kernel barriers.
     """
     pid = tl.program_id(0)
+
+    if start_flags_ptr is not None:
+        per_block_barrier(
+            pid, start_flags_ptr, heap_bases,
+            group_rank, iris_rank, world_size, rank_start, rank_stride,
+        )
 
     if NUM_XCDS != 1:
         pid = chiplet_transform_chunked(pid, COMM_SMS, NUM_XCDS, CHUNK_SIZE)
@@ -156,7 +162,13 @@ def persistent_reduce_scatter_two_shot(
             reduced = acc.to(output_ptr.type.element_ty)
 
             # Store only to own rank (no broadcast)
-            tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
+            tl.store(out_ptr, reduced, mask=mask)
+
+    if end_flags_ptr is not None:
+        per_block_barrier(
+            pid, end_flags_ptr, heap_bases,
+            group_rank, iris_rank, world_size, rank_start, rank_stride,
+        )
 
 
 @triton.jit()
@@ -314,6 +326,9 @@ def _select_variant(size_bytes, world_size):
     return VARIANT_TWO_SHOT
 
 
+_rs_workspace_cache = {}
+
+
 def launch(
     output_tensor,
     input_tensor,
@@ -326,7 +341,7 @@ def launch(
     config,
     workspace=None,
 ):
-    """Launch the Triton reduce-scatter kernel."""
+    """Launch the Triton reduce-scatter kernel with in-kernel barriers."""
     M, N = input_tensor.shape[:2]
 
     variant = config.reduce_scatter_variant.lower()
@@ -336,6 +351,16 @@ def launch(
         variant = _select_variant(size_bytes, world_size)
 
     heap_bases = ctx.get_heap_bases()
+
+    # Get or create barrier flag workspace
+    if "rs" not in _rs_workspace_cache:
+        max_blocks = config.comm_sms
+        needed = max_blocks * world_size
+        _rs_workspace_cache["rs"] = {
+            "start": ctx.zeros((needed,), dtype=torch.int32),
+            "end": ctx.zeros((needed,), dtype=torch.int32),
+        }
+    barrier_ws = _rs_workspace_cache["rs"]
 
     if variant == VARIANT_TWO_SHOT:
         stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
@@ -366,6 +391,8 @@ def launch(
             config.num_xcds,
             config.chunk_size,
             distribution,
+            barrier_ws["start"],
+            barrier_ws["end"],
             num_stages=config.num_stages,
             num_warps=config.num_warps,
             waves_per_eu=config.waves_per_eu,

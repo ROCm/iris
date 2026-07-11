@@ -53,7 +53,4 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
     if not ctx.is_symmetric(output_tensor):
         output_tensor.copy_(heap_out)
 
-    if not async_op:
-        ctx.barrier()
-
     return workspace
