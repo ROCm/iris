@@ -2,23 +2,43 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Reduce-scatter collective operation -- public API.
+Reduce-scatter collective operation — public API.
 
-Triton only (no gluon support).
-
-Variants:
-- auto: Select best variant based on message size (default)
-- two_shot: Serial accumulation chain, general-purpose
-- inreg: In-register reduction, best at <=2MB (8-GPU)
-- twophase: Two-phase decomposition, best at 2-8MB (8-GPU)
+Drop-in replacement for torch.distributed.reduce_scatter_tensor.
+Accepts regular CUDA tensors, handles heap copy internally.
 """
 
 from iris.ccl.utils import extract_group_info
+
+_buf_cache = {}
+
+
+def _get_heap_bufs(ctx, shape, dtype):
+    key = ("rs", shape, dtype)
+    if key not in _buf_cache:
+        _buf_cache[key] = {
+            "inp": ctx.zeros(shape, dtype=dtype),
+            "out": ctx.zeros(shape, dtype=dtype),
+        }
+    return _buf_cache[key]["inp"], _buf_cache[key]["out"]
+
+
+def _is_on_heap(tensor, ctx):
+    try:
+        heap = ctx.heap
+        ptr = tensor.data_ptr()
+        base = heap.base_addr
+        size = heap.heap_size
+        return base <= ptr < base + size
+    except Exception:
+        return False
 
 
 def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None, workspace=None):
     """
     Reduce-scatter: each rank reduces its assigned tiles, stores locally.
+
+    Accepts regular CUDA tensors — copies to/from symmetric heap internally.
 
     Args:
         output_tensor: Shape (M, N)
@@ -29,9 +49,6 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         async_op: If True, skip trailing barrier
         config: Config with kernel parameters
         workspace: Reusable workspace (for twophase variant scratch buffer)
-
-    Returns:
-        workspace if variant needs it (twophase), else None
     """
     from iris.ccl.config import Config
     from iris.ccl.utils import ReduceOp
@@ -45,27 +62,22 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         )
     if config is None:
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
-    if config.use_gluon:
-        raise ValueError(
-            "reduce_scatter does not support use_gluon=True. "
-            "Gluon implementation is not available for reduce_scatter. "
-            "Use default config (use_gluon=False)."
-        )
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
-    M, N = input_tensor.shape[:2]
 
-    if output_tensor.shape[:2] != (M, N):
-        raise ValueError(
-            f"Output tensor shape {output_tensor.shape[:2]} does not match input shape {(M, N)}. "
-            f"For reduce-scatter, output should have the same shape as input."
-        )
+    needs_copy = not _is_on_heap(input_tensor, ctx)
+    if needs_copy:
+        heap_inp, heap_out = _get_heap_bufs(ctx, input_tensor.shape, input_tensor.dtype)
+        heap_inp.copy_(input_tensor)
+        kernel_in, kernel_out = heap_inp, heap_out
+    else:
+        kernel_in, kernel_out = input_tensor, output_tensor
 
     from iris.ccl.triton.reduce_scatter import launch
 
     workspace = launch(
-        output_tensor,
-        input_tensor,
+        kernel_out,
+        kernel_in,
         ctx,
         rank_in_group,
         rank_global,
@@ -75,6 +87,9 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         config,
         workspace=workspace,
     )
+
+    if needs_copy:
+        output_tensor.copy_(kernel_out)
 
     if not async_op:
         ctx.barrier()

@@ -4,22 +4,41 @@
 """
 Broadcast collective operation — public API.
 
-Routes to triton/ based on config.
+Drop-in replacement for torch.distributed.broadcast.
+Accepts regular CUDA tensors, handles heap copy internally.
 """
 
 from iris.ccl.utils import extract_group_info
+
+_buf_cache = {}
+
+
+def _get_heap_bufs(ctx, shape, dtype):
+    key = ("bc", shape, dtype)
+    if key not in _buf_cache:
+        _buf_cache[key] = {
+            "inp": ctx.zeros(shape, dtype=dtype),
+            "out": ctx.zeros(shape, dtype=dtype),
+        }
+    return _buf_cache[key]["inp"], _buf_cache[key]["out"]
+
+
+def _is_on_heap(tensor, ctx):
+    try:
+        heap = ctx.heap
+        ptr = tensor.data_ptr()
+        base = heap.base_addr
+        size = heap.heap_size
+        return base <= ptr < base + size
+    except Exception:
+        return False
 
 
 def broadcast(output_tensor, input_tensor, ctx, src=0, group=None, async_op=False, config=None):
     """
     Broadcast: root rank sends its data to all ranks.
 
-    The source rank's input_tensor is copied to output_tensor on ALL ranks.
-    Non-root ranks' input_tensor values are ignored.
-
-    Pull-based broadcast adapted for
-    iris's symmetric heap. Instead of passing data around a ring, we
-    leverage direct XGMI writes for better performance.
+    Accepts regular CUDA tensors — copies to/from symmetric heap internally.
 
     Args:
         output_tensor: Shape (M, N) — will contain src's data on all ranks
@@ -47,11 +66,19 @@ def broadcast(output_tensor, input_tensor, ctx, src=0, group=None, async_op=Fals
     if src < 0 or src >= world_size:
         raise ValueError(f"src rank {src} is out of range [0, {world_size})")
 
+    needs_copy = not _is_on_heap(input_tensor, ctx)
+    if needs_copy:
+        heap_inp, heap_out = _get_heap_bufs(ctx, input_tensor.shape, input_tensor.dtype)
+        heap_inp.copy_(input_tensor)
+        kernel_in, kernel_out = heap_inp, heap_out
+    else:
+        kernel_in, kernel_out = input_tensor, output_tensor
+
     from iris.ccl.triton.broadcast import launch
 
     launch(
-        input_tensor,
-        output_tensor,
+        kernel_in,
+        kernel_out,
         ctx,
         rank_in_group,
         rank_global,
@@ -61,6 +88,9 @@ def broadcast(output_tensor, input_tensor, ctx, src=0, group=None, async_op=Fals
         src,
         config,
     )
+
+    if needs_copy:
+        output_tensor.copy_(kernel_out)
 
     if not async_op:
         ctx.barrier()
