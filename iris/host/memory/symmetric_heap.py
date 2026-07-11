@@ -750,20 +750,20 @@ class SymmetricHeap:
 
     _symmetric_cache: dict = None
 
-    def as_symmetric(self, external_tensor: torch.Tensor) -> torch.Tensor:
+    def as_symmetric(self, external_tensor: torch.Tensor, tag: str = "") -> torch.Tensor:
         """
         Place an external PyTorch tensor on the symmetric heap.
 
-        Caches heap buffers by (shape, dtype) for stable addresses across
+        Caches heap buffers by (shape, dtype, tag) for stable addresses across
         calls. First call allocates on the heap and copies data. Subsequent
-        calls with the same (shape, dtype) reuse the cached buffer and only
-        copy data. This makes as_symmetric graph-capture safe — addresses
-        are stable across replays.
+        calls with the same key reuse the cached buffer and only copy data.
+        This makes as_symmetric graph-capture safe.
 
         If the tensor is already on the symmetric heap, returns it directly.
 
         Args:
             external_tensor: External PyTorch tensor (must be CUDA, contiguous)
+            tag: Cache key disambiguator for same-shape buffers (e.g. "inp", "out")
 
         Returns:
             Tensor on the symmetric heap (same shape/dtype)
@@ -774,7 +774,7 @@ class SymmetricHeap:
         if self._symmetric_cache is None:
             self._symmetric_cache = {}
 
-        key = (external_tensor.shape, external_tensor.dtype)
+        key = (external_tensor.shape, external_tensor.dtype, tag)
         if key in self._symmetric_cache:
             buf = self._symmetric_cache[key]
             buf.copy_(external_tensor)

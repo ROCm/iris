@@ -16,8 +16,8 @@ def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace
     """Prepare reusable workspace for all-reduce."""
     from iris.ccl.triton.all_reduce import all_reduce_preamble as _preamble
 
-    heap_in = ctx.as_symmetric(input_tensor)
-    heap_out = ctx.as_symmetric(output_tensor)
+    heap_in = ctx.as_symmetric(input_tensor, tag="ar_inp")
+    heap_out = ctx.as_symmetric(output_tensor, tag="ar_out")
     return _preamble(heap_out, heap_in, ctx, config=config, workspace=workspace)
 
 
@@ -48,8 +48,8 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
-    heap_in = ctx.as_symmetric(input_tensor)
-    heap_out = ctx.as_symmetric(output_tensor)
+    heap_in = ctx.as_symmetric(input_tensor, tag="ar_inp")
+    heap_out = ctx.as_symmetric(output_tensor, tag="ar_out")
 
     from iris.ccl.triton.all_reduce import launch
 

@@ -32,8 +32,8 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
-    heap_in = ctx.as_symmetric(input_tensor)
-    heap_out = ctx.as_symmetric(output_tensor)
+    heap_in = ctx.as_symmetric(input_tensor, tag="rs_inp")
+    heap_out = ctx.as_symmetric(output_tensor, tag="rs_out")
 
     from iris.ccl.triton.reduce_scatter import launch
 

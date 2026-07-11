@@ -578,40 +578,22 @@ class Iris:
             requires_grad=requires_grad,
         )
 
-    def as_symmetric(self, external_tensor: torch.Tensor) -> torch.Tensor:
+    def as_symmetric(self, external_tensor: torch.Tensor, tag: str = "") -> torch.Tensor:
         """
-        Import an external PyTorch tensor into the symmetric heap.
+        Place an external tensor on the symmetric heap with caching.
 
-        This creates a new tensor in the symmetric heap that shares physical memory
-        with the external tensor. Any modifications to either tensor will be visible
-        in both. This is useful for importing pre-allocated tensors (e.g., model weights)
-        into the symmetric heap for RMA operations.
-
-        Note: This feature requires `allocator_type='vmem'`.
+        First call: allocates heap buffer and copies data.
+        Subsequent calls with same (shape, dtype, tag): reuses cached buffer, copies data.
+        Already on heap: returns directly.
 
         Args:
-            external_tensor (torch.Tensor): External PyTorch tensor to import.
-                Must be a CUDA tensor.
+            external_tensor: External CUDA tensor
+            tag: Cache key disambiguator for same-shape buffers (e.g. "inp", "out")
 
         Returns:
-            torch.Tensor: New tensor in symmetric heap sharing memory with external tensor
-
-        Raises:
-            RuntimeError: If allocator doesn't support imports or import fails
-
-        Example:
-            >>> ctx = iris.iris(allocator_type='vmem')
-            >>> # Create an external tensor
-            >>> external = torch.randn(1000, 1000, device='cuda')
-            >>> # Import it into symmetric heap
-            >>> symmetric = ctx.as_symmetric(external)
-            >>> # Verify they share memory
-            >>> external[0, 0] = 999.0
-            >>> assert symmetric[0, 0].item() == 999.0
-            >>> # Now you can use symmetric in RMA operations
-            >>> ctx.put(symmetric, peer_rank, remote_buffer)
+            Tensor on the symmetric heap with the external tensor's data
         """
-        return self.heap.as_symmetric(external_tensor)
+        return self.heap.as_symmetric(external_tensor, tag=tag)
 
     def is_symmetric(self, tensor: torch.Tensor) -> bool:
         """

@@ -34,8 +34,8 @@ def broadcast(output_tensor, input_tensor, ctx, src=0, group=None, async_op=Fals
     if src < 0 or src >= world_size:
         raise ValueError(f"src rank {src} is out of range [0, {world_size})")
 
-    heap_in = ctx.as_symmetric(input_tensor)
-    heap_out = ctx.as_symmetric(output_tensor)
+    heap_in = ctx.as_symmetric(input_tensor, tag="bc_inp")
+    heap_out = ctx.as_symmetric(output_tensor, tag="bc_out")
 
     from iris.ccl.triton.broadcast import launch
 
