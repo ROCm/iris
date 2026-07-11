@@ -70,8 +70,14 @@ def persistent_reduce_scatter_two_shot(
 
     if start_flags_ptr is not None:
         per_block_barrier(
-            pid, start_flags_ptr, heap_bases,
-            group_rank, iris_rank, world_size, rank_start, rank_stride,
+            pid,
+            start_flags_ptr,
+            heap_bases,
+            group_rank,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
         )
 
     if NUM_XCDS != 1:
@@ -166,8 +172,14 @@ def persistent_reduce_scatter_two_shot(
 
     if end_flags_ptr is not None:
         per_block_barrier(
-            pid, end_flags_ptr, heap_bases,
-            group_rank, iris_rank, world_size, rank_start, rank_stride,
+            pid,
+            end_flags_ptr,
+            heap_bases,
+            group_rank,
+            iris_rank,
+            world_size,
+            rank_start,
+            rank_stride,
         )
 
 
