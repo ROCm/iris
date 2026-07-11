@@ -147,7 +147,7 @@ def persistent_reduce_scatter_two_shot(
             reduced = acc.to(output_ptr.type.element_ty)
 
             # Store only to own rank (no broadcast)
-            tl.store(out_ptr, reduced, cache_modifier=".wt")
+            tl.store(out_ptr, reduced)
 
         # Slow path: MASKED (only boundary tiles land here)
         else:
@@ -238,7 +238,7 @@ def persistent_reduce_scatter_inreg(
         acc = d0 + d1 + d2 + d3 + d4 + d5 + d6 + d7
 
         out = acc.to(output_ptr.type.element_ty)
-        tl.store(output_ptr + rn, out, mask=mask, cache_modifier=".wt")
+        tl.store(output_ptr + rn, out, mask=mask)
 
 
 @triton.jit()
@@ -317,7 +317,7 @@ def rs_reduce_kernel(
                 acc += val
 
         out = acc.to(output_ptr.type.element_ty)
-        tl.store(output_ptr + rn, out, mask=mask, cache_modifier=".wt")
+        tl.store(output_ptr + rn, out, mask=mask)
 
 
 def _select_variant(size_bytes, world_size):

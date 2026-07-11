@@ -686,7 +686,7 @@ def persistent_all_reduce_two_shot(
 
             reduced = acc.to(output_ptr.type.element_ty)
 
-            tl.store(out_ptr, reduced, cache_modifier=".wt")
+            tl.store(out_ptr, reduced)
 
             for i in tl.static_range(0, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
@@ -709,7 +709,7 @@ def persistent_all_reduce_two_shot(
 
             reduced = acc.to(output_ptr.type.element_ty)
 
-            tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
+            tl.store(out_ptr, reduced, mask=mask)
 
             for i in tl.static_range(0, world_size):
                 remote_rank_idx = (start_rank_idx + i) % world_size
