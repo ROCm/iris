@@ -8,11 +8,32 @@ Note: This test requires tritonBLAS to be installed.
 Install with: pip install git+https://github.com/ROCm/tritonBLAS.git
 """
 
+import os
 import pytest
 import torch
 import torch.distributed as dist
 import iris
 import iris.ops as ops
+from iris.ops.config import FusedConfig
+
+
+def _param_shapes():
+    if "IRIS_TEST_M" in os.environ:
+        return [
+            (
+                int(os.environ["IRIS_TEST_M"]),
+                int(os.environ["IRIS_TEST_N"]),
+                int(os.environ["IRIS_TEST_K"]),
+            )
+        ]
+    return [
+        (128, 64, 32),
+        (1024, 256, 512),
+    ]
+
+
+def _heap_size() -> int:
+    return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 2**33))
 
 
 @pytest.mark.parametrize(
@@ -25,10 +46,7 @@ import iris.ops as ops
 )
 @pytest.mark.parametrize(
     "M, N, K",
-    [
-        (128, 64, 32),
-        (1024, 256, 512),
-    ],
+    _param_shapes(),
 )
 @pytest.mark.parametrize(
     "variant",
@@ -38,25 +56,29 @@ import iris.ops as ops
     ],
 )
 def test_matmul_all_reduce(dtype, atol, rtol, M, N, K, variant):
-    """Test matmul_all_reduce by comparing against torch.matmul + dist.all_reduce."""
+    """Test matmul_all_reduce against torch.matmul plus fp32 all-reduce."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33  # 8GB
+    heap_size = _heap_size()
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
-    # Create input matrices
+    # Match the benchmark inputs: per-rank A, replicated B.
+    torch.manual_seed(123 + rank)
     A_local = torch.randn(M, K, dtype=dtype, device=f"cuda:{rank}")
+    torch.manual_seed(456)
     B = torch.randn(K, N, dtype=dtype, device=f"cuda:{rank}")
 
-    # Compute reference: torch.matmul + dist.all_reduce
+    # Compute reference: local matmul rounded to output dtype, fp32 all-reduce,
+    # then final cast back to the output dtype.
     C_local_ref = torch.matmul(A_local, B)
-    pytorch_output = C_local_ref.clone()
+    pytorch_output = C_local_ref.to(torch.float32)
     shmem.barrier()
     dist.all_reduce(pytorch_output, op=dist.ReduceOp.SUM)
     torch.cuda.synchronize()
+    pytorch_output = pytorch_output.to(dtype)
 
     # Set up Iris tensors
     iris_A = shmem.zeros((M, K), dtype=dtype)
@@ -67,15 +89,7 @@ def test_matmul_all_reduce(dtype, atol, rtol, M, N, K, variant):
 
     shmem.barrier()
 
-    # Select appropriate config based on problem size
-    from iris.ops.config import FusedConfig
-
-    if M <= 128 or K <= 64 or N <= 128:
-        config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant=variant)
-    elif dtype == torch.float32:
-        config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant=variant)
-    else:
-        config = FusedConfig(all_reduce_variant=variant)
+    config = FusedConfig(all_reduce_variant=variant)
 
     # Use high-level API
     ops.matmul_all_reduce(shmem, iris_C, iris_A, iris_B, config=config)
@@ -86,7 +100,7 @@ def test_matmul_all_reduce(dtype, atol, rtol, M, N, K, variant):
     max_diff = torch.abs(iris_C - pytorch_output).max().item()
 
     assert torch.allclose(iris_C, pytorch_output, atol=atol, rtol=rtol), (
-        f"Max difference: {max_diff}, expected < {atol}\n"
+        f"Max difference: {max_diff}, expected within atol={atol}, rtol={rtol}\n"
         f"Rank {rank}: iris.ops.matmul_all_reduce output doesn't match reference"
     )
 
@@ -116,14 +130,15 @@ def test_matmul_all_reduce_via_shmem_ops():
     B = shmem.randn((K, N), dtype=dtype)
     output = shmem.zeros((M, N), dtype=dtype)
 
-    # Reference using PyTorch
+    # Reference using PyTorch with the same fp32 all-reduce contract as the op.
     A_ref = A.clone()
     B_ref = B.clone()
     C_ref = torch.matmul(A_ref, B_ref)
-    pytorch_output = C_ref.clone()
+    pytorch_output = C_ref.to(torch.float32)
     shmem.barrier()
     dist.all_reduce(pytorch_output, op=dist.ReduceOp.SUM)
     torch.cuda.synchronize()
+    pytorch_output = pytorch_output.to(dtype)
 
     # Use shmem.ops interface
     shmem.ops.matmul_all_reduce(output, A, B)

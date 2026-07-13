@@ -159,7 +159,10 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
     C,
     reduce_buffer,
     completion_signals,
+    all_gather_pid_arrivals,
+    all_gather_rank_arrivals,
     expected_completion_value,
+    barrier_generation,
     M,
     N,
     stride_reduce_m,
@@ -173,6 +176,7 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
     REDUCE_BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     NUM_SMS: tl.constexpr,
+    REDUCE_NUM_PROGRAMS: tl.constexpr,
     WAIT_FOR_COMPLETION: tl.constexpr,
 ):
     """
@@ -183,6 +187,8 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
     """
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
     dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
+    pid = tl.program_id(0)
+    zero = pid * 0
 
     if WAIT_FOR_COMPLETION:
         for wait_src_rank in tl.static_range(0, world_size):
@@ -194,7 +200,6 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
                 ) < expected_completion_value:
                     pass
 
-    pid = tl.program_id(0)
     rows_per_rank = M // world_size
     num_pid_m = tl.cdiv(rows_per_rank, REDUCE_BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, REDUCE_BLOCK_SIZE_N)
@@ -240,7 +245,14 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
             REDUCE_BLOCK_SIZE_N,
             acc.to(C.type.element_ty),
         )
-        ctx.all_gather(tile_obj, dst_view, dim=0)
+        ctx.all_gather(tile_obj, dst_view, dim=0, src_mask=mask)
+
+    ctx.exit_barrier(
+        all_gather_pid_arrivals,
+        all_gather_rank_arrivals,
+        REDUCE_NUM_PROGRAMS,
+        barrier_generation,
+    )
 
 
 @triton.jit()
@@ -602,6 +614,12 @@ def _ensure_transfer_workspace(
 
     if getattr(workspace, "completion_signals", None) is None or workspace.completion_signals.numel() != world_size:
         workspace.completion_signals = shmem.zeros((world_size,), dtype=torch.int32)
+    barrier_signal_count = 2
+    if (
+        getattr(workspace, "barrier_signals", None) is None
+        or workspace.barrier_signals.numel() != barrier_signal_count
+    ):
+        workspace.barrier_signals = shmem.zeros((barrier_signal_count,), dtype=torch.int32)
 
 
 def _post_host_copy_engine_transfers(
@@ -882,9 +900,10 @@ def matmul_all_reduce_copy_engine_preamble(
     workspace: Optional[FusedWorkspace] = None,
     selector=None,
     out_dtype: Optional[torch.dtype] = None,
+    flag_iteration: int = 0,
 ) -> FusedWorkspace:
     """
-    Allocate and reset temporary buffers for matmul_all_reduce_copy_engine.
+    Allocate temporary buffers for matmul_all_reduce_copy_engine.
 
     Args:
         shmem: Iris shmem context
@@ -895,6 +914,9 @@ def matmul_all_reduce_copy_engine_preamble(
         workspace: Optional existing workspace to reuse. If None, creates new one.
         selector: Optional pre-built tritonBLAS Origami selector.
         out_dtype: Optional output dtype for selector construction.
+        flag_iteration: Current synchronization generation. Synchronization
+            buffers are reset only for generation 0; later generations rely on
+            cumulative counters.
 
     Returns:
         FusedWorkspace instance ready for kernel launch.
@@ -944,24 +966,19 @@ def matmul_all_reduce_copy_engine_preamble(
 
     if config.all_reduce_variant == "two_shot":
         if workspace.aux_buffer is None or workspace.aux_buffer.shape != (aux_rows, N):
-            workspace.aux_buffer = shmem.zeros((aux_rows, N), dtype=dtype)
-        else:
-            workspace.aux_buffer.zero_()
+            workspace.aux_buffer = shmem.empty((aux_rows, N), dtype=dtype)
         inbox_rows = aux_rows
     else:
         workspace.aux_buffer = None
         inbox_rows = aux_rows * world_size
 
     if workspace.a_inbox is None or workspace.a_inbox.shape != (inbox_rows, N):
-        workspace.a_inbox = shmem.zeros((inbox_rows, N), dtype=dtype)
-    else:
-        workspace.a_inbox.zero_()
+        workspace.a_inbox = shmem.empty((inbox_rows, N), dtype=dtype)
     _ensure_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
-    workspace.locks.zero_()
-    workspace.completion_signals.zero_()
-
-    # Zero output tensor
-    C.zero_()
+    if flag_iteration == 0:
+        workspace.locks.zero_()
+        workspace.completion_signals.zero_()
+        workspace.barrier_signals.zero_()
 
     return workspace
 
@@ -1060,6 +1077,7 @@ def matmul_all_reduce_copy_engine(
             workspace=workspace,
             selector=selector,
             out_dtype=C.dtype,
+            flag_iteration=flag_iteration,
         )
 
     launch = workspace.launch_params
@@ -1236,6 +1254,8 @@ def matmul_all_reduce_copy_engine(
         # Use persistent kernel with limited number of workgroups
         num_sms = launch["reduce_num_sms"]
         reduce_grid = (min(num_sms, total_reduce_tiles),)
+        all_gather_pid_arrivals = workspace.barrier_signals
+        all_gather_rank_arrivals = workspace.barrier_signals[1:]
 
         # Reduce-scatter waits for the same completion condition as
         # _matmul_all_reduce_copy_engine_wait_completion_kernel: every remote
@@ -1247,6 +1267,9 @@ def matmul_all_reduce_copy_engine(
             C,
             workspace.a_inbox,
             workspace.completion_signals,
+            all_gather_pid_arrivals,
+            all_gather_rank_arrivals,
+            flag_iteration + 1,
             flag_iteration + 1,
             M,
             N,
@@ -1261,6 +1284,7 @@ def matmul_all_reduce_copy_engine(
             REDUCE_BLOCK_SIZE_N=launch["reduce_block_size_n"],
             GROUP_SIZE_M=launch["group_size_m"],
             NUM_SMS=num_sms,
+            REDUCE_NUM_PROGRAMS=reduce_grid[0],
             WAIT_FOR_COMPLETION=True,
             algorithm="matmul_all_reduce_copy_engine_reduce_scatter",
             rank=rank,
@@ -1270,6 +1294,6 @@ def matmul_all_reduce_copy_engine(
 
     # Barrier unless async
     if not async_op:
-        shmem.barrier()
+        torch.cuda.synchronize()
 
     return workspace

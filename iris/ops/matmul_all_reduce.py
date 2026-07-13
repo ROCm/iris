@@ -169,7 +169,10 @@ def _matmul_all_reduce_reduce_scatter_kernel(
     C,
     a_inbox,
     locks,
+    all_gather_local_arrivals,
+    all_gather_rank_arrivals,
     expected_completion_value,
+    barrier_generation,
     M,
     N,
     stride_inbox_m,
@@ -183,6 +186,7 @@ def _matmul_all_reduce_reduce_scatter_kernel(
     REDUCE_BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     NUM_SMS: tl.constexpr,
+    REDUCE_NUM_PROGRAMS: tl.constexpr,
 ):
     """Reduce this rank's row shard, then all-gather it to every rank."""
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
@@ -231,7 +235,14 @@ def _matmul_all_reduce_reduce_scatter_kernel(
             REDUCE_BLOCK_SIZE_N,
             acc.to(C.type.element_ty),
         )
-        ctx.all_gather(tile_obj, dst_view, dim=0)
+        ctx.all_gather(tile_obj, dst_view, dim=0, src_mask=mask)
+
+    ctx.exit_barrier(
+        all_gather_local_arrivals,
+        all_gather_rank_arrivals,
+        REDUCE_NUM_PROGRAMS,
+        barrier_generation,
+    )
 
 
 @triton.jit()
@@ -561,10 +572,15 @@ def matmul_all_reduce_preamble(
     else:
         workspace.locks.zero_()
 
-    workspace.completion_signals = None
+    if config.all_reduce_variant == "two_shot":
+        if workspace.completion_signals is None or workspace.completion_signals.numel() != 2:
+            workspace.completion_signals = shmem.zeros((2,), dtype=torch.int32)
+        else:
+            workspace.completion_signals.zero_()
+    else:
+        workspace.completion_signals = None
 
     workspace.generation = 0
-    C.zero_()
     return workspace
 
 
@@ -780,6 +796,8 @@ def matmul_all_reduce(
         total_reduce_tiles = reduce_tiles_m * reduce_tiles_n
         num_sms = launch["reduce_num_sms"]
         reduce_grid = (min(num_sms, total_reduce_tiles),)
+        all_gather_local_arrivals = workspace.completion_signals
+        all_gather_rank_arrivals = workspace.completion_signals[1:]
 
         iris_launch(
             _matmul_all_reduce_reduce_scatter_kernel,
@@ -787,7 +805,10 @@ def matmul_all_reduce(
             C,
             workspace.a_inbox,
             workspace.locks,
+            all_gather_local_arrivals,
+            all_gather_rank_arrivals,
             expected_publish_count,
+            generation,
             M,
             N,
             stride_inbox_m,
@@ -801,6 +822,7 @@ def matmul_all_reduce(
             REDUCE_BLOCK_SIZE_N=reduce_block_size_n,
             GROUP_SIZE_M=launch["group_size_m"],
             NUM_SMS=num_sms,
+            REDUCE_NUM_PROGRAMS=reduce_grid[0],
             algorithm="matmul_all_reduce_reduce_scatter",
             rank=rank,
             dtype=A.dtype,
@@ -809,6 +831,6 @@ def matmul_all_reduce(
 
     # Barrier unless async
     if not async_op:
-        shmem.barrier()
+        torch.cuda.synchronize()
 
     return workspace

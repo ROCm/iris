@@ -684,6 +684,56 @@ class Context:
         translated_ptr = self._translate(pointer, self.rank, to_rank, hint)
         return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
 
+    @triton.jit
+    def exit_barrier(
+        self,
+        local_arrivals,
+        rank_arrivals,
+        local_arrivals_per_rank: tl.constexpr,
+        generation=1,
+    ):
+        """
+        Device-side kernel exit barrier across all ranks.
+
+        This is intended for the tail of a kernel, after all remote stores for
+        the kernel are issued. Every program must call it exactly once. Each
+        rank uses ``local_arrivals`` to elect the final local program; only that
+        leader signals ``rank_arrivals`` on every rank and polls its local
+        ``rank_arrivals`` slot until every rank has reached this exit point.
+        Non-leader programs do not wait after arriving; the elected leader keeps
+        the kernel alive until the cross-rank exit condition is satisfied.
+
+        The counters are cumulative. For generation 1 they must start at zero;
+        later generations can reuse the same counters without clearing them.
+
+        Args:
+            local_arrivals: Rank-local int32 counter incremented by every
+                program in this rank.
+            rank_arrivals: Symmetric int32 counter incremented once per rank
+                by the local leader and polled locally.
+            local_arrivals_per_rank: Number of programs that call this barrier
+                per rank for each generation.
+            generation: 1-based generation for cumulative counter reuse.
+        """
+        tl.debug_barrier()
+        local_expected = generation * local_arrivals_per_rank
+        rank_expected = generation * self.world_size
+        old = tl.atomic_add(local_arrivals, 1, sem="acq_rel", scope="sys")
+        is_rank_leader = old + 1 == local_expected
+
+        if is_rank_leader:
+            for signal_rank in tl.static_range(self.world_size):
+                self.atomic_add(
+                    rank_arrivals,
+                    1,
+                    to_rank=signal_rank,
+                    sem="release",
+                    scope="sys",
+                )
+
+            while tl.load(rank_arrivals, cache_modifier=".cv", volatile=True) < rank_expected:
+                pass
+
     # === Tile-level collective methods ===
 
     @triton.jit
@@ -839,7 +889,7 @@ class Context:
                     self.store(dst_tile_ptr, result, to_rank=dest_rank, mask=mask, hint=(1, tile.block_n))
 
     @triton.jit
-    def all_gather(self, tile: Tile, dst_view: TensorView, dim: tl.constexpr):
+    def all_gather(self, tile: Tile, dst_view: TensorView, dim: tl.constexpr, src_mask=None):
         """
         Tile-level all-gather operation.
 
@@ -849,6 +899,7 @@ class Context:
             tile: Tile with position, dimensions, and computed data.
             dst_view: TensorView for destination (full gathered size).
             dim: Dimension to gather along (0 for rows, 1 for columns).
+            src_mask: Optional mask for valid source elements in tile.data.
         """
         if dim == 0:
             M_local = dst_view.M // self.world_size
@@ -856,9 +907,9 @@ class Context:
             N_local = dst_view.N // self.world_size
 
         if dim == 0:
-            dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_m=self.rank * M_local, src_mask=None)
+            dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_m=self.rank * M_local, src_mask=src_mask)
         else:
-            dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_n=self.rank * N_local, src_mask=None)
+            dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_n=self.rank * N_local, src_mask=src_mask)
 
         for dest_rank in tl.static_range(self.world_size):
             self.store(dst_ptr, tile.data, to_rank=dest_rank, mask=combined_mask, hint=(1, tile.block_n))

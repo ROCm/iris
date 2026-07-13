@@ -53,6 +53,7 @@ class FusedWorkspace:
     a_inbox: Optional[torch.Tensor] = None  # Receiver-side inbox/reduction buffer
     signal_flags: Optional[torch.Tensor] = None  # (world_size, world_size, m_tiles, k_tiles)
     completion_signals: Optional[torch.Tensor] = None  # (world_size,) sender-completion slots
+    barrier_signals: Optional[torch.Tensor] = None  # Small device-side barrier state
 
     # Launch-wave copy-engine metadata
     wave_tile_counts: Optional[torch.Tensor] = None
@@ -116,6 +117,7 @@ class FusedWorkspace:
         self.a_inbox = None
         self.signal_flags = None
         self.completion_signals = None
+        self.barrier_signals = None
         self.wave_tile_counts = None
         self.wave_transfer_offsets = None
         self.wave_transfer_counts = None
