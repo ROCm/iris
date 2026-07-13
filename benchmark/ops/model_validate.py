@@ -30,7 +30,13 @@ from pathlib import Path
 from typing import Any, Dict
 
 from model_configs import MODELS, SweepOperation
-from model_sweep import generate_dimension_configs, DECODE_BATCH_SIZES, PREFILL_BATCH_SIZES, TRAINING_BATCH_SIZES
+from model_sweep import (
+    generate_dimension_configs,
+    ALL_BATCH_SIZES,
+    DECODE_BATCH_SIZES,
+    PREFILL_BATCH_SIZES,
+    TRAINING_BATCH_SIZES,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 TIMEOUT_SECONDS = 180
@@ -145,7 +151,7 @@ def _format_repro_command(cmd: list[str], env: dict[str, str]) -> str:
     return f"cd {shlex.quote(str(PROJECT_ROOT))} && {cmd_str}"
 
 
-def _shape_env(config: Dict[str, Any], operation: str) -> Dict[str, str]:
+def _shape_env(config: Dict[str, Any], operation: str, tp_degree: int) -> Dict[str, str]:
     """Set environment variables for test based on operation and dimensions.
 
     config contains both global (m, n, k) and local (m_local, n_local, k_local) dimensions.
@@ -161,8 +167,9 @@ def _shape_env(config: Dict[str, Any], operation: str) -> Dict[str, str]:
     }
 
     if operation == "matmul_all_gather":
-        # Tests expect global M and global K
-        env["IRIS_TEST_M"] = str(m)
+        # The benchmark axis is M_local. The pytest takes global M and divides
+        # by world size, so send the equivalent global row count.
+        env["IRIS_TEST_M"] = str(m_local * tp_degree)
         env["IRIS_TEST_K"] = str(k)
     elif operation == "matmul_all_reduce":
         # Tests expect global M and K_local (sharded K)
@@ -176,7 +183,7 @@ def _shape_env(config: Dict[str, Any], operation: str) -> Dict[str, str]:
     return env
 
 
-def _estimate_heap_bytes(operation: str, test_name: str, config: Dict[str, Any]) -> int | None:
+def _estimate_heap_bytes(operation: str, test_name: str, config: Dict[str, Any], tp_degree: int) -> int | None:
     """Estimate heap size needed for validation test.
 
     Uses global dimensions since that's what heap calculation is based on.
@@ -189,12 +196,14 @@ def _estimate_heap_bytes(operation: str, test_name: str, config: Dict[str, Any])
 
     if operation == "matmul_all_gather":
         # Matches the test allocations:
-        # A_local (M, K), B (K, N), output (M, N)
+        # A_local (M_local, K), B (K, N), output (M, N)
         # Output is ALWAYS allocated from heap via shmem.zeros()
-        total = (m * k + k * n + m * n) * elem
+        test_m = config["m_local"] * tp_degree
+        test_m_local = config["m_local"]
+        total = (test_m_local * k + k * n + test_m * n) * elem
         if test_name == "tritonblas_rcclbaseline":
             # The direct tritonBLAS+RCCL path also materializes local C_local (M, N).
-            total += (m * n) * elem
+            total += (test_m_local * n) * elem
         return total
 
     if operation == "matmul_all_reduce":
@@ -204,23 +213,23 @@ def _estimate_heap_bytes(operation: str, test_name: str, config: Dict[str, Any])
 
         if test_name == "one_shot":
             # Rank-major all-inbox: a_inbox[src_rank * M + row, col].
-            total += (NUM_GPUS * m * n) * elem
+            total += (tp_degree * m * n) * elem
         elif test_name == "two_shot":
             # Row-shard inbox: a_inbox[src_rank * rows_per_rank + row, col].
             total += (m * n) * elem
         elif test_name == "copy_engine_one_shot":
             # Rank-major all-inbox: a_inbox[src_rank * M + row, col].
-            total += (NUM_GPUS * m * n) * elem
+            total += (tp_degree * m * n) * elem
         elif test_name == "copy_engine_two_shot":
             # Tile-major flat staging
             block_m = COPY_ENGINE_HEAP_ESTIMATE_BLOCK_M
             block_n = COPY_ENGINE_HEAP_ESTIMATE_BLOCK_N
-            partition_rows = (m + NUM_GPUS - 1) // NUM_GPUS
+            partition_rows = (m + tp_degree - 1) // tp_degree
             partition_tiles_m = (partition_rows + block_m - 1) // block_m + 1
             partition_tiles_n = (n + block_n - 1) // block_n
             max_partition_tiles = max(1, partition_tiles_m * partition_tiles_n)
             tile_elements = block_m * block_n
-            flat_staging_elements = NUM_GPUS * max_partition_tiles * tile_elements
+            flat_staging_elements = tp_degree * max_partition_tiles * tile_elements
             total += 2 * flat_staging_elements * elem
         elif "copy_engine" in test_name:
             total += (m * n) * elem
@@ -280,14 +289,20 @@ def _round_up(value: int, alignment: int) -> int:
     return ((value + alignment - 1) // alignment) * alignment
 
 
-def _run_validation_test(operation: str, test_cfg: Dict[str, str], config: Dict[str, Any]) -> Dict[str, Any]:
+def _run_validation_test(
+    operation: str,
+    test_cfg: Dict[str, str],
+    config: Dict[str, Any],
+    tp_degree: int,
+) -> Dict[str, Any]:
     label = config["label"]
     env = os.environ.copy()
     env.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
-    env.update(_shape_env(config, operation))
+    shape_env = _shape_env(config, operation, tp_degree)
+    env.update(shape_env)
     env.update(test_cfg.get("env", {}))
 
-    estimated_heap_bytes = _estimate_heap_bytes(operation, test_cfg["name"], config)
+    estimated_heap_bytes = _estimate_heap_bytes(operation, test_cfg["name"], config, tp_degree)
     requested_heap_size = int(env.get("IRIS_TEST_HEAP_SIZE", DEFAULT_HEAP_SIZE))
     if estimated_heap_bytes is not None:
         requested_heap_size = max(
@@ -298,7 +313,7 @@ def _run_validation_test(operation: str, test_cfg: Dict[str, str], config: Dict[
 
     cmd = [
         "torchrun",
-        f"--nproc_per_node={NUM_GPUS}",
+        f"--nproc_per_node={tp_degree}",
         str(PROJECT_ROOT / "tests/run_tests_distributed.py"),
         "-q",
         str(PROJECT_ROOT / test_cfg["path"]),
@@ -310,6 +325,7 @@ def _run_validation_test(operation: str, test_cfg: Dict[str, str], config: Dict[
     log(f"  Validating {test_cfg['name']}: {label}")
     log(f"    Heap size: {requested_heap_size / (1024**3):.1f} GiB")
     log(f"    M={config['m']}, N={config['n']}, K={config['k']}, K_local={config['k_local']}")
+    log(f"    Test env: {', '.join(f'{key}={value}' for key, value in sorted(shape_env.items()))}")
 
     process = None
     try:
@@ -338,6 +354,7 @@ def _run_validation_test(operation: str, test_cfg: Dict[str, str], config: Dict[
             f.write(stdout)
             f.write("\n")
             f.write(stderr)
+        log(f"    Full output saved to: {error_log_file}")
         lines = (stdout + stderr).strip().split("\n")
         for line in lines[-5:]:
             log(f"      {line}")
@@ -363,6 +380,7 @@ def _run_validation_test(operation: str, test_cfg: Dict[str, str], config: Dict[
             f.write(partial_stdout)
             f.write("\n")
             f.write(partial_stderr)
+        log(f"    Full output saved to: {error_log_file}")
         lines = (partial_stdout + partial_stderr).strip().split("\n") if (partial_stdout or partial_stderr) else []
         for line in lines[-5:]:
             log(f"      {line}")
@@ -398,7 +416,8 @@ def main() -> None:
         type=str,
         default=None,
         help="Comma-separated batch sizes in tokens (default: all). "
-        f"Presets: decode={DECODE_BATCH_SIZES}, prefill={PREFILL_BATCH_SIZES}",
+        f"Presets: decode={DECODE_BATCH_SIZES}, prefill={PREFILL_BATCH_SIZES}, "
+        f"training={TRAINING_BATCH_SIZES}",
     )
     parser.add_argument(
         "--tp-degree",
@@ -424,7 +443,7 @@ def main() -> None:
     if args.batch_sizes:
         batch_sizes = [int(b.strip()) for b in args.batch_sizes.split(",")]
     else:
-        batch_sizes = DECODE_BATCH_SIZES + PREFILL_BATCH_SIZES
+        batch_sizes = ALL_BATCH_SIZES
 
     # Generate dimension configs (same as model_sweep.py)
     dimension_configs = generate_dimension_configs(
@@ -469,13 +488,21 @@ def main() -> None:
             "M": config["m"],
             "N": config["n"],
             "K": config["k"],
+            "M_local": config["m_local"],
+            "N_local": config["n_local"],
+            "K_local": config["k_local"],
             "operation": args.operation,
             "validations": {},
         }
         log(f"[{idx}/{len(dimension_configs)}] Testing {config['label']}")
 
         for test_cfg in tests:
-            row["validations"][test_cfg["name"]] = _run_validation_test(args.operation, test_cfg, config)
+            row["validations"][test_cfg["name"]] = _run_validation_test(
+                args.operation,
+                test_cfg,
+                config,
+                args.tp_degree,
+            )
 
         results.append(row)
         log("")
