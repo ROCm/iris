@@ -12,7 +12,7 @@ from iris.ops import FusedConfig, matmul_all_reduce_preamble
 from tritonblas.matmul import persistent_matmul_lt
 
 
-_MAX_ONE_SHOT_INBOX_ELEMENTS = 2**32
+_MAX_ONE_SHOT_INBOX_ELEMENTS = 2**31
 
 
 @bench.register
@@ -106,9 +106,9 @@ def matmul_all_reduce(state, ctx):
     world_size = ctx.get_num_ranks()
     rank = ctx.get_rank()
 
-    if variant == "one_shot" and world_size * M * N >= _MAX_ONE_SHOT_INBOX_ELEMENTS:
+    if variant == "one_shot" and world_size * M * N > _MAX_ONE_SHOT_INBOX_ELEMENTS:
         state.skip(
-            "one_shot requires world_size * M * N < 2**32 elements "
+            "one_shot requires world_size * M * N <= 2**31 elements "
             f"(got {world_size * M * N})"
         )
 

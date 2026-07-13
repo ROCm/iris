@@ -23,7 +23,7 @@ from .workspace import FusedWorkspace
 
 
 _SUPPORTED_VARIANTS = ("one_shot", "two_shot")
-_MAX_ONE_SHOT_INBOX_ELEMENTS = 2**32
+_MAX_ONE_SHOT_INBOX_ELEMENTS = 2**31
 
 
 @triton.jit()
@@ -371,9 +371,9 @@ def _validate_variant(variant: str):
 
 def _validate_one_shot_inbox_size(M: int, N: int, world_size: int):
     inbox_elements = world_size * M * N
-    if inbox_elements >= _MAX_ONE_SHOT_INBOX_ELEMENTS:
+    if inbox_elements > _MAX_ONE_SHOT_INBOX_ELEMENTS:
         raise ValueError(
-            "matmul_all_reduce one_shot requires world_size * M * N < 2**32 elements "
+            "matmul_all_reduce one_shot requires world_size * M * N <= 2**31 elements "
             "because the current publish/reduce kernels use 32-bit element offsets; "
             f"got world_size={world_size}, M={M}, N={N}, elements={inbox_elements}."
         )

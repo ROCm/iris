@@ -16,6 +16,9 @@ from iris.ops.matmul_all_reduce_copy_engine import (
 from tritonblas.matmul import _make_matmul_selector
 
 
+_MAX_ONE_SHOT_INBOX_ELEMENTS = 2**31
+
+
 def _make_selector(M: int, N: int, K: int, dtype: torch.dtype, device: torch.device):
     return _make_matmul_selector(
         M,
@@ -44,6 +47,11 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
         state.skip(f"N={N} must be divisible by block_size_n={selector.block_n}")
     if K % selector.block_k != 0:
         state.skip(f"K={K} must be divisible by block_size_k={selector.block_k}")
+    if variant == "one_shot" and world_size * M * N > _MAX_ONE_SHOT_INBOX_ELEMENTS:
+        state.skip(
+            "one_shot requires world_size * M * N <= 2**31 elements "
+            f"(got {world_size * M * N})"
+        )
 
     torch.manual_seed(123 + rank)
     A = ctx.randn((M, K), dtype=dtype)

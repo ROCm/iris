@@ -24,6 +24,9 @@ from iris.host.tracing.kernel_artifacts import iris_launch
 from .tritonblas_launch_wave_schedule import build_launch_wave_plan
 
 
+_MAX_ONE_SHOT_INBOX_ELEMENTS = 2**31
+
+
 @triton.jit()
 def _partitioned_xcd_matmul_kernel(
     A,
@@ -421,6 +424,16 @@ def _round_up_to_multiple(value: int, multiple: int) -> int:
 
 def _ceil_div(value: int, divisor: int) -> int:
     return (value + divisor - 1) // divisor
+
+
+def _validate_one_shot_inbox_size(M: int, N: int, world_size: int):
+    inbox_elements = world_size * M * N
+    if inbox_elements > _MAX_ONE_SHOT_INBOX_ELEMENTS:
+        raise ValueError(
+            "matmul_all_reduce_copy_engine one_shot requires world_size * M * N <= 2**31 elements "
+            "because the current local-reduce kernels use 32-bit element offsets; "
+            f"got world_size={world_size}, M={M}, N={N}, elements={inbox_elements}."
+        )
 
 
 def _partitioned_xcd_gemm_num_sms(launch: dict, world_size: int) -> int:
@@ -916,8 +929,10 @@ def matmul_all_reduce_copy_engine_preamble(
     dtype = A.dtype
     world_size = shmem.get_num_ranks()
 
-    # Validate config
     config.validate(world_size=world_size)
+
+    if config.all_reduce_variant == "one_shot":
+        _validate_one_shot_inbox_size(M, N, world_size)
 
     if config.all_reduce_variant == "two_shot" and M % world_size != 0:
         raise ValueError(
@@ -1046,6 +1061,9 @@ def matmul_all_reduce_copy_engine(
     world_size = shmem.get_num_ranks()
 
     config.validate(world_size=world_size)
+
+    if config.all_reduce_variant == "one_shot":
+        _validate_one_shot_inbox_size(M, N, world_size)
 
     # Prepare workspace if needed
     if workspace is None:
