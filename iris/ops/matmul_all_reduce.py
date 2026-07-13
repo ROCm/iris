@@ -23,6 +23,7 @@ from .workspace import FusedWorkspace
 
 
 _SUPPORTED_VARIANTS = ("one_shot", "two_shot")
+_MAX_ONE_SHOT_INBOX_ELEMENTS = 2**32
 
 
 @triton.jit()
@@ -368,6 +369,16 @@ def _validate_variant(variant: str):
         raise ValueError(f"matmul_all_reduce supports only {_SUPPORTED_VARIANTS}, got {variant!r}")
 
 
+def _validate_one_shot_inbox_size(M: int, N: int, world_size: int):
+    inbox_elements = world_size * M * N
+    if inbox_elements >= _MAX_ONE_SHOT_INBOX_ELEMENTS:
+        raise ValueError(
+            "matmul_all_reduce one_shot requires world_size * M * N < 2**32 elements "
+            "because the current publish/reduce kernels use 32-bit element offsets; "
+            f"got world_size={world_size}, M={M}, N={N}, elements={inbox_elements}."
+        )
+
+
 def _default_chunk_size(total_tiles: int, group_size_m: int, num_xcds: int) -> int:
     chunk_size = group_size_m * group_size_m
     if num_xcds > 0:
@@ -524,8 +535,11 @@ def matmul_all_reduce_preamble(
     dtype = A.dtype
     world_size = shmem.get_num_ranks()
 
-    # Validate config
     config.validate(world_size=world_size)
+    _validate_variant(config.all_reduce_variant)
+
+    if config.all_reduce_variant == "one_shot":
+        _validate_one_shot_inbox_size(M, N, world_size)
 
     if config.all_reduce_variant == "two_shot" and M % world_size != 0:
         raise ValueError(
@@ -616,6 +630,9 @@ def matmul_all_reduce(
     config.validate(world_size=world_size)
     _validate_variant(config.all_reduce_variant)
 
+    if config.all_reduce_variant == "one_shot":
+        _validate_one_shot_inbox_size(M, N, world_size)
+
     if workspace is None:
         workspace = matmul_all_reduce_preamble(
             shmem,
@@ -636,7 +653,7 @@ def matmul_all_reduce(
             "matmul_all_reduce two_shot requires M to be divisible by world_size "
             "because the final all-gather uses equal row shards."
         )
-    generation = int(getattr(workspace, "generation", 0)) + 1
+    generation = workspace.generation + 1
     workspace.generation = generation
     gemm_num_sms = _partitioned_xcd_gemm_num_sms(launch, world_size)
     launch["gemm_num_sms"] = gemm_num_sms
