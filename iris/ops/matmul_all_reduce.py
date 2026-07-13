@@ -512,7 +512,6 @@ def matmul_all_reduce_preamble(
     A: torch.Tensor,
     B: torch.Tensor,
     config: Optional[FusedConfig] = None,
-    workspace: Optional[FusedWorkspace] = None,
     selector=None,
     out_dtype: Optional[torch.dtype] = None,
 ) -> FusedWorkspace:
@@ -548,8 +547,7 @@ def matmul_all_reduce_preamble(
     else:
         launch["reduce_num_sms"] = launch["num_sms"]
 
-    if workspace is None:
-        workspace = FusedWorkspace()
+    workspace = FusedWorkspace()
 
     workspace.operation = "matmul_all_reduce"
     workspace.shape = (M, N, K)
@@ -559,24 +557,13 @@ def matmul_all_reduce_preamble(
     workspace.selector = selector
     workspace.config = config
     workspace.launch_params = launch
-    workspace.aux_buffer = None
 
     inbox_rows = M * world_size if config.all_reduce_variant == "one_shot" else M
-    if workspace.a_inbox is None or workspace.a_inbox.shape != (inbox_rows, N):
-        workspace.a_inbox = shmem.zeros((inbox_rows, N), dtype=dtype)
-    else:
-        workspace.a_inbox.zero_()
-
-    if workspace.locks is None or workspace.locks.numel() != 1:
-        workspace.locks = shmem.zeros((1,), dtype=torch.int32)
-    else:
-        workspace.locks.zero_()
+    workspace.a_inbox = shmem.zeros((inbox_rows, N), dtype=dtype)
+    workspace.locks = shmem.zeros((1,), dtype=torch.int32)
 
     if config.all_reduce_variant == "two_shot":
-        if workspace.completion_signals is None or workspace.completion_signals.numel() != 2:
-            workspace.completion_signals = shmem.zeros((2,), dtype=torch.int32)
-        else:
-            workspace.completion_signals.zero_()
+        workspace.completion_signals = shmem.zeros((2,), dtype=torch.int32)
     else:
         workspace.completion_signals = None
 
@@ -592,7 +579,6 @@ def matmul_all_reduce(
     async_op: bool = False,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
-    selector=None,
 ) -> FusedWorkspace:
     """
     Fused matrix multiplication and all-reduce.
@@ -637,8 +623,6 @@ def matmul_all_reduce(
             A,
             B,
             config=config,
-            workspace=workspace,
-            selector=selector,
             out_dtype=C.dtype,
         )
 
@@ -646,11 +630,6 @@ def matmul_all_reduce(
     block_size_m = launch["block_size_m"]
     block_size_n = launch["block_size_n"]
     block_size_k = launch["block_size_k"]
-
-    if getattr(workspace, "selector", None) is None:
-        assert M >= block_size_m, f"M={M} too small for block_size_m={block_size_m}"
-        assert K >= block_size_k, f"K={K} too small for block_size_k={block_size_k}"
-        assert N >= block_size_n, f"N={N} too small for block_size_n={block_size_n}"
 
     if config.all_reduce_variant == "two_shot" and M % world_size != 0:
         raise ValueError(

@@ -30,7 +30,6 @@ def _register_fused_matmul_all_gather(state, ctx) -> None:
 
     state.set_flops(2 * M_local * N * K)
     state.set_bytes((world_size - 1) * M_local * N * A.element_size())
-    state.add_counter("selector_fallback", int(workspace.selector_fallback))
     state.add_counter("block_m", launch["block_size_m"])
     state.add_counter("block_n", launch["block_size_n"])
     state.add_counter("block_k", launch["block_size_k"])

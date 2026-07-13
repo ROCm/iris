@@ -75,7 +75,6 @@ class OpsNamespace:
         async_op=False,
         config=None,
         workspace=None,
-        selector=None,
     ):
         """
         Fused matrix multiplication and all-reduce.
@@ -99,7 +98,7 @@ class OpsNamespace:
             >>> output = shmem.zeros((M, N), dtype=torch.float16)
             >>> shmem.ops.matmul_all_reduce(output, A, B)
         """
-        return matmul_all_reduce(self._shmem, output_tensor, A, B, async_op, config, workspace, selector=selector)
+        return matmul_all_reduce(self._shmem, output_tensor, A, B, async_op, config, workspace)
 
     def all_gather_matmul(
         self,

@@ -12,6 +12,9 @@ from iris.ops import FusedConfig, matmul_all_reduce_preamble
 from tritonblas.matmul import persistent_matmul_lt
 
 
+_MAX_ONE_SHOT_INBOX_ELEMENTS = 2**32
+
+
 @bench.register
 @bench.axis("num_ranks", [2, 4, 8])
 @bench.axis("M", [1024, 4096, 16384])
@@ -103,6 +106,12 @@ def matmul_all_reduce(state, ctx):
     world_size = ctx.get_num_ranks()
     rank = ctx.get_rank()
 
+    if variant == "one_shot" and world_size * M * N >= _MAX_ONE_SHOT_INBOX_ELEMENTS:
+        state.skip(
+            "one_shot requires world_size * M * N < 2**32 elements "
+            f"(got {world_size * M * N})"
+        )
+
     torch.manual_seed(123 + rank)
     A = ctx.randn((M, K), dtype=dtype)
     torch.manual_seed(456)
@@ -132,16 +141,7 @@ def matmul_all_reduce(state, ctx):
     def _run():
         ctx.ops.matmul_all_reduce(C, A, B, config=config, workspace=workspace)
 
-    def _preamble():
-        C.zero_()
-        if workspace.a_inbox is not None:
-            workspace.a_inbox.zero_()
-        if workspace.locks is not None:
-            workspace.locks.zero_()
-        workspace.generation = 0
-        workspace.prepared = True
-
-    state.exec(_run, preamble_fn=_preamble)
+    state.exec(_run)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import torch
 import iris.bench as bench
 
 from iris.ops.matmul_all_reduce_copy_engine import (
+    FusedConfig,
     matmul_all_reduce_copy_engine as _copy_engine,
     matmul_all_reduce_copy_engine_preamble,
     matmul_all_reduce_copy_engine_prepost_transfers,
@@ -50,7 +51,6 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
     B = ctx.randn((K, N), dtype=dtype)
     C = ctx.zeros((M, N), dtype=dtype)
 
-    from iris.ops import FusedConfig
 
     config = FusedConfig(all_reduce_variant=variant)
     workspace = matmul_all_reduce_copy_engine_preamble(

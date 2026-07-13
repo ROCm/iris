@@ -565,7 +565,7 @@ def _build_partitioned_xcd_transfer_plan(M: int, N: int, world_size: int, launch
     }
 
 
-def _ensure_transfer_workspace(
+def _init_transfer_workspace(
     shmem,
     workspace: FusedWorkspace,
     M: int,
@@ -589,37 +589,28 @@ def _ensure_transfer_workspace(
         world_size,
         element_size,
     )
-    if getattr(workspace, "transfer_plan_key", None) != plan_key:
-        plan = _build_partitioned_xcd_transfer_plan(M, N, world_size, launch, element_size)
-        workspace.transfer_plan_key = plan_key
-        workspace.launch_wave_plan = None
-        workspace.num_transfer_waves = plan["max_batches_per_partition"]
-        workspace.num_transfer_flags = plan["num_transfer_flags"]
-        workspace.batch_tiles_per_xcd = plan["sms_per_xcd"]
-        workspace.max_rects_per_owner_wave = plan["max_rects_per_owner_wave"]
-        workspace.num_transfers = plan["num_transfers"]
-        workspace.transfers_by_owner_wave = plan["transfers_by_owner_wave"]
-        workspace.wave_tile_counts_host = plan["wave_tile_counts"]
-        workspace.owner_last_wave_host = plan["owner_last_wave"]
-        workspace.wave_tile_counts = torch.tensor(plan["flat_wave_tile_counts"], device=device, dtype=torch.int32)
-        workspace.wave_transfer_offsets = torch.tensor(plan["wave_transfer_offsets"], device=device, dtype=torch.int32)
-        workspace.wave_transfer_counts = torch.tensor(plan["wave_transfer_counts"], device=device, dtype=torch.int32)
-        workspace.owner_last_wave = torch.tensor(plan["owner_last_wave"], device=device, dtype=torch.int32)
-        workspace.transfer_row_offsets = torch.tensor(plan["transfer_row_offsets"], device=device, dtype=torch.int32)
-        workspace.transfer_col_offsets = torch.tensor(plan["transfer_col_offsets"], device=device, dtype=torch.int32)
-        workspace.transfer_width_bytes = torch.tensor(plan["transfer_width_bytes"], device=device, dtype=torch.int32)
-        workspace.transfer_heights = torch.tensor(plan["transfer_heights"], device=device, dtype=torch.int32)
-
-        workspace.locks = shmem.zeros((plan["num_transfer_flags"],), dtype=torch.int32)
-
-    if getattr(workspace, "completion_signals", None) is None or workspace.completion_signals.numel() != world_size:
-        workspace.completion_signals = shmem.zeros((world_size,), dtype=torch.int32)
-    barrier_signal_count = 2
-    if (
-        getattr(workspace, "barrier_signals", None) is None
-        or workspace.barrier_signals.numel() != barrier_signal_count
-    ):
-        workspace.barrier_signals = shmem.zeros((barrier_signal_count,), dtype=torch.int32)
+    plan = _build_partitioned_xcd_transfer_plan(M, N, world_size, launch, element_size)
+    workspace.transfer_plan_key = plan_key
+    workspace.launch_wave_plan = None
+    workspace.num_transfer_waves = plan["max_batches_per_partition"]
+    workspace.num_transfer_flags = plan["num_transfer_flags"]
+    workspace.batch_tiles_per_xcd = plan["sms_per_xcd"]
+    workspace.max_rects_per_owner_wave = plan["max_rects_per_owner_wave"]
+    workspace.num_transfers = plan["num_transfers"]
+    workspace.transfers_by_owner_wave = plan["transfers_by_owner_wave"]
+    workspace.wave_tile_counts_host = plan["wave_tile_counts"]
+    workspace.owner_last_wave_host = plan["owner_last_wave"]
+    workspace.wave_tile_counts = torch.tensor(plan["flat_wave_tile_counts"], device=device, dtype=torch.int32)
+    workspace.wave_transfer_offsets = torch.tensor(plan["wave_transfer_offsets"], device=device, dtype=torch.int32)
+    workspace.wave_transfer_counts = torch.tensor(plan["wave_transfer_counts"], device=device, dtype=torch.int32)
+    workspace.owner_last_wave = torch.tensor(plan["owner_last_wave"], device=device, dtype=torch.int32)
+    workspace.transfer_row_offsets = torch.tensor(plan["transfer_row_offsets"], device=device, dtype=torch.int32)
+    workspace.transfer_col_offsets = torch.tensor(plan["transfer_col_offsets"], device=device, dtype=torch.int32)
+    workspace.transfer_width_bytes = torch.tensor(plan["transfer_width_bytes"], device=device, dtype=torch.int32)
+    workspace.transfer_heights = torch.tensor(plan["transfer_heights"], device=device, dtype=torch.int32)
+    workspace.locks = shmem.zeros((plan["num_transfer_flags"],), dtype=torch.int32)
+    workspace.completion_signals = shmem.zeros((world_size,), dtype=torch.int32)
+    workspace.barrier_signals = shmem.zeros((2,), dtype=torch.int32)
 
 
 def _post_host_copy_engine_transfers(
@@ -810,8 +801,9 @@ def matmul_all_reduce_copy_engine_prepost_transfers(
     launch = workspace.launch_params
     if launch is None:
         raise ValueError("workspace.launch_params must be initialized before preposting")
+    if workspace.transfers_by_owner_wave is None or workspace.wave_tile_counts_host is None:
+        raise ValueError("copy-engine transfer workspace is not initialized; call preamble first")
 
-    _ensure_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
     if workspace.variant == "one_shot":
         rank = shmem.get_rank()
         local_inbox_slice = workspace.a_inbox[rank * M : (rank + 1) * M, :]
@@ -897,10 +889,8 @@ def matmul_all_reduce_copy_engine_preamble(
     A: torch.Tensor,
     B: torch.Tensor,
     config: Optional[FusedConfig] = None,
-    workspace: Optional[FusedWorkspace] = None,
     selector=None,
     out_dtype: Optional[torch.dtype] = None,
-    flag_iteration: int = 0,
 ) -> FusedWorkspace:
     """
     Allocate temporary buffers for matmul_all_reduce_copy_engine.
@@ -911,12 +901,9 @@ def matmul_all_reduce_copy_engine_preamble(
         A: Input matrix A (M, K)
         B: Input matrix B (K, N)
         config: Optional FusedConfig. If None, uses defaults.
-        workspace: Optional existing workspace to reuse. If None, creates new one.
         selector: Optional pre-built tritonBLAS Origami selector.
         out_dtype: Optional output dtype for selector construction.
-        flag_iteration: Current synchronization generation. Synchronization
-            buffers are reset only for generation 0; later generations rely on
-            cumulative counters.
+            preamble always creates a fresh workspace and initializes counters.
 
     Returns:
         FusedWorkspace instance ready for kernel launch.
@@ -941,17 +928,14 @@ def matmul_all_reduce_copy_engine_preamble(
     if selector is None:
         c_dtype = dtype if out_dtype is None else out_dtype
         selector = _make_origami_selector(M, N, K, A, B, c_dtype)
-
     launch = _matmul_all_reduce_copy_engine_launch_params(M, N, selector, A.device)
-
     launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
     if config.all_reduce_variant == "two_shot":
         launch["reduce_num_sms"] = _default_reduce_num_sms()
     else:
         launch["reduce_num_sms"] = launch["num_sms"]
 
-    if workspace is None:
-        workspace = FusedWorkspace()
+    workspace = FusedWorkspace()
 
     workspace.operation = "matmul_all_reduce_copy_engine"
     workspace.shape = (M, N, K)
@@ -965,20 +949,17 @@ def matmul_all_reduce_copy_engine_preamble(
     aux_rows = M
 
     if config.all_reduce_variant == "two_shot":
-        if workspace.aux_buffer is None or workspace.aux_buffer.shape != (aux_rows, N):
-            workspace.aux_buffer = shmem.empty((aux_rows, N), dtype=dtype)
+        workspace.aux_buffer = shmem.empty((aux_rows, N), dtype=dtype)
         inbox_rows = aux_rows
     else:
         workspace.aux_buffer = None
         inbox_rows = aux_rows * world_size
 
-    if workspace.a_inbox is None or workspace.a_inbox.shape != (inbox_rows, N):
-        workspace.a_inbox = shmem.empty((inbox_rows, N), dtype=dtype)
-    _ensure_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
-    if flag_iteration == 0:
-        workspace.locks.zero_()
-        workspace.completion_signals.zero_()
-        workspace.barrier_signals.zero_()
+    workspace.a_inbox = shmem.empty((inbox_rows, N), dtype=dtype)
+    _init_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
+    workspace.locks.zero_()
+    workspace.completion_signals.zero_()
+    workspace.barrier_signals.zero_()
 
     return workspace
 
@@ -991,7 +972,6 @@ def matmul_all_reduce_copy_engine(
     async_op: bool = False,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
-    selector=None,
     flag_iteration: int = 0,
     copy_engine_transfers_preposted: bool = False,
     split_completion_wait: bool = False,
@@ -1012,7 +992,6 @@ def matmul_all_reduce_copy_engine(
         async_op: If False, performs barrier at end. Default: False.
         config: Optional FusedConfig for tuning. If None, uses defaults.
         workspace: Optional pre-allocated workspace. If None, creates new one.
-        selector: Optional pre-built tritonBLAS Origami selector.
         flag_iteration: Launch generation for cumulative copy-engine wait and
             completion counters. Increment this when reusing a workspace without
             zeroing its synchronization buffers.
@@ -1033,6 +1012,8 @@ def matmul_all_reduce_copy_engine(
         >>> C = shmem.zeros((1024, 2048), dtype=torch.float16)
         >>> shmem.ops.matmul_all_reduce_copy_engine(C, A, B)
     """
+    if config is None and workspace is not None and workspace.config is not None:
+        config = workspace.config
     if config is None:
         config = FusedConfig()
 
@@ -1074,19 +1055,30 @@ def matmul_all_reduce_copy_engine(
             A,
             B,
             config=config,
-            workspace=workspace,
-            selector=selector,
             out_dtype=C.dtype,
             flag_iteration=flag_iteration,
         )
+
+    expected_shape = (M, N, K)
+    if (
+        workspace.operation != "matmul_all_reduce_copy_engine"
+        or workspace.shape != expected_shape
+        or workspace.dtype != A.dtype
+        or workspace.world_size != world_size
+        or workspace.variant != config.all_reduce_variant
+        or workspace.launch_params is None
+        or workspace.a_inbox is None
+        or workspace.locks is None
+        or workspace.completion_signals is None
+        or workspace.barrier_signals is None
+    ):
+        raise ValueError("workspace must be created by matmul_all_reduce_copy_engine_preamble for this call")
 
     launch = workspace.launch_params
 
     block_size_m = launch["block_size_m"]
     block_size_n = launch["block_size_n"]
     block_size_k = launch["block_size_k"]
-
-    _ensure_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
 
     even_k = K % block_size_k == 0
     launch_kwargs = {
