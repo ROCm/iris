@@ -130,10 +130,19 @@ def coverage_report(rows, order):
 
 
 def main():
-    data_dir = os.path.join(_HERE, "data")
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    # Raw corpus lives in origami_comms, not in this repo; default to a local
+    # ./data/ if present (e.g. a scratch regen), else require --data.
+    ap.add_argument("--data", default=os.path.join(_HERE, "data"),
+                    help="directory of <arch>_world<W>.json corpus files (origami_comms)")
+    args = ap.parse_args()
+
+    data_dir = args.data
     by_arch = load_rows_by_arch(data_dir)
     if not by_arch:
-        print(f"no corpus data found in {data_dir}; run collect_corpus.py first")
+        print(f"no corpus data found in {data_dir}; point --data at the origami_comms corpus dir")
         return
 
     out = {"_tol": TOL, "_note": "ordered greedy set-cover of (split_frac, gemm_block); benchmark top-k."}

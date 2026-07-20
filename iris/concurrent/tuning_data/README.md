@@ -8,22 +8,27 @@ world sizes, and **architectures**. This is the empirical basis for:
    with no cost model — see `iris/concurrent/autotune.py`), and
 2. the **validation set** for the analytical predictor (`predictor.py`) added later.
 
-**We commit the raw data so nobody has to re-run the sweeps.** Re-run only when a
-new architecture, collective, or kernel change invalidates the numbers.
+Only the **derived** `candidate_set.json` (a runtime dependency of the tuner) and
+the collect/derive **tooling** live here. The **raw per-shape grid measurements**
+(`data/<arch>_world<W>.json`, several MB and growing per arch × world) are
+research/provenance, not needed at runtime, and are kept in the origami_comms
+workbench instead of bloating this repo:
+
+```
+origami_comms  ->  microbench/.../iris/concurrent/tuning_data/data/<arch>_world<W>.json
+```
+
+Point `collect_corpus.py --out` / `derive_candidates.py` at that directory to
+regenerate. The committed `candidate_set.json` here is the derived output of record.
 
 ## Layout
 
 ```
 tuning_data/
-  collect_corpus.py     # on-device grid sweep  -> data/<arch>_world<W>.json
+  collect_corpus.py     # on-device grid sweep  -> <out>/<arch>_world<W>.json
   derive_candidates.py  # corpus -> candidate_set.json (pure Python, no GPU)
-  candidate_set.json    # DERIVED: per-arch ordered candidate list + coverage
-  data/                 # RAW measurements, one file per (arch, world_size)
-    gfx942_world2.json
-    gfx942_world4.json
-    gfx942_world8.json
-    gfx950_world2.json
-    ...
+  candidate_set.json    # DERIVED: per-arch ordered candidate list + coverage (shipped)
+  # data/ (raw measurements) lives in origami_comms, not here
 ```
 
 ## Raw data schema (`data/<arch>_world<W>.json`)
@@ -34,7 +39,7 @@ tuning_data/
   "device_name": "...",
   "world_size": 2,
   "cu_count": 304,
-  "torch_version": "...", "host": "...", "python": "...", "timestamp_utc": "...",
+  "torch_version": "...", "python": "...", "timestamp_utc": "...",
   "grid": {                     // the config grid that was swept
     "split_fracs": [0.55, ...], // gemm_wgs = round(frac * cu_count)
     "tiles": [[256,256,64], ...],
@@ -82,18 +87,21 @@ On a node with the target GPUs (see repo `AGENTS.md` / cluster skills for the
 ROCm 7.x environment iris needs):
 
 ```bash
-# one run per world size you care about (W = nproc = #GPUs used)
-torchrun --nproc_per_node=2 -m iris.concurrent.tuning_data.collect_corpus
-torchrun --nproc_per_node=4 -m iris.concurrent.tuning_data.collect_corpus
-torchrun --nproc_per_node=8 -m iris.concurrent.tuning_data.collect_corpus
-# smoke test first with:  ... collect_corpus --quick
+# CORPUS = the origami_comms data dir (raw measurements live there, not in iris)
+CORPUS=/path/to/origami_comms/.../iris/concurrent/tuning_data/data
 
-# then derive (pure Python, no GPU):
-python -m iris.concurrent.tuning_data.derive_candidates
+# one run per world size you care about (W = nproc = #GPUs used)
+torchrun --nproc_per_node=2 -m iris.concurrent.tuning_data.collect_corpus --out "$CORPUS"
+torchrun --nproc_per_node=4 -m iris.concurrent.tuning_data.collect_corpus --out "$CORPUS"
+torchrun --nproc_per_node=8 -m iris.concurrent.tuning_data.collect_corpus --out "$CORPUS"
+# smoke test first with:  ... collect_corpus --out "$CORPUS" --quick
+
+# then derive candidate_set.json from that corpus (pure Python, no GPU):
+python -m iris.concurrent.tuning_data.derive_candidates --data "$CORPUS"
 ```
 
-Each `collect_corpus` run appends/overwrites one `data/<arch>_world<W>.json`.
-Commit the new JSON(s) and the regenerated `candidate_set.json`.
+Each `collect_corpus` run writes one `<arch>_world<W>.json` into the corpus dir
+(commit those to origami_comms). Commit the regenerated `candidate_set.json` here.
 
 ## Coverage status
 
