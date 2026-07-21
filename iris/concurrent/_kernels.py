@@ -113,12 +113,14 @@ def _all_gather_tile(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
 ):
-    """Push one local block into rows ``[cur_rank*Mc : ...]`` of every peer's
-    symmetric ``comm_dst`` (all-gather along dim-0)."""
+    """All-gather one local ``(Mc, Nc)`` block into rows ``[cur_rank*Mc : ...]``
+    of every peer's symmetric ``comm_dst`` (dim-0), via the shared iris
+    device-context tile collective ``ctx.all_gather`` (same primitive used by
+    ``iris.ops``)."""
     num_pid_m = tl.cdiv(Mc, BLOCK_SIZE_M)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = tile_id // num_pid_in_group
@@ -134,23 +136,12 @@ def _all_gather_tile(
     rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
     rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
     sub_mask = (rm[:, None] < Mc) & (rn[None, :] < Nc)
+    data = tl.load(comm_src + rm[:, None] * stride_sm + rn[None, :] * stride_sn, mask=sub_mask)
 
-    src_off = rm[:, None] * stride_sm + rn[None, :] * stride_sn
-    dst_off = (rm[:, None] + cur_rank * Mc) * stride_dm + rn[None, :] * stride_dn
-
-    for remote_rank in range(world_size):
-        if remote_rank == cur_rank:
-            data = tl.load(comm_src + src_off, mask=sub_mask)
-            tl.store(comm_dst + dst_off, data, mask=sub_mask)
-        else:
-            iris.put(
-                comm_src + src_off,
-                comm_dst + dst_off,
-                cur_rank,
-                remote_rank,
-                heap_bases,
-                mask=sub_mask,
-            )
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+    dst_view = iris.make_tensor_view(comm_dst, world_size * Mc, Nc, stride_dm, stride_dn)
+    tile = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, data)
+    ctx.all_gather(tile, dst_view, dim=0)
 
 
 @triton.jit()
@@ -253,7 +244,7 @@ def fused_ws_gemm_all_gather(
     COMM_BLOCK_N: tl.constexpr,
     COMM_GROUP_M: tl.constexpr,
     EVEN_K: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
 ):
@@ -313,7 +304,7 @@ def fused_ws_gemm_all_gather(
                 COMM_BLOCK_M,
                 COMM_BLOCK_N,
                 COMM_GROUP_M,
-                heap_bases,
+                context_tensor,
                 cur_rank,
                 world_size,
             )
@@ -336,7 +327,7 @@ def fused_ws_gemm_all_gather(
                 COMM_BLOCK_M,
                 COMM_BLOCK_N,
                 COMM_GROUP_M,
-                heap_bases,
+                context_tensor,
                 cur_rank,
                 world_size,
             )
@@ -443,7 +434,7 @@ def ws_all_gather(
     COMM_BLOCK_M: tl.constexpr,
     COMM_BLOCK_N: tl.constexpr,
     COMM_GROUP_M: tl.constexpr,
-    heap_bases: tl.tensor,
+    context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
 ):
@@ -464,7 +455,7 @@ def ws_all_gather(
             COMM_BLOCK_M,
             COMM_BLOCK_N,
             COMM_GROUP_M,
-            heap_bases,
+            context_tensor,
             cur_rank,
             world_size,
         )

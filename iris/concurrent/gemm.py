@@ -195,7 +195,7 @@ def all_gather(
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
     cu_count = shmem.get_cu_count()
-    heap_bases = shmem.get_heap_bases()
+    context_tensor = shmem.get_device_context()
 
     M, K = A.shape
     _, N = B.shape
@@ -281,7 +281,7 @@ def all_gather(
             COMM_BLOCK_N=cn,
             COMM_GROUP_M=comm_group_m,
             EVEN_K=even_k,
-            heap_bases=heap_bases,
+            context_tensor=context_tensor,
             cur_rank=rank,
             world_size=world_size,
             num_stages=num_stages,
@@ -339,7 +339,7 @@ def all_gather(
                 COMM_BLOCK_M=cm,
                 COMM_BLOCK_N=cn,
                 COMM_GROUP_M=comm_group_m,
-                heap_bases=heap_bases,
+                context_tensor=context_tensor,
                 cur_rank=rank,
                 world_size=world_size,
                 num_warps=num_warps,
