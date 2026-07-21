@@ -26,6 +26,11 @@ import triton
 import triton.language as tl
 
 import iris
+from tritonblas.kernels.stages import (
+    GemmContext,
+    Tile as _TBTile,
+    make_tensor_view as _tb_make_tensor_view,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +58,13 @@ def _gemm_tile(
     GROUP_SIZE_M: tl.constexpr,
     EVEN_K: tl.constexpr,
 ):
-    """Compute one output tile of ``C = A @ B`` and store it locally."""
+    """Compute one output tile of ``C = A @ B`` and store it locally.
+
+    The K-loop is delegated to tritonblas ``GemmContext.reduce_axis`` (shared with
+    ``iris.ops``); we keep only the GROUP_M tile swizzle and the local store.
+    ``cache_modifier=""`` is REQUIRED: GemmContext defaults to ``".cg"`` (bypass-L1
+    streaming) which throws away GEMM operand reuse and is ~1.3-1.6x slower here;
+    with default L1/L2 caching this matches/beats the old hand-rolled loop."""
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = tile_id // num_pid_in_group
@@ -64,40 +75,25 @@ def _gemm_tile(
     tl.assume(pid_m >= 0)
     tl.assume(pid_n >= 0)
 
-    acc_dtype = tl.float32 if C.type.element_ty != tl.int8 else tl.int32
-
-    rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    rk = tl.arange(0, BLOCK_SIZE_K)
-    rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-    rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-    A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-    B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-
-    loop_k = tl.cdiv(K, BLOCK_SIZE_K)
-    if not EVEN_K:
-        loop_k -= 1
-
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-    for k in range(0, loop_k):
-        a = tl.load(tl.multiple_of(A_BASE, (1, 16)))
-        b = tl.load(tl.multiple_of(B_BASE, (16, 1)))
-        acc += tl.dot(a, b)
-        A_BASE += BLOCK_SIZE_K * stride_ak
-        B_BASE += BLOCK_SIZE_K * stride_bk
-
-    if not EVEN_K:
-        k = loop_k
-        rk = k * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-        A_BASE = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-        B_BASE = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-        A_BASE = tl.multiple_of(A_BASE, (1, 16))
-        B_BASE = tl.multiple_of(B_BASE, (16, 1))
-        a = tl.load(A_BASE, mask=rk[None, :] < K, other=0.0)
-        b = tl.load(B_BASE, mask=rk[:, None] < K, other=0.0)
-        acc += tl.dot(a, b)
+    tensorA = _tb_make_tensor_view(A, M, K, stride_am, stride_ak)
+    tensorB = _tb_make_tensor_view(B, K, N, stride_bk, stride_bn)
+    gemm_ctx = GemmContext(
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=1,
+        even_k=EVEN_K,
+        cache_modifier_a="",
+        cache_modifier_b="",
+    )
+    out_tile = _TBTile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+    acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
 
     c = acc.to(C.type.element_ty)
+    rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+    rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
     c_mask = (rm[:, None] < M) & (rn[None, :] < N)
     tl.store(C + rm[:, None] * stride_cm + rn[None, :] * stride_cn, c, mask=c_mask, cache_modifier=".wt")
 
