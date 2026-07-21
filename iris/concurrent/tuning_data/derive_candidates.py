@@ -135,8 +135,11 @@ def main():
     ap = argparse.ArgumentParser()
     # Raw corpus lives in origami_comms, not in this repo; default to a local
     # ./data/ if present (e.g. a scratch regen), else require --data.
-    ap.add_argument("--data", default=os.path.join(_HERE, "data"),
-                    help="directory of <arch>_world<W>.json corpus files (origami_comms)")
+    ap.add_argument(
+        "--data",
+        default=os.path.join(_HERE, "data"),
+        help="directory of <arch>_world<W>.json corpus files (origami_comms)",
+    )
     args = ap.parse_args()
 
     data_dir = args.data
