@@ -58,7 +58,7 @@ class FabricInfo:
     GPU-to-GPU links (NVLink via NVSwitch, or xGMI) without RDMA.
 
     AMD mapping:
-        cluster_uuid  <->  ppod_id   (physical pod identifier, uint64)
+        cluster_uuid  <->  ppod_id   (physical pod identifier, 16 bytes)
         clique_id     <->  vpod_id   (virtual pod identifier, uint32)
 
     NVIDIA mapping:
@@ -223,6 +223,136 @@ def _get_amdsmi_handle_by_pci(pci_bus_id: str, all_handles=None):
 # Fabric info
 # ---------------------------------------------------------------------------
 
+_AMDSMI_UINT32_SENTINEL = 0xFFFFFFFF
+_AMDSMI_STATUS_SUCCESS = 0
+_AMDSMI_INIT_AMD_GPUS = 1 << 1
+_AMDSMI_PPOD_ID_BYTES = 16
+_AMDSMI_FABRIC_PPOD_SENTINEL = bytes([0x99] * _AMDSMI_PPOD_ID_BYTES)
+
+
+class _AmdSmiBdfBitfields(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("function_number", ctypes.c_uint64, 3),
+        ("device_number", ctypes.c_uint64, 5),
+        ("bus_number", ctypes.c_uint64, 8),
+        ("domain_number", ctypes.c_uint64, 48),
+    ]
+
+
+class _AmdSmiBdf(ctypes.Union):
+    _pack_ = 1
+    _fields_ = [
+        ("bdf", _AmdSmiBdfBitfields),
+        ("as_uint", ctypes.c_uint64),
+    ]
+
+
+class _AmdSmiFabricInfoV1(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("accelerator_id", ctypes.c_uint32),
+        ("fabric_type", ctypes.c_uint32),
+        ("bandwidth", ctypes.c_uint32),
+        ("latency", ctypes.c_uint32),
+        ("ppod_id", ctypes.c_ubyte * _AMDSMI_PPOD_ID_BYTES),
+        ("ppod_size", ctypes.c_uint32),
+        ("vpod_id", ctypes.c_uint32),
+        ("vpod_size", ctypes.c_uint32),
+        ("vpod_active_accelerators", ctypes.c_uint32 * 32),
+        ("local_accelerators", ctypes.c_uint32 * 16),
+        ("addr_mode", ctypes.c_uint32),
+        ("accel_state", ctypes.c_uint32),
+    ]
+
+
+class _AmdSmiFabricInfoUnion(ctypes.Union):
+    _pack_ = 1
+    _fields_ = [("v1", _AmdSmiFabricInfoV1)]
+
+
+class _AmdSmiFabricInfoVer(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("version", ctypes.c_uint32),
+        ("fabric_version", _AmdSmiFabricInfoUnion),
+    ]
+
+
+class _AmdSmiFabricInfo(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("bdf", _AmdSmiBdf),
+        ("fabric_info", _AmdSmiFabricInfoVer),
+        ("reserved", ctypes.c_uint32 * 15),
+        ("_padding", ctypes.c_ubyte * 4),
+    ]
+
+
+_PCI_BDF_RE = re.compile(r"([0-9a-fA-F]+):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\.([0-7])")
+
+
+def _amdsmi_bdf_from_pci_bus_id(pci_bus_id: str) -> _AmdSmiBdf:
+    match = _PCI_BDF_RE.search(pci_bus_id.strip())
+    if match is None:
+        raise ValueError(f"Unable to parse PCI bus ID: {pci_bus_id!r}")
+
+    domain = int(match.group(1), 16)
+    bus = int(match.group(2), 16)
+    device = int(match.group(3), 16)
+    function = int(match.group(4), 16)
+
+    bdf = _AmdSmiBdf()
+    bdf.as_uint = (domain << 16) | (bus << 8) | (device << 3) | function
+    return bdf
+
+
+def _amd_ppod_id_to_hex(ppod_id: Any) -> str:
+    """Normalize a 16-byte AMDSMI ppod_id value to the FabricInfo cluster_uuid string."""
+    if ppod_id is None:
+        return ""
+
+    try:
+        if isinstance(ppod_id, memoryview):
+            data = ppod_id.tobytes()
+        else:
+            data = bytes(ppod_id)
+    except (TypeError, ValueError):
+        try:
+            data = bytes(int(x) & 0xFF for x in ppod_id)
+        except Exception:
+            return ""
+
+    if len(data) != _AMDSMI_PPOD_ID_BYTES:
+        return ""
+    if set(data) <= {0} or set(data) <= {0xFF} or data == _AMDSMI_FABRIC_PPOD_SENTINEL:
+        return ""
+    return data.hex()
+
+
+def _amd_fabric_info_from_raw(raw: Any) -> FabricInfo:
+    """Convert an AMDSMI fabric-info dict/object into FabricInfo."""
+    if raw is None:
+        return FabricInfo()
+
+    if isinstance(raw, dict):
+        ppod_id = raw.get("ppod_id")
+        vpod_id = raw.get("vpod_id", 0)
+    else:
+        ppod_id = getattr(raw, "ppod_id", None)
+        vpod_id = getattr(raw, "vpod_id", 0)
+
+    try:
+        clique_id = int(vpod_id)
+    except (TypeError, ValueError):
+        return FabricInfo()
+
+    cluster_uuid = _amd_ppod_id_to_hex(ppod_id)
+    if not cluster_uuid or clique_id == _AMDSMI_UINT32_SENTINEL:
+        return FabricInfo()
+
+    return FabricInfo(cluster_uuid=cluster_uuid, clique_id=clique_id)
+
 
 def _amd_get_gpu_fabric_info(gpu_id: int, pci_bus_id: str = "") -> FabricInfo:
     """
@@ -239,7 +369,73 @@ def _amd_get_gpu_fabric_info(gpu_id: int, pci_bus_id: str = "") -> FabricInfo:
         FabricInfo with cluster_uuid = hex(ppod_id), clique_id = vpod_id.
         Returns empty FabricInfo if the call fails or is not available.
     """
-    # Default placeholder: no fabric info available (single-node behavior)
+    if not pci_bus_id or pci_bus_id == "unknown":
+        logger.debug("No PCI bus ID available for AMD fabric info query on GPU %d", gpu_id)
+        return FabricInfo()
+
+    try:
+        amdsmi = None
+        for amdsmi_path in (
+            ctypes.util.find_library("amd_smi"),
+            "libamd_smi.so",
+            "/opt/rocm/lib/libamd_smi.so",
+        ):
+            if not amdsmi_path:
+                continue
+            try:
+                amdsmi = ctypes.CDLL(amdsmi_path)
+                break
+            except OSError:
+                continue
+        if amdsmi is None:
+            logger.debug("libamd_smi.so not available, skipping AMD fabric info")
+            return FabricInfo()
+
+        amdsmi.amdsmi_init.argtypes = [ctypes.c_uint64]
+        amdsmi.amdsmi_init.restype = ctypes.c_uint32
+        amdsmi.amdsmi_get_processor_handle_from_bdf.argtypes = [
+            _AmdSmiBdf,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        amdsmi.amdsmi_get_processor_handle_from_bdf.restype = ctypes.c_uint32
+        amdsmi.amdsmi_get_gpu_fabric_info.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_AmdSmiFabricInfo),
+        ]
+        amdsmi.amdsmi_get_gpu_fabric_info.restype = ctypes.c_uint32
+
+        ret = int(amdsmi.amdsmi_init(_AMDSMI_INIT_AMD_GPUS))
+        if ret != _AMDSMI_STATUS_SUCCESS:
+            logger.debug("amdsmi_init() failed for AMD fabric info query with status %d", ret)
+            return FabricInfo()
+
+        processor = ctypes.c_void_p()
+        ret = int(
+            amdsmi.amdsmi_get_processor_handle_from_bdf(
+                _amdsmi_bdf_from_pci_bus_id(pci_bus_id),
+                ctypes.byref(processor),
+            )
+        )
+        if ret != _AMDSMI_STATUS_SUCCESS or processor.value is None:
+            logger.debug(
+                "amdsmi_get_processor_handle_from_bdf(%s) failed for GPU %d with status %d",
+                pci_bus_id,
+                gpu_id,
+                ret,
+            )
+            return FabricInfo()
+
+        raw = _AmdSmiFabricInfo()
+        ret = int(amdsmi.amdsmi_get_gpu_fabric_info(processor, ctypes.byref(raw)))
+        if ret != _AMDSMI_STATUS_SUCCESS:
+            logger.debug("amdsmi_get_gpu_fabric_info failed for GPU %d with status %d", gpu_id, ret)
+            return FabricInfo()
+
+        v1 = raw.fabric_info.fabric_version.v1
+        return _amd_fabric_info_from_raw({"ppod_id": bytes(v1.ppod_id), "vpod_id": int(v1.vpod_id)})
+    except Exception as e:
+        logger.debug("AMDSMI fabric info query failed for GPU %d: %s", gpu_id, e)
+
     return FabricInfo()
 
 

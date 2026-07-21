@@ -136,6 +136,7 @@ def _make_fake_amdsmi():
         "gpu0": "0000:41:00.0",
         "gpu1": "0000:42:00.0",
     }
+    module.fabric_by_handle = {}
 
     class AmdSmiLinkType:
         AMDSMI_LINK_TYPE_XGMI = "xgmi"
@@ -155,6 +156,15 @@ def _make_fake_amdsmi():
     def amdsmi_get_gpu_device_uuid(handle):
         return f"amd-{handle}"
 
+    def amdsmi_get_gpu_fabric_info(handle):
+        return module.fabric_by_handle.get(
+            handle,
+            {
+                "ppod_id": [0x99] * 16,
+                "vpod_id": 0xFFFFFFFF,
+            },
+        )
+
     def amdsmi_get_link_topology_nearest(handle, link_type):
         return {"processor_list": []}
 
@@ -164,6 +174,7 @@ def _make_fake_amdsmi():
     module.amdsmi_get_processor_handles = amdsmi_get_processor_handles
     module.amdsmi_get_gpu_device_bdf = amdsmi_get_gpu_device_bdf
     module.amdsmi_get_gpu_device_uuid = amdsmi_get_gpu_device_uuid
+    module.amdsmi_get_gpu_fabric_info = amdsmi_get_gpu_fabric_info
     module.amdsmi_get_link_topology_nearest = amdsmi_get_link_topology_nearest
 
     return module
@@ -424,6 +435,63 @@ class TestVendorLibraryLifecycle:
         fabric = topology._get_gpu_fabric_info(0, "nvidia", pci_bus_id="0000:41:00.0")
 
         assert fabric.domain_key == f"{'ab' * 16}:32766"
+
+    def test_amd_fabric_info_uses_direct_amdsmi_byref(self, monkeypatch):
+        class FakeAmdSmiFunction:
+            def __init__(self, callback):
+                self.callback = callback
+                self.restype = None
+                self.argtypes = None
+
+            def __call__(self, *args):
+                return self.callback(*args)
+
+        class FakeAmdSmiLib:
+            def __init__(self):
+                self.amdsmi_init = FakeAmdSmiFunction(self._init)
+                self.amdsmi_get_processor_handle_from_bdf = FakeAmdSmiFunction(self._get_handle)
+                self.amdsmi_get_gpu_fabric_info = FakeAmdSmiFunction(self._get_fabric_info)
+
+            def _init(self, flags):
+                assert flags == 1 << 1
+                return 0
+
+            def _get_handle(self, bdf, processor_ptr):
+                assert bdf.as_uint == 0x4100
+                processor_ptr._obj.value = 0xABCD
+                return 0
+
+            def _get_fabric_info(self, processor, info_ptr):
+                assert processor.value == 0xABCD
+                info = info_ptr._obj.fabric_info.fabric_version.v1
+                for idx, value in enumerate(bytes.fromhex("ab" * 16)):
+                    info.ppod_id[idx] = value
+                info.vpod_id = 9
+                return 0
+
+        monkeypatch.setattr(topology.ctypes.util, "find_library", lambda name: "fake-amdsmi")
+        monkeypatch.setattr(topology.ctypes, "CDLL", lambda path: FakeAmdSmiLib())
+
+        fabric = topology._get_gpu_fabric_info(0, "amd", pci_bus_id="0000:41:00.0")
+
+        assert fabric.domain_key == f"{'ab' * 16}:9"
+
+    def test_amd_fabric_info_requires_pci_bus_id(self):
+        fabric = topology._get_gpu_fabric_info(1, "amd")
+
+        assert fabric == FabricInfo()
+
+    def test_amd_fabric_info_rejects_sentinel_values(self):
+        assert topology._amd_fabric_info_from_raw({"ppod_id": [0x99] * 16, "vpod_id": 1}) == FabricInfo()
+        assert topology._amd_fabric_info_from_raw({"ppod_id": [0] * 16, "vpod_id": 1}) == FabricInfo()
+        assert topology._amd_fabric_info_from_raw({"ppod_id": [0xFF] * 16, "vpod_id": 1}) == FabricInfo()
+        assert topology._amd_fabric_info_from_raw({"ppod_id": [1] * 16, "vpod_id": 0xFFFFFFFF}) == FabricInfo()
+
+    def test_amd_fabric_info_rejects_non_16_byte_ppod(self):
+        assert topology._amd_fabric_info_from_raw({"ppod_id": 0x1234, "vpod_id": 5}) == FabricInfo()
+        assert topology._amd_fabric_info_from_raw({"ppod_id": "not-hex", "vpod_id": 1}) == FabricInfo()
+        assert topology._amd_fabric_info_from_raw({"ppod_id": [1] * 8, "vpod_id": 5}) == FabricInfo()
+        assert topology._amd_fabric_info_from_raw({"ppod_id": [1] * 17, "vpod_id": 5}) == FabricInfo()
 
     def test_missing_library_fallbacks_preserve_logs(self, monkeypatch, caplog):
         caplog.set_level(logging.DEBUG, logger="iris.topology")
