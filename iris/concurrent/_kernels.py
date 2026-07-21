@@ -26,11 +26,39 @@ import triton
 import triton.language as tl
 
 import iris
+from iris.mem.triton.types import tile_layout
 from tritonblas.kernels.stages import (
     GemmContext,
     Tile as _TBTile,
     make_tensor_view as _tb_make_tensor_view,
 )
+
+
+@triton.jit()
+def _grouped_coords(
+    tid,
+    M,
+    N,
+    num_pid_n,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+):
+    """Shared tile-coordinate helper: GROUP_M work-stealing swizzle of a flat
+    ``tid`` into ``(pid_m, pid_n)`` plus the ``(rm, rn, mask)`` layout via the
+    shared ``iris.mem.triton.types.tile_layout`` (with its vectorization hints).
+    Replaces the copy-pasted preamble in every per-tile comm primitive."""
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = tid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((tid % num_pid_in_group) % group_size_m)
+    pid_n = (tid % num_pid_in_group) // group_size_m
+    tl.assume(pid_m >= 0)
+    tl.assume(pid_n >= 0)
+    rm, rn, mask = tile_layout(pid_m, pid_n, M, N, BLOCK_SIZE_M, BLOCK_SIZE_N)
+    return pid_m, pid_n, rm, rn, mask
 
 
 # ---------------------------------------------------------------------------
@@ -173,21 +201,8 @@ def _all_reduce_tile(
     valid = tile_id < AR_TOTAL_TILES
     tid = min(tile_id, AR_TOTAL_TILES - 1)
 
-    num_pid_m = tl.cdiv(Mc, BLOCK_SIZE_M)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = tid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((tid % num_pid_in_group) % group_size_m)
-    pid_n = (tid % num_pid_in_group) // group_size_m
-    tl.assume(pid_m >= 0)
-    tl.assume(pid_n >= 0)
-
-    rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % Mc
-    rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % Nc
-    rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-    rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-    sub_mask = (rm[:, None] < Mc) & (rn[None, :] < Nc) & valid
+    _, _, rm, rn, mask = _grouped_coords(tid, Mc, Nc, num_pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M)
+    sub_mask = mask & valid
 
     src_off = rm[:, None] * stride_sm + rn[None, :] * stride_sn
     dst_off = rm[:, None] * stride_dm + rn[None, :] * stride_dn
@@ -688,20 +703,7 @@ def _reduce_scatter_tile(
 ):
     """This rank's output slice (rows cur_rank*Mout..): sum that slice over all
     peers' src, store locally. Grid is over the (Mout, Nc) output."""
-    num_pid_m = tl.cdiv(Mout, BLOCK_SIZE_M)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = tid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((tid % num_pid_in_group) % group_size_m)
-    pid_n = (tid % num_pid_in_group) // group_size_m
-    tl.assume(pid_m >= 0)
-    tl.assume(pid_n >= 0)
-    rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % Mout
-    rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % Nc
-    rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-    rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-    sub_mask = (rm[:, None] < Mout) & (rn[None, :] < Nc)
+    _, _, rm, rn, sub_mask = _grouped_coords(tid, Mout, Nc, num_pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M)
     grow = cur_rank * Mout + rm
     src_off = grow[:, None] * stride_sm + rn[None, :] * stride_sn
     dst_off = rm[:, None] * stride_dm + rn[None, :] * stride_dn
@@ -740,21 +742,8 @@ def _all_to_all_tile(
     regardless of write ordering, so a permutation can't help. A real speedup
     needs a different transport (DMA/SDMA or a staged multi-step). Selector should
     fall back to RCCL for comm-heavy A2A."""
-    num_pid_m = tl.cdiv(Mc, BLOCK_SIZE_M)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = tid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((tid % num_pid_in_group) % group_size_m)
-    pid_n = (tid % num_pid_in_group) // group_size_m
-    tl.assume(pid_m >= 0)
-    tl.assume(pid_n >= 0)
+    pid_m, _, rm, rn, sub_mask = _grouped_coords(tid, Mc, Nc, num_pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M)
     peer = (pid_m * BLOCK_SIZE_M) // CHUNK
-    rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % Mc
-    rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % Nc
-    rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-    rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-    sub_mask = (rm[:, None] < Mc) & (rn[None, :] < Nc)
     src_off = rm[:, None] * stride_sm + rn[None, :] * stride_sn
     dst_rows = cur_rank * CHUNK + (rm - peer * CHUNK)
     dst_off = dst_rows[:, None] * stride_dm + rn[None, :] * stride_dn
@@ -788,20 +777,7 @@ def _broadcast_tile(
     """ROOT pushes its src tile to every rank's dst (identical layout); non-root
     ranks do nothing for this tile."""
     if cur_rank == ROOT:
-        num_pid_m = tl.cdiv(Mc, BLOCK_SIZE_M)
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = tid // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((tid % num_pid_in_group) % group_size_m)
-        pid_n = (tid % num_pid_in_group) // group_size_m
-        tl.assume(pid_m >= 0)
-        tl.assume(pid_n >= 0)
-        rm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % Mc
-        rn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % Nc
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        sub_mask = (rm[:, None] < Mc) & (rn[None, :] < Nc)
+        _, _, rm, rn, sub_mask = _grouped_coords(tid, Mc, Nc, num_pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_SIZE_M)
         src_off = rm[:, None] * stride_sm + rn[None, :] * stride_sn
         dst_off = rm[:, None] * stride_dm + rn[None, :] * stride_dn
         data = tl.load(src + src_off, mask=sub_mask)
