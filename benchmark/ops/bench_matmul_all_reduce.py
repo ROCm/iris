@@ -38,7 +38,14 @@ def pytorch_matmul_all_reduce(state, ctx):
     C = ctx.zeros((M, N), dtype=dtype)
 
     state.set_flops(2 * M * N * K)
-    state.set_bytes((world_size - 1) * M * N * C.element_size())
+
+    # HBM bytes: matmul A + B + C
+    hbm_bytes = (M * K + K * N + M * N) * C.element_size()
+    state.set_bytes(hbm_bytes)
+
+    # XGMI bytes: PyTorch uses ring all-reduce (two-shot)
+    xgmi_bytes = 2 * (world_size - 1) * M * N * C.element_size() // world_size
+    state.add_counter("xgmi_bytes", xgmi_bytes)
 
     state.exec(
         lambda: (
@@ -81,7 +88,14 @@ def tritonblas_rccl_matmul_all_reduce(state, ctx):
     )
 
     state.set_flops(2 * M * N * K)
-    state.set_bytes((world_size - 1) * M * N * C.element_size())
+
+    # HBM bytes: matmul A + B + C
+    hbm_bytes = (M * K + K * N + M * N) * C.element_size()
+    state.set_bytes(hbm_bytes)
+
+    # XGMI bytes: RCCL uses ring all-reduce (two-shot)
+    xgmi_bytes = 2 * (world_size - 1) * M * N * C.element_size() // world_size
+    state.add_counter("xgmi_bytes", xgmi_bytes)
 
     state.exec(
         lambda: (
@@ -123,7 +137,20 @@ def matmul_all_reduce(state, ctx):
     launch = workspace.launch_params
 
     state.set_flops(2 * M * N * K)
-    state.set_bytes((world_size - 1) * M * N * C.element_size())
+
+    # HBM bytes: matmul A + B + C
+    hbm_bytes = (M * K + K * N + M * N) * C.element_size()
+    state.set_bytes(hbm_bytes)
+
+    # XGMI bytes: depends on algorithm variant
+    if variant == "one_shot":
+        # One-shot: each rank broadcasts its full M×N output to (world_size-1) peers
+        xgmi_bytes = (world_size - 1) * M * N * C.element_size()
+    else:  # two_shot
+        # Two-shot ring all-reduce: 2 × (world_size-1)/world_size × full_output
+        xgmi_bytes = 2 * (world_size - 1) * M * N * C.element_size() // world_size
+    state.add_counter("xgmi_bytes", xgmi_bytes)
+
     state.add_counter("uses_selector", int(workspace.selector is not None))
     state.add_counter("block_m", launch["block_size_m"])
     state.add_counter("block_n", launch["block_size_n"])

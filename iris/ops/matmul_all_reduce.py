@@ -129,7 +129,7 @@ def _matmul_all_reduce_gemm_publish_kernel(
 
                 if VARIANT == "one_shot":
                     tile_obj = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
-                    ctx.all_gather(tile_obj, inbox_view, dim=0)
+                    ctx.all_gather(tile_obj, inbox_view, dim=0, src_mask=mask)
                 else:
                     rows_per_rank = M // world_size
                     local_rm = rm - partition_m_start
@@ -468,20 +468,27 @@ def _matmul_all_reduce_launch_params(M: int, N: int, K: int, selector, device: t
     block_size_k = selector.block_k
     group_size_m = selector.group_m
     num_stages = getattr(selector, "num_stages", 2)
+    enable_selector_fallback = not getattr(selector, "disable_matmul_all_reduce_fallback", False)
     selector_fallback = False
 
     # Origami's 256x256 tile is good when GEMM dominates, but one_shot also
     # reduces every rank's full output. For shallow-K shapes, narrower N tiles
     # keep each reduction work item closer to the pre-refactor behavior.
     if (
-        variant == "one_shot"
+        enable_selector_fallback
+        and variant == "one_shot"
         and K < 16 * 1024
         and block_size_m == 256
         and block_size_n == 256
-        and block_size_k == 64
+        and block_size_k <= 64
     ):
         block_size_n = 64
-        group_size_m = 1
+        block_size_k = 64
+        if N == 8192 and 2048 < K < 3072:
+            block_size_k = 32
+            group_size_m = 1
+        elif N >= 8 * K and K < 1024:
+            group_size_m = 1
         num_stages = None
         selector_fallback = True
 

@@ -56,6 +56,7 @@ def _partitioned_xcd_matmul_kernel(
     OUTPUT_PARTITIONS: tl.constexpr,
     MAX_BATCHES_PER_PARTITION: tl.constexpr,
     STORE_LOCAL_REDUCE_SHARD: tl.constexpr,
+    SIGNAL_LOCKS: tl.constexpr,
     EVEN_K: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
 ):
@@ -138,9 +139,10 @@ def _partitioned_xcd_matmul_kernel(
                     aux_ptr = local_aux_buffer + rm[:, None] * stride_local_aux_m + rn[None, :] * stride_local_aux_n
                     tl.store(aux_ptr, c, mask=mask, cache_modifier=".wt")
 
-                tl.debug_barrier()
-                batch_id = partition_id * MAX_BATCHES_PER_PARTITION + batch_iter
-                tl.atomic_add(locks + batch_id, 1, sem="release", scope="sys")
+                if SIGNAL_LOCKS:
+                    tl.debug_barrier()
+                    batch_id = partition_id * MAX_BATCHES_PER_PARTITION + batch_iter
+                    tl.atomic_add(locks + batch_id, 1, sem="release", scope="sys")
 
 
 @triton.jit()
@@ -634,7 +636,7 @@ def _post_host_copy_engine_transfers(
     rank: int,
     world_size: int,
     rows_per_rank: int,
-    flag_iteration: int,
+    prepost_generation: int,
 ) -> float:
     """Queue host-side SDMA wait+copy packets for the two-shot reduce-scatter."""
     element_size = local_aux_buffer.element_size()
@@ -659,7 +661,7 @@ def _post_host_copy_engine_transfers(
             if not wave_transfers:
                 continue
 
-            wait_value = (flag_iteration + 1) * wave_tile_counts[dst_rank][wave_id]
+            wait_value = prepost_generation * wave_tile_counts[dst_rank][wave_id]
             flag_id = dst_rank * max_batches_per_partition + wave_id
             wait_flag = workspace.locks.data_ptr() + flag_id * workspace.locks.element_size()
             signal_flag = None
@@ -701,7 +703,7 @@ def _post_host_copy_engine_transfers(
                 wait_flag=wait_flag,
                 wait_value=wait_value,
                 signal_flag=signal_flag,
-                signal_value=flag_iteration + 1,
+                signal_value=1,
                 async_op=True,
                 channel=0,
             )
@@ -716,7 +718,7 @@ def _post_host_copy_engine_broadcast_transfers(
     rank: int,
     world_size: int,
     M: int,
-    flag_iteration: int,
+    prepost_generation: int,
 ) -> float:
     """Queue host-side SDMA wait+copy packets for the one-shot all-gather of GEMM partials."""
     element_size = local_aux_buffer.element_size()
@@ -744,7 +746,7 @@ def _post_host_copy_engine_broadcast_transfers(
             continue
 
         for work_idx, (partition_id, partition_m_start, wave_id, wave_transfers) in enumerate(transfer_work):
-            wait_value = (flag_iteration + 1) * wave_tile_counts[partition_id][wave_id]
+            wait_value = prepost_generation * wave_tile_counts[partition_id][wave_id]
             flag_id = partition_id * max_batches_per_partition + wave_id
             wait_flag = workspace.locks.data_ptr() + flag_id * workspace.locks.element_size()
             signal_flag = None
@@ -784,7 +786,7 @@ def _post_host_copy_engine_broadcast_transfers(
                 wait_flag=wait_flag,
                 wait_value=wait_value,
                 signal_flag=signal_flag,
-                signal_value=flag_iteration + 1,
+                signal_value=1,
                 async_op=True,
                 channel=0,
             )
@@ -796,11 +798,16 @@ def matmul_all_reduce_copy_engine_prepost_transfers(
     A: torch.Tensor,
     B: torch.Tensor,
     workspace: FusedWorkspace,
-    flag_iteration: int = 0,
 ) -> float:
     """Queue SDMA wait+copy packets before the timed GEMM launch."""
     if workspace is None:
         raise ValueError("workspace is required when preposting copy-engine transfers")
+
+    # Prepost manages its own generation counter.
+    # Increment first, then use the new value for wait/signal.
+    prepost_generation = workspace.prepost_generation + 1
+    workspace.prepost_generation = prepost_generation
+
     if workspace.variant not in ("one_shot", "two_shot"):
         return 0.0
     if workspace.a_inbox is None:
@@ -828,7 +835,7 @@ def matmul_all_reduce_copy_engine_prepost_transfers(
             rank,
             world_size,
             M,
-            flag_iteration,
+            prepost_generation,
         )
 
     return _post_host_copy_engine_transfers(
@@ -839,7 +846,7 @@ def matmul_all_reduce_copy_engine_prepost_transfers(
         shmem.get_rank(),
         world_size,
         M // world_size,
-        flag_iteration,
+        prepost_generation,
     )
 
 
@@ -975,6 +982,8 @@ def matmul_all_reduce_copy_engine_preamble(
     workspace.locks.zero_()
     workspace.completion_signals.zero_()
     workspace.barrier_signals.zero_()
+    workspace.generation = 0
+    workspace.prepost_generation = 0
 
     return workspace
 
@@ -987,7 +996,6 @@ def matmul_all_reduce_copy_engine(
     async_op: bool = False,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
-    flag_iteration: int = 0,
     copy_engine_transfers_preposted: bool = False,
     split_completion_wait: bool = False,
 ) -> FusedWorkspace:
@@ -1007,11 +1015,8 @@ def matmul_all_reduce_copy_engine(
         async_op: If False, performs barrier at end. Default: False.
         config: Optional FusedConfig for tuning. If None, uses defaults.
         workspace: Optional pre-allocated workspace. If None, creates new one.
-        flag_iteration: Launch generation for cumulative copy-engine wait and
-            completion counters. Increment this when reusing a workspace without
-            zeroing its synchronization buffers.
         copy_engine_transfers_preposted: If True, the SDMA wait+copy
-            packets for this flag_iteration were already queued by the caller,
+            packets for this generation were already queued by the caller,
             usually from a benchmark preamble_fn outside the timed region.
         split_completion_wait: If True, launch a separate completion-wait
             kernel and run the reduce kernel with its inline completion wait
@@ -1074,7 +1079,6 @@ def matmul_all_reduce_copy_engine(
             B,
             config=config,
             out_dtype=C.dtype,
-            flag_iteration=flag_iteration,
         )
 
     expected_shape = (M, N, K)
@@ -1091,6 +1095,9 @@ def matmul_all_reduce_copy_engine(
         or workspace.barrier_signals is None
     ):
         raise ValueError("workspace must be created by matmul_all_reduce_copy_engine_preamble for this call")
+
+    generation = workspace.generation + 1
+    workspace.generation = generation
 
     launch = workspace.launch_params
 
@@ -1150,6 +1157,7 @@ def matmul_all_reduce_copy_engine(
         world_size,
         workspace.num_transfer_waves,
         config.all_reduce_variant == "two_shot",
+        True,
         even_k,
         launch["allow_tf32"],
         algorithm="matmul_all_reduce_copy_engine_partitioned_xcd_gemm",
@@ -1164,7 +1172,6 @@ def matmul_all_reduce_copy_engine(
             A,
             B,
             workspace,
-            flag_iteration,
         )
 
     if config.all_reduce_variant == "one_shot":
@@ -1177,7 +1184,7 @@ def matmul_all_reduce_copy_engine(
                 _matmul_all_reduce_copy_engine_wait_completion_kernel,
                 (world_size,),
                 workspace.completion_signals,
-                flag_iteration + 1,
+                generation,
                 cur_rank=rank,
                 world_size=world_size,
                 algorithm="matmul_all_reduce_copy_engine_wait_completion",
@@ -1205,7 +1212,7 @@ def matmul_all_reduce_copy_engine(
                 gemm_output_buffer,
                 workspace.a_inbox,
                 workspace.completion_signals,
-                flag_iteration + 1,
+                generation,
                 total_reduce_elements,
                 cur_rank=rank,
                 world_size=world_size,
@@ -1230,7 +1237,7 @@ def matmul_all_reduce_copy_engine(
                 gemm_output_buffer,
                 workspace.a_inbox,
                 workspace.completion_signals,
-                flag_iteration + 1,
+                generation,
                 M,
                 N,
                 gemm_output_buffer.stride(0),
@@ -1269,7 +1276,7 @@ def matmul_all_reduce_copy_engine(
 
         # Reduce-scatter waits for the same completion condition as
         # _matmul_all_reduce_copy_engine_wait_completion_kernel: every remote
-        # rank's completion slot must reach flag_iteration + 1.
+        # rank's completion slot must reach generation.
         device_context = shmem.get_device_context()
         iris_launch(
             _matmul_all_reduce_copy_engine_reduce_scatter_kernel,
@@ -1279,8 +1286,8 @@ def matmul_all_reduce_copy_engine(
             workspace.completion_signals,
             all_gather_pid_arrivals,
             all_gather_rank_arrivals,
-            flag_iteration + 1,
-            flag_iteration + 1,
+            generation,
+            generation,
             M,
             N,
             workspace.a_inbox.stride(0),

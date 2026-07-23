@@ -432,6 +432,18 @@ def _run_benchmarks_worker(
                 if state._flops is not None and mean_ms > 0:
                     tflops = (state._flops / 1e12) / (mean_ms * 1e-3)
 
+                # Calculate XGMI bandwidth if xgmi_bytes counter is present
+                xgmi_bw = None
+                if "xgmi_bytes" in state._counters and mean_ms > 0:
+                    xgmi_bytes = state._counters["xgmi_bytes"]
+                    if xgmi_bytes > 0:
+                        xgmi_bw = (xgmi_bytes / 1e9) / (mean_ms * 1e-3)
+
+                # Add xgmi_bandwidth_gbps to counters for JSON output
+                counters = dict(state._counters)
+                if xgmi_bw is not None:
+                    counters["bandwidth_xgmi_gbps"] = xgmi_bw
+
                 all_results.append(
                     Result(
                         benchmark_name=bdef.name,
@@ -440,7 +452,7 @@ def _run_benchmarks_worker(
                         all_times_ms=times,
                         bandwidth_gbps=bw,
                         tflops=tflops,
-                        counters=dict(state._counters),
+                        counters=counters,
                         world_size=world_size,
                     )
                 )

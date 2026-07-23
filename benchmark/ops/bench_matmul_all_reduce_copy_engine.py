@@ -32,7 +32,7 @@ def _make_selector(M: int, N: int, K: int, dtype: torch.dtype, device: torch.dev
     )
 
 
-def _register_copy_engine(state, ctx, *, variant: str) -> None:
+def _register_copy_engine(state, ctx, *, variant: str, prepost: bool = False) -> None:
     M, N, K = state["M"], state["N"], state["K"]
     dtype = state["dtype"]
     rank = ctx.get_rank()
@@ -41,12 +41,6 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
     device = torch.device(f"cuda:{torch.cuda.current_device()}")
     selector = _make_selector(M, N, K, dtype, device)
 
-    if M % selector.block_m != 0:
-        state.skip(f"M={M} must be divisible by block_size_m={selector.block_m}")
-    if N % selector.block_n != 0:
-        state.skip(f"N={N} must be divisible by block_size_n={selector.block_n}")
-    if K % selector.block_k != 0:
-        state.skip(f"K={K} must be divisible by block_size_k={selector.block_k}")
     if variant == "one_shot" and world_size * M * N > _MAX_ONE_SHOT_INBOX_ELEMENTS:
         state.skip(
             "one_shot requires world_size * M * N <= 2**31 elements "
@@ -70,8 +64,7 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
         selector=selector,
     )
 
-    flag_iteration = [0]
-    prepost_transfers = variant in ("one_shot") #, "two_shot")
+    prepost_transfers = prepost
 
     def _run_copy_engine():
         _copy_engine(
@@ -82,10 +75,8 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
             async_op=True,
             config=config,
             workspace=workspace,
-            flag_iteration=flag_iteration[0],
             copy_engine_transfers_preposted=prepost_transfers,
         )
-        flag_iteration[0] += 1
 
     def _preamble():
         if prepost_transfers:
@@ -94,7 +85,6 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
                 A,
                 B,
                 workspace,
-                flag_iteration[0],
             )
 
     def _run():
@@ -103,7 +93,19 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
     state.set_flops(2 * M * N * K)
     state.exec(_run, preamble_fn=_preamble)
 
-    state.set_bytes((world_size - 1) * M * N * C.element_size())
+    # HBM bytes: matmul A + B + C
+    hbm_bytes = (M * K + K * N + M * N) * C.element_size()
+    state.set_bytes(hbm_bytes)
+
+    # XGMI bytes: depends on algorithm variant
+    if variant == "one_shot":
+        # One-shot: each rank broadcasts its full M×N output to (world_size-1) peers
+        xgmi_bytes = (world_size - 1) * M * N * C.element_size()
+    else:  # two_shot
+        # Two-shot ring all-reduce: 2 × (world_size-1)/world_size × full_output
+        xgmi_bytes = 2 * (world_size - 1) * M * N * C.element_size() // world_size
+    state.add_counter("xgmi_bytes", xgmi_bytes)
+
     launch = workspace.launch_params
     state.add_counter("block_m", launch["block_size_m"])
     state.add_counter("block_n", launch["block_size_n"])
@@ -135,10 +137,12 @@ def _register_copy_engine(state, ctx, *, variant: str) -> None:
 @bench.axis("K", [8192])
 @bench.axis("dtype", [torch.float16])
 @bench.axis("variant", ["one_shot", "two_shot"])
+@bench.axis("prepost", [False, True])
 def matmul_all_reduce_copy_engine(state, ctx):
-    """Kernel-based matmul_all_reduce with one_shot/two_shot variants."""
+    """Kernel-based matmul_all_reduce with one_shot/two_shot variants and prepost option."""
     variant = state["variant"]
-    _register_copy_engine(state, ctx, variant=variant)
+    prepost = state["prepost"]
+    _register_copy_engine(state, ctx, variant=variant, prepost=prepost)
 
 
 if __name__ == "__main__":
