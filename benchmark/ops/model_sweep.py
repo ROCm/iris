@@ -52,7 +52,7 @@ from sweep_bench import (
 )
 
 # Batch size categories (in tokens)
-DECODE_BATCH_SIZES = [8, 32, 128]  # Online inference decode
+DECODE_BATCH_SIZES = [32, 128]  # Online inference decode
 PREFILL_BATCH_SIZES = [2048, 4096]  # Prefill / context ingestion
 TRAINING_BATCH_SIZES = [16384, 32768]  # Long-context training
 ALL_BATCH_SIZES = DECODE_BATCH_SIZES + PREFILL_BATCH_SIZES + TRAINING_BATCH_SIZES

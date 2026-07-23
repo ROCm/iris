@@ -83,6 +83,7 @@ DIMENSION_CONFIGS = [
     # Llama 3/3.1 8B: hidden_size=4096, intermediate_size=14336
     {"m_local": 16384, "n": 4096, "k": 4096, "label": "llama3_8b_attn_out_16k"},
     {"m_local": 16384, "n": 4096, "k": 14336, "label": "llama3_8b_mlp_down_16k"},
+
     # {"m_local": 32768, "n": 4096, "k": 4096, "label": "llama3_8b_attn_out_32k"},
     # {"m_local": 32768, "n": 4096, "k": 14336, "label": "llama3_8b_mlp_down_32k"},
     # {"m_local": 65536, "n": 4096, "k": 4096, "label": "llama3_8b_attn_out_64k"},
@@ -90,6 +91,7 @@ DIMENSION_CONFIGS = [
     # Llama 3/3.1 70B: hidden_size=8192, intermediate_size=28672 (same as Llama 2 70B)
     {"m_local": 16384, "n": 8192, "k": 8192, "label": "llama3_70b_attn_out_16k"},
     {"m_local": 16384, "n": 8192, "k": 28672, "label": "llama3_70b_mlp_down_16k"},
+
     # {"m_local": 32768, "n": 8192, "k": 8192, "label": "llama3_70b_attn_out_32k"},
     # {"m_local": 32768, "n": 8192, "k": 28672, "label": "llama3_70b_mlp_down_32k"},
     # {"m_local": 65536, "n": 8192, "k": 8192, "label": "llama3_70b_attn_out_64k"},
@@ -210,6 +212,113 @@ BENCHMARK_CONFIGS = {
             "axes": {"m": "M", "n": "N", "k": "K"},
         },
     },
+    "matmul_all_reduce": {
+        "pytorchbaseline": {
+            "script": "benchmark/ops/bench_matmul_all_reduce.py",
+            "benchmark_filter": "^pytorch_matmul_all_reduce$",
+            "axes": {"m": "M", "n": "N", "k": "K"},
+        },
+        "tritonblas_rcclbaseline": {
+            "script": "benchmark/ops/bench_matmul_all_reduce.py",
+            "benchmark_filter": "^tritonblas_rccl_matmul_all_reduce$",
+            "axes": {"m": "M", "n": "N", "k": "K"},
+        },
+        "one_shot": {
+            "script": "benchmark/ops/bench_matmul_all_reduce.py",
+            "benchmark_filter": "^matmul_all_reduce$",
+            "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
+            "variant": "one_shot",
+        },
+        "two_shot": {
+            "script": "benchmark/ops/bench_matmul_all_reduce.py",
+            "benchmark_filter": "^matmul_all_reduce$",
+            "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
+            "variant": "two_shot",
+        },
+        # "spinlock": {
+        #     "script": "benchmark/ops/bench_matmul_all_reduce.py",
+        #     "benchmark_filter": "^matmul_all_reduce$",
+        #     "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
+        #     "variant": "spinlock",
+        # },
+        # "copy_engine_one_shot": {
+        #     "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
+        #     "benchmark_filter": "^matmul_all_reduce_copy_engine$",
+        #     "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
+        #     "variant": "one_shot",
+        # },
+        # "copy_engine_two_shot": {
+        #     "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
+        #     "benchmark_filter": "^matmul_all_reduce_copy_engine$",
+        #     "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
+        #     "variant": "two_shot",
+        # },
+        # "copy_engine_host_hip_memcpy_one_shot": {
+        #     "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
+        #     "benchmark_filter": "^matmul_all_reduce_copy_engine_host_hip_memcpy$",
+        #     "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
+        #     "variant": "one_shot",
+        # },
+        # "copy_engine_host_hip_memcpy_two_shot": {
+        #     "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
+        #     "benchmark_filter": "^matmul_all_reduce_copy_engine_host_hip_memcpy$",
+        #     "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
+        #     "variant": "two_shot",
+        # },
+        "copy_engine_device_one_shot": {
+            "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
+            "benchmark_filter": "^matmul_all_reduce_copy_engine$",
+            "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant", "prepost": "prepost"},
+            "variant": "one_shot",
+            "prepost": False,
+        },
+        "copy_engine_device_two_shot": {
+            "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
+            "benchmark_filter": "^matmul_all_reduce_copy_engine$",
+            "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant", "prepost": "prepost"},
+            "variant": "two_shot",
+            "prepost": False,
+        },
+        "copy_engine_device_one_shot_prepost": {
+            "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
+            "benchmark_filter": "^matmul_all_reduce_copy_engine$",
+            "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant", "prepost": "prepost"},
+            "variant": "one_shot",
+            "prepost": True,
+        },
+        "copy_engine_device_two_shot_prepost": {
+            "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
+            "benchmark_filter": "^matmul_all_reduce_copy_engine$",
+            "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant", "prepost": "prepost"},
+            "variant": "two_shot",
+            "prepost": True,
+        },
+        "copy_engine_partitioned_gemm": {
+            "script": "benchmark/ops/bench_matmul.py",
+            "benchmark_filter": "^matmul_copy_engine_partitioned_gemm$",
+            "axes": {"m": "M", "n": "N", "k": "K"},
+        },
+        # "matmul_only": {
+        #     "script": "benchmark/ops/bench_matmul.py",
+        #     "benchmark_filter": "^matmul_only$",
+        #     "axes": {"m": "M", "n": "N", "k": "K"},
+        # },
+        # "matmul_work_stealing": {
+        #     "script": "benchmark/ops/bench_matmul.py",
+        #     "benchmark_filter": "^matmul_work_stealing$",
+        #     "axes": {"m": "M", "n": "N", "k": "K"},
+        # },
+        # "matmul_streamk": {
+        #     "script": "benchmark/ops/bench_matmul.py",
+        #     "benchmark_filter": "^matmul_streamk$",
+        #     "axes": {"m": "M", "n": "N", "k": "K"},
+        # },
+        # "pytorchmatmul_only": {
+        #     "script": "benchmark/ops/bench_matmul.py",
+        #     "benchmark_filter": "^pytorch_matmul_only$",
+        #     "axes": {"m": "M", "n": "N", "k": "K"},
+        # },
+    },
 }
 
 TIMEOUT_SECONDS = 150
@@ -308,6 +417,24 @@ def _calculate_heap_size(
         # Conservative estimate: assume both C_local and C are allocated
         total_size = a_size + b_size + c_local_size + c_size
 
+    elif operation == "matmul_all_reduce":
+        # All allocations from bench_matmul_all_reduce.py:
+        # - A: M × K
+        # - B: K × N
+        # - C: M × N (output)
+        # - a_inbox: world_size × M × N in the worst one_shot case
+        # - locks/completion_signals: small readiness counters
+
+        a_size = m * k * element_size
+        b_size = k * n * element_size
+        c_size = m * n * element_size
+
+        total_size = a_size + b_size + c_size
+
+        inbox_size = num_gpus * m * n * element_size
+        readiness_size = (1 + num_gpus) * 4
+        total_size += inbox_size + readiness_size
+
     else:
         total_size = DEFAULT_HEAP_SIZE
 
@@ -344,6 +471,7 @@ def _run_bench_benchmark(
     axes: Dict[str, str],
     heap_size: int,
     operation: str,
+    variant: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -385,6 +513,10 @@ def _run_bench_benchmark(
         "--axis_dtype=fp16",
         f"--heap_size={heap_size}",
     ]
+
+    # Add variant parameter if present (for matmul_all_reduce)
+    if variant is not None and "variant" in axes:
+        cmd.append(f"--axis_{axes['variant']}={variant}")
 
     log(f"  Running {benchmark_name}: M={m_value}, N={n_value}, K={k_value}")
     log(f"    Heap size: {heap_size / (1 << 30):.2f} GB")
@@ -523,6 +655,7 @@ def run_benchmark(
         bench_config.get("axes", {"m": "M", "n": "N", "k": "K"}),
         heap_size,
         operation,
+        bench_config.get("variant"),
     )
 
 
@@ -535,7 +668,7 @@ def main():
         "--operation",
         type=str,
         required=True,
-        choices=["matmul_all_gather", "all_gather_matmul"],
+        choices=["matmul_all_gather", "all_gather_matmul", "matmul_all_reduce"],
         help="Operation type to benchmark",
     )
     parser.add_argument(

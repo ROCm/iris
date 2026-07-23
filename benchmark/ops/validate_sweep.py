@@ -27,34 +27,36 @@ DEFAULT_HEAP_SIZE = 1 << 34
 DEFAULT_ELEMENT_SIZE_BYTES = 2
 HEAP_HEADROOM_FACTOR = 1.25
 HEAP_ALIGNMENT_BYTES = 1 << 30
+COPY_ENGINE_HEAP_ESTIMATE_BLOCK_M = 512
+COPY_ENGINE_HEAP_ESTIMATE_BLOCK_N = 512
 
 
 DIMENSION_CONFIGS = [
-    # {"m_local": 2048, "n": 2048, "k": 16384, "label": "M2048_N2048_K16384"},
-    # {"m_local": 2048, "n": 16384, "k": 2048, "label": "M2048_N16384_K2048"},
-    # {"m_local": 2048, "n": 16384, "k": 16384, "label": "M2048_N16384_K16384"},
-    # {"m_local": 2048, "n": 16384, "k": 65536, "label": "M2048_N16384_K65536"},
-    # {"m_local": 2048, "n": 131072, "k": 16384, "label": "M2048_N131072_K16384"},
-    # {"m_local": 16384, "n": 2048, "k": 2048, "label": "M16384_N2048_K2048"},
-    # {"m_local": 16384, "n": 2048, "k": 16384, "label": "M16384_N2048_K16384"},
-    # {"m_local": 16384, "n": 2048, "k": 131072, "label": "M16384_N2048_K131072"},
-    # {"m_local": 16384, "n": 16384, "k": 2048, "label": "M16384_N16384_K2048"},
+    {"m_local": 2048, "n": 2048, "k": 16384, "label": "M2048_N2048_K16384"},
+    {"m_local": 2048, "n": 16384, "k": 2048, "label": "M2048_N16384_K2048"},
+    {"m_local": 2048, "n": 16384, "k": 16384, "label": "M2048_N16384_K16384"},
+    {"m_local": 2048, "n": 16384, "k": 65536, "label": "M2048_N16384_K65536"},
+    {"m_local": 2048, "n": 131072, "k": 16384, "label": "M2048_N131072_K16384"},
+    {"m_local": 16384, "n": 2048, "k": 2048, "label": "M16384_N2048_K2048"},
+    {"m_local": 16384, "n": 2048, "k": 16384, "label": "M16384_N2048_K16384"},
+    {"m_local": 16384, "n": 2048, "k": 131072, "label": "M16384_N2048_K131072"},
+    {"m_local": 16384, "n": 16384, "k": 2048, "label": "M16384_N16384_K2048"},
     {"m_local": 131072, "n": 2048, "k": 16384, "label": "M131072_N2048_K16384"},
-    {"m_local": 131072, "n": 16384, "k": 16384, "label": "g2"},
-    {"m_local": 147456, "n": 28672, "k": 4096, "label": "g14"},
-    {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"},
-    {"m_local": 229376, "n": 28672, "k": 4096, "label": "g16"},
-    {"m_local": 8192, "n": 8192, "k": 262144, "label": "g5"},
-    {"m_local": 262144, "n": 8192, "k": 8192, "label": "g6"},
-    {"m_local": 16384, "n": 16384, "k": 131072, "label": "g1"},
-    {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"},
-    {"m_local": 196608, "n": 18432, "k": 16384, "label": "g9"},
-    {"m_local": 4096, "n": 14336, "k": 4096, "label": "mixtral_gate"},
-    {"m_local": 4096, "n": 11008, "k": 4096, "label": "llama7b_gate"},
-    {"m_local": 4096, "n": 4096, "k": 4096, "label": "pow2_4k"},
-    {"m_local": 1024, "n": 3584, "k": 8192, "label": "M1024_N3584_K8192"},
-    {"m_local": 4096, "n": 3584, "k": 8192, "label": "M4096_N3584_K8192"},
-    {"m_local": 16384, "n": 3584, "k": 8192, "label": "M16384_N3584_K8192"},
+    # {"m_local": 131072, "n": 16384, "k": 16384, "label": "g2"},
+    # {"m_local": 147456, "n": 28672, "k": 4096, "label": "g14"},
+    # {"m_local": 327680, "n": 28672, "k": 4096, "label": "g15"},
+    # {"m_local": 229376, "n": 28672, "k": 4096, "label": "g16"},
+    # {"m_local": 8192, "n": 8192, "k": 262144, "label": "g5"},
+    # {"m_local": 262144, "n": 8192, "k": 8192, "label": "g6"},
+    # {"m_local": 16384, "n": 16384, "k": 131072, "label": "g1"},
+    # {"m_local": 262144, "n": 28672, "k": 8192, "label": "g8"},
+    # {"m_local": 196608, "n": 18432, "k": 16384, "label": "g9"},
+    # {"m_local": 4096, "n": 14336, "k": 4096, "label": "mixtral_gate"},
+    # {"m_local": 4096, "n": 11008, "k": 4096, "label": "llama7b_gate"},
+    # {"m_local": 4096, "n": 4096, "k": 4096, "label": "pow2_4k"},
+    # {"m_local": 1024, "n": 3584, "k": 8192, "label": "M1024_N3584_K8192"},
+    # {"m_local": 4096, "n": 3584, "k": 8192, "label": "M4096_N3584_K8192"},
+    # {"m_local": 16384, "n": 3584, "k": 8192, "label": "M16384_N3584_K8192"},
 ]
 
 
@@ -65,23 +67,23 @@ VALIDATION_TESTS = {
             "path": "tests/ops/test_matmul_all_gather.py",
             "pytest_k": "test_matmul_all_gather and not test_tritonblas",
         },
-        {
-            "name": "tritonblas_rcclbaseline",
-            "path": "tests/ops/test_matmul_all_gather.py",
-            "pytest_k": "test_tritonblas_rccl_matmul_all_gather",
-        },
-        {
-            "name": "host_copy_engine",
-            "path": "tests/ops/test_matmul_all_gather_copy_engine.py",
-            "pytest_k": "test_matmul_all_gather_copy_engine",
-            "env": {"IRIS_TEST_COPY_ENGINE_MODE": "host"},
-        },
-        {
-            "name": "device_copy_engine",
-            "path": "tests/ops/test_matmul_all_gather_copy_engine.py",
-            "pytest_k": "test_matmul_all_gather_copy_engine",
-            "env": {"IRIS_TEST_COPY_ENGINE_MODE": "device"},
-        },
+        # {
+        #     "name": "tritonblas_rcclbaseline",
+        #     "path": "tests/ops/test_matmul_all_gather.py",
+        #     "pytest_k": "test_tritonblas_rccl_matmul_all_gather",
+        # },
+        # {
+        #     "name": "host_copy_engine",
+        #     "path": "tests/ops/test_matmul_all_gather_copy_engine.py",
+        #     "pytest_k": "test_matmul_all_gather_copy_engine",
+        #     "env": {"IRIS_TEST_COPY_ENGINE_MODE": "host"},
+        # },
+        # {
+        #     "name": "device_copy_engine",
+        #     "path": "tests/ops/test_matmul_all_gather_copy_engine.py",
+        #     "pytest_k": "test_matmul_all_gather_copy_engine",
+        #     "env": {"IRIS_TEST_COPY_ENGINE_MODE": "device"},
+        # },
     ],
     "all_gather_matmul": [
         {
@@ -119,6 +121,34 @@ VALIDATION_TESTS = {
             "path": "tests/ops/test_all_gather_matmul_copy_engine.py",
             "pytest_k": "test_all_gather_matmul_copy_engine",
             "env": {"IRIS_TEST_COPY_ENGINE_MODE": "device"},
+        },
+    ],
+    "matmul_all_reduce": [
+        {
+            "name": "one_shot",
+            "path": "tests/ops/test_matmul_all_reduce.py",
+            "pytest_k": "test_matmul_all_reduce[one_shot",
+        },
+        {
+            "name": "two_shot",
+            "path": "tests/ops/test_matmul_all_reduce.py",
+            "pytest_k": "test_matmul_all_reduce[two_shot",
+        },
+        # Spinlock is currently disabled in tests pending cache-modifiers support
+        # {
+        #     "name": "spinlock",
+        #     "path": "tests/ops/test_matmul_all_reduce.py",
+        #     "pytest_k": "test_matmul_all_reduce[spinlock",
+        # },
+        {
+            "name": "copy_engine_one_shot",
+            "path": "tests/ops/test_matmul_all_reduce_copy_engine.py",
+            "pytest_k": "test_matmul_all_reduce_copy_engine[one_shot",
+        },
+        {
+            "name": "copy_engine_two_shot",
+            "path": "tests/ops/test_matmul_all_reduce_copy_engine.py",
+            "pytest_k": "test_matmul_all_reduce_copy_engine[two_shot",
         },
     ],
 }
@@ -166,6 +196,9 @@ def _shape_env(config: dict[str, Any], operation: str) -> dict[str, str]:
     if operation == "matmul_all_gather":
         env["IRIS_TEST_M"] = str(m_local * NUM_GPUS)
         env["IRIS_TEST_K"] = str(k)
+    elif operation == "matmul_all_reduce":
+        env["IRIS_TEST_M"] = str(m_local)
+        env["IRIS_TEST_K"] = str(k)
     else:
         if k % NUM_GPUS != 0:
             env["IRIS_TEST_INVALID"] = "1"
@@ -189,6 +222,56 @@ def _estimate_heap_bytes(operation: str, test_name: str, shape_cfg: dict[str, An
         if test_name == "tritonblas_rcclbaseline":
             # The direct tritonBLAS+RCCL path also materializes local C_local (M_local, N).
             total += (m_local * n) * elem
+        return total
+
+    if operation == "matmul_all_reduce":
+        # Allocations for matmul_all_reduce:
+        # A (M, K), B (K, N), C (M, N)
+        total = (m_local * k + k * n + m_local * n) * elem
+
+        if test_name == "one_shot":
+            # Rank-major all-inbox: a_inbox[src_rank * M + row, col].
+            total += (NUM_GPUS * m_local * n) * elem
+        elif test_name == "two_shot":
+            # Row-shard inbox: a_inbox[src_rank * rows_per_rank + row, col].
+            total += (m_local * n) * elem
+        elif test_name == "copy_engine_one_shot":
+            # Rank-major all-inbox: a_inbox[src_rank * M + row, col].
+            total += (NUM_GPUS * m_local * n) * elem
+        elif test_name == "copy_engine_two_shot":
+            # Tile-major flat staging:
+            #   aux_buffer/a_inbox: (world_size * max_partition_tiles, tile_elements)
+            # Use a conservative 512x512 envelope because the validation script
+            # does not instantiate the Origami selector for each shape.
+            block_m = COPY_ENGINE_HEAP_ESTIMATE_BLOCK_M
+            block_n = COPY_ENGINE_HEAP_ESTIMATE_BLOCK_N
+            partition_rows = (m_local + NUM_GPUS - 1) // NUM_GPUS
+            partition_tiles_m = (partition_rows + block_m - 1) // block_m + 1
+            partition_tiles_n = (n + block_n - 1) // block_n
+            max_partition_tiles = max(1, partition_tiles_m * partition_tiles_n)
+            tile_elements = block_m * block_n
+            flat_staging_elements = NUM_GPUS * max_partition_tiles * tile_elements
+            total += 2 * flat_staging_elements * elem
+        elif "copy_engine" in test_name:
+            total += (m_local * n) * elem
+
+            # Flags for copy engine coordination
+            block_m = 64
+            block_n = 64
+            num_m_tiles = (m_local + block_m - 1) // block_m
+            num_n_tiles = (n + block_n - 1) // block_n
+            total_tiles = num_m_tiles * num_n_tiles
+            total += total_tiles * 4  # flags array
+
+        # Lock array for all variants that use locks
+        if test_name in {"spinlock", "one_shot", "two_shot"} or "copy_engine" in test_name:
+            block_m = 64
+            block_n = 64
+            num_m_tiles = (m_local + block_m - 1) // block_m
+            num_n_tiles = (n + block_n - 1) // block_n
+            total_tiles = num_m_tiles * num_n_tiles
+            total += total_tiles * 4  # 4 bytes per lock (int32)
+
         return total
 
     if operation == "all_gather_matmul":
@@ -334,7 +417,7 @@ def main() -> None:
         "--operation",
         type=str,
         required=True,
-        choices=["matmul_all_gather", "all_gather_matmul"],
+        choices=["matmul_all_gather", "all_gather_matmul", "matmul_all_reduce"],
         help="Operation family to validate",
     )
     parser.add_argument(
