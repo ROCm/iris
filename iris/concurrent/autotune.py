@@ -32,6 +32,7 @@ Environment overrides (all optional):
 * ``IRIS_CONCURRENT_CACHE``       -- tuning-db file path
 """
 
+import fcntl
 import json
 import math
 import os
@@ -89,14 +90,32 @@ def load_db():
 
 def _save_db(db):
     path = cache_path()
+    tmp = None
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w") as f:
-            json.dump(db, f, indent=2, sort_keys=True)
-        os.replace(tmp, path)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(f"{path}.lock", "a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                with open(path, "r") as f:
+                    merged = json.load(f)
+            except (OSError, ValueError):
+                merged = {}
+            merged.update(db)
+            tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(tmp, "w") as f:
+                json.dump(merged, f, indent=2, sort_keys=True)
+            os.replace(tmp, path)
+            tmp = None
+            db.clear()
+            db.update(merged)
     except OSError:
         pass
+    finally:
+        if tmp is not None:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def clear():
@@ -111,6 +130,7 @@ def clear():
 
 def _make_key(shape, mode, num_wgs, arch, extra):
     """Stable string key for a (shape, mode, hardware) tuning point."""
+    arch = str(arch).split(":", 1)[0] or "unknown"
     parts = [
         f"arch={arch}",
         f"world={shape['world']}",

@@ -18,17 +18,13 @@ global stealing makes the achieved makespan a bit better than this static max,
 so it is used purely as a *ranker*.
 
 Requires the origami extension (LD_PRELOAD a libstdc++ with GLIBCXX_3.4.32 if the
-interpreter's libstdc++ is older than ROCm's) and the origami comm model
-(``model.collective`` / ``model.hardware`` from the origami_comms repo, located
-via the ORIGAMI_COMM_MODEL env var or PYTHONPATH).
+interpreter's libstdc++ is older than ROCm's).
 
-This module is import-safe without those deps; the cost functions raise a clear
+This module is import-safe without that dependency; the cost functions raise a clear
 error if their backend is missing.
 """
 
 import functools
-import os
-import sys
 
 # ---- GEMM backend: origami -------------------------------------------------
 try:
@@ -37,34 +33,6 @@ try:
     _HAVE_ORIGAMI = True
 except Exception:  # pragma: no cover
     _HAVE_ORIGAMI = False
-
-# ---- comm backend: origami comm model (origami_comms/model) ----------------
-_comm = None
-
-
-def _load_comm_model():
-    global _comm
-    if _comm is not None:
-        return _comm
-    cand = []
-    if os.environ.get("ORIGAMI_COMM_MODEL"):
-        cand.append(os.environ["ORIGAMI_COMM_MODEL"])
-    cand += [p for p in sys.path]
-    for base in cand:
-        try:
-            if base and base not in sys.path:
-                sys.path.insert(0, base)
-            from model.collective import predict_row  # noqa: F401
-            from model.hardware import MI300X, MI300X_COMM  # noqa: F401
-            import model.collective as mc
-            import model.hardware as mh
-
-            _comm = (mc, mh)
-            return _comm
-        except Exception:
-            continue
-    raise ImportError("comm model not found; set ORIGAMI_COMM_MODEL to the origami_comms repo root")
-
 
 _ARCH = {"gfx942": "gfx942"}
 
@@ -151,7 +119,7 @@ GEMM_INTERFERENCE_ALPHA = 0.40
 COMM_SAT_CHANNELS = 64
 
 
-def _comm_sat_channels(collective, world, base=COMM_SAT_CHANNELS):
+def _comm_sat_channels(collective, world, base=COMM_SAT_CHANNELS, num_wgs=None):
     """CUs comm needs to SATURATE xGMI, scaled by per-tile transfer count (the
     physics, not a per-collective fit): a tile that pushes/pulls more remote
     blocks needs more CUs to hit link bandwidth. Relative to all_gather's N-1
@@ -166,9 +134,10 @@ def _comm_sat_channels(collective, world, base=COMM_SAT_CHANNELS):
     # so a floor there only mis-shifts their (already good) picks -- an A/B on the
     # fine grid showed a blanket floor drops AG exact 78->65%, BC 75->63%. So
     # floor AR at 2x base; leave the rest unfloored.
-    if collective == "all_reduce":
-        return max(1, min(int(round(base * 2.0)), 304))
-    return 1
+    floor = int(round(base * 2.0)) if collective == "all_reduce" else 1
+    if num_wgs is not None:
+        floor = min(floor, num_wgs)
+    return max(1, floor)
 
 
 def gemm_tile_ms_fused(
@@ -341,7 +310,23 @@ def schedule_makespan(
     return makespan
 
 
-def _best_split_for_tile(M, N, K, cm, cn, coll, W, num_wgs, candidates, mt, cb, c_atomic_gemm, c_atomic_comm, oneshot):
+def _best_split_for_tile(
+    M,
+    N,
+    K,
+    cm,
+    cn,
+    coll,
+    W,
+    num_wgs,
+    candidates,
+    mt,
+    cb,
+    c_atomic_gemm,
+    c_atomic_comm,
+    oneshot,
+    comm_sat,
+):
     """Best CU split for ONE fixed GEMM tile `mt`. Returns
     (gw, makespan, t_gemm, comm_full, Lc_unit, Lg, n_gemm, curve)."""
     n_gemm = _cdiv(M, mt[0]) * _cdiv(N, mt[1])
@@ -351,7 +336,7 @@ def _best_split_for_tile(M, N, K, cm, cn, coll, W, num_wgs, candidates, mt, cb, 
     comm_intensity = comm_full_sat / max(1e-9, gemm_full_ms(M, N, K, tuple(mt), n_cu=num_wgs))
     curve = []
     best = None
-    csat = _comm_sat_channels(coll, W)  # per-collective comm saturation floor
+    csat = _comm_sat_channels(coll, W, base=comm_sat, num_wgs=num_wgs)
     for gw in candidates:
         Lg = gemm_tile_ms_fused(M, N, K, num_wgs, gw, comm_intensity, tuple(mt))
         t_gemm = Lg * _cdiv(n_gemm, gw)
@@ -411,7 +396,21 @@ def predict_split(
     per_tile = {}
     for tmt in tiles:
         per_tile[tmt] = _best_split_for_tile(
-            M, N, K, cm, cn, coll, W, num_wgs, candidates, tmt, cb, c_atomic_gemm, c_atomic_comm, oneshot
+            M,
+            N,
+            K,
+            cm,
+            cn,
+            coll,
+            W,
+            num_wgs,
+            candidates,
+            tmt,
+            cb,
+            c_atomic_gemm,
+            c_atomic_comm,
+            oneshot,
+            comm_sat,
         )  # (gw, mk, tg, cf, lc, lg, ng, curve)
     # margin gate: keep the preferred/default tile unless another is predicted
     # clearly (> mt_margin) faster. Expanding the tile space rescues the

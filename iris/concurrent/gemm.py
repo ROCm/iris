@@ -58,7 +58,8 @@ def _arch(device):
     """Short device-arch string for the tuning-db cache key."""
     try:
         props = torch.cuda.get_device_properties(device)
-        return getattr(props, "gcnArchName", None) or props.name
+        arch = getattr(props, "gcnArchName", None) or props.name
+        return str(arch).split(":", 1)[0]
     except Exception:
         return "unknown"
 

@@ -11,6 +11,7 @@ exercised by the example tests.
 """
 
 import importlib.util
+import json
 import os
 
 import pytest
@@ -68,6 +69,16 @@ def test_db_roundtrip(tmp_db):
     assert A.load_db()["mykey"]["config"]["gemm_wgs"] == 240
 
 
+def test_db_save_merges_entries_added_by_another_process(tmp_db):
+    db = A.load_db()
+    db["local"] = {"config": {"gemm_wgs": 240}}
+    with open(tmp_db, "w") as f:
+        json.dump({"remote": {"config": {"gemm_wgs": 160}}}, f)
+    A._save_db(db)
+    A._db_cache = None
+    assert set(A.load_db()) == {"local", "remote"}
+
+
 def test_clear_removes_file(tmp_db):
     A._save_db({"x": 1})
     assert os.path.exists(tmp_db)
@@ -83,6 +94,7 @@ def test_make_key_stable_and_distinct():
     assert k1 != k3  # mode is part of the key
     k4 = A._make_key({**SHAPE, "collective": "all_reduce"}, "fused", 304, "gfx942", None)
     assert k1 != k4  # collective is part of the key
+    assert A._make_key(SHAPE, "fused", 304, "gfx942:sramecc+:xnack-", None) == k1
 
 
 def test_tune_config_cache_hit_skips_benchmark(tmp_db):

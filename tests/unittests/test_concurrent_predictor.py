@@ -110,8 +110,40 @@ def test_comm_full_ms_channel_independent():
 # ---------------------------------------------------------------------------
 def test_comm_sat_only_all_reduce():
     assert P._comm_sat_channels("all_reduce", W) == 2 * P.COMM_SAT_CHANNELS
+    assert P._comm_sat_channels("all_reduce", W, num_wgs=64) == 64
     for c in ("all_gather", "reduce_scatter", "broadcast", "all_to_all"):
         assert P._comm_sat_channels(c, W) == 1
+
+
+def test_best_split_uses_comm_sat_override(monkeypatch):
+    seen = []
+    monkeypatch.setattr(P, "comm_full_ms", lambda *args, **kwargs: 1.0)
+    monkeypatch.setattr(P, "gemm_full_ms", lambda *args, **kwargs: 1.0)
+    monkeypatch.setattr(P, "gemm_tile_ms_fused", lambda *args, **kwargs: 1.0)
+
+    def schedule(*args, **kwargs):
+        seen.append(kwargs["comm_sat"])
+        return 1.0
+
+    monkeypatch.setattr(P, "schedule_makespan", schedule)
+    P._best_split_for_tile(
+        256,
+        256,
+        64,
+        256,
+        64,
+        "all_reduce",
+        W,
+        80,
+        [40],
+        (256, 256, 64),
+        CB,
+        0.0,
+        0.0,
+        True,
+        10,
+    )
+    assert seen == [20]
 
 
 # ---------------------------------------------------------------------------
