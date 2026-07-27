@@ -39,6 +39,7 @@ from .all_gather_matmul import all_gather_matmul, all_gather_matmul_preamble
 from .all_gather_matmul_hbm_buffer import all_gather_matmul_hbm_buffer, all_gather_matmul_hbm_buffer_preamble
 from .matmul_all_gather import matmul_all_gather
 from .matmul_reduce_scatter import matmul_reduce_scatter, matmul_reduce_scatter_preamble
+from .matmul_reduce_scatter_hbm_buffer import matmul_reduce_scatter_hbm_buffer, matmul_reduce_scatter_hbm_buffer_preamble
 
 
 class OpsNamespace:
@@ -186,4 +187,6 @@ __all__ = [
     "matmul_all_gather",
     "matmul_reduce_scatter",
     "matmul_reduce_scatter_preamble",
+    "matmul_reduce_scatter_hbm_buffer",
+    "matmul_reduce_scatter_hbm_buffer_preamble",
 ]
