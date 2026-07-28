@@ -419,33 +419,39 @@ def matmul_reduce_scatter_hbm_buffer(
     if num_stages is not None:
         launch_kwargs["num_stages"] = num_stages
 
-    # Two-kernel approach: GEMM → barrier → Scatter
-    # Avoids in-kernel cross-rank flag synchronization issues.
-    _gemm_only_kernel[(gemm_tiles,)](
-        A, B, workspace.aux_buffer,
-        M, N, K_local,
-        A.stride(0), A.stride(1),
-        B.stride(0), B.stride(1),
-        workspace.aux_buffer.stride(0), workspace.aux_buffer.stride(1),
-        config.block_size_m, config.block_size_n, config.block_size_k,
-        config.group_size_m,
-        num_m_tiles, num_tiles_n,
-        config.allow_tf32,
-        **launch_kwargs,
-    )
-
-    ctx.barrier()
-
-    _scatter_only_kernel[(num_scatter_sms,)](
-        workspace.aux_buffer, output_tensor,
+    # Single-kernel: GEMM WGs + Scatter WGs with in-kernel cross-rank sync
+    _hbm_buffer_matmul_reduce_scatter_kernel[(grid_size,)](
+        A,
+        B,
+        output_tensor,
+        workspace.aux_buffer,
+        workspace.locks,
+        M,
+        N,
+        K_local,
+        M_local,
+        A.stride(0),
+        A.stride(1),
+        B.stride(0),
+        B.stride(1),
+        output_tensor.stride(0),
+        output_tensor.stride(1),
+        workspace.aux_buffer.stride(0),
+        workspace.aux_buffer.stride(1),
         ctx.get_heap_bases(),
-        M, N, M_local,
-        workspace.aux_buffer.stride(0), workspace.aux_buffer.stride(1),
-        output_tensor.stride(0), output_tensor.stride(1),
-        rank, world_size,
-        config.block_size_m, config.block_size_n,
-        num_m_tiles_local, num_tiles_n,
+        ctx.get_device_context(),
+        rank,
+        world_size,
+        config.block_size_m,
+        config.block_size_n,
+        config.block_size_k,
+        config.group_size_m,
         num_scatter_sms,
+        num_m_tiles,
+        num_tiles_n,
+        num_m_tiles_local,
+        gemm_tiles,
+        config.allow_tf32,
         **launch_kwargs,
     )
 
