@@ -192,6 +192,115 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
                 tl.store(out_ptrs, reduced, mask=out_mask, cache_modifier=".wt")
 
 
+@triton.jit
+def _gemm_only_kernel(
+    A, B, staged_c,
+    M, N, K_local,
+    stride_am, stride_ak, stride_bk, stride_bn,
+    stride_sc_m, stride_sc_n,
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr,
+    NUM_M_TILES: tl.constexpr, NUM_TILES_N: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+):
+    """GEMM-only kernel: compute partial C = A_local @ B, store to staged_c."""
+    pid = tl.program_id(0)
+    acc_dtype = tl.float32
+
+    num_pid_in_group = GROUP_SIZE_M * NUM_TILES_N
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    first_pid_m = min(first_pid_m, NUM_M_TILES - 1)
+    group_sz = min(NUM_M_TILES - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_sz)
+    pid_n = (pid % num_pid_in_group) // group_sz
+    pid_m = min(pid_m, NUM_M_TILES - 1)
+
+    rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+    rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+
+    num_k_blocks = tl.cdiv(K_local, BLOCK_SIZE_K)
+    for k_block in range(num_k_blocks):
+        rk = k_block * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+        rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
+
+        a_ptrs = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
+        a = tl.load(a_ptrs, mask=(rm[:, None] < M) & (rk[None, :] < K_local), other=0.0)
+
+        b_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+        b = tl.load(b_ptrs, mask=(rk[:, None] < K_local) & (rn[None, :] < N), other=0.0)
+
+        if ALLOW_TF32:
+            acc = tl.dot(a, b, acc, allow_tf32=True)
+        else:
+            acc += tl.dot(a, b, allow_tf32=False)
+
+    c = acc.to(staged_c.type.element_ty)
+    sc_ptrs = staged_c + rm.to(tl.int64)[:, None] * stride_sc_m + rn[None, :] * stride_sc_n
+    sc_mask = (rm[:, None] < M) & (rn[None, :] < N)
+    tl.store(sc_ptrs, c, mask=sc_mask, cache_modifier=".wt")
+
+
+@triton.jit
+def _scatter_only_kernel(
+    staged_c, C,
+    heap_bases: tl.tensor,
+    M, N, M_local,
+    stride_sc_m, stride_sc_n, stride_cm, stride_cn,
+    cur_rank: tl.constexpr, world_size: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
+    NUM_M_TILES_LOCAL: tl.constexpr, NUM_TILES_N: tl.constexpr,
+    NUM_SCATTER_SMS: tl.constexpr,
+):
+    """Scatter-only kernel: read all peers' staged_c, reduce, store to C."""
+    pid = tl.program_id(0)
+    acc_dtype = tl.float32
+
+    m_offset = cur_rank * NUM_M_TILES_LOCAL
+    total_local_tiles = NUM_M_TILES_LOCAL * NUM_TILES_N
+
+    for tile_offset in range(pid, total_local_tiles, NUM_SCATTER_SMS):
+        local_pid_m = tile_offset // NUM_TILES_N
+        pid_n = tile_offset % NUM_TILES_N
+
+        global_pid_m = m_offset + local_pid_m
+
+        rm = global_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        sc_offset = rm[:, None] * stride_sc_m + rn[None, :] * stride_sc_n
+        base_ptr = staged_c + sc_offset
+        is_full = (global_pid_m * BLOCK_SIZE_M + BLOCK_SIZE_M <= M) & (pid_n * BLOCK_SIZE_N + BLOCK_SIZE_N <= N)
+
+        if is_full:
+            acc = iris.load(base_ptr, cur_rank, 0, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                acc += iris.load(base_ptr, cur_rank, i, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+
+            reduced = acc.to(C.type.element_ty)
+            out_rm = local_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            out_rm = tl.max_contiguous(tl.multiple_of(out_rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+            out_ptrs = C + out_rm[:, None] * stride_cm + rn[None, :] * stride_cn
+            tl.store(out_ptrs, reduced, cache_modifier=".wt")
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            acc = iris.load(base_ptr, cur_rank, 0, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                acc += iris.load(base_ptr, cur_rank, i, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+
+            reduced = acc.to(C.type.element_ty)
+            out_rm = local_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            out_mask = (out_rm[:, None] < M_local) & (rn[None, :] < N)
+            out_ptrs = C + out_rm[:, None] * stride_cm + rn[None, :] * stride_cn
+            tl.store(out_ptrs, reduced, mask=out_mask, cache_modifier=".wt")
+
+
 def matmul_reduce_scatter_hbm_buffer_preamble(
     ctx,
     A: torch.Tensor,
@@ -311,38 +420,33 @@ def matmul_reduce_scatter_hbm_buffer(
     if num_stages is not None:
         launch_kwargs["num_stages"] = num_stages
 
-    _hbm_buffer_matmul_reduce_scatter_kernel[(grid_size,)](
-        A,
-        B,
-        output_tensor,
-        workspace.aux_buffer,
-        workspace.locks,
-        M,
-        N,
-        K_local,
-        M_local,
-        A.stride(0),
-        A.stride(1),
-        B.stride(0),
-        B.stride(1),
-        output_tensor.stride(0),
-        output_tensor.stride(1),
-        workspace.aux_buffer.stride(0),
-        workspace.aux_buffer.stride(1),
-        ctx.get_heap_bases(),
-        ctx.get_device_context(),
-        rank,
-        world_size,
-        config.block_size_m,
-        config.block_size_n,
-        config.block_size_k,
+    # Two-kernel approach: GEMM → barrier → Scatter
+    # Avoids in-kernel cross-rank flag synchronization issues.
+    _gemm_only_kernel[(gemm_tiles,)](
+        A, B, workspace.aux_buffer,
+        M, N, K_local,
+        A.stride(0), A.stride(1),
+        B.stride(0), B.stride(1),
+        workspace.aux_buffer.stride(0), workspace.aux_buffer.stride(1),
+        config.block_size_m, config.block_size_n, config.block_size_k,
         config.group_size_m,
-        num_scatter_sms,
-        num_m_tiles,
-        num_tiles_n,
-        num_m_tiles_local,
-        gemm_tiles,
+        num_m_tiles, num_tiles_n,
         config.allow_tf32,
+        **launch_kwargs,
+    )
+
+    ctx.barrier()
+
+    _scatter_only_kernel[(num_scatter_sms,)](
+        workspace.aux_buffer, output_tensor,
+        ctx.get_heap_bases(),
+        M, N, M_local,
+        workspace.aux_buffer.stride(0), workspace.aux_buffer.stride(1),
+        output_tensor.stride(0), output_tensor.stride(1),
+        rank, world_size,
+        config.block_size_m, config.block_size_n,
+        num_m_tiles_local, num_tiles_n,
+        num_scatter_sms,
         **launch_kwargs,
     )
 
