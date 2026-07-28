@@ -39,8 +39,8 @@ def _reference_gemm_reduce_scatter(A, B, world_size, rank):
 @pytest.mark.parametrize(
     "M, N, K_local",
     [
-        (256, 128, 64),
-        (512, 256, 128),
+        (1024, 128, 64),
+        (2048, 256, 128),
         (2048, 2880, 512),
     ],
 )
@@ -160,7 +160,7 @@ def test_workspace_reuse(dtype=torch.float16):
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
-    M, N, K_local = 256, 128, 64
+    M, N, K_local = 1024, 128, 64
     if M % (world_size * 128) != 0:
         pytest.skip("Shape not compatible")
 

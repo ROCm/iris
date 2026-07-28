@@ -147,7 +147,7 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
                     peer_val = iris.load(
                         flags_ptr + flag_offset,
                         cur_rank, peer, ctx.heap_bases,
-                        hint=(1, 1),
+                        hint=(1,),
                     )
                     peer_done = tl.sum(peer_val)
 
