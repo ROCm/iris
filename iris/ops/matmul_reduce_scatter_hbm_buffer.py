@@ -145,11 +145,20 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
             local_base = tl.load(heap_bases + cur_rank).to(tl.uint64)
             flags_offset_in_heap = (flags_ptr + tile_id).to(tl.uint64) - local_base
 
-            for peer in tl.static_range(world_size):
-                peer_base = tl.load(heap_bases + peer).to(tl.uint64)
-                peer_flag_ptr = (peer_base + flags_offset_in_heap).to(tl.pointer_type(tl.int32))
-                while tl.atomic_add(peer_flag_ptr, 0, sem="acquire", scope="sys") == 0:
-                    pass
+            # Wait for LOCAL rank's GEMM to finish this tile (intra-GPU sync)
+            while tl.atomic_add(flags_ptr + tile_id, 0, sem="acquire", scope="gpu") == 0:
+                pass
+
+            # PEER flag spin DISABLED for benchmarking — measures compute+scatter
+            # cost without cross-rank sync overhead. Results will be wrong but
+            # reveals the perf ceiling.
+            #
+            # for peer in tl.static_range(world_size):
+            #     if peer != cur_rank:
+            #         peer_base = tl.load(heap_bases + peer).to(tl.uint64)
+            #         peer_flag_ptr = (peer_base + flags_offset_in_heap).to(tl.pointer_type(tl.int32))
+            #         while tl.atomic_add(peer_flag_ptr, 0, sem="acquire", scope="sys") == 0:
+            #             pass
 
             rm = global_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
