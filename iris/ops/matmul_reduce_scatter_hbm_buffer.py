@@ -139,18 +139,17 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
             global_pid_m = m_offset + local_pid_m
             tile_id = global_pid_m * NUM_TILES_N + pid_n
 
-            # Wait for ALL ranks' GEMM to finish this tile
-            # Check each rank's flag via iris.load (flags are in symmetric heap)
-            flag_offset = tile_id + tl.arange(0, 1) * 0  # 1-element offset
+            # Wait for ALL ranks' GEMM to finish this tile.
+            # Compute peer flag address using symmetric heap base translation:
+            #   peer_flag_ptr = heap_bases[peer] + (flags_ptr - heap_bases[cur_rank]) + tile_id
+            local_base = tl.load(heap_bases + cur_rank).to(tl.uint64)
+            flags_offset_in_heap = (flags_ptr + tile_id).to(tl.uint64) - local_base
+
             for peer in tl.static_range(world_size):
-                peer_done = zero
-                while peer_done == 0:
-                    peer_val = iris.load(
-                        flags_ptr + flag_offset,
-                        cur_rank, peer, heap_bases,
-                        hint=(1,),
-                    )
-                    peer_done = tl.sum(peer_val)
+                peer_base = tl.load(heap_bases + peer).to(tl.uint64)
+                peer_flag_ptr = (peer_base + flags_offset_in_heap).to(tl.pointer_type(tl.int32))
+                while tl.atomic_add(peer_flag_ptr, 0, sem="acquire", scope="sys") == 0:
+                    pass
 
             rm = global_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
