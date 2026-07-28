@@ -46,6 +46,7 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
     stride_cn,
     stride_sc_m,
     stride_sc_n,
+    heap_bases: tl.tensor,
     context_tensor: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -146,7 +147,7 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
                 while peer_done == 0:
                     peer_val = iris.load(
                         flags_ptr + flag_offset,
-                        cur_rank, peer, ctx.heap_bases,
+                        cur_rank, peer, heap_bases,
                         hint=(1,),
                     )
                     peer_done = tl.sum(peer_val)
@@ -163,10 +164,10 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
             if is_full:
                 # Read from first rank and accumulate
                 start_rank = scatter_pid % world_size
-                acc = iris.load(base_ptr, cur_rank, start_rank, ctx.heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+                acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
                 for i in tl.static_range(1, world_size):
                     remote_rank = (start_rank + i) % world_size
-                    acc += iris.load(base_ptr, cur_rank, remote_rank, ctx.heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+                    acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
 
                 reduced = acc.to(C.type.element_ty)
 
@@ -178,10 +179,10 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
             else:
                 mask = (rm[:, None] < M) & (rn[None, :] < N)
                 start_rank = scatter_pid % world_size
-                acc = iris.load(base_ptr, cur_rank, start_rank, ctx.heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+                acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
                 for i in tl.static_range(1, world_size):
                     remote_rank = (start_rank + i) % world_size
-                    acc += iris.load(base_ptr, cur_rank, remote_rank, ctx.heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+                    acc += iris.load(base_ptr, cur_rank, remote_rank, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
 
                 reduced = acc.to(C.type.element_ty)
 
@@ -328,6 +329,7 @@ def matmul_reduce_scatter_hbm_buffer(
         output_tensor.stride(1),
         workspace.aux_buffer.stride(0),
         workspace.aux_buffer.stride(1),
+        ctx.get_heap_bases(),
         ctx.get_device_context(),
         rank,
         world_size,
