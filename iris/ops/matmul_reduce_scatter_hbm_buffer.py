@@ -23,6 +23,8 @@ import triton
 import triton.language as tl
 import iris
 
+from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
+
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 
@@ -60,6 +62,7 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
     NUM_M_TILES_LOCAL: tl.constexpr,
     GEMM_TILES_PER_STAGE: tl.constexpr,
     ALLOW_TF32: tl.constexpr,
+    EVEN_K: tl.constexpr,
 ):
     pid = tl.program_id(0)
     acc_dtype = tl.float32
@@ -84,35 +87,30 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
         pid_n = (gemm_pid % num_pid_in_group) // group_sz
         pid_m = min(pid_m, NUM_M_TILES - 1)
 
-        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-        rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+        # GEMM via tritonblas — handles EVEN_K, alignment, masking automatically
+        tensorA = make_tensor_view(A, M, K_local, stride_am, stride_ak)
+        tensorB = make_tensor_view(B, K_local, N, stride_bk, stride_bn)
+        gemm_ctx = GemmContext(
+            BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
+            num_sms=1, even_k=EVEN_K,
+        )
+        out_tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
+        acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
 
-        acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-
-        # K-loop over local K shard
-        num_k_blocks = tl.cdiv(K_local, BLOCK_SIZE_K)
-        for k_block in range(num_k_blocks):
-            rk = k_block * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
-
-            a_ptrs = A + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            a = tl.load(a_ptrs, mask=(rm[:, None] < M) & (rk[None, :] < K_local), other=0.0)
-
-            b_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
-            b = tl.load(b_ptrs, mask=(rk[:, None] < K_local) & (rn[None, :] < N), other=0.0)
-
-            if ALLOW_TF32:
-                acc = tl.dot(a, b, acc, allow_tf32=True)
-            else:
-                acc += tl.dot(a, b, allow_tf32=False)
-
-        # Store partial result to staged_c (in symmetric heap, peer-visible)
+        rm, rn = out_tile.indices()
         c = acc.to(staged_c.type.element_ty)
-        sc_ptrs = staged_c + rm.to(tl.int64)[:, None] * stride_sc_m + rn[None, :] * stride_sc_n
-        sc_mask = (rm[:, None] < M) & (rn[None, :] < N)
-        tl.store(sc_ptrs, c, mask=sc_mask, cache_modifier=".wt")
+
+        # Store to staged_c — fast path (no mask) for interior tiles
+        rm_base = pid_m * BLOCK_SIZE_M
+        rn_base = pid_n * BLOCK_SIZE_N
+        is_full_tile = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
+
+        sc_ptrs = staged_c + rm[:, None] * stride_sc_m + rn[None, :] * stride_sc_n
+        if is_full_tile:
+            tl.store(sc_ptrs, c, cache_modifier=".wt")
+        else:
+            sc_mask = (rm[:, None] < M) & (rn[None, :] < N)
+            tl.store(sc_ptrs, c, mask=sc_mask, cache_modifier=".wt")
 
         # Signal tile is ready — scope="sys" for cross-GPU visibility
         tile_id = pid_m * NUM_TILES_N + pid_n
@@ -131,6 +129,10 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
         # Scatter WGs loop over this rank's assigned tiles
         total_local_tiles = NUM_M_TILES_LOCAL * NUM_TILES_N
 
+        # Hoist heap base load outside tile loop
+        local_base = tl.load(heap_bases + cur_rank).to(tl.uint64)
+        flags_base_in_heap = flags_ptr.to(tl.uint64) - local_base
+
         for tile_offset in range(scatter_pid, total_local_tiles, NUM_SCATTER_SMS):
             local_pid_m = tile_offset // NUM_TILES_N
             pid_n = tile_offset % NUM_TILES_N
@@ -139,11 +141,7 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
             global_pid_m = m_offset + local_pid_m
             tile_id = global_pid_m * NUM_TILES_N + pid_n
 
-            # Wait for ALL ranks' GEMM to finish this tile.
-            # Compute peer flag address using symmetric heap base translation:
-            #   peer_flag_ptr = heap_bases[peer] + (flags_ptr - heap_bases[cur_rank]) + tile_id
-            local_base = tl.load(heap_bases + cur_rank).to(tl.uint64)
-            flags_offset_in_heap = (flags_ptr + tile_id).to(tl.uint64) - local_base
+            flags_offset_in_heap = flags_base_in_heap + tile_id
 
             # Wait for LOCAL rank's GEMM to finish this tile (intra-GPU sync)
             while tl.atomic_add(flags_ptr + tile_id, 0, sem="acquire", scope="gpu") == 0:
@@ -461,6 +459,7 @@ def matmul_reduce_scatter_hbm_buffer(
         num_m_tiles_local,
         gemm_tiles,
         config.allow_tf32,
+        K_local % config.block_size_k == 0,
         **launch_kwargs,
     )
 
