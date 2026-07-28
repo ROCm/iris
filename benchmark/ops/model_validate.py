@@ -110,12 +110,17 @@ VALIDATION_TESTS = {
         {
             "name": "copy_engine_one_shot",
             "path": "tests/ops/test_matmul_all_reduce_copy_engine.py",
-            "pytest_k": "test_matmul_all_reduce_copy_engine[one_shot",
+            "pytest_k": "test_matmul_all_reduce_copy_engine and one_shot",
         },
         {
             "name": "copy_engine_two_shot",
             "path": "tests/ops/test_matmul_all_reduce_copy_engine.py",
-            "pytest_k": "test_matmul_all_reduce_copy_engine[two_shot",
+            "pytest_k": "test_matmul_all_reduce_copy_engine and two_shot and not two_shot_gpu_init",
+        },
+        {
+            "name": "copy_engine_two_shot_gpu_init",
+            "path": "tests/ops/test_matmul_all_reduce_copy_engine.py",
+            "pytest_k": "test_matmul_all_reduce_copy_engine and two_shot_gpu_init",
         },
     ],
 }
@@ -220,8 +225,8 @@ def _estimate_heap_bytes(operation: str, test_name: str, config: Dict[str, Any],
         elif test_name == "copy_engine_one_shot":
             # Rank-major all-inbox: a_inbox[src_rank * M + row, col].
             total += (tp_degree * m * n) * elem
-        elif test_name == "copy_engine_two_shot":
-            # Tile-major flat staging
+        elif test_name in {"copy_engine_two_shot", "copy_engine_two_shot_gpu_init"}:
+            # Conservative copy-engine two-shot staging estimate.
             block_m = COPY_ENGINE_HEAP_ESTIMATE_BLOCK_M
             block_n = COPY_ENGINE_HEAP_ESTIMATE_BLOCK_N
             partition_rows = (m + tp_degree - 1) // tp_degree

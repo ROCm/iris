@@ -1365,6 +1365,82 @@ def wait_then_put_rects(
 
 
 @triton.jit
+def put_rects(
+    from_base_ptr,
+    to_base_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    transfer_row_offsets,
+    transfer_col_offsets,
+    transfer_width_bytes,
+    transfer_heights,
+    transfer_start,
+    transfer_count,
+    stride_n_bytes,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    MAX_RECTS: tl.constexpr,
+    hint: tl.constexpr = None,
+):
+    """
+    Enqueue many 2D SUB_WINDOW_COPY packets in one SDMA submission.
+
+    This is the no-poll counterpart to wait_then_put_rects for GPU-side
+    producers that only submit SDMA after the data is already ready.
+    """
+    translated_to_base_ptr = __translate(to_base_ptr, from_rank, to_rank, heap_bases, hint)
+
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    copy_packet_bytes = 80
+    command_in_bytes = transfer_count * copy_packet_bytes
+
+    base, offset = sdma_utils.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+    from_base_val = from_base_ptr.to(tl.uint64)
+    to_base_val = translated_to_base_ptr.to(tl.uint64)
+
+    for i in range(MAX_RECTS):
+        if i < transfer_count:
+            transfer_idx = transfer_start + i
+            row_offset = tl.load(transfer_row_offsets + transfer_idx)
+            col_offset = tl.load(transfer_col_offsets + transfer_idx)
+            width_bytes = tl.load(transfer_width_bytes + transfer_idx)
+            height = tl.load(transfer_heights + transfer_idx)
+            byte_offset = (row_offset.to(tl.uint64) * src_pitch) + (col_offset.to(tl.uint64) * stride_n_bytes)
+            copy_offset_bytes = packet_offset_bytes + i * copy_packet_bytes
+            sdma_utils.place_sub_window_copy_packet(
+                queue_ptr_u32,
+                copy_offset_bytes,
+                from_base_val + byte_offset,
+                to_base_val + byte_offset,
+                tile_width=width_bytes,
+                tile_height=height,
+                src_buffer_pitch=src_pitch,
+                dst_buffer_pitch=dst_pitch,
+                src_x=0,
+                src_y=0,
+                dst_x=0,
+                dst_y=0,
+            )
+
+    pending_wptr = base + offset + command_in_bytes
+    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
 def wait_then_put_signal_rect(
     from_ptr,
     to_ptr,
@@ -1526,6 +1602,92 @@ def wait_then_put_signal_rects(
     sdma_utils.place_atomic_add_packet(
         queue_ptr_u32,
         packet_offset_bytes + poll_packet_bytes + transfer_count * copy_packet_bytes,
+        translated_signal_ptr.to(tl.uint64),
+        signal_value,
+    )
+
+    pending_wptr = base + offset + command_in_bytes
+    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+
+@triton.jit
+def put_signal_rects(
+    from_base_ptr,
+    to_base_ptr,
+    from_rank,
+    to_rank,
+    heap_bases,
+    copy_engine_ctx: tl.tensor,
+    signal_flag_ptr,
+    signal_value,
+    transfer_row_offsets,
+    transfer_col_offsets,
+    transfer_width_bytes,
+    transfer_heights,
+    transfer_start,
+    transfer_count,
+    stride_n_bytes,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    MAX_RECTS: tl.constexpr,
+    hint: tl.constexpr = None,
+):
+    """
+    Enqueue many 2D SUB_WINDOW_COPY packets and one ATOMIC in one SDMA submission.
+
+    This is the no-poll counterpart to wait_then_put_signal_rects for GPU-side
+    producers that only submit SDMA after the data is already ready.
+    """
+    translated_to_base_ptr = __translate(to_base_ptr, from_rank, to_rank, heap_bases, hint)
+    translated_signal_ptr = __translate(signal_flag_ptr, from_rank, to_rank, heap_bases, hint)
+
+    ctx = copy_engine_ctx + (6 * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+    copy_packet_bytes = 80
+    atomic_packet_bytes = 32
+    command_in_bytes = transfer_count * copy_packet_bytes + atomic_packet_bytes
+
+    base, offset = sdma_utils.acquire_fadd(
+        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
+    )
+    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+
+    packet_offset_bytes = base + offset
+    from_base_val = from_base_ptr.to(tl.uint64)
+    to_base_val = translated_to_base_ptr.to(tl.uint64)
+    for i in range(MAX_RECTS):
+        if i < transfer_count:
+            transfer_idx = transfer_start + i
+            row_offset = tl.load(transfer_row_offsets + transfer_idx)
+            col_offset = tl.load(transfer_col_offsets + transfer_idx)
+            width_bytes = tl.load(transfer_width_bytes + transfer_idx)
+            height = tl.load(transfer_heights + transfer_idx)
+            byte_offset = (row_offset.to(tl.uint64) * src_pitch) + (col_offset.to(tl.uint64) * stride_n_bytes)
+            copy_offset_bytes = packet_offset_bytes + i * copy_packet_bytes
+            sdma_utils.place_sub_window_copy_packet(
+                queue_ptr_u32,
+                copy_offset_bytes,
+                from_base_val + byte_offset,
+                to_base_val + byte_offset,
+                tile_width=width_bytes,
+                tile_height=height,
+                src_buffer_pitch=src_pitch,
+                dst_buffer_pitch=dst_pitch,
+                src_x=0,
+                src_y=0,
+                dst_x=0,
+                dst_y=0,
+            )
+
+    sdma_utils.place_atomic_add_packet(
+        queue_ptr_u32,
+        packet_offset_bytes + transfer_count * copy_packet_bytes,
         translated_signal_ptr.to(tl.uint64),
         signal_value,
     )

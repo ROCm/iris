@@ -279,6 +279,12 @@ BENCHMARK_CONFIGS = {
             "variant": "two_shot",
             "prepost": False,
         },
+        "copy_engine_device_two_shot_gpu_init": {
+            "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
+            "benchmark_filter": "^matmul_all_reduce_copy_engine$",
+            "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
+            "variant": "two_shot_gpu_init",
+        },
         "copy_engine_device_one_shot_prepost": {
             "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
             "benchmark_filter": "^matmul_all_reduce_copy_engine$",

@@ -5,7 +5,8 @@
 Tests for matmul_all_reduce_copy_engine.
 
 Each rank computes A @ B locally, then reduces across all ranks using
-copy-engine for communication. Supports one_shot and two_shot variants.
+copy-engine for communication. Supports one_shot, two_shot, and experimental
+GPU-posted two_shot variants.
 """
 
 import gc
@@ -76,7 +77,7 @@ def _reference_tolerances(dtype: torch.dtype):
 
 @pytest.mark.parametrize("M,N,K", _param_shapes())
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("variant", ["one_shot", "two_shot"])
+@pytest.mark.parametrize("variant", ["one_shot", "two_shot", "two_shot_gpu_init"])
 def test_matmul_all_reduce_copy_engine(M, N, K, dtype, variant):
     """Test matmul_all_reduce_copy_engine against tritonBLAS matmul + fp32 all-reduce."""
     if not dist.is_initialized():

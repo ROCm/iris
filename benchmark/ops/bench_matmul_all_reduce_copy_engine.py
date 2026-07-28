@@ -38,6 +38,9 @@ def _register_copy_engine(state, ctx, *, variant: str, prepost: bool = False) ->
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
 
+    if variant == "two_shot_gpu_init" and prepost:
+        state.skip("two_shot_gpu_init posts SDMA transfers from the GEMM kernel; host prepost is not used")
+
     device = torch.device(f"cuda:{torch.cuda.current_device()}")
     selector = _make_selector(M, N, K, dtype, device)
 
@@ -128,6 +131,8 @@ def _register_copy_engine(state, ctx, *, variant: str, prepost: bool = False) ->
     state.add_counter("reduce_num_sms", launch.get("reduce_num_sms", 0))
     state.add_counter("variant_one_shot", 1.0 if variant == "one_shot" else 0.0)
     state.add_counter("variant_two_shot", 1.0 if variant == "two_shot" else 0.0)
+    state.add_counter("variant_two_shot_gpu_init", 1.0 if variant == "two_shot_gpu_init" else 0.0)
+    state.add_counter("gpu_init_row_major", 1.0 if variant == "two_shot_gpu_init" else 0.0)
 
 
 @bench.register
@@ -136,7 +141,7 @@ def _register_copy_engine(state, ctx, *, variant: str, prepost: bool = False) ->
 @bench.axis("N", [3584])
 @bench.axis("K", [8192])
 @bench.axis("dtype", [torch.float16])
-@bench.axis("variant", ["one_shot", "two_shot"])
+@bench.axis("variant", ["one_shot", "two_shot", "two_shot_gpu_init"])
 @bench.axis("prepost", [False, True])
 def matmul_all_reduce_copy_engine(state, ctx):
     """Kernel-based matmul_all_reduce with one_shot/two_shot variants and prepost option."""

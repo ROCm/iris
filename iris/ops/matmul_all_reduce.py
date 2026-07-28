@@ -24,6 +24,7 @@ from .workspace import FusedWorkspace
 
 _SUPPORTED_VARIANTS = ("one_shot", "two_shot")
 _MAX_ONE_SHOT_INBOX_ELEMENTS = 2**31
+_MAX_GEMM_SHARED_BYTES = 64 * 1024
 
 
 @triton.jit()
@@ -454,6 +455,29 @@ def _make_origami_selector(M: int, N: int, K: int, A: torch.Tensor, B: torch.Ten
     )
 
 
+def _dtype_element_size(dtype: torch.dtype) -> int:
+    return torch.empty((), dtype=dtype).element_size()
+
+
+def _clamp_block_k_for_shared_memory(
+    block_size_m: int,
+    block_size_n: int,
+    block_size_k: int,
+    dtype: torch.dtype,
+) -> int:
+    element_size = _dtype_element_size(dtype)
+    max_block_k = _MAX_GEMM_SHARED_BYTES // ((block_size_m + block_size_n) * element_size)
+    if block_size_k <= max_block_k:
+        return block_size_k
+
+    # Keep K tiles power-of-two-ish for the matmul pipeline. Current fallbacks
+    # use 32/64; this mainly prevents fp32 validation from selecting 80 KiB LDS.
+    if max_block_k < 16:
+        return max(1, max_block_k)
+    clamped = 1 << (max_block_k.bit_length() - 1)
+    return max(16, min(block_size_k, clamped))
+
+
 def _selector_active_cus(selector, device: torch.device) -> int:
     active_cus = getattr(selector, "_ACTIVE_CU", None)
     if active_cus is None or active_cus <= 0:
@@ -462,7 +486,15 @@ def _selector_active_cus(selector, device: torch.device) -> int:
     return int(active_cus)
 
 
-def _matmul_all_reduce_launch_params(M: int, N: int, K: int, selector, device: torch.device, variant: str) -> dict:
+def _matmul_all_reduce_launch_params(
+    M: int,
+    N: int,
+    K: int,
+    selector,
+    device: torch.device,
+    variant: str,
+    dtype: torch.dtype,
+) -> dict:
     block_size_m = selector.block_m
     block_size_n = selector.block_n
     block_size_k = selector.block_k
@@ -491,6 +523,8 @@ def _matmul_all_reduce_launch_params(M: int, N: int, K: int, selector, device: t
             group_size_m = 1
         num_stages = None
         selector_fallback = True
+
+    block_size_k = _clamp_block_k_for_shared_memory(block_size_m, block_size_n, block_size_k, dtype)
 
     num_xcds = selector.num_sms
     if num_xcds <= 0:
@@ -557,7 +591,7 @@ def matmul_all_reduce_preamble(
     if selector is None:
         c_dtype = dtype if out_dtype is None else out_dtype
         selector = _make_origami_selector(M, N, K, A, B, c_dtype)
-    launch = _matmul_all_reduce_launch_params(M, N, K, selector, A.device, config.all_reduce_variant)
+    launch = _matmul_all_reduce_launch_params(M, N, K, selector, A.device, config.all_reduce_variant, dtype)
     launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
     publish_counts = _partitioned_xcd_publish_counts(M, N, world_size, launch)
     launch["publish_tiles"] = publish_counts["tiles"]

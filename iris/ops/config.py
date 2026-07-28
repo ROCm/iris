@@ -32,7 +32,8 @@ class FusedConfig:
 
     CCL Parameters (for operations that need collective communication):
         all_reduce_variant: All-reduce algorithm variant. Options: "atomic", "ring",
-                           "one_shot", "two_shot", "spinlock". Default: "two_shot".
+                           "one_shot", "two_shot", "two_shot_gpu_init", "spinlock".
+                           Default: "two_shot".
         all_reduce_num_rings: Number of concurrent rings (for ring variant). Default: 1.
         reduce_num_sms: Maximum number of SMs to use for reduce-scatter style communication kernels. Default: 64.
 
@@ -60,7 +61,7 @@ class FusedConfig:
     allow_tf32: bool = True
 
     # CCL-specific parameters
-    all_reduce_variant: str = "two_shot"  # atomic, ring, one_shot, two_shot, spinlock
+    all_reduce_variant: str = "two_shot"  # atomic, ring, one_shot, two_shot, two_shot_gpu_init, spinlock
     all_reduce_num_rings: int = 1
     reduce_num_sms: int = 64
 
@@ -90,7 +91,7 @@ class FusedConfig:
             raise ValueError(f"chunk_size must be positive, got {self.chunk_size}")
 
         # Validate all_reduce_variant
-        valid_variants = ["atomic", "ring", "one_shot", "two_shot", "spinlock"]
+        valid_variants = ["atomic", "ring", "one_shot", "two_shot", "two_shot_gpu_init", "spinlock"]
         if self.all_reduce_variant not in valid_variants:
             raise ValueError(f"all_reduce_variant must be one of {valid_variants}, got {self.all_reduce_variant}")
 
