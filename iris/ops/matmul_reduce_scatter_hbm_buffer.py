@@ -113,10 +113,10 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
         sc_mask = (rm[:, None] < M) & (rn[None, :] < N)
         tl.store(sc_ptrs, c, mask=sc_mask, cache_modifier=".wt")
 
-        # Signal tile is ready
+        # Signal tile is ready — scope="sys" for cross-GPU visibility
         tile_id = pid_m * NUM_TILES_N + pid_n
         tl.debug_barrier()
-        tl.atomic_xchg(flags_ptr + tile_id, 1, sem="release", scope="gpu")
+        tl.atomic_xchg(flags_ptr + tile_id, 1, sem="release", scope="sys")
 
     else:
         # ==============================================================
@@ -130,9 +130,6 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
         # Scatter WGs loop over this rank's assigned tiles
         total_local_tiles = NUM_M_TILES_LOCAL * NUM_TILES_N
 
-        # Flags view for reading peer flags via iris.load
-        flags_view = iris.make_tensor_view(flags_ptr, NUM_M_TILES * NUM_TILES_N, 1, 1, 1)
-
         for tile_offset in range(scatter_pid, total_local_tiles, NUM_SCATTER_SMS):
             local_pid_m = tile_offset // NUM_TILES_N
             pid_n = tile_offset % NUM_TILES_N
@@ -141,20 +138,18 @@ def _hbm_buffer_matmul_reduce_scatter_kernel(
             global_pid_m = m_offset + local_pid_m
             tile_id = global_pid_m * NUM_TILES_N + pid_n
 
-            # Wait for ALL peers' GEMM to finish this tile
-            # Local rank: spin on local flag via atomic
-            while tl.atomic_add(flags_ptr + tile_id, 0, sem="acquire", scope="gpu") == 0:
-                pass
-
-            # Remote ranks: spin on peer flags via iris.load
+            # Wait for ALL ranks' GEMM to finish this tile
+            # Check each rank's flag via iris.load (flags are in symmetric heap)
+            flag_offset = tile_id + tl.arange(0, 1) * 0  # 1-element offset
             for peer in tl.static_range(world_size):
-                if peer != cur_rank:
-                    flag_ptr = flags_ptr + tile_id
-                    flag_addr = tl.make_block_ptr(flags_ptr, shape=(NUM_M_TILES * NUM_TILES_N,), strides=(1,), offsets=(tile_id,), block_shape=(1,), order=(0,))
-                    peer_flag = zero
-                    while peer_flag == 0:
-                        peer_val = iris.load(flags_ptr + tile_id + tl.arange(0, 1) * 0, cur_rank, peer, ctx.heap_bases, hint=(1, 1))
-                        peer_flag = tl.sum(peer_val)
+                peer_done = zero
+                while peer_done == 0:
+                    peer_val = iris.load(
+                        flags_ptr + flag_offset,
+                        cur_rank, peer, ctx.heap_bases,
+                        hint=(1, 1),
+                    )
+                    peer_done = tl.sum(peer_val)
 
             rm = global_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
