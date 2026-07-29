@@ -102,12 +102,55 @@ hipblas_ms = s.elapsed_time(e) / iters
 if rank == 0:
     print(f"Triton GEMM tuning: M={M}, N={N}, K_local={K_local}, TP={world_size}")
     print(f"hipBLASLt: {hipblas_ms:.4f}ms")
-    print()
-    print(f"{'bm':>4} {'bn':>4} {'bk':>4} {'gm':>3} {'sms':>4} {'w':>2} {'st':>3} {'mfma':>5} | {'ms':>8} {'vs hipBLASLt':>13}")
-    print("-" * 75)
 
 C_ref = torch.mm(A, B)
 torch.cuda.synchronize()
+
+# ===== Alternative baselines =====
+if rank == 0:
+    print("\nAlternative GEMM baselines:")
+
+# tritonblas (autotuned for MI355X)
+try:
+    import tritonblas
+    C_tb = torch.zeros(M, N, dtype=dtype, device=f"cuda:{rank}")
+    for _ in range(warmup):
+        tritonblas.matmul(A, B, C_tb)
+    torch.cuda.synchronize()
+    s.record()
+    for _ in range(iters):
+        tritonblas.matmul(A, B, C_tb)
+    e.record()
+    torch.cuda.synchronize()
+    tb_ms = s.elapsed_time(e) / iters
+    tb_diff = torch.abs(C_tb - C_ref).max().item()
+    if rank == 0:
+        print(f"  tritonblas: {tb_ms:.4f}ms ({tb_ms/hipblas_ms:.2f}x vs hipBLASLt) diff={tb_diff:.4f}")
+except Exception as ex:
+    if rank == 0:
+        print(f"  tritonblas: N/A ({str(ex)[:60]})")
+
+# torch.matmul (may pick different kernel than torch.mm)
+try:
+    for _ in range(warmup):
+        C_tm = torch.matmul(A, B)
+    torch.cuda.synchronize()
+    s.record()
+    for _ in range(iters):
+        C_tm = torch.matmul(A, B)
+    e.record()
+    torch.cuda.synchronize()
+    tm_ms = s.elapsed_time(e) / iters
+    if rank == 0:
+        print(f"  torch.matmul: {tm_ms:.4f}ms ({tm_ms/hipblas_ms:.2f}x)")
+except Exception as ex:
+    if rank == 0:
+        print(f"  torch.matmul: N/A")
+
+if rank == 0:
+    print()
+    print(f"{'bm':>4} {'bn':>4} {'bk':>4} {'gm':>3} {'sms':>4} {'w':>2} {'st':>3} {'mfma':>5} | {'ms':>8} {'vs hipBLASLt':>13}")
+    print("-" * 75)
 
 best_ms = 999.0
 best_cfg = None
