@@ -175,19 +175,19 @@ def _fused_ring_reduce_scatter_kernel(
                     while tl.atomic_add(prev_ring_flag_ptr, 0, sem="acquire", scope="sys") == 0:
                         pass
 
-                # Read prev rank's staged_c for this tile
+                # Read prev rank's staged_c for this tile via iris.load
                 sc_offset = rm[:, None] * stride_sc_m + rn[None, :] * stride_sc_n
-                prev_sc_ptrs = (prev_base + staged_c_offset).to(staged_c.type) + sc_offset
+                base_ptr = staged_c + sc_offset
                 mask = (rm[:, None] < M) & (rn[None, :] < N)
 
                 if is_full:
-                    prev_tile = tl.load(prev_sc_ptrs, cache_modifier=".cv")
+                    prev_tile = iris.load(base_ptr, cur_rank, prev_rank, heap_bases, hint=(1, BLOCK_SIZE_N))
                     own_tile = tl.load(staged_c + sc_offset)
                     result = prev_tile.to(acc_dtype) + own_tile.to(acc_dtype)
                     result_cast = result.to(staged_c.type.element_ty)
                     tl.store(staged_c + sc_offset, result_cast, cache_modifier=".wt")
                 else:
-                    prev_tile = tl.load(prev_sc_ptrs, mask=mask, other=0.0, cache_modifier=".cv")
+                    prev_tile = iris.load(base_ptr, cur_rank, prev_rank, heap_bases, mask=mask, hint=(1, BLOCK_SIZE_N))
                     own_tile = tl.load(staged_c + sc_offset, mask=mask, other=0.0)
                     result = prev_tile.to(acc_dtype) + own_tile.to(acc_dtype)
                     result_cast = result.to(staged_c.type.element_ty)
