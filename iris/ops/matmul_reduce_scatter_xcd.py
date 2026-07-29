@@ -46,6 +46,7 @@ def _xcd_aware_gemm_rs_kernel(
     stride_sc_m, stride_sc_n,
     stride_out_m, stride_out_n,
     heap_bases: tl.tensor,
+    flag_target,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -152,10 +153,11 @@ def _xcd_aware_gemm_rs_kernel(
             global_pid_m = m_offset + local_pid_m
             global_tile_id = global_pid_m * NUM_N_TILES + pid_n
 
-            # Wait until ALL ranks have signaled this tile.
-            # Each rank adds 1 to our local flag → wait for flag >= world_size.
-            # Poll is DEVICE-scope (cheap!) — peers pushed via fire-and-forget sys-scope writes.
-            while tl.atomic_add(tile_flags + global_tile_id, 0, sem="acquire", scope="gpu") < world_size:
+            # Wait until ALL ranks have signaled this tile THIS iteration.
+            # MONOTONIC counters: flags never reset. After iteration i,
+            # flag == i * world_size. Poll for flag >= flag_target.
+            # Poll is DEVICE-scope (cheap!) — peers pushed via fire-and-forget sys writes.
+            while tl.atomic_add(tile_flags + global_tile_id, 0, sem="acquire", scope="gpu") < flag_target:
                 pass
 
             rm = global_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -207,6 +209,7 @@ def matmul_reduce_scatter_xcd(
     num_xcds: int = 8,
     cus_per_xcd: int = 38,
     num_warps: int = 8,
+    workspace: Optional[dict] = None,
 ):
     """
     XCD-aware fused GEMM+RS.
@@ -230,14 +233,27 @@ def matmul_reduce_scatter_xcd(
     num_local_m_tiles = M_local // block_m
     total_local_tiles = num_local_m_tiles * num_n_tiles
 
-    staged_c = ctx.zeros((M, N), dtype=A.dtype)
-    tile_flags = ctx.zeros((total_tiles,), dtype=torch.int32)
-    heap_bases = ctx.get_heap_bases()
+    # Workspace holds persistent buffers + iteration counter.
+    # MONOTONIC flags: never reset, so no flag-reset race between iterations.
+    if workspace is None:
+        workspace = {}
+    if "staged_c" not in workspace or workspace["staged_c"].shape != (M, N):
+        workspace["staged_c"] = ctx.zeros((M, N), dtype=A.dtype)
+        workspace["tile_flags"] = ctx.zeros((total_tiles,), dtype=torch.int32)
+        workspace["iteration"] = 0
+        ctx.barrier()
 
+    staged_c = workspace["staged_c"]
+    tile_flags = workspace["tile_flags"]
+    workspace["iteration"] += 1
+    # After iteration i, each tile's flag == i * world_size
+    flag_target = workspace["iteration"] * world_size
+
+    heap_bases = ctx.get_heap_bases()
     num_sms = num_xcds * cus_per_xcd
 
-    # No host barrier — cross-rank sync via per-tile atomic counters.
-    # GEMM WGs push flags to all peers. Comm WGs poll locally.
+    # No host barrier — cross-rank sync via monotonic per-tile counters.
+    # GEMM WGs push +1 to all peers. Comm WGs poll locally for >= flag_target.
 
     launch_kwargs = {}
     if getattr(torch.version, "hip", None):
@@ -250,7 +266,7 @@ def matmul_reduce_scatter_xcd(
         B.stride(0), B.stride(1),
         staged_c.stride(0), staged_c.stride(1),
         output_tensor.stride(0), output_tensor.stride(1),
-        heap_bases, rank, world_size,
+        heap_bases, flag_target, rank, world_size,
         block_m, block_n, block_k, group_m,
         gemm_sms_per_xcd, num_xcds, cus_per_xcd, num_sms,
         K % block_k == 0,
@@ -260,4 +276,4 @@ def matmul_reduce_scatter_xcd(
         **launch_kwargs,
     )
 
-    ctx.barrier()
+    return workspace

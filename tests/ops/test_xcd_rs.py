@@ -39,7 +39,7 @@ torch.cuda.synchronize()
 
 # Test
 shmem.barrier()
-matmul_reduce_scatter_xcd(shmem, C_out, A, B)
+ws = matmul_reduce_scatter_xcd(shmem, C_out, A, B)
 torch.cuda.synchronize()
 
 max_diff = torch.abs(C_out - ref).max().item()
@@ -53,6 +53,21 @@ if max_diff > 1.0:
     shmem.barrier()
     dist.destroy_process_group()
     exit(1)
+
+# Repeated correctness — validates monotonic counters across iterations
+if rank == 0:
+    print("\nRepeated correctness (5 iterations):")
+for i in range(5):
+    C_out.zero_()
+    ws = matmul_reduce_scatter_xcd(shmem, C_out, A, B, workspace=ws)
+    torch.cuda.synchronize()
+    d = torch.abs(C_out - ref).max().item()
+    if rank == 0:
+        print(f"  iter {i+1}: max_diff={d:.6f} {'PASS' if d < 1.0 else 'FAIL'}")
+    if d > 1.0:
+        shmem.barrier()
+        dist.destroy_process_group()
+        exit(1)
 
 # Benchmark
 warmup, iters = 50, 200
@@ -83,17 +98,20 @@ for bn in [64, 128, 256]:
             continue
         C_out.zero_()
         shmem.barrier()
+        ws_bench = None
 
         try:
             for _ in range(warmup // 2):
-                matmul_reduce_scatter_xcd(shmem, C_out, A, B,
-                                          block_n=bn, gemm_sms_per_xcd=gemm_per_xcd)
+                ws_bench = matmul_reduce_scatter_xcd(shmem, C_out, A, B,
+                                          block_n=bn, gemm_sms_per_xcd=gemm_per_xcd,
+                                          workspace=ws_bench)
             torch.cuda.synchronize()
 
             s.record()
             for _ in range(iters):
-                matmul_reduce_scatter_xcd(shmem, C_out, A, B,
-                                          block_n=bn, gemm_sms_per_xcd=gemm_per_xcd)
+                ws_bench = matmul_reduce_scatter_xcd(shmem, C_out, A, B,
+                                          block_n=bn, gemm_sms_per_xcd=gemm_per_xcd,
+                                          workspace=ws_bench)
             e.record()
             torch.cuda.synchronize()
             ms = s.elapsed_time(e) / iters
