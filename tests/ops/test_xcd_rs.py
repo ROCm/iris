@@ -92,8 +92,8 @@ if rank == 0:
     print(f"\nRCCL: {rccl_ms:.3f}ms")
     print("XCD-aware fused sweep:")
 
-for bn in [64, 128, 256]:
-    for gemm_per_xcd in [8, 16, 24, 30, 34]:
+for bn in [128, 256, 512]:
+    for gemm_per_xcd in [30, 32, 34, 36, 37]:
         if M % (world_size * 128) != 0:
             continue
         C_out.zero_()
