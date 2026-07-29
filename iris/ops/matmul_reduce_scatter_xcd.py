@@ -202,13 +202,15 @@ def matmul_reduce_scatter_xcd(
     A: torch.Tensor,
     B: torch.Tensor,
     block_m: int = 128,
-    block_n: int = 64,
+    block_n: int = 256,   # tuned: bn=256 beats bn=64
     block_k: int = 64,
     group_m: int = 4,
-    gemm_sms_per_xcd: int = 30,
+    gemm_sms_per_xcd: int = 32,
     num_xcds: int = 8,
     cus_per_xcd: int = 38,
     num_warps: int = 8,
+    num_stages: int = 3,  # tuned: stages=3 beats stages=2
+    mfma: int = 32,       # tuned: 32x32x16 MFMA beats 16x16x16 for M>64
     workspace: Optional[dict] = None,
 ):
     """
@@ -257,7 +259,7 @@ def matmul_reduce_scatter_xcd(
 
     launch_kwargs = {}
     if getattr(torch.version, "hip", None):
-        launch_kwargs["matrix_instr_nonkdim"] = 16
+        launch_kwargs["matrix_instr_nonkdim"] = mfma
 
     _xcd_aware_gemm_rs_kernel[(num_sms,)](
         A, B, staged_c, output_tensor, tile_flags,
@@ -272,7 +274,7 @@ def matmul_reduce_scatter_xcd(
         K % block_k == 0,
         num_m_tiles, num_n_tiles, num_local_m_tiles,
         total_tiles, total_local_tiles,
-        num_warps=num_warps, num_stages=2,
+        num_warps=num_warps, num_stages=num_stages,
         **launch_kwargs,
     )
 
