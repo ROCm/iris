@@ -19,7 +19,6 @@ import iris
 from iris.ops import FusedConfig
 from iris.ops.matmul_reduce_scatter_ring import (
     matmul_reduce_scatter_ring,
-    matmul_reduce_scatter_ring_preamble,
 )
 
 
@@ -76,7 +75,12 @@ def test_ring_reduce_scatter(dtype, atol, M, N, K_local):
     shmem.barrier()
 
     matmul_reduce_scatter_ring(
-        shmem, iris_C, iris_A, B, config=config, num_scatter_sms=32,
+        shmem,
+        iris_C,
+        iris_A,
+        B,
+        config=config,
+        num_scatter_sms=32,
     )
     torch.cuda.synchronize()
 
@@ -84,13 +88,12 @@ def test_ring_reduce_scatter(dtype, atol, M, N, K_local):
     if rank == 0:
         print(f"Ring RS: {dtype}, M={M}, N={N}, K_local={K_local}, max_diff={max_diff:.6f}")
 
-    assert torch.allclose(iris_C, ref, atol=atol, rtol=1e-2), (
-        f"Rank {rank}: Max diff {max_diff}, expected < {atol}"
-    )
+    assert torch.allclose(iris_C, ref, atol=atol, rtol=1e-2), f"Rank {rank}: Max diff {max_diff}, expected < {atol}"
 
     shmem.barrier()
     del shmem
     import gc
+
     gc.collect()
 
 

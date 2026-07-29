@@ -92,8 +92,11 @@ def _fused_ring_reduce_scatter_kernel(
         tensorA = make_tensor_view(A, M, K_local, stride_am, stride_ak)
         tensorB = make_tensor_view(B, K_local, N, stride_bk, stride_bn)
         gemm_ctx = GemmContext(
-            BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
-            num_sms=1, even_k=EVEN_K,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            BLOCK_SIZE_K,
+            num_sms=1,
+            even_k=EVEN_K,
         )
         out_tile = Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
         acc = gemm_ctx.reduce_axis(tensorA, tensorB, out_tile)
@@ -165,13 +168,17 @@ def _fused_ring_reduce_scatter_kernel(
                         pass
 
                     # Also wait for prev rank's GEMM to finish this tile
-                    prev_gemm_flag_ptr = (prev_base + (gemm_flags_ptr.to(tl.uint64) - local_base) + tile_id).to(tl.pointer_type(tl.int32))
+                    prev_gemm_flag_ptr = (prev_base + (gemm_flags_ptr.to(tl.uint64) - local_base) + tile_id).to(
+                        tl.pointer_type(tl.int32)
+                    )
                     while tl.atomic_add(prev_gemm_flag_ptr, 0, sem="acquire", scope="sys") == 0:
                         pass
                 else:
                     # Step s>0: wait for prev rank to finish step s-1 for this tile
                     prev_ring_flag_offset = (step - 1) * TOTAL_LOCAL_TILES + tile_offset
-                    prev_ring_flag_ptr = (prev_base + (ring_flags_ptr.to(tl.uint64) - local_base) + prev_ring_flag_offset).to(tl.pointer_type(tl.int32))
+                    prev_ring_flag_ptr = (
+                        prev_base + (ring_flags_ptr.to(tl.uint64) - local_base) + prev_ring_flag_offset
+                    ).to(tl.pointer_type(tl.int32))
                     while tl.atomic_add(prev_ring_flag_ptr, 0, sem="acquire", scope="sys") == 0:
                         pass
 
