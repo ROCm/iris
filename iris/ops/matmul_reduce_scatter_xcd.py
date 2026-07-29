@@ -122,10 +122,20 @@ def _xcd_aware_gemm_rs_kernel(
             sc_offset = rm[:, None] * stride_sc_m + rn[None, :] * stride_sc_n
             tl.store(C_staged + sc_offset, c, cache_modifier=".wt")
 
-            # Signal tile done — DEVICE scope (intra-GPU, cheap)
-            # Comm WGs on the same GPU will see this.
+            # Signal tile done using atomic_add counter:
+            # Each rank adds 1 to the flag on ALL ranks (including self).
+            # Comm WGs wait until flag == world_size (all ranks done).
+            # Local add is device-scope (cheap).
+            # Remote adds are sys-scope (fire-and-forget, 1 per peer per tile).
             tl.debug_barrier()
-            tl.atomic_xchg(tile_flags + tile_id, 1, sem="release", scope="gpu")
+            tl.atomic_add(tile_flags + tile_id, 1, sem="release", scope="gpu")
+            for peer in tl.static_range(world_size):
+                if peer != cur_rank:
+                    iris.atomic_add(
+                        tile_flags + tile_id, 1,
+                        cur_rank, peer, heap_bases,
+                        sem="release", scope="sys",
+                    )
 
     elif local_pid < CUS_PER_XCD:
         # ==============================================================
@@ -143,13 +153,11 @@ def _xcd_aware_gemm_rs_kernel(
             global_pid_m = m_offset + local_pid_m
             global_tile_id = global_pid_m * NUM_N_TILES + pid_n
 
-            # Wait for LOCAL GEMM to finish this tile — DEVICE scope (cheap!)
-            while tl.atomic_add(tile_flags + global_tile_id, 0, sem="acquire", scope="gpu") == 0:
+            # Wait until ALL ranks have signaled this tile.
+            # Each rank adds 1 to our local flag → wait for flag >= world_size.
+            # Poll is DEVICE-scope (cheap!) — peers pushed via fire-and-forget sys-scope writes.
+            while tl.atomic_add(tile_flags + global_tile_id, 0, sem="acquire", scope="gpu") < world_size:
                 pass
-
-            # For peer tiles: we rely on same-stream ordering from ctx.barrier()
-            # before kernel launch. All peers' GEMM output is visible.
-            # No per-tile cross-rank sync needed.
 
             rm = global_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -229,7 +237,8 @@ def matmul_reduce_scatter_xcd(
 
     num_sms = num_xcds * cus_per_xcd
 
-    ctx.barrier()
+    # No host barrier — cross-rank sync via per-tile atomic counters.
+    # GEMM WGs push flags to all peers. Comm WGs poll locally.
 
     launch_kwargs = {}
     if getattr(torch.version, "hip", None):
