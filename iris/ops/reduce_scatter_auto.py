@@ -12,11 +12,22 @@ The physics:
 Small messages: launch/step overhead dominates -> one-shot wins
 Large messages: bandwidth dominates -> ring wins
 
-Measured crossover on MI355X (ws=2, N=2880, FP16): M ~ 3000
-  M=2048: one-shot 0.130ms vs RCCL 0.173ms (1.33x faster)
-  M=4096: one-shot 0.314ms vs RCCL 0.308ms (0.98x, ring wins)
+Measured on MI355X (N=2880, FP16):
 
-Crossover is expressed in bytes-per-rank so it generalizes across shapes.
+  ws=2 — RCCL ring is 1 step (already optimal). One-shot moves 2x the
+  bytes for zero step savings, so there IS a crossover at ~8MB/rank:
+    M=2048 (5.9MB):  one-shot 0.130ms vs RCCL 0.173ms  -> 1.33x
+    M=4096 (11.8MB): one-shot 0.314ms vs RCCL 0.308ms  -> RCCL wins
+
+  ws=4 — RCCL ring needs 3 sequential steps. One-shot does a single
+  parallel burst. Step overhead never amortizes, so one-shot wins at
+  EVERY size measured:
+    M=2048:  0.072ms vs 0.107ms -> 1.50x
+    M=4096:  0.142ms vs 0.174ms -> 1.23x
+    M=8192:  0.275ms vs 0.317ms -> 1.15x
+    M=16384: 0.537ms vs 0.604ms -> 1.13x
+
+So the size check only applies at ws=2.
 """
 
 from typing import Optional
@@ -196,8 +207,16 @@ def reduce_scatter_auto(
         use_one_shot = False
     elif force == "one_shot":
         use_one_shot = True
-    else:
+    elif world_size == 2:
+        # ws=2 is the only case where RCCL's ring is already optimal
+        # (1 step, no coordination overhead to amortize). One-shot moves
+        # 2x the bytes for zero step savings, so RCCL wins at large sizes.
         use_one_shot = bytes_per_rank < threshold
+    else:
+        # ws>=4: RCCL ring needs (ws-1) sequential steps. One-shot does a
+        # single parallel burst. The step overhead never amortizes, so
+        # one-shot wins at every measured size (1.13x-1.50x at ws=4).
+        use_one_shot = True
 
     if use_one_shot:
         one_shot_reduce_scatter(ctx, output_tensor, input_tensor, **kwargs)
