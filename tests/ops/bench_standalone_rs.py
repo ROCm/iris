@@ -55,7 +55,7 @@ from iris.ccl.config import Config as CCLConfig
 
 input_iris = shmem.zeros((M, N), dtype=dtype)
 input_iris.copy_(input_rccl)
-output_iris = torch.zeros(M_local, N, dtype=dtype, device=f"cuda:{rank}")
+output_iris = shmem.zeros((M, N), dtype=dtype)
 
 ccl_config = CCLConfig()
 shmem.barrier()
@@ -96,7 +96,9 @@ ref = torch.empty(M_local, N, dtype=dtype, device=f"cuda:{rank}")
 dist.reduce_scatter_tensor(ref, input_rccl, op=dist.ReduceOp.SUM)
 torch.cuda.synchronize()
 
-max_diff = torch.abs(output_iris - ref).max().item()
+m_start = rank * M_local
+m_end = m_start + M_local
+max_diff = torch.abs(output_iris[m_start:m_end] - ref).max().item()
 if rank == 0:
     print(f"\nCorrectness: max_diff = {max_diff:.6f} {'PASS' if max_diff < 1.0 else 'FAIL'}")
 
