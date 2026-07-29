@@ -39,6 +39,7 @@ from .all_gather_matmul import all_gather_matmul, all_gather_matmul_preamble
 from .all_gather_matmul_hbm_buffer import all_gather_matmul_hbm_buffer, all_gather_matmul_hbm_buffer_preamble
 from .matmul_all_gather import matmul_all_gather
 from .matmul_reduce_scatter import matmul_reduce_scatter, matmul_reduce_scatter_preamble
+from .matmul_reduce_scatter_fast import matmul_reduce_scatter_fast, fast_reduce_scatter
 
 
 class OpsNamespace:
@@ -167,6 +168,45 @@ class OpsNamespace:
         """
         return matmul_reduce_scatter(self._shmem, output_tensor, A, B, bias, async_op, config, workspace)
 
+    def matmul_reduce_scatter_fast(self, output_tensor, A, B, **kwargs):
+        """
+        Fast GEMM + ReduceScatter: hipBLASLt GEMM + one-shot pull RS.
+
+        1.23-2.06x faster than torch.mm + RCCL RS on GPT-OSS-120B shapes.
+
+        Args:
+            output_tensor: Output (M_local, N) — this rank's reduced shard
+            A: Input matrix (M, K_local) — must be in symmetric heap
+            B: Input matrix (K_local, N)
+            **kwargs: block_m, block_n, num_sms, num_warps (auto-selected if omitted)
+
+        Example:
+            >>> A = shmem.zeros((M, K_local), dtype=torch.float16)
+            >>> output = torch.zeros(M_local, N, dtype=torch.float16, device="cuda")
+            >>> shmem.ops.matmul_reduce_scatter_fast(output, A, B)
+        """
+        return matmul_reduce_scatter_fast(self._shmem, output_tensor, A, B, **kwargs)
+
+    def fast_reduce_scatter(self, output_tensor, input_tensor, **kwargs):
+        """
+        Fast standalone reduce-scatter via one-shot pull.
+
+        Input must be in the symmetric heap. Each rank reads all peers'
+        partials via iris.load, reduces in fp32, stores to output.
+
+        Args:
+            output_tensor: Output (M_local, N)
+            input_tensor: Input (M, N) — in symmetric heap
+            **kwargs: block_m, block_n, num_sms, num_warps (auto-selected if omitted)
+
+        Example:
+            >>> C_partial = shmem.zeros((M, N), dtype=torch.float16)
+            >>> torch.mm(A, B, out=C_partial)
+            >>> output = torch.zeros(M_local, N, dtype=torch.float16, device="cuda")
+            >>> shmem.ops.fast_reduce_scatter(output, C_partial)
+        """
+        return fast_reduce_scatter(self._shmem, output_tensor, input_tensor, **kwargs)
+
 
 # Export public API
 __all__ = [
@@ -186,4 +226,6 @@ __all__ = [
     "matmul_all_gather",
     "matmul_reduce_scatter",
     "matmul_reduce_scatter_preamble",
+    "matmul_reduce_scatter_fast",
+    "fast_reduce_scatter",
 ]
