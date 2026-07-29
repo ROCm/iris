@@ -77,28 +77,33 @@ if rank == 0:
     print(f"\nRCCL: {rccl_ms:.3f}ms")
     print("XCD-aware fused sweep:")
 
-for gemm_per_xcd in [8, 16, 24, 30, 34]:
-    C_out.zero_()
-    shmem.barrier()
+for bn in [64, 128, 256]:
+    for gemm_per_xcd in [8, 16, 24, 30, 34]:
+        if M % (world_size * 128) != 0:
+            continue
+        C_out.zero_()
+        shmem.barrier()
 
-    try:
-        for _ in range(warmup // 2):
-            matmul_reduce_scatter_xcd(shmem, C_out, A, B, gemm_sms_per_xcd=gemm_per_xcd)
-        torch.cuda.synchronize()
+        try:
+            for _ in range(warmup // 2):
+                matmul_reduce_scatter_xcd(shmem, C_out, A, B,
+                                          block_n=bn, gemm_sms_per_xcd=gemm_per_xcd)
+            torch.cuda.synchronize()
 
-        s.record()
-        for _ in range(iters):
-            matmul_reduce_scatter_xcd(shmem, C_out, A, B, gemm_sms_per_xcd=gemm_per_xcd)
-        e.record()
-        torch.cuda.synchronize()
-        ms = s.elapsed_time(e) / iters
+            s.record()
+            for _ in range(iters):
+                matmul_reduce_scatter_xcd(shmem, C_out, A, B,
+                                          block_n=bn, gemm_sms_per_xcd=gemm_per_xcd)
+            e.record()
+            torch.cuda.synchronize()
+            ms = s.elapsed_time(e) / iters
 
-        comm_per_xcd = 38 - gemm_per_xcd
-        if rank == 0:
-            print(f"  gemm={gemm_per_xcd}/xcd comm={comm_per_xcd}/xcd: {ms:.3f}ms ({rccl_ms/ms:.2f}x)")
-    except Exception as ex:
-        if rank == 0:
-            print(f"  gemm={gemm_per_xcd}/xcd: ERROR ({str(ex)[:80]})")
+            comm_per_xcd = 38 - gemm_per_xcd
+            if rank == 0:
+                print(f"  bn={bn:3d} gemm={gemm_per_xcd}/xcd comm={comm_per_xcd}/xcd: {ms:.3f}ms ({rccl_ms/ms:.2f}x)")
+        except Exception as ex:
+            if rank == 0:
+                print(f"  bn={bn:3d} gemm={gemm_per_xcd}/xcd: ERROR ({str(ex)[:80]})")
 
 shmem.barrier()
 dist.destroy_process_group()
