@@ -122,17 +122,16 @@ def _xcd_aware_gemm_rs_kernel(
             sc_offset = rm[:, None] * stride_sc_m + rn[None, :] * stride_sc_n
             tl.store(C_staged + sc_offset, c, cache_modifier=".wt")
 
-            # Signal tile done using atomic_add counter:
-            # Each rank adds 1 to the flag on ALL ranks (including self).
-            # Comm WGs wait until flag == world_size (all ranks done).
-            # Local add is device-scope (cheap).
-            # Remote adds are sys-scope (fire-and-forget, 1 per peer per tile).
+            # Signal tile done using atomic_add counter.
+            # Index by LOGICAL tile position (pid_m * N_tiles + pid_n),
+            # not the swizzled iteration index.
+            logical_tile_id = pid_m * NUM_N_TILES + pid_n
             tl.debug_barrier()
-            tl.atomic_add(tile_flags + tile_id, 1, sem="release", scope="gpu")
+            tl.atomic_add(tile_flags + logical_tile_id, 1, sem="release", scope="gpu")
             for peer in tl.static_range(world_size):
                 if peer != cur_rank:
                     iris.atomic_add(
-                        tile_flags + tile_id, 1,
+                        tile_flags + logical_tile_id, 1,
                         cur_rank, peer, heap_bases,
                         sem="release", scope="sys",
                     )
@@ -232,7 +231,7 @@ def matmul_reduce_scatter_xcd(
     total_local_tiles = num_local_m_tiles * num_n_tiles
 
     staged_c = ctx.zeros((M, N), dtype=A.dtype)
-    tile_flags = torch.zeros(total_tiles, dtype=torch.int32, device=f"cuda:{rank}")
+    tile_flags = ctx.zeros((total_tiles,), dtype=torch.int32)
     heap_bases = ctx.get_heap_bases()
 
     num_sms = num_xcds * cus_per_xcd
