@@ -33,6 +33,7 @@ def _batched_fusion_kernel(
     stride_am, stride_ak,
     stride_bk, stride_bn,
     stride_out_m, stride_out_n,
+    stride_slot,
     heap_bases: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -41,6 +42,7 @@ def _batched_fusion_kernel(
     BLOCK_K: tl.constexpr,
     NUM_SMS: tl.constexpr,
     BATCH: tl.constexpr,      # tiles computed before scattering
+    USE_SLOTS: tl.constexpr,  # bulk store to slots vs element-wise atomics
     EVEN_K: tl.constexpr,
     NUM_M_TILES: tl.constexpr,
     NUM_N_TILES: tl.constexpr,
@@ -108,14 +110,47 @@ def _batched_fusion_kernel(
                 out_msk = (out_rm[:, None] < M_local) & (out_rn[None, :] < N)
 
                 c = acc.to(C_out.type.element_ty)
-                if owner == cur_rank:
-                    tl.atomic_add(C_out + out_off, c, mask=out_msk)
+                if USE_SLOTS:
+                    # Bulk store into the owner's per-source slot.
+                    # C_out is [world_size, M_local, N]; we own slot cur_rank.
+                    # No atomics — a plain vectorized store. A second pass
+                    # sums the ws slots locally.
+                    slot_off = cur_rank * stride_slot + out_off
+                    if owner == cur_rank:
+                        tl.store(C_out + slot_off, c, mask=out_msk)
+                    else:
+                        iris.store(C_out + slot_off, c,
+                                   cur_rank, owner, heap_bases, mask=out_msk)
                 else:
-                    iris.atomic_add(
-                        C_out + out_off, c,
-                        cur_rank, owner, heap_bases,
-                        mask=out_msk, sem="relaxed", scope="sys",
-                    )
+                    # Element-wise remote atomics (BLOCK_M*BLOCK_N per tile)
+                    if owner == cur_rank:
+                        tl.atomic_add(C_out + out_off, c, mask=out_msk)
+                    else:
+                        iris.atomic_add(
+                            C_out + out_off, c,
+                            cur_rank, owner, heap_bases,
+                            mask=out_msk, sem="relaxed", scope="sys",
+                        )
+
+
+@triton.jit
+def _local_slot_reduce(
+    slots, out,
+    n_elem,
+    stride_slot,
+    world_size: tl.constexpr,
+    BLOCK: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+):
+    """Sum the ws per-source slots into the final output. Pure local HBM."""
+    pid = tl.program_id(0)
+    for base in range(pid * BLOCK, n_elem, NUM_SMS * BLOCK):
+        offs = base + tl.arange(0, BLOCK)
+        msk = offs < n_elem
+        acc = tl.zeros((BLOCK,), dtype=tl.float32)
+        for r in tl.static_range(world_size):
+            acc += tl.load(slots + r * stride_slot + offs, mask=msk, other=0.0).to(tl.float32)
+        tl.store(out + offs, acc.to(out.type.element_ty), mask=msk)
 
 
 def matmul_reduce_scatter_batched(
@@ -130,6 +165,8 @@ def matmul_reduce_scatter_batched(
     num_sms: int = 304,
     num_warps: int = 4,
     mfma: int = 32,
+    use_slots: bool = False,
+    slots_buf: Optional[torch.Tensor] = None,
 ):
     """
     Full fusion, no CU split. All WGs compute `batch` tiles into registers,
@@ -150,7 +187,21 @@ def matmul_reduce_scatter_batched(
     num_n_tiles = (N + block_n - 1) // block_n
     total_tiles = num_m_tiles * num_n_tiles
 
-    output_tensor.zero_()
+    hb = ctx.get_heap_bases()
+
+    if use_slots:
+        # Per-source slots: [world_size, M_local, N] in the symmetric heap.
+        if slots_buf is None:
+            slots_buf = ctx.zeros((world_size, M_local, N), dtype=A.dtype)
+        target = slots_buf
+        stride_slot = slots_buf.stride(0)
+        s_m, s_n = slots_buf.stride(1), slots_buf.stride(2)
+    else:
+        output_tensor.zero_()
+        target = output_tensor
+        stride_slot = 0
+        s_m, s_n = output_tensor.stride(0), output_tensor.stride(1)
+
     ctx.barrier()
 
     kw = {"num_warps": num_warps, "num_stages": 2}
@@ -158,17 +209,28 @@ def matmul_reduce_scatter_batched(
         kw["matrix_instr_nonkdim"] = mfma
 
     _batched_fusion_kernel[(num_sms,)](
-        A, B, output_tensor,
+        A, B, target,
         M, N, K, M_local,
         A.stride(0), A.stride(1),
         B.stride(0), B.stride(1),
-        output_tensor.stride(0), output_tensor.stride(1),
-        ctx.get_heap_bases(), rank, world_size,
+        s_m, s_n, stride_slot,
+        hb, rank, world_size,
         block_m, block_n, block_k,
-        num_sms, batch,
+        num_sms, batch, use_slots,
         K % block_k == 0,
         num_m_tiles, num_n_tiles, total_tiles,
         **kw,
     )
 
     ctx.barrier()
+
+    if use_slots:
+        # Second pass: sum the ws slots locally (pure HBM, no XGMI).
+        n_elem = M_local * N
+        _local_slot_reduce[(num_sms,)](
+            slots_buf, output_tensor, n_elem, stride_slot,
+            world_size, 4096, num_sms,
+            num_warps=4,
+        )
+
+    return slots_buf

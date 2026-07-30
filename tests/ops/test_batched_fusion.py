@@ -54,62 +54,65 @@ if rank == 0:
     print(f"RCCL: {rccl_ms:.4f}ms")
     print(f"Two-kernel best (known): 0.130-0.138ms")
     print()
-    print(f"{'bm':>4} {'bn':>4} {'batch':>6} {'sms':>4} {'w':>2} | {'reg KB/tile':>11} {'ms':>9} {'vs RCCL':>8} {'ok':>4}")
-    print("-" * 66)
+    print(f"{'mode':>7} {'bm':>4} {'bn':>4} {'batch':>6} {'sms':>4} {'w':>2} | {'regKB':>7} {'ms':>9} {'vs RCCL':>8}")
+    print("-" * 68)
 
 best = (999.0, None)
-for bm in [16, 32, 64]:
-    if M_local % bm != 0:
-        continue
-    for bn in [32, 64]:
-        reg_kb = bm * bn * 4 / 1024   # fp32 accumulator per tile
-        for batch in [1, 2, 4, 8]:
-            if reg_kb * batch > 96:   # VGPR budget guard
-                continue
-            for sms in [128, 256, 304]:
-                for warps in [4, 8]:
-                    try:
-                        C_out.zero_()
-                        shmem.barrier()
-                        for _ in range(10):
-                            matmul_reduce_scatter_batched(
-                                shmem, C_out, A, B,
-                                block_m=bm, block_n=bn, batch=batch,
-                                num_sms=sms, num_warps=warps)
-                        torch.cuda.synchronize()
+for use_slots in [False, True]:
+    mode = "slots" if use_slots else "atomic"
+    slots_buf = None
+    for bm in [16, 32, 64]:
+        if M_local % bm != 0:
+            continue
+        for bn in [32, 64]:
+            reg_kb = bm * bn * 4 / 1024   # fp32 accumulator per tile
+            for batch in [1, 2, 4, 8]:
+                if reg_kb * batch > 96:   # VGPR budget guard
+                    continue
+                for sms in [128, 256, 304]:
+                    for warps in [4, 8]:
+                        try:
+                            C_out.zero_()
+                            shmem.barrier()
+                            for _ in range(10):
+                                slots_buf = matmul_reduce_scatter_batched(
+                                    shmem, C_out, A, B,
+                                    block_m=bm, block_n=bn, batch=batch,
+                                    num_sms=sms, num_warps=warps,
+                                    use_slots=use_slots, slots_buf=slots_buf)
+                            torch.cuda.synchronize()
 
-                        d = torch.abs(C_out - ref).max().item()
-                        ok = d < 1.0
-                        if not ok:
+                            d = torch.abs(C_out - ref).max().item()
+                            if d > 1.0:
+                                continue
+
+                            s.record()
+                            for _ in range(iters):
+                                slots_buf = matmul_reduce_scatter_batched(
+                                    shmem, C_out, A, B,
+                                    block_m=bm, block_n=bn, batch=batch,
+                                    num_sms=sms, num_warps=warps,
+                                    use_slots=use_slots, slots_buf=slots_buf)
+                            e.record()
+                            torch.cuda.synchronize()
+                            ms = s.elapsed_time(e) / iters
+
+                            if ms < best[0]:
+                                best = (ms, (mode, bm, bn, batch, sms, warps))
+                                if rank == 0:
+                                    print(f"{mode:>7} {bm:4d} {bn:4d} {batch:6d} {sms:4d} {warps:2d} | "
+                                          f"{reg_kb*batch:6.1f} {ms:9.4f} {rccl_ms/ms:7.2f}x  ***")
+                        except Exception:
                             continue
-
-                        s.record()
-                        for _ in range(iters):
-                            matmul_reduce_scatter_batched(
-                                shmem, C_out, A, B,
-                                block_m=bm, block_n=bn, batch=batch,
-                                num_sms=sms, num_warps=warps)
-                        e.record()
-                        torch.cuda.synchronize()
-                        ms = s.elapsed_time(e) / iters
-
-                        if ms < best[0]:
-                            best = (ms, (bm, bn, batch, sms, warps))
-                            if rank == 0:
-                                print(f"{bm:4d} {bn:4d} {batch:6d} {sms:4d} {warps:2d} | "
-                                      f"{reg_kb*batch:10.1f} {ms:9.4f} {rccl_ms/ms:7.2f}x "
-                                      f"{'PASS':>4}  ***")
-                    except Exception:
-                        continue
 
 if rank == 0:
     print()
     print(f"RCCL:          {rccl_ms:.4f}ms")
     print(f"Two-kernel:    ~0.134ms  ({rccl_ms/0.134:.2f}x)")
     if best[1]:
-        bm, bn, batch, sms, w = best[1]
+        mode, bm, bn, batch, sms, w = best[1]
         print(f"Batched fusion: {best[0]:.4f}ms ({rccl_ms/best[0]:.2f}x)")
-        print(f"  bm={bm} bn={bn} batch={batch} sms={sms} warps={w}")
+        print(f"  mode={mode} bm={bm} bn={bn} batch={batch} sms={sms} warps={w}")
         if best[0] < 0.134:
             print(f"  *** BEATS TWO-KERNEL by {(0.134-best[0])*1000:.1f}us ***")
         else:
