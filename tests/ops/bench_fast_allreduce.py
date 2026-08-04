@@ -185,3 +185,92 @@ if rank == 0:
 
 shmem.barrier()
 dist.destroy_process_group()
+
+# ---- fused two-shot: one kernel, monotonic counters, no host barrier ----
+if rank == 0:
+    print()
+    print("=== FUSED TWO-SHOT (1 launch, no barrier) ===")
+
+try:
+    from iris.ops.all_reduce_fast import fused_two_shot_all_reduce
+
+    C_out3 = torch.zeros(M, N, dtype=dtype, device=f"cuda:{rank}")
+    torch.mm(A, B, out=C_sym)
+    shmem.barrier()
+    ws3 = fused_two_shot_all_reduce(shmem, C_out3, C_sym)
+    torch.cuda.synchronize()
+    d3 = torch.abs(C_out3 - ref).max().item()
+    if rank == 0:
+        print(f"  correctness: max_diff={d3:.6f} {'PASS' if d3 < 1.0 else 'FAIL'}")
+
+    if d3 < 1.0:
+        # repeated-call correctness validates the monotonic counters
+        ok = True
+        for i in range(5):
+            C_out3.zero_()
+            ws3 = fused_two_shot_all_reduce(shmem, C_out3, C_sym, workspace=ws3)
+            torch.cuda.synchronize()
+            di = torch.abs(C_out3 - ref).max().item()
+            if di > 1.0:
+                ok = False
+                if rank == 0:
+                    print(f"  iter {i+1}: FAIL diff={di:.4f}")
+                break
+        if rank == 0 and ok:
+            print(f"  5 repeated iterations: PASS")
+
+        if ok:
+            f_ms = bench(lambda: fused_two_shot_all_reduce(
+                shmem, C_out3, C_sym, workspace=ws3))
+            if rank == 0:
+                print(f"  standalone:  {f_ms:.4f}ms  ({rccl_ar_ms/f_ms:.2f}x vs RCCL AR)")
+
+            f_e2e = bench(lambda: (torch.mm(A, B, out=C_sym),
+                                   fused_two_shot_all_reduce(
+                                       shmem, C_out3, C_sym, workspace=ws3)))
+            if rank == 0:
+                print(f"  E2E:         {f_e2e:.4f}ms  ({rccl_e2e/f_e2e:.2f}x vs RCCL E2E)")
+
+            # sweep
+            if rank == 0:
+                print()
+                print("  sweep:")
+            fbest = (999.0, None)
+            for bm_ in [32, 64, 128]:
+                if (M // world_size) % bm_:
+                    continue
+                for bn_ in [64, 128]:
+                    for sms_ in [64, 128, 196, 304]:
+                        for w_ in [2, 4, 8]:
+                            try:
+                                wsx = None
+                                C_out3.zero_()
+                                for _ in range(8):
+                                    wsx = fused_two_shot_all_reduce(
+                                        shmem, C_out3, C_sym, workspace=wsx,
+                                        block_m=bm_, block_n=bn_,
+                                        num_sms=sms_, num_warps=w_)
+                                torch.cuda.synchronize()
+                                if torch.abs(C_out3 - ref).max().item() > 1.0:
+                                    continue
+                                ms = bench(lambda: fused_two_shot_all_reduce(
+                                    shmem, C_out3, C_sym, workspace=wsx,
+                                    block_m=bm_, block_n=bn_,
+                                    num_sms=sms_, num_warps=w_))
+                                if ms < fbest[0]:
+                                    fbest = (ms, (bm_, bn_, sms_, w_))
+                                    if rank == 0:
+                                        print(f"    bm={bm_:3d} bn={bn_:3d} sms={sms_:3d} "
+                                              f"w={w_} : {ms:.4f}ms "
+                                              f"({rccl_ar_ms/ms:.2f}x)  ***")
+                            except Exception:
+                                continue
+            if rank == 0 and fbest[1]:
+                print()
+                print(f"  best fused two-shot: {fbest[0]:.4f}ms "
+                      f"({rccl_ar_ms/fbest[0]:.2f}x vs RCCL AR)")
+except Exception as ex:
+    if rank == 0:
+        print(f"  fused two-shot: ERROR {str(ex)[:70]}")
+
+shmem.barrier()

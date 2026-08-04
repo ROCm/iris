@@ -331,3 +331,199 @@ def matmul_all_reduce_fast(ctx, output_tensor, A, B, variant="one_shot", **kw):
         return two_shot_all_reduce(ctx, output_tensor, C_partial, **kw)
     one_shot_all_reduce(ctx, output_tensor, C_partial, **kw)
     return None
+
+
+# ==========================================================================
+# Fused two-shot: RS + AG in ONE kernel, monotonic-counter sync.
+#
+# The two-phase version pays a host ctx.barrier() between reduce-scatter and
+# all-gather. Measured at ws=8 that barrier is 0.071ms — larger than the
+# entire traffic saving two-shot buys over one-shot.
+#
+# This fuses both phases into a single launch and replaces the host barrier
+# with per-tile monotonic counters:
+#   - after its RS tile, a WG adds +1 to that tile's counter on EVERY rank
+#     (local add is device-scope; remote adds are fire-and-forget sys-scope)
+#   - before gathering a tile, a WG polls its LOCAL counter for >= target
+#     (device-scope poll — cheap; peers pushed the increments to us)
+#
+# Counters are monotonic (never reset), so `target = iteration * world_size`
+# and there is no flag-reset race between calls. Same pattern that fixed the
+# XCD fused GEMM+RS kernel.
+# ==========================================================================
+
+
+@triton.jit
+def _fused_two_shot_ar_kernel(
+    input_ptr,
+    scratch_ptr,
+    output_ptr,
+    flags_ptr,
+    M,
+    N,
+    M_local,
+    stride_in_m,
+    stride_in_n,
+    stride_s_m,
+    stride_s_n,
+    stride_out_m,
+    stride_out_n,
+    heap_bases: tl.tensor,
+    flag_target,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    NUM_M_TILES_LOCAL: tl.constexpr,
+    NUM_N_TILES: tl.constexpr,
+    TOTAL_LOCAL_TILES: tl.constexpr,
+    NUM_M_TILES: tl.constexpr,
+    TOTAL_TILES: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    acc_dtype = tl.float32
+    m_offset = cur_rank * NUM_M_TILES_LOCAL
+
+    # ---------------- Phase 1: reduce-scatter (pull) ----------------
+    for tile_id in range(pid, TOTAL_LOCAL_TILES, NUM_SMS):
+        local_pid_m = tile_id // NUM_N_TILES
+        pid_n = tile_id % NUM_N_TILES
+        global_pid_m = m_offset + local_pid_m
+
+        rm = global_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        off = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+        base_ptr = input_ptr + off
+        s_off = rm[:, None] * stride_s_m + rn[None, :] * stride_s_n
+        is_full = (global_pid_m * BLOCK_SIZE_M + BLOCK_SIZE_M <= M) & (
+            pid_n * BLOCK_SIZE_N + BLOCK_SIZE_N <= N
+        )
+
+        if is_full:
+            start_rank = pid % world_size
+            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases,
+                            hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                r = (start_rank + i) % world_size
+                acc += iris.load(base_ptr, cur_rank, r, heap_bases,
+                                 hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+            tl.store(scratch_ptr + s_off, acc.to(scratch_ptr.type.element_ty),
+                     cache_modifier=".wt")
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            start_rank = pid % world_size
+            acc = iris.load(base_ptr, cur_rank, start_rank, heap_bases,
+                            mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+            for i in tl.static_range(1, world_size):
+                r = (start_rank + i) % world_size
+                acc += iris.load(base_ptr, cur_rank, r, heap_bases,
+                                 mask=mask, hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+            tl.store(scratch_ptr + s_off, acc.to(scratch_ptr.type.element_ty),
+                     mask=mask, cache_modifier=".wt")
+
+        # Signal this shard-tile is reduced. Index by GLOBAL tile position so
+        # the gather phase on any rank can address it.
+        global_tile_id = global_pid_m * NUM_N_TILES + pid_n
+        tl.debug_barrier()
+        tl.atomic_add(flags_ptr + global_tile_id, 1, sem="release", scope="gpu")
+        for peer in tl.static_range(world_size):
+            if peer != cur_rank:
+                iris.atomic_add(flags_ptr + global_tile_id, 1,
+                                cur_rank, peer, heap_bases,
+                                sem="release", scope="sys")
+
+    # ---------------- Phase 2: all-gather (pull) ----------------
+    m_tiles_per_rank = NUM_M_TILES_LOCAL
+    for tile_id in range(pid, TOTAL_TILES, NUM_SMS):
+        pid_m = tile_id // NUM_N_TILES
+        pid_n = tile_id % NUM_N_TILES
+        owner = pid_m // m_tiles_per_rank
+
+        # Wait until the owning rank has reduced this tile. Poll is LOCAL
+        # (device-scope) — every rank pushed its increment to us already.
+        while tl.atomic_add(flags_ptr + tile_id, 0,
+                            sem="acquire", scope="gpu") < flag_target:
+            pass
+
+        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        s_off = rm[:, None] * stride_s_m + rn[None, :] * stride_s_n
+        o_off = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
+        is_full = (pid_m * BLOCK_SIZE_M + BLOCK_SIZE_M <= M) & (
+            pid_n * BLOCK_SIZE_N + BLOCK_SIZE_N <= N
+        )
+
+        if is_full:
+            v = iris.load(scratch_ptr + s_off, cur_rank, owner, heap_bases,
+                          hint=(1, BLOCK_SIZE_N))
+            tl.store(output_ptr + o_off, v)
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            v = iris.load(scratch_ptr + s_off, cur_rank, owner, heap_bases,
+                          mask=mask, hint=(1, BLOCK_SIZE_N))
+            tl.store(output_ptr + o_off, v, mask=mask)
+
+
+def fused_two_shot_all_reduce(ctx, output_tensor, input_tensor,
+                              workspace=None, **kw):
+    """
+    Two-shot AllReduce in ONE kernel launch, no host barrier.
+
+    Traffic 2(ws-1)/ws * M * N — matches RCCL's ring — but pull-direction
+    throughout, one launch, and device-scope polling for the phase handoff.
+
+    Returns the workspace dict (reuse it across calls; it carries the
+    monotonic iteration counter).
+    """
+    M, N = input_tensor.shape
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
+    M_local = M // world_size
+    assert output_tensor.shape == (M, N)
+    assert M % world_size == 0
+
+    cfg = _get_config(world_size, M_local)
+    bm = kw.get("block_m") or cfg["block_m"]
+    bn = kw.get("block_n") or cfg["block_n"]
+    sms = kw.get("num_sms") or cfg["num_sms"]
+    warps = kw.get("num_warps") or cfg["num_warps"]
+    assert M_local % bm == 0
+
+    num_m_tiles = M // bm
+    num_n_tiles = (N + bn - 1) // bn
+    total_tiles = num_m_tiles * num_n_tiles
+    num_m_tiles_local = M_local // bm
+    total_local_tiles = num_m_tiles_local * num_n_tiles
+
+    if workspace is None:
+        workspace = {}
+    if workspace.get("shape") != (M, N, bm, bn):
+        workspace["scratch"] = ctx.zeros((M, N), dtype=input_tensor.dtype)
+        workspace["flags"] = ctx.zeros((total_tiles,), dtype=torch.int32)
+        workspace["iteration"] = 0
+        workspace["shape"] = (M, N, bm, bn)
+        ctx.barrier()
+
+    workspace["iteration"] += 1
+    flag_target = workspace["iteration"] * world_size
+
+    _fused_two_shot_ar_kernel[(sms,)](
+        input_tensor, workspace["scratch"], output_tensor, workspace["flags"],
+        M, N, M_local,
+        input_tensor.stride(0), input_tensor.stride(1),
+        workspace["scratch"].stride(0), workspace["scratch"].stride(1),
+        output_tensor.stride(0), output_tensor.stride(1),
+        ctx.get_heap_bases(), flag_target, rank, world_size,
+        bm, bn, sms,
+        num_m_tiles_local, num_n_tiles, total_local_tiles,
+        num_m_tiles, total_tiles,
+        num_warps=warps,
+    )
+    return workspace
