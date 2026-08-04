@@ -17,7 +17,10 @@ Two variants:
              traffic = ws * M * N.  1 kernel, all reads in parallel.
 
   two_shot:  reduce-scatter then all-gather.
-             traffic = 2 * (ws-1)/ws * M * N.  2 phases, less data.
+             traffic = 2 * (ws-1)/ws * M * N -- less data than one_shot, but
+             requires a host barrier between phases (0.071ms at ws=8), which
+             costs more than the traffic saving. Measured slower than one_shot
+             at every M. Kept for reference; prefer one_shot.
 
 At ws=2 one_shot moves 2x and two_shot moves 1x, so two_shot should win on
 bytes; at small M one_shot should win on launch/step overhead. That crossover
@@ -268,7 +271,7 @@ def one_shot_all_reduce(ctx, output_tensor, input_tensor, **kw):
 
 
 def two_shot_all_reduce(ctx, output_tensor, input_tensor, scratch=None,
-                        use_barrier=False, **kw):
+                        use_barrier=True, **kw):
     """
     Two-shot AllReduce: reduce-scatter then all-gather, both pull-direction.
     Traffic: 2*(ws-1)/ws * M * N — less than one-shot, but two phases.
@@ -299,12 +302,24 @@ def two_shot_all_reduce(ctx, output_tensor, input_tensor, scratch=None,
         input_tensor.stride(0), input_tensor.stride(1),
         hb, rank, world_size, bm, bn, sms, num_warps=warps,
     )
-    # No host barrier: same-stream ordering guarantees the RS kernel completes
-    # before the AG kernel starts on this rank, and a peer's AG read of our
-    # scratch cannot outrun our RS store by more than the launch gap. Measured
-    # at 0.071ms, ctx.barrier() costs more than the entire traffic saving
-    # two-shot buys -- see the GEMM+RS study, where dropping barriers was worth
-    # 0.07ms with no correctness cost.
+    # The barrier is REQUIRED for correctness here. Do not remove it.
+    #
+    # Same-stream ordering only orders THIS rank's two kernels. The AG phase
+    # reads a peer's `scratch`, which that peer writes in ITS OWN RS kernel --
+    # nothing prevents us entering AG while a peer is still inside RS. That is
+    # a genuine cross-rank read-after-write with no ordering primitive behind
+    # it. Measured barrier-free: 6.5-8.6ms and max_diff=313.5 at M=2048.
+    #
+    # This differs from GEMM+RS, where dropping the barrier WAS safe: there the
+    # RS kernel read peer `staged_c` written by torch.mm, and every rank's mm
+    # starts at ~the same wall-clock time and runs for ~the same duration, so
+    # skew is bounded and self-limiting (validated to n=1000). Here the
+    # producer is a peer's *kernel 1*, with no such coupling.
+    #
+    # Cost: 0.071ms at ws=8, which exceeds the traffic saving two-shot buys
+    # over one-shot -- so two-shot is not competitive for AR unless this sync
+    # gets cheaper (e.g. one global counter + poll per rank, ~5-10us, instead
+    # of a full host barrier).
     if use_barrier:
         ctx.barrier()
     _two_shot_gather_kernel[(sms,)](
