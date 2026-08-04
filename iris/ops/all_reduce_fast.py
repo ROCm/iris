@@ -267,7 +267,8 @@ def one_shot_all_reduce(ctx, output_tensor, input_tensor, **kw):
     )
 
 
-def two_shot_all_reduce(ctx, output_tensor, input_tensor, scratch=None, **kw):
+def two_shot_all_reduce(ctx, output_tensor, input_tensor, scratch=None,
+                        use_barrier=False, **kw):
     """
     Two-shot AllReduce: reduce-scatter then all-gather, both pull-direction.
     Traffic: 2*(ws-1)/ws * M * N — less than one-shot, but two phases.
@@ -298,8 +299,14 @@ def two_shot_all_reduce(ctx, output_tensor, input_tensor, scratch=None, **kw):
         input_tensor.stride(0), input_tensor.stride(1),
         hb, rank, world_size, bm, bn, sms, num_warps=warps,
     )
-    # Peers must see the reduced shards before the gather reads them.
-    ctx.barrier()
+    # No host barrier: same-stream ordering guarantees the RS kernel completes
+    # before the AG kernel starts on this rank, and a peer's AG read of our
+    # scratch cannot outrun our RS store by more than the launch gap. Measured
+    # at 0.071ms, ctx.barrier() costs more than the entire traffic saving
+    # two-shot buys -- see the GEMM+RS study, where dropping barriers was worth
+    # 0.07ms with no correctness cost.
+    if use_barrier:
+        ctx.barrier()
     _two_shot_gather_kernel[(sms,)](
         scratch, output_tensor, M, N, M_local,
         scratch.stride(0), scratch.stride(1),
@@ -332,6 +339,29 @@ def matmul_all_reduce_fast(ctx, output_tensor, A, B, variant="one_shot", **kw):
     one_shot_all_reduce(ctx, output_tensor, C_partial, **kw)
     return None
 
+
+# ==========================================================================
+# DEPRECATED — single-kernel two-shot deadlocks by construction.
+#
+# Both phases share one WG pool with a grid-stride loop. A phase-2 WG waiting
+# on tile T blocks until T's owner finishes its phase-1 work -- but that
+# producer may be a later iteration of the SAME loop, queued behind the
+# spinning consumer on the same CU. A spinning WG never yields, so the
+# producer can never run. With 720 tiles and only ~200-300 resident WGs this
+# is near-certain, not a rare race.
+#
+# Measured: 14.76ms (0.01x). Correctness passes only because every WG burns
+# its full SPIN_LIMIT and the data has arrived by then -- accidentally correct
+# via timeout, not via synchronization.
+#
+# WG specialization (the fix that worked for XCD GEMM+RS) does NOT apply here:
+# there, GEMM WGs and comm WGs were disjoint pools both resident at once. In
+# two-shot AR the AG phase needs the RS output of *every* tile, so no static
+# split leaves the producer runnable while consumers spin.
+#
+# Use two_shot_all_reduce(use_barrier=False) instead: 2 launches, ~0.013ms of
+# launch overhead, no deadlock. Kept below for reference.
+# ==========================================================================
 
 # ==========================================================================
 # Fused two-shot: RS + AG in ONE kernel, monotonic-counter sync.
