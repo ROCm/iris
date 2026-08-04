@@ -380,6 +380,7 @@ def _fused_two_shot_ar_kernel(
     TOTAL_LOCAL_TILES: tl.constexpr,
     NUM_M_TILES: tl.constexpr,
     TOTAL_TILES: tl.constexpr,
+    SPIN_LIMIT: tl.constexpr,
 ):
     pid = tl.program_id(0)
     acc_dtype = tl.float32
@@ -443,11 +444,16 @@ def _fused_two_shot_ar_kernel(
         pid_n = tile_id % NUM_N_TILES
         owner = pid_m // m_tiles_per_rank
 
-        # Wait until the owning rank has reduced this tile. Poll is LOCAL
-        # (device-scope) — every rank pushed its increment to us already.
-        while tl.atomic_add(flags_ptr + tile_id, 0,
-                            sem="acquire", scope="gpu") < flag_target:
-            pass
+        # Wait until the owning rank has reduced this tile.
+        # Each tile is reduced by exactly ONE rank (its owner), which pushes
+        # +1 to every rank's copy of that tile's counter. So the counter
+        # advances by exactly 1 per iteration -> target = iteration.
+        # Poll is LOCAL (device-scope); the owner already pushed to us.
+        spins = 0
+        done = tl.atomic_add(flags_ptr + tile_id, 0, sem="acquire", scope="gpu")
+        while (done < flag_target) and (spins < SPIN_LIMIT):
+            done = tl.atomic_add(flags_ptr + tile_id, 0, sem="acquire", scope="gpu")
+            spins += 1
 
         rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -472,7 +478,7 @@ def _fused_two_shot_ar_kernel(
 
 
 def fused_two_shot_all_reduce(ctx, output_tensor, input_tensor,
-                              workspace=None, **kw):
+                              workspace=None, spin_limit=100_000_000, **kw):
     """
     Two-shot AllReduce in ONE kernel launch, no host barrier.
 
@@ -512,7 +518,10 @@ def fused_two_shot_all_reduce(ctx, output_tensor, input_tensor,
         ctx.barrier()
 
     workspace["iteration"] += 1
-    flag_target = workspace["iteration"] * world_size
+    # Each tile's counter is incremented ONCE per iteration (by its owner,
+    # broadcast to all ranks), so the target is the iteration number itself
+    # -- NOT iteration * world_size.
+    flag_target = workspace["iteration"]
 
     _fused_two_shot_ar_kernel[(sms,)](
         input_tensor, workspace["scratch"], output_tensor, workspace["flags"],
@@ -524,6 +533,7 @@ def fused_two_shot_all_reduce(ctx, output_tensor, input_tensor,
         bm, bn, sms,
         num_m_tiles_local, num_n_tiles, total_local_tiles,
         num_m_tiles, total_tiles,
+        spin_limit,
         num_warps=warps,
     )
     return workspace
