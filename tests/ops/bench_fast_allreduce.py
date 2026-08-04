@@ -183,8 +183,6 @@ if rank == 0:
         print(f"Fast one-shot: {best[0]:.4f}ms ({rccl_ar_ms/best[0]:.2f}x)")
         print(f"  bm={bm} bn={bn} sms={sms} warps={w}")
 
-shmem.barrier()
-dist.destroy_process_group()
 
 # ---- fused two-shot: one kernel, monotonic counters, no host barrier ----
 if rank == 0:
@@ -269,8 +267,12 @@ try:
                 print()
                 print(f"  best fused two-shot: {fbest[0]:.4f}ms "
                       f"({rccl_ar_ms/fbest[0]:.2f}x vs RCCL AR)")
-except Exception as ex:
-    if rank == 0:
-        print(f"  fused two-shot: ERROR {str(ex)[:70]}")
+except Exception:
+    import traceback
+    print(f"[rank {rank}] fused two-shot FAILED:")
+    traceback.print_exc()
 
 shmem.barrier()
+
+shmem.barrier()
+dist.destroy_process_group()
