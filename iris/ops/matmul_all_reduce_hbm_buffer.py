@@ -46,6 +46,9 @@ COST
 
 from typing import Optional
 
+# Flags are spaced this many int32s apart (32 * 4B = 128B, one cache line).
+FLAG_STRIDE = 32
+
 import torch
 import triton
 import triton.language as tl
@@ -105,6 +108,7 @@ def _fused_gemm_two_shot_ar_kernel(
     NUM_RS_SMS: tl.constexpr,
     NUM_AG_SMS: tl.constexpr,
     TILES_PER_FLAG: tl.constexpr,
+    FLAG_STRIDE: tl.constexpr,
     SPIN_LIMIT: tl.constexpr,
     TRACE: tl.constexpr,
 ):
@@ -174,7 +178,7 @@ def _fused_gemm_two_shot_ar_kernel(
             # group, not per tile. This is the knob that mattered most in the
             # all-gather HBM-buffer op (52% of its perf range).
             tl.debug_barrier()
-            fslot = gemm_flags_ptr + grp + tl.arange(0, 1)
+            fslot = gemm_flags_ptr + grp * FLAG_STRIDE + tl.arange(0, 1)
             one = tl.zeros((1,), dtype=tl.int32) + 1
             for r in tl.static_range(world_size):
                 iris.atomic_add(fslot, one, cur_rank, r, heap_bases,
@@ -188,7 +192,6 @@ def _fused_gemm_two_shot_ar_kernel(
         local_pid = pid - NUM_GEMM_SMS
         shard_tiles = m_tiles_per_rank * num_n_tiles
         m_offset = cur_rank * m_tiles_per_rank
-        zero = tl.zeros((1,), dtype=tl.int32)
 
         for t in range(local_pid, shard_tiles, NUM_RS_SMS):
             local_pid_m = t // num_n_tiles
@@ -203,11 +206,14 @@ def _fused_gemm_two_shot_ar_kernel(
             if TRACE:
                 tl.atomic_min(ts_rs_beg + tile_id, read_realtime())
             spins = 0
-            gslot = gemm_flags_ptr + grp + tl.arange(0, 1)
-            done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
+            gslot = gemm_flags_ptr + grp * FLAG_STRIDE
+            done = tl.load(gslot, volatile=True)
             while (done < gemm_target) and (spins < SPIN_LIMIT):
-                done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
+                done = tl.load(gslot, volatile=True)
                 spins += 1
+            # One acquire fence after the spin, instead of an acquire RMW on
+            # every iteration of it.
+            tl.debug_barrier()
 
             if TRACE:
                 tl.atomic_max(ts_rs_ready + tile_id, read_realtime())
@@ -239,7 +245,7 @@ def _fused_gemm_two_shot_ar_kernel(
             # Publish to every rank's AG pool. Per tile, not per group: an RS
             # WG grid-strides across groups so it never owns a whole one.
             tl.debug_barrier()
-            fslot = rs_flags_ptr + tile_id + tl.arange(0, 1)
+            fslot = rs_flags_ptr + tile_id * FLAG_STRIDE + tl.arange(0, 1)
             one = tl.zeros((1,), dtype=tl.int32) + 1
             for r in tl.static_range(world_size):
                 iris.atomic_add(fslot, one, cur_rank, r, heap_bases,
@@ -260,12 +266,12 @@ def _fused_gemm_two_shot_ar_kernel(
             if TRACE:
                 tl.atomic_min(ts_ag_beg + tile_id, read_realtime())
             spins = 0
-            rslot = rs_flags_ptr + tile_id + tl.arange(0, 1)
-            zero = tl.zeros((1,), dtype=tl.int32)
-            done = tl.min(tl.atomic_add(rslot, zero, sem="acquire", scope="sys"))
+            rslot = rs_flags_ptr + tile_id * FLAG_STRIDE
+            done = tl.load(rslot, volatile=True)
             while (done < rs_target) and (spins < SPIN_LIMIT):
-                done = tl.min(tl.atomic_add(rslot, zero, sem="acquire", scope="sys"))
+                done = tl.load(rslot, volatile=True)
                 spins += 1
+            tl.debug_barrier()
             if TRACE:
                 tl.atomic_max(ts_ag_ready + tile_id, read_realtime())
 
@@ -308,8 +314,13 @@ def matmul_all_reduce_hbm_buffer_preamble(
         "staged_c": ctx.zeros((M, N), device="cuda", dtype=dtype),
         "scratch": ctx.zeros((M, N), device="cuda", dtype=dtype),
         # Flags live in the symmetric heap so iris.atomic_add can reach peers.
-        "gemm_flags": ctx.zeros((total_tiles,), device="cuda", dtype=torch.int32),
-        "rs_flags": ctx.zeros((total_tiles,), device="cuda", dtype=torch.int32),
+        # FLAG_STRIDE int32s apart so each flag owns a cache line. Adjacent
+        # flags meant 16 unrelated tiles shared one 64B line and their
+        # spinners fought each other for it.
+        "gemm_flags": ctx.zeros((total_tiles * FLAG_STRIDE,), device="cuda",
+                                dtype=torch.int32),
+        "rs_flags": ctx.zeros((total_tiles * FLAG_STRIDE,), device="cuda",
+                              dtype=torch.int32),
         "iteration": 0,
         "block_m": block_m,
         "block_n": block_n,
@@ -331,6 +342,7 @@ def matmul_all_reduce_hbm_buffer(
     num_warps: int = 8,
     mfma: int = 32,
     tiles_per_flag: int = 1,
+    flag_stride: int = 32,
     spin_limit: int = 1_000_000,
     trace: bool = False,
 ):
@@ -426,6 +438,7 @@ def matmul_all_reduce_hbm_buffer(
         NUM_RS_SMS=num_rs_sms,
         NUM_AG_SMS=num_ag_sms,
         TILES_PER_FLAG=tiles_per_flag,
+        FLAG_STRIDE=flag_stride,
         SPIN_LIMIT=spin_limit,
         TRACE=trace,
         num_warps=num_warps,
