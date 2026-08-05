@@ -45,8 +45,10 @@ def summarize(ts, freq_mhz, label, rank):
     ar = ts["ag_ready"].cpu().numpy().astype(np.int64)
     a1 = ts["ag_end"].cpu().numpy().astype(np.int64)
 
+    MAXV = np.iinfo(np.int64).max
+
     def nz(x):
-        return x[x > 0]
+        return x[(x > 0) & (x != MAXV)]
 
     allv = np.concatenate([nz(g0), nz(r0), nz(a0)])
     if allv.size == 0:

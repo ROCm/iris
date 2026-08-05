@@ -130,7 +130,7 @@ def _fused_gemm_two_shot_ar_kernel(
                 pid_n = slot % num_n_tiles
                 tile_id = pid_m * num_n_tiles + pid_n
                 if TRACE:
-                    tl.store(ts_gemm_beg + tile_id, read_realtime())
+                    tl.atomic_min(ts_gemm_beg + tile_id, read_realtime())
 
                 rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
                 rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -156,7 +156,7 @@ def _fused_gemm_two_shot_ar_kernel(
                 tl.store(staged_c_ptr + c_off, acc.to(staged_c_ptr.type.element_ty),
                          mask=c_mask, cache_modifier=".wt")
                 if TRACE:
-                    tl.store(ts_gemm_end + tile_id, read_realtime())
+                    tl.atomic_max(ts_gemm_end + tile_id, read_realtime())
 
             # One release fence + world_size remote atomics for the WHOLE
             # group, not per tile. This is the knob that mattered most in the
@@ -189,7 +189,7 @@ def _fused_gemm_two_shot_ar_kernel(
             # this rank's shard slot t lives in group (t / TPF) * ws + rank.
             grp = (t // TILES_PER_FLAG) * world_size + cur_rank
             if TRACE:
-                tl.store(ts_rs_beg + tile_id, read_realtime())
+                tl.atomic_min(ts_rs_beg + tile_id, read_realtime())
             spins = 0
             gslot = gemm_flags_ptr + grp + tl.arange(0, 1)
             done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
@@ -198,7 +198,7 @@ def _fused_gemm_two_shot_ar_kernel(
                 spins += 1
 
             if TRACE:
-                tl.store(ts_rs_ready + tile_id, read_realtime())
+                tl.atomic_max(ts_rs_ready + tile_id, read_realtime())
 
             rm = global_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -222,7 +222,7 @@ def _fused_gemm_two_shot_ar_kernel(
                      mask=mask, cache_modifier=".wt")
 
             if TRACE:
-                tl.store(ts_rs_end + tile_id, read_realtime())
+                tl.atomic_max(ts_rs_end + tile_id, read_realtime())
 
             # Publish to every rank's AG pool. Per tile, not per group: an RS
             # WG grid-strides across groups so it never owns a whole one.
@@ -246,7 +246,7 @@ def _fused_gemm_two_shot_ar_kernel(
             owner = pid_m // m_tiles_per_rank
 
             if TRACE:
-                tl.store(ts_ag_beg + tile_id, read_realtime())
+                tl.atomic_min(ts_ag_beg + tile_id, read_realtime())
             spins = 0
             rslot = rs_flags_ptr + tile_id + tl.arange(0, 1)
             zero = tl.zeros((1,), dtype=tl.int32)
@@ -255,7 +255,7 @@ def _fused_gemm_two_shot_ar_kernel(
                 done = tl.min(tl.atomic_add(rslot, zero, sem="acquire", scope="sys"))
                 spins += 1
             if TRACE:
-                tl.store(ts_ag_ready + tile_id, read_realtime())
+                tl.atomic_max(ts_ag_ready + tile_id, read_realtime())
 
             rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -269,7 +269,7 @@ def _fused_gemm_two_shot_ar_kernel(
                           mask=mask, hint=(1, BLOCK_SIZE_N))
             tl.store(output_ptr + off, v, mask=mask)
             if TRACE:
-                tl.store(ts_ag_end + tile_id, read_realtime())
+                tl.atomic_max(ts_ag_end + tile_id, read_realtime())
 
 
 def matmul_all_reduce_hbm_buffer_preamble(
@@ -362,8 +362,9 @@ def matmul_all_reduce_hbm_buffer(
                   for k in ("gemm_beg", "gemm_end", "rs_beg", "rs_ready",
                             "rs_end", "ag_beg", "ag_ready", "ag_end")}
             workspace["trace"] = ts
-        for v in ts.values():
-            v.zero_()
+        # atomic_min needs a high initial value; atomic_max needs a low one
+        for k, v in ts.items():
+            v.fill_(torch.iinfo(torch.int64).max if k.endswith("_beg") else 0)
         tb = [ts["gemm_beg"], ts["gemm_end"], ts["rs_beg"], ts["rs_ready"],
               ts["rs_end"], ts["ag_beg"], ts["ag_ready"], ts["ag_end"]]
     else:
