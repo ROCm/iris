@@ -96,6 +96,9 @@ def _worker(local_rank, world_size, init_url, outfile):
             print(f"  two-kernel one-shot        {twok_ms:.4f}ms  {base_ms/twok_ms:.2f}x")
 
         best = (1e9, None)
+        ws_cache = {}
+        out = torch.zeros(M, N_GLOBAL, dtype=dtype, device=f"cuda:{rank}")
+        first_err = None
         for block_m in [16, 32, 64, 128]:
             num_m_tiles = triton.cdiv(M, block_m)
             # RS phase shards M-tiles across ranks -- must divide evenly
@@ -122,11 +125,12 @@ def _worker(local_rank, world_size, init_url, outfile):
                         if g + r_ + a_ > cu_count:
                             continue
                         try:
-                            out = torch.zeros(M, N_GLOBAL, dtype=dtype,
-                                              device=f"cuda:{rank}")
-                            ws = matmul_all_reduce_hbm_buffer_preamble(
-                                shmem, M, N_GLOBAL, dtype, block_m, block_n)
-                            shmem.barrier()
+                            wkey = (block_m, block_n)
+                            if wkey not in ws_cache:
+                                ws_cache[wkey] = matmul_all_reduce_hbm_buffer_preamble(
+                                    shmem, M, N_GLOBAL, dtype, block_m, block_n)
+                                shmem.barrier()
+                            ws = ws_cache[wkey]
 
                             kw = dict(block_m=block_m, block_n=block_n, block_k=64,
                                       num_gemm_sms=g, num_rs_sms=r_, num_ag_sms=a_,
@@ -157,7 +161,9 @@ def _worker(local_rank, world_size, init_url, outfile):
                                 if rank == 0:
                                     print(f"    {cfg:<44} {ms:.4f}ms "
                                           f"{base_ms/ms:.2f}x  ***", flush=True)
-                        except Exception:
+                        except Exception as ex:
+                            if first_err is None:
+                                first_err = f"{type(ex).__name__}: {ex}"
                             continue
 
         if rank == 0:
@@ -165,10 +171,11 @@ def _worker(local_rank, world_size, init_url, outfile):
                 print(f"  HBM-buffer two-shot fused  {best[0]:.4f}ms  "
                       f"{base_ms/best[0]:.2f}x  ({best[1]})")
             else:
-                print(f"  HBM-buffer two-shot fused  no valid config")
+                print(f"  HBM-buffer two-shot fused  no valid config"
+                      f"{'  first error -> ' + first_err if first_err else ''}")
             print(flush=True)
 
-        del A, B, Cs, Co
+        del A, B, Cs, Co, ws_cache
         torch.cuda.empty_cache()
         shmem.barrier()
 
