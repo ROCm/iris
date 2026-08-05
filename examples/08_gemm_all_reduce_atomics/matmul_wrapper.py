@@ -38,6 +38,8 @@ class matmul(torch.autograd.Function):
         BLK_K: int,
         gsize_m: int,
         num_stages: int,
+        mfma: int = None,
+        num_warps: int = None,
         heap_bases_ptr: torch.Tensor = None,
         arch: str = "gfx942",
         COLLECT_TIMESTAMPS: bool = False,
@@ -53,9 +55,9 @@ class matmul(torch.autograd.Function):
         num_xcds = iris.hip.get_num_xcc()
 
         # TODO: Use arch-specific values.
-        num_warps = 8
+        num_warps = 8 if num_warps is None else num_warps
         waves_per_eu = 0
-        mfma = 16
+        mfma = 16 if mfma is None else mfma
         kpack = 1
 
         total_blocks_M = triton.cdiv(M, BLK_M)
@@ -128,6 +130,8 @@ class matmul(torch.autograd.Function):
         BLK_K: int,
         gsize_m: int,
         num_stages: int,
+        mfma: int = None,
+        num_warps: int = None,
         heap_bases_ptr: torch.Tensor = None,
         arch: str = "gfx942",
         COLLECT_TIMESTAMPS: bool = False,
@@ -148,6 +152,8 @@ class matmul(torch.autograd.Function):
             BLK_K=BLK_K,
             gsize_m=gsize_m,
             num_stages=num_stages,
+            mfma=mfma,
+            num_warps=num_warps,
             heap_bases_ptr=heap_bases_ptr,
             arch=arch,
             COLLECT_TIMESTAMPS=COLLECT_TIMESTAMPS,
