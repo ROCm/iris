@@ -106,7 +106,10 @@ def _worker(local_rank, world_size, init_url, outfile):
                     # The decomposition says AR is 14x the GEMM, so the split
                     # should favour comm heavily. RS pulls from ws peers while
                     # AG pulls from one, so RS also wants more CUs than AG.
-                    for g, r_, a_ in [
+                    for tpf, (g, r_, a_) in [
+                        (t, sp)
+                        for t in (1, 2, 4, 8)
+                        for sp in [
                         (192, 32, 32),   # previous best, kept as control
                         (128, 64, 64),
                         (96, 96, 64),
@@ -114,6 +117,7 @@ def _worker(local_rank, world_size, init_url, outfile):
                         (64, 96, 96),
                         (32, 144, 80),
                         (32, 112, 112),
+                        ]
                     ]:
                         if g + r_ + a_ > cu_count:
                             continue
@@ -126,7 +130,7 @@ def _worker(local_rank, world_size, init_url, outfile):
 
                             kw = dict(block_m=block_m, block_n=block_n, block_k=64,
                                       num_gemm_sms=g, num_rs_sms=r_, num_ag_sms=a_,
-                                      mfma=mfma)
+                                      mfma=mfma, tiles_per_flag=tpf)
                             # repeated iterations validate the monotonic counters
                             ok = True
                             for _ in range(3):
@@ -145,7 +149,7 @@ def _worker(local_rank, world_size, init_url, outfile):
                                        matmul_all_reduce_hbm_buffer(
                                            shmem, out, A, B, workspace=ws, **kw))
                             cfg = (f"bm={block_m} bn={block_n} mfma={mfma} "
-                                   f"G/R/A={g}/{r_}/{a_}")
+                                   f"G/R/A={g}/{r_}/{a_} tpf={tpf}")
                             results.append(dict(M=M, ms=ms, cfg=cfg,
                                                 speedup=base_ms / ms))
                             if ms < best[0]:

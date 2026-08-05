@@ -83,6 +83,7 @@ def _fused_gemm_two_shot_ar_kernel(
     NUM_GEMM_SMS: tl.constexpr,
     NUM_RS_SMS: tl.constexpr,
     NUM_AG_SMS: tl.constexpr,
+    TILES_PER_FLAG: tl.constexpr,
     SPIN_LIMIT: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -91,6 +92,7 @@ def _fused_gemm_two_shot_ar_kernel(
     num_n_tiles = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_m_tiles * num_n_tiles
     m_tiles_per_rank = num_m_tiles // world_size
+    total_groups = total_tiles // TILES_PER_FLAG
     acc_dtype = tl.float32
 
     if pid < NUM_GEMM_SMS:
@@ -98,52 +100,54 @@ def _fused_gemm_two_shot_ar_kernel(
         # POOL G -- GEMM. Never waits on anything, so the pipeline always
         # has a runnable producer.
         # ------------------------------------------------------------------
-        for seq in range(pid, total_tiles, NUM_GEMM_SMS):
-            # Shard-interleaved emission order. In row-major tile order a
-            # rank's M-shard is a CONTIGUOUS block -- rank ws-1 owns the last
-            # 1/ws of all tiles, so its RS pool cannot start until the GEMM
-            # has emitted (ws-1)/ws of everything. That serialises the
-            # pipeline for every rank but rank 0.
-            #
-            # Emitting shard (seq % ws) slot (seq // ws) instead means after
-            # the first ws tiles EVERY rank's RS pool has work, so all ranks
-            # overlap from the start.
-            # The preamble requires num_m_tiles % ws == 0, so
-            # total_tiles == ws * tiles_per_shard and this is a bijection.
-            shard = seq % world_size
-            slot = seq // world_size
-            pid_m = shard * m_tiles_per_rank + slot // num_n_tiles
-            pid_n = slot % num_n_tiles
-            tile_id = pid_m * num_n_tiles + pid_n
+        # One WG owns a whole flag group, so it can signal once for the group
+        # instead of once per tile. Flag traffic is the dominant cost here:
+        # each signal is world_size remote system-scope atomics with a release
+        # fence, and at TILES_PER_FLAG=1 that was ~3k fences per rank.
+        for grp in range(pid, total_groups, NUM_GEMM_SMS):
+            # Shard-interleaved group order. In row-major tile order a rank's
+            # M-shard is a CONTIGUOUS block -- rank ws-1 owns the last 1/ws of
+            # all tiles, so its RS pool cannot start until the GEMM has
+            # emitted (ws-1)/ws of everything. Interleaving by shard means
+            # after the first ws groups EVERY rank's RS pool has work.
+            shard = grp % world_size
+            gslot = grp // world_size
+            base_seq = gslot * TILES_PER_FLAG
 
-            rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
-            rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-            rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
-            rk = tl.arange(0, BLOCK_SIZE_K)
+            for j in range(0, TILES_PER_FLAG):
+                slot = base_seq + j
+                pid_m = shard * m_tiles_per_rank + slot // num_n_tiles
+                pid_n = slot % num_n_tiles
 
-            a_ptrs = a_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
-            b_ptrs = b_ptr + rk[:, None] * stride_bk + rn[None, :] * stride_bn
+                rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+                rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+                rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+                rk = tl.arange(0, BLOCK_SIZE_K)
 
-            acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-            for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-                k_rem = K - k * BLOCK_SIZE_K
-                a = tl.load(a_ptrs, mask=rk[None, :] < k_rem, other=0.0)
-                b = tl.load(b_ptrs, mask=rk[:, None] < k_rem, other=0.0)
-                acc += tl.dot(a, b)
-                a_ptrs += BLOCK_SIZE_K * stride_ak
-                b_ptrs += BLOCK_SIZE_K * stride_bk
+                a_ptrs = a_ptr + rm[:, None] * stride_am + rk[None, :] * stride_ak
+                b_ptrs = b_ptr + rk[:, None] * stride_bk + rn[None, :] * stride_bn
 
-            c_off = rm[:, None] * stride_cm + rn[None, :] * stride_cn
-            c_mask = (rm[:, None] < M) & (rn[None, :] < N)
-            # .wt so the partial is visible to peers pulling it in the RS phase
-            tl.store(staged_c_ptr + c_off, acc.to(staged_c_ptr.type.element_ty),
-                     mask=c_mask, cache_modifier=".wt")
+                acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
+                for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+                    k_rem = K - k * BLOCK_SIZE_K
+                    a = tl.load(a_ptrs, mask=rk[None, :] < k_rem, other=0.0)
+                    b = tl.load(b_ptrs, mask=rk[:, None] < k_rem, other=0.0)
+                    acc += tl.dot(a, b)
+                    a_ptrs += BLOCK_SIZE_K * stride_ak
+                    b_ptrs += BLOCK_SIZE_K * stride_bk
 
-            # Publish: every rank's RS pool needs to know THIS rank produced
-            # tile_id. One int per tile per peer -- negligible vs the data.
+                c_off = rm[:, None] * stride_cm + rn[None, :] * stride_cn
+                c_mask = (rm[:, None] < M) & (rn[None, :] < N)
+                # .wt so the partial is visible to peers pulling it in the RS phase
+                tl.store(staged_c_ptr + c_off, acc.to(staged_c_ptr.type.element_ty),
+                         mask=c_mask, cache_modifier=".wt")
+
+            # One release fence + world_size remote atomics for the WHOLE
+            # group, not per tile. This is the knob that mattered most in the
+            # all-gather HBM-buffer op (52% of its perf range).
             tl.debug_barrier()
-            fslot = gemm_flags_ptr + tile_id + tl.arange(0, 1)
+            fslot = gemm_flags_ptr + grp + tl.arange(0, 1)
             one = tl.zeros((1,), dtype=tl.int32) + 1
             for r in tl.static_range(world_size):
                 iris.atomic_add(fslot, one, cur_rank, r, heap_bases,
@@ -157,6 +161,7 @@ def _fused_gemm_two_shot_ar_kernel(
         local_pid = pid - NUM_GEMM_SMS
         shard_tiles = m_tiles_per_rank * num_n_tiles
         m_offset = cur_rank * m_tiles_per_rank
+        zero = tl.zeros((1,), dtype=tl.int32)
 
         for t in range(local_pid, shard_tiles, NUM_RS_SMS):
             local_pid_m = t // num_n_tiles
@@ -164,10 +169,12 @@ def _fused_gemm_two_shot_ar_kernel(
             global_pid_m = m_offset + local_pid_m
             tile_id = global_pid_m * num_n_tiles + pid_n
 
-            # Wait until every rank has produced this tile.
+            # Wait until every rank has produced the GROUP containing this
+            # tile. Group index matches the GEMM pool's interleaved order:
+            # this rank's shard slot t lives in group (t / TPF) * ws + rank.
+            grp = (t // TILES_PER_FLAG) * world_size + cur_rank
             spins = 0
-            gslot = gemm_flags_ptr + tile_id + tl.arange(0, 1)
-            zero = tl.zeros((1,), dtype=tl.int32)
+            gslot = gemm_flags_ptr + grp + tl.arange(0, 1)
             done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
             while (done < gemm_target) and (spins < SPIN_LIMIT):
                 done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
@@ -194,7 +201,8 @@ def _fused_gemm_two_shot_ar_kernel(
             tl.store(scratch_ptr + off, acc.to(scratch_ptr.type.element_ty),
                      mask=mask, cache_modifier=".wt")
 
-            # Publish to every rank's AG pool: owner's shard tile is reduced.
+            # Publish to every rank's AG pool. Per tile, not per group: an RS
+            # WG grid-strides across groups so it never owns a whole one.
             tl.debug_barrier()
             fslot = rs_flags_ptr + tile_id + tl.arange(0, 1)
             one = tl.zeros((1,), dtype=tl.int32) + 1
@@ -281,6 +289,7 @@ def matmul_all_reduce_hbm_buffer(
     num_ag_sms: int = 64,
     num_warps: int = 8,
     mfma: int = 32,
+    tiles_per_flag: int = 1,
     spin_limit: int = 1_000_000,
 ):
     """Fused GEMM + two-shot AllReduce, three co-resident WG pools.
@@ -310,6 +319,16 @@ def matmul_all_reduce_hbm_buffer(
 
     staged_c = workspace["staged_c"]
     scratch = workspace["scratch"]
+
+    # Each GEMM WG owns a whole flag group, and a group lives entirely inside
+    # one rank's shard, so the shard's tile count must divide by the group size.
+    num_m_tiles = triton.cdiv(M, block_m)
+    tiles_per_shard = (num_m_tiles // world_size) * triton.cdiv(N, block_n)
+    if tiles_per_shard % tiles_per_flag != 0:
+        raise ValueError(
+            f"tiles_per_flag ({tiles_per_flag}) must divide the per-shard tile "
+            f"count ({tiles_per_shard})"
+        )
 
     total_sms = num_gemm_sms + num_rs_sms + num_ag_sms
     grid = (total_sms,)
@@ -343,6 +362,7 @@ def matmul_all_reduce_hbm_buffer(
         NUM_GEMM_SMS=num_gemm_sms,
         NUM_RS_SMS=num_rs_sms,
         NUM_AG_SMS=num_ag_sms,
+        TILES_PER_FLAG=tiles_per_flag,
         SPIN_LIMIT=spin_limit,
         num_warps=num_warps,
         matrix_instr_nonkdim=mfma,
