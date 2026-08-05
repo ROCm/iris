@@ -51,6 +51,7 @@ import triton
 import triton.language as tl
 
 import iris
+from iris.device.utils import read_realtime
 
 
 @triton.jit
@@ -62,6 +63,14 @@ def _fused_gemm_two_shot_ar_kernel(
     output_ptr,
     gemm_flags_ptr,
     rs_flags_ptr,
+    ts_gemm_beg,
+    ts_gemm_end,
+    ts_rs_beg,
+    ts_rs_ready,
+    ts_rs_end,
+    ts_ag_beg,
+    ts_ag_ready,
+    ts_ag_end,
     M,
     N,
     K,
@@ -85,6 +94,7 @@ def _fused_gemm_two_shot_ar_kernel(
     NUM_AG_SMS: tl.constexpr,
     TILES_PER_FLAG: tl.constexpr,
     SPIN_LIMIT: tl.constexpr,
+    TRACE: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
@@ -118,6 +128,9 @@ def _fused_gemm_two_shot_ar_kernel(
                 slot = base_seq + j
                 pid_m = shard * m_tiles_per_rank + slot // num_n_tiles
                 pid_n = slot % num_n_tiles
+                tile_id = pid_m * num_n_tiles + pid_n
+                if TRACE:
+                    tl.store(ts_gemm_beg + tile_id, read_realtime())
 
                 rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
                 rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -142,6 +155,8 @@ def _fused_gemm_two_shot_ar_kernel(
                 # .wt so the partial is visible to peers pulling it in the RS phase
                 tl.store(staged_c_ptr + c_off, acc.to(staged_c_ptr.type.element_ty),
                          mask=c_mask, cache_modifier=".wt")
+                if TRACE:
+                    tl.store(ts_gemm_end + tile_id, read_realtime())
 
             # One release fence + world_size remote atomics for the WHOLE
             # group, not per tile. This is the knob that mattered most in the
@@ -173,12 +188,17 @@ def _fused_gemm_two_shot_ar_kernel(
             # tile. Group index matches the GEMM pool's interleaved order:
             # this rank's shard slot t lives in group (t / TPF) * ws + rank.
             grp = (t // TILES_PER_FLAG) * world_size + cur_rank
+            if TRACE:
+                tl.store(ts_rs_beg + tile_id, read_realtime())
             spins = 0
             gslot = gemm_flags_ptr + grp + tl.arange(0, 1)
             done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
             while (done < gemm_target) and (spins < SPIN_LIMIT):
                 done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
                 spins += 1
+
+            if TRACE:
+                tl.store(ts_rs_ready + tile_id, read_realtime())
 
             rm = global_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -201,6 +221,9 @@ def _fused_gemm_two_shot_ar_kernel(
             tl.store(scratch_ptr + off, acc.to(scratch_ptr.type.element_ty),
                      mask=mask, cache_modifier=".wt")
 
+            if TRACE:
+                tl.store(ts_rs_end + tile_id, read_realtime())
+
             # Publish to every rank's AG pool. Per tile, not per group: an RS
             # WG grid-strides across groups so it never owns a whole one.
             tl.debug_barrier()
@@ -222,6 +245,8 @@ def _fused_gemm_two_shot_ar_kernel(
             pid_n = tile_id % num_n_tiles
             owner = pid_m // m_tiles_per_rank
 
+            if TRACE:
+                tl.store(ts_ag_beg + tile_id, read_realtime())
             spins = 0
             rslot = rs_flags_ptr + tile_id + tl.arange(0, 1)
             zero = tl.zeros((1,), dtype=tl.int32)
@@ -229,6 +254,8 @@ def _fused_gemm_two_shot_ar_kernel(
             while (done < rs_target) and (spins < SPIN_LIMIT):
                 done = tl.min(tl.atomic_add(rslot, zero, sem="acquire", scope="sys"))
                 spins += 1
+            if TRACE:
+                tl.store(ts_ag_ready + tile_id, read_realtime())
 
             rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -241,6 +268,8 @@ def _fused_gemm_two_shot_ar_kernel(
             v = iris.load(scratch_ptr + off, cur_rank, owner, heap_bases,
                           mask=mask, hint=(1, BLOCK_SIZE_N))
             tl.store(output_ptr + off, v, mask=mask)
+            if TRACE:
+                tl.store(ts_ag_end + tile_id, read_realtime())
 
 
 def matmul_all_reduce_hbm_buffer_preamble(
@@ -291,6 +320,7 @@ def matmul_all_reduce_hbm_buffer(
     mfma: int = 32,
     tiles_per_flag: int = 1,
     spin_limit: int = 1_000_000,
+    trace: bool = False,
 ):
     """Fused GEMM + two-shot AllReduce, three co-resident WG pools.
 
@@ -320,6 +350,25 @@ def matmul_all_reduce_hbm_buffer(
     staged_c = workspace["staged_c"]
     scratch = workspace["scratch"]
 
+    # Per-tile timestamps. Six phase marks per tile let us separate "the pool
+    # was waiting on its producer" from "the pool was doing work", which is
+    # the difference between a serialization problem and a bandwidth problem.
+    if trace:
+        num_tiles = triton.cdiv(M, block_m) * triton.cdiv(N, block_n)
+        dev = staged_c.device
+        ts = workspace.get("trace")
+        if ts is None or ts["gemm_beg"].numel() != num_tiles:
+            ts = {k: torch.zeros(num_tiles, dtype=torch.int64, device=dev)
+                  for k in ("gemm_beg", "gemm_end", "rs_beg", "rs_ready",
+                            "rs_end", "ag_beg", "ag_ready", "ag_end")}
+            workspace["trace"] = ts
+        for v in ts.values():
+            v.zero_()
+        tb = [ts["gemm_beg"], ts["gemm_end"], ts["rs_beg"], ts["rs_ready"],
+              ts["rs_end"], ts["ag_beg"], ts["ag_ready"], ts["ag_end"]]
+    else:
+        tb = [staged_c] * 8  # unused; TRACE=False compiles the stores away
+
     # Each GEMM WG owns a whole flag group, and a group lives entirely inside
     # one rank's shard, so the shard's tile count must divide by the group size.
     num_m_tiles = triton.cdiv(M, block_m)
@@ -341,6 +390,7 @@ def matmul_all_reduce_hbm_buffer(
         output_tensor,
         workspace["gemm_flags"],
         workspace["rs_flags"],
+        tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7],
         M,
         N,
         K,
@@ -364,6 +414,7 @@ def matmul_all_reduce_hbm_buffer(
         NUM_AG_SMS=num_ag_sms,
         TILES_PER_FLAG=tiles_per_flag,
         SPIN_LIMIT=spin_limit,
+        TRACE=trace,
         num_warps=num_warps,
         matrix_instr_nonkdim=mfma,
     )
