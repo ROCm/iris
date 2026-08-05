@@ -193,15 +193,15 @@ def _worker(local_rank, world_size, init_url, outfile):
         else:
             log(pattern="P3a fused-seq atomic", M=M, ok=False, why="no valid cfg")
 
-        # ---------- P4: fused WG specialization, one-shot pull (ex09) ----------
+        # ---------- P3c: fused sequential, one-shot pull (ex09) ----------
         best = (1e9, None)
         for blk_m in [32, 64, 128, 256]:
             if blk_m > M:
                 continue
             for blk_n in [64, 128]:
                 for mfma in [16, 32]:
-                    for gemm_sms in [64, 128, 192, 256]:
-                        if gemm_sms >= cu_count:
+                    for gemm_sms in [128, 192, 256]:
+                        if gemm_sms > cu_count:
                             continue
                         try:
                             tbm = triton.cdiv(M, blk_m)
@@ -217,7 +217,8 @@ def _worker(local_rank, world_size, init_url, outfile):
                             shmem.barrier()
                             mm_oneshot.apply(
                                 a_s, b_s, lC, gC, None, P, lk, tc, rank, world_size,
-                                cu_count, blk_m, blk_n, 64, 1, True, 1, 8, 0, mfma, 1, heap, cu_count,
+                                gemm_sms, blk_m, blk_n, 64, 1, True, 1, 8, 0, mfma, 1,
+                                heap, cu_count,
                             )
                             torch.cuda.synchronize()
                             shmem.barrier()
@@ -225,14 +226,14 @@ def _worker(local_rank, world_size, init_url, outfile):
                             if dd > tol:
                                 continue
 
-                            def _pre(gC=gC, tc=tc, lk=lk):
-                                gC.zero_(); tc.zero_(); lk.zero_()
+                            def _pre(gC=gC):
+                                gC.zero_()
 
                             def _run(blk_m=blk_m, blk_n=blk_n, mfma=mfma, gC=gC, lC=lC,
                                      P=P, lk=lk, tc=tc):
                                 mm_oneshot.apply(
                                     a_s, b_s, lC, gC, None, P, lk, tc, rank, world_size,
-                                    cu_count, blk_m, blk_n, 64, 1, True, 1, 8, 0, mfma, 1,
+                                    gemm_sms, blk_m, blk_n, 64, 1, True, 1, 8, 0, mfma, 1,
                                     heap, cu_count,
                                 )
 
@@ -242,9 +243,9 @@ def _worker(local_rank, world_size, init_url, outfile):
                         except Exception:
                             continue
         if best[1]:
-            log(pattern="P4 fused WG-spec 1shot", M=M, ms=best[0], speedup=base_ms / best[0], ok=True, cfg=best[1])
+            log(pattern="P3c fused-seq one-shot", M=M, ms=best[0], speedup=base_ms / best[0], ok=True, cfg=best[1])
         else:
-            log(pattern="P4 fused WG-spec 1shot", M=M, ok=False, why="no valid cfg")
+            log(pattern="P3c fused-seq one-shot", M=M, ok=False, why="no valid cfg")
 
         # ---------- P3b: fused ring (ex15) ----------
         best = (1e9, None)
