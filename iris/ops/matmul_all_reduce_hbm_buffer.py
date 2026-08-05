@@ -98,9 +98,23 @@ def _fused_gemm_two_shot_ar_kernel(
         # POOL G -- GEMM. Never waits on anything, so the pipeline always
         # has a runnable producer.
         # ------------------------------------------------------------------
-        for tile_id in range(pid, total_tiles, NUM_GEMM_SMS):
-            pid_m = tile_id // num_n_tiles
-            pid_n = tile_id % num_n_tiles
+        for seq in range(pid, total_tiles, NUM_GEMM_SMS):
+            # Shard-interleaved emission order. In row-major tile order a
+            # rank's M-shard is a CONTIGUOUS block -- rank ws-1 owns the last
+            # 1/ws of all tiles, so its RS pool cannot start until the GEMM
+            # has emitted (ws-1)/ws of everything. That serialises the
+            # pipeline for every rank but rank 0.
+            #
+            # Emitting shard (seq % ws) slot (seq // ws) instead means after
+            # the first ws tiles EVERY rank's RS pool has work, so all ranks
+            # overlap from the start.
+            # The preamble requires num_m_tiles % ws == 0, so
+            # total_tiles == ws * tiles_per_shard and this is a bijection.
+            shard = seq % world_size
+            slot = seq // world_size
+            pid_m = shard * m_tiles_per_rank + slot // num_n_tiles
+            pid_n = slot % num_n_tiles
+            tile_id = pid_m * num_n_tiles + pid_n
 
             rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)

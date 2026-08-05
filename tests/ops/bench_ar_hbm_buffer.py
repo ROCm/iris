@@ -96,19 +96,24 @@ def _worker(local_rank, world_size, init_url, outfile):
             print(f"  two-kernel one-shot        {twok_ms:.4f}ms  {base_ms/twok_ms:.2f}x")
 
         best = (1e9, None)
-        for block_m in [32, 64, 128]:
+        for block_m in [16, 32, 64, 128]:
             num_m_tiles = triton.cdiv(M, block_m)
             # RS phase shards M-tiles across ranks -- must divide evenly
             if num_m_tiles % world_size != 0:
                 continue
             for block_n in [64, 128]:
                 for mfma in [16, 32]:
+                    # The decomposition says AR is 14x the GEMM, so the split
+                    # should favour comm heavily. RS pulls from ws peers while
+                    # AG pulls from one, so RS also wants more CUs than AG.
                     for g, r_, a_ in [
+                        (192, 32, 32),   # previous best, kept as control
                         (128, 64, 64),
-                        (160, 48, 48),
-                        (192, 32, 32),
-                        (96, 80, 80),
+                        (96, 96, 64),
+                        (64, 128, 64),
                         (64, 96, 96),
+                        (32, 144, 80),
+                        (32, 112, 112),
                     ]:
                         if g + r_ + a_ > cu_count:
                             continue
