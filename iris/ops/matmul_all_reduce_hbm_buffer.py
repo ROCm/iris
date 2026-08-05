@@ -211,9 +211,11 @@ def _fused_gemm_two_shot_ar_kernel(
             while (done < gemm_target) and (spins < SPIN_LIMIT):
                 done = tl.load(gslot, volatile=True)
                 spins += 1
-            # One acquire fence after the spin, instead of an acquire RMW on
-            # every iteration of it.
-            tl.debug_barrier()
+            # Exactly one acquire RMW once the spin succeeds, rather than one
+            # per poll iteration. tl.debug_barrier() is a workgroup s_barrier,
+            # not a cross-device acquire, so it cannot order the peer stores.
+            tl.atomic_add(gslot + tl.arange(0, 1), tl.zeros((1,), dtype=tl.int32),
+                          sem="acquire", scope="sys")
 
             if TRACE:
                 tl.atomic_max(ts_rs_ready + tile_id, read_realtime())
@@ -271,7 +273,8 @@ def _fused_gemm_two_shot_ar_kernel(
             while (done < rs_target) and (spins < SPIN_LIMIT):
                 done = tl.load(rslot, volatile=True)
                 spins += 1
-            tl.debug_barrier()
+            tl.atomic_add(rslot + tl.arange(0, 1), tl.zeros((1,), dtype=tl.int32),
+                          sem="acquire", scope="sys")
             if TRACE:
                 tl.atomic_max(ts_ag_ready + tile_id, read_realtime())
 
