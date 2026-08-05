@@ -51,7 +51,19 @@ import triton
 import triton.language as tl
 
 import iris
-from iris.device.utils import read_realtime
+
+# iris.device.utils.read_realtime gates on importing BOTH memrealtime and smid,
+# and smid is absent from triton 3.5.1+rocm7.2 -- so the whole module falls back
+# to a static_assert stub and all iris tracing silently dies. We only need the
+# timestamp, so import it directly.
+try:
+    from triton.language.extra.hip import memrealtime as read_realtime
+
+    _HAS_TIMER = True
+except ImportError:  # pragma: no cover - non-HIP builds
+    from iris.device.utils import read_realtime
+
+    _HAS_TIMER = False
 
 
 @triton.jit
