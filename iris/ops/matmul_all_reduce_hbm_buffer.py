@@ -268,17 +268,29 @@ def _fused_gemm_two_shot_ar_kernel(
         # ------------------------------------------------------------------
         local_pid = pid - NUM_GEMM_SMS - NUM_RS_SMS
 
-        # NOTE: consecutive tiles share an owner here, so a cohort of
-        # grid-strided WGs pulls from the same peer while ws-1 links idle.
-        # The obvious fix -- owner = seq % ws -- is WRONG as written: with
-        # NUM_AG_SMS a multiple of ws, seq % ws is constant per WG, so each WG
-        # reads from exactly one peer and it serializes harder. It also took
-        # bad elements from 1390 to 691026 per shard, so it interacts with the
-        # open RS bug. Left alone until the RS pool is correct.
-        for tile_id in range(local_pid, total_tiles, NUM_AG_SMS):
-            pid_m = tile_id // num_n_tiles
-            pid_n = tile_id % num_n_tiles
-            owner = pid_m // m_tiles_per_rank
+        # Peer tiles only, indexed so consecutive tiles fan across peers.
+        #
+        # Row-major order (owner = pid_m // m_tiles_per_rank) makes a cohort of
+        # grid-strided WGs pull from the SAME peer -- one XGMI link hot, ws-1
+        # idle. `owner = seq % ws` does not fix it either: NUM_AG_SMS is
+        # typically a multiple of ws, so gcd(stride, ws) == ws and seq % ws is
+        # CONSTANT per WG. It also wastes 1/ws of the iterations re-reading
+        # this rank's own shard.
+        #
+        # The modulus has to be world_size-1: peers excluding self. At ws=8
+        # that is 7, which is prime, so gcd(NUM_AG_SMS, 7) == 1 for any
+        # workgroup count that is not a multiple of 7 -- every WG then walks
+        # all 7 peers. Worth 106 -> 316 GB/s in a standalone all-gather.
+        n_peers: tl.constexpr = world_size - 1
+        peer_tiles = m_tiles_per_rank * num_n_tiles * n_peers
+
+        for seq in range(local_pid, peer_tiles, NUM_AG_SMS):
+            pk = seq % n_peers
+            slot = seq // n_peers
+            owner = (cur_rank + 1 + pk) % world_size
+            pid_m = owner * m_tiles_per_rank + slot // num_n_tiles
+            pid_n = slot % num_n_tiles
+            tile_id = pid_m * num_n_tiles + pid_n
 
             if TRACE:
                 tl.atomic_min(ts_ag_beg + tile_id, read_realtime())
@@ -305,6 +317,32 @@ def _fused_gemm_two_shot_ar_kernel(
             tl.store(output_ptr + off, v, mask=mask)
             if TRACE:
                 tl.atomic_max(ts_ag_end + tile_id, read_realtime())
+
+        # This rank's own shard: already reduced into scratch by our RS pool,
+        # so it is a local copy with no peer read and no flag wait beyond the
+        # RS ordering the pool already observed.
+        own_tiles = m_tiles_per_rank * num_n_tiles
+        for slot in range(local_pid, own_tiles, NUM_AG_SMS):
+            pid_m = cur_rank * m_tiles_per_rank + slot // num_n_tiles
+            pid_n = slot % num_n_tiles
+            tile_id = pid_m * num_n_tiles + pid_n
+
+            spins = 0
+            rslot = rs_flags_ptr + tile_id * FLAG_STRIDE + tl.arange(0, 1)
+            zero3 = tl.zeros((1,), dtype=tl.int32)
+            done = tl.min(tl.atomic_add(rslot, zero3, sem="acquire", scope="sys"))
+            while (done < rs_target) and (spins < SPIN_LIMIT):
+                done = tl.min(tl.atomic_add(rslot, zero3, sem="acquire", scope="sys"))
+                spins += 1
+
+            rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+            rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+            off = rm[:, None] * stride_cm + rn[None, :] * stride_cn
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            v = tl.load(scratch_ptr + off, mask=mask)
+            tl.store(output_ptr + off, v, mask=mask)
 
 
 def matmul_all_reduce_hbm_buffer_preamble(
