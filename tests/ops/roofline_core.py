@@ -181,6 +181,19 @@ def metrics(t_meas, t_gemm_var, t_comm_var, t_gemm_torch, t_comm_rccl,
         "launch_gain * true_overlap != overlap_gain"
     assert abs(algorithm * kernel - comm_gain) / comm_gain < 0.02, \
         "comm_gain != algorithm * kernel"
+    # Overlap cannot beat perfect hiding. If it does, t_comm_var came from a
+    # DIFFERENT implementation than the variant runs -- e.g. scoring a
+    # barrier-free fused kernel against a standalone reference that pays a
+    # host barrier. The difference is then credited as overlap, which is the
+    # same mislabeling as the launch leak, one level up. Fail loudly.
+    if denom > 1e-9:
+        ceiling = t_serial_var / t_ideal
+        assert true_overlap <= ceiling * 1.05, (
+            f"true_overlap {true_overlap:.3f} exceeds the physical ceiling "
+            f"{ceiling:.3f} -- t_comm_var ({t_comm_var:.4f}ms) is not the comm "
+            f"cost of this variant's own implementation"
+        )
+
     if t_gemm_var > 1e-9:
         w_g = t_gemm_torch / t_serial_torch
         w_c = t_comm_rccl / t_serial_torch
