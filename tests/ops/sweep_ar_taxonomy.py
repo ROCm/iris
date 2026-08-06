@@ -309,14 +309,35 @@ def _worker(local_rank, world_size, init_url, outfile):
     dist.destroy_process_group()
 
 
+def _free_port(explicit=None):
+    """Hardcoded TCPStore ports collide when two people share a node.
+    Bind :0 and let the OS hand us a free one unless told otherwise."""
+    if explicit:
+        return explicit
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+_PORT = None
+
+
 def main():
+    global _PORT
     p = argparse.ArgumentParser()
     p.add_argument("-r", "--num_ranks", type=int, default=8)
+    p.add_argument("--port", type=int, default=None,
+                   help="TCPStore port; default picks a free one")
     p.add_argument("-o", "--output", type=str, default="ar_taxonomy.json")
     args = p.parse_args()
+    _PORT = args.port
     mp.spawn(
         fn=_worker,
-        args=(args.num_ranks, "tcp://127.0.0.1:29511", args.output),
+        args=(args.num_ranks, f"tcp://127.0.0.1:{_free_port(_PORT)}", args.output),
         nprocs=args.num_ranks,
         join=True,
     )

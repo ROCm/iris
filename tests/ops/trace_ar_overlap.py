@@ -168,18 +168,39 @@ def _worker(local_rank, world_size, init_url, M, block_m, block_n, tpf, split):
     dist.destroy_process_group()
 
 
+def _free_port(explicit=None):
+    """Hardcoded TCPStore ports collide when two people share a node.
+    Bind :0 and let the OS hand us a free one unless told otherwise."""
+    if explicit:
+        return explicit
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+_PORT = None
+
+
 def main():
+    global _PORT
     p = argparse.ArgumentParser()
     p.add_argument("-r", "--num_ranks", type=int, default=8)
+    p.add_argument("--port", type=int, default=None,
+                   help="TCPStore port; default picks a free one")
     p.add_argument("-m", type=int, default=2048)
     p.add_argument("--bm", type=int, default=128)
     p.add_argument("--bn", type=int, default=128)
     p.add_argument("--tpf", type=int, default=1)
     p.add_argument("--split", type=str, default="192,32,32")
     a = p.parse_args()
+    _PORT = a.port
     split = tuple(int(x) for x in a.split.split(","))
     mp.spawn(fn=_worker,
-             args=(a.num_ranks, "tcp://127.0.0.1:29517", a.m, a.bm, a.bn,
+             args=(a.num_ranks, f"tcp://127.0.0.1:{_free_port(_PORT)}", a.m, a.bm, a.bn,
                    a.tpf, split),
              nprocs=a.num_ranks, join=True)
 
