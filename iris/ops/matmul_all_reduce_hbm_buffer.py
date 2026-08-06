@@ -213,16 +213,12 @@ def _fused_gemm_two_shot_ar_kernel(
             if TRACE:
                 tl.atomic_min(ts_rs_beg + tile_id, read_realtime())
             spins = 0
-            gslot = gemm_flags_ptr + grp * FLAG_STRIDE
-            done = tl.load(gslot, volatile=True)
+            gslot = gemm_flags_ptr + grp * FLAG_STRIDE + tl.arange(0, 1)
+            zero = tl.zeros((1,), dtype=tl.int32)
+            done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
             while (done < gemm_target) and (spins < SPIN_LIMIT):
-                done = tl.load(gslot, volatile=True)
+                done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
                 spins += 1
-            # Exactly one acquire RMW once the spin succeeds, rather than one
-            # per poll iteration. tl.debug_barrier() is a workgroup s_barrier,
-            # not a cross-device acquire, so it cannot order the peer stores.
-            tl.atomic_add(gslot + tl.arange(0, 1), tl.zeros((1,), dtype=tl.int32),
-                          sem="acquire", scope="sys")
 
             if TRACE:
                 tl.atomic_max(ts_rs_ready + tile_id, read_realtime())
@@ -237,21 +233,13 @@ def _fused_gemm_two_shot_ar_kernel(
             base = staged_c_ptr + off
 
             # Rotate the starting peer per WG so we don't all hammer rank 0.
-            # Flag counters verify EXACT (gemm_flags==ws, rs_flags==1), so the
-            # spin waits correctly -- the flag just arrives before the data is
-            # visible. The producer's store uses ".wt", which is write-through
-            # to L2 and NOT system-visible on gfx950, so this read can be
-            # served a stale local line. ".cv" bypasses it on the reader side.
-            # Reader-side half only; the producer store is unchanged.
             start = local_pid % world_size
             acc = iris.load(base, cur_rank, start, heap_bases, mask=mask,
-                            hint=(1, BLOCK_SIZE_N),
-                            cache_modifier=".cv").to(acc_dtype)
+                            hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 r = (start + i) % world_size
                 acc += iris.load(base, cur_rank, r, heap_bases, mask=mask,
-                                 hint=(1, BLOCK_SIZE_N),
-                                 cache_modifier=".cv").to(acc_dtype)
+                                 hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
 
             tl.store(scratch_ptr + off, acc.to(scratch_ptr.type.element_ty),
                      mask=mask, cache_modifier=".wt")
@@ -290,13 +278,12 @@ def _fused_gemm_two_shot_ar_kernel(
             if TRACE:
                 tl.atomic_min(ts_ag_beg + tile_id, read_realtime())
             spins = 0
-            rslot = rs_flags_ptr + tile_id * FLAG_STRIDE
-            done = tl.load(rslot, volatile=True)
+            rslot = rs_flags_ptr + tile_id * FLAG_STRIDE + tl.arange(0, 1)
+            zero2 = tl.zeros((1,), dtype=tl.int32)
+            done = tl.min(tl.atomic_add(rslot, zero2, sem="acquire", scope="sys"))
             while (done < rs_target) and (spins < SPIN_LIMIT):
-                done = tl.load(rslot, volatile=True)
+                done = tl.min(tl.atomic_add(rslot, zero2, sem="acquire", scope="sys"))
                 spins += 1
-            tl.atomic_add(rslot + tl.arange(0, 1), tl.zeros((1,), dtype=tl.int32),
-                          sem="acquire", scope="sys")
             if TRACE:
                 tl.atomic_max(ts_ag_ready + tile_id, read_realtime())
 
