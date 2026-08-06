@@ -46,9 +46,6 @@ COST
 
 from typing import Optional
 
-# Flags are spaced this many int32s apart (32 * 4B = 128B, one cache line).
-FLAG_STRIDE = 32
-
 import torch
 import triton
 import triton.language as tl
@@ -67,6 +64,9 @@ except ImportError:  # pragma: no cover - non-HIP builds
     from iris.device.utils import read_realtime
 
     _HAS_TIMER = False
+
+# Flags are spaced this many int32s apart (32 * 4B = 128B, one cache line).
+FLAG_STRIDE = 32
 
 
 @triton.jit
@@ -109,6 +109,7 @@ def _fused_gemm_two_shot_ar_kernel(
     NUM_AG_SMS: tl.constexpr,
     TILES_PER_FLAG: tl.constexpr,
     FLAG_STRIDE: tl.constexpr,
+    SKIP_GEMM: tl.constexpr,
     SPIN_LIMIT: tl.constexpr,
     TRACE: tl.constexpr,
 ):
@@ -158,13 +159,19 @@ def _fused_gemm_two_shot_ar_kernel(
                 b_ptrs = b_ptr + rk[:, None] * stride_bk + rn[None, :] * stride_bn
 
                 acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
-                for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-                    k_rem = K - k * BLOCK_SIZE_K
-                    a = tl.load(a_ptrs, mask=rk[None, :] < k_rem, other=0.0)
-                    b = tl.load(b_ptrs, mask=rk[:, None] < k_rem, other=0.0)
-                    acc += tl.dot(a, b)
-                    a_ptrs += BLOCK_SIZE_K * stride_ak
-                    b_ptrs += BLOCK_SIZE_K * stride_bk
+                if not SKIP_GEMM:
+                    # SKIP_GEMM leaves the store and the flag publish intact and
+                    # drops only the math, so a comm-only measurement keeps this
+                    # kernel's own barriers, launch count and flag protocol.
+                    # Scoring the fused row against a standalone kernel instead
+                    # launders that difference into "overlap".
+                    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+                        k_rem = K - k * BLOCK_SIZE_K
+                        a = tl.load(a_ptrs, mask=rk[None, :] < k_rem, other=0.0)
+                        b = tl.load(b_ptrs, mask=rk[:, None] < k_rem, other=0.0)
+                        acc += tl.dot(a, b)
+                        a_ptrs += BLOCK_SIZE_K * stride_ak
+                        b_ptrs += BLOCK_SIZE_K * stride_bk
 
                 c_off = rm[:, None] * stride_cm + rn[None, :] * stride_cn
                 c_mask = (rm[:, None] < M) & (rn[None, :] < N)
@@ -346,6 +353,7 @@ def matmul_all_reduce_hbm_buffer(
     mfma: int = 32,
     tiles_per_flag: int = 1,
     flag_stride: int = 32,
+    skip_gemm: bool = False,
     spin_limit: int = 1_000_000,
     trace: bool = False,
 ):
@@ -442,6 +450,7 @@ def matmul_all_reduce_hbm_buffer(
         NUM_AG_SMS=num_ag_sms,
         TILES_PER_FLAG=tiles_per_flag,
         FLAG_STRIDE=flag_stride,
+        SKIP_GEMM=skip_gemm,
         SPIN_LIMIT=spin_limit,
         TRACE=trace,
         num_warps=num_warps,

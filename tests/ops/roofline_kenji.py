@@ -174,9 +174,21 @@ def v_fused_hbm(ctx):
         BLOCK_SIZE_M=cfg["BM"], BLOCK_SIZE_N=cfg["BN"], BLOCK_SIZE_K=64,
         NUM_SMS=g, num_warps=cfg["num_warps"], matrix_instr_nonkdim=32))
 
-    t_comm_var = ctx.get("t_twoshot")
-    if t_comm_var is None:
-        raise RuntimeError("twoshot_ar_only must run before fused_hbm_twoshot")
+    # Comm reference must be THIS kernel's comm, not the closest standalone we
+    # have. twoshot_ar_only pays a host barrier the fused path never pays, and
+    # scoring against it credits that saving as overlap -- which the ceiling
+    # assert in roofline_core now catches. SKIP_GEMM drops only the math and
+    # keeps the barriers, launch count and flag protocol identical.
+    g, r, a = cfg["split"]
+    key = (cfg["BM"], cfg["BN"])
+    t_comm_var = bench(lambda: matmul_all_reduce_hbm_buffer(
+        shmem, out, A, B, workspace=wcache[key],
+        block_m=cfg["BM"], block_n=cfg["BN"], block_k=64,
+        num_gemm_sms=g, num_rs_sms=r, num_ag_sms=a,
+        num_warps=cfg["num_warps"], mfma=32, tiles_per_flag=cfg["tpf"],
+        skip_gemm=True))
+    log(f"  fused_hbm_twoshot: comm-only (SKIP_GEMM) {t_comm_var:.4f}ms "
+        f"vs standalone twoshot {ctx.get('t_twoshot', float('nan')):.4f}ms")
 
     # One kernel where the serial reference issues two.
     return ms, cfg, diff, "two_shot", t_gemm_var, t_comm_var, 1
