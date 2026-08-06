@@ -78,6 +78,8 @@ def _fused_gemm_two_shot_ar_kernel(
     output_ptr,
     gemm_flags_ptr,
     rs_flags_ptr,
+    ag_next_ptr,
+    own_next_ptr,
     ts_gemm_beg,
     ts_gemm_end,
     ts_rs_beg,
@@ -107,6 +109,7 @@ def _fused_gemm_two_shot_ar_kernel(
     NUM_GEMM_SMS: tl.constexpr,
     NUM_RS_SMS: tl.constexpr,
     NUM_AG_SMS: tl.constexpr,
+    TAIL_HELP: tl.constexpr,
     TILES_PER_FLAG: tl.constexpr,
     FLAG_STRIDE: tl.constexpr,
     SKIP_GEMM: tl.constexpr,
@@ -121,6 +124,23 @@ def _fused_gemm_two_shot_ar_kernel(
     m_tiles_per_rank = num_m_tiles // world_size
     total_groups = total_tiles // TILES_PER_FLAG
     acc_dtype = tl.float32
+
+    # Pools are STATIC, and elastic pools were tried and are worse.
+    #
+    # The trace is suggestive: the GEMM pool finishes at 92us in a 277us kernel,
+    # so 192 CUs -- 75% of the machine -- look idle for the back 185us. Retiring
+    # them into the all-gather should have been free throughput. Measured, at
+    # M=2048, it was 1.8x SLOWER (0.1958 static -> 0.3584 elastic), and the same
+    # with an atomic work counter (0.3570).
+    #
+    # Why: RS is the gate, not AG. RS pulls from ws peers and AG from one, and
+    # the fabric tops out around 85% of line with both pools active. Adding 192
+    # more work-groups to AG does not raise that ceiling -- it takes bandwidth
+    # from RS, which every AG tile is waiting on. The extra workers starve the
+    # producer they depend on.
+    #
+    # So the idle CUs are not recoverable by handing them to AG. Whatever the 3x
+    # over the fabric floor is, it is not simply unused compute.
 
     if pid < NUM_GEMM_SMS:
         # ------------------------------------------------------------------
@@ -191,6 +211,43 @@ def _fused_gemm_two_shot_ar_kernel(
                 iris.atomic_add(fslot, one, cur_rank, r, heap_bases,
                                 sem="release", scope="sys")
 
+        if TAIL_HELP:
+            # Retired GEMM work-groups walk the peer tiles BACK to front with
+            # their own static stride -- no counter, which is what confounded
+            # the earlier elastic attempt. No explicit gate either: the back
+            # tiles are the last ones RS produces, so polling them self-gates
+            # the helpers into the idle tail. All-gather is an idempotent copy,
+            # so a tile done twice is harmless; it costs bandwidth, and in the
+            # tail the fabric is idle anyway.
+            n_peers_t: tl.constexpr = world_size - 1
+            peer_tiles_t = m_tiles_per_rank * num_n_tiles * n_peers_t
+            for jj in range(pid, peer_tiles_t, NUM_GEMM_SMS):
+                seq = peer_tiles_t - 1 - jj
+                pk = seq % n_peers_t
+                slot = seq // n_peers_t
+                owner = (cur_rank + 1 + pk) % world_size
+                pid_m = owner * m_tiles_per_rank + slot // num_n_tiles
+                pid_n = slot % num_n_tiles
+                tile_id = pid_m * num_n_tiles + pid_n
+
+                spins = 0
+                rslot = rs_flags_ptr + tile_id * FLAG_STRIDE + tl.arange(0, 1)
+                zero2 = tl.zeros((1,), dtype=tl.int32)
+                done = tl.min(tl.atomic_add(rslot, zero2, sem="acquire", scope="sys"))
+                while (done < rs_target) and (spins < SPIN_LIMIT):
+                    done = tl.min(tl.atomic_add(rslot, zero2, sem="acquire", scope="sys"))
+                    spins += 1
+
+                rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+                rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+                rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+                rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+                off = rm[:, None] * stride_cm + rn[None, :] * stride_cn
+                mask = (rm[:, None] < M) & (rn[None, :] < N)
+                v = iris.load(scratch_ptr + off, cur_rank, owner, heap_bases,
+                              mask=mask, hint=(1, BLOCK_SIZE_N))
+                tl.store(output_ptr + off, v, mask=mask)
+
     elif pid < NUM_GEMM_SMS + NUM_RS_SMS:
         # ------------------------------------------------------------------
         # POOL R -- reduce-scatter. Waits only on pool G (which never waits).
@@ -213,16 +270,17 @@ def _fused_gemm_two_shot_ar_kernel(
             if TRACE:
                 tl.atomic_min(ts_rs_beg + tile_id, read_realtime())
             spins = 0
-            gslot = gemm_flags_ptr + grp * FLAG_STRIDE
-            done = tl.load(gslot, volatile=True)
+            # MUST be an atomic RMW, not tl.load(volatile=True). volatile does
+            # NOT block LICM on the AMD backend: the compiler hoists the load
+            # out of this loop, every WG spins on a stale register, burns
+            # SPIN_LIMIT and proceeds with garbage. It is silently WRONG, not
+            # slow -- and it is faster precisely because it stops waiting.
+            gslot = gemm_flags_ptr + grp * FLAG_STRIDE + tl.arange(0, 1)
+            zero = tl.zeros((1,), dtype=tl.int32)
+            done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
             while (done < gemm_target) and (spins < SPIN_LIMIT):
-                done = tl.load(gslot, volatile=True)
+                done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
                 spins += 1
-            # Exactly one acquire RMW once the spin succeeds, rather than one
-            # per poll iteration. tl.debug_barrier() is a workgroup s_barrier,
-            # not a cross-device acquire, so it cannot order the peer stores.
-            tl.atomic_add(gslot + tl.arange(0, 1), tl.zeros((1,), dtype=tl.int32),
-                          sem="acquire", scope="sys")
 
             if TRACE:
                 tl.atomic_max(ts_rs_ready + tile_id, read_realtime())
@@ -267,21 +325,39 @@ def _fused_gemm_two_shot_ar_kernel(
         # ------------------------------------------------------------------
         local_pid = pid - NUM_GEMM_SMS - NUM_RS_SMS
 
-        for tile_id in range(local_pid, total_tiles, NUM_AG_SMS):
-            pid_m = tile_id // num_n_tiles
-            pid_n = tile_id % num_n_tiles
-            owner = pid_m // m_tiles_per_rank
+        # Peer tiles only, indexed so consecutive tiles fan across peers.
+        #
+        # Row-major order (owner = pid_m // m_tiles_per_rank) makes a cohort of
+        # grid-strided WGs pull from the SAME peer -- one XGMI link hot, ws-1
+        # idle. `owner = seq % ws` does not fix it either: NUM_AG_SMS is
+        # typically a multiple of ws, so gcd(stride, ws) == ws and seq % ws is
+        # CONSTANT per WG. It also wastes 1/ws of the iterations re-reading
+        # this rank's own shard.
+        #
+        # The modulus has to be world_size-1: peers excluding self. At ws=8
+        # that is 7, which is prime, so gcd(NUM_AG_SMS, 7) == 1 for any
+        # workgroup count that is not a multiple of 7 -- every WG then walks
+        # all 7 peers. Worth 106 -> 316 GB/s in a standalone all-gather.
+        n_peers: tl.constexpr = world_size - 1
+        peer_tiles = m_tiles_per_rank * num_n_tiles * n_peers
+
+        for seq in range(local_pid, peer_tiles, NUM_AG_SMS):
+            pk = seq % n_peers
+            slot = seq // n_peers
+            owner = (cur_rank + 1 + pk) % world_size
+            pid_m = owner * m_tiles_per_rank + slot // num_n_tiles
+            pid_n = slot % num_n_tiles
+            tile_id = pid_m * num_n_tiles + pid_n
 
             if TRACE:
                 tl.atomic_min(ts_ag_beg + tile_id, read_realtime())
             spins = 0
-            rslot = rs_flags_ptr + tile_id * FLAG_STRIDE
-            done = tl.load(rslot, volatile=True)
+            rslot = rs_flags_ptr + tile_id * FLAG_STRIDE + tl.arange(0, 1)
+            zero2 = tl.zeros((1,), dtype=tl.int32)
+            done = tl.min(tl.atomic_add(rslot, zero2, sem="acquire", scope="sys"))
             while (done < rs_target) and (spins < SPIN_LIMIT):
-                done = tl.load(rslot, volatile=True)
+                done = tl.min(tl.atomic_add(rslot, zero2, sem="acquire", scope="sys"))
                 spins += 1
-            tl.atomic_add(rslot + tl.arange(0, 1), tl.zeros((1,), dtype=tl.int32),
-                          sem="acquire", scope="sys")
             if TRACE:
                 tl.atomic_max(ts_ag_ready + tile_id, read_realtime())
 
@@ -298,6 +374,32 @@ def _fused_gemm_two_shot_ar_kernel(
             tl.store(output_ptr + off, v, mask=mask)
             if TRACE:
                 tl.atomic_max(ts_ag_end + tile_id, read_realtime())
+
+        # This rank's own shard: already reduced into scratch by our RS pool,
+        # so it is a local copy with no peer read and no flag wait beyond the
+        # RS ordering the pool already observed.
+        own_tiles = m_tiles_per_rank * num_n_tiles
+        for slot in range(local_pid, own_tiles, NUM_AG_SMS):
+            pid_m = cur_rank * m_tiles_per_rank + slot // num_n_tiles
+            pid_n = slot % num_n_tiles
+            tile_id = pid_m * num_n_tiles + pid_n
+
+            spins = 0
+            rslot = rs_flags_ptr + tile_id * FLAG_STRIDE + tl.arange(0, 1)
+            zero3 = tl.zeros((1,), dtype=tl.int32)
+            done = tl.min(tl.atomic_add(rslot, zero3, sem="acquire", scope="sys"))
+            while (done < rs_target) and (spins < SPIN_LIMIT):
+                done = tl.min(tl.atomic_add(rslot, zero3, sem="acquire", scope="sys"))
+                spins += 1
+
+            rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+            rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+            rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+            rn = tl.max_contiguous(tl.multiple_of(rn % N, BLOCK_SIZE_N), BLOCK_SIZE_N)
+            off = rm[:, None] * stride_cm + rn[None, :] * stride_cn
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            v = tl.load(scratch_ptr + off, mask=mask)
+            tl.store(output_ptr + off, v, mask=mask)
 
 
 def matmul_all_reduce_hbm_buffer_preamble(
@@ -331,6 +433,10 @@ def matmul_all_reduce_hbm_buffer_preamble(
                                 dtype=torch.int32),
         "rs_flags": ctx.zeros((total_tiles * FLAG_STRIDE,), device="cuda",
                               dtype=torch.int32),
+        # Dynamic work counters. Unlike the flags these are NOT monotonic --
+        # they index within a single launch, so they must be reset every call.
+        "ag_next": ctx.zeros((1,), device="cuda", dtype=torch.int32),
+        "own_next": ctx.zeros((1,), device="cuda", dtype=torch.int32),
         "iteration": 0,
         "block_m": block_m,
         "block_n": block_n,
@@ -350,6 +456,7 @@ def matmul_all_reduce_hbm_buffer(
     num_rs_sms: int = 64,
     num_ag_sms: int = 64,
     num_warps: int = 8,
+    tail_help: bool = False,
     mfma: int = 32,
     tiles_per_flag: int = 1,
     flag_stride: int = 32,
@@ -374,6 +481,10 @@ def matmul_all_reduce_hbm_buffer(
             ctx, M, N, output_tensor.dtype, block_m, block_n
         )
         ctx.barrier()
+
+    # Reset per launch: these count tiles within one call, not across calls.
+    workspace["ag_next"].zero_()
+    workspace["own_next"].zero_()
 
     workspace["iteration"] += 1
     it = workspace["iteration"]
@@ -426,6 +537,8 @@ def matmul_all_reduce_hbm_buffer(
         output_tensor,
         workspace["gemm_flags"],
         workspace["rs_flags"],
+        workspace["ag_next"],
+        workspace["own_next"],
         tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7],
         M,
         N,
@@ -448,6 +561,7 @@ def matmul_all_reduce_hbm_buffer(
         NUM_GEMM_SMS=num_gemm_sms,
         NUM_RS_SMS=num_rs_sms,
         NUM_AG_SMS=num_ag_sms,
+        TAIL_HELP=tail_help,
         TILES_PER_FLAG=tiles_per_flag,
         FLAG_STRIDE=flag_stride,
         SKIP_GEMM=skip_gemm,
