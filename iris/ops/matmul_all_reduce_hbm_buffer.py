@@ -88,6 +88,9 @@ def _fused_gemm_two_shot_ar_kernel(
     ts_ag_beg,
     ts_ag_ready,
     ts_ag_end,
+    ts_gemm_wg,
+    ts_rs_wg,
+    ts_ag_wg,
     M,
     N,
     K,
@@ -167,6 +170,7 @@ def _fused_gemm_two_shot_ar_kernel(
                 tile_id = pid_m * num_n_tiles + pid_n
                 if TRACE:
                     tl.atomic_min(ts_gemm_beg + tile_id, read_realtime())
+                    tl.atomic_max(ts_gemm_wg + tile_id, pid)
 
                 rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
                 rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -231,6 +235,7 @@ def _fused_gemm_two_shot_ar_kernel(
             grp = (t // TILES_PER_FLAG) * world_size + cur_rank
             if TRACE:
                 tl.atomic_min(ts_rs_beg + tile_id, read_realtime())
+                tl.atomic_max(ts_rs_wg + tile_id, pid)
             spins = 0
             # MUST be an atomic RMW, not tl.load(volatile=True). volatile does
             # NOT block LICM on the AMD backend: the compiler hoists the load
@@ -313,6 +318,7 @@ def _fused_gemm_two_shot_ar_kernel(
 
             if TRACE:
                 tl.atomic_min(ts_ag_beg + tile_id, read_realtime())
+                tl.atomic_max(ts_ag_wg + tile_id, pid)
             spins = 0
             rslot = rs_flags_ptr + tile_id * FLAG_STRIDE + tl.arange(0, 1)
             zero2 = tl.zeros((1,), dtype=tl.int32)
@@ -467,15 +473,17 @@ def matmul_all_reduce_hbm_buffer(
         if ts is None or ts["gemm_beg"].numel() != num_tiles:
             ts = {k: torch.zeros(num_tiles, dtype=torch.int64, device=dev)
                   for k in ("gemm_beg", "gemm_end", "rs_beg", "rs_ready",
-                            "rs_end", "ag_beg", "ag_ready", "ag_end")}
+                            "rs_end", "ag_beg", "ag_ready", "ag_end",
+                            "gemm_wg", "rs_wg", "ag_wg")}
             workspace["trace"] = ts
         # atomic_min needs a high initial value; atomic_max needs a low one
         for k, v in ts.items():
             v.fill_(torch.iinfo(torch.int64).max if k.endswith("_beg") else 0)
         tb = [ts["gemm_beg"], ts["gemm_end"], ts["rs_beg"], ts["rs_ready"],
-              ts["rs_end"], ts["ag_beg"], ts["ag_ready"], ts["ag_end"]]
+              ts["rs_end"], ts["ag_beg"], ts["ag_ready"], ts["ag_end"],
+              ts["gemm_wg"], ts["rs_wg"], ts["ag_wg"]]
     else:
-        tb = [staged_c] * 8  # unused; TRACE=False compiles the stores away
+        tb = [staged_c] * 11  # unused; TRACE=False compiles the stores away
 
     # Each GEMM WG owns a whole flag group, and a group lives entirely inside
     # one rank's shard, so the shard's tile count must divide by the group size.
@@ -501,6 +509,7 @@ def matmul_all_reduce_hbm_buffer(
         workspace["ag_next"],
         workspace["own_next"],
         tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7],
+        tb[8], tb[9], tb[10],
         M,
         N,
         K,

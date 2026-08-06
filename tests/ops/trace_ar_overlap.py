@@ -112,7 +112,7 @@ def summarize(ts, freq_mhz, label, rank):
     print(f"  kernel wall span {total:7.2f} us")
 
 
-def _worker(local_rank, world_size, init_url, M, block_m, block_n, tpf, split):
+def _worker(local_rank, world_size, init_url, M, block_m, block_n, tpf, split, dump):
     dist.init_process_group(
         backend="nccl", init_method=init_url, world_size=world_size,
         rank=local_rank, device_id=torch.device(f"cuda:{local_rank}"))
@@ -156,6 +156,13 @@ def _worker(local_rank, world_size, init_url, M, block_m, block_n, tpf, split):
     d = torch.abs(out - ref).max().item()
     shmem.barrier()
 
+    if rank == 0 and dump:
+        import numpy as np
+        arrs = {k: v.cpu().numpy() for k, v in ws["trace"].items()}
+        arrs["freq_mhz"] = np.array(freq_mhz)
+        np.savez(dump, **arrs)
+        print(f"dumped raw timestamps -> {dump}")
+
     for r in range(world_size):
         if r == rank and rank in (0, world_size - 1):
             print(f"\n{'='*70}")
@@ -196,12 +203,14 @@ def main():
     p.add_argument("--bn", type=int, default=128)
     p.add_argument("--tpf", type=int, default=1)
     p.add_argument("--split", type=str, default="192,32,32")
+    p.add_argument("--dump", type=str, default=None,
+                   help="write raw per-tile timestamps to this .npz")
     a = p.parse_args()
     _PORT = a.port
     split = tuple(int(x) for x in a.split.split(","))
     mp.spawn(fn=_worker,
              args=(a.num_ranks, f"tcp://127.0.0.1:{_free_port(_PORT)}", a.m, a.bm, a.bn,
-                   a.tpf, split),
+                   a.tpf, split, a.dump),
              nprocs=a.num_ranks, join=True)
 
 
