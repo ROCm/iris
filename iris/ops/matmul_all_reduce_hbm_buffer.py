@@ -237,13 +237,21 @@ def _fused_gemm_two_shot_ar_kernel(
             base = staged_c_ptr + off
 
             # Rotate the starting peer per WG so we don't all hammer rank 0.
+            # Flag counters verify EXACT (gemm_flags==ws, rs_flags==1), so the
+            # spin waits correctly -- the flag just arrives before the data is
+            # visible. The producer's store uses ".wt", which is write-through
+            # to L2 and NOT system-visible on gfx950, so this read can be
+            # served a stale local line. ".cv" bypasses it on the reader side.
+            # Reader-side half only; the producer store is unchanged.
             start = local_pid % world_size
             acc = iris.load(base, cur_rank, start, heap_bases, mask=mask,
-                            hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+                            hint=(1, BLOCK_SIZE_N),
+                            cache_modifier=".cv").to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 r = (start + i) % world_size
                 acc += iris.load(base, cur_rank, r, heap_bases, mask=mask,
-                                 hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+                                 hint=(1, BLOCK_SIZE_N),
+                                 cache_modifier=".cv").to(acc_dtype)
 
             tl.store(scratch_ptr + off, acc.to(scratch_ptr.type.element_ty),
                      mask=mask, cache_modifier=".wt")
