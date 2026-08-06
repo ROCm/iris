@@ -381,7 +381,11 @@ def main():
         # The standalone all_reduce runs on zeros: reducing the same buffer 125
         # times multiplies it by ws each pass and would overflow fp16 to inf.
         # NCCL timing is data-independent, so zeros cost nothing and stay finite.
-        Z = torch.zeros(M, N, device=dev, dtype=dt)
+        # Timing all_reduce on zeros dodges the fp16 overflow from reducing the
+        # same buffer 125 times, but RCCL's reduction cost can be data
+        # dependent. Scale by 1/ws instead: the sum is a fixed point, so it
+        # stays finite over any number of iterations without being trivial.
+        Z = torch.full((M, N), 1.0 / ws, device=dev, dtype=dt)
         t_launch = bench(lambda: null_kernel[(1,)](Z))
         t_gemm_torch = bench(lambda: torch.mm(A, B, out=Cr))
         t_rccl = bench(lambda: dist.all_reduce(Z))
@@ -425,6 +429,14 @@ def main():
             row = {"variant": name, "kind": v["kind"], "M": M, "cfg": cfg,
                    "max_diff": diff, "vs_torch": t_torch / ms,
                    "t_gemm_var": t_g, "t_comm_var": t_c, **mt}
+            if name == "torch_serial":
+                cal = abs(row["vs_torch"] - 1.0)
+                row["calibration_err_pct"] = cal * 100
+                if cal > 0.03:
+                    log(f"  !! CALIBRATION: torch_serial scored "
+                        f"{row['vs_torch']:.3f}x against itself ({cal*100:.1f}% off). "
+                        f"References are mis-measured; treat every effect "
+                        f"smaller than {cal*100:.0f}% in this block as noise.")
             payload["results"].append(row)
             rows.append(row)
             # C_sym is clobbered by fused/two-kernel runs; restore for the next.
