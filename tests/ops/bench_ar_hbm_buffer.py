@@ -95,6 +95,37 @@ def _worker(local_rank, world_size, init_url, outfile):
             print(f"  torch bulk-sync            {base_ms:.4f}ms  1.00x")
             print(f"  two-kernel one-shot        {twok_ms:.4f}ms  {base_ms/twok_ms:.2f}x")
 
+        # KNOWN-GOOD CONTROL. Run one config that is known to pass before the
+        # sweep, and say so loudly if it fails. An all-fail sweep reported as
+        # "no valid config" cost a full run once -- the kernel was fine and the
+        # harness had exhausted the symmetric heap. A sweep where nothing
+        # passes is a harness result until this control says otherwise.
+        ctl_ok = None
+        try:
+            cbm, cbn = (64, 128) if M % (64 * world_size) == 0 else (128, 128)
+            if triton.cdiv(M, cbm) % world_size == 0:
+                cws = matmul_all_reduce_hbm_buffer_preamble(
+                    shmem, M, N_GLOBAL, dtype, cbm, cbn)
+                shmem.barrier()
+                cout = torch.zeros(M, N_GLOBAL, dtype=dtype,
+                                   device=f"cuda:{rank}")
+                matmul_all_reduce_hbm_buffer(
+                    shmem, cout, A, B, workspace=cws, block_m=cbm, block_n=cbn,
+                    block_k=64, mfma=16, tiles_per_flag=1, num_gemm_sms=208,
+                    num_rs_sms=32, num_ag_sms=16)
+                torch.cuda.synchronize()
+                ctl_ok = torch.abs(cout - ref).max().item() < tol
+                shmem.barrier()
+                del cws, cout
+                torch.cuda.empty_cache()
+        except Exception as ex:
+            ctl_ok = False
+            if rank == 0:
+                print(f"  CONTROL raised {type(ex).__name__}: {str(ex)[:70]}")
+        if rank == 0 and ctl_ok is False:
+            print("  *** KNOWN-GOOD CONTROL FAILED -- suspect the harness, "
+                  "not the sweep ***")
+
         best = (1e9, None)
         ws_cache = {}
         out = torch.zeros(M, N_GLOBAL, dtype=dtype, device=f"cuda:{rank}")
