@@ -124,30 +124,22 @@ def _fused_gemm_two_shot_ar_kernel(
     total_groups = total_tiles // TILES_PER_FLAG
     acc_dtype = tl.float32
 
-    # Pools are ELASTIC, not static. The GEMM pool finishes at 92us in a
-    # 277us kernel and its 192 CUs -- 75% of the machine -- then sit idle for
-    # the remaining 185us. That idle time, not bandwidth and not sync, is the
-    # ~3x between this kernel and the measured fabric floor.
+    # Pools are STATIC, and elastic pools were tried and are worse.
     #
-    # The GEMM pool cannot simply be made smaller: RS cannot start tile t until
-    # EVERY rank has produced it, so the GEMM gates the whole pipeline and has
-    # to be fast. That is why 192/32/32 wins every sweep even though the
-    # AllReduce is 14x the GEMM.
+    # The trace is suggestive: the GEMM pool finishes at 92us in a 277us kernel,
+    # so 192 CUs -- 75% of the machine -- look idle for the back 185us. Retiring
+    # them into the all-gather should have been free throughput. Measured, at
+    # M=2048, it was 1.8x SLOWER (0.1958 static -> 0.3584 elastic), and the same
+    # with an atomic work counter (0.3570).
     #
-    # So instead of shrinking it, retire it: once a GEMM work-group has emitted
-    # its tiles it falls through and joins the all-gather.
+    # Why: RS is the gate, not AG. RS pulls from ws peers and AG from one, and
+    # the fabric tops out around 85% of line with both pools active. Adding 192
+    # more work-groups to AG does not raise that ceiling -- it takes bandwidth
+    # from RS, which every AG tile is waiting on. The extra workers starve the
+    # producer they depend on.
     #
-    # Dispatch is a STATIC grid-stride over the combined worker set. An atomic
-    # work counter looks better on paper -- no tile is bound to a worker that
-    # has not retired yet -- but it is one device-scope RMW per tile across 224
-    # workers hammering a single line, and measured here it was 1.7-1.8x SLOWER
-    # end to end (M=2048: 0.357 dynamic vs 0.196 static). The contention costs
-    # more than the load imbalance it removes.
-    #
-    # The staggered-arrival imbalance is real: tiles in a late worker's stride
-    # class do wait. It is just cheaper to eat it than to serialize every tile
-    # through one counter.
-    is_rs_pool = (pid >= NUM_GEMM_SMS) and (pid < NUM_GEMM_SMS + NUM_RS_SMS)
+    # So the idle CUs are not recoverable by handing them to AG. Whatever the 3x
+    # over the fabric floor is, it is not simply unused compute.
 
     if pid < NUM_GEMM_SMS:
         # ------------------------------------------------------------------
@@ -218,7 +210,7 @@ def _fused_gemm_two_shot_ar_kernel(
                 iris.atomic_add(fslot, one, cur_rank, r, heap_bases,
                                 sem="release", scope="sys")
 
-    if is_rs_pool:
+    elif pid < NUM_GEMM_SMS + NUM_RS_SMS:
         # ------------------------------------------------------------------
         # POOL R -- reduce-scatter. Waits only on pool G (which never waits).
         # Reduces this rank's own M-shard by pulling that shard from everyone.
@@ -288,15 +280,12 @@ def _fused_gemm_two_shot_ar_kernel(
                 iris.atomic_add(fslot, one, cur_rank, r, heap_bases,
                                 sem="release", scope="sys")
 
-    if not is_rs_pool:
+    else:
         # ------------------------------------------------------------------
         # POOL A -- all-gather. Waits only on pool R. Pulls each tile from
         # whichever rank owns it after the reduce-scatter.
-        #
-        # Workers: the AG pool gets ids [0, NUM_AG_SMS) and retired GEMM WGs
-        # get [NUM_AG_SMS, NUM_AG_SMS + NUM_GEMM_SMS). Contiguous ids over a
-        # matching stride, so every tile is still claimed exactly once.
         # ------------------------------------------------------------------
+        local_pid = pid - NUM_GEMM_SMS - NUM_RS_SMS
 
         # Peer tiles only, indexed so consecutive tiles fan across peers.
         #
@@ -314,13 +303,7 @@ def _fused_gemm_two_shot_ar_kernel(
         n_peers: tl.constexpr = world_size - 1
         peer_tiles = m_tiles_per_rank * num_n_tiles * n_peers
 
-        AG_WORKERS: tl.constexpr = NUM_AG_SMS + NUM_GEMM_SMS
-        if pid < NUM_GEMM_SMS:
-            ag_id = NUM_AG_SMS + pid
-        else:
-            ag_id = pid - NUM_GEMM_SMS - NUM_RS_SMS
-
-        for seq in range(ag_id, peer_tiles, AG_WORKERS):
+        for seq in range(local_pid, peer_tiles, NUM_AG_SMS):
             pk = seq % n_peers
             slot = seq // n_peers
             owner = (cur_rank + 1 + pk) % world_size
@@ -357,20 +340,8 @@ def _fused_gemm_two_shot_ar_kernel(
         # This rank's own shard: already reduced into scratch by our RS pool,
         # so it is a local copy with no peer read and no flag wait beyond the
         # RS ordering the pool already observed.
-        # Own-shard copy stays on the AG pool with a static stride. Putting it
-        # on the dynamic counter alongside the retired GEMM WGs corrupted it
-        # (689980 bad elements, own shard only, peers clean) and it is 12.5% of
-        # the tiles and a purely local copy -- not where the tail is. Isolated
-        # rather than left in while unexplained.
         own_tiles = m_tiles_per_rank * num_n_tiles
-        # Retired GEMM WGs skip this loop. Their pid makes the start index
-        # NEGATIVE, which would run the loop rather than skip it -- so set the
-        # start past the end instead of trying to bail out inside the body.
-        if pid < NUM_GEMM_SMS:
-            own_start = own_tiles
-        else:
-            own_start = pid - NUM_GEMM_SMS - NUM_RS_SMS
-        for slot in range(own_start, own_tiles, NUM_AG_SMS):
+        for slot in range(local_pid, own_tiles, NUM_AG_SMS):
             pid_m = cur_rank * m_tiles_per_rank + slot // num_n_tiles
             pid_n = slot % num_n_tiles
             tile_id = pid_m * num_n_tiles + pid_n
