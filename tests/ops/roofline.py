@@ -13,13 +13,27 @@ PER (variant, M, ws) WE EMIT
     T_ideal     max(T_gemm, T_comm)        -- comm perfectly hidden behind compute
     T_measured  what the variant actually does
 
+Every headline factors exactly, so nothing is unattributed:
+
+    T_torch / T_meas = component_gain * overlap_gain
+    component_gain   = T_torch      / (T_gemm_var + T_comm_var)
+    overlap_gain     = T_serial_var / T_meas
+
+and the comm side splits into physics:
+
+    algorithm = rccl_algo_bytes / variant_algo_bytes   (fewer bytes)
+    kernel    = variant_GBs     / rccl_GBs             (better efficiency)
+    comm_gain = algorithm * kernel  ==  T_comm_rccl / T_comm_var
+    gemm_gain = T_gemm_torch / T_gemm_var              (Triton GEMM tax)
+
+Both identities are asserted at runtime: a row that does not multiply out
+crashes rather than printing a plausible number.
+
     overlap_ratio = (T_serial - T_measured) / (T_serial - T_ideal)
 
         1.0  comm fully hidden -- the stated goal
         0.0  no overlap, identical to running them back to back
        <0    fusion is actively costing us
-       >1    impossible from overlap alone; the variant also improved a
-             component, and the table must say which
 
 Two efficiency axes so we know which side binds:
     comm_pct_line   achieved GB/s over XGMI line rate
@@ -32,13 +46,14 @@ reference inflates T_serial and makes every variant look good. `num_warps` was
 never swept on any variant in this study and is worth up to 4.3x, so the
 references are tuned over it here before anything else runs.
 
-ALGORITHM GAIN IS REPORTED SEPARATELY
--------------------------------------
-A variant that switches one-shot -> two-shot must not book that as "overlap".
-Each variant is scored against the comm reference for its own algorithm, and
-the algorithm win is reported on its own axis:
-
-    algorithm_gain = T_comm(one_shot) / T_comm(variant's algorithm)
+BASELINE IS RCCL, NOT OUR OWN KERNEL
+------------------------------------
+A variant that switches one-shot -> two-shot must not book that as "overlap",
+so each variant is scored against the comm reference for its own algorithm.
+The algorithm win is anchored to RCCL rather than to our one-shot: anchoring
+to our own kernel hands every two-shot variant a free win against a strawman
+we wrote, and moves the number every time we retune one-shot. RCCL is also a
+two-shot ring, so it compares like with like on bytes.
 """
 
 import argparse
@@ -251,6 +266,7 @@ def _worker(local_rank, world_size, init_url, outfile, m_list):
             var_gbs = comm_gbs if comm_gbs else var_bytes / 1e9 / (T_c * 1e-3)
             kernel = var_gbs / rccl_gbs
             comm_gain = comm_ref["rccl"] / T_c
+            gemm_gain = T_gemm / T_g
 
             # The decomposition is only worth printing if it is exact.
             assert abs(component_gain * overlap_gain - torch_ms / T_meas) < 1e-6
@@ -263,7 +279,8 @@ def _worker(local_rank, world_size, init_url, outfile, m_list):
             emit(kind="variant", name=name, M=M, ms=T_meas, algo=algo,
                  vs_torch=torch_ms / T_meas, component_gain=component_gain,
                  overlap_gain=overlap_gain, algorithm=algorithm, kernel=kernel,
-                 comm_gain=comm_gain, overlap_ratio=ov_ratio,
+                 comm_gain=comm_gain, gemm_gain=gemm_gain,
+                 overlap_ratio=ov_ratio,
                  T_serial_var=T_serial_var, T_ideal=T_ideal, T_gemm=T_g,
                  T_comm=T_c, comm_gbs=var_gbs, cfg=cfg)
 
