@@ -355,10 +355,20 @@ def _fused_gemm_two_shot_ar_kernel(
         # This rank's own shard: already reduced into scratch by our RS pool,
         # so it is a local copy with no peer read and no flag wait beyond the
         # RS ordering the pool already observed.
+        # Own-shard copy stays on the AG pool with a static stride. Putting it
+        # on the dynamic counter alongside the retired GEMM WGs corrupted it
+        # (689980 bad elements, own shard only, peers clean) and it is 12.5% of
+        # the tiles and a purely local copy -- not where the tail is. Isolated
+        # rather than left in while unexplained.
         own_tiles = m_tiles_per_rank * num_n_tiles
-        ctr2 = own_next_ptr + tl.arange(0, 1)
-        slot = tl.min(tl.atomic_add(ctr2, one_i, sem="relaxed", scope="gpu"))
-        while slot < own_tiles:
+        # Retired GEMM WGs skip this loop. Their pid makes the start index
+        # NEGATIVE, which would run the loop rather than skip it -- so set the
+        # start past the end instead of trying to bail out inside the body.
+        if pid < NUM_GEMM_SMS:
+            own_start = own_tiles
+        else:
+            own_start = pid - NUM_GEMM_SMS - NUM_RS_SMS
+        for slot in range(own_start, own_tiles, NUM_AG_SMS):
             pid_m = cur_rank * m_tiles_per_rank + slot // num_n_tiles
             pid_n = slot % num_n_tiles
             tile_id = pid_m * num_n_tiles + pid_n
@@ -379,7 +389,6 @@ def _fused_gemm_two_shot_ar_kernel(
             mask = (rm[:, None] < M) & (rn[None, :] < N)
             v = tl.load(scratch_ptr + off, mask=mask)
             tl.store(output_ptr + off, v, mask=mask)
-            slot = tl.min(tl.atomic_add(ctr2, one_i, sem="relaxed", scope="gpu"))
 
 
 def matmul_all_reduce_hbm_buffer_preamble(
