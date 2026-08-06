@@ -38,7 +38,7 @@ STYLE = {
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("json")
+    p.add_argument("json", nargs="+", help="one roofline json per world size")
     p.add_argument("-o", "--out", default="roofline")
     a = p.parse_args()
 
@@ -46,13 +46,17 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    rows = json.load(open(a.json))
-    ws = rows[0]["world_size"]
+    per_ws = {}
+    for path in a.json:
+        rows = json.load(open(path))
+        w = rows[0]["world_size"]
+        d = defaultdict(dict)
+        for r in rows:
+            d[r["algo"]][r["M"]] = r
+        per_ws[w] = d
+    ws = max(per_ws)
+    by = per_ws[ws]
     byte_ratio = ws / (2 * (ws - 1) / ws)
-
-    by = defaultdict(dict)
-    for r in rows:
-        by[r["algo"]][r["M"]] = r
 
     plt.rcParams.update({
         "figure.facecolor": "black", "axes.facecolor": "black",
@@ -117,35 +121,37 @@ def main():
     ax.legend(facecolor="black", edgecolor="#555555", labelcolor="white",
               fontsize=8, loc="upper left")
 
-    # ---- 4. the crossover rule ----
+    # ---- 4. the crossover rule, across world sizes ----
+    # byte_ratio(ws) = ws / (2(ws-1)/ws) = ws^2 / (2(ws-1)):
+    #   ws=2 -> 2.00, ws=4 -> 2.67, ws=8 -> 4.57
+    # so the rule predicts the crossover MOVES with ws. Overlaying the
+    # measured efficiency ratio per ws against its own byte ratio tests that.
     ax = axes[1][1]
-    Ms = sorted(set(by["RCCL all_reduce"]) & set(by["iris one-shot"]))
-    eff = [by["iris one-shot"][m]["gbs"] / by["RCCL all_reduce"][m]["gbs"]
-           for m in Ms]
-    ax.plot(Ms, eff, color="#bc3754", marker="s", lw=2.2,
-            label="efficiency ratio  one-shot / RCCL")
-    ax.axhline(byte_ratio, color="#f98e09", ls="--", lw=2,
-               label=f"byte ratio  {byte_ratio:.2f}x")
-    ax.fill_between(Ms, byte_ratio, eff,
-                    where=[e >= byte_ratio for e in eff],
-                    color="#bc3754", alpha=0.25)
-    ax.fill_between(Ms, byte_ratio, eff,
-                    where=[e < byte_ratio for e in eff],
-                    color="#f98e09", alpha=0.25)
-    # where the two curves cross, in log-M
-    cross = None
-    for i in range(1, len(Ms)):
-        if (eff[i - 1] - byte_ratio) * (eff[i] - byte_ratio) < 0:
-            x0, x1 = np.log2(Ms[i - 1]), np.log2(Ms[i])
-            y0, y1 = eff[i - 1], eff[i]
-            cross = 2 ** (x0 + (byte_ratio - y0) * (x1 - x0) / (y1 - y0))
-    if cross:
-        ax.axvline(cross, color="white", ls=":", lw=1.4)
-        ax.text(cross * 1.05, max(eff) * 0.85, f"crossover M≈{cross:.0f}",
-                color="white", fontsize=9)
+    shades = {2: "#fcffa4", 4: "#f98e09", 8: "#bc3754"}
+    crossings = {}
+    for w in sorted(per_ws):
+        b = per_ws[w]
+        if "RCCL all_reduce" not in b or "iris one-shot" not in b:
+            continue
+        br = w / (2 * (w - 1) / w)
+        Ms = sorted(set(b["RCCL all_reduce"]) & set(b["iris one-shot"]))
+        eff = [b["iris one-shot"][m]["gbs"] / b["RCCL all_reduce"][m]["gbs"]
+               for m in Ms]
+        c = shades.get(w, "#57106e")
+        ax.plot(Ms, eff, color=c, marker="o", lw=2,
+                label=f"ws={w}: efficiency ratio")
+        ax.axhline(br, color=c, ls="--", lw=1.4, alpha=0.8)
+        ax.text(Ms[0], br * 1.04, f"byte ratio {br:.2f}", color=c, fontsize=7)
+        for i in range(1, len(Ms)):
+            if (eff[i - 1] - br) * (eff[i] - br) < 0:
+                x0, x1 = np.log2(Ms[i - 1]), np.log2(Ms[i])
+                cx = 2 ** (x0 + (br - eff[i - 1]) * (x1 - x0) /
+                           (eff[i] - eff[i - 1]))
+                crossings[w] = cx
+                ax.axvline(cx, color=c, ls=":", lw=1.2, alpha=0.8)
     ax.set_xscale("log", base=2); ax.set_yscale("log", base=2)
     ax.set_xlabel("M (tokens)")
-    ax.set_ylabel("ratio")
+    ax.set_ylabel("ratio  (solid = measured, dashed = predicted threshold)")
     ax.grid(alpha=0.3)
     ax.legend(facecolor="black", edgecolor="#555555", labelcolor="white",
               fontsize=8, loc="upper right")
@@ -153,8 +159,9 @@ def main():
     fig.tight_layout()
     fig.savefig(f"{a.out}_roofline.png", dpi=140)
     print(f"wrote {a.out}_roofline.png")
-    if cross:
-        print(f"predicted crossover: M ~= {cross:.0f}")
+    for w in sorted(crossings):
+        print(f"  ws={w}: byte_ratio={w/(2*(w-1)/w):.2f}  "
+              f"crossover M ~= {crossings[w]:.0f}")
     for m in Ms:
         r_, o_ = by["RCCL all_reduce"][m], by["iris one-shot"][m]
         f_ = by.get("fused two-shot (comm)", {}).get(m)
