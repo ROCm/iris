@@ -72,6 +72,18 @@ def _worker(local_rank, world_size, init_url, M, bm, bn, tpf, split):
     torch.cuda.synchronize()
     shmem.barrier()
 
+    # Flag counters after exactly one call. Expected: gemm_flags[grp] == ws
+    # (each rank signals each group once) and rs_flags[tile] == 1.
+    # A value ABOVE the target means the spin was satisfied before every peer
+    # had written -- the RS pool would then read staged_c too early, which is
+    # exactly the symptom (producer correct, consumer garbage).
+    from iris.ops.matmul_all_reduce_hbm_buffer import FLAG_STRIDE
+    gf = wsx["gemm_flags"][::FLAG_STRIDE]
+    rf = wsx["rs_flags"][::FLAG_STRIDE]
+    n_grp = triton.cdiv(M, bm) * triton.cdiv(N_GLOBAL, bn) // tpf
+    gf_v = gf[:n_grp]
+    rf_v = rf[:triton.cdiv(M, bm) * triton.cdiv(N_GLOBAL, bn)]
+
     d_staged = torch.abs(wsx["staged_c"] - partial).max().item()
     d_scratch = torch.abs(wsx["scratch"][my_rows] - full[my_rows]).max().item()
     d_out = torch.abs(out - full).max().item()
@@ -94,6 +106,12 @@ def _worker(local_rank, world_size, init_url, M, bm, bn, tpf, split):
                   f"{'RS POOL OK' if d_scratch < 0.05 else 'RS POOL WRONG'}")
             print(f"  3. output vs full all-reduce   maxdiff {d_out:.4f}  "
                   f"{'AG POOL OK' if d_out < 0.05 else 'AG POOL WRONG'}")
+            print(f"  gemm_flags: min={gf_v.min().item()} max={gf_v.max().item()} "
+                  f"expected={world_size}   "
+                  f"{'OK' if gf_v.min().item()==world_size and gf_v.max().item()==world_size else 'MISCOUNT'}")
+            print(f"  rs_flags:   min={rf_v.min().item()} max={rf_v.max().item()} "
+                  f"expected=1   "
+                  f"{'OK' if rf_v.min().item()==1 and rf_v.max().item()==1 else 'MISCOUNT'}")
             print(f"  bad elements per shard: {per_shard}")
             own = per_shard[rank]
             other = sum(per_shard) - own
