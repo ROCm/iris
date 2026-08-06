@@ -267,18 +267,17 @@ def _fused_gemm_two_shot_ar_kernel(
         # ------------------------------------------------------------------
         local_pid = pid - NUM_GEMM_SMS - NUM_RS_SMS
 
-        # Owner-interleaved order. In row-major tile order consecutive tiles
-        # share an owner, so a whole cohort of grid-strided WGs pulls from the
-        # SAME peer at the same instant -- one XGMI link saturated, ws-1 idle.
-        # Mapping seq -> owner (seq % ws) fans consecutive tiles across every
-        # peer. Same reordering the GEMM pool already does, and it is the fix
-        # that took a standalone all-gather from 106 to 316 GB/s.
-        for seq in range(local_pid, total_tiles, NUM_AG_SMS):
-            owner = seq % world_size
-            slot = seq // world_size
-            pid_m = owner * m_tiles_per_rank + slot // num_n_tiles
-            pid_n = slot % num_n_tiles
-            tile_id = pid_m * num_n_tiles + pid_n
+        # NOTE: consecutive tiles share an owner here, so a cohort of
+        # grid-strided WGs pulls from the same peer while ws-1 links idle.
+        # The obvious fix -- owner = seq % ws -- is WRONG as written: with
+        # NUM_AG_SMS a multiple of ws, seq % ws is constant per WG, so each WG
+        # reads from exactly one peer and it serializes harder. It also took
+        # bad elements from 1390 to 691026 per shard, so it interacts with the
+        # open RS bug. Left alone until the RS pool is correct.
+        for tile_id in range(local_pid, total_tiles, NUM_AG_SMS):
+            pid_m = tile_id // num_n_tiles
+            pid_n = tile_id % num_n_tiles
+            owner = pid_m // m_tiles_per_rank
 
             if TRACE:
                 tl.atomic_min(ts_ag_beg + tile_id, read_realtime())
