@@ -237,13 +237,19 @@ def _fused_gemm_two_shot_ar_kernel(
             base = staged_c_ptr + off
 
             # Rotate the starting peer per WG so we don't all hammer rank 0.
+            # cache_modifier=".cv" bypasses the local L2. Without it the flag
+            # can arrive and the load still be served a stale line -- staged_c
+            # verifies correct on the producing rank (0.0000) while the
+            # consuming rank reduces garbage.
             start = local_pid % world_size
             acc = iris.load(base, cur_rank, start, heap_bases, mask=mask,
-                            hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+                            hint=(1, BLOCK_SIZE_N),
+                            cache_modifier=".cv").to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 r = (start + i) % world_size
                 acc += iris.load(base, cur_rank, r, heap_bases, mask=mask,
-                                 hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
+                                 hint=(1, BLOCK_SIZE_N),
+                                 cache_modifier=".cv").to(acc_dtype)
 
             tl.store(scratch_ptr + off, acc.to(scratch_ptr.type.element_ty),
                      mask=mask, cache_modifier=".wt")
@@ -267,10 +273,18 @@ def _fused_gemm_two_shot_ar_kernel(
         # ------------------------------------------------------------------
         local_pid = pid - NUM_GEMM_SMS - NUM_RS_SMS
 
-        for tile_id in range(local_pid, total_tiles, NUM_AG_SMS):
-            pid_m = tile_id // num_n_tiles
-            pid_n = tile_id % num_n_tiles
-            owner = pid_m // m_tiles_per_rank
+        # Owner-interleaved order. In row-major tile order consecutive tiles
+        # share an owner, so a whole cohort of grid-strided WGs pulls from the
+        # SAME peer at the same instant -- one XGMI link saturated, ws-1 idle.
+        # Mapping seq -> owner (seq % ws) fans consecutive tiles across every
+        # peer. Same reordering the GEMM pool already does, and it is the fix
+        # that took a standalone all-gather from 106 to 316 GB/s.
+        for seq in range(local_pid, total_tiles, NUM_AG_SMS):
+            owner = seq % world_size
+            slot = seq // world_size
+            pid_m = owner * m_tiles_per_rank + slot // num_n_tiles
+            pid_n = slot % num_n_tiles
+            tile_id = pid_m * num_n_tiles + pid_n
 
             if TRACE:
                 tl.atomic_min(ts_ag_beg + tile_id, read_realtime())
@@ -294,7 +308,8 @@ def _fused_gemm_two_shot_ar_kernel(
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
             v = iris.load(scratch_ptr + off, cur_rank, owner, heap_bases,
-                          mask=mask, hint=(1, BLOCK_SIZE_N))
+                          mask=mask, hint=(1, BLOCK_SIZE_N),
+                          cache_modifier=".cv")
             tl.store(output_ptr + off, v, mask=mask)
             if TRACE:
                 tl.atomic_max(ts_ag_end + tile_id, read_realtime())

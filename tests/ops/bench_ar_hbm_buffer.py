@@ -78,7 +78,7 @@ def _worker(local_rank, world_size, init_url, outfile):
         ref = torch.mm(A, B)
         dist.all_reduce(ref, op=dist.ReduceOp.SUM)
         torch.cuda.synchronize()
-        tol = 2.0
+        tol = 0.05
 
         Ct = torch.empty(M, N_GLOBAL, dtype=dtype, device=f"cuda:{rank}")
         base_ms = bench(lambda: (torch.mm(A, B, out=Ct),

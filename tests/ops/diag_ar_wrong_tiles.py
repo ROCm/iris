@@ -77,7 +77,7 @@ def _worker(local_rank, world_size, init_url, M, bm, bn, tpf, split):
     d_out = torch.abs(out - full).max().item()
 
     # per-shard breakdown of the final output
-    bad = (torch.abs(out - full) > 2.0)
+    bad = (torch.abs(out - full) > 0.05)
     per_shard = [
         bad[s * m_per_rank:(s + 1) * m_per_rank].sum().item()
         for s in range(world_size)
@@ -89,11 +89,11 @@ def _worker(local_rank, world_size, init_url, M, bm, bn, tpf, split):
             print(f"\n[ws={world_size} rank={rank}] M={M} bm={bm} bn={bn} "
                   f"tpf={tpf} G/R/A={g}/{r_}/{a_}  m_tiles={n_tiles_m}")
             print(f"  1. staged_c vs local partial   maxdiff {d_staged:.4f}  "
-                  f"{'GEMM POOL OK' if d_staged < 2.0 else 'GEMM POOL WRONG'}")
+                  f"{'GEMM POOL OK' if d_staged < 0.05 else 'GEMM POOL WRONG'}")
             print(f"  2. scratch[my shard] vs truth  maxdiff {d_scratch:.4f}  "
-                  f"{'RS POOL OK' if d_scratch < 2.0 else 'RS POOL WRONG'}")
+                  f"{'RS POOL OK' if d_scratch < 0.05 else 'RS POOL WRONG'}")
             print(f"  3. output vs full all-reduce   maxdiff {d_out:.4f}  "
-                  f"{'AG POOL OK' if d_out < 2.0 else 'AG POOL WRONG'}")
+                  f"{'AG POOL OK' if d_out < 0.05 else 'AG POOL WRONG'}")
             print(f"  bad elements per shard: {per_shard}")
             own = per_shard[rank]
             other = sum(per_shard) - own

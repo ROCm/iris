@@ -100,7 +100,7 @@ def _worker(local_rank, world_size, init_url):
 
             if rank == 0:
                 worst = max(diffs)
-                verdict = "PASS" if worst < 2.0 else "WRONG"
+                verdict = "PASS" if worst < 0.05 else "WRONG"
                 cells = " ".join(f"{d:10.4f}" for d in diffs)
                 print(f"{M:6d} {w:6d} {f'{g}/{r_}/{a_}':>12} {cells}  {verdict}",
                       flush=True)
