@@ -88,9 +88,6 @@ def _fused_gemm_two_shot_ar_kernel(
     ts_ag_beg,
     ts_ag_ready,
     ts_ag_end,
-    ts_gemm_wg,
-    ts_rs_wg,
-    ts_ag_wg,
     M,
     N,
     K,
@@ -169,8 +166,7 @@ def _fused_gemm_two_shot_ar_kernel(
                 pid_n = slot % num_n_tiles
                 tile_id = pid_m * num_n_tiles + pid_n
                 if TRACE:
-                    tl.store(ts_gemm_beg + tile_id + tl.arange(0, 1), read_realtime() + tl.zeros((1,), dtype=tl.int64))
-                    tl.store(ts_gemm_wg + tile_id + tl.arange(0, 1), pid + tl.zeros((1,), dtype=tl.int64))
+                    tl.atomic_min(ts_gemm_beg + tile_id, read_realtime())
 
                 rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
                 rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -202,7 +198,7 @@ def _fused_gemm_two_shot_ar_kernel(
                 tl.store(staged_c_ptr + c_off, acc.to(staged_c_ptr.type.element_ty),
                          mask=c_mask, cache_modifier=".wt")
                 if TRACE:
-                    tl.store(ts_gemm_end + tile_id + tl.arange(0, 1), read_realtime() + tl.zeros((1,), dtype=tl.int64))
+                    tl.atomic_max(ts_gemm_end + tile_id, read_realtime())
 
             # One release fence + world_size remote atomics for the WHOLE
             # group, not per tile. This is the knob that mattered most in the
@@ -234,8 +230,7 @@ def _fused_gemm_two_shot_ar_kernel(
             # this rank's shard slot t lives in group (t / TPF) * ws + rank.
             grp = (t // TILES_PER_FLAG) * world_size + cur_rank
             if TRACE:
-                tl.store(ts_rs_beg + tile_id + tl.arange(0, 1), read_realtime() + tl.zeros((1,), dtype=tl.int64))
-                tl.store(ts_rs_wg + tile_id + tl.arange(0, 1), pid + tl.zeros((1,), dtype=tl.int64))
+                tl.atomic_min(ts_rs_beg + tile_id, read_realtime())
             spins = 0
             # MUST be an atomic RMW, not tl.load(volatile=True). volatile does
             # NOT block LICM on the AMD backend: the compiler hoists the load
@@ -250,7 +245,7 @@ def _fused_gemm_two_shot_ar_kernel(
                 spins += 1
 
             if TRACE:
-                tl.store(ts_rs_ready + tile_id + tl.arange(0, 1), read_realtime() + tl.zeros((1,), dtype=tl.int64))
+                tl.atomic_max(ts_rs_ready + tile_id, read_realtime())
 
             rm = global_pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -274,7 +269,7 @@ def _fused_gemm_two_shot_ar_kernel(
                      mask=mask, cache_modifier=".wt")
 
             if TRACE:
-                tl.store(ts_rs_end + tile_id + tl.arange(0, 1), read_realtime() + tl.zeros((1,), dtype=tl.int64))
+                tl.atomic_max(ts_rs_end + tile_id, read_realtime())
 
             # Publish to every rank's AG pool. Per tile, not per group: an RS
             # WG grid-strides across groups so it never owns a whole one.
@@ -317,8 +312,7 @@ def _fused_gemm_two_shot_ar_kernel(
             tile_id = pid_m * num_n_tiles + pid_n
 
             if TRACE:
-                tl.store(ts_ag_beg + tile_id + tl.arange(0, 1), read_realtime() + tl.zeros((1,), dtype=tl.int64))
-                tl.store(ts_ag_wg + tile_id + tl.arange(0, 1), pid + tl.zeros((1,), dtype=tl.int64))
+                tl.atomic_min(ts_ag_beg + tile_id, read_realtime())
             spins = 0
             rslot = rs_flags_ptr + tile_id * FLAG_STRIDE + tl.arange(0, 1)
             zero2 = tl.zeros((1,), dtype=tl.int32)
@@ -327,7 +321,7 @@ def _fused_gemm_two_shot_ar_kernel(
                 done = tl.min(tl.atomic_add(rslot, zero2, sem="acquire", scope="sys"))
                 spins += 1
             if TRACE:
-                tl.store(ts_ag_ready + tile_id + tl.arange(0, 1), read_realtime() + tl.zeros((1,), dtype=tl.int64))
+                tl.atomic_max(ts_ag_ready + tile_id, read_realtime())
 
             rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
             rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
@@ -341,7 +335,7 @@ def _fused_gemm_two_shot_ar_kernel(
                           mask=mask, hint=(1, BLOCK_SIZE_N))
             tl.store(output_ptr + off, v, mask=mask)
             if TRACE:
-                tl.store(ts_ag_end + tile_id + tl.arange(0, 1), read_realtime() + tl.zeros((1,), dtype=tl.int64))
+                tl.atomic_max(ts_ag_end + tile_id, read_realtime())
 
         # This rank's own shard: already reduced into scratch by our RS pool,
         # so it is a local copy with no peer read and no flag wait beyond the
@@ -473,17 +467,15 @@ def matmul_all_reduce_hbm_buffer(
         if ts is None or ts["gemm_beg"].numel() != num_tiles:
             ts = {k: torch.zeros(num_tiles, dtype=torch.int64, device=dev)
                   for k in ("gemm_beg", "gemm_end", "rs_beg", "rs_ready",
-                            "rs_end", "ag_beg", "ag_ready", "ag_end",
-                            "gemm_wg", "rs_wg", "ag_wg")}
+                            "rs_end", "ag_beg", "ag_ready", "ag_end")}
             workspace["trace"] = ts
-        # Plain stores, so 0 means "never written" for every buffer.
-        for v in ts.values():
-            v.zero_()
+        # atomic_min needs a high initial value; atomic_max needs a low one
+        for k, v in ts.items():
+            v.fill_(torch.iinfo(torch.int64).max if k.endswith("_beg") else 0)
         tb = [ts["gemm_beg"], ts["gemm_end"], ts["rs_beg"], ts["rs_ready"],
-              ts["rs_end"], ts["ag_beg"], ts["ag_ready"], ts["ag_end"],
-              ts["gemm_wg"], ts["rs_wg"], ts["ag_wg"]]
+              ts["rs_end"], ts["ag_beg"], ts["ag_ready"], ts["ag_end"]]
     else:
-        tb = [staged_c] * 11  # unused; TRACE=False compiles the stores away
+        tb = [staged_c] * 8  # unused; TRACE=False compiles the stores away
 
     # Each GEMM WG owns a whole flag group, and a group lives entirely inside
     # one rank's shard, so the shard's tile count must divide by the group size.
@@ -509,7 +501,6 @@ def matmul_all_reduce_hbm_buffer(
         workspace["ag_next"],
         workspace["own_next"],
         tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7],
-        tb[8], tb[9], tb[10],
         M,
         N,
         K,

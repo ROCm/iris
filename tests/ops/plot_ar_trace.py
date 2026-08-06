@@ -35,15 +35,21 @@ def plot(npz_path, out_prefix, world_size, M):
 
     d = np.load(npz_path)
     freq = float(d["freq_mhz"])
-    # Trace buffers are plain stores now, so 0 means "never written".
+    MAXV = np.iinfo(np.int64).max
+
     def clean(a):
         a = a.astype(np.int64)
-        return np.where(a <= 0, -1, a)
+        return np.where((a == MAXV) | (a <= 0), -1, a)
 
     g0, g1 = clean(d["gemm_beg"]), clean(d["gemm_end"])
     r0, rr, r1 = clean(d["rs_beg"]), clean(d["rs_ready"]), clean(d["rs_end"])
     a0, ar, a1 = clean(d["ag_beg"]), clean(d["ag_ready"]), clean(d["ag_end"])
-    gwg, rwg, awg = d["gemm_wg"].astype(int), d["rs_wg"].astype(int), d["ag_wg"].astype(int)
+    # Work-group ids cost 44x in instrumentation overhead, so the Gantt is
+    # indexed by TILE instead. For a pipeline that is the more direct view:
+    # a diagonal band means tiles are flowing, a vertical wall means a phase
+    # is gating on something.
+    ntile = len(g0)
+    gwg = rwg = awg = np.arange(ntile)
 
     valid = np.concatenate([g0[g0 > 0], r0[r0 > 0], a0[a0 > 0]])
     t0 = valid.min()
@@ -68,15 +74,15 @@ def plot(npz_path, out_prefix, world_size, M):
     for wg, b, e, name in ((gwg, G0, G1, "GEMM"), (rwg, R0, R1, "RS"),
                            (awg, A0, A1, "AG")):
         m = ~np.isnan(b) & ~np.isnan(e)
-        ax.barh(wg[m], (e - b)[m], left=b[m], height=0.9,
+        ax.barh(wg[m], (e - b)[m], left=b[m], height=1.0,
                 color=C[name], linewidth=0)
     # the spin portion, drawn over the bar so waiting is visually distinct
     for wg, b, ready in ((rwg, R0, RR), (awg, A0, AR)):
         m = ~np.isnan(b) & ~np.isnan(ready)
-        ax.barh(wg[m], (ready - b)[m], left=b[m], height=0.9,
+        ax.barh(wg[m], (ready - b)[m], left=b[m], height=1.0,
                 color=C["spin"], linewidth=0)
     ax.set_xlabel("time (us)")
-    ax.set_ylabel("work-group id")
+    ax.set_ylabel("tile id")
     ax.set_xlim(0, tmax)
     ax.legend(handles=[Patch(color=C[k], label=v) for k, v in
                        (("GEMM", "GEMM"), ("RS", "reduce-scatter"),
@@ -143,10 +149,8 @@ def plot(npz_path, out_prefix, world_size, M):
     print(f"wrote {out_prefix}_{{gantt,occupancy,spin,flow}}.png")
 
     # numbers the plots should be read against
-    gw = np.unique(gwg[~np.isnan(G0)])
-    rw = np.unique(rwg[~np.isnan(R0)])
-    aw = np.unique(awg[~np.isnan(A0)])
-    print(f"  work-groups seen: GEMM {len(gw)}  RS {len(rw)}  AG {len(aw)}")
+    print(f"  tiles traced: GEMM {np.sum(~np.isnan(G0))}  "
+          f"RS {np.sum(~np.isnan(R0))}  AG {np.sum(~np.isnan(A0))}")
     print(f"  GEMM  {np.nanmin(G0):7.1f} -> {np.nanmax(G1):7.1f} us")
     print(f"  RS    {np.nanmin(R0):7.1f} -> {np.nanmax(R1):7.1f} us")
     print(f"  AG    {np.nanmin(A0):7.1f} -> {np.nanmax(A1):7.1f} us")
