@@ -122,6 +122,21 @@ def _fused_gemm_two_shot_ar_kernel(
     total_groups = total_tiles // TILES_PER_FLAG
     acc_dtype = tl.float32
 
+    # Pools are ELASTIC, not static. The GEMM pool finishes at 92us in a
+    # 277us kernel and its 192 CUs -- 75% of the machine -- then sit idle for
+    # the remaining 185us. That idle time, not bandwidth and not sync, is the
+    # ~3x between this kernel and the measured fabric floor.
+    #
+    # The GEMM pool cannot simply be made smaller: RS cannot start tile t until
+    # EVERY rank has produced it, so the GEMM gates the whole pipeline and has
+    # to be fast. That is why 192/32/32 wins every sweep even though the
+    # AllReduce is 14x the GEMM.
+    #
+    # So instead of shrinking it, retire it: once a GEMM work-group has emitted
+    # its tiles it falls through and joins the all-gather. AG then runs on
+    # NUM_AG_SMS + NUM_GEMM_SMS workers for the back of the kernel.
+    is_rs_pool = (pid >= NUM_GEMM_SMS) and (pid < NUM_GEMM_SMS + NUM_RS_SMS)
+
     if pid < NUM_GEMM_SMS:
         # ------------------------------------------------------------------
         # POOL G -- GEMM. Never waits on anything, so the pipeline always
@@ -191,7 +206,7 @@ def _fused_gemm_two_shot_ar_kernel(
                 iris.atomic_add(fslot, one, cur_rank, r, heap_bases,
                                 sem="release", scope="sys")
 
-    elif pid < NUM_GEMM_SMS + NUM_RS_SMS:
+    if is_rs_pool:
         # ------------------------------------------------------------------
         # POOL R -- reduce-scatter. Waits only on pool G (which never waits).
         # Reduces this rank's own M-shard by pulling that shard from everyone.
@@ -261,12 +276,20 @@ def _fused_gemm_two_shot_ar_kernel(
                 iris.atomic_add(fslot, one, cur_rank, r, heap_bases,
                                 sem="release", scope="sys")
 
-    else:
+    if not is_rs_pool:
         # ------------------------------------------------------------------
         # POOL A -- all-gather. Waits only on pool R. Pulls each tile from
         # whichever rank owns it after the reduce-scatter.
+        #
+        # Workers: the AG pool gets ids [0, NUM_AG_SMS) and retired GEMM WGs
+        # get [NUM_AG_SMS, NUM_AG_SMS + NUM_GEMM_SMS). Contiguous ids over a
+        # matching stride, so every tile is still claimed exactly once.
         # ------------------------------------------------------------------
-        local_pid = pid - NUM_GEMM_SMS - NUM_RS_SMS
+        AG_WORKERS: tl.constexpr = NUM_AG_SMS + NUM_GEMM_SMS
+        if pid < NUM_GEMM_SMS:
+            local_pid = NUM_AG_SMS + pid
+        else:
+            local_pid = pid - NUM_GEMM_SMS - NUM_RS_SMS
 
         # Peer tiles only, indexed so consecutive tiles fan across peers.
         #
@@ -284,7 +307,7 @@ def _fused_gemm_two_shot_ar_kernel(
         n_peers: tl.constexpr = world_size - 1
         peer_tiles = m_tiles_per_rank * num_n_tiles * n_peers
 
-        for seq in range(local_pid, peer_tiles, NUM_AG_SMS):
+        for seq in range(local_pid, peer_tiles, AG_WORKERS):
             pk = seq % n_peers
             slot = seq // n_peers
             owner = (cur_rank + 1 + pk) % world_size
@@ -322,7 +345,7 @@ def _fused_gemm_two_shot_ar_kernel(
         # so it is a local copy with no peer read and no flag wait beyond the
         # RS ordering the pool already observed.
         own_tiles = m_tiles_per_rank * num_n_tiles
-        for slot in range(local_pid, own_tiles, NUM_AG_SMS):
+        for slot in range(local_pid, own_tiles, AG_WORKERS):
             pid_m = cur_rank * m_tiles_per_rank + slot // num_n_tiles
             pid_n = slot % num_n_tiles
             tile_id = pid_m * num_n_tiles + pid_n
