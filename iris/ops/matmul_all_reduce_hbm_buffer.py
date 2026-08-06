@@ -80,7 +80,6 @@ def _fused_gemm_two_shot_ar_kernel(
     rs_flags_ptr,
     ag_next_ptr,
     own_next_ptr,
-    rs_done_ptr,
     ts_gemm_beg,
     ts_gemm_end,
     ts_rs_beg,
@@ -125,26 +124,28 @@ def _fused_gemm_two_shot_ar_kernel(
     total_groups = total_tiles // TILES_PER_FLAG
     acc_dtype = tl.float32
 
-    # Pools are static during the contended phase and elastic in the TAIL.
+    # Pools are STATIC. Elastic pools were tried three ways and all lost.
     #
-    # The kernel has two regimes, and treating it as one is what made the
-    # first elastic attempt 1.8x slower:
-    #   0 - 127us   GEMM + RS + AG all live, fabric saturated. Extra comm
-    #               work-groups add contention and zero bandwidth here.
-    #   127 - 214us RS has drained. Only AG is left, ~8 tiles in flight on 16
-    #               WGs, and the fabric is IDLE. 41% of the kernel.
+    # Yael's occupancy trace shows the kernel has two regimes: a contended
+    # phase (GEMM+RS+AG live, fabric saturated) and a 41% AG-only tail with
+    # ~8 tiles in flight and an idle fabric. Extra workers can only pay in the
+    # tail, so the third attempt GATED retired GEMM WGs on this rank's RS pool
+    # draining, to make them arrive there instead of at ~65us.
     #
-    # Retired GEMM WGs previously joined at ~65us -- squarely inside the
-    # contended phase, which is why it lost. Gate them on RS draining so they
-    # arrive in the tail, where AG genuinely is work-starved (AG's whole
-    # 322-tile workload is 30.4us standalone at 256 WGs, against a 214us span
-    # in the fused kernel).
+    #   static stride, no elasticity     0.1848  <- best
+    #   elastic, static stride           0.3584
+    #   elastic, atomic counter          0.3570
+    #   elastic, atomic counter + gate   0.3985
     #
-    # Tail workers take from an atomic counter rather than a static stride: a
-    # static partition would bind tiles to workers that have not arrived, and
-    # stall the 16-WG AG pool waiting for them. The counter was measured slower
-    # when 224 workers hammered it from t=0; here only 16 touch it until the
-    # tail.
+    # The gate did not recover it. But note the confound: the gated version
+    # also moved AG dispatch onto the atomic counter, which independently
+    # measured 0.3570 vs 0.1848. The counter cost dominates and swamps
+    # whatever the gate is worth, so the tail hypothesis is NOT cleanly tested
+    # here -- only "tail gate on top of a counter" is, and that loses.
+    #
+    # A clean test needs the AG pool on its static stride with ONLY the tail
+    # workers on a counter, claiming from the opposite end so the two do not
+    # duplicate. Untested.
     #
     # The trace is suggestive: the GEMM pool finishes at 92us in a 277us kernel,
     # so 192 CUs -- 75% of the machine -- look idle for the back 185us. Retiring
@@ -291,13 +292,6 @@ def _fused_gemm_two_shot_ar_kernel(
             if TRACE:
                 tl.atomic_max(ts_rs_end + tile_id, read_realtime())
 
-            # Local drain counter: how many of this rank's RS tiles are done.
-            # Device scope, one per tile (46 at M=2048) -- the tail gate reads
-            # it, nothing remote does.
-            tl.atomic_add(rs_done_ptr + tl.arange(0, 1),
-                          tl.zeros((1,), dtype=tl.int32) + 1,
-                          sem="release", scope="gpu")
-
             # Publish to every rank's AG pool. Per tile, not per group: an RS
             # WG grid-strides across groups so it never owns a whole one.
             tl.debug_barrier()
@@ -307,24 +301,12 @@ def _fused_gemm_two_shot_ar_kernel(
                 iris.atomic_add(fslot, one, cur_rank, r, heap_bases,
                                 sem="release", scope="sys")
 
-    if not ((pid >= NUM_GEMM_SMS) and (pid < NUM_GEMM_SMS + NUM_RS_SMS)):
+    else:
         # ------------------------------------------------------------------
-        # POOL A -- all-gather, plus GEMM work-groups that have retired AND
-        # waited for RS to drain.
+        # POOL A -- all-gather. Waits only on pool R. Pulls each tile from
+        # whichever rank owns it after the reduce-scatter.
         # ------------------------------------------------------------------
-        if pid < NUM_GEMM_SMS:
-            # Tail gate. Do not help until this rank's RS pool has finished;
-            # before that the fabric is saturated and an extra puller is pure
-            # contention.
-            shard_tiles_g = m_tiles_per_rank * num_n_tiles
-            tgate = 0
-            zg = tl.zeros((1,), dtype=tl.int32)
-            dn = tl.min(tl.atomic_add(rs_done_ptr + tl.arange(0, 1), zg,
-                                      sem="acquire", scope="gpu"))
-            while (dn < shard_tiles_g) and (tgate < SPIN_LIMIT):
-                dn = tl.min(tl.atomic_add(rs_done_ptr + tl.arange(0, 1), zg,
-                                          sem="acquire", scope="gpu"))
-                tgate += 1
+        local_pid = pid - NUM_GEMM_SMS - NUM_RS_SMS
 
         # Peer tiles only, indexed so consecutive tiles fan across peers.
         #
@@ -342,10 +324,7 @@ def _fused_gemm_two_shot_ar_kernel(
         n_peers: tl.constexpr = world_size - 1
         peer_tiles = m_tiles_per_rank * num_n_tiles * n_peers
 
-        one_i = tl.zeros((1,), dtype=tl.int32) + 1
-        ctr = ag_next_ptr + tl.arange(0, 1)
-        seq = tl.min(tl.atomic_add(ctr, one_i, sem="relaxed", scope="gpu"))
-        while seq < peer_tiles:
+        for seq in range(local_pid, peer_tiles, NUM_AG_SMS):
             pk = seq % n_peers
             slot = seq // n_peers
             owner = (cur_rank + 1 + pk) % world_size
@@ -378,17 +357,12 @@ def _fused_gemm_two_shot_ar_kernel(
             tl.store(output_ptr + off, v, mask=mask)
             if TRACE:
                 tl.atomic_max(ts_ag_end + tile_id, read_realtime())
-            seq = tl.min(tl.atomic_add(ctr, one_i, sem="relaxed", scope="gpu"))
 
         # This rank's own shard: already reduced into scratch by our RS pool,
         # so it is a local copy with no peer read and no flag wait beyond the
         # RS ordering the pool already observed.
         own_tiles = m_tiles_per_rank * num_n_tiles
-        if pid < NUM_GEMM_SMS:
-            own_start = own_tiles
-        else:
-            own_start = pid - NUM_GEMM_SMS - NUM_RS_SMS
-        for slot in range(own_start, own_tiles, NUM_AG_SMS):
+        for slot in range(local_pid, own_tiles, NUM_AG_SMS):
             pid_m = cur_rank * m_tiles_per_rank + slot // num_n_tiles
             pid_n = slot % num_n_tiles
             tile_id = pid_m * num_n_tiles + pid_n
@@ -446,7 +420,6 @@ def matmul_all_reduce_hbm_buffer_preamble(
         # they index within a single launch, so they must be reset every call.
         "ag_next": ctx.zeros((1,), device="cuda", dtype=torch.int32),
         "own_next": ctx.zeros((1,), device="cuda", dtype=torch.int32),
-        "rs_done": ctx.zeros((1,), device="cuda", dtype=torch.int32),
         "iteration": 0,
         "block_m": block_m,
         "block_n": block_n,
@@ -494,7 +467,6 @@ def matmul_all_reduce_hbm_buffer(
     # Reset per launch: these count tiles within one call, not across calls.
     workspace["ag_next"].zero_()
     workspace["own_next"].zero_()
-    workspace["rs_done"].zero_()
 
     workspace["iteration"] += 1
     it = workspace["iteration"]
@@ -549,7 +521,6 @@ def matmul_all_reduce_hbm_buffer(
         workspace["rs_flags"],
         workspace["ag_next"],
         workspace["own_next"],
-        workspace["rs_done"],
         tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7],
         M,
         N,
