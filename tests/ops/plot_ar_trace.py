@@ -35,11 +35,10 @@ def plot(npz_path, out_prefix, world_size, M):
 
     d = np.load(npz_path)
     freq = float(d["freq_mhz"])
-    MAXV = np.iinfo(np.int64).max
-
+    # Trace buffers are plain stores now, so 0 means "never written".
     def clean(a):
         a = a.astype(np.int64)
-        return np.where((a == MAXV) | (a <= 0), -1, a)
+        return np.where(a <= 0, -1, a)
 
     g0, g1 = clean(d["gemm_beg"]), clean(d["gemm_end"])
     r0, rr, r1 = clean(d["rs_beg"]), clean(d["rs_ready"]), clean(d["rs_end"])
