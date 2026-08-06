@@ -126,6 +126,11 @@ def _worker(local_rank, world_size, init_url, outfile, m_list):
                   f"one-shot moves {bytes_one/1e6:.1f}MB   "
                   f"two-shot moves {bytes_two/1e6:.1f}MB")
 
+        # torch bulk-sync first: it is the denominator for every gain below
+        Ct = torch.empty(M, N_GLOBAL, dtype=dtype, device=f"cuda:{rank}")
+        torch_ms = bench(lambda: (torch.mm(A, B, out=Ct),
+                                  dist.all_reduce(Ct, op=dist.ReduceOp.SUM)))
+
         # ---------------- REFERENCE 1: compute ----------------
         C = shmem.zeros((M, N_GLOBAL), device="cuda", dtype=dtype)
         T_gemm = bench(lambda: torch.mm(A, B, out=C))
@@ -205,35 +210,74 @@ def _worker(local_rank, world_size, init_url, outfile, m_list):
         if rank == 0:
             print(f"  {'-'*74}")
             print(f"  {'variant':<26} {'ms':>8} {'vs torch':>9} "
-                  f"{'overlap':>8} {'algo gain':>10}  config")
+                  f"{'compnt':>8} {'overlap':>8} {'algo':>7} {'kernel':>7} "
+                  f"{'ovR':>7}  config")
+            print(f"  {'':<26} {'':>8} {'= c*o':>9} "
+                  f"{'':>8} {'':>8} {'x kern':>7} {'= comm':>7}")
 
-        def score(name, T_meas, algo, cfg=""):
-            """Attribute a variant against the comm reference for ITS algorithm."""
+        def score(name, T_meas, algo, cfg="", T_gemm_var=None, comm_gbs=None):
+            """Attribute a variant so the factors multiply out to the headline.
+
+                T_torch / T_meas = component_gain * overlap_gain      (exact)
+
+                component_gain = T_torch      / T_serial_var
+                overlap_gain   = T_serial_var / T_meas
+                T_serial_var   = T_gemm_var + T_comm_var
+
+            and the comm side splits into physics:
+
+                algorithm = rccl_algo_bytes / variant_algo_bytes
+                kernel    = variant_GBs     / rccl_GBs
+                comm_gain = algorithm * kernel  ==  T_comm_rccl / T_comm_var
+
+            Baseline is RCCL, not our own one-shot: anchoring to our kernel
+            hands every two-shot variant a free win against a strawman we
+            wrote, and moves the number every time we retune one-shot.
+            """
             T_c = comm_ref.get(algo)
             if T_c is None:
                 return
-            T_serial = T_gemm + T_c
-            T_ideal = max(T_gemm, T_c)
-            denom = T_serial - T_ideal
-            ov = (T_serial - T_meas) / denom if denom > 1e-9 else float("nan")
-            algo_gain = comm_ref["one_shot"] / T_c if comm_ref.get("one_shot") else float("nan")
+            T_g = T_gemm_var if T_gemm_var is not None else T_gemm
+            T_serial_var = T_g + T_c
+            T_ideal = max(T_g, T_c)
+
+            component_gain = torch_ms / T_serial_var
+            overlap_gain = T_serial_var / T_meas
+            denom = T_serial_var - T_ideal
+            ov_ratio = (T_serial_var - T_meas) / denom if denom > 1e-9 else float("nan")
+
+            var_bytes = bytes_one if algo == "one_shot" else bytes_two
+            algorithm = bytes_two / var_bytes          # RCCL ring moves bytes_two
+            var_gbs = comm_gbs if comm_gbs else var_bytes / 1e9 / (T_c * 1e-3)
+            kernel = var_gbs / rccl_gbs
+            comm_gain = comm_ref["rccl"] / T_c
+
+            # The decomposition is only worth printing if it is exact.
+            assert abs(component_gain * overlap_gain - torch_ms / T_meas) < 1e-6
+            assert abs(algorithm * kernel - comm_gain) / max(comm_gain, 1e-9) < 0.02
+
             if rank == 0:
                 print(f"  {name:<26} {T_meas:8.4f} {torch_ms/T_meas:8.2f}x "
-                      f"{ov:8.2f} {algo_gain:9.2f}x  {cfg}")
+                      f"{component_gain:7.2f}x {overlap_gain:7.2f}x  "
+                      f"{algorithm:6.2f}x {kernel:6.2f}x {ov_ratio:7.2f}  {cfg}")
             emit(kind="variant", name=name, M=M, ms=T_meas, algo=algo,
-                 vs_torch=torch_ms / T_meas, overlap_ratio=ov,
-                 algorithm_gain=algo_gain, T_serial=T_serial, T_ideal=T_ideal,
-                 T_gemm=T_gemm, T_comm=T_c, cfg=cfg)
+                 vs_torch=torch_ms / T_meas, component_gain=component_gain,
+                 overlap_gain=overlap_gain, algorithm=algorithm, kernel=kernel,
+                 comm_gain=comm_gain, overlap_ratio=ov_ratio,
+                 T_serial_var=T_serial_var, T_ideal=T_ideal, T_gemm=T_g,
+                 T_comm=T_c, comm_gbs=var_gbs, cfg=cfg)
 
         # torch bulk-sync -- defines the 1.00x column
-        Ct = torch.empty(M, N_GLOBAL, dtype=dtype, device=f"cuda:{rank}")
-        torch_ms = bench(lambda: (torch.mm(A, B, out=Ct),
-                                  dist.all_reduce(Ct, op=dist.ReduceOp.SUM)))
         if rank == 0:
             print(f"  {'P1 torch bulk-sync':<26} {torch_ms:8.4f} {1.0:8.2f}x "
-                  f"{'--':>8} {'--':>10}")
+                  f"{'1.00x':>8} {'1.00x':>8} {'1.00x':>7} {'1.00x':>7} {'--':>7}")
+        serial_err = abs(torch_ms - (T_gemm + comm_ref["rccl"])) / torch_ms
+        if rank == 0:
+            print(f"  {'':<26} torch serial check: "
+                  f"gemm+rccl={T_gemm + comm_ref['rccl']:.4f} vs measured "
+                  f"{torch_ms:.4f}  ({100*serial_err:.1f}% off)")
         emit(kind="variant", name="P1 torch bulk-sync", M=M, ms=torch_ms,
-             algo="rccl", vs_torch=1.0)
+             algo="rccl", vs_torch=1.0, serial_err_pct=100 * serial_err)
 
         # two-kernel one-shot, using the tuned comm reference config
         if "one_shot" in comm_ref:
