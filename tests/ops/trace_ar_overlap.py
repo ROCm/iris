@@ -144,7 +144,7 @@ def _worker(local_rank, world_size, init_url, M, block_m, block_n, tpf, split, d
               num_rs_sms=r_, num_ag_sms=a_, mfma=32, tiles_per_flag=tpf)
 
     # warm the JIT and the counters before the traced run
-    for _ in range(5):
+    for _ in range(30):
         out.zero_()
         matmul_all_reduce_hbm_buffer(shmem, out, A, B, workspace=ws, **kw)
     torch.cuda.synchronize()
@@ -156,12 +156,14 @@ def _worker(local_rank, world_size, init_url, M, block_m, block_n, tpf, split, d
     d = torch.abs(out - ref).max().item()
     shmem.barrier()
 
-    if rank == 0 and dump:
+    if dump:
         import numpy as np
         arrs = {k: v.cpu().numpy() for k, v in ws["trace"].items()}
         arrs["freq_mhz"] = np.array(freq_mhz)
-        np.savez(dump, **arrs)
-        print(f"dumped raw timestamps -> {dump}")
+        path = dump.replace(".npz", f"_r{rank}.npz")
+        np.savez(path, **arrs)
+        if rank == 0:
+            print(f"dumped raw timestamps -> {dump.replace('.npz', '_r*.npz')}")
 
     for r in range(world_size):
         if r == rank and rank in (0, world_size - 1):
