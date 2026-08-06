@@ -137,16 +137,16 @@ def _fused_gemm_two_shot_ar_kernel(
     # So instead of shrinking it, retire it: once a GEMM work-group has emitted
     # its tiles it falls through and joins the all-gather.
     #
-    # Dispatch has to be DYNAMIC, not a static grid-stride over the combined
-    # worker set. A static stride assumes all 224 workers exist at t=0, but 192
-    # of them arrive at ~92us and at staggered times -- so every tile in a
-    # retired-GEMM stride class is untouchable until that specific WG retires,
-    # and the 32 original AG workers cannot help because the partition already
-    # gave those tiles away. That still gates the AG tail on GEMM completion,
-    # with worse load balance than the honest 32-worker version.
+    # Dispatch is a STATIC grid-stride over the combined worker set. An atomic
+    # work counter looks better on paper -- no tile is bound to a worker that
+    # has not retired yet -- but it is one device-scope RMW per tile across 224
+    # workers hammering a single line, and measured here it was 1.7-1.8x SLOWER
+    # end to end (M=2048: 0.357 dynamic vs 0.196 static). The contention costs
+    # more than the load imbalance it removes.
     #
-    # An atomic work counter has no such binding: early workers keep taking
-    # tiles, and a WG that joins at 92us takes whatever is left.
+    # The staggered-arrival imbalance is real: tiles in a late worker's stride
+    # class do wait. It is just cheaper to eat it than to serialize every tile
+    # through one counter.
     is_rs_pool = (pid >= NUM_GEMM_SMS) and (pid < NUM_GEMM_SMS + NUM_RS_SMS)
 
     if pid < NUM_GEMM_SMS:
@@ -314,10 +314,13 @@ def _fused_gemm_two_shot_ar_kernel(
         n_peers: tl.constexpr = world_size - 1
         peer_tiles = m_tiles_per_rank * num_n_tiles * n_peers
 
-        one_i = tl.zeros((1,), dtype=tl.int32) + 1
-        ctr = ag_next_ptr + tl.arange(0, 1)
-        seq = tl.min(tl.atomic_add(ctr, one_i, sem="relaxed", scope="gpu"))
-        while seq < peer_tiles:
+        AG_WORKERS: tl.constexpr = NUM_AG_SMS + NUM_GEMM_SMS
+        if pid < NUM_GEMM_SMS:
+            ag_id = NUM_AG_SMS + pid
+        else:
+            ag_id = pid - NUM_GEMM_SMS - NUM_RS_SMS
+
+        for seq in range(ag_id, peer_tiles, AG_WORKERS):
             pk = seq % n_peers
             slot = seq // n_peers
             owner = (cur_rank + 1 + pk) % world_size
@@ -350,7 +353,6 @@ def _fused_gemm_two_shot_ar_kernel(
             tl.store(output_ptr + off, v, mask=mask)
             if TRACE:
                 tl.atomic_max(ts_ag_end + tile_id, read_realtime())
-            seq = tl.min(tl.atomic_add(ctr, one_i, sem="relaxed", scope="gpu"))
 
         # This rank's own shard: already reduced into scratch by our RS pool,
         # so it is a local copy with no peer read and no flag wait beyond the
