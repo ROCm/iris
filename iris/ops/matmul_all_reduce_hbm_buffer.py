@@ -237,19 +237,13 @@ def _fused_gemm_two_shot_ar_kernel(
             base = staged_c_ptr + off
 
             # Rotate the starting peer per WG so we don't all hammer rank 0.
-            # cache_modifier=".cv" bypasses the local L2. Without it the flag
-            # can arrive and the load still be served a stale line -- staged_c
-            # verifies correct on the producing rank (0.0000) while the
-            # consuming rank reduces garbage.
             start = local_pid % world_size
             acc = iris.load(base, cur_rank, start, heap_bases, mask=mask,
-                            hint=(1, BLOCK_SIZE_N),
-                            cache_modifier=".cv").to(acc_dtype)
+                            hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
             for i in tl.static_range(1, world_size):
                 r = (start + i) % world_size
                 acc += iris.load(base, cur_rank, r, heap_bases, mask=mask,
-                                 hint=(1, BLOCK_SIZE_N),
-                                 cache_modifier=".cv").to(acc_dtype)
+                                 hint=(1, BLOCK_SIZE_N)).to(acc_dtype)
 
             tl.store(scratch_ptr + off, acc.to(scratch_ptr.type.element_ty),
                      mask=mask, cache_modifier=".wt")
@@ -308,8 +302,7 @@ def _fused_gemm_two_shot_ar_kernel(
             mask = (rm[:, None] < M) & (rn[None, :] < N)
 
             v = iris.load(scratch_ptr + off, cur_rank, owner, heap_bases,
-                          mask=mask, hint=(1, BLOCK_SIZE_N),
-                          cache_modifier=".cv")
+                          mask=mask, hint=(1, BLOCK_SIZE_N))
             tl.store(output_ptr + off, v, mask=mask)
             if TRACE:
                 tl.atomic_max(ts_ag_end + tile_id, read_realtime())
