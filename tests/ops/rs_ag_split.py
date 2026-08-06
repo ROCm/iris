@@ -21,21 +21,29 @@ def rs_k(C,outp,hb:tl.tensor,M,N,scm,scn,som,son,
         pm=t//n_n; pn=t%n_n
         rm=r0+pm*BM+tl.arange(0,BM); rn=pn*BN+tl.arange(0,BN)
         mk=(rm[:,None]<r0+MS)&(rn[None,:]<N); off=rm[:,None]*scm+rn[None,:]*scn
-        acc=iris.load(C+off,cur,(cur+1)%W,hb,mask=mk).to(tl.float32)
-        for i in tl.static_range(2,W+1):
-            acc+=iris.load(C+off,cur,(cur+i)%W,hb,mask=mk).to(tl.float32)
+        # stagger the peer walk per workgroup so all WGs are not hammering
+        # the same peer link at the same instant
+        s0=(cur+1+pid)%W
+        acc=iris.load(C+off,cur,s0,hb,mask=mk).to(tl.float32)
+        for i in tl.static_range(1,W):
+            acc+=iris.load(C+off,cur,(s0+i)%W,hb,mask=mk).to(tl.float32)
         om=pm*BM+tl.arange(0,BM)
         tl.store(outp+om[:,None]*som+rn[None,:]*son,acc.to(outp.dtype.element_ty),
                  mask=(om[:,None]<MS)&(rn[None,:]<N))
 
 @triton.jit
 def ag_k(S,outp,hb:tl.tensor,M,N,ssm,ssn,som,son,
-         cur:tl.constexpr,W:tl.constexpr,BM:tl.constexpr,BN:tl.constexpr,WGS:tl.constexpr):
+         cur:tl.constexpr,W:tl.constexpr,BM:tl.constexpr,BN:tl.constexpr,WGS:tl.constexpr,
+         INTERLEAVE:tl.constexpr=False):
     '''rank cur gathers the W-1 peer shards into the full [M,N] output.'''
     pid=tl.program_id(0); MS=M//W; n_n=tl.cdiv(N,BN); n_pt=tl.cdiv(MS,BM)*n_n
     n_t=n_pt*(W-1)
     for t in range(pid,n_t,WGS):
-        pk=t//n_pt; src=(cur+1+pk)%W; lt=t%n_pt
+        if INTERLEAVE:
+            pk=t%(W-1); lt=t//(W-1)
+        else:
+            pk=t//n_pt; lt=t%n_pt
+        src=(cur+1+pk)%W
         pm=lt//n_n; pn=lt%n_n
         rm=pm*BM+tl.arange(0,BM); rn=pn*BN+tl.arange(0,BN)
         mk=(rm[:,None]<MS)&(rn[None,:]<N)
@@ -59,7 +67,24 @@ def _w(lr,W,url):
         P(f'\n=== M={M} ws={W}  RS reads {rs_b/1e6:.1f}MB  AG reads {ag_b/1e6:.1f}MB  '
           f'total {(rs_b+ag_b)/1e6:.1f}MB ===')
         P(f'  RCCL AR moves 20.64MB in 0.0979ms = 210.9 GB/s. 2x target = 0.049ms total.')
-        for nm,fn,byts,args in [('RS',rs_k,rs_b,(C,rso,hb,M,NG,C.stride(0),C.stride(1),rso.stride(0),rso.stride(1))),
+        sh.barrier()
+        rs_k[(196,)](C,rso,hb,M,NG,C.stride(0),C.stride(1),rso.stride(0),rso.stride(1),
+                     rank,W,32,128,196,num_warps=8); torch.cuda.synchronize()
+        full=C.clone(); dist.all_reduce(full)
+        rs_d=(rso.float()-full[rank*MS:(rank+1)*MS].float()).abs().max().item()
+        sh.barrier()
+        ag_k[(196,)](S,ago,hb,M,NG,S.stride(0),S.stride(1),ago.stride(0),ago.stride(1),
+                     rank,W,32,128,196,True,num_warps=8); torch.cuda.synchronize()
+        gath=[torch.empty_like(S) for _ in range(W)]
+        dist.all_gather(gath,S)
+        ag_ref=torch.cat(gath,0)
+        # AG never writes its OWN shard - the caller already has it locally
+        ago[rank*MS:(rank+1)*MS].copy_(S)
+        ag_d=(ago.float()-ag_ref.float()).abs().max().item()
+        verdict = "PASS" if max(rs_d,ag_d)<0.05 else "FAIL"
+        P(f'  correctness: RS max_diff={rs_d:.5f}  AG-interleave max_diff={ag_d:.5f}  {verdict}')
+        sh.barrier()
+        for nm,fn,byts,args in [('AG-interleave',ag_k,ag_b,(S,ago,hb,M,NG,S.stride(0),S.stride(1),ago.stride(0),ago.stride(1))),('RS',rs_k,rs_b,(C,rso,hb,M,NG,C.stride(0),C.stride(1),rso.stride(0),rso.stride(1))),
                                 ('AG',ag_k,ag_b,(S,ago,hb,M,NG,S.stride(0),S.stride(1),ago.stride(0),ago.stride(1)))]:
             P(f"  {nm}: {'BM':>4} {'BN':>4} {'WG':>4} {'w':>2} {'ms':>9} {'GB/s':>8} {'%line':>6}")
             best=(9e9,None)
@@ -67,7 +92,8 @@ def _w(lr,W,url):
                                 (16,128,64,8),(16,256,64,8),(32,256,64,8),(64,128,64,8),
                                 (32,128,32,8),(32,128,196,8),(16,128,128,8),(64,64,64,8)]:
                 sh.barrier()
-                ms=bench(lambda BM=BM,BN=BN,wg=wg,nw=nw: fn[(wg,)](*args,rank,W,BM,BN,wg,num_warps=nw))
+                il=(nm=='AG-interleave')
+                ms=bench(lambda BM=BM,BN=BN,wg=wg,nw=nw,il=il: fn[(wg,)](*args,rank,W,BM,BN,wg,il,num_warps=nw) if fn is ag_k else fn[(wg,)](*args,rank,W,BM,BN,wg,num_warps=nw))
                 gb=byts/(ms*1e-3)/1e9
                 if ms<best[0]: best=(ms,f'{BM}x{BN} {wg}WG {nw}w')
                 P(f'       {BM:>4} {BN:>4} {wg:>4} {nw:>2} {ms:>9.4f} {gb:>8.1f} {gb/448*100:>5.0f}%')
