@@ -143,10 +143,17 @@ def _worker(local_rank, world_size, init_url, M, block_m, block_n, tpf, split, d
     kw = dict(block_m=block_m, block_n=block_n, block_k=64, num_gemm_sms=g,
               num_rs_sms=r_, num_ag_sms=a_, mfma=32, tiles_per_flag=tpf)
 
-    # warm the JIT and the counters before the traced run
+    # Warm up WITH tracing on. 30 untraced warmups then one traced launch is
+    # still asymmetric: the traced call is instrumented and its peers' previous
+    # call was not, so the ranks desync and the RS pool exhausts SPIN_LIMIT
+    # (~1e6 polls x 15ns = 15ms+). That artifact survived the first fix.
+    # Instrumenting every iteration makes them all equally slow, so the last
+    # one is genuinely steady state. The launcher resets the trace buffers on
+    # every traced call, so only the final iteration's stamps survive.
     for _ in range(30):
         out.zero_()
-        matmul_all_reduce_hbm_buffer(shmem, out, A, B, workspace=ws, **kw)
+        matmul_all_reduce_hbm_buffer(shmem, out, A, B, workspace=ws,
+                                     trace=True, **kw)
     torch.cuda.synchronize()
     shmem.barrier()
 
