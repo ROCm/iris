@@ -113,9 +113,20 @@ def _worker(local_rank, world_size, init_url, outfile):
                         (t, sp)
                         for t in (1, 2)
                         for sp in [
-                        (192, 32, 32),
-                        (128, 64, 64),
-                        (96, 96, 64),
+                        # Every split swept so far kept RS <= AG. Counting
+                        # actual work at M=2048: RS is 46 tiles x 8 peer pulls
+                        # = 368 pull-tiles at 64.3us each; AG is 322 tiles x 1
+                        # pull at 6.7us. Per CU on an even 32/32 that is RS 92us
+                        # vs AG 67us -- RS is the longer pole, so bias toward it.
+                        # GEMM still has to be fast because it gates RS.
+                        (192, 32, 32),    # control, current best
+                        (224, 16, 16),
+                        (176, 56, 24),
+                        (160, 64, 32),
+                        (160, 56, 40),
+                        (128, 96, 32),
+                        (128, 80, 48),
+                        (96, 128, 32),
                         ]
                     ]:
                         if g + r_ + a_ > cu_count:
