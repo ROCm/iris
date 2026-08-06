@@ -110,6 +110,16 @@ def summarize(ts, freq_mhz, label, rank):
         print(f"  first RS   tile done at {to_us(nz(r1).min()):7.2f} us; "
               f"AG first unblocked at {to_us(nz(ar).min()):7.2f} us")
     print(f"  kernel wall span {total:7.2f} us")
+    print("  NOTE: compare this against the BENCHMARKED wall for the same "
+          "config.\n"
+          "        >1.3x be suspicious, >2x and the trace is not evidence "
+          "about the kernel.\n"
+          "        RS waits on the slowest peer per tile, so per-rank probe "
+          "noise does not\n"
+          "        average out -- it compounds into something shaped exactly "
+          "like cross-rank\n"
+          "        skew. A 2.64x trace once produced a 250us 'dead gap' "
+          "inside a 182us kernel.")
 
 
 def _worker(local_rank, world_size, init_url, M, block_m, block_n, tpf, split, dump):
