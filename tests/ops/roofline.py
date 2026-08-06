@@ -221,14 +221,18 @@ def _worker(local_rank, world_size, init_url, outfile, m_list):
         emit(kind="ref", name="comm_rccl", M=M, ms=T_rccl, gbs=rccl_gbs,
              pct_line=100 * rccl_gbs / LINE_GBS, algo_bytes=bytes_two)
 
+        # torch is nearly but not exactly serial; the residual is launch
+        # overhead and it gets its own factor rather than being absorbed.
+        T_serial_torch = T_gemm + comm_ref["rccl"]
+        serial_overhead_torch = torch_ms / T_serial_torch
+
         # ---------------- VARIANTS ----------------
         if rank == 0:
             print(f"  {'-'*74}")
-            print(f"  {'variant':<26} {'ms':>8} {'vs torch':>9} "
-                  f"{'compnt':>8} {'overlap':>8} {'algo':>7} {'kernel':>7} "
-                  f"{'ovR':>7}  config")
-            print(f"  {'':<26} {'':>8} {'= c*o':>9} "
-                  f"{'':>8} {'':>8} {'x kern':>7} {'= comm':>7}")
+            print(f"  {'variant':<24} {'vs_torch = serial x compnt x ovlap':>38}"
+                  f"   {'[gemm | comm = algo x kern]':<40} {'achieved':>18}")
+            print(f"  {'':<24} {'(these three multiply exactly)':>38}"
+                  f"   {'(gemm x comm does NOT -- harmonic mean)':<40}")
 
         def score(name, T_meas, algo, cfg="", T_gemm_var=None, comm_gbs=None):
             """Attribute a variant so the factors multiply out to the headline.
@@ -256,8 +260,13 @@ def _worker(local_rank, world_size, init_url, outfile, m_list):
             T_serial_var = T_g + T_c
             T_ideal = max(T_g, T_c)
 
-            component_gain = torch_ms / T_serial_var
+            # Three exact factors. component_gain compares idealized serial to
+            # idealized serial, so the launch residual gets its own term
+            # instead of being absorbed silently.
+            serial_overhead = torch_ms / T_serial_torch
+            component_gain = T_serial_torch / T_serial_var
             overlap_gain = T_serial_var / T_meas
+
             denom = T_serial_var - T_ideal
             ov_ratio = (T_serial_var - T_meas) / denom if denom > 1e-9 else float("nan")
 
@@ -268,27 +277,41 @@ def _worker(local_rank, world_size, init_url, outfile, m_list):
             comm_gain = comm_ref["rccl"] / T_c
             gemm_gain = T_gemm / T_g
 
-            # The decomposition is only worth printing if it is exact.
-            assert abs(component_gain * overlap_gain - torch_ms / T_meas) < 1e-6
+            # This study has already produced three confident-and-wrong
+            # diagnoses, so make the arithmetic fail loudly instead of
+            # printing a plausible number.
+            assert abs(serial_overhead * component_gain * overlap_gain
+                       - torch_ms / T_meas) < 1e-9
             assert abs(algorithm * kernel - comm_gain) / max(comm_gain, 1e-9) < 0.02
+            # component_gain is a ratio of SUMS -- it is the harmonic mean of
+            # gemm_gain and comm_gain weighted by how torch splits its time,
+            # NOT their product. Asserted so nobody re-derives it wrong.
+            w_g = T_gemm / T_serial_torch
+            w_c = comm_ref["rccl"] / T_serial_torch
+            harm = 1.0 / (w_g / gemm_gain + w_c / comm_gain)
+            assert abs(harm - component_gain) / component_gain < 1e-6
 
             if rank == 0:
-                print(f"  {name:<26} {T_meas:8.4f} {torch_ms/T_meas:8.2f}x "
-                      f"{component_gain:7.2f}x {overlap_gain:7.2f}x  "
-                      f"{algorithm:6.2f}x {kernel:6.2f}x {ov_ratio:7.2f}  {cfg}")
+                print(f"  {name:<24} {torch_ms/T_meas:7.3f} = "
+                      f"{serial_overhead:.3f} x {component_gain:.3f} x {overlap_gain:.3f}"
+                      f"   [gemm {gemm_gain:.2f} | comm {comm_gain:.3f} "
+                      f"= algo {algorithm:.3f} x kern {kernel:.2f}]"
+                      f"  {var_gbs:6.1f} GB/s ({100*var_gbs/LINE_GBS:.0f}%)  {cfg}")
             emit(kind="variant", name=name, M=M, ms=T_meas, algo=algo,
-                 vs_torch=torch_ms / T_meas, component_gain=component_gain,
-                 overlap_gain=overlap_gain, algorithm=algorithm, kernel=kernel,
-                 comm_gain=comm_gain, gemm_gain=gemm_gain,
-                 overlap_ratio=ov_ratio,
+                 vs_torch=torch_ms / T_meas, serial_overhead=serial_overhead,
+                 component_gain=component_gain, overlap_gain=overlap_gain,
+                 algorithm=algorithm, kernel=kernel, comm_gain=comm_gain,
+                 gemm_gain=gemm_gain, overlap_ratio=ov_ratio,
                  T_serial_var=T_serial_var, T_ideal=T_ideal, T_gemm=T_g,
                  T_comm=T_c, comm_gbs=var_gbs, cfg=cfg)
 
         # torch bulk-sync -- defines the 1.00x column
         if rank == 0:
-            print(f"  {'P1 torch bulk-sync':<26} {torch_ms:8.4f} {1.0:8.2f}x "
-                  f"{'1.00x':>8} {'1.00x':>8} {'1.00x':>7} {'1.00x':>7} {'--':>7}")
-        serial_err = abs(torch_ms - (T_gemm + comm_ref["rccl"])) / torch_ms
+            print(f"  {'P1 torch bulk-sync':<24} {1.0:7.3f} = "
+                  f"{serial_overhead_torch:.3f} x 1.000 x 1.000"
+                  f"   [gemm 1.00 | comm 1.000 = algo 1.000 x kern 1.00]"
+                  f"  {rccl_gbs:6.1f} GB/s ({100*rccl_gbs/LINE_GBS:.0f}%)")
+        serial_err = abs(torch_ms - T_serial_torch) / torch_ms
         if rank == 0:
             print(f"  {'':<26} torch serial check: "
                   f"gemm+rccl={T_gemm + comm_ref['rccl']:.4f} vs measured "
