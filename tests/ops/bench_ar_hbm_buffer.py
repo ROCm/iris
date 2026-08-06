@@ -99,12 +99,12 @@ def _worker(local_rank, world_size, init_url, outfile):
         ws_cache = {}
         out = torch.zeros(M, N_GLOBAL, dtype=dtype, device=f"cuda:{rank}")
         first_err = None
-        for block_m in [64, 128]:
+        for block_m in [128]:
             num_m_tiles = triton.cdiv(M, block_m)
             # RS phase shards M-tiles across ranks -- must divide evenly
             if num_m_tiles % world_size != 0:
                 continue
-            for block_n in [64, 128]:
+            for block_n in [128]:
                 for mfma in [16]:
                     # The decomposition says AR is 14x the GEMM, so the split
                     # should favour comm heavily. RS pulls from ws peers while
@@ -119,14 +119,17 @@ def _worker(local_rank, world_size, init_url, outfile):
                         # pull at 6.7us. Per CU on an even 32/32 that is RS 92us
                         # vs AG 67us -- RS is the longer pole, so bias toward it.
                         # GEMM still has to be fast because it gates RS.
-                        (192, 32, 32),    # control, current best
-                        (224, 16, 16),
-                        (176, 56, 24),
-                        (160, 64, 32),
-                        (160, 56, 40),
-                        (128, 96, 32),
-                        (128, 80, 48),
-                        (96, 128, 32),
+                        # RS-biased splits (128/96/32, 96/128/32, 160/64/32)
+                        # all LOST, and 224/16/16 beat 192/32/32. So the comm
+                        # pools are not CU-starved -- the trend runs the other
+                        # way and had not bottomed out. Push it further.
+                        (224, 16, 16),    # previous best
+                        (240, 8, 8),
+                        (232, 16, 8),
+                        (232, 8, 16),
+                        (208, 32, 16),
+                        (208, 16, 32),
+                        (192, 32, 32),    # control
                         ]
                     ]:
                         if g + r_ + a_ > cu_count:
