@@ -78,6 +78,8 @@ def _fused_gemm_two_shot_ar_kernel(
     output_ptr,
     gemm_flags_ptr,
     rs_flags_ptr,
+    ag_next_ptr,
+    own_next_ptr,
     ts_gemm_beg,
     ts_gemm_end,
     ts_rs_beg,
@@ -133,8 +135,18 @@ def _fused_gemm_two_shot_ar_kernel(
     # AllReduce is 14x the GEMM.
     #
     # So instead of shrinking it, retire it: once a GEMM work-group has emitted
-    # its tiles it falls through and joins the all-gather. AG then runs on
-    # NUM_AG_SMS + NUM_GEMM_SMS workers for the back of the kernel.
+    # its tiles it falls through and joins the all-gather.
+    #
+    # Dispatch has to be DYNAMIC, not a static grid-stride over the combined
+    # worker set. A static stride assumes all 224 workers exist at t=0, but 192
+    # of them arrive at ~92us and at staggered times -- so every tile in a
+    # retired-GEMM stride class is untouchable until that specific WG retires,
+    # and the 32 original AG workers cannot help because the partition already
+    # gave those tiles away. That still gates the AG tail on GEMM completion,
+    # with worse load balance than the honest 32-worker version.
+    #
+    # An atomic work counter has no such binding: early workers keep taking
+    # tiles, and a WG that joins at 92us takes whatever is left.
     is_rs_pool = (pid >= NUM_GEMM_SMS) and (pid < NUM_GEMM_SMS + NUM_RS_SMS)
 
     if pid < NUM_GEMM_SMS:
@@ -285,11 +297,6 @@ def _fused_gemm_two_shot_ar_kernel(
         # get [NUM_AG_SMS, NUM_AG_SMS + NUM_GEMM_SMS). Contiguous ids over a
         # matching stride, so every tile is still claimed exactly once.
         # ------------------------------------------------------------------
-        AG_WORKERS: tl.constexpr = NUM_AG_SMS + NUM_GEMM_SMS
-        if pid < NUM_GEMM_SMS:
-            local_pid = NUM_AG_SMS + pid
-        else:
-            local_pid = pid - NUM_GEMM_SMS - NUM_RS_SMS
 
         # Peer tiles only, indexed so consecutive tiles fan across peers.
         #
@@ -307,7 +314,10 @@ def _fused_gemm_two_shot_ar_kernel(
         n_peers: tl.constexpr = world_size - 1
         peer_tiles = m_tiles_per_rank * num_n_tiles * n_peers
 
-        for seq in range(local_pid, peer_tiles, AG_WORKERS):
+        one_i = tl.zeros((1,), dtype=tl.int32) + 1
+        ctr = ag_next_ptr + tl.arange(0, 1)
+        seq = tl.min(tl.atomic_add(ctr, one_i, sem="relaxed", scope="gpu"))
+        while seq < peer_tiles:
             pk = seq % n_peers
             slot = seq // n_peers
             owner = (cur_rank + 1 + pk) % world_size
@@ -340,12 +350,15 @@ def _fused_gemm_two_shot_ar_kernel(
             tl.store(output_ptr + off, v, mask=mask)
             if TRACE:
                 tl.atomic_max(ts_ag_end + tile_id, read_realtime())
+            seq = tl.min(tl.atomic_add(ctr, one_i, sem="relaxed", scope="gpu"))
 
         # This rank's own shard: already reduced into scratch by our RS pool,
         # so it is a local copy with no peer read and no flag wait beyond the
         # RS ordering the pool already observed.
         own_tiles = m_tiles_per_rank * num_n_tiles
-        for slot in range(local_pid, own_tiles, AG_WORKERS):
+        ctr2 = own_next_ptr + tl.arange(0, 1)
+        slot = tl.min(tl.atomic_add(ctr2, one_i, sem="relaxed", scope="gpu"))
+        while slot < own_tiles:
             pid_m = cur_rank * m_tiles_per_rank + slot // num_n_tiles
             pid_n = slot % num_n_tiles
             tile_id = pid_m * num_n_tiles + pid_n
@@ -366,6 +379,7 @@ def _fused_gemm_two_shot_ar_kernel(
             mask = (rm[:, None] < M) & (rn[None, :] < N)
             v = tl.load(scratch_ptr + off, mask=mask)
             tl.store(output_ptr + off, v, mask=mask)
+            slot = tl.min(tl.atomic_add(ctr2, one_i, sem="relaxed", scope="gpu"))
 
 
 def matmul_all_reduce_hbm_buffer_preamble(
@@ -399,6 +413,10 @@ def matmul_all_reduce_hbm_buffer_preamble(
                                 dtype=torch.int32),
         "rs_flags": ctx.zeros((total_tiles * FLAG_STRIDE,), device="cuda",
                               dtype=torch.int32),
+        # Dynamic work counters. Unlike the flags these are NOT monotonic --
+        # they index within a single launch, so they must be reset every call.
+        "ag_next": ctx.zeros((1,), device="cuda", dtype=torch.int32),
+        "own_next": ctx.zeros((1,), device="cuda", dtype=torch.int32),
         "iteration": 0,
         "block_m": block_m,
         "block_n": block_n,
@@ -442,6 +460,10 @@ def matmul_all_reduce_hbm_buffer(
             ctx, M, N, output_tensor.dtype, block_m, block_n
         )
         ctx.barrier()
+
+    # Reset per launch: these count tiles within one call, not across calls.
+    workspace["ag_next"].zero_()
+    workspace["own_next"].zero_()
 
     workspace["iteration"] += 1
     it = workspace["iteration"]
@@ -494,6 +516,8 @@ def matmul_all_reduce_hbm_buffer(
         output_tensor,
         workspace["gemm_flags"],
         workspace["rs_flags"],
+        workspace["ag_next"],
+        workspace["own_next"],
         tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7],
         M,
         N,
