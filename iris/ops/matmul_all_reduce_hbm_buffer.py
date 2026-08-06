@@ -213,6 +213,11 @@ def _fused_gemm_two_shot_ar_kernel(
             if TRACE:
                 tl.atomic_min(ts_rs_beg + tile_id, read_realtime())
             spins = 0
+            # MUST be an atomic RMW, not tl.load(volatile=True). volatile does
+            # NOT block LICM on the AMD backend: the compiler hoists the load
+            # out of this loop, every WG spins on a stale register, burns
+            # SPIN_LIMIT and proceeds with garbage. It is silently WRONG, not
+            # slow -- and it is faster precisely because it stops waiting.
             gslot = gemm_flags_ptr + grp * FLAG_STRIDE + tl.arange(0, 1)
             zero = tl.zeros((1,), dtype=tl.int32)
             done = tl.min(tl.atomic_add(gslot, zero, sem="acquire", scope="sys"))
