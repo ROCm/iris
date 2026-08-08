@@ -61,6 +61,19 @@ from multi_gpu import attn_kernels as ak  # noqa: E402
 from multi_gpu import moe_kernels as mk  # noqa: E402
 from multi_gpu import persistent_kernels as pk  # noqa: E402
 
+# UNGUARDED RESIDENCY HAZARD. These kernels synchronise with a grid-wide barrier
+# (20 call sites across attn_kernels.py, moe_kernels.py and persistent_kernels.py),
+# which requires every program to be resident at once. Above the device's CU count
+# some programs are never scheduled and the resident ones spin forever -- the kernel
+# HANGS with no error. 120 fits the parts in use (MI355X 256 CU, MI300X 304 CU) but
+# NOT an 80-CU MI308X. The single-GPU path checks this in MegaModel.__init__ via
+# _check_grid_fits(); nothing checks it here, because this directory has no test
+# coverage and adding the import blind was judged worse than documenting it.
+#
+# Note this became reachable only recently: the --persistent path (13 of the 20
+# sites) raised KeyError: MEASURE_NOEXCH before it ever launched a kernel, so the
+# hazard could not fire. That KeyError is now fixed, which is a strict improvement
+# over an unrunnable path -- but it means these sites are live where they were not.
 NWG = 120
 LP = dict(BLOCK_K=1024, BLOCK_M=8, BLOCK_M_LM=16, BLOCK_NQ=32, BLOCK_ND=16,
           BLOCK_KQ=1024, MTILE=16, BLOCK_T=64, NSTAGES=3)
