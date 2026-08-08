@@ -17,7 +17,7 @@ Files:
   swiglu.py     SwiGLU-OAI (fp8-quant and bf16 variants)
 """
 
-from common.barrier import _barrier
+from common.barrier import _barrier, _barrier_noinv
 from common.fp4 import _fp4_lut
 from common.quant import _quant_norm_fp8
 from common.rmsnorm import _store_resid_rmsnorm
@@ -39,6 +39,7 @@ from common.swiglu import _swiglu_quant_fp8, _swiglu_bf16
 
 __all__ = [
     "_barrier",
+    "_barrier_noinv",
     "_fp4_lut",
     "_quant_norm_fp8",
     "_store_resid_rmsnorm",

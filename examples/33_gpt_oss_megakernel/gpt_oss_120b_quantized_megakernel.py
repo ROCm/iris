@@ -200,7 +200,7 @@ def gpt_oss_megakernel(
             _gemv_bf16_rmsnorm(wq, x_p, na, q_p, True, bq, q_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
             _gemv_bf16_rmsnorm(wk, x_p, na, k_p, True, bk, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
             _gemv_bf16_rmsnorm(wv, x_p, na, v_p, True, bv, kv_dim, H, pid, eps, BLOCK_M, BLOCK_K, NORMK)
-        _barrier(bar_p, (lb + 1) * _NWG)
+        _barrier_noinv(bar_p, (lb + 1) * _NWG)
 
         # ---- P2+P3 FUSED: RoPE, KV-cache append, and attention in one phase (no
         # separate KV-append barrier). The current position's key/value are RoPE'd and
@@ -218,7 +218,7 @@ def gpt_oss_megakernel(
             )
         bc = 1  # barriers used so far this layer: QKV(1); KV-append fused into attention
         bc += 1
-        _barrier(bar_p, (lb + bc) * _NWG)
+        _barrier_noinv(bar_p, (lb + bc) * _NWG)
 
         # ---- P4: O-proj -> o_p (the post-attention output). The residual add is
         # deferred to the layer's final accumulation, so there is no separate
@@ -229,7 +229,7 @@ def gpt_oss_megakernel(
             _gemv_bf16_tiled(wo, attn_p, o_p, True, bo, H, q_dim, pid, BLOCK_M, BLOCK_K)
         rstep = _NWG * BLOCK_M
         bc += 1
-        _barrier(bar_p, (lb + bc) * _NWG)
+        _barrier_noinv(bar_p, (lb + bc) * _NWG)
 
         # ---- P5: router GEMV, expert-input quant, and accumulator reset all run in
         # one phase -- they only depend on x + o, available since the O-proj barrier.
@@ -251,7 +251,7 @@ def gpt_oss_megakernel(
         else:
             _store_resid_rmsnorm(x_p, o_p, nm, normed_p, H, pid, eps, BLOCK_M, NORMK)
         bc += 1
-        _barrier(bar_p, (lb + bc) * _NWG)
+        _barrier_noinv(bar_p, (lb + bc) * _NWG)
 
         # Every program does the top-k + softmax over the E router logits redundantly
         # in registers (E is tiny) and writes ids_p/gw_p. The writes are identical
@@ -294,7 +294,7 @@ def gpt_oss_megakernel(
             else:
                 _gemv_fp4(gu_blk, gu_scl, normed_p, gu_out, gu_b, True, 2 * I, H, GU_NB, pid, 1.0, ACCUM=False)
         bc += 1
-        _barrier(bar_p, (lb + bc) * _NWG)
+        _barrier_noinv(bar_p, (lb + bc) * _NWG)
         # --- phase B: SwiGLU for every expert. QUANT quantizes each 32-element block
         # in place (producer == consumer for that block, no barrier needed). ---
         for slot in range(0, TOPK):
@@ -304,7 +304,7 @@ def gpt_oss_megakernel(
             else:
                 _swiglu_bf16(gu_out, act_p + slot * I, I, pid, alpha, limit)
         bc += 1
-        _barrier(bar_p, (lb + bc) * _NWG)
+        _barrier_noinv(bar_p, (lb + bc) * _NWG)
         # --- phase C: down for every expert, accumulating gate-weighted sum into moe_p.
         # Each program owns the same output rows across all experts, so the running
         # accumulation is program-local and needs no barrier between experts. ---
@@ -348,7 +348,7 @@ def gpt_oss_megakernel(
                 act_out = act_p + slot * I
                 _gemv_fp4(dn_blk, dn_scl, act_out, moe_p, dn_b, True, H, I, DN_NB, pid, gwv, ACCUM=(slot > 0))
         bc += 1
-        _barrier(bar_p, (lb + bc) * _NWG)
+        _barrier_noinv(bar_p, (lb + bc) * _NWG)
 
         # ---- P7 (BF16 path only): final residual x = x + o + moe, striped. The
         # QUANT path folds this into the last down GEMV above. ----
@@ -363,7 +363,7 @@ def gpt_oss_megakernel(
                 tl.store(x_p + woff, xv + ov + mv, mask=wm)
                 base_w += rstep
             bc += 1
-            _barrier(bar_p, (lb + bc) * _NWG)
+            _barrier_noinv(bar_p, (lb + bc) * _NWG)
         base = lb + bc
 
     # ===== final norm (fused) + lm_head + argmax =====
@@ -409,7 +409,7 @@ def gpt_oss_megakernel(
     tl.store(amax_v_p + pid, best_v)
     tl.store(amax_i_p + pid, best_i)
     base = base + 1
-    _barrier(bar_p, base * _NWG)
+    _barrier_noinv(bar_p, base * _NWG)
     if pid == 0:
         bv = -1e30
         bi = 0

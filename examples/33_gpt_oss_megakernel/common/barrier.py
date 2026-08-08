@@ -37,3 +37,41 @@ def _barrier(bar_ptr, target):
     # L1-only invalidate (asm) instead of a full sc1 acquire, so the next phase reads
     # every peer's writes fresh from the shared L2.
     _l1_invalidate()
+
+
+@triton.jit
+def _barrier_noinv(bar_ptr, target):
+    """Grid-wide barrier WITHOUT the trailing cache invalidate. Use this on a single-GPU
+    grid where programs share a per-XCD L2.
+
+    `buffer_inv` *discards* dirty lines rather than writing them back, and on MI355X the L2
+    is per-XCD and shared with ~31 other workgroups. By the time one program leaves the spin,
+    peers have already passed the barrier and begun writing the next phase -- a cache-wide
+    invalidate throws those writes away. Measured on GPT-OSS-120B decode, 300 fresh-model
+    reps per arm, one variable, same node and prompt:
+
+        invalidate            corrupt runs      distinct wrong outputs
+        (none)                     0/300                 0
+        buffer_inv sc0            15/300                 1
+        buffer_inv sc1           293/300                21
+        buffer_inv sc0 sc1       300/300                 6
+
+    Monotonic in invalidation strength; no-invalidate vs sc0 is Fisher one-sided p = 2.6e-05,
+    and it is perf-neutral. The release side is unchanged, so writes are still published:
+    `buffer_wbl2 sc1` + `s_waitcnt vmcnt(0)` still precede the arrival.
+
+    NOT a drop-in replacement for `_barrier` everywhere. Correctness here relies on there
+    being no cross-phase reuse of shared addresses -- true for BS=1 decode, where weights
+    stream read-once so nothing stale is resident. A pattern that re-reads shared addresses
+    it already has cached needs visibility from somewhere; an all-to-all test fails 0/10
+    with this barrier and passes with an invalidating one. `multi_gpu/` still uses
+    `_barrier` and is untested against this change.
+    """
+    tl.debug_barrier()
+    tl.atomic_add(bar_ptr, 1, sem="release", scope="gpu")
+    done = 0
+    while done == 0:
+        cur = tl.atomic_add(bar_ptr, 0, sem="relaxed", scope="gpu")
+        if cur >= target:
+            done = 1
+
