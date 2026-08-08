@@ -76,12 +76,23 @@ def _barrier_noinv(bar_ptr, target):
     barrier in a *different* kernel: check whether your programs re-read shared addresses
     across a barrier, and if they do, use `_barrier`.
 
-    Measurement conditions, which are part of the claim: the 0/300 above was collected on a
-    node that was near-idle over the reps where failures appear (an earlier arm shared it,
-    but only across the stretch where no arm can differ). Behaviour under heavy node
-    contention is UNCHARACTERISED -- neighbours on other GPUs cannot touch this GPU's L2,
-    but they can move clocks via the board power cap, and this barrier's correctness has
-    never been observed past that quiet stretch under known load.
+    A RESIDUAL DEFECT IS NOT EXCLUDED. Pooling every run of this barrier:
+
+        near-idle node, informative region   0/300
+        exclusive node                       0/75
+        shared node                          1/100   <- one non-reference output
+        pooled                               1/475 = 0.21%, 95% CI [0.01%, 1.17%]
+
+    Node contention was the first explanation for that event and it is NOT supported:
+    sampling GPU 0 under this workload measured 2388 MHz on an idle node and 2392 MHz with
+    seven sibling GPUs saturated (0.2% apart), so the board power cap is not binding and
+    neighbours do not move this GPU's clock. They also cannot reach its L2. With no
+    established channel, the event is more likely a real low-rate defect than an artifact.
+
+    That does not make this barrier the wrong choice -- the one it replaces measured 15/300
+    (5.0%) on a quiet node, so the pooled rate here is ~24x lower (Fisher one-sided
+    p = 5e-06). Treat it as a large improvement with an uncharacterised remainder, not as
+    a clean barrier.
 
     `multi_gpu/` still uses `_barrier` and is untested against this change.
     """
