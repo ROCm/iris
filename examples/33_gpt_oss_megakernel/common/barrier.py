@@ -56,14 +56,24 @@ def _barrier_noinv(bar_ptr, target):
         buffer_inv sc1           293/300                21
         buffer_inv sc0 sc1       300/300                 6
 
-    THE sc0 ROW HAS NOT REPRODUCED. That 15/300 came from one session. The identical file
-    has since run 0/300 under a controlled synthetic load and 0/300 solo on a node verified
-    as sole occupant before the run -- 600 further reps, two venues, no failures, Fisher
-    one-sided p = 2.6e-05 against the original. So there is no reproducible failure rate for
-    the shipping dose, and none should be quoted. The 15 failures were real (15 byte-identical
-    prompt-echo trajectories is not noise) and remain unexplained; the only pattern consistent
-    with every run is that they began after a co-tenant left the machine mid-run, which is a
-    transition rather than a state and is not something these measurements isolate.
+    THE sc0 ROW SORTS BY MACHINE, NOT BY RATE. Every run of the identical file, by host:
+
+        thor-2          co-tenant then solo    15/300   fails
+        thor-2          synthetic load ON       1/50    fails (before any load change)
+        pollara-1       synthetic load ON       0/300   clean
+        dlc-pollara-4   solo, verified          0/300   clean
+
+    Load was varied on both sides and does not sort anything; the host does, with no
+    exceptions so far. Note the two clean hosts are the same node family (`pollara`) and the
+    two failing runs are the same machine, so this is one family sampled twice against one
+    machine sampled twice -- not four independent venues. A run on another `thor` node would
+    separate "this machine" from "this family" and has not been done.
+
+    Practical consequence: there is no reproducible failure rate for the shipping dose and
+    none should be quoted, but "does not reproduce" is host-conditioned and not a clean bill.
+    The 15 failures were real -- 15 byte-identical prompt-echo trajectories is not noise --
+    and remain unexplained. "Host" here is a label for whatever differs, not a mechanism;
+    Slurm reports the nodes as identical in version, GRES, CPU and memory.
 
     Removing the invalidate is still the right call, and the argument does not need that rate.
     It is weakly dominant: removal has zero measured cost (perf-neutral in both dtypes),
