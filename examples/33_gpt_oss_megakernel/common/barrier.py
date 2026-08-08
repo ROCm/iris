@@ -96,10 +96,18 @@ def _barrier_noinv(bar_ptr, target):
     neighbours do not move this GPU's clock. They also cannot reach its L2. With no
     established channel, the event is more likely a real low-rate defect than an artifact.
 
-    That does not make this barrier the wrong choice -- the one it replaces measured 15/300
-    (5.0%) on a quiet node, so the pooled rate here is ~24x lower (Fisher one-sided
-    p = 5e-06). Treat it as a large improvement with an uncharacterised remainder, not as
-    a clean barrier.
+    That does not make this barrier the wrong choice, but do not quote a ratio between the
+    two. The barrier it replaces measured 15/300 (5.0%) on a quiet node; the figure above
+    pools a quiet node and a shared one. **The two have never been measured side by side,
+    same n, same machine**, so any ratio between them compares a cross-venue number to a
+    single-venue one. Early data from a paired run has the old barrier at 0/175 under a
+    synthetic load where it historically failed ~10% past this point, which is not yet
+    decisive but is enough reason not to lean on the comparison.
+
+    What does not depend on any of this: the sc1 variants measured 293/300 and 300/300.
+    No venue argument reaches numbers like those, so the decision to remove the invalidate
+    stands independently of what the low-rate figures settle at. Treat this barrier as a
+    large improvement with an uncharacterised remainder, not as a clean one.
 
     `multi_gpu/` still uses `_barrier` and is untested against this change.
     """
