@@ -76,19 +76,22 @@ def _barrier_noinv(bar_ptr, target):
     barrier in a *different* kernel: check whether your programs re-read shared addresses
     across a barrier, and if they do, use `_barrier`.
 
-    A RESIDUAL DEFECT IS NOT EXCLUDED. One non-reference output has been observed from this
-    barrier, on a shared node, at rep 100 of 100. Every run of it so far:
+    A RESIDUAL DEFECT IS NOT EXCLUDED, and the one observation sits entirely in the venue
+    we could not characterise. Split by machine rather than pooled, because that is where
+    the structure is:
 
-        near-idle node, informative region   0/300   complete
-        shared node                          1/100   complete  <- the event
-        exclusive node                       0/75+   IN FLIGHT at time of writing
+        near-idle node, informative region     0/300    95% CI [0.00%, 1.22%]
+        exclusive node, channel measured absent 0/300   95% CI [0.00%, 1.22%]
+        characterised venues combined          0/600    95% CI [0.00%, 0.61%]
+        organically busy shared node           1/100    95% CI [0.03%, 5.45%]  <- the event
 
-    Pooled that is 1/475 = 0.21% (95% CI 0.01-1.17%), but read that figure with two
-    conditions attached. It counts an unfinished run, so the denominator only grows. And
-    pooling across nodes assumes the rate does not depend on the node, which is exactly
-    what the single event put in question -- it is only defensible because the channel was
-    measured and found absent (below). If a channel is ever established, this figure has to
-    be split by venue rather than pooled.
+    Pooled it is 1/700 (0.14%), but the pooled number hides the only interesting fact: this
+    barrier has never failed on a machine whose conditions we understand, and the single
+    failure came from one we do not. That is not evidence the barrier is safe on a busy
+    node -- 100 reps is thin and a synthetic load built to reproduce the condition was
+    measured inert (it saturates sibling GPUs, and sibling GPUs do not move this GPU's
+    clock). "Organically busy multi-tenant node" is a condition we cannot reproduce on
+    demand, so this rate is unknown there rather than merely unmeasured.
 
     Node contention was the first explanation for that event and it is NOT supported:
     sampling GPU 0 under this workload measured 2388 MHz on an idle node and 2392 MHz with
