@@ -99,13 +99,15 @@ def _barrier_noinv(bar_ptr, target):
     neighbours do not move this GPU's clock. They also cannot reach its L2. With no
     established channel, the event is more likely a real low-rate defect than an artifact.
 
-    That does not make this barrier the wrong choice, but do not quote a ratio between the
-    two. The barrier it replaces measured 15/300 (5.0%) on a quiet node; the figure above
-    pools a quiet node and a shared one. **The two have never been measured side by side,
-    same n, same machine**, so any ratio between them compares a cross-venue number to a
-    single-venue one. Early data from a paired run has the old barrier at 0/175 under a
-    synthetic load where it historically failed ~10% past this point, which is not yet
-    decisive but is enough reason not to lean on the comparison.
+    Do not quote a ratio against the barrier this replaces, and do not quote its 5% either:
+    that rate is venue-conditioned. The same `buffer_inv sc0` file, same harness, same n:
+
+        thor-2, co-tenant for reps 1-117 then solo   15/300 = 5.0%
+        pollara-1, controlled synthetic load          0/300 = 0.0%   Fisher p = 2.6e-05
+
+    Both are real measurements of the same code. Note also that all 15 failures in the
+    first run landed after its co-tenant left, so "5% on a quiet node" was wrong in both
+    halves -- the node was not quiet, and 5% is not the barrier's rate.
 
     What does not depend on any of this: the sc1 variants measured 293/300 and 300/300.
     No venue argument reaches numbers like those, so the decision to remove the invalidate
