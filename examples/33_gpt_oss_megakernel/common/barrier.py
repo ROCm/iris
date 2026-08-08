@@ -73,9 +73,9 @@ def _barrier_noinv(bar_ptr, target):
     where `buffer_inv sc0` has ever failed, and taking every full-length run of either
     barrier there:
 
-        buffer_inv sc0    19/575 = 3.3%   (two runs, two different load conditions)
+        buffer_inv sc0    19/600 = 3.2%   (two runs, two different load conditions)
         _barrier_noinv     0/600 = 0.0%   (two runs, paired in one container)
-                                          Fisher one-sided p = 1.1e-06
+                                          Fisher one-sided p = 1.7e-06
 
     Same machine, both barriers, full n, no cross-venue or cross-run division on either
     side. That is a stronger justification for this change than the 5% ever was: it is
