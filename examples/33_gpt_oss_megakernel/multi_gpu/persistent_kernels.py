@@ -60,6 +60,7 @@ def attn_persistent_kernel(
     BLOCK_T: tl.constexpr, NSTAGES: tl.constexpr,
     FP8_QKV: tl.constexpr, FP8_O: tl.constexpr, FP8_ROUTER: tl.constexpr, MXFP8_BLK: tl.constexpr,
     ATTN_RANK: tl.constexpr, BLOCK: tl.constexpr,
+    MEASURE_NOEXCH: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     HALF: tl.constexpr = DH // 2
@@ -156,13 +157,19 @@ def attn_persistent_kernel(
                 iris.store(r_gw_p, tl.load(gw_p + slot), ATTN_RANK, dst, heap_bases)
                 iris.atomic_xchg(r_in_flag_p + layer, layer + 1, ATTN_RANK, dst, heap_bases, sem="release", scope="sys")
         # ---- wait for all TOPK results. EVERY program acquires each out_flag so the
-        # remotely-delivered res[] is coherent for the program that will read it. ----
-        for slot in tl.static_range(TOPK):
-            done = 0
-            while done == 0:
-                fv = iris.atomic_add(out_flag_p + layer * TOPK + slot, 0, ATTN_RANK, ATTN_RANK, heap_bases, sem="acquire", scope="sys")
-                if fv >= layer + 1:
-                    done = 1
+        # remotely-delivered res[] is coherent for the program that will read it.
+        # MEASURE_NOEXCH skips the wait to time the attention rank in isolation: the
+        # output is GARBAGE (res[] holds the previous layer's values, or zeros on the
+        # first), so this is a profiling switch only, never a correctness path. ----
+        if MEASURE_NOEXCH:
+            pass
+        else:
+            for slot in tl.static_range(TOPK):
+                done = 0
+                while done == 0:
+                    fv = iris.atomic_add(out_flag_p + layer * TOPK + slot, 0, ATTN_RANK, ATTN_RANK, heap_bases, sem="acquire", scope="sys")
+                    if fv >= layer + 1:
+                        done = 1
         bc += 1
         _barrier(bar_p, bc * NWG)  # all programs past the acquires before accumulate
 

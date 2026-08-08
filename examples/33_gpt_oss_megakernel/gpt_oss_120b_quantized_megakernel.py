@@ -158,7 +158,6 @@ def gpt_oss_megakernel(
     pid = tl.program_id(0)
     HALF: tl.constexpr = DH // 2
     GROUP: tl.constexpr = NH // NKV
-    bars_per_layer = 11  # number of _barrier calls per layer
     base = 0
 
     for layer in range(L):
@@ -424,6 +423,28 @@ def gpt_oss_megakernel(
 
 
 # ───────────────────────── host wrapper ─────────────────────────
+def _check_grid_fits(num_wg: int = NUM_WG, dev: str = "cuda") -> None:
+    """Refuse a grid the device cannot hold.
+
+    The megakernel synchronises with a grid-wide barrier, which requires every program
+    to be resident simultaneously, and it gets one workgroup per CU. Above the CU count
+    some programs are never scheduled and the resident ones spin on a target that can
+    never be reached -- the kernel HANGS with no error. Measured on three parts:
+
+        MI308X  gfx942   80 CU    80 runs,  81 hangs
+        MI355X  gfx950  256 CU   256 runs, 257 hangs
+        MI300X  gfx942  304 CU   304 runs, 305 hangs
+
+    The boundary tracks the CU count, not a constant, so check it at run time.
+    """
+    cus = torch.cuda.get_device_properties(dev).multi_processor_count
+    if num_wg > cus:
+        raise ValueError(
+            f"NUM_WG={num_wg} exceeds this device's {cus} CUs. The grid-wide barrier "
+            f"needs every program resident, so this would hang rather than fail."
+        )
+
+
 class MegaModel:
     def __init__(
         self,
@@ -437,6 +458,7 @@ class MegaModel:
         fp8_components=None,
         fp8_scale_blk=0,
     ):
+        _check_grid_fits()
         self.cfg = cfg
         self.L = num_layers
         self.dev = dev
