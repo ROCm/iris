@@ -69,6 +69,20 @@ def _barrier_noinv(bar_ptr, target):
     machine sampled twice -- not four independent venues. A run on another `thor` node would
     separate "this machine" from "this family" and has not been done.
 
+    THE COMPARISON THAT DOES HOLD IS ON ONE MACHINE. Restricting to thor-2, the only host
+    where `buffer_inv sc0` has ever failed, and taking every full-length run of either
+    barrier there:
+
+        buffer_inv sc0    19/575 = 3.3%   (two runs, two different load conditions)
+        _barrier_noinv     0/600 = 0.0%   (two runs, paired in one container)
+                                          Fisher one-sided p = 1.1e-06
+
+    Same machine, both barriers, full n, no cross-venue or cross-run division on either
+    side. That is a stronger justification for this change than the 5% ever was: it is
+    measured on the host that actually exhibits the defect rather than averaged over hosts
+    that do not. (The noinv runs predate knowing thor-2 was the interesting machine, so
+    they were not designed as this comparison -- they simply are one.)
+
     Practical consequence: there is no reproducible failure rate for the shipping dose and
     none should be quoted, but "does not reproduce" is host-conditioned and not a clean bill.
     The 15 failures were real -- 15 byte-identical prompt-echo trajectories is not noise --
