@@ -71,6 +71,15 @@ def _barrier_noinv(bar_ptr, target):
     tl.atomic_add(bar_ptr, 1, sem="release", scope="gpu")
     done = 0
     while done == 0:
+        # DO NOT "optimise" this RMW into a plain or cache-bypassing load. Polling with
+        # atomic_add(ptr, 0) looks wasteful -- it is an unbounded read-modify-write on one
+        # line -- but it is also forcing a coherence point that the PAYLOAD depends on,
+        # which is what makes a barrier with no invalidate sound at all. Swapping it for
+        # tl.load(bar_ptr, cache_modifier=".cv") keeps the counting semantics exactly
+        # right (the counter is monotonic and the test is >=, so a stale read can only
+        # spin longer, never exit early) and still corrupts output: 25/25 runs wrong with
+        # 25 distinct trajectories, versus 0/300 with this RMW. It is ~1.2x faster,
+        # because the speed came from the coherence it removed.
         cur = tl.atomic_add(bar_ptr, 0, sem="relaxed", scope="gpu")
         if cur >= target:
             done = 1
