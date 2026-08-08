@@ -60,12 +60,23 @@ def _barrier_noinv(bar_ptr, target):
     and it is perf-neutral. The release side is unchanged, so writes are still published:
     `buffer_wbl2 sc1` + `s_waitcnt vmcnt(0)` still precede the arrival.
 
-    NOT a drop-in replacement for `_barrier` everywhere. Correctness here relies on there
-    being no cross-phase reuse of shared addresses -- true for BS=1 decode, where weights
-    stream read-once so nothing stale is resident. A pattern that re-reads shared addresses
-    it already has cached needs visibility from somewhere; an all-to-all test fails 0/10
-    with this barrier and passes with an invalidating one. `multi_gpu/` still uses
-    `_barrier` and is untested against this change.
+    NOT a drop-in replacement for `_barrier`. THE CONDITION IS THE ACCESS PATTERN, NOT THE
+    BATCH SIZE: this barrier is sound only where programs do not re-read, across a barrier,
+    shared addresses they already have cached. Measured on both sides of that condition:
+
+        reuse absent  (this kernel)              0/300 correct
+        reuse present (64-program all-to-all,     0/10  FAIL -- and passes with an
+                       same slots re-read each          invalidating barrier
+                       phase)
+
+    This kernel satisfies it because decode streams weights read-once, so nothing stale is
+    resident to go unnoticed. Do not restate that as "safe at batch size 1" -- this kernel
+    has no batch dimension and cannot leave that regime, so batch size is not the axis and
+    points a reader at the wrong test. The audience for this warning is anyone reusing the
+    barrier in a *different* kernel: check whether your programs re-read shared addresses
+    across a barrier, and if they do, use `_barrier`.
+
+    `multi_gpu/` still uses `_barrier` and is untested against this change.
     """
     tl.debug_barrier()
     tl.atomic_add(bar_ptr, 1, sem="release", scope="gpu")
