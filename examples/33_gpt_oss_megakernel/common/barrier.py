@@ -76,6 +76,13 @@ def _barrier_noinv(bar_ptr, target):
     barrier in a *different* kernel: check whether your programs re-read shared addresses
     across a barrier, and if they do, use `_barrier`.
 
+    Measurement conditions, which are part of the claim: the 0/300 above was collected on a
+    node that was near-idle over the reps where failures appear (an earlier arm shared it,
+    but only across the stretch where no arm can differ). Behaviour under heavy node
+    contention is UNCHARACTERISED -- neighbours on other GPUs cannot touch this GPU's L2,
+    but they can move clocks via the board power cap, and this barrier's correctness has
+    never been observed past that quiet stretch under known load.
+
     `multi_gpu/` still uses `_barrier` and is untested against this change.
     """
     tl.debug_barrier()
