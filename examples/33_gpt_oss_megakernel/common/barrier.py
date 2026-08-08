@@ -76,12 +76,19 @@ def _barrier_noinv(bar_ptr, target):
     barrier in a *different* kernel: check whether your programs re-read shared addresses
     across a barrier, and if they do, use `_barrier`.
 
-    A RESIDUAL DEFECT IS NOT EXCLUDED. Pooling every run of this barrier:
+    A RESIDUAL DEFECT IS NOT EXCLUDED. One non-reference output has been observed from this
+    barrier, on a shared node, at rep 100 of 100. Every run of it so far:
 
-        near-idle node, informative region   0/300
-        exclusive node                       0/75
-        shared node                          1/100   <- one non-reference output
-        pooled                               1/475 = 0.21%, 95% CI [0.01%, 1.17%]
+        near-idle node, informative region   0/300   complete
+        shared node                          1/100   complete  <- the event
+        exclusive node                       0/75+   IN FLIGHT at time of writing
+
+    Pooled that is 1/475 = 0.21% (95% CI 0.01-1.17%), but read that figure with two
+    conditions attached. It counts an unfinished run, so the denominator only grows. And
+    pooling across nodes assumes the rate does not depend on the node, which is exactly
+    what the single event put in question -- it is only defensible because the channel was
+    measured and found absent (below). If a channel is ever established, this figure has to
+    be split by venue rather than pooled.
 
     Node contention was the first explanation for that event and it is NOT supported:
     sampling GPU 0 under this workload measured 2388 MHz on an idle node and 2392 MHz with
