@@ -69,11 +69,19 @@ def _barrier_noinv(bar_ptr, target):
     The host sorts every run. It is ONE MACHINE, not a node family -- thor-3 is the same
     family as thor-2 and is clean at full length.
 
-    How strong that is: 0/300 on thor-3 excludes thor-2's measured rate (P = 0.008 at 1.6%)
-    but not the bottom of its interval (P = 0.27 at 0.44%). So thor-3 does not behave like
-    thor-2 at any rate actually observed there, and a rate below ~0.4% is not excluded. Note
-    also that thor-2's own two runs disagree by 4x (15/300 and 4/300), so the host sorts the
-    outcome without producing a stable rate underneath it.
+    How strong that is, and it depends on which thor-2 estimate you compare against:
+
+        thor-2 pooled 19/600   95% CI [1.92%, 4.90%]   disjoint from thor-3's [0, 1.22%]
+                               P(0 in 300 | 1.92% floor) = 0.003   decisive
+        thor-2 lowest run 4/300, floor 0.36%
+                               P(0 in 300 | 0.36%)      = 0.33     not excluded
+
+    Pooling thor-2's two runs assumes they sample one rate, and they differ 4x (15/300 and
+    4/300), so the conservative read is the second line: thor-3 is clean against every rate
+    actually observed on thor-2, and a rate at the bottom of its weakest run is not ruled
+    out. Either way the host sorts whether it fails without producing a stable rate
+    underneath -- and the difference between "decisive" and "not excluded" here is entirely
+    a choice about pooling, not new data about thor-3.
 
     THE COMPARISON THAT DOES HOLD IS ON ONE MACHINE. Restricting to thor-2, the only host
     where `buffer_inv sc0` has ever failed, and taking every full-length run of either
