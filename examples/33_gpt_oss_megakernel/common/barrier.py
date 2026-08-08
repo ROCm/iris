@@ -59,15 +59,21 @@ def _barrier_noinv(bar_ptr, target):
     THE sc0 ROW SORTS BY MACHINE, NOT BY RATE. Every run of the identical file, by host:
 
         thor-2          co-tenant then solo    15/300   fails
-        thor-2          synthetic load ON       1/50    fails (before any load change)
-        pollara-1       synthetic load ON       0/300   clean
-        dlc-pollara-4   solo, verified          0/300   clean
+        thor-2          synthetic load ON        4/300   fails (from rep ~50, load still on)
+        thor-3          solo, verified           0/300   clean   <- same node family
+        pollara-1       synthetic load ON        0/300   clean
+        dlc-pollara-4   solo, verified           0/300   clean
 
-    Load was varied on both sides and does not sort anything; the host does, with no
-    exceptions so far. Note the two clean hosts are the same node family (`pollara`) and the
-    two failing runs are the same machine, so this is one family sampled twice against one
-    machine sampled twice -- not four independent venues. A run on another `thor` node would
-    separate "this machine" from "this family" and has not been done.
+    Load was varied on both sides and sorts nothing: the failing host fails both with a
+    co-tenant and under synthetic load, and the passing hosts pass both loaded and solo.
+    The host sorts every run. It is ONE MACHINE, not a node family -- thor-3 is the same
+    family as thor-2 and is clean at full length.
+
+    How strong that is: 0/300 on thor-3 excludes thor-2's measured rate (P = 0.008 at 1.6%)
+    but not the bottom of its interval (P = 0.27 at 0.44%). So thor-3 does not behave like
+    thor-2 at any rate actually observed there, and a rate below ~0.4% is not excluded. Note
+    also that thor-2's own two runs disagree by 4x (15/300 and 4/300), so the host sorts the
+    outcome without producing a stable rate underneath it.
 
     THE COMPARISON THAT DOES HOLD IS ON ONE MACHINE. Restricting to thor-2, the only host
     where `buffer_inv sc0` has ever failed, and taking every full-length run of either
