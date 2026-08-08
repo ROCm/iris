@@ -52,11 +52,28 @@ def _barrier_noinv(bar_ptr, target):
 
         invalidate            corrupt runs      distinct wrong outputs
         (none)                     0/300                 0
-        buffer_inv sc0            15/300                 1
+        buffer_inv sc0            15/300                 1    <- SEE BELOW: not reproduced
         buffer_inv sc1           293/300                21
         buffer_inv sc0 sc1       300/300                 6
 
-    Monotonic in invalidation strength; no-invalidate vs sc0 is Fisher one-sided p = 2.6e-05,
+    THE sc0 ROW HAS NOT REPRODUCED. That 15/300 came from one session. The identical file
+    has since run 0/300 under a controlled synthetic load and 0/300 solo on a node verified
+    as sole occupant before the run -- 600 further reps, two venues, no failures, Fisher
+    one-sided p = 2.6e-05 against the original. So there is no reproducible failure rate for
+    the shipping dose, and none should be quoted. The 15 failures were real (15 byte-identical
+    prompt-echo trajectories is not noise) and remain unexplained; the only pattern consistent
+    with every run is that they began after a co-tenant left the machine mid-run, which is a
+    transition rather than a state and is not something these measurements isolate.
+
+    Removing the invalidate is still the right call, and the argument does not need that rate.
+    It is weakly dominant: removal has zero measured cost (perf-neutral in both dtypes),
+    keeping it has no demonstrated benefit of any kind, the operation is destructive by
+    mechanism and catastrophic at stronger scopes, and no run of any length in any venue has
+    ever failed after removing it. A decision that survives its headline number being wrong is
+    sturdier than one that needed it.
+
+    The sc1 rows are what the mechanism rests on; they reproduce in every venue tested at full
+    n and no venue argument reaches numbers that size. Monotonic in invalidation strength,
     and it is perf-neutral. The release side is unchanged, so writes are still published:
     `buffer_wbl2 sc1` + `s_waitcnt vmcnt(0)` still precede the arrival.
 
