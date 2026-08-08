@@ -116,11 +116,13 @@ def _barrier_noinv(bar_ptr, target):
         # ~1.9x cheaper and the token ~1.2x faster -- and corrupts the output: 25/25 runs
         # wrong with 25 distinct trajectories, against 0/300 with this RMW.
         #
-        # Two candidate mechanisms, NEITHER CONFIRMED: the atomic may be ordering other
-        # memory operations across the spin exit, or the contention may simply be
-        # delaying every workgroup long enough for peers' writes to drain -- in which
-        # case this barrier is correct by being slow. Adding a single relaxed atomic back
-        # at the exit does not fix it, so it is not one discrete coherence event.
+        # It is NOT that the poll is merely slow. Substituting a delay of 27x the RMW's
+        # measured cost (s_sleep 4096, ~109 us against ~4.00 us) on an exclusive node is
+        # 25/25 corrupt -- so "correct by being slow" is eliminated, at a dose and in a
+        # venue where a failure is interpretable. Nor is it one discrete coherence event:
+        # adding a single relaxed atomic back at the exit does not fix it either, and
+        # neither does draining with s_waitcnt. What remains is something about the
+        # REPEATED RMW's memory-model semantics, and it is not yet explained.
         #
         # Practical rule until someone settles it: any change that makes this loop faster
         # must be gated on a >=300-rep output-correctness run. A timing harness cannot
