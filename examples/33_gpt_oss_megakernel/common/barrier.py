@@ -120,16 +120,30 @@ def _barrier_noinv(bar_ptr, target):
     shared addresses they already have cached. Measured on both sides of that condition:
 
         reuse absent  (this kernel)              0/300 correct
-        reuse present (64-program all-to-all,     0/10  FAIL -- and passes with an
-                       same slots re-read each          invalidating barrier
-                       phase)
+        reuse present (64-program all-to-all,     0/10  FAIL
+                       same slots re-read each phase)
+
+    IMPORTANT, and NOT satisfied by simply switching back to `_barrier`: that same
+    all-to-all test was run against all four barrier variants, and the L1-only invalidate
+    `_barrier` uses fails it too.
+
+        no invalidate       (this function)   0/10  FAIL
+        buffer_inv sc0      (`_barrier`)      0/10  FAIL
+        buffer_inv sc1      (sem="acquire")  10/10  pass
+        buffer_inv sc0 sc1                   10/10  pass
+
+    So a kernel that re-reads shared addresses across a barrier needs an invalidate that
+    reaches L2 -- sc1 or sc0 sc1 -- and NEITHER barrier in this file provides one. Do not
+    read "use `_barrier` instead" out of this note; it is not a working alternative for
+    that access pattern, it merely fails less often in this kernel.
 
     This kernel satisfies it because decode streams weights read-once, so nothing stale is
     resident to go unnoticed. Do not restate that as "safe at batch size 1" -- this kernel
     has no batch dimension and cannot leave that regime, so batch size is not the axis and
     points a reader at the wrong test. The audience for this warning is anyone reusing the
     barrier in a *different* kernel: check whether your programs re-read shared addresses
-    across a barrier, and if they do, use `_barrier`.
+    across a barrier, and if they do, neither barrier here is correct for it -- see the
+    four-variant table above.
 
     A RESIDUAL DEFECT IS NOT EXCLUDED, and the one observation sits entirely in the venue
     we could not characterise. Split by machine rather than pooled, because that is where
