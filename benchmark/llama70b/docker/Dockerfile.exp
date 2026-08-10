@@ -9,7 +9,7 @@ ENV MAX_JOBS=32
 ARG GPU_ARCHS="gfx950"                                          # MI350
 ARG TRITON_COMMIT="6898a3288c28d50d1f4e1f91aa5867ca0d1f3c3b"   # gluon-capable
 ARG VLLM_COMMIT="4e61409d254f761994b7498b20c78c3b5ecff8ae"     # micmelesse/vllm allreduce_only (make_communicator gets both cpu+device groups)
-ARG AITER_COMMIT="51f6c3197f775bdf93272f94335a96f534334ed4"   # ROCm/aiter micmelesse/allreduce_only (make_communicator(cpu_group, device_group, ...); torch backend uses device_group)
+ARG AITER_COMMIT="51f6c3197f775bdf93272f94335a96f534334ed4"   # micmelesse/aiter micmelesse/allreduce_only (make_communicator(cpu_group, device_group, ...); torch backend uses device_group)
 ARG IRIS_COMMIT="04ad32409251c7a7b55a39c8bae4629154e89c2c"    # ROCm/iris muhaawad/one-shot-vllm
 
 RUN git clone https://github.com/micmelesse/vllm.git /src/vllm \
@@ -21,7 +21,7 @@ RUN pip install "triton @ git+https://github.com/triton-lang/triton.git@${TRITON
 
 # aiter: editable install (deps + base extension). No JIT kernels here — they're
 # warmed in a separate step at the end.
-RUN git clone --recursive https://github.com/ROCm/aiter.git /src/aiter \
+RUN git clone --recursive https://github.com/micmelesse/aiter.git /src/aiter \
     && cd /src/aiter && git checkout ${AITER_COMMIT} \
     && git submodule update --init --recursive \
     && pip install -e . --no-build-isolation

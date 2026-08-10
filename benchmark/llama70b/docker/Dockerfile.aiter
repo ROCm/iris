@@ -26,7 +26,7 @@ RUN pip install "triton @ git+https://github.com/triton-lang/triton.git@${TRITON
 
 # aiter: editable install (deps + base extension). No JIT kernels here — they're
 # warmed in a separate step at the end.
-RUN git clone --recursive https://github.com/ROCm/aiter.git /src/aiter \
+RUN git clone --recursive https://github.com/micmelesse/aiter.git /src/aiter \
     && cd /src/aiter && git checkout ${AITER_COMMIT} \
     && git submodule update --init --recursive \
     && pip install -e . --no-build-isolation
