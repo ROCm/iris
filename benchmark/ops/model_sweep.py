@@ -55,14 +55,28 @@ from sweep_bench import (
 DECODE_BATCH_SIZES = [32, 128]  # Online inference decode
 PREFILL_BATCH_SIZES = [2048, 4096]  # Prefill / context ingestion
 TRAINING_BATCH_SIZES = [16384, 32768]  # Long-context training
-ALL_BATCH_SIZES = DECODE_BATCH_SIZES + PREFILL_BATCH_SIZES + TRAINING_BATCH_SIZES
+ALL_BATCH_SIZES = [32, 128, 512, 2048, 8192] #DECODE_BATCH_SIZES + PREFILL_BATCH_SIZES + TRAINING_BATCH_SIZES
 
 # Operation mapping: sweep operation type → which OperationTypes to benchmark
 # Different sweep operations use different TP sharding patterns even for the same layer
 OPERATION_TYPE_MAP = {
-    SweepOperation.ALL_GATHER_MATMUL: [OperationType.ATTN_OUT, OperationType.MLP_DOWN],  # K-sharding
-    SweepOperation.MATMUL_ALL_GATHER: [OperationType.MLP_DOWN],  # N-sharding (different from all_gather_matmul)
-    SweepOperation.MATMUL_ALL_REDUCE: [OperationType.ATTN_OUT, OperationType.MLP_DOWN],  # N-sharding
+    SweepOperation.ALL_GATHER_MATMUL: [
+        OperationType.ATTN_OUT,
+        OperationType.MLP_DOWN,
+        OperationType.EXPERT_MLP_DOWN,
+        # OperationType.ACTIVE_MOE_MLP_DOWN,
+    ],  # K-sharding
+    SweepOperation.MATMUL_ALL_GATHER: [
+        OperationType.MLP_DOWN,
+        OperationType.EXPERT_MLP_DOWN,
+        OperationType.ACTIVE_MOE_MLP_DOWN,
+    ],  # N-sharding (different from all_gather_matmul)
+    SweepOperation.MATMUL_ALL_REDUCE: [
+        OperationType.ATTN_OUT,
+        OperationType.MLP_DOWN,
+        OperationType.EXPERT_MLP_DOWN,
+        # OperationType.ACTIVE_MOE_MLP_DOWN,
+    ],  # K-sharding
 }
 
 
@@ -263,6 +277,13 @@ def generate_dimension_configs(
         model = MODELS[model_name]
 
         for op_type in operation_types:
+            if op_type == OperationType.MLP_DOWN and model.num_dense_layers == 0:
+                continue
+            if (
+                op_type in (OperationType.EXPERT_MLP_DOWN, OperationType.ACTIVE_MOE_MLP_DOWN)
+                and model.expert_intermediate_size is None
+            ):
+                continue
             for batch_size in batch_sizes:
                 try:
                     # compute_dimensions now takes sweep_operation and handles dimension mapping

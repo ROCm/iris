@@ -5,7 +5,7 @@
 """Model architecture configurations for LLM benchmarking.
 
 This module provides a centralized registry of model parameters (hidden_size,
-intermediate_size) for generating benchmark dimension configurations across
+attention_output_size, intermediate_size) for generating benchmark dimension configurations across
 different operations and batch sizes.
 
 Usage:
@@ -20,7 +20,7 @@ Usage:
     K_local (sharded): 512
 
 Adding a new model:
-    1. Add entry to MODELS dict with hidden_size and intermediate_size
+    1. Add entry to MODELS dict with hidden_size, attention_output_size, and intermediate_size
     2. Optionally add full_name and notes for documentation
     3. Run model_sweep.py to validate TP sharding divides evenly
 
@@ -28,6 +28,7 @@ Adding a new model:
         MODELS["new_model"] = ModelConfig(
             name="new_model",
             hidden_size=4096,
+            attention_output_size=4096,
             intermediate_size=16384,
             full_name="New Model 100B",
             notes="Architecture details or source"
@@ -49,15 +50,41 @@ class ModelConfig:
     Attributes:
         name: Canonical model identifier (e.g., "llama3_8b")
         hidden_size: d_model - token embedding dimension (attention input/output)
+        attention_output_size: Concatenated attention-head output width before the output projection
+        num_attention_heads: Number of query/attention heads
+        head_dim: Conventional Q/K/V head width when the architecture uses one common width
+        value_head_dim: Value-head width when it differs from the Q/K head width
         intermediate_size: FFN intermediate dimension (after up-projection, before down-projection)
+        expert_intermediate_size: Per-expert FFN width for MoE layers, if present
+        num_routed_experts: Total number of routed experts in each MoE layer
+        num_experts_per_token: Number of routed experts selected for each token
+        num_shared_experts: Number of experts that process every token
+        num_dense_layers: Number of transformer layers that use the dense FFN
+        active_moe_intermediate_size: Calculated aggregate width of active routed and shared experts
         full_name: Human-readable model name (e.g., "Llama 3 8B")
         notes: Source, estimation details, or architecture notes
     """
     name: str
     hidden_size: int
+    attention_output_size: int
     intermediate_size: int
+    num_attention_heads: int | None = None
+    head_dim: int | None = None
+    value_head_dim: int | None = None
+    expert_intermediate_size: int | None = None
+    num_routed_experts: int = 0
+    num_experts_per_token: int = 0
+    num_shared_experts: int = 0
+    num_dense_layers: int | None = None
     full_name: str = ""
     notes: str = ""
+
+    @property
+    def active_moe_intermediate_size(self) -> int | None:
+        """Aggregate intermediate width active for each token in an MoE layer."""
+        if self.expert_intermediate_size is None:
+            return None
+        return self.expert_intermediate_size * (self.num_experts_per_token + self.num_shared_experts)
 
 
 class OperationType(Enum):
@@ -66,10 +93,14 @@ class OperationType(Enum):
     These correspond to different linear layers:
     - ATTN_OUT: Attention output projection
     - MLP_DOWN: MLP down-projection from FFN to hidden
+    - EXPERT_MLP_DOWN: Per-expert MoE down-projection from expert FFN to hidden
+    - ACTIVE_MOE_MLP_DOWN: Aggregate active routed and shared expert down-projections
     - MLP_UP: MLP up-projection from hidden to FFN
     """
     ATTN_OUT = "attn_out"
     MLP_DOWN = "mlp_down"
+    EXPERT_MLP_DOWN = "expert_mlp_down"
+    ACTIVE_MOE_MLP_DOWN = "active_moe_mlp_down"
     MLP_UP = "mlp_up"
 
 
@@ -130,41 +161,89 @@ MODELS: Dict[str, ModelConfig] = {
     "deepseek_v3": ModelConfig(
         name="deepseek_v3",
         hidden_size=7168,
+        attention_output_size=16384,
         intermediate_size=18432,
+        num_attention_heads=128,
+        value_head_dim=128,
+        expert_intermediate_size=2048,
+        num_routed_experts=256,
+        num_experts_per_token=8,
+        num_shared_experts=1,
+        num_dense_layers=3,
         full_name="DeepSeek-V3",
-        notes="671B params, MoE architecture"
+        notes="671B params; 3 dense layers followed by 58 MoE layers",
+    ),
+    "deepseek_v4": ModelConfig(
+        name="deepseek_v4",
+        hidden_size=7168,
+        attention_output_size=16384,
+        intermediate_size=3072,
+        num_attention_heads=128,
+        head_dim=512,
+        expert_intermediate_size=3072,
+        num_routed_experts=384,
+        num_experts_per_token=6,
+        num_shared_experts=1,
+        num_dense_layers=0,
+        full_name="DeepSeek-V4 Pro",
+        notes="1.6T params, 384-expert MoE",
     ),
     "llama3_8b": ModelConfig(
         name="llama3_8b",
         hidden_size=4096,
+        attention_output_size=4096,
         intermediate_size=14336,
+        num_attention_heads=32,
+        head_dim=128,
         full_name="Llama 3/3.1 8B",
     ),
     "llama3_70b": ModelConfig(
         name="llama3_70b",
         hidden_size=8192,
+        attention_output_size=8192,
         intermediate_size=28672,
+        num_attention_heads=64,
+        head_dim=128,
         full_name="Llama 3/3.1 70B",
     ),
     "llama3_405b": ModelConfig(
         name="llama3_405b",
         hidden_size=16384,
+        attention_output_size=16384,
         intermediate_size=53248,
+        num_attention_heads=128,
+        head_dim=128,
         full_name="Llama 3.1 405B",
     ),
     "llama4_scout": ModelConfig(
         name="llama4_scout",
-        hidden_size=8192,
-        intermediate_size=22016,
+        hidden_size=5120,
+        attention_output_size=5120,
+        intermediate_size=8192,
+        num_attention_heads=40,
+        head_dim=128,
+        expert_intermediate_size=8192,
+        num_routed_experts=16,
+        num_experts_per_token=1,
+        num_shared_experts=1,
+        num_dense_layers=0,
         full_name="Llama 4 Scout",
-        notes="Estimated based on 17B active params, Llama lineage",
+        notes="17B active params, 16-expert MoE",
     ),
     "gpt_oss_120b": ModelConfig(
         name="gpt_oss_120b",
         hidden_size=2880,
+        attention_output_size=4096,
         intermediate_size=2880,
+        num_attention_heads=64,
+        head_dim=64,
+        expert_intermediate_size=2880,
+        num_routed_experts=128,
+        num_experts_per_token=4,
+        num_shared_experts=0,
+        num_dense_layers=0,
         full_name="GPT-OSS 120B",
-        notes="Open-source GPT variant, 4x FFN expansion",
+        notes="Open-weight GPT model, 128-expert MoE",
     ),
 }
 
@@ -202,19 +281,25 @@ def compute_dimensions(
     communication pattern (sweep_operation):
 
     ALL_GATHER_MATMUL (gather input along K, then matmul):
-        - ATTN_OUT: M=batch, N=hidden, K=hidden (K-sharded)
+        - ATTN_OUT: M=batch, N=hidden, K=attention output (K-sharded)
         - MLP_DOWN: M=batch, N=hidden, K=intermediate (K-sharded)
+        - EXPERT_MLP_DOWN: M=batch, N=hidden, K=expert intermediate (K-sharded)
+        - ACTIVE_MOE_MLP_DOWN: M=batch, N=hidden, K=aggregate active MoE width (K-sharded)
 
     MATMUL_ALL_REDUCE (matmul with sharded weights, then all-reduce):
         - MLP_DOWN: M=batch, N=intermediate, K=hidden (N-sharded)
-        - ATTN_OUT: M=batch, N=hidden, K=hidden (N-sharded)
+        - EXPERT_MLP_DOWN: M=batch, N=expert intermediate, K=hidden (N-sharded)
+        - ACTIVE_MOE_MLP_DOWN: M=batch, N=aggregate active MoE width, K=hidden (N-sharded)
+        - ATTN_OUT: M=batch, N=hidden, K=attention output (K-sharded)
 
     MATMUL_ALL_GATHER (matmul with sharded weights, then all-gather output):
         - MLP_DOWN: M=batch, N=intermediate, K=hidden (N-sharded, column-parallel)
+        - EXPERT_MLP_DOWN: M=batch, N=expert intermediate, K=hidden (N-sharded)
+        - ACTIVE_MOE_MLP_DOWN: M=batch, N=aggregate active MoE width, K=hidden (N-sharded)
 
     Args:
-        model: Model configuration with hidden_size and intermediate_size
-        operation_type: Layer type (ATTN_OUT, MLP_DOWN, MLP_UP)
+        model: Model configuration with hidden_size, attention_output_size, and intermediate_size
+        operation_type: Layer type (ATTN_OUT, MLP_DOWN, EXPERT_MLP_DOWN, ACTIVE_MOE_MLP_DOWN, MLP_UP)
         sweep_operation: Communication pattern (ALL_GATHER_MATMUL, MATMUL_ALL_REDUCE, etc.)
         batch_size: Number of tokens (M dimension before TP)
         tp_degree: Tensor parallelism degree (must divide sharded dimensions evenly)
@@ -240,52 +325,76 @@ def compute_dimensions(
         (16384, 14336, 4096)  # N=intermediate, K=hidden (N and K swapped!)
     """
     h = model.hidden_size
-    ffn = model.intermediate_size
+    attn_out = model.attention_output_size
+    if operation_type in (OperationType.EXPERT_MLP_DOWN, OperationType.ACTIVE_MOE_MLP_DOWN):
+        if model.expert_intermediate_size is None:
+            raise ValueError(f"Model '{model.name}' does not define an expert intermediate size")
+        if operation_type == OperationType.ACTIVE_MOE_MLP_DOWN:
+            ffn = model.active_moe_intermediate_size
+            ffn_name = "active_moe_intermediate_size"
+        else:
+            ffn = model.expert_intermediate_size
+            ffn_name = "expert_intermediate_size"
+    else:
+        ffn = model.intermediate_size
+        ffn_name = "intermediate_size"
 
     # Compute dimensions based on (operation_type, sweep_operation) combination
     if sweep_operation == SweepOperation.ALL_GATHER_MATMUL:
         # All-gather input, then matmul (K-sharding)
         if operation_type == OperationType.ATTN_OUT:
-            m, n, k = batch_size, h, h
+            m, n, k = batch_size, h, attn_out
             k_local = k // tp_degree
             m_local, n_local = m, n
-            _validate_tp_sharding(k, tp_degree, "K (hidden_size)", operation_type.value)
-        elif operation_type == OperationType.MLP_DOWN:
+            _validate_tp_sharding(k, tp_degree, "K (attention_output_size)", operation_type.value)
+        elif operation_type in (
+            OperationType.MLP_DOWN,
+            OperationType.EXPERT_MLP_DOWN,
+            OperationType.ACTIVE_MOE_MLP_DOWN,
+        ):
             m, n, k = batch_size, h, ffn
             k_local = k // tp_degree
             m_local, n_local = m, n
-            _validate_tp_sharding(k, tp_degree, "K (intermediate_size)", operation_type.value)
+            _validate_tp_sharding(k, tp_degree, f"K ({ffn_name})", operation_type.value)
         else:
             raise ValueError(f"Unsupported operation_type {operation_type} for {sweep_operation}")
 
     elif sweep_operation == SweepOperation.MATMUL_ALL_REDUCE:
         # Matmul with row-parallel weights, then all-reduce (K-sharding)
         # Each rank has partial input and weight slice, computes partial sum, then all-reduce
-        if operation_type == OperationType.MLP_DOWN:
+        if operation_type in (
+            OperationType.MLP_DOWN,
+            OperationType.EXPERT_MLP_DOWN,
+            OperationType.ACTIVE_MOE_MLP_DOWN,
+        ):
             # [batch, intermediate/tp] @ [intermediate/tp, hidden] → all-reduce SUM
             # Row-parallel: K dimension (intermediate) is sharded
             m, n, k = batch_size, h, ffn
             k_local = k // tp_degree
             m_local, n_local = m, n
-            _validate_tp_sharding(k, tp_degree, "K (intermediate_size)", operation_type.value)
+            _validate_tp_sharding(k, tp_degree, f"K ({ffn_name})", operation_type.value)
         elif operation_type == OperationType.ATTN_OUT:
-            # [batch, hidden/tp] @ [hidden/tp, hidden] → all-reduce SUM
-            # Row-parallel: K dimension (hidden) is sharded
-            m, n, k = batch_size, h, h
+            # [batch, attention_output/tp] @ [attention_output/tp, hidden] → all-reduce SUM
+            # Row-parallel: K dimension (attention output) is sharded
+            m, n, k = batch_size, h, attn_out
             k_local = k // tp_degree
             m_local, n_local = m, n
-            _validate_tp_sharding(k, tp_degree, "K (hidden_size)", operation_type.value)
+            _validate_tp_sharding(k, tp_degree, "K (attention_output_size)", operation_type.value)
         else:
             raise ValueError(f"Unsupported operation_type {operation_type} for {sweep_operation}")
 
     elif sweep_operation == SweepOperation.MATMUL_ALL_GATHER:
         # Matmul with column-parallel weights, then all-gather output (N-sharding)
-        if operation_type == OperationType.MLP_DOWN:
+        if operation_type in (
+            OperationType.MLP_DOWN,
+            OperationType.EXPERT_MLP_DOWN,
+            OperationType.ACTIVE_MOE_MLP_DOWN,
+        ):
             # Column-parallel: [batch, hidden] @ [hidden, intermediate/tp] → all-gather
             m, n, k = batch_size, ffn, h
             n_local = n // tp_degree
             m_local, k_local = m, k
-            _validate_tp_sharding(n, tp_degree, "N (intermediate_size)", operation_type.value)
+            _validate_tp_sharding(n, tp_degree, f"N ({ffn_name})", operation_type.value)
         else:
             raise ValueError(f"Unsupported operation_type {operation_type} for {sweep_operation}")
 
