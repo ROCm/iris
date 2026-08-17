@@ -46,7 +46,10 @@ def _param_shapes():
                 int(os.environ["IRIS_TEST_N"]),
             )
         ]
-    return [(256, 128, 256)]
+    return [
+        (256, 128, 256),
+        (256, 45, 256),
+    ]
 
 
 def _device_initiated_modes():
@@ -238,10 +241,6 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, host
 
     if M % selector.block_m != 0:
         pytest.skip(f"M={M} must be divisible by block_m={selector.block_m}")
-    if K % selector.block_k != 0:
-        pytest.skip(f"K={K} must be divisible by block_k={selector.block_k}")
-    if K_local % selector.block_k != 0:
-        pytest.skip(f"K_local={K_local} must be divisible by block_k={selector.block_k}")
 
     A_sharded_shmem = ctx.zeros((M, K_local), dtype=dtype)
     A_sharded_shmem.copy_(A_sharded)

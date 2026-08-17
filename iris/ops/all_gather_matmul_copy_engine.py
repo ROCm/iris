@@ -18,7 +18,6 @@ import triton
 import triton.language as tl
 import iris
 import iris.host.platform.hip as hip
-import iris.x
 from tritonblas.matmul import persistent_matmul_lt, create_wait_config
 from tritonblas.kernels.stages import (
     Tile as StageTile,
@@ -366,8 +365,6 @@ def all_gather_matmul_copy_engine_preamble(
             M, N, K, A_sharded.dtype, B.dtype, A_sharded.dtype, A_sharded.device, streamk=False
         )
 
-    assert K_local % selector.block_k == 0
-    assert K % selector.block_k == 0
     assert M % selector.block_m == 0
 
     num_m_tiles = M // selector.block_m
@@ -579,10 +576,7 @@ def all_gather_matmul_copy_engine(
     m_tiles_per_batch = workspace.m_tiles_per_batch
 
     assert M % selector.block_m == 0
-    assert K % selector.block_k == 0
-    assert K_local % selector.block_k == 0
-
-    num_k_blocks_local = K_local // selector.block_k
+    num_k_blocks_local = (K_local + selector.block_k - 1) // selector.block_k
     num_m_tiles = M // selector.block_m
     num_tiles_n = (N + selector.block_n - 1) // selector.block_n
 

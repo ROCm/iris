@@ -43,10 +43,6 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool, host_transfer_b
 
     if M % selector.block_m != 0:
         state.skip(f"M={M} must be divisible by block_size_m={selector.block_m}")
-    if K % selector.block_k != 0:
-        state.skip(f"K={K} must be divisible by block_size_k={selector.block_k}")
-    if K_local % selector.block_k != 0:
-        state.skip(f"K_local={K_local} must be divisible by block_size_k={selector.block_k}")
 
     host_transfer_backend = os.environ.get("IRIS_BENCH_HOST_TRANSFER_BACKEND", host_transfer_backend)
 
