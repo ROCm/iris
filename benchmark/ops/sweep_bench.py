@@ -166,11 +166,11 @@ BENCHMARK_CONFIGS = {
         },
     },
     "all_gather_matmul": {
-        "baseline": {
-            "script": "benchmark/ops/bench_all_gather_matmul.py",
-            "benchmark_filter": "^all_gather_matmul$",
-            "axes": {"m": "M", "n": "N", "k": "K"},
-        },
+        # "baseline": {
+        #     "script": "benchmark/ops/bench_all_gather_matmul.py",
+        #     "benchmark_filter": "^all_gather_matmul$",
+        #     "axes": {"m": "M", "n": "N", "k": "K"},
+        # },
         "pytorchbaseline": {
             "script": "benchmark/ops/bench_all_gather_matmul.py",
             "benchmark_filter": "^rccl_all_gather_matmul$",
@@ -191,26 +191,26 @@ BENCHMARK_CONFIGS = {
             "benchmark_filter": "^all_gather_matmul_copy_engine_host$",
             "axes": {"m": "M", "n": "N", "k": "K"},
         },
-        "copy_engine_host_hip_memcpy": {
-            "script": "benchmark/ops/bench_all_gather_matmul_copy_engine.py",
-            "benchmark_filter": "^all_gather_matmul_copy_engine_host_hip_memcpy$",
-            "axes": {"m": "M", "n": "N", "k": "K"},
-        },
+        # "copy_engine_host_hip_memcpy": {
+        #     "script": "benchmark/ops/bench_all_gather_matmul_copy_engine.py",
+        #     "benchmark_filter": "^all_gather_matmul_copy_engine_host_hip_memcpy$",
+        #     "axes": {"m": "M", "n": "N", "k": "K"},
+        # },
         "copy_engine_device": {
             "script": "benchmark/ops/bench_all_gather_matmul_copy_engine.py",
             "benchmark_filter": "^all_gather_matmul_copy_engine_device$",
             "axes": {"m": "M", "n": "N", "k": "K"},
         },
-        "matmul_only": {
-            "script": "benchmark/ops/bench_matmul.py",
-            "benchmark_filter": "^matmul_only$",
-            "axes": {"m": "M", "n": "N", "k": "K"},
-        },
-        "pytorchmatmul_only": {
-            "script": "benchmark/ops/bench_matmul.py",
-            "benchmark_filter": "^pytorch_matmul_only$",
-            "axes": {"m": "M", "n": "N", "k": "K"},
-        },
+        # "matmul_only": {
+        #     "script": "benchmark/ops/bench_matmul.py",
+        #     "benchmark_filter": "^matmul_only$",
+        #     "axes": {"m": "M", "n": "N", "k": "K"},
+        # },
+        # "pytorchmatmul_only": {
+        #     "script": "benchmark/ops/bench_matmul.py",
+        #     "benchmark_filter": "^pytorch_matmul_only$",
+        #     "axes": {"m": "M", "n": "N", "k": "K"},
+        # },
     },
     "matmul_all_reduce": {
         "pytorchbaseline": {
@@ -223,12 +223,12 @@ BENCHMARK_CONFIGS = {
             "benchmark_filter": "^tritonblas_rccl_matmul_all_reduce$",
             "axes": {"m": "M", "n": "N", "k": "K"},
         },
-        "one_shot": {
-            "script": "benchmark/ops/bench_matmul_all_reduce.py",
-            "benchmark_filter": "^matmul_all_reduce$",
-            "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
-            "variant": "one_shot",
-        },
+        # "one_shot": {
+        #     "script": "benchmark/ops/bench_matmul_all_reduce.py",
+        #     "benchmark_filter": "^matmul_all_reduce$",
+        #     "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
+        #     "variant": "one_shot",
+        # },
         "two_shot": {
             "script": "benchmark/ops/bench_matmul_all_reduce.py",
             "benchmark_filter": "^matmul_all_reduce$",
@@ -265,13 +265,13 @@ BENCHMARK_CONFIGS = {
         #     "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
         #     "variant": "two_shot",
         # },
-        "copy_engine_device_one_shot": {
-            "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
-            "benchmark_filter": "^matmul_all_reduce_copy_engine$",
-            "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant", "prepost": "prepost"},
-            "variant": "one_shot",
-            "prepost": False,
-        },
+        # "copy_engine_device_one_shot": {
+        #     "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
+        #     "benchmark_filter": "^matmul_all_reduce_copy_engine$",
+        #     "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant", "prepost": "prepost"},
+        #     "variant": "one_shot",
+        #     "prepost": False,
+        # },
         "copy_engine_device_two_shot": {
             "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
             "benchmark_filter": "^matmul_all_reduce_copy_engine$",
@@ -285,13 +285,13 @@ BENCHMARK_CONFIGS = {
             "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant"},
             "variant": "two_shot_gpu_init",
         },
-        "copy_engine_device_one_shot_prepost": {
-            "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
-            "benchmark_filter": "^matmul_all_reduce_copy_engine$",
-            "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant", "prepost": "prepost"},
-            "variant": "one_shot",
-            "prepost": True,
-        },
+        # "copy_engine_device_one_shot_prepost": {
+        #     "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
+        #     "benchmark_filter": "^matmul_all_reduce_copy_engine$",
+        #     "axes": {"m": "M", "n": "N", "k": "K", "variant": "variant", "prepost": "prepost"},
+        #     "variant": "one_shot",
+        #     "prepost": True,
+        # },
         "copy_engine_device_two_shot_prepost": {
             "script": "benchmark/ops/bench_matmul_all_reduce_copy_engine.py",
             "benchmark_filter": "^matmul_all_reduce_copy_engine$",

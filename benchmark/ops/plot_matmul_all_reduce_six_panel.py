@@ -195,7 +195,7 @@ def _write_tex(
         for benchmark_index, (benchmark_key, display_name, _) in enumerate(benchmarks):
             color = color_names[benchmark_index]
             lines.append(
-                rf"\addplot+[fill={color}, draw={color}, bar width=5pt] "
+                rf"\addplot+[fill={color}, draw={color}, bar width=5pt, area legend] "
                 rf"table[x=M,y={benchmark_key},col sep=comma] {{{relative_csv}}};"
             )
             if panel_index == 0:
