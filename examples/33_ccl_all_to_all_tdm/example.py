@@ -237,6 +237,7 @@ def main():
 
     dtype = {"fp16": torch.float16, "fp32": torch.float32, "bf16": torch.bfloat16}[args["datatype"]]
 
+    dist.init_process_group(backend="gloo")
     ctx = iris.iris(args["heap_size"])
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
