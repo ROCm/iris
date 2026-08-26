@@ -112,20 +112,23 @@ def all_to_all_tdm_kernel(
 
 
 def _max_lds_bytes():
-    """Per-workgroup LDS limit, queried if the driver will say and assumed low if not.
+    """Per-workgroup LDS limit.
 
-    A wrong-but-conservative ceiling is fine here: the point is that an oversized tile is
-    reported against the flag the user typed, not that the bound is exact.
+    Returns:
+        ``(limit, queried)`` -- ``queried`` is False when the driver would not answer and
+        the value is a conservative assumption. The caller says which in the error,
+        because a fallback that refuses a tile the device would allow should not read as
+        a hardware limit.
     """
     try:
         import triton.runtime.driver as driver
 
         limit = int(driver.active.utils.get_device_properties(0)["max_shared_mem"])
         if limit > 0:
-            return limit
+            return limit, True
     except Exception:
         pass
-    return 64 * 1024
+    return 64 * 1024, False
 
 
 def all_to_all_tdm(ctx, output_tensor, input_tensor, block_m, block_n, comm_sms, num_warps):
@@ -145,10 +148,16 @@ def all_to_all_tdm(ctx, output_tensor, input_tensor, block_m, block_n, comm_sms,
 
     # PaddedSharedLayout pads the inner dimension by 8 elements, so budget for it.
     lds_bytes = block_m * (block_n + 8) * input_tensor.element_size()
-    lds_limit = _max_lds_bytes()
+    lds_limit, queried = _max_lds_bytes()
     if lds_bytes > lds_limit:
+        source = (
+            "the device limit"
+            if queried
+            else "a conservative fallback, since the driver would not report the limit -- "
+            "this device may allow a larger tile"
+        )
         raise ValueError(
-            f"Tile needs {lds_bytes} bytes of LDS, limit is {lds_limit}. "
+            f"Tile needs {lds_bytes} bytes of LDS, against {lds_limit} ({source}). "
             f"Reduce --block_size_m ({block_m}) or --block_size_n ({block_n})."
         )
 
