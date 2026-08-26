@@ -25,7 +25,13 @@ import torch
 import torch.distributed as dist
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-from triton.experimental.gluon.language.amd.gfx1250 import tdm
+
+# Upstream moved the TDM module under the architecture-family package; the older
+# location is kept as a fallback so this runs on either Triton.
+try:
+    from triton.experimental.gluon.language.amd.cdna5 import tdm
+except ImportError:  # pragma: no cover - depends on the installed Triton
+    from triton.experimental.gluon.language.amd.gfx1250 import tdm
 
 import iris
 
