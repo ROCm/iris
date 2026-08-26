@@ -111,6 +111,23 @@ def all_to_all_tdm_kernel(
         tdm.async_wait(0)
 
 
+def _max_lds_bytes():
+    """Per-workgroup LDS limit, queried if the driver will say and assumed low if not.
+
+    A wrong-but-conservative ceiling is fine here: the point is that an oversized tile is
+    reported against the flag the user typed, not that the bound is exact.
+    """
+    try:
+        import triton.runtime.driver as driver
+
+        limit = int(driver.active.utils.get_device_properties(0)["max_shared_mem"])
+        if limit > 0:
+            return limit
+    except Exception:
+        pass
+    return 64 * 1024
+
+
 def all_to_all_tdm(ctx, output_tensor, input_tensor, block_m, block_n, comm_sms, num_warps):
     """Host side: validate the tiling, build the peer offset table, launch.
 
@@ -119,6 +136,21 @@ def all_to_all_tdm(ctx, output_tensor, input_tensor, block_m, block_n, comm_sms,
     """
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
+
+    # Both tile dimensions come straight from the CLI, so check them here: without this
+    # a bad value surfaces from inside the layout or the launch, naming neither flag.
+    for name, value in (("--block_size_m", block_m), ("--block_size_n", block_n)):
+        if value <= 0 or value & (value - 1):
+            raise ValueError(f"{name} must be a power of 2, got {value}")
+
+    # PaddedSharedLayout pads the inner dimension by 8 elements, so budget for it.
+    lds_bytes = block_m * (block_n + 8) * input_tensor.element_size()
+    lds_limit = _max_lds_bytes()
+    if lds_bytes > lds_limit:
+        raise ValueError(
+            f"Tile needs {lds_bytes} bytes of LDS, limit is {lds_limit}. "
+            f"Reduce --block_size_m ({block_m}) or --block_size_n ({block_n})."
+        )
 
     M, total_n = input_tensor.shape[:2]
     if total_n % world_size:
