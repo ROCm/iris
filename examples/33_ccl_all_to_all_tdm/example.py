@@ -44,9 +44,7 @@ def all_to_all_tdm_kernel(
     M,
     N,
     stride_in_m,
-    stride_in_n,
     stride_out_m,
-    stride_out_n,
     group_rank: gl.constexpr,
     world_size: gl.constexpr,
     BLOCK_M: gl.constexpr,
@@ -63,8 +61,11 @@ def all_to_all_tdm_kernel(
             ``output_ptr + elem_deltas[peer]``.
         M: Rows.
         N: Columns per rank slice.
-        stride_in_m, stride_in_n: Input strides.
-        stride_out_m, stride_out_n: Output strides.
+        stride_in_m: Input row stride. The column stride is the literal 1 --
+            make_tensor_descriptor requires one dimension to have stride 1 and cannot
+            prove it of a runtime value, so passing it as an argument fails to legalize
+            with "requires at least one dimension to have stride 1".
+        stride_out_m: Output row stride.
         group_rank: This rank's index in the group.
         world_size: Ranks in the group.
         BLOCK_M, BLOCK_N: Tile shape. BLOCK_N must divide N -- see the host-side check.
@@ -87,7 +88,7 @@ def all_to_all_tdm_kernel(
     input_desc = tdm.make_tensor_descriptor(
         base=input_ptr,
         shape=[M, n_total],
-        strides=[stride_in_m, stride_in_n],
+        strides=[stride_in_m, 1],
         block_shape=[BLOCK_M, BLOCK_N],
         layout=smem_layout,
     )
@@ -109,7 +110,7 @@ def all_to_all_tdm_kernel(
         out_desc = tdm.make_tensor_descriptor(
             base=output_ptr + gl.load(elem_deltas + dest),
             shape=[M, n_total],
-            strides=[stride_out_m, stride_out_n],
+            strides=[stride_out_m, 1],
             block_shape=[BLOCK_M, BLOCK_N],
             layout=smem_layout,
         )
@@ -167,6 +168,11 @@ def all_to_all_tdm(ctx, output_tensor, input_tensor, block_m, block_n, comm_sms,
             f"Reduce --block_size_m ({block_m}) or --block_size_n ({block_n})."
         )
 
+    # The kernel hardcodes a column stride of 1, so the rows must actually be contiguous.
+    for name, t in (("input", input_tensor), ("output", output_tensor)):
+        if t.stride(1) != 1:
+            raise ValueError(f"{name} tensor must have contiguous rows, got stride(1)={t.stride(1)}")
+
     M, total_n = input_tensor.shape[:2]
     if total_n % world_size:
         raise ValueError(f"Input width {total_n} must be divisible by world_size {world_size}")
@@ -199,9 +205,7 @@ def all_to_all_tdm(ctx, output_tensor, input_tensor, block_m, block_n, comm_sms,
         M,
         N,
         input_tensor.stride(0),
-        input_tensor.stride(1),
         output_tensor.stride(0),
-        output_tensor.stride(1),
         rank,
         world_size,
         block_m,
