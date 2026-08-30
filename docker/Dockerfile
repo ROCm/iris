@@ -20,7 +20,13 @@ ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
     OMPI_ALLOW_RUN_AS_ROOT=1
 
 # Install system packages
-RUN apt-get update && \
+# The rocm/pytorch base images ship /etc/apt/sources.list.d/rocm.list pinned to a
+# specific internal build (e.g. compute-rocm-rel-7.1 20) on compute-artifactory.amd.com.
+# Once that build is rotated out upstream the index 404s, apt-get update returns 100,
+# and the whole layer fails -- taking every downstream CI job with it. ROCm and torch
+# are already installed in the image, so nothing here needs that repo.
+RUN rm -f /etc/apt/sources.list.d/rocm.list && \
+    apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
     git wget ninja-build cmake python3-pip python3-dev build-essential libdwarf-dev && \
     rm -rf /var/lib/apt/lists/*

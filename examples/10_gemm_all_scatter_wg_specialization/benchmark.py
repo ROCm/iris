@@ -93,6 +93,18 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     if args["gemm_sms"] is None:
         # For wg_specialized: use next smaller power of 2
         args["gemm_sms"] = 2 ** int(math.log2(cu_count)) if cu_count > 0 else 1
+        # The kernel launches num_sms workgroups and gives whatever is left after
+        # gemm_sms to the communication path. When the CU count is itself a power
+        # of two (256 on MI350X) that leaves nothing, so step down once.
+        if args["gemm_sms"] >= args["num_sms"]:
+            args["gemm_sms"] //= 2
+
+    if args["gemm_sms"] >= args["num_sms"]:
+        raise ValueError(
+            f"gemm_sms ({args['gemm_sms']}) must be less than num_sms ({args['num_sms']}): "
+            "workgroup specialization needs the remainder for the communication path, "
+            "and with none of it the all-scatter never runs."
+        )
 
     # GEMM
     datatype = torch.float32
