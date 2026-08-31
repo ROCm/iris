@@ -53,6 +53,7 @@ from iris.host.platform.hip import (
     count_devices,
 )
 from iris.host.memory.symmetric_heap import SymmetricHeap
+from iris.host.memory.address_map import SymmetricAddressMap
 import numpy as np
 from typing import Any
 import torch
@@ -917,6 +918,85 @@ class Iris:
             >>> print(heap_bases.shape)  # torch.Size([num_ranks])
         """
         return self.heap_bases
+
+    def get_symmetric_address_map(self, tensor: torch.Tensor) -> SymmetricAddressMap:
+        """
+        Return the normalized address descriptor for a symmetric tensor.
+
+        This is the provider-facing half of the allocator-agnostic interface: it
+        turns an Iris-allocated tensor into the same :class:`SymmetricAddressMap`
+        that rocSHMEM or Torch Symmetric Memory adapters will produce, so device
+        code can translate addresses without knowing which allocator was used.
+
+        Iris currently maps every symmetric tensor through one context-wide heap,
+        so the descriptor for any Iris tensor describes that heap. The shape is
+        per-allocation regardless, which is what lets a single kernel consume
+        tensors backed by different providers.
+
+        Args:
+            tensor (torch.Tensor): Tensor on the Iris symmetric heap.
+
+        Returns:
+            SymmetricAddressMap: Descriptor for the tensor's backing allocation.
+
+        Raises:
+            ValueError: If the tensor is not on the Iris symmetric heap.
+
+        Example:
+            >>> ctx = iris.iris(1 << 20)
+            >>> tensor = ctx.zeros(1024, dtype=torch.float32)
+            >>> address_map = ctx.get_symmetric_address_map(tensor)
+            >>> address_map.peer_bases[address_map.local_rank] == address_map.allocation_base
+        """
+        if not self.is_symmetric(tensor):
+            raise ValueError(
+                "tensor is not on the Iris symmetric heap; allocate it with an Iris "
+                "creation op or import it with as_symmetric()"
+            )
+
+        return SymmetricAddressMap(
+            peer_bases=self.heap_bases,
+            local_rank=self.cur_rank,
+            allocation_base=int(self.heap_bases[self.cur_rank].item()),
+            allocation_bytes=self.heap_size,
+        )
+
+    def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, SymmetricAddressMap]:
+        """
+        Allocate a symmetric tensor together with its address descriptor.
+
+        This is the allocator-agnostic allocation entry point. Every provider
+        exposes the same call, so kernels written against the returned pair run
+        unchanged on tensors from any of them::
+
+            tensor, address_map = provider.allocate_symmetric(1024, dtype=torch.float32)
+            kernel[grid](tensor, address_map.peer_bases, target_rank, ...)
+
+        The tensor and its map are passed to kernels as two separate arguments
+        -- a pointer and a tensor -- rather than bound into one struct, so that
+        this works on the older Triton releases pinned in several environments.
+
+        Args:
+            *size (int...): Shape of the tensor, as a sequence of integers or a
+                single collection.
+            dtype (torch.dtype, optional): Element type. Defaults to the torch
+                default dtype.
+
+        Returns:
+            tuple[torch.Tensor, SymmetricAddressMap]: The tensor and the
+            descriptor for its backing allocation.
+
+        Note:
+            Collective. All ranks must call this together, as with the other
+            Iris allocation ops.
+
+        Example:
+            >>> ctx = iris.iris(1 << 20)
+            >>> tensor, address_map = ctx.allocate_symmetric(1024, dtype=torch.float32)
+            >>> tensor.shape  # torch.Size([1024])
+        """
+        tensor = self.zeros(*size, dtype=dtype)
+        return tensor, self.get_symmetric_address_map(tensor)
 
     def _build_device_context(self):
         """
