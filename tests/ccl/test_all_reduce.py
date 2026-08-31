@@ -18,6 +18,7 @@ from iris.ccl import Config
         "atomic",
         # "ring",
         "two_shot",
+        "one_shot_legacy",
         "one_shot",
         # TODO enable these tests when support for cache-modifiers is in place.
         # "spinlock",
@@ -48,8 +49,8 @@ def test_all_reduce(variant, dtype, M, N, block_size_m, block_size_n):
         pytest.skip("torch.distributed not initialized")
 
     heap_size = 2**33  # 8GB
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
 
     # PyTorch's all_reduce format: each rank has M x N data
     # All ranks compute the sum of all tensors
@@ -59,19 +60,19 @@ def test_all_reduce(variant, dtype, M, N, block_size_m, block_size_n):
 
     # Run PyTorch's all_reduce to get reference output
     pytorch_output_tensor = pytorch_input_tensor.clone()
-    shmem.barrier()
+    ctx.barrier()
     dist.all_reduce(pytorch_output_tensor, op=dist.ReduceOp.SUM)
     torch.cuda.synchronize()
 
     # Now set up Iris all_reduce format
     # Iris format: same as PyTorch - input and output are both (M, N)
-    iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
+    iris_input_tensor = ctx.zeros((M, N), dtype=dtype)
     iris_input_tensor.copy_(pytorch_input_tensor)
 
-    iris_output_tensor = shmem.zeros((M, N), dtype=dtype)
+    iris_output_tensor = ctx.zeros((M, N), dtype=dtype)
 
     # Run Iris all_reduce with specified variant
-    shmem.barrier()
+    ctx.barrier()
     config = Config(all_reduce_variant=variant, block_size_m=block_size_m, block_size_n=block_size_n)
     if variant == "two_shot":
         # Test both distribution modes for two_shot
@@ -81,11 +82,11 @@ def test_all_reduce(variant, dtype, M, N, block_size_m, block_size_n):
 
     # Explicitly call preamble to ensure proper initialization and synchronization
     # This helps with test isolation when tests run sequentially
-    workspace = shmem.ccl.all_reduce_preamble(iris_output_tensor, iris_input_tensor, config=config)
-    shmem.barrier()  # Ensure all ranks have completed preamble before starting kernel
+    workspace = ctx.ccl.all_reduce_preamble(iris_output_tensor, iris_input_tensor, config=config)
+    ctx.barrier()  # Ensure all ranks have completed preamble before starting kernel
 
     # Now call all_reduce with the prepared workspace
-    shmem.ccl.all_reduce(iris_output_tensor, iris_input_tensor, config=config, workspace=workspace)
+    ctx.ccl.all_reduce(iris_output_tensor, iris_input_tensor, config=config, workspace=workspace)
     torch.cuda.synchronize()
 
     # Compare results
@@ -100,10 +101,10 @@ def test_all_reduce(variant, dtype, M, N, block_size_m, block_size_n):
     finally:
         # Final barrier to ensure all ranks complete before test cleanup
         # This helps with test isolation when running multiple tests
-        # Note: shmem.barrier() already does cuda.synchronize()
-        shmem.barrier()
-        # Explicitly delete the shmem instance to trigger cleanup
-        del shmem
+        # Note: ctx.barrier() already does cuda.synchronize()
+        ctx.barrier()
+        # Explicitly delete the ctx instance to trigger cleanup
+        del ctx
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
 
@@ -123,31 +124,31 @@ def test_all_reduce_two_shot_distribution(distribution, dtype=torch.float32, M=1
         pytest.skip("torch.distributed not initialized")
 
     heap_size = 2**33
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
 
     pytorch_input_tensor = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
     pytorch_input_tensor.fill_(float(rank + 1))
 
     pytorch_output_tensor = pytorch_input_tensor.clone()
-    shmem.barrier()
+    ctx.barrier()
     dist.all_reduce(pytorch_output_tensor, op=dist.ReduceOp.SUM)
     torch.cuda.synchronize()
 
-    iris_input_tensor = shmem.zeros((M, N), dtype=dtype)
+    iris_input_tensor = ctx.zeros((M, N), dtype=dtype)
     iris_input_tensor.copy_(pytorch_input_tensor)
 
-    iris_output_tensor = shmem.zeros((M, N), dtype=dtype)
+    iris_output_tensor = ctx.zeros((M, N), dtype=dtype)
 
-    shmem.barrier()
+    ctx.barrier()
     config = Config(all_reduce_variant="two_shot", all_reduce_distribution=distribution)
 
     # Explicitly call preamble to ensure proper initialization and synchronization
-    workspace = shmem.ccl.all_reduce_preamble(iris_output_tensor, iris_input_tensor, config=config)
-    shmem.barrier()  # Ensure all ranks have completed preamble before starting kernel
+    workspace = ctx.ccl.all_reduce_preamble(iris_output_tensor, iris_input_tensor, config=config)
+    ctx.barrier()  # Ensure all ranks have completed preamble before starting kernel
 
     # Now call all_reduce with the prepared workspace
-    shmem.ccl.all_reduce(iris_output_tensor, iris_input_tensor, config=config, workspace=workspace)
+    ctx.ccl.all_reduce(iris_output_tensor, iris_input_tensor, config=config, workspace=workspace)
     torch.cuda.synchronize()
 
     atol = 1e-5
@@ -161,10 +162,10 @@ def test_all_reduce_two_shot_distribution(distribution, dtype=torch.float32, M=1
     finally:
         # Final barrier to ensure all ranks complete before test cleanup
         # This helps with test isolation when running multiple tests
-        # Note: shmem.barrier() already does cuda.synchronize()
-        shmem.barrier()
-        # Explicitly delete the shmem instance to trigger cleanup
-        del shmem
+        # Note: ctx.barrier() already does cuda.synchronize()
+        ctx.barrier()
+        # Explicitly delete the ctx instance to trigger cleanup
+        del ctx
         # Force garbage collection to ensure IPC handles are cleaned up
         import gc
 
@@ -182,31 +183,146 @@ def test_all_reduce_spinlock_lock_too_small():
         pytest.skip("torch.distributed not initialized")
 
     heap_size = 2**33
-    shmem = iris.iris(heap_size)
+    ctx = iris.iris(heap_size)
 
     M, N = 512, 512
 
-    iris_input = shmem.zeros((M, N), dtype=torch.float32)
-    iris_output = shmem.zeros((M, N), dtype=torch.float32)
+    iris_input = ctx.zeros((M, N), dtype=torch.float32)
+    iris_output = ctx.zeros((M, N), dtype=torch.float32)
 
-    shmem.barrier()
+    ctx.barrier()
 
     # Step 1: run preamble with larger block sizes → allocates a smaller lock array
     config_large = Config(all_reduce_variant="spinlock", block_size_m=128, block_size_n=128)
-    workspace = shmem.ccl.all_reduce_preamble(iris_output, iris_input, config=config_large)
+    workspace = ctx.ccl.all_reduce_preamble(iris_output, iris_input, config=config_large)
 
     # Step 2: call all_reduce with smaller block sizes that need more tiles —
     # workspace.matches() returns True (same shape/dtype/variant), preamble is skipped,
     # and the undersized lock array is detected.
     config_small = Config(all_reduce_variant="spinlock", block_size_m=64, block_size_n=64)
     with pytest.raises(ValueError, match="Lock array too small"):
-        shmem.ccl.all_reduce(iris_output, iris_input, config=config_small, workspace=workspace)
+        ctx.ccl.all_reduce(iris_output, iris_input, config=config_small, workspace=workspace)
 
-    shmem.barrier()
-    del shmem
+    ctx.barrier()
+    del ctx
     import gc
 
     gc.collect()
+
+
+@pytest.mark.parametrize("numel", [1024, 4096, 16384, 32768, 65536, 131072])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_all_reduce_one_shot_small(numel, dtype):
+    """Test one_shot at vLLM-relevant small message sizes."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
+
+    pytorch_input = torch.randn(numel, dtype=dtype, device=f"cuda:{rank}")
+    pytorch_input.fill_(float(rank + 1))
+
+    pytorch_output = pytorch_input.clone()
+    ctx.barrier()
+    dist.all_reduce(pytorch_output, op=dist.ReduceOp.SUM)
+    torch.cuda.synchronize()
+
+    iris_input = ctx.zeros((1, numel), dtype=dtype)
+    iris_input.view(-1).copy_(pytorch_input)
+    iris_output = ctx.zeros((1, numel), dtype=dtype)
+
+    ctx.barrier()
+    config = Config(all_reduce_variant="one_shot")
+    workspace = ctx.ccl.all_reduce_preamble(iris_output, iris_input, config=config)
+    ctx.barrier()
+    ctx.ccl.all_reduce(iris_output, iris_input, config=config, workspace=workspace)
+    torch.cuda.synchronize()
+
+    atol = 1e-3 if dtype == torch.float16 else 1e-3
+    max_diff = torch.abs(iris_output.view(-1) - pytorch_output).max().item()
+
+    try:
+        assert torch.allclose(iris_output.view(-1), pytorch_output, atol=atol), (
+            f"Max difference: {max_diff}, expected < {atol}\n"
+            f"Rank {rank}: one_shot output doesn't match PyTorch (numel={numel}, dtype={dtype})"
+        )
+    finally:
+        ctx.barrier()
+        del ctx
+        import gc
+
+        gc.collect()
+
+
+@pytest.mark.parametrize("numel", [4096, 32768, 131072])
+def test_all_reduce_one_shot_graph_capture(numel, dtype=torch.bfloat16):
+    """Test that one_shot is HIP graph capturable and produces correct results on replay."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33
+    ctx = iris.iris(heap_size)
+    rank = ctx.get_rank()
+    world_size = dist.get_world_size()
+
+    iris_input = ctx.zeros((1, numel), dtype=dtype)
+    iris_input.view(-1).fill_(float(rank + 1))
+    iris_output = ctx.zeros((1, numel), dtype=dtype)
+
+    config = Config(all_reduce_variant="one_shot")
+    workspace = ctx.ccl.all_reduce_preamble(iris_output, iris_input, config=config)
+    ctx.barrier()
+
+    # Warmup run outside graph to JIT-compile the kernel
+    ctx.ccl.all_reduce(iris_output, iris_input, config=config, workspace=workspace)
+    torch.cuda.synchronize()
+
+    # Capture into a HIP graph
+    ctx.barrier()
+    iris_output.zero_()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        graph = torch.cuda.CUDAGraph()
+        graph.capture_begin()
+        ctx.ccl.all_reduce(iris_output, iris_input, config=config, workspace=workspace)
+        graph.capture_end()
+    torch.cuda.current_stream().wait_stream(stream)
+
+    # Replay the graph
+    iris_output.zero_()
+    graph.replay()
+    torch.cuda.synchronize()
+
+    expected_sum = world_size * (world_size + 1) / 2.0
+    atol = 1e-3
+    max_diff = torch.abs(iris_output.view(-1) - expected_sum).max().item()
+
+    try:
+        assert max_diff < atol, (
+            f"Graph replay: max difference {max_diff}, expected < {atol}\n"
+            f"Rank {rank}: one_shot graph capture produced wrong results (numel={numel})"
+        )
+
+        # Replay a second time to verify monotonic flags advance correctly
+        iris_output.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        max_diff2 = torch.abs(iris_output.view(-1) - expected_sum).max().item()
+        assert max_diff2 < atol, (
+            f"Second graph replay: max difference {max_diff2}, expected < {atol}\n"
+            f"Rank {rank}: monotonic barrier flags broke on second replay (numel={numel})"
+        )
+    finally:
+        del graph
+        ctx.barrier()
+        del ctx
+        import gc
+
+        gc.collect()
 
 
 def test_all_reduce_ring_flags_too_small():
@@ -220,8 +336,8 @@ def test_all_reduce_ring_flags_too_small():
         pytest.skip("torch.distributed not initialized")
 
     heap_size = 2**33
-    shmem = iris.iris(heap_size)
-    world_size = shmem.get_num_ranks()
+    ctx = iris.iris(heap_size)
+    world_size = ctx.get_num_ranks()
 
     M, N = 512, 512
 
@@ -230,13 +346,13 @@ def test_all_reduce_ring_flags_too_small():
     block_size_n_large = (128 // world_size) * world_size
     block_size_n_small = (64 // world_size) * world_size
     if block_size_n_large == 0 or block_size_n_small == 0 or block_size_n_large == block_size_n_small:
-        del shmem
+        del ctx
         pytest.skip(f"Cannot create two distinct block sizes divisible by world_size={world_size}")
 
-    iris_input = shmem.zeros((M, N), dtype=torch.float32)
-    iris_output = shmem.zeros((M, N), dtype=torch.float32)
+    iris_input = ctx.zeros((M, N), dtype=torch.float32)
+    iris_output = ctx.zeros((M, N), dtype=torch.float32)
 
-    shmem.barrier()
+    ctx.barrier()
 
     # Step 1: run preamble with larger block sizes → allocates a smaller flags array
     config_large = Config(
@@ -244,7 +360,7 @@ def test_all_reduce_ring_flags_too_small():
         block_size_m=128,
         block_size_n=block_size_n_large,
     )
-    workspace = shmem.ccl.all_reduce_preamble(iris_output, iris_input, config=config_large)
+    workspace = ctx.ccl.all_reduce_preamble(iris_output, iris_input, config=config_large)
 
     # Step 2: call all_reduce with smaller block sizes that need more tiles —
     # workspace.matches() returns True (same shape/dtype/variant), preamble is skipped,
@@ -255,10 +371,10 @@ def test_all_reduce_ring_flags_too_small():
         block_size_n=block_size_n_small,
     )
     with pytest.raises(ValueError, match="Flags array too small"):
-        shmem.ccl.all_reduce(iris_output, iris_input, config=config_small, workspace=workspace)
+        ctx.ccl.all_reduce(iris_output, iris_input, config=config_small, workspace=workspace)
 
-    shmem.barrier()
-    del shmem
+    ctx.barrier()
+    del ctx
     import gc
 
     gc.collect()
