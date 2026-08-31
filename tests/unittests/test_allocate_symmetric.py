@@ -62,49 +62,101 @@ def _put_translated_kernel(
     tl.store(remote_ptrs, values, mask=mask)
 
 
-def test_allocate_symmetric_descriptor():
-    """The descriptor describes the tensor's backing allocation."""
+def test_allocate_symmetric_returns_peer_bases():
+    """The table is device-resident, rank-indexed, and holds our own base."""
     shmem = iris.iris(1 << 20)
 
     try:
-        tensor, address_map = shmem.allocate_symmetric(1024, dtype=torch.float32)
+        tensor, peer_bases = shmem.allocate_symmetric(1024, dtype=torch.float32)
 
         assert tensor.shape == (1024,)
         assert tensor.dtype == torch.float32
         assert shmem.is_symmetric(tensor)
 
-        # The invariant device translation depends on: subtracting the local
-        # base and adding a peer base is only correct if these agree.
-        local_base = int(address_map.peer_bases[address_map.local_rank].item())
-        assert local_base == address_map.allocation_base
+        assert peer_bases.numel() == shmem.get_num_ranks()
+        assert peer_bases.dtype in (torch.int64, torch.uint64)
+        assert peer_bases.is_cuda
 
-        assert address_map.local_rank == shmem.get_rank()
-        assert address_map.world_size == shmem.get_num_ranks()
-        assert address_map.owns(tensor)
+        # peer_bases[cur_rank] is the base translation subtracts, so it has to
+        # be this rank's own heap base and the tensor has to sit inside it.
+        local_base = int(peer_bases[shmem.get_rank()].item())
+        assert local_base == int(shmem.get_heap_bases()[shmem.get_rank()].item())
+        assert tensor.data_ptr() >= local_base
 
-        # A tensor outside the heap is not covered by this allocation.
+        # An external tensor has no table to hand out.
         external = torch.zeros(1024, dtype=torch.float32, device=shmem.get_device())
-        assert not address_map.owns(external)
+        with pytest.raises(ValueError, match="not on the Iris symmetric heap"):
+            shmem.get_peer_bases(external)
     finally:
         shmem.barrier()
         del shmem
         gc.collect()
 
 
+def test_view_translates_against_allocation_root():
+    """A view translates against the allocation root, not its own pointer.
+
+    The kernel subtracts peer_bases[local_rank] -- the allocation base -- so a
+    view's offset within the allocation survives translation. Subtracting the
+    view pointer instead would land at the start of the peer's allocation.
+    """
+    shmem = iris.iris(1 << 24)
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+    target_rank = (rank + 1) % world_size
+
+    n_elements = 512
+    offset = 128
+
+    try:
+        src, _ = shmem.allocate_symmetric(n_elements, dtype=torch.float32)
+        dst, dst_peer_bases = shmem.allocate_symmetric(n_elements, dtype=torch.float32)
+
+        # A view into the middle of the allocation. Its data_ptr is not the
+        # allocation base, but it translates against the same table.
+        view = dst[offset:]
+        assert view.data_ptr() != int(dst_peer_bases[rank].item())
+
+        src.fill_(rank + 1)
+        dst.fill_(-1)
+        shmem.barrier()
+
+        _put_translated_kernel[(1,)](
+            src,
+            view,
+            dst_peer_bases,
+            view.numel(),
+            target_rank,
+            CUR_RANK=rank,
+            BLOCK_SIZE=512,
+        )
+        shmem.barrier()
+
+        source_rank = (rank - 1) % world_size
+        # The view's region received the peer's data; everything before it did not.
+        torch.testing.assert_close(dst[offset:], torch.full_like(dst[offset:], source_rank + 1))
+        torch.testing.assert_close(dst[:offset], torch.full_like(dst[:offset], -1.0))
+    finally:
+        shmem.barrier()
+        del shmem
+        gc.collect()
+
+
+@pytest.mark.parametrize("n_elements", [256, 200])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-def test_allocate_symmetric_remote_put(dtype):
+def test_allocate_symmetric_remote_put(dtype, n_elements):
     """A kernel given (pointer, peer_bases) reaches the right peer allocation."""
     shmem = iris.iris(1 << 24)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
     target_rank = (rank + 1) % world_size
 
-    n_elements = 256
+    # 200 is not a multiple of the block, so the mask is actually exercised.
     block_size = 256
 
     try:
         src, _ = shmem.allocate_symmetric(n_elements, dtype=dtype)
-        dst, dst_map = shmem.allocate_symmetric(n_elements, dtype=dtype)
+        dst, dst_peer_bases = shmem.allocate_symmetric(n_elements, dtype=dtype)
 
         # Each rank stamps a distinct value so a write landing on the wrong
         # rank produces the wrong answer rather than a plausible one.
@@ -115,7 +167,7 @@ def test_allocate_symmetric_remote_put(dtype):
         _put_translated_kernel[(1,)](
             src,
             dst,
-            dst_map.peer_bases,
+            dst_peer_bases,
             n_elements,
             target_rank,
             CUR_RANK=rank,

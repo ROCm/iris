@@ -43,11 +43,6 @@ Quick Start (Gluon API - Experimental):
 """
 
 from iris.host.iris import Iris, iris
-from iris.host.memory.address_map import (
-    SymmetricAddressMap,
-    CAP_REMOTE_LOAD_STORE,
-    CAP_REMOTE_ATOMICS,
-)
 from iris.mem.triton.context import Context, Context as DeviceContext
 from iris.host.tracing.events import TraceEvent
 from iris.mem.triton.types import (
@@ -102,9 +97,6 @@ from iris.host.logging.logging import (
 __all__ = [
     "Iris",
     "iris",
-    "SymmetricAddressMap",
-    "CAP_REMOTE_LOAD_STORE",
-    "CAP_REMOTE_ATOMICS",
     "get_device_id_for_rank",
     "Context",
     "DeviceContext",
