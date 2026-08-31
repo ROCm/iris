@@ -46,12 +46,8 @@ def _put_translated_kernel(
     remote_base_byte = tl.cast(remote_base, tl.pointer_type(tl.int8))
     remote_dst = tl.cast(remote_base_byte + offset, dst.dtype)
 
-    # Hint goes on the indexed pointers; remote_dst is still scalar here.
-    remote_ptrs = remote_dst + offsets
-    remote_ptrs = tl.max_contiguous(tl.multiple_of(remote_ptrs, BLOCK_SIZE), BLOCK_SIZE)
-
     values = tl.load(src + offsets, mask=mask)
-    tl.store(remote_ptrs, values, mask=mask)
+    tl.store(remote_dst + offsets, values, mask=mask)
 
 
 def test_allocate_symmetric_returns_peer_bases():
@@ -70,8 +66,10 @@ def test_allocate_symmetric_returns_peer_bases():
         assert peer_bases.is_cuda
 
         # peer_bases[cur_rank] is what translation subtracts, so the tensor has
-        # to sit inside it.
-        assert tensor.data_ptr() >= int(peer_bases[ctx.get_rank()].item())
+        # to sit inside the heap it points at.
+        local_base = int(peer_bases[ctx.get_rank()].item())
+        assert local_base <= tensor.data_ptr()
+        assert tensor.data_ptr() + tensor.nbytes <= local_base + ctx.heap_size
     finally:
         ctx.barrier()
         del ctx
@@ -118,6 +116,11 @@ def test_view_translates_against_allocation_root():
         # The view's region received the peer's data; everything before it did not.
         torch.testing.assert_close(dst[offset:], torch.full_like(dst[offset:], source_rank + 1))
         torch.testing.assert_close(dst[:offset], torch.full_like(dst[:offset], -1.0))
+
+        if world_size > 1:
+            # At one rank the sender is the receiver, so the assertions above
+            # hold even if translation never left this rank.
+            assert dst[offset].item() != rank + 1
     finally:
         ctx.barrier()
         del ctx
