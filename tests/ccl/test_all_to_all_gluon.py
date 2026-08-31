@@ -9,7 +9,6 @@ import pytest
 import torch
 import torch.distributed as dist
 
-# Try to import Gluon, skip tests if not available
 try:
     import iris
     from iris.ccl import Config
@@ -20,83 +19,106 @@ except ImportError:
     GLUON_AVAILABLE = False
 
 
+NUM_REPLAYS = 200
+
+
+def _all_to_all(src, stage_buf, result, shmem, config, async_op):
+    """Stage src into the input buffer, then all-to-all. Module-level (no closure
+    over shmem) so the test can ``del shmem`` for IPC cleanup. triton
+    (use_gluon=False) and gluon (use_gluon=True) both dispatch through
+    iris.ccl.all_to_all; async_op=True skips the capture-illegal trailing barrier."""
+    stage_buf.copy_(src)
+    shmem.ccl.all_to_all(result, stage_buf, config=config, async_op=async_op)
+
+
 @pytest.mark.skipif(not GLUON_AVAILABLE, reason="Gluon not available")
-@pytest.mark.parametrize(
-    "dtype",
-    [
-        torch.float16,
-        torch.float32,
-        torch.bfloat16,
-    ],
-)
-@pytest.mark.parametrize(
-    "M, N",
-    [
-        (128, 64),  # Small
-        (1024, 256),  # Medium
-        (8192, 8192),  # Large
-    ],
-)
-def test_all_to_all_gluon(dtype, M, N):
-    """Test all-to-all functionality using Gluon with traffic shaping by comparing against PyTorch's implementation."""
-    # Ensure torch.distributed is initialized (should be done by test runner)
+@pytest.mark.parametrize("impl", ["triton", "gluon"])
+@pytest.mark.parametrize("mode", ["eager_barrier", "eager_nobarrier", "graph"])
+@pytest.mark.parametrize("vary", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=["bf16", "fp16"])
+@pytest.mark.parametrize("M, N", [(128, 1024), (256, 1024)])
+def test_all_to_all_gluon(impl, mode, vary, dtype, M, N):
+    """Drive all-to-all across impl x mode x vary and check the exchanged output.
+    mode/vary as in test_all_gather_gluon. No torch arm — torch.distributed
+    all_to_all uses a different (row-split) layout and can't share this harness;
+    eager_barrier is the reference (correct when properly synced).
+
+    Layout is iris's (M, N*world_size) column-chunks: rank r fills its whole input
+    with 1 + r + replay%16, so output chunk c (columns [c*N:(c+1)*N]) must equal
+    1 + c + replay%16 (chunk c is rank c's data) — any >=1 mismatch is a real drop.
+    Per-source-chunk fail tallies show which chunks dropped."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33  # 8GB
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
+    # Resolve mode up front; the body runs straight-line off these.
+    async_op = mode != "eager_barrier"
+    capture = mode == "graph"
 
-    # PyTorch's all_to_all format: each rank has M x N data to send to all ranks
-    # Create input data: each rank has its own M x N chunk
-    # For rank r, the data it sends to all ranks is the same (M x N tensor)
-    pytorch_input_tensor = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
-    # Fill with deterministic values for easier debugging
-    pytorch_input_tensor.fill_(float(rank))
-
-    # PyTorch all_to_all expects list of tensors: input_list[i] is sent to rank i
-    # Since we're sending the same data to all ranks, we replicate it
-    pytorch_input_list = [pytorch_input_tensor.clone() for _ in range(world_size)]
-    pytorch_output_list = [torch.zeros(M, N, dtype=dtype, device=f"cuda:{rank}") for _ in range(world_size)]
-
-    # Run PyTorch's all_to_all to get reference output
+    shmem = iris.iris(2**33)  # 8 GB
+    rank, world_size = shmem.get_rank(), shmem.get_num_ranks()
+    torch.cuda.set_device(rank)
+    width = N * world_size
+    src = torch.empty((M, width), dtype=dtype, device=f"cuda:{rank}")
+    stage_buf = shmem.zeros((M, width), dtype=dtype)
+    result = shmem.zeros((M, width), dtype=dtype)
+    config = Config(use_gluon=(impl == "gluon"))
     shmem.barrier()
-    dist.all_to_all(pytorch_output_list, pytorch_input_list)
+
+    def fill_src(replay):
+        src.fill_(float(1 + rank + (replay % 16)))
+
+    # Warmup (runs lazy JIT/setup), then capture the step once if in graph mode.
+    fill_src(0)
+    _all_to_all(src, stage_buf, result, shmem, config, async_op)
     torch.cuda.synchronize()
-
-    # Convert PyTorch output to concatenated format for comparison
-    # pytorch_output_list[i] contains data received from rank i
-    pytorch_output_concat = torch.zeros(M, N * world_size, dtype=dtype, device=f"cuda:{rank}")
-    for target_rank in range(world_size):
-        pytorch_output_concat[:, target_rank * N : (target_rank + 1) * N] = pytorch_output_list[target_rank]
-
-    # Now set up Iris Gluon all_to_all format
-    # Iris format: concatenated tensor (M, N * world_size)
-    # input[:, i*N:(i+1)*N] contains data to send to rank i
-    # Since we're sending the same M x N data to all ranks, we replicate it
-    iris_input_concat = shmem.zeros((M, N * world_size), dtype=dtype)
-    for target_rank in range(world_size):
-        iris_input_concat[:, target_rank * N : (target_rank + 1) * N] = pytorch_input_tensor
-
-    iris_output_concat = shmem.zeros((M, N * world_size), dtype=dtype)
-
-    # Run Iris Gluon all_to_all with traffic shaping enabled
     shmem.barrier()
-    config = Config(use_gluon=True)  # Enable Gluon with traffic shaping
-    shmem.ccl.all_to_all(iris_output_concat, iris_input_concat, config=config)
-    torch.cuda.synchronize()
 
-    # Compare results
-    atol = 1e-3 if dtype == torch.float16 else 1e-5
-    max_diff = torch.abs(iris_output_concat - pytorch_output_concat).max().item()
+    graph = None
+    if capture:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            graph = torch.cuda.CUDAGraph()
+            graph.capture_begin()
+            _all_to_all(src, stage_buf, result, shmem, config, async_op)
+            graph.capture_end()
+        torch.cuda.current_stream().wait_stream(stream)
 
+    atol = 0.5  # exact integer inputs; >=1 mismatch is a real drop
+    failures = []  # (step, max|diff|, bad_chunks)
+    chunk_fail = [0] * world_size  # steps each source chunk dropped
     try:
-        assert torch.allclose(iris_output_concat, pytorch_output_concat, atol=atol), (
-            f"Max difference: {max_diff}, expected < {atol}\n"
-            f"Rank {rank}: Iris Gluon output doesn't match PyTorch's all_to_all"
+        for i in range(NUM_REPLAYS):
+            replay = i if vary else 0
+            fill_src(replay)
+            if capture:
+                graph.replay()
+            else:
+                _all_to_all(src, stage_buf, result, shmem, config, async_op)
+            torch.cuda.synchronize()
+            diffs = [
+                torch.abs(result[:, c * N : (c + 1) * N] - float(1 + c + (replay % 16))).max().item()
+                for c in range(world_size)
+            ]
+            bad = [c for c in range(world_size) if diffs[c] > atol]
+            for c in bad:
+                chunk_fail[c] += 1
+            if bad:
+                failures.append((i, round(max(diffs[c] for c in bad), 4), bad))
+        print(
+            f"[rank {rank}] all_to_all impl={impl} mode={mode} vary={vary} dtype={dtype} "
+            f"{M}x{width}: {NUM_REPLAYS - len(failures)}/{NUM_REPLAYS} ok; "
+            f"per-source-chunk fail counts={chunk_fail}" + (f"; first FAIL={failures[0]}" if failures else ""),
+            flush=True,
+        )
+        assert not failures, (
+            f"impl={impl} mode={mode} vary={vary} dtype={dtype} {M}x{width}: "
+            f"{len(failures)}/{NUM_REPLAYS} steps wrong (first {failures[0]}; per-source-chunk "
+            f"fail counts={chunk_fail})."
         )
     finally:
+        if graph is not None:
+            del graph
         # Final barrier to ensure all ranks complete before test cleanup
         # This helps with test isolation when running multiple tests
         # Note: shmem.barrier() already does cuda.synchronize()
