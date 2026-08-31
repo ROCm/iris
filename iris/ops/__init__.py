@@ -66,17 +66,16 @@ class OpsNamespace:
         """
         self._shmem = shmem
 
-    def matmul_all_reduce(self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None):
+    def matmul_all_reduce(self, output_tensor, A, B, async_op=False, config=None, workspace=None):
         """
         Fused matrix multiplication and all-reduce.
 
-        Computes: output = all_reduce(A @ B + bias)
+        Computes: output = all_reduce(A @ B)
 
         Args:
             output_tensor: Output tensor (M, N)
             A: Input matrix A (M, K)
             B: Input matrix B (K, N)
-            bias: Optional bias vector (M,) or (N,)
             async_op: If False, performs barrier at end
             config: Optional FusedConfig for tuning
             workspace: Optional pre-allocated workspace
@@ -142,17 +141,16 @@ class OpsNamespace:
         """
         return matmul_all_gather(self._shmem, output_tensor, A, B, bias, async_op, config, workspace)
 
-    def matmul_reduce_scatter(self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None):
+    def matmul_reduce_scatter(self, output_tensor, A, B, async_op=False, config=None, workspace=None):
         """
         Fused matrix multiplication and reduce-scatter.
 
-        Computes: output = reduce_scatter(A @ B + bias) along N dimension
+        Computes: output = reduce_scatter(A @ B) along N dimension
 
         Args:
             output_tensor: Output tensor (M, N_local) where N_local = N / world_size
             A: Input matrix A (M, K)
             B: Input matrix B (K, N)
-            bias: Optional bias vector (M,) or (N,)
             async_op: If False, performs barrier at end
             config: Optional FusedConfig for tuning
             workspace: Optional pre-allocated workspace
@@ -165,7 +163,7 @@ class OpsNamespace:
             >>> output = shmem.zeros((M, N_local), dtype=torch.float16)
             >>> shmem.ops.matmul_reduce_scatter(output, A, B)
         """
-        return matmul_reduce_scatter(self._shmem, output_tensor, A, B, bias, async_op, config, workspace)
+        return matmul_reduce_scatter(self._shmem, output_tensor, A, B, async_op, config, workspace)
 
 
 # Export public API
