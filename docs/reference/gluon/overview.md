@@ -35,12 +35,13 @@ from triton.experimental.gluon import language as gl
 ctx = iris.iris(heap_size=2**30)  # 1GB heap
 context_tensor = ctx.get_device_context()
 
+
 # Device-side: Use in Gluon kernels
 @gluon.jit
 def kernel(IrisDeviceCtx: gl.constexpr, context_tensor, buffer):
     # Initialize device context from tensor
     ctx = IrisDeviceCtx.initialize(context_tensor)
-    
+
     # Perform remote memory operations
     data = ctx.load(buffer, from_rank=1)
     ctx.store(buffer, data, to_rank=0)
@@ -68,6 +69,7 @@ from triton.experimental.gluon import language as gl
 import iris
 from iris.gluon import IrisDeviceCtx
 
+
 @gluon.jit
 def producer_kernel(
     IrisDeviceCtx: gl.constexpr,
@@ -82,20 +84,21 @@ def producer_kernel(
 ):
     ctx = IrisDeviceCtx.initialize(context_tensor)
     pid = gl.program_id(0)
-    
+
     block_start = pid * BLOCK_SIZE
     layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < buffer_size
-    
+
     # Load from producer's buffer
     values = ctx.load(source_buffer + offsets, producer_rank, mask=mask)
-    
+
     # Store to consumer's buffer
     ctx.store(target_buffer + offsets, values, consumer_rank, mask=mask)
-    
+
     # Signal completion
     ctx.atomic_cas(flag + pid, 0, 1, consumer_rank, sem="release", scope="sys")
+
 
 @gluon.jit
 def consumer_kernel(
@@ -109,39 +112,42 @@ def consumer_kernel(
 ):
     ctx = IrisDeviceCtx.initialize(context_tensor)
     pid = gl.program_id(0)
-    
+
     block_start = pid * BLOCK_SIZE
     layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < buffer_size
-    
+
     # Wait for producer
     done = 0
     while done == 0:
         done = ctx.atomic_cas(flag + pid, 1, 0, consumer_rank, sem="acquire", scope="sys")
-    
+
     # Read from buffer
     values = ctx.load(buffer + offsets, consumer_rank, mask=mask)
-    
+
     # Process values...
     values = values * 2
-    
+
     # Store back
     ctx.store(buffer + offsets, values, consumer_rank, mask=mask)
+
 
 def worker(rank, world_size):
     # Initialize distributed
     device_id = rank % torch.cuda.device_count()
     dist.init_process_group(
-        backend="nccl", rank=rank, world_size=world_size,
+        backend="nccl",
+        rank=rank,
+        world_size=world_size,
         init_method="tcp://127.0.0.1:29500",
-        device_id=torch.device(f"cuda:{device_id}")
+        device_id=torch.device(f"cuda:{device_id}"),
     )
-    
+
     # Initialize Iris Gluon
     ctx = iris.iris(heap_size=2**30)
     context_tensor = ctx.get_device_context()
-    
+
     # Allocate buffers
     buffer_size = 1024
     block_size = 256
@@ -149,13 +155,13 @@ def worker(rank, world_size):
     target = ctx.zeros(buffer_size, dtype=torch.float32)
     num_blocks = triton.cdiv(buffer_size, block_size)
     flag = ctx.zeros(num_blocks, dtype=torch.int32)
-    
+
     # Initialize source data on producer
     producer_rank = 0
     consumer_rank = 1
     if rank == producer_rank:
         source.fill_(42.0)
-    
+
     # Launch kernels based on rank
     grid = (num_blocks,)
     if rank == producer_rank:
@@ -184,9 +190,9 @@ def worker(rank, world_size):
             block_size,
             num_warps=1,
         )
-    
+
     ctx.barrier()
-    
+
     # Validate on consumer
     if rank == consumer_rank:
         expected = source * 2  # Consumer doubles the values
@@ -194,9 +200,10 @@ def worker(rank, world_size):
             ctx.info("Validation successful!")
         else:
             ctx.error("Validation failed!")
-    
+
     ctx.barrier()
     dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     world_size = 2
