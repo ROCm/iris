@@ -22,7 +22,7 @@ dependencies = [
     "requests",
     "ruff<0.16",  # 0.16 formats code blocks in Markdown; see lint.yml
     "tritonblas @ git+https://github.com/ROCm/tritonBLAS.git@muhaawad/iris",
-
+    "rocm-xio @ git+https://github.com/ROCm/rocm-xio.git",
 ]
 
 [project.urls]

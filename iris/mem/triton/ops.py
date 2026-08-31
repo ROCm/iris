@@ -10,6 +10,8 @@ These are the module-level functional API. For the OO API, see DeviceContext.
 import triton
 import triton.language as tl
 from iris.mem.triton.context import __translate
+from xio import sdma_ep
+from iris.device import sdma_utils
 
 
 @triton.jit
@@ -287,6 +289,13 @@ def put(
     load_cache_modifier=None,
     store_cache_modifier=None,
     hint: tl.constexpr = None,
+    copy_engine_ctx: tl.tensor = None,
+    src_row_stride: tl.constexpr = 0,
+    dst_row_stride: tl.constexpr = 0,
+    USE_COPY_ENGINE: tl.constexpr = False,
+    CONTIGUOUS_COPY: tl.constexpr = False,
+    from_base_ptr=None,
+    to_base_ptr=None,
 ):
     """
     Copies data from the current rank's local memory to the specified rank's memory.
@@ -294,16 +303,22 @@ def put(
     rank's `from_ptr`, translating the `to_ptr` from the current rank's address
     space to the `to_rank`'s address space, and storing the data to the `to_rank` memory location.
 
+    Supports both 1D (flat/linear) and 2D (tiled) copies:
+    - 1D copies: Used for 1D pointer blocks, uses linear SDMA packets
+    - 2D copies: Used for 2D pointer blocks, uses sub-window SDMA packets for better performance
     The load is **always local** (reading from the current rank's own ``from_ptr``), while the
     store is **remote** when ``from_rank != to_rank`` (writing to a peer GPU).
 
     Args:
         from_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's local memory from which to read data.
-        to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `to_rank`'s address space. Must be the current rank where the pointer is local.
+        to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `to_rank`'s address space.
         from_rank (int): The current rank ID from which to read the data.
-        to_rank (int): The `to_rank` ID to which the data will be written.
+        to_rank (int): The rank ID to which the data will be written.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
-        mask (Block of triton.int1, optional): If mask[idx] is false, do not load the data at address from_ptr[idx] and do not store to to_ptr[idx]. Defaults to None.
+        copy_engine_ctx (tl.tensor): Copy engine context for SDMA operations.
+        mask (Block of triton.int1, optional): If mask[idx] is false, do not load/copy data at that index.
+            When ``USE_COPY_ENGINE`` and ``CONTIGUOUS_COPY`` are true, ``mask=None`` copies the full pointer block.
+            Defaults to None.
         other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
 
         load_cache_modifier (str, optional): Controls cache behavior of the load (always local). Supported values are:
@@ -319,27 +334,186 @@ def put(
             - ".cs": Cache Streaming. Bypasses L1, streamed through L2, not retained in LLC.
             - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
+        copy_engine_ctx (tl.tensor, optional): Copy engine context for SDMA operations. Required for SDMA bulk copies.
+        src_row_stride (int, optional): Source row stride in elements for 2D SDMA copies. Defaults to 0.
+        dst_row_stride (int, optional): Destination row stride in elements for 2D SDMA copies. Defaults to 0.
+        USE_COPY_ENGINE (tl.constexpr, optional): Whether to use SDMA copy engine. Defaults to False (uses regular load/store).
+        CONTIGUOUS_COPY (tl.constexpr, optional): Opt-in assertion that the masked pointer block represents one contiguous
+            1D span or one rectangular 2D tile. SDMA bulk copies are only used when this is True; otherwise the function
+            falls back to regular load/store semantics.
+        from_base_ptr (triton.PointerType, optional): Base pointer of the source buffer. Required for 2D copies when USE_COPY_ENGINE is True.
+        to_base_ptr (triton.PointerType, optional): Base pointer of the destination buffer. Required for 2D copies when USE_COPY_ENGINE is True.
 
     Returns:
         None
 
-    Example:
+    Examples:
+        1D (flat) copy:
         >>> @triton.jit
-        >>> def kernel(local_ptr, remote_ptr, heap_bases):
+        >>> def kernel(local_ptr, remote_ptr, heap_bases, copy_engine_ctx):
         >>>     from_rank = 0
         >>>     to_rank = 1
-        >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases)
+        >>>     offsets = tl.arange(0, 256)
+        >>>     iris.put(local_ptr + offsets, remote_ptr + offsets,
+        >>>              from_rank, to_rank, heap_bases,
+        >>>              mask=offsets < 256, copy_engine_ctx=copy_engine_ctx,
+        >>>              USE_COPY_ENGINE=True, CONTIGUOUS_COPY=True)
+
+        2D (tiled) copy:
+        >>> @triton.jit
+        >>> def kernel(local_ptr, remote_ptr, heap_bases, copy_engine_ctx, base_ptr):
+        >>>     from_rank = 0
+        >>>     to_rank = 1
+        >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases,
+        >>>              dst_row_stride=1024, src_row_stride=1024,
+        >>>              mask=mask, copy_engine_ctx=copy_engine_ctx,
+        >>>              USE_COPY_ENGINE=True, CONTIGUOUS_COPY=True,
+        >>>              from_base_ptr=base_ptr, to_base_ptr=base_ptr)
     """
     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
 
-    data = tl.load(from_ptr, mask=mask, other=other, cache_modifier=load_cache_modifier)
+    if not USE_COPY_ENGINE or not CONTIGUOUS_COPY:
+        data = tl.load(from_ptr, mask=mask, other=other, cache_modifier=load_cache_modifier)
 
-    tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
+        tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
+    else:
+        ctx = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+        read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+        write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+        doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+        cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+        committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+
+        dst_ptr_val = tl.min(translated_to_ptr.to(tl.uint64))
+        # Extract source address (min of pointer block where data is stored)
+        src_ptr_u64 = from_ptr.to(tl.uint64)
+        src_ptr_val = tl.min(src_ptr_u64)
+
+        # Infer element size from pointer type
+        # src_ptr is a block of pointers with a specific element type (e.g., pointer<float32>)
+        # The pointer dtype tells us the element type, which has a known size
+        # Map Triton dtypes to their byte sizes
+        ptr_dtype = from_ptr.dtype.element_ty  # Get the element type that the pointer points to
+
+        # Get element size in bytes from the dtype
+        # tl.float16 -> 2, tl.float32 -> 4, tl.float64 -> 8, etc.
+        if ptr_dtype == tl.float16 or ptr_dtype == tl.bfloat16:
+            element_size_bytes = 2
+        elif ptr_dtype == tl.float32 or ptr_dtype == tl.int32 or ptr_dtype == tl.uint32:
+            element_size_bytes = 4
+        elif ptr_dtype == tl.float64 or ptr_dtype == tl.int64 or ptr_dtype == tl.uint64:
+            element_size_bytes = 8
+        elif ptr_dtype == tl.int8 or ptr_dtype == tl.uint8:
+            element_size_bytes = 1
+        elif ptr_dtype == tl.int16 or ptr_dtype == tl.uint16:
+            element_size_bytes = 2
+        else:
+            # Default to 4 bytes for unknown types
+            element_size_bytes = 4
+
+        is_2d_copy: tl.constexpr = len(from_ptr.shape) == 2
+
+        # Determine packet size based on copy type
+        # Linear copy packet: 32 bytes for 1D, Sub-window copy packet: 80 bytes for 2D
+        command_in_bytes = (
+            sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES if is_2d_copy else sdma_ep.COPY_LINEAR_COMMAND_BYTES
+        )
+
+        # Acquire space in the queue
+        base, offset = sdma_utils.acquire_fadd(
+            queue_ptr_u32,
+            read_ptr,
+            write_ptr,
+            doorbell_ptr,
+            cached_write_ptr,
+            committed_write_ptr,
+            command_in_bytes,
+        )
+
+        # Write padding NOPs if we wrapped around
+        sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+
+        # Place the appropriate packet type
+        packet_offset_bytes = base + offset
+
+        if not is_2d_copy:
+            if mask is None:
+                size_bytes = tl.full((), from_ptr.numel * element_size_bytes, dtype=tl.uint32)
+            else:
+                # For 1D copies, mask is 1D, so just sum all elements
+                mask_int = mask.to(tl.int32)
+                num_elements = tl.sum(mask_int, axis=0)
+                size_bytes = (num_elements * element_size_bytes).to(tl.uint32)
+
+            # Place linear copy packet for 1D/flat copies
+            sdma_utils.place_copy_packet(
+                queue_ptr_u32,
+                packet_offset_bytes,
+                size_bytes,
+                src_ptr_val,
+                dst_ptr_val,
+            )
+        else:
+            if mask is None:
+                num_elements_per_stride = tl.full((), from_ptr.shape[1], dtype=tl.uint32)
+                num_strides = tl.full((), from_ptr.shape[0], dtype=tl.uint32)
+            else:
+                # For 2D copies, mask is 2D [M, N], use axis operations
+                mask_int = mask.to(tl.int32)
+                num_elements_per_stride = tl.max(tl.sum(mask_int, axis=-1))
+                num_strides = tl.max(tl.sum(mask_int, axis=0))
+            size_bytes = (num_elements_per_stride * element_size_bytes).to(tl.uint32)
+            src_stride = (src_row_stride * element_size_bytes).to(tl.uint32)
+            dst_stride = (dst_row_stride * element_size_bytes).to(tl.uint32)
+
+            # Place sub-window copy packet for 2D tiled copies
+            # Calculate base addresses and offsets for sub-window copy
+            src_base = from_base_ptr.to(tl.uint64)
+            dst_base = __translate(to_base_ptr, from_rank, to_rank, heap_bases).to(tl.uint64)
+
+            # Calculate tile offset from base
+            tile_offset_bytes = src_ptr_val - src_base
+            src_y_val = (tile_offset_bytes // src_stride).to(tl.uint32)
+            src_x_val = (tile_offset_bytes % src_stride).to(tl.uint32)
+
+            tile_offset_bytes_dst = dst_ptr_val - dst_base
+            dst_y_val = (tile_offset_bytes_dst // dst_stride).to(tl.uint32)
+            dst_x_val = (tile_offset_bytes_dst % dst_stride).to(tl.uint32)
+
+            sdma_utils.place_sub_window_copy_packet(
+                queue_ptr_u32,
+                packet_offset_bytes,
+                src_base,
+                dst_base,
+                tile_width=size_bytes,
+                tile_height=num_strides,
+                src_buffer_pitch=src_stride,
+                dst_buffer_pitch=dst_stride,
+                src_x=src_x_val,
+                src_y=src_y_val,
+                dst_x=dst_x_val,
+                dst_y=dst_y_val,
+            )
+
+        # Submit the command to the queue
+        pending_wptr = base + offset + command_in_bytes
+        sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
 
 @triton.jit
 def atomic_add(
-    pointer, val, from_rank, to_rank, heap_bases, mask=None, sem=None, scope=None, hint: tl.constexpr = None
+    pointer,
+    val,
+    from_rank,
+    to_rank,
+    heap_bases,
+    mask=None,
+    sem=None,
+    scope=None,
+    hint: tl.constexpr = None,
+    copy_engine_ctx=None,
+    USE_COPY_ENGINE: tl.constexpr = False,
 ):
     """
     Performs an atomic add at the specified rank's memory location.
@@ -359,6 +533,8 @@ def atomic_add(
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
+        copy_engine_ctx (tl.tensor, optional): Copy engine context used when issuing SDMA-backed atomics. Required when ``USE_COPY_ENGINE`` is True.
+        USE_COPY_ENGINE (tl.constexpr, optional): Whether to route the atomic through the SDMA copy engine. Defaults to False.
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
@@ -373,7 +549,43 @@ def atomic_add(
         >>>     old_val = iris.atomic_add(ptr, increment, cur_rank, remote_rank, heap_bases)
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
-    return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+    if not USE_COPY_ENGINE:
+        return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+    else:
+        handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
+        read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
+        write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
+        doorbell_ptr = tl.load(handle + 3).to(tl.pointer_type(tl.uint64))
+        cached_write_ptr = tl.load(handle + 4).to(tl.pointer_type(tl.uint64))
+        committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
+
+        dst_ptr_val = translated_ptr.to(tl.uint64)
+
+        command_in_bytes = sdma_ep.ATOMIC_COMMAND_BYTES
+        # Acquire space (returns base index and wraparound offset)
+        base, offset = sdma_utils.acquire_fadd(
+            # base = sdma_utils.acquire(
+            queue_ptr_u32,
+            read_ptr,
+            write_ptr,
+            doorbell_ptr,
+            cached_write_ptr,
+            committed_write_ptr,
+            command_in_bytes,
+        )
+        # Write padding NOPs if we wrapped around
+        sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+
+        # Calculate packet position (base + offset for wraparound)
+        packet_offset_bytes = base + offset
+
+        # Place command packet
+        sdma_utils.place_atomic_add_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, val)
+
+        # Submit command
+        pending_wptr = base + offset + command_in_bytes
+        sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
 
 @triton.jit
@@ -416,7 +628,19 @@ def atomic_sub(
 
 
 @triton.jit
-def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scope=None, hint: tl.constexpr = None):
+def atomic_cas(
+    pointer,
+    cmp,
+    val,
+    from_rank,
+    to_rank,
+    heap_bases,
+    sem=None,
+    scope=None,
+    hint: tl.constexpr = None,
+    copy_engine_ctx=None,
+    USE_COPY_ENGINE: tl.constexpr = False,
+):
     """
     Atomically compares and exchanges the specified rank's memory location.
 
@@ -435,9 +659,16 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". Defaults to "acq_rel".
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
+        copy_engine_ctx (tl.tensor, optional): Copy engine context used when issuing SDMA-backed atomics. Required when ``USE_COPY_ENGINE`` is True.
+        USE_COPY_ENGINE (tl.constexpr, optional): Whether to route the CAS through the SDMA copy engine. Defaults to False.
 
     Returns:
         Block: The value contained at the memory location before the atomic operation attempt.
+
+    Note:
+        The SDMA implementation used when ``USE_COPY_ENGINE`` is True does not
+        provide the previous value stored at ``pointer``. In that case this
+        function returns the compare operand ``cmp``.
 
     Example:
         >>> @triton.jit
@@ -450,7 +681,44 @@ def atomic_cas(pointer, cmp, val, from_rank, to_rank, heap_bases, sem=None, scop
         >>>     old_val = iris.atomic_cas(ptr, expected, new_val, cur_rank, remote_rank, heap_bases)
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
-    return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
+    if not USE_COPY_ENGINE:
+        return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
+    else:
+        handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
+        read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
+        write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
+        doorbell_ptr = tl.load(handle + 3).to(tl.pointer_type(tl.uint64))
+        cached_write_ptr = tl.load(handle + 4).to(tl.pointer_type(tl.uint64))
+        committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
+
+        dst_ptr_val = translated_ptr.to(tl.uint64)
+
+        command_in_bytes = sdma_ep.ATOMIC_COMMAND_BYTES
+        # Acquire space (returns base index and wraparound offset)
+        base, offset = sdma_utils.acquire_fadd(
+            queue_ptr_u32,
+            read_ptr,
+            write_ptr,
+            doorbell_ptr,
+            cached_write_ptr,
+            committed_write_ptr,
+            command_in_bytes,
+        )
+        # Write padding NOPs if we wrapped around
+        sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+
+        # Calculate packet position (base + offset for wraparound)
+        packet_offset_bytes = base + offset
+
+        # Place command packet
+        sdma_utils.place_atomic_cas_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, cmp, val)
+
+        # Submit command
+        pending_wptr = base + offset + command_in_bytes
+        sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
+
+        return cmp
 
 
 @triton.jit
@@ -683,3 +951,40 @@ def atomic_max(
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
     return tl.atomic_max(translated_ptr, val, mask=mask, sem=sem, scope=scope)
+
+
+@triton.jit
+def quiet(copy_engine_ctx: tl.tensor, to_rank):
+    """
+    Wait for all submitted SDMA operations to complete for the specified destination rank.
+
+    Polls the hardware read pointer until it catches up to the committed write pointer,
+    ensuring all previously submitted SDMA packets to the destination rank have been processed.
+
+    Args:
+        copy_engine_ctx: Copy engine context tensor containing queue metadata
+        to_rank: The destination rank whose SDMA queue should be drained
+
+    Example:
+        >>> @triton.jit
+        >>> def kernel(src, dst, heap_bases, copy_engine_ctx):
+        >>>     # Submit SDMA operations
+        >>>     iris.put(
+        >>>         src, dst, 0, 1, heap_bases, mask=mask,
+        >>>         copy_engine_ctx=copy_engine_ctx, USE_COPY_ENGINE=True, CONTIGUOUS_COPY=True
+        >>>     )
+        >>>     # Wait for completion
+        >>>     iris.quiet(copy_engine_ctx, 1)
+    """
+    # Extract queue pointers from context
+    # Context layout: [queue_buf, rptr, wptr, doorbell, cached_wptr, committed_wptr]
+    handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+    read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
+    committed_wptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
+
+    # Read current committed write pointer (all submitted packets from all blocks)
+    target = tl.load(committed_wptr, cache_modifier=".cv", volatile=True)
+
+    # Poll until hardware read pointer catches up
+    while tl.load(read_ptr, cache_modifier=".cv", volatile=True) < target:
+        pass

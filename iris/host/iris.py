@@ -52,6 +52,8 @@ from iris.host.platform.hip import (
     get_cu_count,
     count_devices,
 )
+
+from xio import sdma_ep
 from iris.host.memory.symmetric_heap import SymmetricHeap
 import numpy as np
 from typing import Any
@@ -135,6 +137,36 @@ class Iris:
 
         distributed_barrier()
 
+        # initialize copy engines
+        sdma_ep.init()
+
+        context_size = sdma_ep.QUEUE_DEVICE_CTX_SIZE
+        self.copy_engines_device_ctx = torch.zeros((num_ranks, context_size), dtype=torch.uint64, device=self.device)
+
+        num_local_ranks = min(num_gpus, num_ranks)
+        cur_local_rank = cur_rank % num_local_ranks
+
+        for local_rank in range(num_local_ranks):
+            # Device-initiated queues
+            sdma_ep.create_queue(cur_local_rank, local_rank)
+            # Host-initiated queues
+            sdma_ep.create_host_queue(cur_local_rank, local_rank)
+
+            handle = sdma_ep.get_queue_device_ctx(cur_local_rank, local_rank)
+            self.debug(f"---- Queue {local_rank} ------------")
+            self.debug(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
+            self.debug(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
+            self.debug(f"wptr {handle.wptr:#x} at {id(handle.wptr):#x}")
+            self.debug(f"doorbell {handle.doorbell:#x} at {id(handle.doorbell):#x}")
+            self.debug(f"cached_write_ptr {handle.cached_wptr:#x} at {id(handle.cached_wptr):#x}")
+            self.debug(f"committed_write_ptr {handle.committed_wptr:#x} at {id(handle.committed_wptr):#x}")
+
+            self.copy_engines_device_ctx[local_rank][0] = handle.queue_buf
+            self.copy_engines_device_ctx[local_rank][1] = handle.rptr
+            self.copy_engines_device_ctx[local_rank][2] = handle.wptr
+            self.copy_engines_device_ctx[local_rank][3] = handle.doorbell
+            self.copy_engines_device_ctx[local_rank][4] = handle.cached_wptr
+            self.copy_engines_device_ctx[local_rank][5] = handle.committed_wptr
         # Initialize CCL interface
         self.ccl = self.CCL(self)
 
@@ -917,6 +949,306 @@ class Iris:
             >>> print(heap_bases.shape)  # torch.Size([num_ranks])
         """
         return self.heap_bases
+
+    def get_copy_engine_ctx(self):
+        return self.copy_engines_device_ctx
+
+    @staticmethod
+    def _dtype_to_flag_bits(dtype: torch.dtype) -> int:
+        if dtype in (torch.int32, torch.int):
+            return 32
+        if dtype in (torch.int64, torch.long):
+            return 64
+        raise ValueError(f"Unsupported flag tensor dtype: {dtype}")
+
+    def _flag_pointer_and_bits(
+        self,
+        flag,
+        *,
+        translate: bool = False,
+        dst_rank: int | None = None,
+        default_bits: int = 32,
+    ) -> tuple[int, int]:
+        if flag is None:
+            return 0, 0
+
+        if isinstance(flag, torch.Tensor):
+            bits = self._dtype_to_flag_bits(flag.dtype)
+            ptr = flag.data_ptr()
+        else:
+            ptr = int(flag)
+            bits = default_bits
+
+        if translate:
+            if dst_rank is None:
+                raise ValueError("dst_rank must be provided when translate=True")
+            ptr = self.heap.translate(ptr, self.get_rank(), dst_rank)
+
+        if ptr == 0:
+            return 0, 0
+        return ptr, bits
+
+    def put(
+        self,
+        src_tensor: torch.Tensor,
+        dst_rank: int,
+        dst_tensor: torch.Tensor = None,
+        wait_flag: torch.Tensor = None,
+        wait_value: int = None,
+        signal_flag: torch.Tensor = None,
+        signal_value: int = 1,
+        async_op: bool = False,
+        channel: int = 0,
+    ):
+        """
+        One-sided put operation with optional wait (POLL) and signal (ATOMIC).
+
+        Supports:
+        - Simple copy: put(src, dst_rank)
+        - Copy + signal: put(src, dst_rank, signal_flag=flag)
+        - Wait + copy: put(src, dst_rank, wait_flag=flag, wait_value=N)
+        - Wait + copy + signal: put(src, dst_rank, wait_flag=..., signal_flag=...)
+
+        Args:
+            src_tensor: Source tensor (local, must be symmetric)
+            dst_rank: Destination rank
+            dst_tensor: Destination tensor (symmetric). If None, uses src_tensor.
+            wait_flag: Optional LOCAL flag tensor to poll before transfer (POLL packet)
+            wait_value: Expected value for wait_flag
+            signal_flag: Optional flag tensor to atomic-add on REMOTE rank after transfer (will be translated)
+            signal_value: Value to add to signal_flag (default 1)
+            async_op: If True, don't wait for completion
+            channel: SDMA channel to use
+
+        Examples:
+            >>> # Simple copy
+            >>> shmem.put(data, dst_rank=1)
+
+            >>> # Copy with completion signal
+            >>> shmem.put(data, dst_rank=1, signal_flag=completion_flag)
+
+            >>> # Wait for ready signal, then copy
+            >>> shmem.put(data, dst_rank=1, wait_flag=ready_flag, wait_value=1)
+
+            >>> # Full pipeline: wait, copy, signal
+            >>> shmem.put(data, dst_rank=1,
+            ...          wait_flag=batch_ready, wait_value=256,
+            ...          signal_flag=transfer_done, signal_value=1)
+        """
+        if dst_tensor is None:
+            dst_tensor = src_tensor
+
+        src_rank = self.get_rank()
+        src_ptr = src_tensor.data_ptr()
+        dst_ptr = self.heap.translate(dst_tensor.data_ptr(), src_rank, dst_rank)
+        size = src_tensor.numel() * src_tensor.element_size()
+
+        # Early return for zero-size transfers (no-op)
+        if size == 0:
+            return
+
+        wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag)
+        signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, translate=True, dst_rank=dst_rank)
+
+        has_wait = wait_ptr != 0
+        has_signal = signal_ptr != 0
+
+        if has_wait and has_signal:
+            # Wait + copy + signal (two calls)
+            wait_val = int(wait_value if wait_value is not None else 0)
+            signal_val = int(signal_value)
+            sdma_ep.wait_flag_then_put(
+                src_rank, dst_rank, channel, wait_ptr, wait_val, src_ptr, dst_ptr, size, wait_bits
+            )
+            sdma_ep.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
+        elif has_wait:
+            # Wait + copy
+            wait_val = int(wait_value if wait_value is not None else 0)
+            sdma_ep.wait_flag_then_put(
+                src_rank, dst_rank, channel, wait_ptr, wait_val, src_ptr, dst_ptr, size, wait_bits
+            )
+        elif has_signal:
+            # Copy + signal
+            signal_val = int(signal_value)
+            sdma_ep.put_signal(src_rank, dst_rank, channel, src_ptr, dst_ptr, size, signal_ptr, signal_val, signal_bits)
+        else:
+            # Simple copy
+            sdma_ep.put(src_rank, dst_rank, channel, src_ptr, dst_ptr, size)
+
+        if not async_op:
+            sdma_ep.quiet(src_rank, dst_rank, channel)
+
+    def put_tile(
+        self,
+        tile,
+        dst_rank: int,
+        dst_ptr: int,
+        dst_stride: int,
+        wait_flag: int = None,
+        wait_value: int = None,
+        signal_flag: int = None,
+        signal_value: int = 1,
+        async_op: bool = False,
+        channel: int = 0,
+    ):
+        """
+        2D tile transfer with optional wait/signal (sub-window copy).
+
+        Low-level API - caller provides pre-translated pointers for performance.
+
+        Args:
+            tile: Pre-configured sdma_ep.Tile object with data pointer and dimensions set
+            dst_rank: Destination rank
+            dst_ptr: Destination pointer (already translated to remote address space)
+            dst_stride: Destination row stride in bytes
+            wait_flag: Optional LOCAL flag pointer to poll before transfer
+            wait_value: Expected value for wait_flag
+            signal_flag: Optional REMOTE flag pointer to atomic-add after transfer (already translated)
+            signal_value: Value to add to signal_flag
+            async_op: If True, don't wait for completion
+            channel: SDMA channel to use
+
+        Examples:
+            >>> from xio import sdma_ep
+            >>> tile = sdma_ep.Tile()
+            >>> tile.pid_m = 0
+            >>> tile.pid_n = 0
+            >>> tile.block_m = 256
+            >>> tile.block_n = 256
+            >>> tile.elem_size = A.element_size()
+            >>> tile.src_stride = A.stride(0) * tile.elem_size
+            >>> tile.data = A.data_ptr()
+            >>> dst_ptr = shmem.translate(A.data_ptr(), src_rank, dst_rank)
+            >>> dst_stride = A.stride(0) * tile.elem_size
+            >>> wait_ptr = flag.data_ptr()
+            >>> signal_ptr = shmem.translate(flag.data_ptr(), src_rank, dst_rank)
+            >>> shmem.put_tile(tile, dst_rank=1, dst_ptr=dst_ptr, dst_stride=dst_stride,
+            ...               wait_flag=wait_ptr, wait_value=256, signal_flag=signal_ptr)
+        """
+        src_rank = self.get_rank()
+
+        wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
+        signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, default_bits=32)
+
+        has_wait = wait_ptr != 0
+        has_signal = signal_ptr != 0
+
+        if has_wait and has_signal:
+            # Wait + tile copy + signal (two calls)
+            wait_val = int(wait_value if wait_value is not None else 0)
+            signal_val = int(signal_value)
+            sdma_ep.wait_flag_then_put_tile(
+                src_rank, dst_rank, channel, wait_ptr, wait_val, tile, int(dst_ptr), int(dst_stride), wait_bits
+            )
+            sdma_ep.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
+        elif has_wait:
+            # Wait + tile copy
+            wait_val = int(wait_value if wait_value is not None else 0)
+            sdma_ep.wait_flag_then_put_tile(
+                src_rank, dst_rank, channel, wait_ptr, wait_val, tile, int(dst_ptr), int(dst_stride), wait_bits
+            )
+        elif has_signal:
+            # Tile copy + signal
+            signal_val = int(signal_value)
+            sdma_ep.put_tile_signal(
+                src_rank, dst_rank, channel, tile, int(dst_ptr), int(dst_stride), signal_ptr, signal_val, signal_bits
+            )
+        else:
+            # Simple tile copy
+            sdma_ep.put_tile(src_rank, dst_rank, channel, tile, int(dst_ptr), int(dst_stride))
+
+        if not async_op:
+            sdma_ep.quiet(src_rank, dst_rank, channel)
+
+    def put_tiles(
+        self,
+        tiles,
+        dst_rank: int,
+        dst_ptrs,
+        dst_strides,
+        wait_flag: int = None,
+        wait_value: int = None,
+        signal_flag: int = None,
+        signal_value: int = 1,
+        async_op: bool = False,
+        channel: int = 0,
+    ):
+        """
+        Batched 2D tile transfer with optional shared wait/signal.
+
+        Args:
+            tiles: Sequence of pre-configured sdma_ep.Tile objects
+            dst_rank: Destination rank
+            dst_ptrs: Sequence of translated destination pointers
+            dst_strides: Sequence of destination row strides in bytes
+            wait_flag: Optional LOCAL flag pointer to poll before all transfers
+            wait_value: Expected value for wait_flag
+            signal_flag: Optional REMOTE flag pointer to atomic-add after all transfers
+            signal_value: Value to add to signal_flag
+            async_op: If True, don't wait for completion
+            channel: SDMA channel to use
+        """
+        src_rank = self.get_rank()
+
+        if len(tiles) != len(dst_ptrs) or len(tiles) != len(dst_strides):
+            raise ValueError("tiles, dst_ptrs, and dst_strides must have the same length")
+
+        wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
+        signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, default_bits=32)
+
+        has_wait = wait_ptr != 0
+        has_signal = signal_ptr != 0
+
+        dst_ptr_list = [int(p) for p in dst_ptrs]
+        dst_stride_list = [int(s) for s in dst_strides]
+
+        if has_wait and has_signal:
+            # Wait + tiles copy + signal (two calls)
+            wait_val = int(wait_value if wait_value is not None else 0)
+            signal_val = int(signal_value)
+            sdma_ep.wait_flag_then_put_tiles(
+                src_rank, dst_rank, channel, wait_ptr, wait_val, list(tiles), dst_ptr_list, dst_stride_list, wait_bits
+            )
+            sdma_ep.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
+        elif has_wait:
+            # Wait + tiles copy
+            wait_val = int(wait_value if wait_value is not None else 0)
+            sdma_ep.wait_flag_then_put_tiles(
+                src_rank, dst_rank, channel, wait_ptr, wait_val, list(tiles), dst_ptr_list, dst_stride_list, wait_bits
+            )
+        elif has_signal:
+            # Tiles copy + signal (loop + signal)
+            signal_val = int(signal_value)
+            sdma_ep.put_tiles(src_rank, dst_rank, channel, list(tiles), dst_ptr_list, dst_stride_list)
+            sdma_ep.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
+        else:
+            # Simple tiles copy
+            sdma_ep.put_tiles(src_rank, dst_rank, channel, list(tiles), dst_ptr_list, dst_stride_list)
+
+        if not async_op:
+            sdma_ep.quiet(src_rank, dst_rank, channel)
+
+    def quiet(self, dst_rank: int = None, channel: int = 0):
+        """
+        Wait for all outstanding SDMA operations to complete.
+
+        Args:
+            dst_rank: If specified, wait only for ops to this rank.
+                     If None, wait for ops to all ranks.
+            channel: SDMA channel
+
+        Example:
+            >>> shmem.put(tensor, dst_rank=1, async_op=True)
+            >>> shmem.quiet(dst_rank=1)  # Wait for completion
+            >>> shmem.quiet()  # Wait for all ranks
+        """
+        src_rank = self.get_rank()
+        if dst_rank is not None:
+            sdma_ep.quiet(src_rank, dst_rank, channel)
+        else:
+            # Quiet to all ranks
+            for rank in range(self.get_num_ranks()):
+                sdma_ep.quiet(src_rank, rank, channel)
 
     def _build_device_context(self):
         """
