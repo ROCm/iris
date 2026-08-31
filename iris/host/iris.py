@@ -918,58 +918,13 @@ class Iris:
         """
         return self.heap_bases
 
-    def get_peer_bases(self, tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Return the peer base-address table for a symmetric tensor.
-
-        This is the tensor-scoped form of :meth:`get_heap_bases`, and the host
-        half of the allocator-agnostic interface. Device translation needs one
-        thing -- a device-resident table of backing-allocation bases indexed by
-        rank -- and asking a tensor for its table rather than asking the context
-        for a global one is what lets a single kernel consume tensors from
-        different providers.
-
-        Iris maps every symmetric tensor through one context-wide heap today, so
-        every Iris tensor returns the same table. The call shape is what matters:
-        kernels written against it stop depending on the Iris context.
-
-        Args:
-            tensor (torch.Tensor): Tensor on the Iris symmetric heap.
-
-        Returns:
-            torch.Tensor: ``int64[world_size]`` device-resident base addresses,
-            indexed by rank. ``peer_bases[cur_rank]`` is this rank's base, which
-            is the value device-side translation subtracts.
-
-        Raises:
-            ValueError: If the tensor is not on the Iris symmetric heap.
-
-        Example:
-            >>> ctx = iris.iris(1 << 20)
-            >>> tensor = ctx.zeros(1024, dtype=torch.float32)
-            >>> peer_bases = ctx.get_peer_bases(tensor)
-        """
-        if not self.is_symmetric(tensor):
-            raise ValueError(
-                "tensor is not on the Iris symmetric heap; allocate it with an Iris "
-                "creation op or import it with as_symmetric()"
-            )
-        return self.heap_bases
-
     def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Allocate a symmetric tensor together with its peer base table.
+        Allocate a symmetric tensor and return it with its peer-base table.
 
-        This is the allocator-agnostic allocation entry point. Every provider
-        exposes the same call, so kernels written against the returned pair run
-        unchanged on tensors from any of them::
-
-            tensor, peer_bases = provider.allocate_symmetric(1024, dtype=torch.float32)
-            kernel[grid](tensor, peer_bases, target_rank, CUR_RANK=rank, ...)
-
-        The tensor and its table are passed to kernels as two separate arguments
-        -- a pointer and a tensor -- rather than bound into one struct, so this
-        works on the older Triton releases pinned in several environments.
+        Kernels take the pair as two ordinary arguments -- a pointer and a
+        tensor -- and inline the address translation, so the same device code
+        works for a tensor from any provider that returns this shape.
 
         Args:
             *size (int...): Shape of the tensor, as a sequence of integers or a
@@ -978,8 +933,9 @@ class Iris:
                 default dtype.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: The tensor, and the ``int64``
-            peer base table for its backing allocation.
+            tuple[torch.Tensor, torch.Tensor]: The tensor, uninitialized, and an
+            ``int64`` device-resident table of base addresses indexed by rank.
+            ``peer_bases[cur_rank]`` is the base translation subtracts.
 
         Note:
             Collective. All ranks must call this together, as with the other
@@ -988,10 +944,8 @@ class Iris:
         Example:
             >>> ctx = iris.iris(1 << 20)
             >>> tensor, peer_bases = ctx.allocate_symmetric(1024, dtype=torch.float32)
-            >>> tensor.shape  # torch.Size([1024])
         """
-        tensor = self.zeros(*size, dtype=dtype)
-        return tensor, self.get_peer_bases(tensor)
+        return self.empty(*size, dtype=dtype), self.heap_bases
 
     def _build_device_context(self):
         """
