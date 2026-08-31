@@ -47,8 +47,19 @@ def _put_translated_kernel(
     remote_base_byte = tl.cast(remote_base, tl.pointer_type(tl.int8))
     remote_dst = tl.cast(remote_base_byte + offset, dst.dtype)
 
+    # Re-apply the contiguity hint by hand. iris.load/store take a `hint` that
+    # does this inside __translate, and every production collective passes one;
+    # inlining the translation drops it unless the author puts it back. Manual
+    # translation buys control over hoisting, not a free win over the helper.
+    #
+    # It has to go here rather than on remote_dst: translating the base once and
+    # indexing after leaves the translated pointer scalar, and max_contiguous
+    # takes a block whose shape matches the hint.
+    remote_ptrs = remote_dst + offsets
+    remote_ptrs = tl.max_contiguous(tl.multiple_of(remote_ptrs, BLOCK_SIZE), BLOCK_SIZE)
+
     values = tl.load(src + offsets, mask=mask)
-    tl.store(remote_dst + offsets, values, mask=mask)
+    tl.store(remote_ptrs, values, mask=mask)
 
 
 def test_allocate_symmetric_descriptor():
