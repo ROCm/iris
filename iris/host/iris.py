@@ -918,6 +918,35 @@ class Iris:
         """
         return self.heap_bases
 
+    def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Allocate a symmetric tensor and return it with its peer-base table.
+
+        Kernels take the pair as two ordinary arguments -- a pointer and a
+        tensor -- and inline the address translation, so the same device code
+        works for a tensor from any provider that returns this shape.
+
+        Args:
+            *size (int...): Shape of the tensor, as a sequence of integers or a
+                single collection.
+            dtype (torch.dtype, optional): Element type. Defaults to the torch
+                default dtype.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: The tensor, uninitialized, and an
+            ``int64`` device-resident table of base addresses indexed by rank.
+            ``peer_bases[cur_rank]`` is the base translation subtracts.
+
+        Note:
+            Collective. All ranks must call this together, as with the other
+            Iris allocation ops.
+
+        Example:
+            >>> ctx = iris.iris(1 << 20)
+            >>> tensor, peer_bases = ctx.allocate_symmetric(1024, dtype=torch.float32)
+        """
+        return self.empty(*size, dtype=dtype), self.heap_bases
+
     def _build_device_context(self):
         """
         Build and cache the device context tensor.
