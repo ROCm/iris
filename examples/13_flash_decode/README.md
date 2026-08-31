@@ -21,9 +21,13 @@ We perform comparisons against the RCCL baseline.
 
 To simply do a test run of the code, run:
 ```terminal
-python examples/13_flash_decode/example_run.py
+torchrun --nproc_per_node=<num_gpus> --standalone examples/13_flash_decode/example.py
 ```
-This example will run by default on 8 GPUs. Use the `--num_ranks` flag to select the number of GPUs.
+
+Pass `--validate` to verify the output against a PyTorch reference:
+```terminal
+torchrun --nproc_per_node=<num_gpus> --standalone examples/13_flash_decode/example.py --validate
+```
 
 ### Validation
 

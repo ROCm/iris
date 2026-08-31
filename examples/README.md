@@ -80,7 +80,7 @@ python examples/11_gemm_all_scatter_producer_consumer/benchmark.py --benchmark -
 python examples/12_gemm_all_scatter_bulk_synchronous/benchmark.py --benchmark --validate --num_ranks 8
 
 # Flash Decode Attention - simple example run
-python examples/13_flash_decode/example_run.py --num_ranks 8
+torchrun --nproc_per_node=8 --standalone examples/13_flash_decode/example.py
 
 # All-Gather + GEMM - Pull model
 python examples/14_all_gather_gemm/example_run_pull.py --num_ranks 8
