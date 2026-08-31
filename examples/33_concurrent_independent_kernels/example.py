@@ -13,8 +13,10 @@ kernels contend only for GPU resources (CUs, memory bandwidth, fabric).
 This is the "concurrent" overlap model. Compare with example 34, which fuses
 both into a single persistent kernel with two work-stealing queues.
 
-The CU split is controlled by --comm-wgs: the comm kernel gets that many
-workgroups and the GEMM kernel gets the rest.
+--gemm_cus and --comm_cus set each kernel's grid. Because these are two
+independent kernels on two streams, the counts are a real partition of the
+device -- and unlike the fused variant they may sum to more than cu_count,
+deliberately oversubscribing.
 
 Run with:
     torchrun --nproc_per_node=<num_gpus> --standalone example.py [--validate]
@@ -35,12 +37,25 @@ def parse_args():
         description="Two concurrent independent kernels: GEMM + all-gather",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("-m", type=int, default=2048, help="GEMM M dimension")
-    parser.add_argument("-n", type=int, default=1024, help="GEMM N dimension")
-    parser.add_argument("-k", type=int, default=2048, help="GEMM K dimension")
-    parser.add_argument("--comm-rows", type=int, default=256, help="All-gather rows per rank")
-    parser.add_argument("--comm-cols", type=int, default=512, help="All-gather columns")
-    parser.add_argument("--comm-wgs", type=int, default=None, help="Workgroups for the comm kernel (default: cu//8)")
+    parser.add_argument("--gemm_m", type=int, default=2048, help="GEMM M dimension")
+    parser.add_argument("--gemm_n", type=int, default=1024, help="GEMM N dimension")
+    parser.add_argument("--gemm_k", type=int, default=2048, help="GEMM K dimension")
+    parser.add_argument("--comm_m", type=int, default=256, help="All-gather rows, per rank")
+    parser.add_argument("--comm_n", type=int, default=512, help="All-gather columns")
+    parser.add_argument(
+        "--gemm_cus",
+        type=int,
+        default=None,
+        help="CUs for the GEMM kernel (default: cu_count - comm_cus)",
+    )
+    parser.add_argument(
+        "--comm_cus",
+        type=int,
+        default=None,
+        help="CUs for the all-gather kernel (default: cu_count // 8). "
+        "These are two separate kernels on two streams, so the counts are a real "
+        "partition -- and may oversubscribe (sum > cu_count) on purpose.",
+    )
     parser.add_argument("--heap_size", type=int, default=1 << 33, help="Iris heap size")
     parser.add_argument("--datatype", type=str, default="fp16", choices=["fp16", "bf16"], help="Data type")
     parser.add_argument("-v", "--validate", action="store_true", help="Validate both halves against references")
@@ -61,17 +76,24 @@ def main():
 
     dtype_map = {"fp16": torch.float16, "bf16": torch.bfloat16}
     dtype = dtype_map[args["datatype"]]
-    M, N, K = args["m"], args["n"], args["k"]
+    M, N, K = args["gemm_m"], args["gemm_n"], args["gemm_k"]
 
-    # All-gather operands. Rows must tile cleanly across ranks.
-    comm_rows = args["comm_rows"] * world_size
-    comm_cols = args["comm_cols"]
+    # All-gather source is this rank's block: comm_m is PER RANK, exactly as in
+    # example 34. The same flag value means the same tensor in both examples at
+    # every world size.
+    comm_rows = args["comm_m"]
+    comm_cols = args["comm_n"]
 
-    # CU split between the two kernels
-    comm_wgs = args["comm_wgs"] if args["comm_wgs"] is not None else max(1, cu_count // 8)
-    gemm_wgs = cu_count - comm_wgs
-    if gemm_wgs < 1:
-        raise ValueError(f"--comm-wgs ({comm_wgs}) leaves no CUs for the GEMM (cu_count={cu_count})")
+    # CU counts. These are two independent persistent kernels on separate streams,
+    # so each count is that kernel's grid -- a real allocation, not a starting
+    # position. Oversubscribing (sum > cu_count) is permitted and occasionally
+    # useful; we only require each side to be non-empty.
+    comm_cus = args["comm_cus"] if args["comm_cus"] is not None else max(1, cu_count // 8)
+    gemm_cus = args["gemm_cus"] if args["gemm_cus"] is not None else cu_count - comm_cus
+    if gemm_cus < 1:
+        raise ValueError(f"--gemm_cus must be >= 1, got {gemm_cus}")
+    if comm_cus < 1:
+        raise ValueError(f"--comm_cus must be >= 1, got {comm_cus}")
 
     # GEMM operands (independent of the collective)
     torch.manual_seed(42 + rank)
@@ -85,10 +107,15 @@ def main():
     comm_dst = ctx.zeros((world_size * comm_rows, comm_cols), device="cuda", dtype=dtype)
 
     if rank == 0:
+        total_cus = gemm_cus + comm_cus
+        oversub = " OVERSUBSCRIBED" if total_cus > cu_count else ""
         ctx.info(
             f"concurrent mode: GEMM ({M}x{K} @ {K}x{N}) || all_gather "
             f"({comm_rows}x{comm_cols} -> {world_size * comm_rows}x{comm_cols}), "
-            f"gemm_wgs={gemm_wgs} comm_wgs={comm_wgs} cu={cu_count}"
+            f"gemm_cus={gemm_cus} comm_cus={comm_cus} "
+            f"sum={total_cus} cu_count={cu_count}{oversub} "
+            f"[hard partition: 2 kernels, 2 streams -- cf. ex34 where the same "
+            f"numbers are initial placement and stealing rebalances]"
         )
 
     ctx.barrier()
@@ -100,8 +127,8 @@ def main():
         C=C,
         comm_dst=comm_dst,
         mode="concurrent",
-        gemm_wgs=gemm_wgs,
-        comm_wgs=comm_wgs,
+        gemm_wgs=gemm_cus,
+        comm_wgs=comm_cus,
     )
     torch.cuda.synchronize()
     ctx.barrier()
