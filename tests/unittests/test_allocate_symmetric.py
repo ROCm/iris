@@ -81,7 +81,10 @@ def test_view_translates_against_allocation_root():
     target_rank = (rank + 1) % world_size
 
     n_elements = 512
-    offset = 128
+    # Any non-zero start works. All that matters is that the view does not
+    # begin at the allocation base, so translating against the view pointer
+    # instead of the heap base would land somewhere visibly wrong.
+    view_start = 128
 
     try:
         src, _ = ctx.allocate_symmetric(n_elements, dtype=torch.float32)
@@ -89,7 +92,7 @@ def test_view_translates_against_allocation_root():
 
         # The peer tuple for a view describes the view's region, not the
         # allocation base.
-        view = dst[offset:]
+        view = dst[view_start:]
         view_peers = ctx.peer_views(view)
         assert view_peers[rank].data_ptr() == view.data_ptr()
 
@@ -108,11 +111,11 @@ def test_view_translates_against_allocation_root():
         ctx.barrier()
 
         source_rank = (rank - 1) % world_size
-        torch.testing.assert_close(dst[offset:], torch.full_like(dst[offset:], source_rank + 1))
-        torch.testing.assert_close(dst[:offset], torch.full_like(dst[:offset], -1.0))
+        torch.testing.assert_close(dst[view_start:], torch.full_like(dst[view_start:], source_rank + 1))
+        torch.testing.assert_close(dst[:view_start], torch.full_like(dst[:view_start], -1.0))
 
         if world_size > 1:
-            assert dst[offset].item() != rank + 1
+            assert dst[view_start].item() != rank + 1
     finally:
         ctx.barrier()
         del ctx

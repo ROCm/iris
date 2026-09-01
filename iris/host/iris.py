@@ -952,13 +952,19 @@ class Iris:
         if not self.is_symmetric(tensor):
             raise ValueError("tensor is not on the Iris symmetric heap")
 
-        offset = tensor.data_ptr() - int(self.heap_bases[self.cur_rank].item())
+        # Distance in bytes from this rank's heap base to the tensor. The heap
+        # is symmetric -- every rank lays out the same allocations in the same
+        # order -- so the same distance into another rank's heap names that
+        # rank's copy of this same buffer. Taking it from the heap base rather
+        # than from an allocation base is what makes views work: a slice sits
+        # further in, so its peers land the same distance further in.
+        heap_offset = tensor.data_ptr() - int(self.heap_bases[self.cur_rank].item())
         size_bytes = tensor.numel() * tensor.element_size()
         shape = tuple(tensor.shape)
 
         return tuple(
             tensor_from_ptr(
-                int(self.heap_bases[r].item()) + offset,
+                int(self.heap_bases[r].item()) + heap_offset,
                 size_bytes,
                 dtype=tensor.dtype,
                 device=self.device,
