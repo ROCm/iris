@@ -918,6 +918,65 @@ class Iris:
         """
         return self.heap_bases
 
+    def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Allocate a symmetric tensor and return it with a peer pointer table.
+
+        The second value is an ``int64[world_size]`` device tensor whose entry
+        ``r`` is the address of this allocation **on rank r** -- already
+        translated. ``peer_ptrs[cur_rank]`` is the local tensor's own address.
+
+        This differs from ``get_heap_bases()`` in what the table holds. Heap
+        bases require the kernel to subtract its own base and add the peer's,
+        per access; a pointer table has that subtraction already done on the
+        host, so the kernel loads one value and uses it::
+
+            dst = tl.load(peer_ptrs + target_rank).to(src.dtype, bitcast=True)
+            dst = tl.multiple_of(dst, 16)
+            tl.store(dst + offsets, data, mask=mask)
+
+        The index may be a runtime value, so a kernel can select a peer without
+        unrolling over ranks, and the table is a fixed size regardless of world
+        size.
+
+        Warning:
+            The ``multiple_of`` above is not optional. A pointer that comes out
+            of memory carries no alignment information, so without it the
+            compiler emits narrow accesses -- measured on gfx942 as 4x
+            ``buffer_store_dword`` instead of 1x ``buffer_store_dwordx4``. The
+            failure is silent: the kernel is still correct, just four times
+            narrower per store. 16 is the vector width and is true for any
+            allocation on the heap; do not assert a larger value.
+
+        Args:
+            *size (int...): Shape of the tensor, as a sequence of integers or a
+                single collection.
+            dtype (torch.dtype, optional): Element type. Defaults to the torch
+                default dtype.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: The local tensor, uninitialized,
+            and an ``int64[world_size]`` device tensor of translated addresses.
+
+        Note:
+            Collective. All ranks must call this together.
+
+        Example:
+            >>> ctx = iris.iris(1 << 20)
+            >>> tensor, peer_ptrs = ctx.allocate_symmetric(1024, dtype=torch.bfloat16)
+            >>> kernel[grid](tensor, peer_ptrs, target_rank, ...)
+        """
+        tensor = self.empty(*size, dtype=dtype)
+
+        # Distance in bytes from this rank's heap base to the tensor. The heap
+        # is symmetric, so the same distance into rank r's heap is rank r's
+        # copy of this buffer. Taking it from the heap base rather than an
+        # allocation base is what makes views translate correctly too.
+        heap_offset = tensor.data_ptr() - int(self.heap_bases[self.cur_rank].item())
+        peer_ptrs = self.heap_bases + heap_offset
+
+        return tensor, peer_ptrs
+
     def _build_device_context(self):
         """
         Build and cache the device context tensor.
