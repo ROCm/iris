@@ -962,14 +962,21 @@ class Iris:
         size_bytes = tensor.numel() * tensor.element_size()
         shape = tuple(tensor.shape)
 
+        # Build the view as raw bytes and reinterpret, rather than asking
+        # tensor_from_ptr for the element type directly. The CUDA array
+        # interface has no bfloat16 typestr, and CUDAArrayInterface maps it to
+        # "<f2" -- IEEE float16 -- so a bf16 view would come back silently
+        # misinterpreted. Going through uint8 avoids the typestr map entirely.
         return tuple(
             tensor_from_ptr(
                 int(self.heap_bases[r].item()) + heap_offset,
                 size_bytes,
-                dtype=tensor.dtype,
+                dtype=torch.uint8,
                 device=self.device,
-                shape=shape,
+                shape=(size_bytes,),
             )
+            .view(tensor.dtype)
+            .view(shape)
             for r in range(self.num_ranks)
         )
 
