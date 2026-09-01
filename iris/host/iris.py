@@ -68,6 +68,7 @@ from iris.mem.triton.tracing import Tracing as DeviceTracing  # noqa: F401
 
 # Import shared tensor-creation helpers
 from iris.host.memory import tensors as tensor_creation
+from iris.host.memory.tensor_utils import tensor_from_ptr
 from iris.host.platform.utils import is_simulation_env
 
 
@@ -917,6 +918,81 @@ class Iris:
             >>> print(heap_bases.shape)  # torch.Size([num_ranks])
         """
         return self.heap_bases
+
+    def peer_views(self, tensor: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """
+        Return one view per rank aliasing this tensor's region.
+
+        Address translation happens here, once, on the host: entry ``r`` is a
+        tensor covering the same offset and extent within rank ``r``'s heap.
+        Kernels index the tuple instead of doing pointer arithmetic, and Triton
+        flattens it into ordinary arguments, so peer addresses arrive as
+        scalars rather than as a device table a kernel has to load from.
+
+        Works for views as well as whole allocations: the offset is taken
+        relative to the heap base, so a slice maps to the same slice remotely.
+
+        Args:
+            tensor (torch.Tensor): Tensor on the Iris symmetric heap.
+
+        Returns:
+            tuple[torch.Tensor, ...]: ``world_size`` views. ``peers[cur_rank]``
+            aliases ``tensor`` itself.
+
+        Raises:
+            ValueError: If the tensor is not on the Iris symmetric heap.
+
+        Example:
+            >>> ctx = iris.iris(1 << 20)
+            >>> t = ctx.zeros(1024, dtype=torch.float32)
+            >>> peers = ctx.peer_views(t[128:])
+            >>> peers[ctx.get_rank()].data_ptr() == t[128:].data_ptr()
+            True
+        """
+        if not self.is_symmetric(tensor):
+            raise ValueError("tensor is not on the Iris symmetric heap")
+
+        offset = tensor.data_ptr() - int(self.heap_bases[self.cur_rank].item())
+        size_bytes = tensor.numel() * tensor.element_size()
+        shape = tuple(tensor.shape)
+
+        return tuple(
+            tensor_from_ptr(
+                int(self.heap_bases[r].item()) + offset,
+                size_bytes,
+                dtype=tensor.dtype,
+                device=self.device,
+                shape=shape,
+            )
+            for r in range(self.num_ranks)
+        )
+
+    def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        """
+        Allocate a symmetric tensor and return it with one view per rank.
+
+        See :meth:`peer_views` for what the second value is and why it is a
+        tuple rather than a device-resident table.
+
+        Args:
+            *size (int...): Shape of the tensor, as a sequence of integers or a
+                single collection.
+            dtype (torch.dtype, optional): Element type. Defaults to the torch
+                default dtype.
+
+        Returns:
+            tuple[torch.Tensor, tuple[torch.Tensor, ...]]: The local tensor, and
+            a tuple of ``world_size`` views.
+
+        Note:
+            Collective. All ranks must call this together.
+
+        Example:
+            >>> ctx = iris.iris(1 << 20)
+            >>> tensor, peers = ctx.allocate_symmetric(1024, dtype=torch.float32)
+        """
+        tensor = self.empty(*size, dtype=dtype)
+        return tensor, self.peer_views(tensor)
 
     def _build_device_context(self):
         """
