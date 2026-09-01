@@ -19,7 +19,7 @@ jobs:
           python-version: "3.10"
 
       - name: Install Ruff
-        run: pip install ruff
+        run: pip install "ruff<0.16"
 
       - name: Run Ruff and auto-fix issues
         run: ruff check . --fix

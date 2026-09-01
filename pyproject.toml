@@ -20,7 +20,7 @@ requires-python = ">=3.8"
 dependencies = [
     "numpy",
     "requests",
-    "ruff",
+    "ruff<0.16",  # 0.16 formats code blocks in Markdown; see lint.yml
     "tritonblas @ git+https://github.com/ROCm/tritonBLAS.git@muhaawad/iris",
 
 ]

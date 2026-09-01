@@ -13,6 +13,8 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
     export PATH=\"\$ROCM_PATH/bin:\$PATH\"
 
     # Install system packages
+    # see docker/Dockerfile -- base image pins a rotated-out internal ROCm apt repo
+    rm -f /etc/apt/sources.list.d/rocm.list && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         git wget ninja-build cmake python3-pip python3-dev build-essential jq libdwarf-dev && \
