@@ -88,12 +88,14 @@ def test_view_translates_against_allocation_root():
 
     try:
         src, _ = ctx.allocate_symmetric(n_elements, dtype=torch.float32)
-        dst, _ = ctx.allocate_symmetric(n_elements, dtype=torch.float32)
+        dst, dst_peers = ctx.allocate_symmetric(n_elements, dtype=torch.float32)
 
         # The peer tuple for a view describes the view's region, not the
         # allocation base.
+        # A view's peers are the allocation's peers, offset the same way --
+        # translation is relative to the heap base, not the tensor base.
         view = dst[view_start:]
-        view_peers = ctx.peer_views(view)
+        view_peers = tuple(p[view_start:] for p in dst_peers)
         assert view_peers[rank].data_ptr() == view.data_ptr()
 
         src.fill_(rank + 1)

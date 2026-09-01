@@ -919,55 +919,48 @@ class Iris:
         """
         return self.heap_bases
 
-    def peer_views(self, tensor: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """
-        Return one view per rank aliasing this tensor's region.
+        Allocate a symmetric tensor and return it with one view per rank.
 
-        Address translation happens here, once, on the host: entry ``r`` is a
-        tensor covering the same offset and extent within rank ``r``'s heap.
-        Kernels index the tuple instead of doing pointer arithmetic, and Triton
-        flattens it into ordinary arguments, so peer addresses arrive as
-        scalars rather than as a device table a kernel has to load from.
-
-        Works for views as well as whole allocations: the offset is taken
-        relative to the heap base, so a slice maps to the same slice remotely.
+        Address translation happens here, on the host, once per allocation:
+        entry ``r`` of the returned tuple is a tensor covering the same region
+        of rank ``r``'s heap, and ``peers[cur_rank]`` is the local tensor
+        itself. Kernels index the tuple instead of doing pointer arithmetic,
+        and Triton flattens it into ordinary arguments, so peer addresses
+        arrive as scalars rather than as a table the kernel has to load from.
 
         Args:
-            tensor (torch.Tensor): Tensor on the Iris symmetric heap.
+            *size (int...): Shape of the tensor, as a sequence of integers or a
+                single collection.
+            dtype (torch.dtype, optional): Element type. Defaults to the torch
+                default dtype.
 
         Returns:
-            tuple[torch.Tensor, ...]: ``world_size`` views. ``peers[cur_rank]``
-            aliases ``tensor`` itself.
+            tuple[torch.Tensor, tuple[torch.Tensor, ...]]: The local tensor,
+            uninitialized, and a tuple of ``world_size`` views.
 
-        Raises:
-            ValueError: If the tensor is not on the Iris symmetric heap.
+        Note:
+            Collective. All ranks must call this together.
 
         Example:
             >>> ctx = iris.iris(1 << 20)
-            >>> t = ctx.zeros(1024, dtype=torch.float32)
-            >>> peers = ctx.peer_views(t[128:])
-            >>> peers[ctx.get_rank()].data_ptr() == t[128:].data_ptr()
-            True
+            >>> tensor, peers = ctx.allocate_symmetric(1024, dtype=torch.float32)
+            >>> kernel[grid](tensor, peers, N_RANKS=ctx.get_num_ranks())
         """
-        if not self.is_symmetric(tensor):
-            raise ValueError("tensor is not on the Iris symmetric heap")
+        tensor = self.empty(*size, dtype=dtype)
 
         # Distance in bytes from this rank's heap base to the tensor. The heap
-        # is symmetric -- every rank lays out the same allocations in the same
-        # order -- so the same distance into another rank's heap names that
-        # rank's copy of this same buffer. Taking it from the heap base rather
-        # than from an allocation base is what makes views work: a slice sits
-        # further in, so its peers land the same distance further in.
+        # is symmetric, so the same distance into another rank's heap names
+        # that rank's copy of this buffer.
         heap_offset = tensor.data_ptr() - int(self.heap_bases[self.cur_rank].item())
         size_bytes = tensor.numel() * tensor.element_size()
         shape = tuple(tensor.shape)
 
-        # Build the view as raw bytes and reinterpret, rather than asking
-        # tensor_from_ptr for the element type directly. The CUDA array
-        # interface has no bfloat16 typestr, and CUDAArrayInterface maps it to
-        # "<f2" -- IEEE float16 -- so a bf16 view would come back silently
-        # misinterpreted. Going through uint8 avoids the typestr map entirely.
-        return tuple(
+        # Build each view as raw bytes and reinterpret. CUDAArrayInterface maps
+        # bfloat16 to "<f2" -- IEEE float16 -- so asking tensor_from_ptr for the
+        # element type directly returns a silently misinterpreted bf16 view.
+        peers = tuple(
             tensor_from_ptr(
                 int(self.heap_bases[r].item()) + heap_offset,
                 size_bytes,
@@ -979,33 +972,7 @@ class Iris:
             .view(shape)
             for r in range(self.num_ranks)
         )
-
-    def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
-        """
-        Allocate a symmetric tensor and return it with one view per rank.
-
-        See :meth:`peer_views` for what the second value is and why it is a
-        tuple rather than a device-resident table.
-
-        Args:
-            *size (int...): Shape of the tensor, as a sequence of integers or a
-                single collection.
-            dtype (torch.dtype, optional): Element type. Defaults to the torch
-                default dtype.
-
-        Returns:
-            tuple[torch.Tensor, tuple[torch.Tensor, ...]]: The local tensor, and
-            a tuple of ``world_size`` views.
-
-        Note:
-            Collective. All ranks must call this together.
-
-        Example:
-            >>> ctx = iris.iris(1 << 20)
-            >>> tensor, peers = ctx.allocate_symmetric(1024, dtype=torch.float32)
-        """
-        tensor = self.empty(*size, dtype=dtype)
-        return tensor, self.peer_views(tensor)
+        return tensor, peers
 
     def _build_device_context(self):
         """
