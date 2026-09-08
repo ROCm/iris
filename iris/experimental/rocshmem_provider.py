@@ -16,14 +16,16 @@ The table comes from ``rocshmem_ptr(base, peer)``, OpenSHMEM's ``shmem_ptr``: an
 address in this process's own address space for the peer's counterpart of a
 symmetric object, or NULL when that peer is not reachable by direct load/store.
 
-One table serves every allocation. rocSHMEM's peer mapping is a single linear
-translation of the whole symmetric heap, so the offset between a local address
-and its counterpart on a given peer is the same constant everywhere in the heap,
-whatever allocation it belongs to. Any symmetric address therefore anchors a
-table valid for all of them -- which also means rocSHMEM's heap base, which it
-does not expose publicly, is never needed. That property matters because
-iris.copy takes one ``heap_bases`` and translates two pointers against it; a
-provider handing out per-allocation tables could not drive it.
+The per-peer offsets are queried once. rocSHMEM's peer mapping is a single
+linear translation of the whole symmetric heap, so the offset from a local
+address to its counterpart on a given peer is the same constant everywhere in
+the heap. Only those offsets are cached; each allocation's table is materialised
+from its own base, so ``peer_bases[local_rank]`` is always that allocation's
+base. rocSHMEM's heap base, which it does not expose publicly, is never needed.
+
+Because the offsets are shared, a table built for one allocation still
+translates pointers belonging to another. iris.copy relies on that: it takes one
+``heap_bases`` and translates two pointers against it.
 
 Scope is intra-node. A peer not reachable by direct load/store gets a base of 0,
 which would translate to a wild pointer rather than an error, so
@@ -84,8 +86,11 @@ class RocshmemProvider:
     def __init__(self, device: str | None = None):
         self.cur_rank = rshmem.rocshmem_my_pe()
         self.num_ranks = rshmem.rocshmem_n_pes()
-        self.device = device or f"cuda:{torch.cuda.current_device()}"
-        self._context_bases: torch.Tensor | None = None
+        self._device = device
+        # peer -> byte offset from a local address to its counterpart on that
+        # peer, or None when the peer is not reachable by load/store. Constant
+        # across the heap, so it is computed once from the first allocation.
+        self._deltas: list[int | None] | None = None
 
     # ── table form ───────────────────────────────────────────────────────────
 
@@ -94,14 +99,9 @@ class RocshmemProvider:
 
         Same signature and return shape as Iris.allocate_symmetric, so the same
         device kernels drive either provider.
-
-        The table is context-wide: it is built once from the first symmetric
-        allocation and shared by every later one. See the module docstring for
-        why a single anchor suffices, and test_table_is_context_wide for the
-        check that it holds.
         """
-        tensor, _ = self.allocate_symmetric_map(*size, dtype=dtype)
-        return tensor, self.context_peer_bases(tensor)
+        tensor, amap = self.allocate_symmetric_map(*size, dtype=dtype)
+        return tensor, amap.peer_bases
 
     # ── descriptor form ──────────────────────────────────────────────────────
 
@@ -113,48 +113,53 @@ class RocshmemProvider:
         return tensor, self.symmetric_address_map(tensor)
 
     def symmetric_address_map(self, tensor: torch.Tensor) -> SymmetricAddressMap:
-        """Describe an already-allocated rocSHMEM tensor.
-
-        Yields both the base table and, from the same call, rocSHMEM's own
-        answer to whether each peer is reachable by direct load/store.
-        """
+        """Describe an already-allocated rocSHMEM tensor."""
         base = tensor.data_ptr()
-        bases, direct = [], []
-        for peer in range(self.num_ranks):
-            p = base if peer == self.cur_rank else int(rshmem.rocshmem_ptr(base, peer))
-            bases.append(p)
-            direct.append(p != 0)
+        deltas = self._peer_deltas(tensor)
+        bases = [0 if d is None else base + d for d in deltas]
+        return SymmetricAddressMap(
+            peer_bases=torch.tensor(bases, dtype=torch.int64, device=tensor.device),
+            local_rank=self.cur_rank,
+            allocation_base=base,
+            allocation_bytes=tensor.numel() * tensor.element_size(),
+            direct=tuple(d is not None for d in deltas),
+        )
 
-        # An all-zero table (bar our own entry) almost always means rocSHMEM was
-        # built with USE_IPC=OFF rather than that every peer is remote: with IPC
-        # compiled out rocshmem_ptr returns NULL unconditionally. Upstream
-        # defaults USE_IPC=ON. Failing here beats handing back a table whose
-        # zeros translate to wild pointers inside a kernel.
+    def _peer_deltas(self, anchor: torch.Tensor) -> list[int | None]:
+        """Per-peer byte offsets, queried once and reused.
+
+        rocshmem_ptr is a linear translation of the whole symmetric heap, so the
+        offset to a peer's counterpart is the same for every address in it. Only
+        the offsets are cached; each allocation's table is materialised from its
+        own base, which keeps peer_bases[local_rank] == that allocation's base.
+        """
+        if self._deltas is not None:
+            return self._deltas
+
+        base = anchor.data_ptr()
+        deltas: list[int | None] = []
+        for peer in range(self.num_ranks):
+            if peer == self.cur_rank:
+                deltas.append(0)
+                continue
+            p = int(rshmem.rocshmem_ptr(base, peer))
+            deltas.append(p - base if p else None)
+
+        # Every peer unreachable usually means rocSHMEM was built with
+        # USE_IPC=OFF rather than that every peer is remote: with IPC compiled
+        # out rocshmem_ptr returns NULL unconditionally. Upstream defaults it
+        # ON. Failing here beats handing back a table whose zeros would
+        # translate to wild pointers inside a kernel.
         peers = [r for r in range(self.num_ranks) if r != self.cur_rank]
-        if peers and not any(direct[r] for r in peers):
+        if peers and all(deltas[r] is None for r in peers):
             raise RuntimeError(
                 "rocshmem_ptr returned NULL for every peer. If any peer shares "
                 "this node, rocSHMEM was likely built with USE_IPC=OFF (upstream "
                 "defaults ON); check the USE_IPC line in the rocSHMEM banner."
             )
 
-        return SymmetricAddressMap(
-            peer_bases=torch.tensor(bases, dtype=torch.int64, device=self.device),
-            local_rank=self.cur_rank,
-            allocation_base=base,
-            allocation_bytes=tensor.numel() * tensor.element_size(),
-            direct=tuple(direct),
-        )
-
-    def context_peer_bases(self, anchor: torch.Tensor) -> torch.Tensor:
-        """One peer-base table valid for every symmetric allocation.
-
-        Built from the first symmetric tensor seen and cached. See
-        allocate_symmetric for why a single anchor suffices.
-        """
-        if self._context_bases is None:
-            self._context_bases = self.symmetric_address_map(anchor).peer_bases
-        return self._context_bases
+        self._deltas = deltas
+        return deltas
 
     # ── convenience ──────────────────────────────────────────────────────────
 

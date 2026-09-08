@@ -78,12 +78,27 @@ def test_peer_bases_shape_and_invariant(symmetric_pair):
     assert int(peer_bases[provider.get_rank()].item()) == data.data_ptr()
 
 
-def test_table_is_context_wide(provider):
-    """A table built from one allocation is valid for any other."""
+def test_peer_offsets_are_shared(provider):
+    """Each allocation gets its own table, built from shared per-peer offsets.
+
+    Equal offsets are what make a table from one allocation able to translate
+    another's pointers, which iris.copy depends on.
+    """
     a, bases_a = provider.allocate_symmetric(64, dtype=torch.float32)
     b, bases_b = provider.allocate_symmetric(64, dtype=torch.float32)
     try:
-        assert torch.equal(bases_a, bases_b)
+        assert int(bases_a[provider.get_rank()].item()) == a.data_ptr()
+        assert int(bases_b[provider.get_rank()].item()) == b.data_ptr()
+        direct = provider.symmetric_address_map(a).direct
+        for peer in range(provider.get_num_ranks()):
+            if not direct[peer]:
+                # Unreachable peers are 0 in every table, not base + offset.
+                assert int(bases_a[peer].item()) == 0
+                assert int(bases_b[peer].item()) == 0
+                continue
+            da = int(bases_a[peer].item()) - a.data_ptr()
+            db = int(bases_b[peer].item()) - b.data_ptr()
+            assert da == db, f"peer {peer}: offset {da} != {db}"
     finally:
         provider.barrier()
         provider.free(a)
