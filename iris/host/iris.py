@@ -934,8 +934,10 @@ class Iris:
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]: The tensor, uninitialized, and an
-            ``int64`` device-resident table of base addresses indexed by rank.
-            ``peer_bases[cur_rank]`` is the base translation subtracts.
+            ``int64[world_size]`` device-resident table whose entry ``r`` is the
+            address of *this tensor* on rank ``r``. ``peer_bases[cur_rank]`` is
+            the tensor's own ``data_ptr()``, which is the base device-side
+            translation subtracts.
 
         Note:
             Collective. All ranks must call this together, as with the other
@@ -945,7 +947,19 @@ class Iris:
             >>> ctx = iris.iris(1 << 20)
             >>> tensor, peer_bases = ctx.allocate_symmetric(1024, dtype=torch.float32)
         """
-        return self.empty(*size, dtype=dtype), self.heap_bases
+        tensor = self.empty(*size, dtype=dtype)
+
+        # Symmetric allocation means every rank placed this tensor at the same
+        # offset into its own heap, so shifting every heap base by that offset
+        # gives each rank's copy of this tensor. That symmetry is the heap's
+        # guarantee, not an assumption made here -- but the arithmetic below
+        # reads like generic pointer math without it.
+        #
+        # Kept entirely on device: heap_bases[cur_rank] stays a tensor rather
+        # than going through .item(), so this costs one vector-add and no
+        # device-to-host sync on the allocation path.
+        heap_offset = tensor.data_ptr() - self.heap_bases[self.cur_rank]
+        return tensor, self.heap_bases + heap_offset
 
     def _build_device_context(self):
         """

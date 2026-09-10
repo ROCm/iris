@@ -51,7 +51,7 @@ def _put_translated_kernel(
 
 
 def test_allocate_symmetric_returns_peer_bases():
-    """The table is device-resident, rank-indexed, and holds our own base."""
+    """The table is device-resident, rank-indexed, and holds this tensor's address per rank."""
     ctx = iris.iris(1 << 20)
 
     try:
@@ -65,11 +65,14 @@ def test_allocate_symmetric_returns_peer_bases():
         assert peer_bases.dtype in (torch.int64, torch.uint64)
         assert peer_bases.is_cuda
 
-        # peer_bases[cur_rank] is what translation subtracts, so the tensor has
-        # to sit inside the heap it points at.
-        local_base = int(peer_bases[ctx.get_rank()].item())
-        assert local_base <= tensor.data_ptr()
-        assert tensor.data_ptr() + tensor.nbytes <= local_base + ctx.heap_size
+        # Entries are the address of THIS tensor on each rank, so our own
+        # entry is our own data_ptr -- that is the base translation subtracts.
+        assert int(peer_bases[ctx.get_rank()].item()) == tensor.data_ptr()
+
+        # Every entry sits at the same offset into its rank's heap.
+        heap_bases = ctx.get_heap_bases()
+        offsets = {int(peer_bases[r].item()) - int(heap_bases[r].item()) for r in range(ctx.get_num_ranks())}
+        assert len(offsets) == 1
     finally:
         ctx.barrier()
         del ctx
@@ -94,6 +97,8 @@ def test_view_translates_against_allocation_root():
         src, _ = ctx.allocate_symmetric(n_elements, dtype=torch.float32)
         dst, dst_peer_bases = ctx.allocate_symmetric(n_elements, dtype=torch.float32)
 
+        # The table anchors on the allocation, not the view, so the view's
+        # own pointer is deliberately not in it.
         view = dst[offset:]
         assert view.data_ptr() != int(dst_peer_bases[rank].item())
 
