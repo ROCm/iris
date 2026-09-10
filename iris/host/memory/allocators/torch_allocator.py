@@ -8,9 +8,13 @@ Uses torch.empty() to allocate a large memory pool and manages
 sub-allocations within it using bump allocation.
 """
 
+import ctypes
+import ctypes.util
 import logging
 import math
+import mmap
 import numpy as np
+import os
 import torch
 from typing import Optional, Dict
 import struct
@@ -20,6 +24,31 @@ from iris.host.logging.logging import _log_rank
 from iris.host.platform.hip import export_dmabuf_handle, import_dmabuf_handle, destroy_external_memory
 from iris.host.distributed.fd_passing import send_fd, recv_fd, managed_fd
 from iris.host.platform.utils import is_simulation_env
+
+# Not exposed by the mmap module.
+MAP_FIXED = 0x10
+
+
+class _DeviceArray:
+    """Presents a raw device pointer to torch via the CUDA array interface.
+
+    The simulation heap is device memory that we have aliased onto shared host pages,
+    so there is no torch allocation to wrap -- only an address and a length.
+    """
+
+    def __init__(self, address: int, nbytes: int):
+        self.__cuda_array_interface__ = {
+            "data": (address, False),
+            "shape": (nbytes,),
+            "typestr": "|i1",
+            "strides": None,
+            "version": 2,
+        }
+
+
+def _device_tensor(address: int, nbytes: int) -> torch.Tensor:
+    """An int8 tensor over ``nbytes`` at device address ``address``."""
+    return torch.as_tensor(_DeviceArray(address, nbytes), device="cuda")
 
 
 class TorchAllocator(BaseAllocator):
@@ -51,27 +80,108 @@ class TorchAllocator(BaseAllocator):
             rank=cur_rank,
             num_ranks=num_ranks,
         )
+        self._shm_fd = None
+        self._shm_name = None
+        self._device_base = None
+        self._total_size = 0
+
         if is_simulation_env():
-            import json
+            self._shm_name = f"/iris-sim-heap-{os.environ.get('SLURM_JOB_ID', os.getppid())}"
+            total_size = heap_size * num_ranks
+            librt = ctypes.CDLL(ctypes.util.find_library("rt") or "librt.so.1", use_errno=True)
+            librt.shm_open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_uint]
+            librt.shm_open.restype = ctypes.c_int
+            self._librt = librt
 
-            # In simulation, each rank allocates n distinct buffers; memory_pool is a shallow view of the ith.
-            self.rank_bools = [torch.empty(heap_size, device=self.device, dtype=torch.int8) for _ in range(num_ranks)]
-            self.memory_pool = self.rank_bools[cur_rank]
+            if cur_rank == 0:
+                librt.shm_unlink(self._shm_name.encode())
+                fd = librt.shm_open(self._shm_name.encode(), os.O_CREAT | os.O_RDWR, 0o600)
+                if fd < 0:
+                    raise OSError(ctypes.get_errno(), f"shm_open create failed: {os.strerror(ctypes.get_errno())}")
+                os.ftruncate(fd, total_size)
+            else:
+                for _ in range(100):
+                    fd = librt.shm_open(self._shm_name.encode(), os.O_RDWR, 0)
+                    if fd >= 0:
+                        break
+                    import time
 
-            heap_views = [self.rank_bools[r].data_ptr() for r in range(num_ranks)]
-            out_path = f"iris_rank_{cur_rank}_allocator_views.json"
-            with open(out_path, "w") as f:
-                json.dump(
-                    {
-                        "rank": cur_rank,
-                        "num_ranks": num_ranks,
-                        "heap_views": [hex(b) for b in heap_views],
-                    },
-                    f,
-                    indent=2,
+                    time.sleep(0.05)
+                else:
+                    raise OSError(f"shm_open failed: rank 0 never created {self._shm_name}")
+
+            self._shm_fd = fd
+
+            # hipMalloc first, then alias the shm onto the address it returns.
+            #
+            # The two steps buy two different things and we need both. hipMalloc is what
+            # makes the region appear as an AllocPacket in this rank's roccap capture, so
+            # a replayed dispatch finds a legal mapping at the address it dereferences.
+            # The MAP_FIXED alias is what makes the bytes genuinely shared between
+            # processes, so a producer in one rank is observable by a consumer in another.
+            #
+            # hipHostRegister was the previous approach. It shares, but memory the process
+            # never allocated produces no allocation record in any rank's capture, so
+            # nothing downstream can replay it.
+            libhip = ctypes.CDLL("libamdhip64.so", use_errno=True)
+            libhip.hipMalloc.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t]
+            libhip.hipMalloc.restype = ctypes.c_int
+            self._libhip = libhip
+
+            dptr = ctypes.c_void_p()
+            err = libhip.hipMalloc(ctypes.byref(dptr), ctypes.c_size_t(total_size))
+            if err != 0 or not dptr.value:
+                raise RuntimeError(f"hipMalloc({total_size}) failed in simulation mode: hipError {err}")
+            device_base = dptr.value
+
+            libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+            libc.mmap.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_size_t,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_long,
+            ]
+            libc.mmap.restype = ctypes.c_void_p
+            self._libc = libc
+
+            aliased = libc.mmap(
+                ctypes.c_void_p(device_base),
+                ctypes.c_size_t(total_size),
+                mmap.PROT_READ | mmap.PROT_WRITE,
+                mmap.MAP_SHARED | MAP_FIXED,
+                fd,
+                0,
+            )
+            if aliased != device_base:
+                errno = ctypes.get_errno()
+                raise OSError(
+                    errno,
+                    f"MAP_FIXED of the shared heap over the device allocation failed "
+                    f"(wanted 0x{device_base:x}, got 0x{(aliased or 0):x}): {os.strerror(errno)}",
                 )
+
+            self._device_base = device_base
+            self._total_size = total_size
+
+            # Each rank keeps its own view of the whole heap; peer slices are plain offsets
+            # into it. Ranks are not required to agree on device_base -- rank r addresses
+            # peer p through r's own mapping, which is what get_heap_bases() reports.
+            my_offset = cur_rank * heap_size
+            self.memory_pool = _device_tensor(device_base + my_offset, heap_size)
+
+            _log_rank(
+                logging.INFO,
+                "TorchAllocator: sim hipMalloc+shm alias %s at 0x%x, rank %d slice at offset %d",
+                self._shm_name,
+                device_base,
+                cur_rank,
+                my_offset,
+                rank=cur_rank,
+                num_ranks=num_ranks,
+            )
         else:
-            self.rank_bools = None
             self.memory_pool = torch.empty(heap_size, device=self.device, dtype=torch.int8)
 
         self._peer_ext_mem_handles: Dict[int, object] = {}
@@ -151,6 +261,23 @@ class TorchAllocator(BaseAllocator):
         """
         heap_bases_array = np.zeros(self.num_ranks, dtype=np.uint64)
 
+        if is_simulation_env() and self._device_base is not None:
+            # One contiguous device allocation aliased onto the shared segment, so peer
+            # bases are offsets into it. Every base lies inside the region hipMalloc
+            # recorded, which is what keeps each of them replayable from this rank's cap.
+            for rank in range(self.num_ranks):
+                heap_bases_array[rank] = self._device_base + rank * self.heap_size
+            self.heap_bases_array = heap_bases_array
+            _log_rank(
+                logging.INFO,
+                "TorchAllocator: sim peer access via hipMalloc+shm alias at 0x%x, %d ranks",
+                self._device_base,
+                self.num_ranks,
+                rank=self.cur_rank,
+                num_ranks=self.num_ranks,
+            )
+            return
+
         if connections is not None:
             for handle in self._peer_ext_mem_handles.values():
                 try:
@@ -190,7 +317,7 @@ class TorchAllocator(BaseAllocator):
         self.heap_bases_array = heap_bases_array
 
     def close(self):
-        """Release peer external memory handles."""
+        """Release peer external memory handles and shm resources."""
         for handle in self._peer_ext_mem_handles.values():
             try:
                 destroy_external_memory(handle)
@@ -198,8 +325,34 @@ class TorchAllocator(BaseAllocator):
                 pass
         self._peer_ext_mem_handles.clear()
 
+        if self._device_base is not None:
+            # Drop the alias before freeing, so hipFree sees the mapping it handed out
+            # rather than the shared pages we put over it.
+            try:
+                self._libc.munmap(ctypes.c_void_p(self._device_base), ctypes.c_size_t(self._total_size))
+            except Exception:
+                pass
+            try:
+                self._libhip.hipFree(ctypes.c_void_p(self._device_base))
+            except Exception:
+                pass
+            self._device_base = None
+        if self._shm_fd is not None:
+            try:
+                os.close(self._shm_fd)
+            except Exception:
+                pass
+            self._shm_fd = None
+        if self._shm_name is not None and self.cur_rank == 0:
+            try:
+                self._librt.shm_unlink(self._shm_name.encode())
+            except Exception:
+                pass
+
     def get_device(self) -> torch.device:
         """Get the torch device."""
+        if is_simulation_env():
+            return torch.device(self.device)
         return self.memory_pool.device
 
     def import_external_tensor(self, external_tensor: torch.Tensor) -> torch.Tensor:

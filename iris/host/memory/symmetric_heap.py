@@ -400,8 +400,12 @@ class SymmetricHeap:
         from iris.host.platform.utils import is_simulation_env
 
         if is_simulation_env():
+            # The simulation allocator maps every peer slice itself, so ask it for the
+            # bases rather than reusing the gathered ones.
+            all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
+            self.allocator.establish_peer_access(all_bases)
             for r in range(self.num_ranks):
-                self.heap_bases[r] = int(all_bases_arr[r])
+                self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
         else:
             all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
             self.allocator.establish_peer_access(all_bases, self.fd_conns)
