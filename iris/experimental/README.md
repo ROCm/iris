@@ -48,8 +48,16 @@ Two properties of the result are worth knowing:
 - Consequently rocSHMEM's **build options are fixed when `rocshmem4py` is
   built**, not when it is used.
 
-The wheel is CPython-ABI-tagged (`cp312`), so build it with the interpreter that
-will run it.
+The wheel is CPython-ABI-tagged (`cp312` above), so build it with the interpreter
+that will run it.
+
+CI does the same pip install from source, but from a checkout it already has
+rather than a `git+` URL — see `.github/scripts/install_rocshmem.sh`. Since it
+has to build rocSHMEM itself anyway, taking both from one checkout keeps the core
+and the bindings at the same revision; a `git+` URL would clone independently and
+could drift, which `find_package` would not catch because it only compares
+versions. If you are building both by hand, prefer the same: point
+`pip install` at your `python/rocshmem` directory rather than at the URL.
 
 ### Building rocSHMEM first
 

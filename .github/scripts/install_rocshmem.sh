@@ -69,6 +69,14 @@ if ! grep -qi "define ROCSHMEM_USE_IPC\|USE_IPC" \
     echo "==> note: could not confirm USE_IPC from headers; provider will report at run time"
 fi
 
+# A pip install from source, same as the one-liner in iris/experimental/README.md
+# but pointed at the checkout above instead of a git+ URL. That is deliberate: a
+# git+ URL makes pip clone the monorepo again, independently, at whatever HEAD
+# develop happens to be at -- so the bindings could be built from a different
+# revision than the core installed above. find_package would not catch it, since
+# it only compares versions, and the bindings statically link the core. One
+# checkout for both makes the skew impossible, and saves a second clone.
+#
 # CMAKE_PREFIX_PATH is the documented way to point the bindings at an install;
 # setup.py forwards it to CMake as a cache variable so a rocSHMEM shipped under
 # /opt/rocm cannot shadow it. ROCSHMEM_HOME is no longer required.
