@@ -47,6 +47,14 @@ RUN git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e
 RUN pip3 install -e .
 ENV PYTHONPATH=$TRITON_PATH
 
+# rocSHMEM + rocshmem4py, for tests/unittests/test_rocshmem_provider.py. Without
+# it those tests skip: there is no prebuilt rocshmem4py wheel on any index, and
+# its bindings require an existing rocSHMEM install to build against.
+# gfx942 matches the MI325X CI runners; override ROCSHMEM_GPU_TARGETS for others.
+ENV ROCSHMEM_PREFIX=/opt/rocshmem
+COPY .github/scripts/install_rocshmem.sh /tmp/install_rocshmem.sh
+RUN ROCSHMEM_GPU_TARGETS=gfx942 bash /tmp/install_rocshmem.sh && rm /tmp/install_rocshmem.sh
+
 # Set up workspace
 WORKDIR /workspace
 

@@ -89,8 +89,11 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
         echo "[INFO] Using existing Docker image: $IMAGE_NAME"
     else
         echo "[INFO] Docker image $IMAGE_NAME not found, building..."
-        DOCKER_DIR="$(dirname "$(realpath "$0")")/../../docker"
-        if docker build -t "$IMAGE_NAME" "$DOCKER_DIR"; then
+        REPO_ROOT="$(dirname "$(realpath "$0")")/../.."
+        # Build from the repo root, not docker/, so the Dockerfile can COPY in
+        # .github/scripts/install_rocshmem.sh -- the same installer the Apptainer
+        # def file pulls in via %files. A docker/-only context cannot see it.
+        if docker build -t "$IMAGE_NAME" -f "$REPO_ROOT/docker/Dockerfile" "$REPO_ROOT"; then
             echo "[INFO] Built Docker image: $IMAGE_NAME"
         else
             echo "[ERROR] Docker build failed"

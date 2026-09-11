@@ -4,6 +4,13 @@
 Bootstrap: docker
 From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
 
+# The rocSHMEM installer is copied in rather than inlined, so it stays one
+# implementation shared with docker/Dockerfile. Caveat: container_build.sh caches
+# the image on the checksum of THIS def file only, so editing
+# install_rocshmem.sh alone reuses a stale image -- touch this file too.
+%files
+    .github/scripts/install_rocshmem.sh /opt/install_rocshmem.sh
+
 %post
     /bin/bash -c "
     # Set environment variables
@@ -37,6 +44,13 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
 
     # Make the venv writable by all
     chmod -R 777 /opt/venv
+
+    # rocSHMEM + rocshmem4py, for tests/unittests/test_rocshmem_provider.py.
+    # Without it those tests skip: rocshmem4py has no prebuilt wheel on any
+    # index, and its bindings need an existing rocSHMEM to build against.
+    # gfx942 matches the MI325X CI runners.
+    ROCSHMEM_GPU_TARGETS=gfx942 ROCSHMEM_PREFIX=/opt/rocshmem \
+        bash /opt/install_rocshmem.sh
     "
 
 %environment
@@ -52,6 +66,7 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
     export OMPI_ALLOW_RUN_AS_ROOT=1
     # Set required RCCL environment variable for ROCm
     export HSA_NO_SCRATCH_RECLAIM=1
+    export ROCSHMEM_PREFIX=/opt/rocshmem
 
 %runscript
     echo "Welcome to the ROCm-aware Apptainer image!"
