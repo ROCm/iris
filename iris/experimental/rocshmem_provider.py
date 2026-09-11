@@ -105,8 +105,8 @@ class RocshmemProvider:
     def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
         """Allocate a symmetric tensor and return it with its peer-base table.
 
-        Same signature and return shape as Iris.allocate_symmetric, so the same
-        device kernels drive either provider.
+        Returns the provider-facing shape symmetric allocation is converging on,
+        ``(tensor, peer_bases)``, so the same device kernels drive any provider.
 
         Collective: rocSHMEM allocation is, so every PE must call this the same
         number of times and in the same order.
