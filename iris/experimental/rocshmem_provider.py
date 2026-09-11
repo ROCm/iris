@@ -42,6 +42,14 @@ so ``import iris`` does not require rocshmem4py. Keep it that way: adding it to
 that package's eager imports would make a rocSHMEM install mandatory for every
 Iris user.
 
+The dependency is ``rocshmem4py``, a standalone Python package from the
+ROCm/rocm-systems repository rather than something a ROCm install provides. It
+does not link rocSHMEM at run time; it statically links it into its extension
+module, and its version records which rocSHMEM that was (e.g.
+``0.1.0+rocshmem3.7.0``). So installing it needs no separate rocSHMEM on the
+system, and the rocSHMEM build options it was compiled with -- ``USE_IPC`` in
+particular -- are fixed at its build time, not selectable later.
+
 The caller owns bootstrap and tensor lifetime; rocSHMEM must already be
 initialised:
 
@@ -99,6 +107,22 @@ class RocshmemProvider:
 
         Same signature and return shape as Iris.allocate_symmetric, so the same
         device kernels drive either provider.
+
+        Collective: rocSHMEM allocation is, so every PE must call this the same
+        number of times and in the same order.
+
+        Returns ``(tensor, peer_bases)`` where ``peer_bases`` is an
+        ``int64[num_ranks]`` tensor on the same device as ``tensor``, holding for
+        each peer the address of that peer's counterpart of this allocation, in
+        this process's address space. Its ``local_rank`` entry is this
+        allocation's own base, which is what Iris translation subtracts. A peer
+        not reachable by direct load/store is 0; ``allocate_symmetric_map``
+        returns the same thing plus the ``direct`` mask that says which, and
+        callers that may run inter-node should check it rather than launching
+        against a 0.
+
+        Hold the returned table for as long as the allocation lives rather than
+        re-deriving it per launch; it is built once here and does not change.
         """
         tensor, amap = self.allocate_symmetric_map(*size, dtype=dtype)
         return tensor, amap.peer_bases
@@ -113,7 +137,16 @@ class RocshmemProvider:
         return tensor, self.symmetric_address_map(tensor)
 
     def symmetric_address_map(self, tensor: torch.Tensor) -> SymmetricAddressMap:
-        """Describe an already-allocated rocSHMEM tensor."""
+        """Describe an already-allocated rocSHMEM tensor.
+
+        Materialises a fresh ``int64[num_ranks]`` table on each call. That is one
+        small device tensor per allocation on the normal path, since
+        ``allocate_symmetric`` calls this once; it is not meant to be called per
+        kernel launch. The table is not memoised on purpose: keying a cache by
+        ``data_ptr()`` would alias once an allocation is freed and its address
+        reused, and the result would be a silently wrong table rather than an
+        error.
+        """
         base = tensor.data_ptr()
         deltas = self._peer_deltas(tensor)
         bases = [0 if d is None else base + d for d in deltas]
@@ -167,6 +200,15 @@ class RocshmemProvider:
         rshmem_torch.barrier_all()
 
     def free(self, tensor: torch.Tensor):
+        """Release a symmetric allocation. Collective.
+
+        Explicit by necessity, not by preference. rocshmem_free is documented as
+        "a collective operation and must be called by all PEs", so it cannot be
+        driven from ``__del__`` or a weakref finalizer: Python decides when to
+        collect per process, and ranks that collect in different orders, or at
+        different times, would diverge and hang instead of raising. Freeing has
+        to stay where the caller can order it across ranks.
+        """
         rshmem_torch.free_tensor(tensor)
 
     def get_rank(self) -> int:
