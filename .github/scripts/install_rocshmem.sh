@@ -24,6 +24,11 @@ ROCSHMEM_REF="${ROCSHMEM_REF:-develop}"
 ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
 SRC="$(mktemp -d)"
 
+# rocSHMEM is built from source because the CI bases are ROCm 7.2.1 (apptainer)
+# and 7.1 (docker). ROCm 7.14 artifacts onward ship rocSHMEM's static library and
+# headers, so once a base image is that new this build can be dropped and only
+# the bindings below are needed. rocshmem4py has to be built either way until its
+# TheRock packaging lands.
 echo "==> rocSHMEM ${ROCSHMEM_REF} -> ${ROCSHMEM_PREFIX} (GPU_TARGETS=${ROCSHMEM_GPU_TARGETS})"
 
 # rocm-systems is a large monorepo and we need two directories out of it. Sparse
