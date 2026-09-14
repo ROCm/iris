@@ -51,7 +51,12 @@ ENV PYTHONPATH=$TRITON_PATH
 # it those tests skip: there is no prebuilt rocshmem4py wheel on any index, and
 # its bindings require an existing rocSHMEM install to build against.
 # gfx942 matches the MI325X CI runners; override ROCSHMEM_GPU_TARGETS for others.
-ENV ROCSHMEM_PREFIX=/opt/rocshmem
+# Diagnostic, remove once the provider tests pass in CI: rocSHMEM aborts inside
+# init with no message at all, and at info level it prints its config banner, the
+# env vars it actually saw, and the backend it selected. Without this the failure
+# is a bare SIGABRT.
+ENV ROCSHMEM_PREFIX=/opt/rocshmem \
+    ROCSHMEM_DEBUG_LEVEL=info
 COPY .github/scripts/install_rocshmem.sh /tmp/install_rocshmem.sh
 RUN ROCSHMEM_GPU_TARGETS=gfx942 bash /tmp/install_rocshmem.sh && rm /tmp/install_rocshmem.sh
 

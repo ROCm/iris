@@ -13,6 +13,8 @@ peers are not directly addressable, so it is inert rather than failing in a
 normal CI run. tests/manual_rocshmem_provider.py covers the multi-node case.
 """
 
+import os
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -49,6 +51,13 @@ def provider():
         "rocshmem4py", reason="rocSHMEM provider tests need rocshmem4py installed"
     )
     from iris.experimental.rocshmem_provider import RocshmemProvider
+
+    # init_rocshmem_by_uniqueid can abort the process rather than raise, and it
+    # does so before pytest can attribute the failure to anything. Write the
+    # context straight to fd 2 first, which survives both the capture and the
+    # abort, so a crash says what it was attempting.
+    os.write(2, f"[rank {dist.get_rank()}/{dist.get_world_size()}] "
+                f"rocshmem init, {torch.cuda.device_count()} visible GPUs\n".encode())
 
     # rocSHMEM initialises once per process, hence module scope. No finalize in
     # teardown: it would pull the runtime out from under anything else running.
