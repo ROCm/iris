@@ -65,8 +65,6 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
     # Set required RCCL environment variable for ROCm
     export HSA_NO_SCRATCH_RECLAIM=1
     export ROCSHMEM_PREFIX=/opt/rocshmem
-    # Diagnostic; see install_rocshmem.sh. Drop once the provider tests pass.
-    export ROCSHMEM_DEBUG_LEVEL=info
 
 %runscript
     echo "Welcome to the ROCm-aware Apptainer image!"

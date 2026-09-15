@@ -33,11 +33,6 @@ SRC="$(mktemp -d)"
 # would still be needed. The bases are ROCm 7.2.1 (apptainer) and 7.1 (docker)
 # today. rocshmem4py stays a source build either way until its TheRock packaging
 # lands.
-#
-# The images set ROCSHMEM_DEBUG_LEVEL=info alongside this. That is diagnostic
-# only, for a rocSHMEM init that aborts in CI with no message: at info level it
-# prints its config banner, the env vars it saw, and the backend it chose. Drop
-# it once the provider tests pass.
 echo "==> rocSHMEM ${ROCSHMEM_REF} -> ${ROCSHMEM_PREFIX} (GPU_TARGETS=${ROCSHMEM_GPU_TARGETS})"
 
 # rocm-systems is a large monorepo and we need two directories out of it. Sparse
