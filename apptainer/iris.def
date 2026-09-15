@@ -46,8 +46,8 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
     chmod -R 777 /opt/venv
 
     # rocSHMEM + rocshmem4py, so the provider tests run instead of skipping.
-    # See install_rocshmem.sh for the rationale. gfx942 = the MI325X runners.
-    ROCSHMEM_GPU_TARGETS=gfx942 ROCSHMEM_PREFIX=/opt/rocshmem \
+    # See install_rocshmem.sh for the rationale, including the two arches.
+    ROCSHMEM_GPU_TARGETS='gfx942;gfx950' ROCSHMEM_PREFIX=/opt/rocshmem \
         bash /opt/install_rocshmem.sh
     "
 

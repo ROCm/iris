@@ -49,11 +49,11 @@ ENV PYTHONPATH=$TRITON_PATH
 
 # rocSHMEM + rocshmem4py, so tests/unittests/test_rocshmem_provider.py runs
 # instead of skipping. See install_rocshmem.sh for why it is a source build and
-# why ROCSHMEM_DEBUG_LEVEL is set. gfx942 matches the MI325X CI runners.
+# why ROCSHMEM_DEBUG_LEVEL is set, and why it builds for two arches.
 ENV ROCSHMEM_PREFIX=/opt/rocshmem \
     ROCSHMEM_DEBUG_LEVEL=info
 COPY .github/scripts/install_rocshmem.sh /tmp/install_rocshmem.sh
-RUN ROCSHMEM_GPU_TARGETS=gfx942 bash /tmp/install_rocshmem.sh && rm /tmp/install_rocshmem.sh
+RUN ROCSHMEM_GPU_TARGETS='gfx942;gfx950' bash /tmp/install_rocshmem.sh && rm /tmp/install_rocshmem.sh
 
 # Set up workspace
 WORKDIR /workspace
