@@ -918,6 +918,49 @@ class Iris:
         """
         return self.heap_bases
 
+    def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Allocate a symmetric tensor and return it with its peer-base table.
+
+        Kernels take the pair as two ordinary arguments -- a pointer and a
+        tensor -- and inline the address translation, so the same device code
+        works for a tensor from any provider that returns this shape.
+
+        Args:
+            *size (int...): Shape of the tensor, as a sequence of integers or a
+                single collection.
+            dtype (torch.dtype, optional): Element type. Defaults to the torch
+                default dtype.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: The tensor, uninitialized, and an
+            ``int64[world_size]`` device-resident table whose entry ``r`` is the
+            address of *this tensor* on rank ``r``. ``peer_bases[cur_rank]`` is
+            the tensor's own ``data_ptr()``, which is the base device-side
+            translation subtracts.
+
+        Note:
+            Collective. All ranks must call this together, as with the other
+            Iris allocation ops.
+
+        Example:
+            >>> ctx = iris.iris(1 << 20)
+            >>> tensor, peer_bases = ctx.allocate_symmetric(1024, dtype=torch.float32)
+        """
+        tensor = self.empty(*size, dtype=dtype)
+
+        # Symmetric allocation means every rank placed this tensor at the same
+        # offset into its own heap, so shifting every heap base by that offset
+        # gives each rank's copy of this tensor. That symmetry is the heap's
+        # guarantee, not an assumption made here -- but the arithmetic below
+        # reads like generic pointer math without it.
+        #
+        # Kept entirely on device: heap_bases[cur_rank] stays a tensor rather
+        # than going through .item(), so this costs one vector-add and no
+        # device-to-host sync on the allocation path.
+        heap_offset = tensor.data_ptr() - self.heap_bases[self.cur_rank]
+        return tensor, self.heap_bases + heap_offset
+
     def _build_device_context(self):
         """
         Build and cache the device context tensor.
