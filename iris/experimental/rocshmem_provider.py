@@ -105,15 +105,14 @@ class RocshmemProvider:
     def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
         """Allocate a symmetric tensor and return it with its peer-base table.
 
-        Returns the provider-facing shape symmetric allocation is converging on,
-        ``(tensor, peer_bases)``, so the same device kernels drive any provider.
+        This is the provider-facing shape symmetric allocation is converging on,
+        so the same device kernels drive any provider.
 
         Collective: rocSHMEM allocation is, so every PE must call this the same
         number of times and in the same order.
 
-        Returns ``(tensor, peer_bases)`` where ``peer_bases`` is an
-        ``int64[num_ranks]`` tensor on the same device as ``tensor``, holding for
-        each peer the address of that peer's counterpart of this allocation, in
+        ``peer_bases`` is an ``int64[num_ranks]`` tensor on the same device as
+        ``tensor``, holding for each peer the address of that peer's counterpart of this allocation, in
         this process's address space. Its ``local_rank`` entry is this
         allocation's own base, which is what Iris translation subtracts. A peer
         not reachable by direct load/store is 0; ``allocate_symmetric_map``

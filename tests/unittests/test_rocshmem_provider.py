@@ -13,6 +13,7 @@ peers are not directly addressable, so it is inert rather than failing in a
 normal CI run. tests/manual_rocshmem_provider.py covers the multi-node case.
 """
 
+import contextlib
 import os
 
 import pytest
@@ -38,7 +39,7 @@ def _broadcast_kernel(data, results, peer_bases, n_elements, cur_rank,
 
 
 @pytest.fixture(scope="module")
-def provider():
+def provider(request):
     if not dist.is_initialized():
         pytest.skip("needs torch.distributed; run via tests/run_tests_distributed.py")
     if dist.get_world_size() < 2:
@@ -52,16 +53,23 @@ def provider():
     )
     from iris.experimental.rocshmem_provider import RocshmemProvider
 
-    # init_rocshmem_by_uniqueid can abort the process rather than raise, and it
-    # does so before pytest can attribute the failure to anything. Write the
-    # context straight to fd 2 first, which survives both the capture and the
-    # abort, so a crash says what it was attempting.
-    os.write(2, f"[rank {dist.get_rank()}/{dist.get_world_size()}] "
-                f"rocshmem init, {torch.cuda.device_count()} visible GPUs\n".encode())
+    # init_rocshmem_by_uniqueid can abort the process rather than raise, taking
+    # pytest with it before anything is attributed. Getting a diagnosis out of
+    # that needs capture suspended: pytest captures at the fd level and has
+    # already redirected fd 2 by the time a fixture runs, so rocSHMEM's own
+    # logging -- and a plain write to fd 2 -- land in a buffer that is discarded
+    # when the process aborts. faulthandler's output survives only because it
+    # dups the original fd 2 at interpreter startup.
+    capman = request.config.pluginmanager.getplugin("capturemanager")
+    suspended = (capman.global_and_fixture_disabled()
+                 if capman is not None else contextlib.nullcontext())
 
     # rocSHMEM initialises once per process, hence module scope. No finalize in
     # teardown: it would pull the runtime out from under anything else running.
-    rshmem.init_rocshmem_by_uniqueid(dist.group.WORLD)
+    with suspended:
+        os.write(2, f"[rank {dist.get_rank()}/{dist.get_world_size()}] "
+                    f"rocshmem init, {torch.cuda.device_count()} visible GPUs\n".encode())
+        rshmem.init_rocshmem_by_uniqueid(dist.group.WORLD)
     return RocshmemProvider()
 
 
