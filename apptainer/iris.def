@@ -45,10 +45,8 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
     # Make the venv writable by all
     chmod -R 777 /opt/venv
 
-    # rocSHMEM + rocshmem4py, for tests/unittests/test_rocshmem_provider.py.
-    # Without it those tests skip: rocshmem4py has no prebuilt wheel on any
-    # index, and its bindings need an existing rocSHMEM to build against.
-    # gfx942 matches the MI325X CI runners.
+    # rocSHMEM + rocshmem4py, so the provider tests run instead of skipping.
+    # See install_rocshmem.sh for the rationale. gfx942 = the MI325X runners.
     ROCSHMEM_GPU_TARGETS=gfx942 ROCSHMEM_PREFIX=/opt/rocshmem \
         bash /opt/install_rocshmem.sh
     "
@@ -67,10 +65,7 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
     # Set required RCCL environment variable for ROCm
     export HSA_NO_SCRATCH_RECLAIM=1
     export ROCSHMEM_PREFIX=/opt/rocshmem
-    # Diagnostic, remove once the provider tests pass in CI: rocSHMEM aborts inside
-    # init with no message at all, and at info level it prints its config banner, the
-    # env vars it actually saw, and the backend it selected. Without this the failure
-    # is a bare SIGABRT.
+    # Diagnostic; see install_rocshmem.sh. Drop once the provider tests pass.
     export ROCSHMEM_DEBUG_LEVEL=info
 
 %runscript

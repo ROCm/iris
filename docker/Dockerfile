@@ -47,14 +47,9 @@ RUN git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e
 RUN pip3 install -e .
 ENV PYTHONPATH=$TRITON_PATH
 
-# rocSHMEM + rocshmem4py, for tests/unittests/test_rocshmem_provider.py. Without
-# it those tests skip: there is no prebuilt rocshmem4py wheel on any index, and
-# its bindings require an existing rocSHMEM install to build against.
-# gfx942 matches the MI325X CI runners; override ROCSHMEM_GPU_TARGETS for others.
-# Diagnostic, remove once the provider tests pass in CI: rocSHMEM aborts inside
-# init with no message at all, and at info level it prints its config banner, the
-# env vars it actually saw, and the backend it selected. Without this the failure
-# is a bare SIGABRT.
+# rocSHMEM + rocshmem4py, so tests/unittests/test_rocshmem_provider.py runs
+# instead of skipping. See install_rocshmem.sh for why it is a source build and
+# why ROCSHMEM_DEBUG_LEVEL is set. gfx942 matches the MI325X CI runners.
 ENV ROCSHMEM_PREFIX=/opt/rocshmem \
     ROCSHMEM_DEBUG_LEVEL=info
 COPY .github/scripts/install_rocshmem.sh /tmp/install_rocshmem.sh

@@ -24,11 +24,16 @@ ROCSHMEM_REF="${ROCSHMEM_REF:-develop}"
 ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
 SRC="$(mktemp -d)"
 
-# rocSHMEM is built from source because the CI bases are ROCm 7.2.1 (apptainer)
-# and 7.1 (docker). ROCm 7.14 artifacts onward ship rocSHMEM's static library and
-# headers, so once a base image is that new this build can be dropped and only
-# the bindings below are needed. rocshmem4py has to be built either way until its
-# TheRock packaging lands.
+# TODO: drop this source build once the CI base images reach ROCm 7.14+, whose
+# artifacts ship rocSHMEM's static library and headers -- only the bindings below
+# would still be needed. The bases are ROCm 7.2.1 (apptainer) and 7.1 (docker)
+# today. rocshmem4py stays a source build either way until its TheRock packaging
+# lands.
+#
+# The images set ROCSHMEM_DEBUG_LEVEL=info alongside this. That is diagnostic
+# only, for a rocSHMEM init that aborts in CI with no message: at info level it
+# prints its config banner, the env vars it saw, and the backend it chose. Drop
+# it once the provider tests pass.
 echo "==> rocSHMEM ${ROCSHMEM_REF} -> ${ROCSHMEM_PREFIX} (GPU_TARGETS=${ROCSHMEM_GPU_TARGETS})"
 
 # rocm-systems is a large monorepo and we need two directories out of it. Sparse
