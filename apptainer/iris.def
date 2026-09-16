@@ -13,6 +13,16 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
 
 %post
     /bin/bash -c "
+    # Fail the build on the first error. Without this a step can fail silently
+    # and still produce an image that Apptainer reports as built -- which
+    # container_build.sh then caches by def-file checksum and every later job
+    # reuses. That happened: a transient 'fetch-pack: unexpected disconnect'
+    # during the Triton clone left /opt/triton absent, so the pinned checkout and
+    # its editable install never ran, 'import triton' silently fell back to the
+    # older pytorch-triton-rocm in site-packages, and every Triton test failed
+    # far downstream with an unrelated-looking error.
+    set -e
+
     # Set environment variables
     export TRITON_PATH=/opt/triton
     export ROCM_PATH=/opt/rocm
@@ -35,9 +45,16 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
     pip3 install --upgrade pip && \
     pip3 install wheel jupyter
 
-    # Clone and install Triton
+    # Clone and install Triton. Retried: this is a large clone and a transient
+    # disconnect here used to poison the cached image rather than fail the build.
     cd /opt
-    git clone https://github.com/triton-lang/triton.git \$TRITON_PATH
+    for attempt in 1 2 3; do
+        rm -rf \$TRITON_PATH
+        git clone https://github.com/triton-lang/triton.git \$TRITON_PATH && break
+        echo \"triton clone failed (attempt \$attempt)\" >&2
+        [ \$attempt -lt 3 ] || exit 1
+        sleep 10
+    done
     cd \$TRITON_PATH
     git checkout f7c1d69401e9f09050451f30776562954b05e850
     pip3 install -e .
