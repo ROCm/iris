@@ -10,7 +10,9 @@ Run under the usual launcher, which sets up torch.distributed and the device:
 
 Skips when rocshmem4py is absent, when fewer than 2 ranks are present, or when
 peers are not directly addressable, so it is inert rather than failing in a
-normal CI run. tests/manual_rocshmem_provider.py covers the multi-node case.
+normal CI run. The launcher runs torchrun with --nnodes=1, so these only ever
+see intra-node peers; the inter-node case, where rocshmem_ptr returns NULL and
+SymmetricAddressMap.direct reports it, has no automated coverage.
 """
 
 import pytest

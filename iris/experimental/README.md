@@ -98,12 +98,11 @@ The tests skip rather than fail when `rocshmem4py` is absent, when fewer than 2
 ranks are present, or when peers are not directly addressable, so they are inert
 in an environment without rocSHMEM.
 
-`tests/manual_rocshmem_provider.py` covers what the unit tests structurally
-cannot: `run_tests_distributed.py` launches `torchrun` with `--nnodes=1`, so the
-unit tests only ever see intra-node peers, where `rocshmem_ptr` resolves every
-one. The manual script exercises the multi-node case, where `rocshmem_ptr`
-returns NULL for remote peers and `SymmetricAddressMap.direct` is the thing under
-test (`EXPECT_INDIRECT=1`).
+`run_tests_distributed.py` launches `torchrun` with `--nnodes=1`, so these tests
+only ever see intra-node peers, where `rocshmem_ptr` resolves every one. The
+inter-node case -- where `rocshmem_ptr` returns NULL and
+`SymmetricAddressMap.direct` reports the peer as unreachable -- has no automated
+coverage, since it needs two nodes.
 
 ### Running
 

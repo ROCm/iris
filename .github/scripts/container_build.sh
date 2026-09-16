@@ -84,7 +84,7 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
         echo "[INFO] Def file unchanged (checksum: $DEF_CHECKSUM)"
         echo "[INFO] Skipping rebuild, using existing image at $IMAGE_PATH"
     else
-        echo "[INFO] Image or checksum not found, building new Apptainer image..."
+        echo "[INFO] No current image for this def file"
         # Serialize builders. Without this, jobs that start together all see no
         # image and all build concurrently into the same path -- observed, with
         # two runners building at once. The re-check inside the lock is the
@@ -99,11 +99,13 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
             if image_is_current; then
                 echo "[INFO] Another job built it while we waited; using $IMAGE_PATH"
             else
+                echo "[INFO] Building new Apptainer image..."
                 build_image
             fi
             exec 9>&-
         else
             echo "[WARN] flock not available; building without a lock"
+            echo "[INFO] Building new Apptainer image..."
             build_image
         fi
     fi
