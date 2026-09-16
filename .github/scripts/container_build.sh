@@ -43,39 +43,68 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     DEF_CHECKSUM=$(sha256sum "$DEF_FILE" | awk '{print $1}')
     
     # Create persistent Apptainer directory with checksum subdirectory
-    mkdir -p "${HOME}/iris-apptainer-images/${DEF_CHECKSUM}"
+    CACHE_DIR="${HOME}/iris-apptainer-images/${DEF_CHECKSUM}"
+    mkdir -p "$CACHE_DIR"
     
-    # Define paths
-    IMAGE_PATH="${HOME}/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif"
-    CHECKSUM_FILE="${HOME}/iris-apptainer-images/${DEF_CHECKSUM}/iris-dev.sif.checksum"
+    # Define paths. $HOME is shared across the runners, so every job in a run
+    # reads and writes this one directory.
+    IMAGE_PATH="$CACHE_DIR/iris-dev.sif"
+    CHECKSUM_FILE="$CACHE_DIR/iris-dev.sif.checksum"
+    LOCK_FILE="$CACHE_DIR/.build.lock"
     
-    # Check if image exists and has a valid checksum
-    REBUILD_NEEDED=true
-    if [ -f "$IMAGE_PATH" ] && [ -f "$CHECKSUM_FILE" ]; then
-        OLD_CHECKSUM=$(head -n1 "$CHECKSUM_FILE" 2>/dev/null)
+    image_is_current() {
+        [ -f "$IMAGE_PATH" ] && [ -f "$CHECKSUM_FILE" ] || return 1
+        local old
+        old=$(head -n1 "$CHECKSUM_FILE" 2>/dev/null)
         # Validate checksum format (64 hex characters for SHA256)
-        if [[ "$OLD_CHECKSUM" =~ ^[a-f0-9]{64}$ ]] && [ "$OLD_CHECKSUM" = "$DEF_CHECKSUM" ]; then
-            echo "[INFO] Def file unchanged (checksum: $DEF_CHECKSUM)"
-            echo "[INFO] Skipping rebuild, using existing image at $IMAGE_PATH"
-            REBUILD_NEEDED=false
-        else
-            echo "[INFO] Def file changed (old: ${OLD_CHECKSUM:-<invalid>}, new: $DEF_CHECKSUM)"
-            echo "[INFO] Rebuilding Apptainer image..."
-        fi
-    else
-        echo "[INFO] Image or checksum not found, building new Apptainer image..."
-    fi
+        [[ "$old" =~ ^[a-f0-9]{64}$ ]] && [ "$old" = "$DEF_CHECKSUM" ]
+    }
     
-    # Build the image if needed
-    if [ "$REBUILD_NEEDED" = true ]; then
-        if apptainer build --force "$IMAGE_PATH" "$DEF_FILE"; then
+    # Build to a private path and rename into place. Renaming is atomic and
+    # leaves the inode alone, so a job already executing the old image keeps
+    # running against it; `apptainer build --force` straight to IMAGE_PATH would
+    # truncate the file out from under it.
+    build_image() {
+        local tmp
+        tmp=$(mktemp -u "$CACHE_DIR/.iris-dev.XXXXXXXX.sif")
+        if apptainer build --force "$tmp" "$DEF_FILE"; then
+            mv -f "$tmp" "$IMAGE_PATH"
             # Store the checksum only if build succeeded
             echo "$DEF_CHECKSUM" > "$CHECKSUM_FILE"
             echo "[INFO] Built image: $IMAGE_PATH"
             echo "[INFO] Checksum saved: $DEF_CHECKSUM"
         else
+            rm -f "$tmp"
             echo "[ERROR] Apptainer build failed"
             exit 1
+        fi
+    }
+    
+    if image_is_current; then
+        echo "[INFO] Def file unchanged (checksum: $DEF_CHECKSUM)"
+        echo "[INFO] Skipping rebuild, using existing image at $IMAGE_PATH"
+    else
+        echo "[INFO] Image or checksum not found, building new Apptainer image..."
+        # Serialize builders. Without this, jobs that start together all see no
+        # image and all build concurrently into the same path -- observed, with
+        # two runners building at once. The re-check inside the lock is the
+        # point: whoever waits usually finds the image already built and skips a
+        # redundant half-hour build.
+        if command -v flock > /dev/null 2>&1; then
+            exec 9> "$LOCK_FILE"
+            if ! flock -w 5400 9; then
+                echo "[ERROR] Timed out waiting for the image build lock"
+                exit 1
+            fi
+            if image_is_current; then
+                echo "[INFO] Another job built it while we waited; using $IMAGE_PATH"
+            else
+                build_image
+            fi
+            exec 9>&-
+        else
+            echo "[WARN] flock not available; building without a lock"
+            build_image
         fi
     fi
     
