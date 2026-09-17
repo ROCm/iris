@@ -5,7 +5,7 @@
 
 Run under the usual launcher, which sets up torch.distributed and the device:
 
-    python tests/run_tests_distributed.py tests/unittests/test_torch_symmmem_provider.py \
+    python tests/run_tests_distributed.py tests/unittests/test_torch_symm_mem_provider.py \
         --num_ranks 2 -v
 
 Skips when torch symmetric memory cannot allocate on this build, when fewer than
@@ -48,7 +48,7 @@ def provider():
     # Imported here rather than at module scope so the tests are collected and
     # individually skipped. A module-level importorskip collects zero items,
     # which makes pytest exit 5 (NO_TESTS_COLLECTED) and fails the whole run.
-    from iris.experimental.torch_symmmem_provider import TorchSymmMemProvider
+    from iris.experimental.torch_symm_mem_provider import TorchSymmMemProvider
 
     p = TorchSymmMemProvider()
     # Availability is not an import question: the module always imports, and
@@ -136,7 +136,7 @@ def test_foreign_tensor_is_rejected(provider):
         provider.symmetric_address_map(stray)
 
 
-def test_iris_store_over_torch_symmmem_memory(symmetric_pair):
+def test_iris_store_over_torch_symm_mem_memory(symmetric_pair):
     """Unmodified iris.store, on memory Iris did not allocate."""
     provider, data, results, _data_bases, results_bases = symmetric_pair
     me, ws = provider.get_rank(), provider.get_num_ranks()
@@ -159,6 +159,10 @@ def test_iris_store_over_torch_symmmem_memory(symmetric_pair):
         )
         torch.cuda.synchronize()
     provider.barrier()
+    # Every rank, not just the writer: the barrier orders the ranks, but the
+    # reading rank still has its own stream to drain before the inbound writes
+    # are guaranteed visible to work it queues next.
+    torch.cuda.synchronize()
 
     # Rank 0 pushed its value to every rank, including this one.
     assert torch.allclose(results, torch.full_like(results, 1.0))
