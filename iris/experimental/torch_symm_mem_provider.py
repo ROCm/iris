@@ -132,6 +132,15 @@ class TorchSymmMemProvider:
         """Build the descriptor from the handle's own peer-pointer table."""
         bases = [int(p) for p in handle.buffer_ptrs]
 
+        # Length is checked, not assumed. Iris indexes this table by rank inside
+        # the kernel, so a short table reads past the end of the allocation
+        # rather than raising.
+        if len(bases) != self.num_ranks:
+            raise RuntimeError(
+                f"handle.buffer_ptrs has {len(bases)} entries, expected "
+                f"{self.num_ranks}; the table Iris indexes by rank would be short."
+            )
+
         # The invariant every Iris translation depends on. Checked rather than
         # assumed: a silent mismatch here turns every remote address in a kernel
         # into a wild pointer.

@@ -17,7 +17,7 @@ iris` never requires either dependency.
 | Provider | Dependency | Scope |
 | --- | --- | --- |
 | `rocshmem_provider.py` | `rocshmem4py` | intra-node (IPC) |
-| `torch_symmmem_provider.py` | torch only | intra-node (HIP IPC) |
+| `torch_symm_mem_provider.py` | torch only | intra-node (HIP IPC) |
 
 ## rocSHMEM provider
 
@@ -160,7 +160,7 @@ handle = symm_mem.rendezvous(tensor, group=group)
 
 ```bash
 python tests/run_tests_distributed.py \
-  tests/unittests/test_torch_symmmem_provider.py --num_ranks 2 -v
+  tests/unittests/test_torch_symm_mem_provider.py --num_ranks 2 -v
 ```
 
 Passes at 2, 4 and 8 ranks on `torch 2.10.0+rocm7.2.1`. Both allocation and
