@@ -59,33 +59,14 @@ initialised:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 
 import rocshmem4py as rshmem
 from rocshmem4py.interop import torch as rshmem_torch
 
+from iris.experimental.symmetric_memory import SymmetricAddressMap
 
-@dataclass(frozen=True)
-class SymmetricAddressMap:
-    """Address metadata for one symmetric allocation.
-
-    ``allocate_symmetric`` returns only ``(tensor, peer_bases)``; this carries
-    what that pair cannot, notably ``direct``.
-    """
-
-    peer_bases: torch.Tensor  # int64[world_size], device-resident
-    local_rank: int
-    allocation_base: int
-    allocation_bytes: int
-    direct: tuple[bool, ...]  # per peer: reachable by load/store?
-
-    def all_direct(self) -> bool:
-        return all(self.direct)
-
-    def indirect_peers(self) -> list[int]:
-        return [r for r, d in enumerate(self.direct) if not d]
+__all__ = ["RocshmemProvider", "SymmetricAddressMap"]
 
 
 class RocshmemProvider:

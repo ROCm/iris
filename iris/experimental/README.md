@@ -17,6 +17,7 @@ iris` never requires either dependency.
 | Provider | Dependency | Scope |
 | --- | --- | --- |
 | `rocshmem_provider.py` | `rocshmem4py` | intra-node (IPC) |
+| `torch_symm_mem_provider.py` | torch only | intra-node (HIP IPC) |
 
 ## rocSHMEM provider
 
@@ -120,3 +121,64 @@ Allocation and free are both **collective** — `rocshmem_free` is documented as
 the same calls in the same order. That is why `free()` is explicit rather than
 driven by garbage collection: `__del__` would run at whatever moment each rank
 happened to collect, and ranks would hang instead of raising.
+
+## PyTorch symmetric memory provider
+
+### Installing
+
+Nothing to install. It uses `torch.distributed._symmetric_memory`, so the only
+requirement is a torch build whose symmetric memory can allocate.
+
+That is not a given on ROCm, and the import is not a useful test of it — the
+module imports successfully on builds where allocation then fails. Measured on
+gfx950:
+
+| torch | symmetric memory |
+| --- | --- |
+| `2.10.0+rocm7.2.1` | works |
+| `2.13.0+rocm7.2` | works |
+| `2.9.1+rocm7.1` | no — lacks `set_signal_pad_size`, and `rendezvous` fails with `HIP error: invalid argument` |
+| `2.13.0+rocm7.15.0a` (nightly) | no — `hipErrorOutOfMemory` on a 4 KB allocation |
+
+So the tests probe by attempting a throwaway allocation and skip if it fails,
+rather than by importing.
+
+**Do not call `symm_mem.set_backend()`.** The name `get_backend()` returns on
+ROCm is `'CUDA'` — the HIP IPC path — but `set_backend('CUDA')` is rejected with
+"SymmetricMemory does not find allocation backend CUDA", and forcing any other
+name selects a backend that then fails at allocation. The working sequence is
+simply to allocate without ever setting one:
+
+```python
+torch.cuda.set_device(device)
+dist.init_process_group("nccl")
+tensor = symm_mem.empty(shape, dtype=dtype, device=device)
+handle = symm_mem.rendezvous(tensor, group=group)
+```
+
+### Verifying
+
+```bash
+python tests/run_tests_distributed.py \
+  tests/unittests/test_torch_symm_mem_provider.py --num_ranks 2 -v
+```
+
+Passes at 2, 4 and 8 ranks on `torch 2.10.0+rocm7.2.1`. Both allocation and
+`rendezvous` are collective, so every rank must call `allocate_symmetric` the
+same number of times and in the same order.
+
+### How it differs from the rocSHMEM provider
+
+The rendezvous handle's `buffer_ptrs` is already the table Iris needs, with the
+local rank's entry equal to the tensor's own `data_ptr()`, so this provider does
+no pointer arithmetic — it reads the table off the handle.
+
+Peer offsets are **not** shared between allocations here. Each allocation is a
+separate IPC mapping rather than a window onto one linear heap, so a table must
+only translate pointers into the allocation it describes. This is the opposite of
+rocSHMEM, where offsets are uniform across the symmetric heap; borrowing another
+allocation's table there is legitimate and here it produces wild pointers.
+
+`symmetric_address_map` only accepts tensors this provider allocated. Rendezvous
+is collective, so deriving a handle on demand would hang whichever ranks did not
+ask; handles are recorded at allocation time instead.
