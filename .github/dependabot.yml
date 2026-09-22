@@ -14,6 +14,10 @@ updates:
       - "/.github/actions/*"
     schedule:
       interval: "daily"
+    # Wait for a release to age before proposing it, so a compromised or
+    # broken publish has time to be caught upstream (zizmor dependabot-cooldown).
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "chore"
       include: "scope"
@@ -26,6 +30,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "chore"
       include: "scope"
