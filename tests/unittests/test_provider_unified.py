@@ -146,9 +146,8 @@ def provider(request):
         pytest.skip("needs torch.distributed; run via tests/run_tests_distributed.py")
     if dist.get_world_size() < 2:
         pytest.skip("needs at least 2 ranks (--num_ranks 2)")
-    # Built here rather than at module scope so an unavailable provider skips
-    # its own parameters instead of collecting zero items, which would make
-    # pytest exit 5 and fail the whole distributed run.
+    # Built here, not at module scope: importorskip there collects zero items,
+    # which exits pytest 5 and fails the whole distributed run.
     return PROVIDERS[request.param]()
 
 
