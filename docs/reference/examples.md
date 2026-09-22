@@ -17,7 +17,7 @@ We've curated a growing collection of practical examples that showcase the power
 
 ### GEMM Operations
 - **[07_gemm_all_scatter](https://github.com/ROCm/iris/tree/main/examples/07_gemm_all_scatter)**: Matrix multiplication with all-scatter communication
-- **[08_gemm_atomics_all_reduce](https://github.com/ROCm/iris/tree/main/examples/08_gemm_atomics_all_reduce)**: Matrix multiplication with all-reduce using atomics
+- **[08_gemm_all_reduce_atomics](https://github.com/ROCm/iris/tree/main/examples/08_gemm_all_reduce_atomics)**: Matrix multiplication with all-reduce using atomics
 - **[09_gemm_one_shot_all_reduce](https://github.com/ROCm/iris/tree/main/examples/09_gemm_one_shot_all_reduce)**: Matrix multiplication with one-shot all-reduce
 - **[10_gemm_all_scatter_wg_specialization](https://github.com/ROCm/iris/tree/main/examples/10_gemm_all_scatter_wg_specialization)**: Matrix multiplication with all-scatter using workgroup specialization
 - **[11_gemm_all_scatter_producer_consumer](https://github.com/ROCm/iris/tree/main/examples/11_gemm_all_scatter_producer_consumer)**: Matrix multiplication with all-scatter using producer-consumer concurrent kernels
