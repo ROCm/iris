@@ -80,40 +80,18 @@ BACKENDS = {
 }
 
 
-class _IrisProvider:
-    """Gives an Iris context the same surface as a standalone provider."""
-
-    name = "iris"
-
-    def __init__(self):
-        self._ctx = iris.iris(1 << 24)
-
-    def allocate_symmetric(self, *size, dtype=None):
-        return self._ctx.allocate_symmetric(*size, dtype=dtype)
-
-    def get_rank(self):
-        return self._ctx.get_rank()
-
-    def get_num_ranks(self):
-        return self._ctx.get_num_ranks()
-
-    def barrier(self):
-        self._ctx.barrier()
-
-
 def _make_rocshmem():
     rshmem = pytest.importorskip("rocshmem4py", reason="needs rocshmem4py installed")
     from iris.experimental.rocshmem_provider import RocshmemProvider
 
     rshmem.init_rocshmem_by_uniqueid(dist.group.WORLD)
-    provider = RocshmemProvider()
-    provider.name = "rocshmem"
-    return provider
+    return RocshmemProvider()
 
 
-# Needs allocate_symmetric / get_rank / get_num_ranks / barrier.
+# Needs allocate_symmetric / get_rank / get_num_ranks / barrier. An Iris
+# context already has all four, so it goes in unwrapped.
 PROVIDERS = {
-    "iris": _IrisProvider,
+    "iris": lambda: iris.iris(1 << 24),
     "rocshmem": _make_rocshmem,
 }
 
