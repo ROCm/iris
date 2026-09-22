@@ -27,7 +27,7 @@ ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
 # are already installed in the image, so nothing here needs that repo.
 RUN rm -f /etc/apt/sources.list.d/rocm.list && \
     apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     git wget ninja-build cmake python3-pip python3-dev build-essential libdwarf-dev && \
     rm -rf /var/lib/apt/lists/*
 
