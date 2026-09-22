@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+name: Iris CCL Benchmark (Iris vs RCCL)
+
+# Deliberately not on pull_request: this is a measurement job, not a gate. It
+# sweeps shapes across four collectives twice over (Iris and RCCL) and takes
+# long enough that running it per commit would crowd out the test jobs on a
+# shared 8-GPU pool.
+on:
+  workflow_dispatch:
+    inputs:
+      num_ranks:
+        description: "Ranks to benchmark"
+        required: false
+        default: "8"
+      sizes:
+        description: "Comma-separated M=N values, e.g. 1024,4096,16384"
+        required: false
+        default: "1024,4096,16384"
+      n_repeat:
+        description: "Timed iterations per point"
+        required: false
+        default: "50"
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  DOCKER_IMAGE_NAME: ${{ vars.DOCKER_IMAGE_NAME || 'iris-dev-triton-aafec41' }}
+
+jobs:
+  ccl-benchmark:
+    name: CCL benchmark (Iris vs RCCL)
+    runs-on: [linux-mi325-8gpu-ossci-rad]
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Apptainer (if not available)
+        run: |
+          if ! command -v apptainer &> /dev/null && ! command -v docker &> /dev/null; then
+            echo "[ERROR] Neither Apptainer nor Docker is available"
+            exit 1
+          fi
+
+      - name: Build Iris container
+        run: |
+          bash .github/scripts/container_build.sh
+
+      - name: Acquire GPUs
+        run: |
+          bash .github/scripts/acquire_gpus.sh "${{ github.event.inputs.num_ranks || '8' }}"
+
+      - name: Run the sweep
+        run: |
+          set -e
+          bash .github/scripts/run_ccl_benchmark.sh \
+            "${{ github.event.inputs.num_ranks || '8' }}" \
+            "${{ github.event.inputs.sizes || '1024,4096,16384' }}" \
+            "${{ github.event.inputs.n_repeat || '50' }}"
+
+      - name: Publish the comparison table
+        if: always()
+        run: |
+          if [ -f ccl_results/summary.md ]; then
+            {
+              echo "## Iris vs RCCL — ${{ github.event.inputs.num_ranks || '8' }} ranks"
+              echo ""
+              echo "Commit \`${GITHUB_SHA::8}\`. Ratio above 1.00x means Iris is faster."
+              echo ""
+              cat ccl_results/summary.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No summary produced; see the sweep step for why." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccl-benchmark-${{ github.run_id }}
+          path: ccl_results/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh
