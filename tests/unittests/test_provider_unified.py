@@ -34,26 +34,16 @@ def _remote_read_scale_write(
     b_peers,
     n_elements,
     peer,
-    CUR_RANK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Read the peer's ``a``, scale it, write into the peer's ``b``."""
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
 
-    a_local = tl.load(a_peers + CUR_RANK)
-    a_remote = tl.load(a_peers + peer)
-    src = tl.cast(
-        tl.cast(a_remote, tl.pointer_type(tl.int8)) + (tl.cast(a, tl.uint64) - a_local),
-        a.dtype,
-    )
-
-    b_local = tl.load(b_peers + CUR_RANK)
-    b_remote = tl.load(b_peers + peer)
-    dst = tl.cast(
-        tl.cast(b_remote, tl.pointer_type(tl.int8)) + (tl.cast(b, tl.uint64) - b_local),
-        b.dtype,
-    )
+    # Entries are already the peer's address for that tensor, so there is
+    # nothing to translate. a and b are here for their element type.
+    src = tl.load(a_peers + peer).to(a.dtype, bitcast=True)
+    dst = tl.load(b_peers + peer).to(b.dtype, bitcast=True)
 
     value = tl.load(src + offsets, mask=mask)
     tl.store(dst + offsets, value * 2, mask=mask)
@@ -67,7 +57,6 @@ def _remote_read_scale_write_gluon(
     b_peers,
     n_elements,
     peer,
-    CUR_RANK: gl.constexpr,
     WARP_SIZE: gl.constexpr,
     BLOCK_SIZE: gl.constexpr,
 ):
@@ -78,19 +67,8 @@ def _remote_read_scale_write_gluon(
     offsets = gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < n_elements
 
-    a_local = gl.load(a_peers + CUR_RANK)
-    a_remote = gl.load(a_peers + peer)
-    src = tl.cast(
-        tl.cast(a_remote, gl.pointer_type(gl.int8)) + (tl.cast(a, gl.uint64) - a_local),
-        a.dtype,
-    )
-
-    b_local = gl.load(b_peers + CUR_RANK)
-    b_remote = gl.load(b_peers + peer)
-    dst = tl.cast(
-        tl.cast(b_remote, gl.pointer_type(gl.int8)) + (tl.cast(b, gl.uint64) - b_local),
-        b.dtype,
-    )
+    src = gl.load(a_peers + peer).to(a.dtype, bitcast=True)
+    dst = gl.load(b_peers + peer).to(b.dtype, bitcast=True)
 
     value = gl.load(src + offsets, mask=mask)
     gl.store(dst + offsets, value * 2, mask=mask)
@@ -188,7 +166,6 @@ def test_two_tensors_two_tables(provider, dtype, backend):
         b_peers,
         BLOCK_SIZE,
         peer,
-        CUR_RANK=rank,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=1,
         **extra,
