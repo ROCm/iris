@@ -30,6 +30,8 @@ import torch
 import torch.distributed as dist
 import triton
 import triton.language as tl
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
 
 import iris
 
@@ -72,6 +74,56 @@ def _remote_read_scale_write(
 
     value = tl.load(src + offsets, mask=mask)
     tl.store(dst + offsets, value * 2, mask=mask)
+
+
+@gluon.jit
+def _remote_read_scale_write_gluon(
+    a,
+    a_peers,
+    b,
+    b_peers,
+    n_elements,
+    peer,
+    CUR_RANK: gl.constexpr,
+    BLOCK_SIZE: gl.constexpr,
+):
+    """Gluon form of the same kernel, translating by hand.
+
+    The device-side contract is a plain table, so it does not depend on which
+    backend consumes it. This asserts that: the same two tables drive Gluon
+    and Triton to the same result.
+    """
+    # One warp, 64 lanes, BLOCK_SIZE // 64 elements each. The existing Gluon
+    # tests hardcode [1] because they use blocks of 32 or fewer; sizing it
+    # from BLOCK_SIZE keeps the layout and the block in agreement.
+    layout: gl.constexpr = gl.BlockedLayout([BLOCK_SIZE // 64], [64], [1], [0])
+    offsets = gl.arange(0, BLOCK_SIZE, layout=layout)
+    mask = offsets < n_elements
+
+    a_local = gl.load(a_peers + CUR_RANK)
+    a_remote = gl.load(a_peers + peer)
+    src = tl.cast(
+        tl.cast(a_remote, gl.pointer_type(gl.int8)) + (tl.cast(a, gl.uint64) - a_local),
+        a.dtype,
+    )
+
+    b_local = gl.load(b_peers + CUR_RANK)
+    b_remote = gl.load(b_peers + peer)
+    dst = tl.cast(
+        tl.cast(b_remote, gl.pointer_type(gl.int8)) + (tl.cast(b, gl.uint64) - b_local),
+        b.dtype,
+    )
+
+    value = gl.load(src + offsets, mask=mask)
+    gl.store(dst + offsets, value * 2, mask=mask)
+
+
+# Backend -> kernel. Both take the same arguments and mean the same thing;
+# only the dialect differs.
+BACKENDS = {
+    "triton": _remote_read_scale_write,
+    "gluon": _remote_read_scale_write_gluon,
+}
 
 
 class _IrisProvider:
@@ -126,8 +178,9 @@ def provider(request):
     return PROVIDERS[request.param]()
 
 
+@pytest.mark.parametrize("backend", sorted(BACKENDS))
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_two_tensors_two_tables(provider, dtype):
+def test_two_tensors_two_tables(provider, dtype, backend):
     """Each tensor translates through its own table, in one kernel."""
     rank = provider.get_rank()
     world_size = provider.get_num_ranks()
@@ -148,7 +201,7 @@ def test_two_tensors_two_tables(provider, dtype):
     torch.cuda.synchronize()
     provider.barrier()
 
-    _remote_read_scale_write[(1,)](
+    BACKENDS[backend][(1,)](
         a,
         a_peers,
         b,
@@ -157,6 +210,7 @@ def test_two_tensors_two_tables(provider, dtype):
         peer,
         CUR_RANK=rank,
         BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=1,
     )
     torch.cuda.synchronize()
     provider.barrier()
