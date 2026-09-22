@@ -85,6 +85,7 @@ def _remote_read_scale_write_gluon(
     n_elements,
     peer,
     CUR_RANK: gl.constexpr,
+    WARP_SIZE: gl.constexpr,
     BLOCK_SIZE: gl.constexpr,
 ):
     """Gluon form of the same kernel, translating by hand.
@@ -93,10 +94,11 @@ def _remote_read_scale_write_gluon(
     backend consumes it. This asserts that: the same two tables drive Gluon
     and Triton to the same result.
     """
-    # One warp, 64 lanes, BLOCK_SIZE // 64 elements each. The existing Gluon
-    # tests hardcode [1] because they use blocks of 32 or fewer; sizing it
-    # from BLOCK_SIZE keeps the layout and the block in agreement.
-    layout: gl.constexpr = gl.BlockedLayout([BLOCK_SIZE // 64], [64], [1], [0])
+    # One warp of WARP_SIZE lanes, BLOCK_SIZE // WARP_SIZE elements each. The
+    # warp size comes from the target rather than being assumed: it is 64 on
+    # CDNA and 32 on NVIDIA and RDNA, and a layout that disagrees with the
+    # block does not compile.
+    layout: gl.constexpr = gl.BlockedLayout([BLOCK_SIZE // WARP_SIZE], [WARP_SIZE], [1], [0])
     offsets = gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < n_elements
 
@@ -178,6 +180,11 @@ def provider(request):
     return PROVIDERS[request.param]()
 
 
+def _warp_size():
+    """Lanes per warp on the active target. 64 on CDNA, 32 on NVIDIA/RDNA."""
+    return triton.runtime.driver.active.get_current_target().warp_size
+
+
 @pytest.mark.parametrize("backend", sorted(BACKENDS))
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_two_tensors_two_tables(provider, dtype, backend):
@@ -185,6 +192,9 @@ def test_two_tensors_two_tables(provider, dtype, backend):
     rank = provider.get_rank()
     world_size = provider.get_num_ranks()
     peer = (rank + 1) % world_size
+
+    warp_size = _warp_size()
+    assert BLOCK_SIZE % warp_size == 0, f"block {BLOCK_SIZE} must divide into warps of {warp_size}"
 
     a, a_peers = provider.allocate_symmetric(BLOCK_SIZE, dtype=dtype)
     b, b_peers = provider.allocate_symmetric(BLOCK_SIZE, dtype=dtype)
@@ -201,6 +211,7 @@ def test_two_tensors_two_tables(provider, dtype, backend):
     torch.cuda.synchronize()
     provider.barrier()
 
+    extra = {"WARP_SIZE": warp_size} if backend == "gluon" else {}
     BACKENDS[backend][(1,)](
         a,
         a_peers,
@@ -211,6 +222,7 @@ def test_two_tensors_two_tables(provider, dtype, backend):
         CUR_RANK=rank,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=1,
+        **extra,
     )
     torch.cuda.synchronize()
     provider.barrier()
