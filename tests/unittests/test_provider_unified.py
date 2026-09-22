@@ -27,7 +27,7 @@ BLOCK_SIZE = 256
 
 
 @triton.jit
-def _remote_read_scale_write(
+def _remote_read_scale_write_triton(
     a,
     a_peers,
     b,
@@ -75,7 +75,7 @@ def _remote_read_scale_write_gluon(
 
 
 BACKENDS = {
-    "triton": _remote_read_scale_write,
+    "triton": _remote_read_scale_write_triton,
     "gluon": _remote_read_scale_write_gluon,
 }
 
