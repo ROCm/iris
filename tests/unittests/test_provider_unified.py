@@ -2,24 +2,12 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-One kernel, two tensors, two peer tables, every provider.
+One kernel, two tensors, two peer tables, across providers and backends.
 
-The contract a provider owes Iris is a table whose entry ``r`` is that
-tensor's address on rank ``r``. This exercises the part of that contract a
-single-tensor test cannot reach: **each tensor is translated against its own
-table, never against another tensor's.**
-
-That distinction is not cosmetic. Iris and rocSHMEM both allocate from one
-symmetric heap, so the peer delta is a constant of the heap and any table
-happens to translate any pointer. Torch Symmetric Memory is symmetric
-*memory*, not a symmetric heap — each tensor is its own allocation with its
-own peer mapping, so it genuinely has one translation per tensor and the
-deltas differ between allocations.
-
-A kernel that reuses one table for two tensors therefore works on the heap
-providers and silently mistranslates on the per-tensor one. Keeping the tables
-paired with their tensors is what makes the same device code correct
-everywhere, so that is what is tested here rather than assumed.
+Each tensor translates against its own table. Iris and rocSHMEM allocate from
+one heap, so the peer delta is shared and any table happens to translate any
+pointer; Torch Symmetric Memory allocates per tensor, so the deltas differ and
+reusing a table mistranslates.
 
 Run:
     python tests/run_tests_distributed.py tests/unittests/test_provider_unified.py --num_ranks 2
@@ -49,12 +37,7 @@ def _remote_read_scale_write(
     CUR_RANK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Read the peer's ``a``, scale it, write into the peer's ``b``.
-
-    Two tensors, two tables, one launch. ``a`` resolves only through
-    ``a_peers`` and ``b`` only through ``b_peers``; swapping them is the
-    mistake this kernel is shaped to avoid.
-    """
+    """Read the peer's ``a``, scale it, write into the peer's ``b``."""
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
 
@@ -88,16 +71,9 @@ def _remote_read_scale_write_gluon(
     WARP_SIZE: gl.constexpr,
     BLOCK_SIZE: gl.constexpr,
 ):
-    """Gluon form of the same kernel, translating by hand.
-
-    The device-side contract is a plain table, so it does not depend on which
-    backend consumes it. This asserts that: the same two tables drive Gluon
-    and Triton to the same result.
-    """
-    # One warp of WARP_SIZE lanes, BLOCK_SIZE // WARP_SIZE elements each. The
-    # warp size comes from the target rather than being assumed: it is 64 on
-    # CDNA and 32 on NVIDIA and RDNA, and a layout that disagrees with the
-    # block does not compile.
+    """Gluon form of the same kernel."""
+    # Warp size is 64 on CDNA, 32 on NVIDIA/RDNA; a layout that disagrees with
+    # the block does not compile.
     layout: gl.constexpr = gl.BlockedLayout([BLOCK_SIZE // WARP_SIZE], [WARP_SIZE], [1], [0])
     offsets = gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < n_elements
@@ -120,8 +96,6 @@ def _remote_read_scale_write_gluon(
     gl.store(dst + offsets, value * 2, mask=mask)
 
 
-# Backend -> kernel. Both take the same arguments and mean the same thing;
-# only the dialect differs.
 BACKENDS = {
     "triton": _remote_read_scale_write,
     "gluon": _remote_read_scale_write_gluon,
@@ -129,7 +103,7 @@ BACKENDS = {
 
 
 class _IrisProvider:
-    """Adapter so an Iris context and a standalone provider look the same."""
+    """Gives an Iris context the same surface as a standalone provider."""
 
     name = "iris"
 
@@ -159,9 +133,7 @@ def _make_rocshmem():
     return provider
 
 
-# Add new providers here. A provider qualifies if it exposes
-# allocate_symmetric / get_rank / get_num_ranks / barrier. Torch Symmetric
-# Memory joins this list when its provider lands.
+# Needs allocate_symmetric / get_rank / get_num_ranks / barrier.
 PROVIDERS = {
     "iris": _IrisProvider,
     "rocshmem": _make_rocshmem,
@@ -181,7 +153,7 @@ def provider(request):
 
 
 def _warp_size():
-    """Lanes per warp on the active target. 64 on CDNA, 32 on NVIDIA/RDNA."""
+    """Lanes per warp on the active target."""
     return triton.runtime.driver.active.get_current_target().warp_size
 
 
@@ -199,13 +171,11 @@ def test_two_tensors_two_tables(provider, dtype, backend):
     a, a_peers = provider.allocate_symmetric(BLOCK_SIZE, dtype=dtype)
     b, b_peers = provider.allocate_symmetric(BLOCK_SIZE, dtype=dtype)
 
-    # Each table names its own tensor on this rank. This is the invariant
-    # device translation subtracts, and it is per tensor, not per heap.
+    # The invariant device translation subtracts, per tensor not per heap.
     assert int(a_peers[rank].item()) == a.data_ptr()
     assert int(b_peers[rank].item()) == b.data_ptr()
 
-    # Distinct per rank, so data arriving from the wrong peer is a wrong
-    # answer rather than a plausible one.
+    # Distinct per rank, so a wrong peer gives a wrong answer not a plausible one.
     a.fill_(rank + 1)
     b.fill_(-1)
     torch.cuda.synchronize()
@@ -227,12 +197,10 @@ def test_two_tensors_two_tables(provider, dtype, backend):
     torch.cuda.synchronize()
     provider.barrier()
 
-    # Our b was written by the rank that targets us. It read OUR a, which held
-    # rank + 1, and doubled it -- so the value proves both the remote read and
-    # the remote write resolved to this rank.
+    # Written by the rank targeting us, which read our a (rank + 1) and doubled
+    # it -- so this proves both the remote read and the remote write landed here.
     torch.testing.assert_close(b, torch.full_like(b, 2 * (rank + 1)))
-
-    # a is untouched: nothing in this kernel writes through a's table.
+    # Nothing writes through a's table.
     torch.testing.assert_close(a, torch.full_like(a, rank + 1))
 
     provider.barrier()
