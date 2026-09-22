@@ -17,6 +17,9 @@ env:
   DOCKERHUB_USER: muhaawad
   IMAGE_NAME: iris-dev
 
+permissions:
+  contents: read
+
 jobs:
   build-push:
     runs-on: ubuntu-latest

@@ -3,6 +3,9 @@ name: Build Container
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: [self-hosted, mi3xx, linux-mi325-8gpu-ossci-rad]

@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to Iris! This document provides guidelines for contributing to the project.
 
+> **Security vulnerabilities** — do not open a public GitHub issue. See [SECURITY.md](../SECURITY.md) for the private reporting process.
+
 ## Development Workflow
 
 ### 1. Create a Feature Branch
@@ -40,6 +42,17 @@ git push origin $USER/your-feature-name
 - Create a new pull request from your branch
 - Fill in the PR description with details about your changes
 - Feel free to open a draft PR and ask for early feedback while you're still working on your changes
+
+## Security Requirements
+
+Contributors must not:
+
+- Commit secrets, tokens, passwords, or credentials
+- Introduce vulnerable dependencies without justification
+- Bypass security controls or required security reviews
+
+All contributions are subject to automated security scanning (secret scanning, code scanning,
+dependency monitoring, vulnerability scanning) via the PR security scan workflow.
 
 ## License
 

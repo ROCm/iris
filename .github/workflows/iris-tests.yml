@@ -14,6 +14,9 @@ concurrency:
 env:
   DOCKER_IMAGE_NAME: ${{ vars.DOCKER_IMAGE_NAME || 'iris-dev-triton-aafec41' }}
 
+permissions:
+  contents: read
+
 jobs:
   test-git:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, git install)
