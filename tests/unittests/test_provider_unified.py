@@ -80,18 +80,19 @@ BACKENDS = {
 }
 
 
-def _make_rocshmem():
-    rshmem = pytest.importorskip("rocshmem4py", reason="needs rocshmem4py installed")
+def _make_rocshmem(request):
+    # rocshmem_runtime is session-scoped so the runtime is initialised once per
+    # process, however many modules ask for it.
+    request.getfixturevalue("rocshmem_runtime")
     from iris.experimental.rocshmem_provider import RocshmemProvider
 
-    rshmem.init_rocshmem_by_uniqueid(dist.group.WORLD)
     return RocshmemProvider()
 
 
 # Needs allocate_symmetric / get_rank / get_num_ranks / barrier. An Iris
 # context already has all four, so it goes in unwrapped.
 PROVIDERS = {
-    "iris": lambda: iris.iris(1 << 24),
+    "iris": lambda request: iris.iris(1 << 24),
     "rocshmem": _make_rocshmem,
 }
 
@@ -104,7 +105,7 @@ def provider(request):
         pytest.skip("needs at least 2 ranks (--num_ranks 2)")
     # Built here, not at module scope: importorskip there collects zero items,
     # which exits pytest 5 and fails the whole distributed run.
-    return PROVIDERS[request.param]()
+    return PROVIDERS[request.param](request)
 
 
 def _warp_size():
