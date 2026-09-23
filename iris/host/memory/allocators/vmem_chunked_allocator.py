@@ -24,14 +24,13 @@ import math
 import logging
 import weakref
 from collections import defaultdict, deque
-from dataclasses import dataclass
 from threading import Lock
 from typing import List, Optional
 
 import torch
 
 from .base import BaseAllocator
-from iris.drivers.base import LocalAllocation, PeerMapping
+from iris.drivers.base import DriverNotSupported, ExportableMemory, LocalAllocation, MappingPlacement, PeerMapping
 from iris.drivers.factory import DriverFactory
 from iris.host.distributed.topology import (
     InterconnectLevel,
@@ -79,15 +78,6 @@ def _next_power_of_two(n):
 
 def _is_power_of_two(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
-
-
-@dataclass
-class _SharedRegion:
-    """Exported heap region tracked for peer refresh."""
-
-    va: int
-    size: int
-    allocation: Optional[LocalAllocation] = None
 
 
 class VMemChunkedAllocator(BaseAllocator):
@@ -160,7 +150,7 @@ class VMemChunkedAllocator(BaseAllocator):
         self.alloc_sizes = {}
         self._pending_free = deque()
         self.chunks: List[LocalAllocation] = []
-        self._shared_regions: List[_SharedRegion] = []
+        self._shared_regions: List[ExportableMemory] = []
         self._peer_mappings: List[PeerMapping] = []
         self._imported_heap_mappings: List[PeerMapping] = []
         self.mapped_extent = 0
@@ -259,15 +249,10 @@ class VMemChunkedAllocator(BaseAllocator):
             )
 
         target_va = self.base_va + self.mapped_extent
-        alloc_kwargs = {}
-        if self.driver.__class__.__name__ == "LocalHipDriver":
-            alloc_kwargs = {
-                "access_va": self.base_va,
-                "access_size": self.mapped_extent + self.chunk_size,
-            }
-        allocation = self.driver.allocate_exportable(self.chunk_size, va=target_va, **alloc_kwargs)
+        placement = MappingPlacement(target_va, arena_base=self.base_va)
+        allocation = self.driver.allocate_exportable(self.chunk_size, placement)
         self.chunks.append(allocation)
-        self._shared_regions.append(_SharedRegion(va=allocation.va, size=allocation.size, allocation=allocation))
+        self._shared_regions.append(ExportableMemory(va=allocation.va, size=allocation.size, allocation=allocation))
         self.mapped_extent += self.chunk_size
 
     def _process_pending_frees(self):
@@ -437,16 +422,22 @@ class VMemChunkedAllocator(BaseAllocator):
         for i in range(start_index, len(self._shared_regions)):
             region = self._shared_regions[i]
             offset = region.va - self.base_va
-            if region.allocation is not None:
-                handle_bytes = self.driver.export_handle(region.allocation)
-            else:
-                handle_bytes = self.driver.export_pointer_handle(region.va, region.size)
+            handle_bytes = self.driver.export_handle(region)
             result.append((i, offset, region.size, handle_bytes))
         return result
 
     def get_num_chunks(self):
         """Return the number of exported heap regions."""
         return len(self._shared_regions)
+
+    def _can_return_external_tensor_alias(self) -> bool:
+        return self.num_ranks == 1 and self.driver.__class__.__name__ == "LocalCudaDriver"
+
+    def _external_tensor_alias(self, external_tensor: torch.Tensor) -> torch.Tensor:
+        logger.info(
+            "Returning a local CUDA tensor alias because this external allocation cannot be mapped into the Iris heap"
+        )
+        return external_tensor.view(external_tensor.shape)
 
     def import_external_tensor(self, external_tensor: torch.Tensor) -> torch.Tensor:
         """Import an external tensor into the symmetric heap (zero-copy).
@@ -457,10 +448,10 @@ class VMemChunkedAllocator(BaseAllocator):
         until allocator.close() so peer translation remains valid for RMA.
 
         Raises:
-            DriverNotSupported: This operation requires DMA-BUF support and is
-                currently AMD-only. On NVIDIA, the local driver does not
-                implement export_pointer_handle for arbitrary device pointers,
-                and this method will raise.
+            DriverNotSupported: If the active driver cannot export and remap
+                the external allocation. Single-rank local CUDA jobs may return
+                a direct tensor alias instead, because no peer VA translation is
+                needed.
             RuntimeError: If the input tensor is not on a CUDA/HIP device or
                 is not contiguous.
         """
@@ -469,10 +460,18 @@ class VMemChunkedAllocator(BaseAllocator):
                 raise RuntimeError("Can only import CUDA/HIP tensors")
             if not external_tensor.is_contiguous():
                 raise RuntimeError("Only contiguous tensors can be imported; call .contiguous() before as_symmetric()")
+            if self._can_return_external_tensor_alias():
+                return self._external_tensor_alias(external_tensor)
 
             external_ptr = external_tensor.data_ptr()
             tensor_size = external_tensor.numel() * external_tensor.element_size()
-            alloc_base, alloc_size = self.driver.get_address_range(external_ptr)
+            try:
+                alloc_base, alloc_size = self.driver.get_address_range(external_ptr)
+            except DriverNotSupported:
+                if self._can_return_external_tensor_alias():
+                    return self._external_tensor_alias(external_tensor)
+                raise
+
             offset_in_alloc = external_ptr - alloc_base
             aligned_alloc_size = (alloc_size + self.granularity - 1) & ~(self.granularity - 1)
 
@@ -485,22 +484,22 @@ class VMemChunkedAllocator(BaseAllocator):
                 )
 
             target_base_va = self.base_va + target_offset
-            handle_bytes = self.driver.export_pointer_handle(alloc_base, alloc_size)
-            import_kwargs = {}
-            if self.driver.__class__.__name__ == "LocalHipDriver":
-                import_kwargs = {
-                    "access_va": self.base_va,
-                    "access_size": target_offset + aligned_alloc_size,
-                }
+            try:
+                handle_bytes = self.driver.export_handle(ExportableMemory(alloc_base, alloc_size))
+            except DriverNotSupported:
+                if self._can_return_external_tensor_alias():
+                    return self._external_tensor_alias(external_tensor)
+                raise
+
+            placement = MappingPlacement(target_base_va, arena_base=self.base_va)
             mapping = self.driver.import_and_map(
                 self.cur_rank,
                 handle_bytes,
                 aligned_alloc_size,
-                va=target_base_va,
-                **import_kwargs,
+                placement,
             )
             self._imported_heap_mappings.append(mapping)
-            self._shared_regions.append(_SharedRegion(va=target_base_va, size=aligned_alloc_size, allocation=None))
+            self._shared_regions.append(ExportableMemory(va=target_base_va, size=aligned_alloc_size))
             self.mapped_extent = target_offset + aligned_alloc_size
             self.bump = max(self.bump, self.mapped_extent)
 
@@ -516,7 +515,7 @@ class VMemChunkedAllocator(BaseAllocator):
         combined with using self._peer_mappings.remove(mapping) as the gate,
         is what makes cleanup race-free against close() and release_peer_chunk:
         only one code path can successfully remove a given mapping from the
-        list, and that code path owns the cleanup_import call.
+        list, and that code path owns the cleanup call.
 
         The self._closed check before the lock is a fast-path optimization only
         -- it is NOT a correctness gate. On weakly-ordered architectures the
@@ -540,9 +539,9 @@ class VMemChunkedAllocator(BaseAllocator):
             except ValueError:
                 return
             try:
-                self.driver.cleanup_import(mapping)
+                self.driver.cleanup(mapping)
             except Exception as exc:
-                logger.warning("cleanup_import failed in finalizer: %s", exc)
+                logger.warning("cleanup failed in finalizer: %s", exc)
 
     def import_peer_chunk(self, peer_rank: int, handle_bytes: bytes, size: int) -> int:
         """
@@ -552,7 +551,7 @@ class VMemChunkedAllocator(BaseAllocator):
         The caller is responsible for calling release_peer_chunk when done.
         """
         with self.lock:
-            mapping = self.driver.import_and_map(peer_rank, handle_bytes, size, va=None)
+            mapping = self.driver.import_and_map(peer_rank, handle_bytes, size)
             self._peer_mappings.append(mapping)
             return mapping.remote_va
 
@@ -569,7 +568,7 @@ class VMemChunkedAllocator(BaseAllocator):
             for i, mapping in enumerate(self._peer_mappings):
                 if mapping.remote_va == remote_va:
                     try:
-                        self.driver.cleanup_import(mapping)
+                        self.driver.cleanup(mapping)
                     finally:
                         self._peer_mappings.pop(i)
                     return
@@ -617,7 +616,7 @@ class VMemChunkedAllocator(BaseAllocator):
             # Release imported peer mappings
             for mapping in self._peer_mappings:
                 try:
-                    self.driver.cleanup_import(mapping)
+                    self.driver.cleanup(mapping)
                 except Exception:
                     pass
             self._peer_mappings.clear()
@@ -626,18 +625,18 @@ class VMemChunkedAllocator(BaseAllocator):
             # heap VA layout via import_external_tensor.
             for mapping in self._imported_heap_mappings:
                 try:
-                    self.driver.cleanup_import(mapping)
+                    self.driver.cleanup(mapping)
                 except Exception:
                     pass
             self._imported_heap_mappings.clear()
             self._shared_regions.clear()
 
             # Release locally-mapped chunks. Each chunk has _va_owned=False,
-            # so cleanup_local will unmap and release the physical handle
+            # so cleanup will unmap and release the physical handle
             # but will NOT free VA
             for alloc in self.chunks:
                 try:
-                    self.driver.cleanup_local(alloc)
+                    self.driver.cleanup(alloc)
                 except Exception:
                     pass
             self.chunks.clear()

@@ -555,6 +555,55 @@ def main(argv: list[str] | None = None) -> None:
         print("No benchmark configurations to run after applying filters/skips.", file=sys.stderr)
         sys.exit(1)
 
+    # If launched by torchrun/srun for a multi-node job, do not spawn another
+    # local elastic job.  The current process is already one benchmark rank.
+    if all(key in os.environ for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE")):
+        world_size = int(os.environ["WORLD_SIZE"])
+        global_rank = int(os.environ["RANK"])
+        if world_size not in all_num_ranks:
+            if global_rank == 0:
+                configured = ", ".join(str(n) for n in sorted(all_num_ranks))
+                print(
+                    f"torchrun WORLD_SIZE={world_size} does not match benchmark num_ranks selection "
+                    f"{{{configured}}}. Pass --axis_num_ranks={world_size} or launch with a matching world size.",
+                    file=sys.stderr,
+                )
+            sys.exit(1)
+
+        dropped_num_ranks = sorted(all_num_ranks - {world_size})
+        if dropped_num_ranks and global_rank == 0:
+            dropped = ", ".join(str(n) for n in dropped_num_ranks)
+            print(
+                f"Warning: torchrun WORLD_SIZE={world_size}; skipping benchmark num_ranks values: {dropped}",
+                file=sys.stderr,
+            )
+
+        all_results = _run_benchmarks_worker(
+            benchmarks,
+            axis_overrides,
+            skip_overrides,
+            args.heap_size,
+            args.use_gluon,
+            args.n_warmup,
+            args.n_repeat,
+            args.benchmark_filter,
+        )
+
+        if global_rank == 0:
+            if args.benchmark_format == "json":
+                output = _format_json(all_results)
+            elif args.benchmark_format == "csv":
+                output = _format_csv(all_results)
+            else:
+                output = _format_console(all_results)
+
+            print(output, end="")
+
+            if args.benchmark_out:
+                with open(args.benchmark_out, "w") as f:
+                    f.write(output)
+        return
+
     # Launch once per unique num_ranks, collecting results across runs
     all_results: list[Result] = []
 

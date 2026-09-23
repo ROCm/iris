@@ -5,43 +5,54 @@ on:
   pull_request:
     types: [opened]
 
+# Read-only by default. Jobs that write opt in individually, so a new job
+# cannot silently inherit write access to issues or PRs.
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
 
 jobs:
   # Label ISSUES using Renato66/auto-label
   label-issues:
     if: github.event_name == 'issues'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           sparse-checkout: |
             .github/workflows/auto-label.json5
           sparse-checkout-cone-mode: false
-      - uses: Renato66/auto-label@v3
+      - uses: Renato66/auto-label@f6a6e622dd6cab2171b38f4dd4616c1bf65a65dd # v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
   # Add ISSUES to ROCm Project #91 so they land in Todo
+  # Uses a PAT, not GITHUB_TOKEN, so no repo-scoped write is needed here.
   add-issues-to-project:
     if: github.event_name == 'issues'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/add-to-project@v1.0.2
+      - uses: actions/add-to-project@244f685bbc3b7adfa8466e08b698b5577571133e # v1.0.2
         with:
           project-url: https://github.com/orgs/ROCm/projects/91
           github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
 
-  # PRs: label so the project rule moves them to In Progress
+  # PRs: label so the project rule moves them to In Progress.
+  # addLabels goes through the issues API, so this needs issues: write.
   label-prs:
     if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
       - name: Add iris + in-progress labels to PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             await github.rest.issues.addLabels({

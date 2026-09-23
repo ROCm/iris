@@ -65,7 +65,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Apptainer (if not available)
         run: |
@@ -104,6 +106,10 @@ jobs:
       - name: Acquire GPUs
         run: |
           bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
+
+      - name: Report environment versions
+        run: |
+          bash .github/scripts/report_versions.sh
 
       - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (nightly Triton)
         run: |
