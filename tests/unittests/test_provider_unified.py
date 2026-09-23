@@ -113,27 +113,6 @@ def _warp_size():
     return triton.runtime.driver.active.get_current_target().warp_size
 
 
-@pytest.fixture
-def symmetric(provider):
-    """Allocate through the provider; release on teardown, pass or fail."""
-    allocated = []
-
-    def alloc(*size, dtype=None):
-        tensor, table = provider.allocate_symmetric(*size, dtype=dtype)
-        allocated.append(tensor)
-        return tensor, table
-
-    yield alloc
-
-    # rocshmem_free is collective, so every rank frees the same allocations in
-    # the same order. Iris has no free; it releases on heap teardown.
-    provider.barrier()
-    free = getattr(provider, "free", None)
-    if free is not None:
-        for tensor in allocated:
-            free(tensor)
-
-
 def _deallocate(provider, tensor):
     """Release a symmetric allocation.
 
