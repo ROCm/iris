@@ -113,9 +113,61 @@ def _warp_size():
     return triton.runtime.driver.active.get_current_target().warp_size
 
 
+@pytest.fixture
+def symmetric(provider):
+    """Allocate through the provider; release on teardown, pass or fail."""
+    allocated = []
+
+    def alloc(*size, dtype=None):
+        tensor, table = provider.allocate_symmetric(*size, dtype=dtype)
+        allocated.append(tensor)
+        return tensor, table
+
+    yield alloc
+
+    # rocshmem_free is collective, so every rank frees the same allocations in
+    # the same order. Iris has no free; it releases on heap teardown.
+    provider.barrier()
+    free = getattr(provider, "free", None)
+    if free is not None:
+        for tensor in allocated:
+            free(tensor)
+
+
+def _deallocate(provider, tensor):
+    """Release a symmetric allocation.
+
+    Stub until Iris grows a deallocate. rocSHMEM frees explicitly because
+    rocshmem_free is collective; Iris reclaims on heap teardown, except the
+    chunked allocator which reclaims by GC finalizer.
+    """
+    free = getattr(provider, "free", None)
+    if free is not None:
+        free(tensor)
+
+
+@pytest.fixture
+def symmetric(provider):
+    """Allocate through the provider; release on teardown, pass or fail."""
+    allocated = []
+
+    def alloc(*size, dtype=None):
+        tensor, table = provider.allocate_symmetric(*size, dtype=dtype)
+        allocated.append(tensor)
+        return tensor, table
+
+    yield alloc
+
+    # Collective where implemented, so every rank releases the same
+    # allocations in the same order.
+    provider.barrier()
+    for tensor in allocated:
+        _deallocate(provider, tensor)
+
+
 @pytest.mark.parametrize("backend", sorted(BACKENDS))
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_two_tensors_two_tables(provider, dtype, backend):
+def test_two_tensors_two_tables(provider, symmetric, dtype, backend):
     """Each tensor translates through its own table, in one kernel."""
     rank = provider.get_rank()
     world_size = provider.get_num_ranks()
@@ -124,8 +176,10 @@ def test_two_tensors_two_tables(provider, dtype, backend):
     warp_size = _warp_size()
     assert BLOCK_SIZE % warp_size == 0, f"block {BLOCK_SIZE} must divide into warps of {warp_size}"
 
-    a, a_peers = provider.allocate_symmetric(BLOCK_SIZE, dtype=dtype)
-    b, b_peers = provider.allocate_symmetric(BLOCK_SIZE, dtype=dtype)
+    # Keep the allocations together. A rank that dies between them frees a
+    # different count than its peers, and a collective free then hangs.
+    a, a_peers = symmetric(BLOCK_SIZE, dtype=dtype)
+    b, b_peers = symmetric(BLOCK_SIZE, dtype=dtype)
 
     # The invariant device translation subtracts, per tensor not per heap.
     assert int(a_peers[rank].item()) == a.data_ptr()
