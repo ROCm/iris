@@ -9,19 +9,34 @@ Closes: https://github.com/ROCm/iris/issues/63
 Notes on what is and is not covered here
 ----------------------------------------
 The example module defines only Triton device kernels (``@triton.jit``); the
-launch/validation harness lives in the sibling ``benchmark.py`` /
-``matmul_wrapper.py``.  There is therefore no Python-level driver function to
-call directly, so this test exercises the kernels the way CI runs them: by
-launching the example's own entry point under a real distributed process group
-and asserting the validated GEMM result.
+launch and validation harness lives in the sibling ``benchmark.py`` /
+``matmul_wrapper.py``, so unlike the ``00_load`` / ``02_all_load`` examples
+there is no Python-level driver function to import and call.  The test
+therefore exercises the kernels the way a user does: by running the example's
+own entry point and asserting on its exit status.
 
 This file follows the import convention already used by
 ``tests/examples/test_load_bench.py`` and ``test_all_load_bench.py``
 (``importlib.util.spec_from_file_location`` against a path resolved relative to
 this file, so it works from any cwd).
 
-The default shapes are deliberately small: CI runs the ``examples`` directory
-at 1, 2, 4 and 8 ranks, so the test must stay cheap enough to run four times.
+``benchmark.py`` spawns its *own* ranks via ``mp.spawn`` (it is a standalone
+program, not a function the CI process group drives), so ``--num_ranks 1``
+keeps this test to what a single GPU can prove; the rank matrix is covered by
+CI running the ``examples`` directory at 1/2/4/8 ranks.
+
+Two of the example's defaults are known-not-portable and are set explicitly
+below, so this test measures the kernels rather than re-discovering unrelated
+bugs.  Both are filed separately rather than papered over:
+
+1. ``gemm_sms`` auto-detection rejects itself on power-of-two CU counts.
+   ``benchmark.py`` computes ``gemm_sms = 2 ** floor(log2(cu_count))`` and then
+   exits if ``gemm_sms >= total_sms``.  For any GPU whose CU count is already
+   a power of two that is *always* true, so the example dies with
+   ``Invalid number of GEMM SMs`` before doing any work.
+2. ``BLK_M``/``BLK_N`` default to 256x256, which needs 131072 bytes of shared
+   memory — above the 65536-byte limit on some ROCm targets, producing
+   ``triton.runtime.errors.OutOfResources``.  128x128 fits.
 """
 
 import importlib.util
@@ -55,12 +70,13 @@ EXPECTED_KERNELS = (
 @pytest.mark.parametrize("kernel_name", EXPECTED_KERNELS)
 def test_example_exports_expected_kernels(kernel_name):
     """The kernels named by issue #63 are present and are real Triton kernels."""
+    import triton as _triton
+
     assert hasattr(module, kernel_name), f"missing kernel: {kernel_name}"
     kernel = getattr(module, kernel_name)
-    assert callable(kernel)
-    # triton.jit marks the wrapped function; the attribute is the giveaway that
-    # this is a device kernel and not a plain Python helper.
-    assert hasattr(kernel, "cache") or hasattr(kernel, "__wrapped__") or callable(kernel)
+    assert isinstance(kernel, _triton.runtime.jit.JITFunction), (
+        f"{kernel_name} should be a Triton JITFunction, got {type(kernel).__name__}"
+    )
 
 
 def test_example_module_path_is_stable():
@@ -79,32 +95,44 @@ def test_gemm_one_shot_all_reduce_validate(dtype):
     """Run the example end-to-end with --validate and require a clean exit.
 
     ``benchmark.py`` already implements the correctness check (it calls
-    ``validate_gemm`` from ``examples/common/validation.py``); this asserts on
-    its exit status rather than re-implementing the numerical comparison, so
-    the test cannot drift from the example's own definition of correct.
+    ``validate_gemm`` from ``examples/common/validation.py`` and logs
+    "Final C validation passed."); asserting on its exit status rather than
+    re-implementing the numerical comparison keeps this test from drifting
+    away from the example's own definition of correct.
     """
     if not torch.cuda.is_available():
         pytest.skip("requires a ROCm/CUDA device")
 
+    # gemm_sms must be < total_sms; the example's own auto-detection can
+    # violate that on power-of-two CU counts (see module docstring).
+    total_sms = torch.cuda.get_device_properties(0).multi_processor_count
+    gemm_sms = max(1, total_sms // 2)
+
     cmd = [
         sys.executable,
-        str(example_dir / "benchmark.py"),
+        "benchmark.py",
         "--validate",
         "--datatype",
         dtype,
-        # small shapes: this runs at 1/2/4/8 ranks in CI
+        "--num_ranks",
+        "1",
+        # 128x128 blocks fit the 65536-byte shared-memory limit (see docstring)
         "-m",
-        "1024",
+        "512",
         "-n",
-        "1024",
+        "512",
         "-k",
-        "1024",
+        "512",
         "--BLK_M",
-        "256",
+        "128",
         "--BLK_N",
-        "256",
+        "128",
         "--BLK_K",
         "64",
+        "--gemm_sms",
+        str(gemm_sms),
+        "--total_sms",
+        str(total_sms),
     ]
     proc = subprocess.run(cmd, cwd=str(example_dir), capture_output=True, text=True, timeout=900)
     assert proc.returncode == 0, (
