@@ -40,6 +40,7 @@ bugs.  Both are filed separately rather than papered over:
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -108,6 +109,21 @@ def test_gemm_one_shot_all_reduce_validate(dtype):
     total_sms = torch.cuda.get_device_properties(0).multi_processor_count
     gemm_sms = max(1, total_sms // 2)
 
+    # ``benchmark.py`` imports ``from examples.common.utils import ...``, which
+    # requires the REPOSITORY ROOT (the parent of ``examples/``) to be importable.
+    # Running it with ``cwd=example_dir`` puts the example directory on sys.path
+    # (so the sibling ``matmul_wrapper`` resolves) but NOT the repo root, so the
+    # package import raised ``ModuleNotFoundError: No module named 'examples.common'``
+    # and both datatypes failed in CI.  Passing the root via PYTHONPATH satisfies the
+    # package import without changing how the script is invoked -- the same thing the
+    # sibling tests achieve with ``sys.path.insert``, which cannot reach a subprocess.
+    repo_root = example_dir.parent.parent
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(repo_root) if not existing else str(repo_root) + os.pathsep + existing
+    )
+
     cmd = [
         sys.executable,
         "benchmark.py",
@@ -134,7 +150,14 @@ def test_gemm_one_shot_all_reduce_validate(dtype):
         "--total_sms",
         str(total_sms),
     ]
-    proc = subprocess.run(cmd, cwd=str(example_dir), capture_output=True, text=True, timeout=900)
+    proc = subprocess.run(
+        cmd,
+        cwd=str(example_dir),
+        capture_output=True,
+        text=True,
+        timeout=900,
+        env=env,
+    )
     assert proc.returncode == 0, (
         f"gemm_one_shot_all_reduce --validate failed ({dtype})\n"
         f"--- stdout ---\n{proc.stdout[-4000:]}\n"
