@@ -262,6 +262,14 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         json_writer.add_field("success", success)
         shmem.info("Validation completed")
 
+        # Fail the process on a bad result.  Without this the example logs
+        # "Final C validation failed", writes success=false, and still exits 0
+        # — useless as a CI gate.  Raised inside the worker (not via a module
+        # flag read in main()) because mp.spawn runs each rank in its own
+        # process: a global set here is invisible to the parent.
+        if not success:
+            raise RuntimeError("Validation failed: see the mismatches logged above.")
+
     if args["benchmark"]:
         shmem.info("Benchmarking...")
         perf = lambda ms: 2 * args["M"] * args["N"] * args["K"] * 1e-12 / (ms * 1e-3)
@@ -304,6 +312,7 @@ def main():
         nprocs=num_ranks,
         join=True,
     )
+
 
 
 if __name__ == "__main__":
