@@ -12,6 +12,9 @@ name: Reset GPU Allocator
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   reset:
     runs-on: [self-hosted, mi3xx]

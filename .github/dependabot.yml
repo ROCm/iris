@@ -1,0 +1,41 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# Dependabot version updates. See
+# https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    # "/" covers .github/workflows; composite actions keep their own `uses:`
+    # pins, so .github/actions has to be listed separately to get bumped.
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: "daily"
+    # Wait for a release to age before proposing it, so a compromised or
+    # broken publish has time to be caught upstream (zizmor dependabot-cooldown).
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      python-deps:
+        patterns:
+          - "*"
