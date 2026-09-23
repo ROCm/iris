@@ -7,7 +7,7 @@ All-reduce collective operation — public API.
 Triton only (no gluon support).
 """
 
-from iris.ccl.utils import extract_group_info
+from iris.ccl.utils import extract_group_info, _ensure_symmetric, _validate_output_symmetric
 
 
 def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace=None):
@@ -20,6 +20,16 @@ def all_reduce_preamble(output_tensor, input_tensor, ctx, config=None, workspace
 def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None, workspace=None):
     """
     All-reduce: sum inputs across all ranks, result on every rank.
+
+    Which tensors need the symmetric heap depends on the variant:
+    - atomic/spinlock: output is remote-accessed (input is local)
+    - one_shot: input is remote-read (output is local)
+    - two_shot: both are remote-accessed
+    - ring: neither (workspace ring_buffer/flags are, but those are internal)
+
+    We ensure symmetric on the tensors that each variant actually accesses
+    remotely. Workspace tensors (ring_buffer, flags, locks) are allocated
+    internally on the heap already.
 
     Args:
         output_tensor: Shape (M, N)
@@ -54,6 +64,14 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
     valid_variants = ["atomic", "spinlock", "ring", "two_shot", "one_shot"]
     if variant not in valid_variants:
         raise ValueError(f"Invalid all_reduce_variant: {variant}. Must be one of: {', '.join(valid_variants)}")
+
+    # Ensure/validate symmetric only for tensors that are remotely accessed per variant
+    if variant in ("one_shot", "two_shot"):
+        # Input is remote-read — auto-import if needed
+        input_tensor = _ensure_symmetric(ctx, input_tensor, "input_tensor")
+    if variant in ("atomic", "spinlock", "two_shot"):
+        # Output is remote-written — must be pre-allocated on heap
+        _validate_output_symmetric(ctx, output_tensor, "output_tensor")
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 

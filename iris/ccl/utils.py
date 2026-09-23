@@ -76,3 +76,30 @@ def extract_group_info(group, ctx) -> Tuple[int, int, int, int, int]:
     """
 
     return _extract_group_info(group, ctx.get_rank(), ctx.get_num_ranks())
+
+
+def _ensure_symmetric(ctx, tensor, name="tensor"):
+    """Return tensor on symmetric heap, importing if needed.
+
+    For input tensors that are only read: the kernel reads from the heap
+    copy, so the caller doesn't need the returned tensor back.
+
+    Do NOT use this for output tensors — see _validate_output_symmetric.
+    """
+    if ctx.is_symmetric(tensor):
+        return tensor
+    return ctx.as_symmetric(tensor)
+
+
+def _validate_output_symmetric(ctx, tensor, name="output_tensor"):
+    """Raise if output tensor is not on symmetric heap.
+
+    Output tensors cannot be auto-imported because the kernel writes results
+    into the heap copy, but the caller's original tensor would never see
+    those results (torch allocator makes an independent copy).
+    """
+    if not ctx.is_symmetric(tensor):
+        raise ValueError(
+            f"{name} must be on the symmetric heap. "
+            f"Allocate with ctx.zeros() or import with ctx.as_symmetric() before calling."
+        )
