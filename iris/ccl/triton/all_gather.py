@@ -277,6 +277,69 @@ def persistent_all_gather_partitioned(
             )
 
 
+@triton.jit()
+def persistent_all_gather_pull(
+    input_ptr,
+    output_ptr,
+    M,
+    N,
+    stride_in_m,
+    stride_in_n,
+    stride_out_m,
+    stride_out_n,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+):
+    """
+    Pull-model all-gather: each rank reads input from all ranks into its own output.
+
+    Uses simple linear tile indexing (no swizzle/chiplet transform) for clean
+    codegen on MI300X. GROUP_SIZE_M/NUM_XCDS/CHUNK_SIZE accepted but unused.
+    """
+    pid = tl.program_id(0)
+
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    total_tiles = num_pid_m * num_pid_n
+
+    for tile_id in range(pid, total_tiles, COMM_SMS):
+        pid_m = tile_id // num_pid_n
+        pid_n = tile_id % num_pid_n
+
+        tl.assume(pid_m >= 0)
+        tl.assume(pid_n >= 0)
+
+        rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+        rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
+        rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
+
+        for i in tl.static_range(world_size):
+            source_rank = rank_start + i * rank_stride
+            rm_output = rm + i * M
+            output_offset = rm_output[:, None] * stride_out_m + rn[None, :] * stride_out_n
+
+            if i == group_rank:
+                data = tl.load(input_ptr + input_offset, mask=mask, other=0.0)
+                tl.store(output_ptr + output_offset, data, mask=mask, cache_modifier=".wt")
+            else:
+                data = iris.load(input_ptr + input_offset, iris_rank, source_rank, heap_bases, mask=mask)
+                tl.store(output_ptr + output_offset, data, mask=mask, cache_modifier=".wt")
+
+
 def launch(
     input_tensor,
     output_tensor,
@@ -307,6 +370,8 @@ def launch(
         kernel_fn = persistent_all_gather
     elif config.all_gather_variant == "partitioned":
         kernel_fn = persistent_all_gather_partitioned
+    elif config.all_gather_variant == "pull":
+        kernel_fn = persistent_all_gather_pull
     else:
         raise ValueError(f"Unknown all_gather_variant: {config.all_gather_variant}")
 
