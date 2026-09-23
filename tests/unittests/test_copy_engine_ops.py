@@ -31,11 +31,11 @@ def _copy_engine_linear_kernel(
         heap_bases,
         mask=mask,
         copy_engine_ctx=copy_engine_ctx,
-        USE_COPY_ENGINE=True,
-        CONTIGUOUS_COPY=True,
+        use_copy_engine=True,
+        contiguous_copy=True,
     )
     # Each block signals completion to force cache coherency on destination GPU
-    iris.atomic_add(flag, 1, from_rank, to_rank, heap_bases, copy_engine_ctx=copy_engine_ctx, USE_COPY_ENGINE=True)
+    iris.atomic_add(flag, 1, from_rank, to_rank, heap_bases, copy_engine_ctx=copy_engine_ctx, use_copy_engine=True)
     # Wait for this block's SDMA operations to complete
     iris.quiet(copy_engine_ctx, to_rank)
 
@@ -60,10 +60,10 @@ def _copy_engine_linear_no_mask_kernel(
         to_rank,
         heap_bases,
         copy_engine_ctx=copy_engine_ctx,
-        USE_COPY_ENGINE=True,
-        CONTIGUOUS_COPY=True,
+        use_copy_engine=True,
+        contiguous_copy=True,
     )
-    iris.atomic_add(flag, 1, from_rank, to_rank, heap_bases, copy_engine_ctx=copy_engine_ctx, USE_COPY_ENGINE=True)
+    iris.atomic_add(flag, 1, from_rank, to_rank, heap_bases, copy_engine_ctx=copy_engine_ctx, use_copy_engine=True)
     iris.quiet(copy_engine_ctx, to_rank)
 
 
@@ -177,8 +177,8 @@ def test_copy_engine_host_put(num_elements):
     completion_flag = shmem.zeros(1, device="cuda", dtype=torch.int32)
 
     if rank == 0:
-        shmem.put(src, dst_rank=remote_rank, dst_tensor=dst, signal_flag=completion_flag, signal_value=1, async_op=True)
-        shmem.quiet(dst_rank=remote_rank)
+        shmem.put(src, to_rank=remote_rank, to_tensor=dst, signal_flag=completion_flag, signal_value=1, async_op=True)
+        shmem.quiet(to_rank=remote_rank)
 
     shmem.barrier()
 
@@ -206,7 +206,7 @@ def _copy_engine_atomic_kernel(
         to_rank,
         heap_bases,
         copy_engine_ctx=copy_engine_ctx,
-        USE_COPY_ENGINE=True,
+        use_copy_engine=True,
     )
 
 
@@ -261,7 +261,7 @@ def _copy_engine_atomic_cas_kernel(
         to_rank,
         heap_bases,
         copy_engine_ctx=copy_engine_ctx,
-        USE_COPY_ENGINE=True,
+        use_copy_engine=True,
     )
 
 
@@ -336,12 +336,12 @@ def _copy_engine_2d_kernel(
         from_rank,
         to_rank,
         heap_bases,
-        src_row_stride=src_stride,
-        dst_row_stride=dst_stride,
+        from_row_stride=src_stride,
+        to_row_stride=dst_stride,
         mask=mask,
         copy_engine_ctx=copy_engine_ctx,
-        USE_COPY_ENGINE=True,
-        CONTIGUOUS_COPY=True,
+        use_copy_engine=True,
+        contiguous_copy=True,
         from_base_ptr=src_base,
         to_base_ptr=dst_base,
     )
@@ -375,11 +375,11 @@ def _copy_engine_2d_no_mask_kernel(
         from_rank,
         to_rank,
         heap_bases,
-        src_row_stride=src_stride,
-        dst_row_stride=dst_stride,
+        from_row_stride=src_stride,
+        to_row_stride=dst_stride,
         copy_engine_ctx=copy_engine_ctx,
-        USE_COPY_ENGINE=True,
-        CONTIGUOUS_COPY=True,
+        use_copy_engine=True,
+        contiguous_copy=True,
         from_base_ptr=src_base,
         to_base_ptr=dst_base,
     )
@@ -499,8 +499,8 @@ def _copy_engine_put_signal_kernel(
         heap_bases,
         mask=mask,
         copy_engine_ctx=copy_engine_ctx,
-        USE_COPY_ENGINE=True,
-        CONTIGUOUS_COPY=True,
+        use_copy_engine=True,
+        contiguous_copy=True,
     )
 
     # Signal completion (last thread in block)
@@ -512,7 +512,7 @@ def _copy_engine_put_signal_kernel(
             to_rank,
             heap_bases,
             copy_engine_ctx=copy_engine_ctx,
-            USE_COPY_ENGINE=True,
+            use_copy_engine=True,
         )
 
 
@@ -587,8 +587,8 @@ def _copy_engine_multi_block_kernel(
         heap_bases,
         mask=mask,
         copy_engine_ctx=copy_engine_ctx,
-        USE_COPY_ENGINE=True,
-        CONTIGUOUS_COPY=True,
+        use_copy_engine=True,
+        contiguous_copy=True,
     )
 
     # Each block atomically increments its counter
@@ -599,7 +599,7 @@ def _copy_engine_multi_block_kernel(
         to_rank,
         heap_bases,
         copy_engine_ctx=copy_engine_ctx,
-        USE_COPY_ENGINE=True,
+        use_copy_engine=True,
     )
 
 
@@ -662,8 +662,8 @@ def test_copy_engine_zero_size():
 
     if rank == 0:
         # Empty slice should be a no-op
-        shmem.put(src[:0], dst_rank=remote_rank, dst_tensor=dst[:0], async_op=True)
-        shmem.quiet(dst_rank=remote_rank)
+        shmem.put(src[:0], to_rank=remote_rank, to_tensor=dst[:0], async_op=True)
+        shmem.quiet(to_rank=remote_rank)
 
     shmem.barrier()
 

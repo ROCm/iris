@@ -290,10 +290,10 @@ def put(
     store_cache_modifier=None,
     hint: tl.constexpr = None,
     copy_engine_ctx: tl.tensor = None,
-    src_row_stride: tl.constexpr = 0,
-    dst_row_stride: tl.constexpr = 0,
-    USE_COPY_ENGINE: tl.constexpr = False,
-    CONTIGUOUS_COPY: tl.constexpr = False,
+    from_row_stride: tl.constexpr = 0,
+    to_row_stride: tl.constexpr = 0,
+    use_copy_engine: tl.constexpr = False,
+    contiguous_copy: tl.constexpr = False,
     from_base_ptr=None,
     to_base_ptr=None,
 ):
@@ -311,13 +311,13 @@ def put(
 
     Args:
         from_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's local memory from which to read data.
-        to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `to_rank`'s address space.
+        to_ptr (triton.PointerType, or block of dtype=triton.PointerType): Pointer in the current rank's address space that will be translated to the `to_rank`'s address space. Must be the current rank where the pointer is local.
         from_rank (int): The current rank ID from which to read the data.
-        to_rank (int): The rank ID to which the data will be written.
+        to_rank (int): The `to_rank` ID to which the data will be written.
         heap_bases (triton.PointerType): Array containing the heap base addresses for all ranks.
         copy_engine_ctx (tl.tensor): Copy engine context for SDMA operations.
         mask (Block of triton.int1, optional): If mask[idx] is false, do not load/copy data at that index.
-            When ``USE_COPY_ENGINE`` and ``CONTIGUOUS_COPY`` are true, ``mask=None`` copies the full pointer block.
+            When ``use_copy_engine`` and ``contiguous_copy`` are true, ``mask=None`` copies the full pointer block.
             Defaults to None.
         other (Block, optional): Value to return for masked-out elements during the load operation. If not provided, the result for masked-out elements is undefined. Defaults to None.
 
@@ -335,14 +335,14 @@ def put(
             - ".wt": Write-Through. Bypasses L1 and L2 (coherent cache bypass), may hit in LLC with LRU.
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Use a scalar for 1-D (e.g. 16) or a tuple for N-D (e.g. (1, 16)). Defaults to None (no hint).
         copy_engine_ctx (tl.tensor, optional): Copy engine context for SDMA operations. Required for SDMA bulk copies.
-        src_row_stride (int, optional): Source row stride in elements for 2D SDMA copies. Defaults to 0.
-        dst_row_stride (int, optional): Destination row stride in elements for 2D SDMA copies. Defaults to 0.
-        USE_COPY_ENGINE (tl.constexpr, optional): Whether to use SDMA copy engine. Defaults to False (uses regular load/store).
-        CONTIGUOUS_COPY (tl.constexpr, optional): Opt-in assertion that the masked pointer block represents one contiguous
+        from_row_stride (int, optional): Source row stride in elements for 2D SDMA copies. Defaults to 0.
+        to_row_stride (int, optional): Destination row stride in elements for 2D SDMA copies. Defaults to 0.
+        use_copy_engine (tl.constexpr, optional): Whether to use SDMA copy engine. Defaults to False (uses regular load/store).
+        contiguous_copy (tl.constexpr, optional): Opt-in assertion that the masked pointer block represents one contiguous
             1D span or one rectangular 2D tile. SDMA bulk copies are only used when this is True; otherwise the function
             falls back to regular load/store semantics.
-        from_base_ptr (triton.PointerType, optional): Base pointer of the source buffer. Required for 2D copies when USE_COPY_ENGINE is True.
-        to_base_ptr (triton.PointerType, optional): Base pointer of the destination buffer. Required for 2D copies when USE_COPY_ENGINE is True.
+        from_base_ptr (triton.PointerType, optional): Base pointer of the source buffer. Required for 2D copies when use_copy_engine is True.
+        to_base_ptr (triton.PointerType, optional): Base pointer of the destination buffer. Required for 2D copies when use_copy_engine is True.
 
     Returns:
         None
@@ -357,7 +357,7 @@ def put(
         >>>     iris.put(local_ptr + offsets, remote_ptr + offsets,
         >>>              from_rank, to_rank, heap_bases,
         >>>              mask=offsets < 256, copy_engine_ctx=copy_engine_ctx,
-        >>>              USE_COPY_ENGINE=True, CONTIGUOUS_COPY=True)
+        >>>              use_copy_engine=True, contiguous_copy=True)
 
         2D (tiled) copy:
         >>> @triton.jit
@@ -365,14 +365,14 @@ def put(
         >>>     from_rank = 0
         >>>     to_rank = 1
         >>>     iris.put(local_ptr, remote_ptr, from_rank, to_rank, heap_bases,
-        >>>              dst_row_stride=1024, src_row_stride=1024,
+        >>>              to_row_stride=1024, from_row_stride=1024,
         >>>              mask=mask, copy_engine_ctx=copy_engine_ctx,
-        >>>              USE_COPY_ENGINE=True, CONTIGUOUS_COPY=True,
+        >>>              use_copy_engine=True, contiguous_copy=True,
         >>>              from_base_ptr=base_ptr, to_base_ptr=base_ptr)
     """
     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
 
-    if not USE_COPY_ENGINE or not CONTIGUOUS_COPY:
+    if not use_copy_engine or not contiguous_copy:
         data = tl.load(from_ptr, mask=mask, other=other, cache_modifier=load_cache_modifier)
 
         tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
@@ -464,8 +464,8 @@ def put(
                 num_elements_per_stride = tl.max(tl.sum(mask_int, axis=-1))
                 num_strides = tl.max(tl.sum(mask_int, axis=0))
             size_bytes = (num_elements_per_stride * element_size_bytes).to(tl.uint32)
-            src_stride = (src_row_stride * element_size_bytes).to(tl.uint32)
-            dst_stride = (dst_row_stride * element_size_bytes).to(tl.uint32)
+            src_stride = (from_row_stride * element_size_bytes).to(tl.uint32)
+            dst_stride = (to_row_stride * element_size_bytes).to(tl.uint32)
 
             # Place sub-window copy packet for 2D tiled copies
             # Calculate base addresses and offsets for sub-window copy
@@ -513,7 +513,7 @@ def atomic_add(
     scope=None,
     hint: tl.constexpr = None,
     copy_engine_ctx=None,
-    USE_COPY_ENGINE: tl.constexpr = False,
+    use_copy_engine: tl.constexpr = False,
 ):
     """
     Performs an atomic add at the specified rank's memory location.
@@ -533,8 +533,8 @@ def atomic_add(
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". If not provided, the function defaults to using "acq_rel" semantics.
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). The default value is "gpu".
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
-        copy_engine_ctx (tl.tensor, optional): Copy engine context used when issuing SDMA-backed atomics. Required when ``USE_COPY_ENGINE`` is True.
-        USE_COPY_ENGINE (tl.constexpr, optional): Whether to route the atomic through the SDMA copy engine. Defaults to False.
+        copy_engine_ctx (tl.tensor, optional): Copy engine context used when issuing SDMA-backed atomics. Required when ``use_copy_engine`` is True.
+        use_copy_engine (tl.constexpr, optional): Whether to route the atomic through the SDMA copy engine. Defaults to False.
 
     Returns:
         Block: The data stored at pointer before the atomic operation.
@@ -549,7 +549,7 @@ def atomic_add(
         >>>     old_val = iris.atomic_add(ptr, increment, cur_rank, remote_rank, heap_bases)
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
-    if not USE_COPY_ENGINE:
+    if not use_copy_engine:
         return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
     else:
         handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
@@ -639,7 +639,7 @@ def atomic_cas(
     scope=None,
     hint: tl.constexpr = None,
     copy_engine_ctx=None,
-    USE_COPY_ENGINE: tl.constexpr = False,
+    use_copy_engine: tl.constexpr = False,
 ):
     """
     Atomically compares and exchanges the specified rank's memory location.
@@ -659,14 +659,14 @@ def atomic_cas(
         sem (str, optional): Specifies the memory semantics for the operation. Acceptable values are "acquire", "release", "acq_rel" (stands for "ACQUIRE_RELEASE"), and "relaxed". Defaults to "acq_rel".
         scope (str, optional): Defines the scope of threads that observe the synchronizing effect of the atomic operation. Acceptable values are "gpu" (default), "cta" (cooperative thread array, thread block), or "sys" (stands for "SYSTEM"). Defaults to "gpu".
         hint (int or tuple, optional): Vectorization hint passed to tl.multiple_of / tl.max_contiguous on the translated pointer. Defaults to None (no hint).
-        copy_engine_ctx (tl.tensor, optional): Copy engine context used when issuing SDMA-backed atomics. Required when ``USE_COPY_ENGINE`` is True.
-        USE_COPY_ENGINE (tl.constexpr, optional): Whether to route the CAS through the SDMA copy engine. Defaults to False.
+        copy_engine_ctx (tl.tensor, optional): Copy engine context used when issuing SDMA-backed atomics. Required when ``use_copy_engine`` is True.
+        use_copy_engine (tl.constexpr, optional): Whether to route the CAS through the SDMA copy engine. Defaults to False.
 
     Returns:
         Block: The value contained at the memory location before the atomic operation attempt.
 
     Note:
-        The SDMA implementation used when ``USE_COPY_ENGINE`` is True does not
+        The SDMA implementation used when ``use_copy_engine`` is True does not
         provide the previous value stored at ``pointer``. In that case this
         function returns the compare operand ``cmp``.
 
@@ -681,7 +681,7 @@ def atomic_cas(
         >>>     old_val = iris.atomic_cas(ptr, expected, new_val, cur_rank, remote_rank, heap_bases)
     """
     translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
-    if not USE_COPY_ENGINE:
+    if not use_copy_engine:
         return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
     else:
         handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
@@ -971,7 +971,7 @@ def quiet(copy_engine_ctx: tl.tensor, to_rank):
         >>>     # Submit SDMA operations
         >>>     iris.put(
         >>>         src, dst, 0, 1, heap_bases, mask=mask,
-        >>>         copy_engine_ctx=copy_engine_ctx, USE_COPY_ENGINE=True, CONTIGUOUS_COPY=True
+        >>>         copy_engine_ctx=copy_engine_ctx, use_copy_engine=True, contiguous_copy=True
         >>>     )
         >>>     # Wait for completion
         >>>     iris.quiet(copy_engine_ctx, 1)

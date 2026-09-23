@@ -146,13 +146,13 @@ def host_initiated_producer(shmem, source_buffer, destination_buffer, flags, con
 
         shmem.put(
             src_chunk,
-            dst_rank=consumer_rank,
-            dst_tensor=dst_chunk,
+            to_rank=consumer_rank,
+            to_tensor=dst_chunk,
             signal_flag=flag_view,
             async_op=True,
         )
 
-    shmem.quiet(dst_rank=consumer_rank)
+    shmem.quiet(to_rank=consumer_rank)
 
     if verbose:
         end_time = time.time()

@@ -74,7 +74,7 @@ def run_message_passing_kernels(module, args, *, use_copy_engine: bool = False):
             producer_fn.__code__.co_varnames if producer_fn and hasattr(producer_fn, "__code__") else tuple()
         )
         needs_copy_engine_arg = any(param in producer_params for param in ("copy_engine_handle_ptr", "copy_engine_ctx"))
-        has_use_copy_engine = "USE_COPY_ENGINE" in producer_params
+        has_use_copy_engine = "use_copy_engine" in producer_params
 
         if cur_rank == producer_rank:
             # Run producer kernel
@@ -91,7 +91,7 @@ def run_message_passing_kernels(module, args, *, use_copy_engine: bool = False):
             if needs_copy_engine_arg:
                 kernel_args.append(copy_engine_ctx)
 
-            launch_kwargs = {"USE_COPY_ENGINE": use_copy_engine} if has_use_copy_engine else {}
+            launch_kwargs = {"use_copy_engine": use_copy_engine} if has_use_copy_engine else {}
             module.producer_kernel[grid](*kernel_args, **launch_kwargs)
         else:
             # Run consumer kernel

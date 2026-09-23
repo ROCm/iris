@@ -15,11 +15,6 @@ from xio import sdma_ep
 
 
 @triton.jit
-def wait_cnt():
-    tl.inline_asm_elementwise("s_waitcnt vmcnt(0)", "=r", [], dtype=tl.int32, is_pure=False, pack=1)
-
-
-@triton.jit
 def wrap_into_ring(index: tl.uint64):
     queue_size_u32 = sdma_ep.SDMA_QUEUE_SIZE
     queue_size = queue_size_u32.to(tl.uint64)

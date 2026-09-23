@@ -90,3 +90,7 @@ def get_xcc_id():
         )
     else:
         return tl.cast(0, tl.int32)
+
+@triton.jit
+def wait_cnt():
+    tl.inline_asm_elementwise("s_waitcnt vmcnt(0)", "=r", [], dtype=tl.int32, is_pure=False, pack=1)
