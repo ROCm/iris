@@ -1249,6 +1249,7 @@ class Iris:
             # Quiet to all ranks
             for rank in range(self.get_num_ranks()):
                 sdma_ep.quiet(src_rank, rank, channel)
+
     def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Allocate a symmetric tensor and return it with its peer-base table.
