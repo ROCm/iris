@@ -15,6 +15,7 @@ the logic lives in exactly one place.
 
 import math
 
+
 import torch
 
 from iris.host.logging.logging import logger
@@ -299,17 +300,24 @@ def zeros(heap, iris_device, size, *, out=None, dtype=None, layout=torch.strided
     size, num_elements = parse_size(size)
 
     # In simulation, avoid GPU kernel operations which trigger HIP errors
-    from iris.host.platform.utils import is_simulation_env
+    from iris.host.platform.utils import is_simulation_env, parse_bool_env
 
     if is_simulation_env():
         # Allocate and leave as-is (memory is already zero-initialized)
+        # Freshly faulted pages are zero, but heap memory is reused, and once
+        # peer access maps a peer's heap a buffer can hold that peer's stale
+        # data. zero_() was skipped here to avoid launching a GPU kernel, but
+        # the simulator does execute compute kernels, so zero explicitly.
+        skip_zero = parse_bool_env("IRIS_SIM_SKIP_ZERO")
         if out is not None:
             throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
-            # Don't call zero_() - memory is already zeroed, avoid GPU kernel
+            if not skip_zero:
+                out.zero_()
             tensor = out.view(size)
         else:
             tensor = allocate(heap, num_elements, dtype)
-            # Don't call zero_() - memory is already zeroed, avoid GPU kernel
+            if not skip_zero:
+                tensor.zero_()
             tensor = tensor.reshape(size)
     else:
         if out is not None:
