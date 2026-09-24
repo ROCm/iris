@@ -301,7 +301,7 @@ def zeros(heap, iris_device, size, *, out=None, dtype=None, layout=torch.strided
     size, num_elements = parse_size(size)
 
     # In simulation, avoid GPU kernel operations which trigger HIP errors
-    from iris.host.platform.utils import is_simulation_env
+    from iris.host.platform.utils import is_simulation_env, parse_bool_env
 
     if is_simulation_env():
         # Allocate and leave as-is (memory is already zero-initialized)
@@ -309,11 +309,7 @@ def zeros(heap, iris_device, size, *, out=None, dtype=None, layout=torch.strided
         # peer access maps a peer's heap a buffer can hold that peer's stale
         # data. zero_() was skipped here to avoid launching a GPU kernel, but
         # the simulator does execute compute kernels, so zero explicitly.
-        skip_zero = os.environ.get("IRIS_SIM_SKIP_ZERO", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
+        skip_zero = parse_bool_env("IRIS_SIM_SKIP_ZERO")
         if out is not None:
             throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
             if not skip_zero:

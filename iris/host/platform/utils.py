@@ -36,8 +36,19 @@ def is_simulation_env() -> bool:
     When True, Iris will force the torch allocator regardless of allocator_type.
     Set IRIS_SIMULATION=1 (or "true"/"yes") to enable.
     """
-    val = os.environ.get("IRIS_SIMULATION", "").strip().lower()
-    return val in ("1", "true", "yes")
+    return parse_bool_env("IRIS_SIMULATION")
+
+
+def parse_bool_env(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable.
+
+    Accepts "1", "true" and "yes" (case-insensitive) as true; anything else
+    set is false. Unset falls back to `default`.
+    """
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes")
 
 
 def get_simulation_device_id(local_rank: int) -> int:
