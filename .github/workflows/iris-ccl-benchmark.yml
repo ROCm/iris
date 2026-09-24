@@ -25,6 +25,9 @@ on:
   push:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -38,9 +41,24 @@ jobs:
     runs-on: [linux-mi325-8gpu-ossci-rad]
     timeout-minutes: 180
 
+    # Dispatch inputs are bound to environment variables rather than
+    # interpolated into run: blocks. ${{ }} expansion happens before the shell
+    # sees the script, so interpolating user-controlled input directly is a
+    # command-injection vector.
+    env:
+      NUM_RANKS: ${{ github.event.inputs.num_ranks || '8' }}
+      SIZES: ${{ github.event.inputs.sizes || '1024,4096,16384' }}
+      N_REPEAT: ${{ github.event.inputs.n_repeat || '50' }}
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        # Pinned to a hash: the security scan audits changed workflows and
+        # requires it. v4.4.0.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # Nothing here pushes, and the sweep uploads artifacts -- do not leave
+          # credentials in .git/config where they could be packaged up.
+          persist-credentials: false
 
       - name: Setup Apptainer (if not available)
         run: |
@@ -55,22 +73,22 @@ jobs:
 
       - name: Acquire GPUs
         run: |
-          bash .github/scripts/acquire_gpus.sh "${{ github.event.inputs.num_ranks || '8' }}"
+          bash .github/scripts/acquire_gpus.sh "$NUM_RANKS"
 
       - name: Run the sweep
         run: |
           set -e
           bash .github/scripts/run_ccl_benchmark.sh \
-            "${{ github.event.inputs.num_ranks || '8' }}" \
-            "${{ github.event.inputs.sizes || '1024,4096,16384' }}" \
-            "${{ github.event.inputs.n_repeat || '50' }}"
+            "$NUM_RANKS" \
+            "$SIZES" \
+            "$N_REPEAT"
 
       - name: Publish the comparison table
         if: always()
         run: |
           if [ -f ccl_results/summary.md ]; then
             {
-              echo "## Iris vs RCCL — ${{ github.event.inputs.num_ranks || '8' }} ranks"
+              echo "## Iris vs RCCL — ${NUM_RANKS} ranks"
               echo ""
               echo "Commit \`${GITHUB_SHA::8}\`. Ratio above 1.00x means Iris is faster."
               echo ""
@@ -82,7 +100,8 @@ jobs:
 
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        # v4.6.2, pinned as above.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ccl-benchmark-${{ github.run_id }}
           path: ccl_results/
