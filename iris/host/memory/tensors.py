@@ -15,7 +15,6 @@ the logic lives in exactly one place.
 
 import math
 
-import os
 
 import torch
 
