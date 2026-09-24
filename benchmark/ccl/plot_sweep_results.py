@@ -20,8 +20,9 @@ Three figures are written, mirroring benchmark/plot_bench.py in triton-shmem:
 * ``<output stem>_speedup``   -- log-log latency ratio, Iris / RCCL. Lower is
                                  better; below the 1.0 line means Iris wins.
 
-Each figure is a grid of one row per collective and one column per rank count,
-so a sweep over the ``num_ranks`` axis reads left to right.
+Each figure is a grid of one column per collective and one row per rank count,
+so a sweep over the ``num_ranks`` axis grows the figure downwards while each
+collective stays in its own column.
 
 A Markdown table goes to stdout or --markdown_out, so CI can drop it into a job
 summary.
@@ -311,39 +312,60 @@ def plot_speedup(data, args, out_path):
     _finish(fig, args, out_path)
 
 
+def _cell(value, spec):
+    """Format a number, or an em dash when it is genuinely absent.
+
+    Checks ``is not None`` rather than truthiness: 0.0 is a real measurement and
+    must not be rendered as missing data.
+    """
+    return format(value, spec) if value is not None else "—"
+
+
 def markdown_table(data):
-    """Latency and bus bandwidth per operation, rank count and message size."""
-    lines = [
-        "| Operation | Ranks | Size (MiB) | Iris (ms) | RCCL (ms) | Iris (GB/s) | RCCL (GB/s) | Speedup |",
-        "|---|---|---|---|---|---|---|---|",
-    ]
+    """Latency and bus bandwidth per operation, rank count, variant and size.
+
+    Each variant gets its own rows. Flattening them into one series per backend
+    would drop points whenever two variants share a message size, and which one
+    survived would depend on insertion order.
+    """
+    show_variant = any(variant for series in data.values() for _, variant in series)
+    header = (
+        ["Operation", "Ranks"]
+        + (["Variant"] if show_variant else [])
+        + ["Size (MiB)", "Iris (ms)", "RCCL (ms)", "Iris (GB/s)", "RCCL (GB/s)", "Speedup"]
+    )
+    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+
     for op, ranks in sorted(data):
         series = data[(op, ranks)]
+        for variant in sorted({v for _, v in series}):
+            iris = series.get(("iris", variant), {})
+            reference = series.get((REFERENCE_BACKEND, variant))
+            if reference is None:
+                # The reference may not carry the variant label at all (only the
+                # Iris path is parameterised). Pair against it when there is no
+                # ambiguity about which series is meant.
+                ref_keys = [k for k in series if k[0] == REFERENCE_BACKEND]
+                reference = series[ref_keys[0]] if len(ref_keys) == 1 else {}
 
-        def _merge(backend):
-            merged = {}
-            for (b, _), points in series.items():
-                if b == backend:
-                    merged.update(points)
-            return merged
-
-        iris, rccl = _merge("iris"), _merge(REFERENCE_BACKEND)
-        for size in sorted(set(iris) | set(rccl)):
-            il, ib = iris.get(size, (None, None))
-            rl, rb = rccl.get(size, (None, None))
-            # Latency ratio, expressed the way the table reads: >1 = Iris wins.
-            speedup = f"{rl / il:.2f}x" if il and rl else "—"
-            cells = [
-                op,
-                str(ranks),
-                f"{size / (1024 * 1024):.2f}",
-                f"{il:.4f}" if il else "—",
-                f"{rl:.4f}" if rl else "—",
-                f"{ib:.1f}" if ib else "—",
-                f"{rb:.1f}" if rb else "—",
-                speedup,
-            ]
-            lines.append("| " + " | ".join(cells) + " |")
+            for size in sorted(set(iris) | set(reference)):
+                il, ib = iris.get(size, (None, None))
+                rl, rb = reference.get(size, (None, None))
+                # Latency ratio, expressed the way the table reads: >1 = Iris wins.
+                ratio = (rl / il) if (il is not None and rl is not None and il > 0) else None
+                cells = (
+                    [op, str(ranks)]
+                    + ([variant or "—"] if show_variant else [])
+                    + [
+                        f"{size / (1024 * 1024):.2f}",
+                        _cell(il, ".4f"),
+                        _cell(rl, ".4f"),
+                        _cell(ib, ".1f"),
+                        _cell(rb, ".1f"),
+                        _cell(ratio, ".2f") + ("x" if ratio is not None else ""),
+                    ]
+                )
+                lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 

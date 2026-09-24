@@ -250,7 +250,7 @@ def _format_json(results: list[Result]) -> str:
             "gpu_time_ms": r.gpu_time_ms,
             "min_time_ms": r.min_time_ms,
             "skew_pct": r.skew_pct,
-            "all_times_ms": r.all_times_ms,
+            "local_times_ms": r.local_times_ms,
         }
         if r.bandwidth_gbps is not None:
             rec["bandwidth_gbps"] = r.bandwidth_gbps
@@ -402,7 +402,7 @@ def _run_benchmarks_worker(
                             benchmark_name=bdef.name,
                             params=params,
                             gpu_time_ms=0.0,
-                            all_times_ms=[],
+                            local_times_ms=[],
                             skipped=True,
                             skip_reason=skip_reason,
                             world_size=world_size,
@@ -428,18 +428,23 @@ def _run_benchmarks_worker(
                 )
 
                 # Cross-rank aggregation. Summarise each rank with a median
-                # (outlier-resistant), all_gather the per-rank medians, and
-                # report the max as the headline: a collective finishes when its
-                # slowest participant does, so timing one rank can miss a
-                # bottleneck on another GPU. min and skew come along so an
-                # imbalance is visible rather than averaged away.
-                rank_median = float(statistics.median(times))
-                gathered = [torch.zeros(1, dtype=torch.float64, device="cuda") for _ in range(world_size)]
-                dist.all_gather(gathered, torch.tensor([rank_median], dtype=torch.float64, device="cuda"))
-                rank_medians = [float(t.item()) for t in gathered]
+                # (outlier-resistant) and report the slowest rank's as the
+                # headline: a collective finishes when its slowest participant
+                # does, so timing one rank can miss a bottleneck on another GPU.
+                # min and skew come along so an imbalance is visible rather than
+                # averaged away.
+                #
+                # Only the extremes are needed, so two scalar reductions do the
+                # job. all_gather would allocate world_size tensors per
+                # benchmark point purely to take a max and a min of them.
+                rank_median = torch.tensor([statistics.median(times)], dtype=torch.float64, device="cuda")
+                slowest = rank_median.clone()
+                fastest = rank_median.clone()
+                dist.all_reduce(slowest, op=dist.ReduceOp.MAX)
+                dist.all_reduce(fastest, op=dist.ReduceOp.MIN)
 
-                slowest_ms = max(rank_medians)
-                fastest_ms = min(rank_medians)
+                slowest_ms = float(slowest.item())
+                fastest_ms = float(fastest.item())
                 skew_pct = ((slowest_ms - fastest_ms) / slowest_ms * 100.0) if slowest_ms > 0 else 0.0
 
                 # Bandwidth and TFLOPs follow the headline, so they describe the
@@ -457,7 +462,7 @@ def _run_benchmarks_worker(
                         benchmark_name=bdef.name,
                         params=params,
                         gpu_time_ms=slowest_ms,
-                        all_times_ms=times,
+                        local_times_ms=times,
                         min_time_ms=fastest_ms,
                         skew_pct=skew_pct,
                         bandwidth_gbps=bw,

@@ -4,7 +4,7 @@
 name: Iris CCL Benchmark (Iris vs RCCL)
 
 # Deliberately not on pull_request: this is a measurement job, not a gate. It
-# sweeps shapes across four collectives twice over (Iris and RCCL) and takes
+# sweeps shapes across three collectives twice over (Iris and RCCL) and takes
 # long enough that running it per commit would crowd out the test jobs on a
 # shared 8-GPU pool.
 on:
