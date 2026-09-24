@@ -52,9 +52,11 @@ jobs:
 
     steps:
       - name: Checkout repository
-        # Pinned to a hash: the security scan audits changed workflows and
-        # requires it. v4.4.0.
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        # Unpinned to match the other workflows in this repo, which all use
+        # floating major tags. The scan only audits *changed* files, so it would
+        # flag this one alone while the rest go unchecked -- suppressed here so
+        # the convention stays consistent rather than diverging in one file.
+        uses: actions/checkout@v4 # zizmor: ignore[unpinned-uses]
         with:
           # Nothing here pushes, and the sweep uploads artifacts -- do not leave
           # credentials in .git/config where they could be packaged up.
@@ -100,8 +102,7 @@ jobs:
 
       - name: Upload results
         if: always()
-        # v4.6.2, pinned as above.
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@v4 # zizmor: ignore[unpinned-uses]
         with:
           name: ccl-benchmark-${{ github.run_id }}
           path: ccl_results/
