@@ -39,6 +39,26 @@ averaged away. Bandwidth and TFLOPs derive from the headline.
 This matches the triton-shmem harness. Note it changed `iris.bench` behaviour:
 the runner previously reported rank 0's mean.
 
+## Figures
+
+`plot_sweep_results.py` writes three images, mirroring triton-shmem's
+`benchmark/plot_bench.py`, plus the Markdown table:
+
+| file | content |
+|---|---|
+| `<output>` | bus bandwidth (GB/s) vs message size, semilog-x |
+| `<output stem>_latency` | latency (ms) vs message size, log-log |
+| `<output stem>_speedup` | latency ratio Iris / RCCL, log-log; below the 1.0 line means Iris wins |
+
+Each is a grid with one column per collective and one row per rank count, so
+sweeping `--axis_num_ranks` grows the figure downwards.
+
+Bandwidth is **bus** bandwidth, not algorithmic: the bench scripts declare
+`state.set_bytes((W-1) * bytes)` for all_gather and all_to_all, and
+`2 * (W-1)/W * bytes` for all_reduce, which is the convention nccl-tests and
+RCCL report. The plotter divides the framework's figure straight through and
+does not re-apply a factor.
+
 ## What is not covered
 
 `reduce_scatter` has no RCCL comparison here. `iris.ccl.reduce_scatter` is
