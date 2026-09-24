@@ -18,6 +18,7 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 import iris
 import argparse
+import os
 from all_gather_gemm_pull import persistent_ag_gemm
 
 
@@ -35,6 +36,11 @@ def parse_args():
     parser.add_argument("--num_ranks", type=int, default=8, help="Number of GPUs to run the example on.")
     parser.add_argument(
         "--dtype", type=str, default="float16", choices=["float16", "bfloat16"], help="PyTorch data type to use."
+    )
+    parser.add_argument(
+        "--print_topology",
+        action="store_true",
+        help="Print the Iris-discovered topology before initializing the symmetric heap.",
     )
 
     return parser.parse_args()
@@ -72,17 +78,39 @@ def setup_example_data(rank, world_size, args, dtype):
     }
 
 
-def example_run(rank: int, world_size: int, init_url: str, args: argparse.Namespace):
+def example_run(
+    rank: int,
+    world_size: int,
+    init_url: str,
+    args: argparse.Namespace,
+    local_rank: int | None = None,
+):
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(
-        backend=backend, init_method=init_url, world_size=world_size, rank=rank, device_id=torch.device(f"cuda:{rank}")
-    )
+    if local_rank is None:
+        local_rank = rank
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    init_kwargs = {
+        "backend": backend,
+        "init_method": init_url,
+        "world_size": world_size,
+        "rank": rank,
+    }
+    if backend == "nccl":
+        init_kwargs["device_id"] = torch.device(f"cuda:{local_rank}")
+    dist.init_process_group(**init_kwargs)
+
+    if args.print_topology:
+        from iris.host.distributed.topology import TopologyDiscovery
+
+        topology = TopologyDiscovery().discover()
+        if rank == 0:
+            print(topology.summary(), flush=True)
 
     # Initialize Iris for distributed communication
     shmem = iris.iris()
 
     torch.manual_seed(42)  # Use a fixed seed for consistent random data
-    torch.cuda.set_device(rank)
     dtype = getattr(torch, args.dtype)
 
     if rank == 0:
@@ -103,7 +131,7 @@ def example_run(rank: int, world_size: int, init_url: str, args: argparse.Namesp
 
     C_fused = torch.empty(args.M, args.N, dtype=dtype).cuda()  # Output tensor for our kernel
 
-    NUM_SMS = torch.cuda.get_device_properties(rank).multi_processor_count
+    NUM_SMS = torch.cuda.get_device_properties(local_rank).multi_processor_count
     grid = (NUM_SMS,)
 
     # Launch the fused Triton kernel
@@ -165,14 +193,20 @@ def example_run(rank: int, world_size: int, init_url: str, args: argparse.Namesp
 
 def main():
     args = parse_args()
-    num_ranks = args.num_ranks
-    init_url = "tcp://127.0.0.1:29504"
-    mp.spawn(
-        fn=example_run,
-        args=(num_ranks, init_url, args),
-        nprocs=num_ranks,
-        join=True,
-    )
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        example_run(rank, world_size, "env://", args, local_rank=local_rank)
+    else:
+        num_ranks = args.num_ranks
+        init_url = "tcp://127.0.0.1:29504"
+        mp.spawn(
+            fn=example_run,
+            args=(num_ranks, init_url, args),
+            nprocs=num_ranks,
+            join=True,
+        )
 
 
 if __name__ == "__main__":
