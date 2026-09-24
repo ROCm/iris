@@ -4,25 +4,37 @@
 
 """Benchmark for iris-ccl all-gather collective."""
 
-import torch
+import torch.distributed as dist
 import iris.bench as bench
 from iris.ccl import Config
+from benchmark.ccl._common import DTYPES, M_VALUES, N_VALUES, NUM_RANKS, torch_tensor
 
 
 @bench.register
-@bench.axis("num_ranks", [2, 4, 8])
-@bench.axis("M", bench.power_of_two(10, 14))
-@bench.axis("N", bench.power_of_two(10, 14))
-@bench.axis("dtype", [torch.float16, torch.bfloat16])
+@bench.axis("num_ranks", NUM_RANKS)
+@bench.axis("M", M_VALUES)
+@bench.axis("N", N_VALUES)
+@bench.axis("dtype", DTYPES)
+@bench.axis("backend", ["iris", "rccl"])
 def all_gather(state, ctx):
     M, N, dtype = state["M"], state["N"], state["dtype"]
     world_size = ctx.get_num_ranks()
 
+    state.set_bytes((world_size - 1) * M * N * dtype.itemsize)
+
+    if state["backend"] == "rccl":
+        t_in = torch_tensor(ctx, (M, N), dtype)
+        t_out = torch_tensor(ctx, (world_size * M, N), dtype)
+        t_in.fill_(float(ctx.get_rank() + 1))
+        state.exec(
+            lambda: dist.all_gather_into_tensor(t_out, t_in),
+            preamble_fn=lambda: t_out.zero_(),
+        )
+        return
+
     inp = ctx.zeros((M, N), dtype=dtype)
     out = ctx.zeros((world_size * M, N), dtype=dtype)
     inp.fill_(float(ctx.get_rank() + 1))
-
-    state.set_bytes((world_size - 1) * M * N * inp.element_size())
 
     config = Config()
     state.exec(

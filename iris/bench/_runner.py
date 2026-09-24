@@ -189,6 +189,7 @@ def _format_console(results: list[Result]) -> str:
         for pn in param_names:
             cols.append((pn, lambda r, _pn=pn: _dtype_str(r.params[_pn])))
         cols.append(("GPU Time (ms)", lambda r: f"{r.gpu_time_ms:.3f}"))
+        cols.append(("Skew %", lambda r: f"{r.skew_pct:.1f}" if r.skew_pct is not None else "-"))
         if any(r.bandwidth_gbps is not None for r in bench_results):
             cols.append(("BW (GB/s)", lambda r: f"{r.bandwidth_gbps:.1f}" if r.bandwidth_gbps is not None else ""))
         if any(r.tflops is not None for r in bench_results):
@@ -247,7 +248,9 @@ def _format_json(results: list[Result]) -> str:
             "world_size": r.world_size,
             "params": {k: _dtype_str(v) for k, v in r.params.items()},
             "gpu_time_ms": r.gpu_time_ms,
-            "all_times_ms": r.all_times_ms,
+            "min_time_ms": r.min_time_ms,
+            "skew_pct": r.skew_pct,
+            "local_times_ms": r.local_times_ms,
         }
         if r.bandwidth_gbps is not None:
             rec["bandwidth_gbps"] = r.bandwidth_gbps
@@ -286,7 +289,7 @@ def _format_csv(results: list[Result]) -> str:
     fieldnames = (
         ["benchmark", "world_size"]
         + param_names
-        + ["gpu_time_ms", "bandwidth_gbps", "tflops"]
+        + ["gpu_time_ms", "min_time_ms", "skew_pct", "bandwidth_gbps", "tflops"]
         + counter_names
         + ["skipped", "skip_reason"]
     )
@@ -297,6 +300,8 @@ def _format_csv(results: list[Result]) -> str:
             "benchmark": r.benchmark_name,
             "world_size": r.world_size,
             "gpu_time_ms": f"{r.gpu_time_ms:.4f}" if not r.skipped else "",
+            "min_time_ms": f"{r.min_time_ms:.4f}" if r.min_time_ms is not None else "",
+            "skew_pct": f"{r.skew_pct:.2f}" if r.skew_pct is not None else "",
             "bandwidth_gbps": f"{r.bandwidth_gbps:.2f}" if r.bandwidth_gbps is not None else "",
             "tflops": f"{r.tflops:.2f}" if r.tflops is not None else "",
             "skipped": r.skipped,
@@ -397,7 +402,7 @@ def _run_benchmarks_worker(
                             benchmark_name=bdef.name,
                             params=params,
                             gpu_time_ms=0.0,
-                            all_times_ms=[],
+                            local_times_ms=[],
                             skipped=True,
                             skip_reason=skip_reason,
                             world_size=world_size,
@@ -422,22 +427,44 @@ def _run_benchmarks_worker(
                     return_mode="all",
                 )
 
-                mean_ms = statistics.mean(times)
+                # Cross-rank aggregation. Summarise each rank with a median
+                # (outlier-resistant) and report the slowest rank's as the
+                # headline: a collective finishes when its slowest participant
+                # does, so timing one rank can miss a bottleneck on another GPU.
+                # min and skew come along so an imbalance is visible rather than
+                # averaged away.
+                #
+                # Only the extremes are needed, so two scalar reductions do the
+                # job. all_gather would allocate world_size tensors per
+                # benchmark point purely to take a max and a min of them.
+                rank_median = torch.tensor([statistics.median(times)], dtype=torch.float64, device="cuda")
+                slowest = rank_median.clone()
+                fastest = rank_median.clone()
+                dist.all_reduce(slowest, op=dist.ReduceOp.MAX)
+                dist.all_reduce(fastest, op=dist.ReduceOp.MIN)
 
+                slowest_ms = float(slowest.item())
+                fastest_ms = float(fastest.item())
+                skew_pct = ((slowest_ms - fastest_ms) / slowest_ms * 100.0) if slowest_ms > 0 else 0.0
+
+                # Bandwidth and TFLOPs follow the headline, so they describe the
+                # collective rather than the luckiest rank.
                 bw = None
-                if state._bytes is not None and mean_ms > 0:
-                    bw = (state._bytes / 1e9) / (mean_ms * 1e-3)
+                if state._bytes is not None and slowest_ms > 0:
+                    bw = (state._bytes / 1e9) / (slowest_ms * 1e-3)
 
                 tflops = None
-                if state._flops is not None and mean_ms > 0:
-                    tflops = (state._flops / 1e12) / (mean_ms * 1e-3)
+                if state._flops is not None and slowest_ms > 0:
+                    tflops = (state._flops / 1e12) / (slowest_ms * 1e-3)
 
                 all_results.append(
                     Result(
                         benchmark_name=bdef.name,
                         params=params,
-                        gpu_time_ms=mean_ms,
-                        all_times_ms=times,
+                        gpu_time_ms=slowest_ms,
+                        local_times_ms=times,
+                        min_time_ms=fastest_ms,
+                        skew_pct=skew_pct,
                         bandwidth_gbps=bw,
                         tflops=tflops,
                         counters=dict(state._counters),
