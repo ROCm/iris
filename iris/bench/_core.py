@@ -33,8 +33,14 @@ class Result:
 
     benchmark_name: str
     params: dict[str, Any]
+    # Headline: the slowest rank's median. A collective is only as fast as its
+    # slowest participant, so a single rank's timing can hide a straggler.
     gpu_time_ms: float
     all_times_ms: list[float]
+    # Fastest rank's median, and the spread between fastest and slowest. A large
+    # skew means the collective is load-imbalanced rather than bandwidth-bound.
+    min_time_ms: float | None = None
+    skew_pct: float | None = None
     bandwidth_gbps: float | None = None
     tflops: float | None = None
     counters: dict[str, float] = field(default_factory=dict)

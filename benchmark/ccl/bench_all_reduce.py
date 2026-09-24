@@ -4,26 +4,17 @@
 
 """Benchmark for iris-ccl all-reduce collective."""
 
-import torch
 import torch.distributed as dist
 import iris.bench as bench
 from iris.ccl import Config
-
-
-# The RCCL baseline deliberately uses ordinary torch tensors rather than Iris
-# heap memory. Iris allocates its symmetric heap with flags RMA requires (the
-# banner reports the allocator), and timing RCCL against that would measure
-# Iris's allocation choice rather than RCCL. A user weighing "Iris or RCCL?"
-# would call RCCL on normal tensors, so that is what is measured.
-def _torch_tensor(ctx, shape, dtype):
-    return torch.zeros(shape, dtype=dtype, device=f"cuda:{ctx.get_rank()}")
+from benchmark.ccl._common import DTYPES, M_VALUES, N_VALUES, NUM_RANKS, torch_tensor
 
 
 @bench.register
-@bench.axis("num_ranks", [2, 4, 8])
-@bench.axis("M", bench.power_of_two(10, 14))
-@bench.axis("N", bench.power_of_two(10, 14))
-@bench.axis("dtype", [torch.float16, torch.bfloat16])
+@bench.axis("num_ranks", NUM_RANKS)
+@bench.axis("M", M_VALUES)
+@bench.axis("N", N_VALUES)
+@bench.axis("dtype", DTYPES)
 @bench.axis("variant", ["two_shot"])
 @bench.axis("backend", ["iris", "rccl"])
 def all_reduce(state, ctx):
@@ -37,8 +28,8 @@ def all_reduce(state, ctx):
     if state["backend"] == "rccl":
         # dist.all_reduce is in-place; copy in the preamble so the timed region
         # holds only the collective, matching the Iris path.
-        t_in = _torch_tensor(ctx, (M, N), dtype)
-        t_out = _torch_tensor(ctx, (M, N), dtype)
+        t_in = torch_tensor(ctx, (M, N), dtype)
+        t_out = torch_tensor(ctx, (M, N), dtype)
         t_in.fill_(float(ctx.get_rank() + 1))
         state.exec(
             lambda: dist.all_reduce(t_out, op=dist.ReduceOp.SUM),
