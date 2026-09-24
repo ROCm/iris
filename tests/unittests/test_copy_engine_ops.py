@@ -190,6 +190,64 @@ def test_copy_engine_host_put(num_elements):
     del shmem
 
 
+def test_copy_engine_host_put_loopback():
+    """Test a host-initiated copy-engine put when source and destination are the same rank."""
+    shmem = iris.iris(1 << 20)
+
+    num_elements = 512
+    src = _allocate_symmetric_range(shmem, num_elements, torch.float32)
+    dst = shmem.zeros(num_elements, device="cuda", dtype=torch.float32)
+    completion_flag = shmem.zeros(1, device="cuda", dtype=torch.int32)
+
+    shmem.put(
+        src,
+        to_rank=shmem.get_rank(),
+        to_tensor=dst,
+        signal_flag=completion_flag,
+        signal_value=1,
+        async_op=True,
+    )
+    shmem.quiet(to_rank=shmem.get_rank())
+
+    expected = _make_expected(num_elements, torch.float32, dst.device)
+    assert completion_flag.item() == 1
+    assert torch.allclose(dst, expected)
+
+    del shmem
+
+
+def test_copy_engine_device_linear_put_loopback():
+    """Test a device-initiated copy-engine put when source and destination share one rank."""
+    shmem = iris.iris(1 << 20)
+
+    rank = shmem.get_rank()
+    num_elements = 256
+    src = _allocate_symmetric_range(shmem, num_elements, torch.float32)
+    dst = shmem.zeros(num_elements, device="cuda", dtype=torch.float32)
+    completion_flag = shmem.zeros(1, device="cuda", dtype=torch.int32)
+
+    _copy_engine_linear_kernel[_make_grid(num_elements, 128)](
+        src,
+        dst,
+        completion_flag,
+        num_elements,
+        rank,
+        rank,
+        shmem.get_heap_bases(),
+        shmem.get_copy_engine_ctx(),
+        BLOCK_SIZE=128,
+    )
+
+    shmem.barrier()
+
+    expected = _make_expected(num_elements, torch.float32, dst.device)
+    assert completion_flag.item() == triton.cdiv(num_elements, 128)
+    assert torch.allclose(dst, expected)
+
+    shmem.barrier()
+    del shmem
+
+
 @triton.jit
 def _copy_engine_atomic_kernel(
     flag,

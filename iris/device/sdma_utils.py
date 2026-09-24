@@ -12,6 +12,7 @@ and submission operations.
 import triton
 import triton.language as tl
 from xio import sdma_ep
+from iris.mem.utils import wait_cnt
 
 
 @triton.jit
