@@ -399,7 +399,17 @@ class SymmetricHeap:
         """Peer access for TorchAllocator (IPC-based)."""
         from iris.host.platform.utils import is_simulation_env
 
-        if is_simulation_env():
+        # In simulation the dmabuf export/import path is skipped, which leaves
+        # heap_bases holding each peer's address as seen in *that peer's* process.
+        # Those are not valid locally, so every remote access reads unmapped
+        # memory and multi-rank runs cannot be validated. FFM does implement
+        # dmabuf export and import, so allow opting into the real path.
+        sim_peer_access = os.environ.get("IRIS_SIM_PEER_ACCESS", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if is_simulation_env() and not sim_peer_access:
             for r in range(self.num_ranks):
                 self.heap_bases[r] = int(all_bases_arr[r])
         else:
