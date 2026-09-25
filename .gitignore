@@ -69,3 +69,5 @@ docker/rocm-systems/
 .intellikit
 .github/agents/skills/
 docs/benchmark-results/*.png
+
+tmp/
