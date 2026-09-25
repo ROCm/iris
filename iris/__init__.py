@@ -82,6 +82,7 @@ from iris.host.memory.tensor_utils import (
 from iris.host.platform import hip
 from . import experimental
 from . import ops
+from . import concurrent
 from iris.host.memory import tensors as tensor_creation
 from . import bench
 from iris.host.tracing import kernel_artifacts  # noqa: F401  # triggers _init() at import time
@@ -125,6 +126,7 @@ __all__ = [
     "hip",
     "experimental",
     "ops",
+    "concurrent",
     "tensor_creation",
     "bench",
     "set_logger_level",
