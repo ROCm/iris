@@ -990,9 +990,9 @@ class Iris:
 
     def put(
         self,
-        src_tensor: torch.Tensor,
-        dst_rank: int,
-        dst_tensor: torch.Tensor = None,
+        from_tensor: torch.Tensor,
+        to_rank: int,
+        to_tensor: torch.Tensor = None,
         wait_flag: torch.Tensor = None,
         wait_value: int = None,
         signal_flag: torch.Tensor = None,
@@ -1004,15 +1004,15 @@ class Iris:
         One-sided put operation with optional wait (POLL) and signal (ATOMIC).
 
         Supports:
-        - Simple copy: put(src, dst_rank)
-        - Copy + signal: put(src, dst_rank, signal_flag=flag)
-        - Wait + copy: put(src, dst_rank, wait_flag=flag, wait_value=N)
-        - Wait + copy + signal: put(src, dst_rank, wait_flag=..., signal_flag=...)
+        - Simple copy: put(src, to_rank)
+        - Copy + signal: put(src, to_rank, signal_flag=flag)
+        - Wait + copy: put(src, to_rank, wait_flag=flag, wait_value=N)
+        - Wait + copy + signal: put(src, to_rank, wait_flag=..., signal_flag=...)
 
         Args:
-            src_tensor: Source tensor (local, must be symmetric)
-            dst_rank: Destination rank
-            dst_tensor: Destination tensor (symmetric). If None, uses src_tensor.
+            from_tensor: Source tensor (local, must be symmetric)
+            to_rank: Destination rank
+            to_tensor: Destination tensor (symmetric). If None, uses from_tensor.
             wait_flag: Optional LOCAL flag tensor to poll before transfer (POLL packet)
             wait_value: Expected value for wait_flag
             signal_flag: Optional flag tensor to atomic-add on REMOTE rank after transfer (will be translated)
@@ -1022,33 +1022,33 @@ class Iris:
 
         Examples:
             >>> # Simple copy
-            >>> shmem.put(data, dst_rank=1)
+            >>> shmem.put(data, to_rank=1)
 
             >>> # Copy with completion signal
-            >>> shmem.put(data, dst_rank=1, signal_flag=completion_flag)
+            >>> shmem.put(data, to_rank=1, signal_flag=completion_flag)
 
             >>> # Wait for ready signal, then copy
-            >>> shmem.put(data, dst_rank=1, wait_flag=ready_flag, wait_value=1)
+            >>> shmem.put(data, to_rank=1, wait_flag=ready_flag, wait_value=1)
 
             >>> # Full pipeline: wait, copy, signal
-            >>> shmem.put(data, dst_rank=1,
+            >>> shmem.put(data, to_rank=1,
             ...          wait_flag=batch_ready, wait_value=256,
             ...          signal_flag=transfer_done, signal_value=1)
         """
-        if dst_tensor is None:
-            dst_tensor = src_tensor
+        if to_tensor is None:
+            to_tensor = from_tensor
 
-        src_rank = self.get_rank()
-        src_ptr = src_tensor.data_ptr()
-        dst_ptr = self.heap.translate(dst_tensor.data_ptr(), src_rank, dst_rank)
-        size = src_tensor.numel() * src_tensor.element_size()
+        from_rank = self.get_rank()
+        from_ptr = from_tensor.data_ptr()
+        to_ptr = self.heap.translate(to_tensor.data_ptr(), from_rank, to_rank)
+        size = from_tensor.numel() * from_tensor.element_size()
 
         # Early return for zero-size transfers (no-op)
         if size == 0:
             return
 
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag)
-        signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, translate=True, dst_rank=dst_rank)
+        signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, translate=True, dst_rank=to_rank)
 
         has_wait = wait_ptr != 0
         has_signal = signal_ptr != 0
@@ -1058,32 +1058,32 @@ class Iris:
             wait_val = int(wait_value if wait_value is not None else 0)
             signal_val = int(signal_value)
             sdma_ep.wait_flag_then_put(
-                src_rank, dst_rank, channel, wait_ptr, wait_val, src_ptr, dst_ptr, size, wait_bits
+                from_rank, to_rank, channel, wait_ptr, wait_val, from_ptr, to_ptr, size, wait_bits
             )
-            sdma_ep.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
+            sdma_ep.signal(from_rank, to_rank, channel, signal_ptr, signal_val, signal_bits)
         elif has_wait:
             # Wait + copy
             wait_val = int(wait_value if wait_value is not None else 0)
             sdma_ep.wait_flag_then_put(
-                src_rank, dst_rank, channel, wait_ptr, wait_val, src_ptr, dst_ptr, size, wait_bits
+                from_rank, to_rank, channel, wait_ptr, wait_val, from_ptr, to_ptr, size, wait_bits
             )
         elif has_signal:
             # Copy + signal
             signal_val = int(signal_value)
-            sdma_ep.put_signal(src_rank, dst_rank, channel, src_ptr, dst_ptr, size, signal_ptr, signal_val, signal_bits)
+            sdma_ep.put_signal(from_rank, to_rank, channel, from_ptr, to_ptr, size, signal_ptr, signal_val, signal_bits)
         else:
             # Simple copy
-            sdma_ep.put(src_rank, dst_rank, channel, src_ptr, dst_ptr, size)
+            sdma_ep.put(from_rank, to_rank, channel, from_ptr, to_ptr, size)
 
         if not async_op:
-            sdma_ep.quiet(src_rank, dst_rank, channel)
+            sdma_ep.quiet(from_rank, to_rank, channel)
 
     def put_tile(
         self,
         tile,
-        dst_rank: int,
-        dst_ptr: int,
-        dst_stride: int,
+        to_rank: int,
+        to_ptr: int,
+        to_stride: int,
         wait_flag: int = None,
         wait_value: int = None,
         signal_flag: int = None,
@@ -1098,9 +1098,9 @@ class Iris:
 
         Args:
             tile: Pre-configured sdma_ep.Tile object with data pointer and dimensions set
-            dst_rank: Destination rank
-            dst_ptr: Destination pointer (already translated to remote address space)
-            dst_stride: Destination row stride in bytes
+            to_rank: Destination rank
+            to_ptr: Destination pointer (already translated to remote address space)
+            to_stride: Destination row stride in bytes
             wait_flag: Optional LOCAL flag pointer to poll before transfer
             wait_value: Expected value for wait_flag
             signal_flag: Optional REMOTE flag pointer to atomic-add after transfer (already translated)
@@ -1122,10 +1122,10 @@ class Iris:
             >>> dst_stride = A.stride(0) * tile.elem_size
             >>> wait_ptr = flag.data_ptr()
             >>> signal_ptr = shmem.translate(flag.data_ptr(), src_rank, dst_rank)
-            >>> shmem.put_tile(tile, dst_rank=1, dst_ptr=dst_ptr, dst_stride=dst_stride,
+            >>> shmem.put_tile(tile, to_rank=1, to_ptr=dst_ptr, to_stride=dst_stride,
             ...               wait_flag=wait_ptr, wait_value=256, signal_flag=signal_ptr)
         """
-        src_rank = self.get_rank()
+        from_rank = self.get_rank()
 
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
         signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, default_bits=32)
@@ -1138,34 +1138,34 @@ class Iris:
             wait_val = int(wait_value if wait_value is not None else 0)
             signal_val = int(signal_value)
             sdma_ep.wait_flag_then_put_tile(
-                src_rank, dst_rank, channel, wait_ptr, wait_val, tile, int(dst_ptr), int(dst_stride), wait_bits
+                from_rank, to_rank, channel, wait_ptr, wait_val, tile, int(to_ptr), int(to_stride), wait_bits
             )
-            sdma_ep.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
+            sdma_ep.signal(from_rank, to_rank, channel, signal_ptr, signal_val, signal_bits)
         elif has_wait:
             # Wait + tile copy
             wait_val = int(wait_value if wait_value is not None else 0)
             sdma_ep.wait_flag_then_put_tile(
-                src_rank, dst_rank, channel, wait_ptr, wait_val, tile, int(dst_ptr), int(dst_stride), wait_bits
+                from_rank, to_rank, channel, wait_ptr, wait_val, tile, int(to_ptr), int(to_stride), wait_bits
             )
         elif has_signal:
             # Tile copy + signal
             signal_val = int(signal_value)
             sdma_ep.put_tile_signal(
-                src_rank, dst_rank, channel, tile, int(dst_ptr), int(dst_stride), signal_ptr, signal_val, signal_bits
+                from_rank, to_rank, channel, tile, int(to_ptr), int(to_stride), signal_ptr, signal_val, signal_bits
             )
         else:
             # Simple tile copy
-            sdma_ep.put_tile(src_rank, dst_rank, channel, tile, int(dst_ptr), int(dst_stride))
+            sdma_ep.put_tile(from_rank, to_rank, channel, tile, int(to_ptr), int(to_stride))
 
         if not async_op:
-            sdma_ep.quiet(src_rank, dst_rank, channel)
+            sdma_ep.quiet(from_rank, to_rank, channel)
 
     def put_tiles(
         self,
         tiles,
-        dst_rank: int,
-        dst_ptrs,
-        dst_strides,
+        to_rank: int,
+        to_ptrs,
+        to_strides,
         wait_flag: int = None,
         wait_value: int = None,
         signal_flag: int = None,
@@ -1178,9 +1178,9 @@ class Iris:
 
         Args:
             tiles: Sequence of pre-configured sdma_ep.Tile objects
-            dst_rank: Destination rank
-            dst_ptrs: Sequence of translated destination pointers
-            dst_strides: Sequence of destination row strides in bytes
+            to_rank: Destination rank
+            to_ptrs: Sequence of translated destination pointers
+            to_strides: Sequence of destination row strides in bytes
             wait_flag: Optional LOCAL flag pointer to poll before all transfers
             wait_value: Expected value for wait_flag
             signal_flag: Optional REMOTE flag pointer to atomic-add after all transfers
@@ -1188,10 +1188,10 @@ class Iris:
             async_op: If True, don't wait for completion
             channel: SDMA channel to use
         """
-        src_rank = self.get_rank()
+        from_rank = self.get_rank()
 
-        if len(tiles) != len(dst_ptrs) or len(tiles) != len(dst_strides):
-            raise ValueError("tiles, dst_ptrs, and dst_strides must have the same length")
+        if len(tiles) != len(to_ptrs) or len(tiles) != len(to_strides):
+            raise ValueError("tiles, to_ptrs, and to_strides must have the same length")
 
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
         signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, default_bits=32)
@@ -1199,56 +1199,99 @@ class Iris:
         has_wait = wait_ptr != 0
         has_signal = signal_ptr != 0
 
-        dst_ptr_list = [int(p) for p in dst_ptrs]
-        dst_stride_list = [int(s) for s in dst_strides]
+        to_ptr_list = [int(p) for p in to_ptrs]
+        to_stride_list = [int(s) for s in to_strides]
 
         if has_wait and has_signal:
             # Wait + tiles copy + signal (two calls)
             wait_val = int(wait_value if wait_value is not None else 0)
             signal_val = int(signal_value)
             sdma_ep.wait_flag_then_put_tiles(
-                src_rank, dst_rank, channel, wait_ptr, wait_val, list(tiles), dst_ptr_list, dst_stride_list, wait_bits
+                from_rank, to_rank, channel, wait_ptr, wait_val, list(tiles), to_ptr_list, to_stride_list, wait_bits
             )
-            sdma_ep.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
+            sdma_ep.signal(from_rank, to_rank, channel, signal_ptr, signal_val, signal_bits)
         elif has_wait:
             # Wait + tiles copy
             wait_val = int(wait_value if wait_value is not None else 0)
             sdma_ep.wait_flag_then_put_tiles(
-                src_rank, dst_rank, channel, wait_ptr, wait_val, list(tiles), dst_ptr_list, dst_stride_list, wait_bits
+                from_rank, to_rank, channel, wait_ptr, wait_val, list(tiles), to_ptr_list, to_stride_list, wait_bits
             )
         elif has_signal:
             # Tiles copy + signal (loop + signal)
             signal_val = int(signal_value)
-            sdma_ep.put_tiles(src_rank, dst_rank, channel, list(tiles), dst_ptr_list, dst_stride_list)
-            sdma_ep.signal(src_rank, dst_rank, channel, signal_ptr, signal_val, signal_bits)
+            sdma_ep.put_tiles(from_rank, to_rank, channel, list(tiles), to_ptr_list, to_stride_list)
+            sdma_ep.signal(from_rank, to_rank, channel, signal_ptr, signal_val, signal_bits)
         else:
             # Simple tiles copy
-            sdma_ep.put_tiles(src_rank, dst_rank, channel, list(tiles), dst_ptr_list, dst_stride_list)
+            sdma_ep.put_tiles(from_rank, to_rank, channel, list(tiles), to_ptr_list, to_stride_list)
 
         if not async_op:
-            sdma_ep.quiet(src_rank, dst_rank, channel)
+            sdma_ep.quiet(from_rank, to_rank, channel)
 
-    def quiet(self, dst_rank: int = None, channel: int = 0):
+    def quiet(self, to_rank: int = None, channel: int = 0):
         """
         Wait for all outstanding SDMA operations to complete.
 
         Args:
-            dst_rank: If specified, wait only for ops to this rank.
+            to_rank: If specified, wait only for ops to this rank.
                      If None, wait for ops to all ranks.
             channel: SDMA channel
 
         Example:
             >>> shmem.put(tensor, dst_rank=1, async_op=True)
-            >>> shmem.quiet(dst_rank=1)  # Wait for completion
+            >>> shmem.quiet(to_rank=1)  # Wait for completion
             >>> shmem.quiet()  # Wait for all ranks
         """
         src_rank = self.get_rank()
-        if dst_rank is not None:
-            sdma_ep.quiet(src_rank, dst_rank, channel)
+        if to_rank is not None:
+            sdma_ep.quiet(src_rank, to_rank, channel)
         else:
             # Quiet to all ranks
             for rank in range(self.get_num_ranks()):
                 sdma_ep.quiet(src_rank, rank, channel)
+
+    def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Allocate a symmetric tensor and return it with its peer-base table.
+
+        Kernels take the pair as two ordinary arguments -- a pointer and a
+        tensor -- and inline the address translation, so the same device code
+        works for a tensor from any provider that returns this shape.
+
+        Args:
+            *size (int...): Shape of the tensor, as a sequence of integers or a
+                single collection.
+            dtype (torch.dtype, optional): Element type. Defaults to the torch
+                default dtype.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: The tensor, uninitialized, and an
+            ``int64[world_size]`` device-resident table whose entry ``r`` is the
+            address of *this tensor* on rank ``r``. ``peer_bases[cur_rank]`` is
+            the tensor's own ``data_ptr()``, which is the base device-side
+            translation subtracts.
+
+        Note:
+            Collective. All ranks must call this together, as with the other
+            Iris allocation ops.
+
+        Example:
+            >>> ctx = iris.iris(1 << 20)
+            >>> tensor, peer_bases = ctx.allocate_symmetric(1024, dtype=torch.float32)
+        """
+        tensor = self.empty(*size, dtype=dtype)
+
+        # Symmetric allocation means every rank placed this tensor at the same
+        # offset into its own heap, so shifting every heap base by that offset
+        # gives each rank's copy of this tensor. That symmetry is the heap's
+        # guarantee, not an assumption made here -- but the arithmetic below
+        # reads like generic pointer math without it.
+        #
+        # Kept entirely on device: heap_bases[cur_rank] stays a tensor rather
+        # than going through .item(), so this costs one vector-add and no
+        # device-to-host sync on the allocation path.
+        heap_offset = tensor.data_ptr() - self.heap_bases[self.cur_rank]
+        return tensor, self.heap_bases + heap_offset
 
     def _build_device_context(self):
         """

@@ -20,8 +20,14 @@ ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
     OMPI_ALLOW_RUN_AS_ROOT=1
 
 # Install system packages
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+# The rocm/pytorch base images ship /etc/apt/sources.list.d/rocm.list pinned to a
+# specific internal build (e.g. compute-rocm-rel-7.1 20) on compute-artifactory.amd.com.
+# Once that build is rotated out upstream the index 404s, apt-get update returns 100,
+# and the whole layer fails -- taking every downstream CI job with it. ROCm and torch
+# are already installed in the image, so nothing here needs that repo.
+RUN rm -f /etc/apt/sources.list.d/rocm.list && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     git wget ninja-build cmake python3-pip python3-dev build-essential libdwarf-dev && \
     rm -rf /var/lib/apt/lists/*
 
@@ -40,6 +46,13 @@ RUN git clone https://github.com/triton-lang/triton.git $TRITON_PATH
 RUN git checkout bcbcabdd0cff6539c7168299075992b2a23ff38e
 RUN pip3 install -e .
 ENV PYTHONPATH=$TRITON_PATH
+
+# rocSHMEM + rocshmem4py, so tests/unittests/test_rocshmem_provider.py runs
+# instead of skipping. See install_rocshmem.sh for why it is a source build and
+# why it builds for two arches.
+ENV ROCSHMEM_PREFIX=/opt/rocshmem
+COPY .github/scripts/install_rocshmem.sh /tmp/install_rocshmem.sh
+RUN ROCSHMEM_GPU_TARGETS='gfx942;gfx950' bash /tmp/install_rocshmem.sh && rm /tmp/install_rocshmem.sh
 
 # Set up workspace
 WORKDIR /workspace

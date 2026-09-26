@@ -24,7 +24,7 @@ def producer_kernel(
     BLOCK_SIZE: tl.constexpr,
     heap_bases_ptr: tl.tensor,  # tl.tensor: pointer to heap bases pointers
     copy_engine_handle_ptr,
-    USE_COPY_ENGINE: tl.constexpr,
+    use_copy_engine: tl.constexpr,
 ):
     pid = tl.program_id(0)
 
@@ -44,8 +44,8 @@ def producer_kernel(
         heap_bases_ptr,
         mask=mask,
         copy_engine_ctx=copy_engine_handle_ptr,
-        USE_COPY_ENGINE=USE_COPY_ENGINE,
-        CONTIGUOUS_COPY=True,
+        use_copy_engine=use_copy_engine,
+        contiguous_copy=True,
     )
 
     # Set flag to signal completion
@@ -58,7 +58,7 @@ def producer_kernel(
         heap_bases_ptr,
         sem="release",
         scope="sys",
-        USE_COPY_ENGINE=USE_COPY_ENGINE,
+        use_copy_engine=use_copy_engine,
         copy_engine_ctx=copy_engine_handle_ptr,
     )
 
@@ -198,7 +198,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
             args["block_size"],
             shmem.get_heap_bases(),
             copy_engine_ctx,
-            USE_COPY_ENGINE=args["use_copy_engine"],
+            use_copy_engine=args["use_copy_engine"],
         )
     else:
         shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank}.")
