@@ -3,6 +3,7 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 import argparse
+import os
 
 import torch
 import torch.distributed as dist
@@ -149,8 +150,13 @@ def bench_load(
                 shmem.get_heap_bases(),
             )
 
+    shmem.debug(f"[bench] enter src={source_rank} dst={destination_rank} n={n_elements}")
+    shmem.debug("[bench] do_bench(store) start")
     store_ms = iris.do_bench(run_store, shmem.barrier, n_repeat=num_experiments, n_warmup=num_warmup)
+    shmem.debug(f"[bench] do_bench(store) done {store_ms:.4f} ms")
+    shmem.debug("[bench] do_bench(load) start")
     get_ms = iris.do_bench(run_load, shmem.barrier, n_repeat=num_experiments, n_warmup=num_warmup)
+    shmem.debug(f"[bench] do_bench(load) done {get_ms:.4f} ms")
 
     # Subtract overhead
     triton_ms = get_ms - store_ms
@@ -243,6 +249,8 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     )
 
     # Main benchmark logic
+    if os.environ.get("IRIS_DEBUG"):
+        iris.set_logger_level(iris.DEBUG)
     shmem = iris.iris(args["heap_size"])
     num_ranks = shmem.get_num_ranks()
     bandwidth_matrix = np.zeros((num_ranks, num_ranks), dtype=np.float32)
