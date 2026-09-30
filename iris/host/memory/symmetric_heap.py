@@ -20,7 +20,7 @@ from iris.host.memory.allocators import TorchAllocator, VMemAllocator, VMemChunk
 from iris.drivers.base import MappingPlacement, PeerMapping
 from iris.host.distributed.fd_passing import setup_fd_infrastructure
 from iris.host.distributed.helpers import distributed_allgather
-from iris.host.platform.utils import is_simulation_env, parse_bool_env
+from iris.host.platform.utils import is_simulation_env
 
 logger = logging.getLogger("iris.host.memory.symmetric_heap")
 
@@ -397,22 +397,10 @@ class SymmetricHeap:
 
     def _refresh_peer_access_torch(self, dist, all_bases_arr):
         """Peer access for TorchAllocator (IPC-based)."""
-        from iris.host.platform.utils import is_simulation_env
-
-        # In simulation the dmabuf export/import path is skipped, which leaves
-        # heap_bases holding each peer's address as seen in *that peer's* process.
-        # Those are not valid locally, so every remote access reads unmapped
-        # memory and multi-rank runs cannot be validated. FFM does implement
-        # dmabuf export and import, so allow opting into the real path.
-        sim_peer_access = parse_bool_env("IRIS_SIM_PEER_ACCESS")
-        if is_simulation_env() and not sim_peer_access:
-            for r in range(self.num_ranks):
-                self.heap_bases[r] = int(all_bases_arr[r])
-        else:
-            all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
-            self.allocator.establish_peer_access(all_bases, self.fd_conns)
-            for r in range(self.num_ranks):
-                self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
+        all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
+        self.allocator.establish_peer_access(all_bases, self.fd_conns)
+        for r in range(self.num_ranks):
+            self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
 
     def _get_collective_device(self, dist) -> torch.device:
         """Choose a safe device for small distributed tensor collectives."""
