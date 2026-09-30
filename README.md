@@ -59,6 +59,7 @@ import triton
 import triton.language as tl
 import iris
 
+
 # Device-side APIs
 @triton.jit
 def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bases_ptr):
@@ -73,9 +74,8 @@ def kernel(buffer, buffer_size: tl.constexpr, block_size: tl.constexpr, heap_bas
     # Store 1 in the target buffer at each offset
     source_rank = 0
     target_rank = 1
-    iris.store(buffer + offsets, 1,
-            source_rank, target_rank,
-            heap_bases_ptr, mask=mask)
+    iris.store(buffer + offsets, 1, source_rank, target_rank, heap_bases_ptr, mask=mask)
+
 
 def _worker(rank, world_size):
     # Torch distributed initialization
@@ -85,11 +85,11 @@ def _worker(rank, world_size):
         rank=rank,
         world_size=world_size,
         init_method="tcp://127.0.0.1:29500",
-        device_id=torch.device(f"cuda:{device_id}")
+        device_id=torch.device(f"cuda:{device_id}"),
     )
 
     # Iris initialization
-    heap_size = 2**30   # 1GiB symmetric heap for inter-GPU communication
+    heap_size = 2**30  # 1GiB symmetric heap for inter-GPU communication
     iris_ctx = iris.iris(heap_size)
     cur_rank = iris_ctx.get_rank()
 
@@ -113,6 +113,7 @@ def _worker(rank, world_size):
     iris_ctx.barrier()
     dist.destroy_process_group()
 
+
 if __name__ == "__main__":
     world_size = 2  # Using two ranks
     mp.spawn(_worker, args=(world_size,), nprocs=world_size, join=True)
@@ -134,13 +135,13 @@ from triton.experimental.gluon import language as gl
 import iris
 from iris.gluon import IrisDeviceCtx
 
+
 # Device-side APIs - context encapsulates heap_bases
 @gluon.jit
-def kernel(IrisDeviceCtx: gl.constexpr, context_tensor,
-          buffer, buffer_size: gl.constexpr, block_size: gl.constexpr):
+def kernel(IrisDeviceCtx: gl.constexpr, context_tensor, buffer, buffer_size: gl.constexpr, block_size: gl.constexpr):
     # Initialize device context from tensor
     ctx = IrisDeviceCtx.initialize(context_tensor)
-    
+
     pid = gl.program_id(0)
     block_start = pid * block_size
     layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
@@ -151,6 +152,7 @@ def kernel(IrisDeviceCtx: gl.constexpr, context_tensor,
     target_rank = 1
     ctx.store(buffer + offsets, 1, target_rank, mask=mask)
 
+
 def _worker(rank, world_size):
     # Torch distributed initialization
     device_id = rank % torch.cuda.device_count()
@@ -159,11 +161,11 @@ def _worker(rank, world_size):
         rank=rank,
         world_size=world_size,
         init_method="tcp://127.0.0.1:29500",
-        device_id=torch.device(f"cuda:{device_id}")
+        device_id=torch.device(f"cuda:{device_id}"),
     )
 
     # Iris initialization
-    heap_size = 2**30   # 1GiB symmetric heap
+    heap_size = 2**30  # 1GiB symmetric heap
     iris_ctx = iris.iris(heap_size)
     context_tensor = iris_ctx.get_device_context()  # Get encoded context
     cur_rank = iris_ctx.get_rank()
@@ -177,12 +179,12 @@ def _worker(rank, world_size):
     grid = (buffer_size + block_size - 1) // block_size
     source_rank = 0
     if cur_rank == source_rank:
-        kernel[(grid,)](IrisDeviceCtx, context_tensor,
-                       buffer, buffer_size, block_size, num_warps=1)
+        kernel[(grid,)](IrisDeviceCtx, context_tensor, buffer, buffer_size, block_size, num_warps=1)
 
     # Synchronize all ranks
     iris_ctx.barrier()
     dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     world_size = 2  # Using two ranks
