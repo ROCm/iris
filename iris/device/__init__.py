@@ -3,3 +3,6 @@
 """Backward compat shim — canonical code moved to iris.mem."""
 
 from iris.mem import *  # noqa: F401,F403
+from . import sdma_utils
+
+__all__ = ["sdma_utils"]
