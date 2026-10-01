@@ -92,7 +92,7 @@ class Config:
     reduce_scatter_variant: str = "two_shot"
     num_stages: int = 1
     num_warps: int = 4
-    threads_per_warp: int = 64
+    threads_per_warp: int | None = None
     waves_per_eu: int = 0
 
     def __post_init__(self):
@@ -144,7 +144,45 @@ class Config:
         if self.reduce_scatter_variant != "two_shot":
             raise ValueError(f"reduce_scatter_variant must be 'two_shot', got '{self.reduce_scatter_variant}'")
 
+        if self.threads_per_warp is None:
+            # Do NOT assume 64 on AMD. CDNA is 64, but gfx1250 is an AMD part
+            # with a 32-wide wavefront, and assuming 64 silently halves the
+            # thread count a tile is spread over -- which doubles elements per
+            # thread and pushes configs that are fine on gfx942 into register
+            # pressure and illegal memory accesses.
+            try:
+                import torch
+
+                self.threads_per_warp = torch.cuda.get_device_properties(torch.cuda.current_device()).warp_size
+            except Exception:
+                self.threads_per_warp = 64
         if self.threads_per_warp not in (32, 64):
-            raise ValueError(f"threads_per_warp must be 32 (NVIDIA) or 64 (AMD), got {self.threads_per_warp}")
+            raise ValueError(
+                f"threads_per_warp must be 32 or 64, got {self.threads_per_warp}. "
+                "Both occur on AMD: CDNA is 64, gfx1250 is 32."
+            )
         if self.num_warps <= 0:
             raise ValueError(f"num_warps must be positive, got {self.num_warps}")
+
+        # A tile spread over too few threads faults. Measured on gfx1250
+        # (world=4, all_reduce two_shot, fp16): 16 elements/thread is fine and
+        # 32 faults with an illegal memory access, for every combination of
+        # block_size_n and num_warps that lands on those ratios -- bn=256/nw=8
+        # and bn=512/nw=16 both fault, bn=256/nw=16 and bn=512/nw=32 both pass.
+        # The accumulator is fp32 and each rank's load is held live, so the
+        # register cost per thread scales with this ratio.
+        #
+        # Raise here rather than let it reach the GPU: the failure surfaces
+        # asynchronously as "illegal memory access" at an unrelated later
+        # synchronize, which is extremely hard to trace back to tile shape.
+        threads = self.num_warps * self.threads_per_warp
+        per_thread = (self.block_size_m * self.block_size_n) / threads
+        if per_thread >= 32:
+            raise ValueError(
+                f"block_size_m*block_size_n ({self.block_size_m}*{self.block_size_n}"
+                f" = {self.block_size_m * self.block_size_n}) over num_warps*"
+                f"threads_per_warp ({self.num_warps}*{self.threads_per_warp}"
+                f" = {threads}) is {per_thread:.0f} elements/thread; >= 32 faults "
+                f"with an illegal memory access. Raise num_warps to "
+                f"{self.num_warps * 2} or halve block_size_n."
+            )
