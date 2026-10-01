@@ -20,7 +20,7 @@ version, as they do when torch is built against HIP 7.x on a ROCm 10 host.
 
 Returns None off Linux or when nothing matches, so every caller keeps its
 existing fallback chain.
-""" 
+"""
 
 from typing import Optional
 
