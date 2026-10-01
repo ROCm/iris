@@ -176,9 +176,16 @@ class Config:
         # Raise here rather than let it reach the GPU: the failure surfaces
         # asynchronously as "illegal memory access" at an unrelated later
         # synchronize, which is extremely hard to trace back to tile shape.
+        # The TDM engine stages a tile through LDS rather than registers, so
+        # the register-pressure limit below does not apply to it. Note this
+        # exemption keys off an all_gather field, so a Config carrying
+        # all_gather_variant='tdm' is only safe for all_gather -- reusing it
+        # for a register-path collective would skip a check that collective
+        # still needs.
+        tdm_path = self.use_gluon and self.all_gather_variant == "tdm"
         threads = self.num_warps * self.threads_per_warp
         per_thread = (self.block_size_m * self.block_size_n) / threads
-        if per_thread >= 32:
+        if per_thread >= 32 and not tdm_path:
             raise ValueError(
                 f"block_size_m*block_size_n ({self.block_size_m}*{self.block_size_n}"
                 f" = {self.block_size_m * self.block_size_n}) over num_warps*"
