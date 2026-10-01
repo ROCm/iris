@@ -194,11 +194,15 @@ def main():
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--heap", type=int, default=8 << 30)
     ap.add_argument("--gluon", action="store_true")
+    ap.add_argument("--backend", default="nccl", choices=["nccl", "gloo"],
+                    help="process-group backend. nccl has no cross-node transport "
+                         "configured on this fabric, so use gloo for world>4; the "
+                         "RCCL baseline is then skipped rather than faked.")
     ap.add_argument("--json", default="")
     args = ap.parse_args()
 
     torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend=args.backend)
     rank, world = dist.get_rank(), dist.get_world_size()
     ctx = iris.iris(args.heap)
     dtype = DTYPES[args.dtype]
@@ -265,7 +269,10 @@ def main():
                         continue
 
                     t_i, sp_i = bench(iris_fn, args.warmup, args.iters, ctx.barrier)
-                    t_r, sp_r = bench(rccl_fn, args.warmup, args.iters, ctx.barrier)
+                    if args.backend == "nccl":
+                        t_r, sp_r = bench(rccl_fn, args.warmup, args.iters, ctx.barrier)
+                    else:
+                        t_r, sp_r = float("nan"), float("nan")
                     rec.update(
                         iris_ms=t_i * 1e3,
                         rccl_ms=t_r * 1e3,
