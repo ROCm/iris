@@ -1,0 +1,15 @@
+# The Docker build context is the repo root (see .github/scripts/container_build.sh)
+# so that the Dockerfile can COPY in .github/scripts/install_rocshmem.sh. Nothing
+# else in the tree is needed at image build time, and .git alone is tens of MB.
+.git
+.github/workflows
+**/__pycache__
+**/*.pyc
+.pytest_cache
+*.egg-info
+build
+dist
+docs
+examples
+tests
+.claude

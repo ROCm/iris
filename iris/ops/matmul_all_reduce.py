@@ -8,6 +8,7 @@ This module provides a torch-like interface for GEMM+All-Reduce operations,
 automatically inferring dimensions, strides, and hardware parameters.
 """
 
+import logging
 from typing import Optional
 import torch
 import triton
@@ -18,7 +19,7 @@ from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
-import iris.x
+from iris.host.tracing.kernel_artifacts import iris_launch
 
 
 @triton.jit()
@@ -111,16 +112,16 @@ def _fused_matmul_all_reduce_kernel(
 
     # Create views and context
     ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
-    dst_view = iris.x.make_tensor_view(C, M, N, stride_cm, stride_cn)
+    dst_view = iris.make_tensor_view(C, M, N, stride_cm, stride_cn)
 
     # Create tile object once for all variants
-    tile_obj = iris.x.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
+    tile_obj = iris.Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N, c)
 
     # Dispatch to appropriate all-reduce variant
     if VARIANT == "atomic":
-        iris.x.all_reduce_atomic(tile_obj, dst_view, ctx)
+        ctx.all_reduce_atomic(tile_obj, dst_view)
     elif VARIANT == "spinlock":
-        iris.x.all_reduce_spinlock(tile_obj, dst_view, locks, ctx)
+        ctx.all_reduce_spinlock(tile_obj, dst_view, locks)
     elif VARIANT == "one_shot" or VARIANT == "two_shot":
         # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock
         # Store GEMM result to aux_buffer (avoid race condition with final output)
@@ -135,12 +136,12 @@ def _fused_matmul_all_reduce_kernel(
         tl.atomic_xchg(lock_ptr, 1, sem="release", scope="sys")  # Release ensures prior stores visible to remote GPUs
 
         # Create source view only when needed (aux_buffer is not None)
-        src_view = iris.x.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
+        src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
 
         if VARIANT == "one_shot":
-            iris.x.all_reduce_one_shot(tile_obj, src_view, dst_view, locks, ctx)
+            ctx.all_reduce_one_shot(tile_obj, src_view, dst_view, locks)
         elif VARIANT == "two_shot":
-            iris.x.all_reduce_two_shot(tile_obj, src_view, dst_view, locks, ctx)
+            ctx.all_reduce_two_shot(tile_obj, src_view, dst_view, locks)
 
 
 def matmul_all_reduce_preamble(
@@ -286,6 +287,22 @@ def matmul_all_reduce(
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
 
+    from iris.host.logging.logging import _log_rank
+
+    _log_rank(
+        logging.DEBUG,
+        "matmul_all_reduce: shape=(%d,%d,%d) dtype=%s variant=%s rank=%d/%d",
+        M,
+        N,
+        K,
+        A.dtype,
+        config.all_reduce_variant,
+        rank,
+        world_size,
+        rank=rank,
+        num_ranks=world_size,
+    )
+
     # Prepare workspace if needed
     needs_prepare = workspace is None or not workspace.matches(
         "matmul_all_reduce", (M, N, K), A.dtype, world_size, config.all_reduce_variant
@@ -314,7 +331,9 @@ def matmul_all_reduce(
 
     even_k = K % config.block_size_k == 0
 
-    _fused_matmul_all_reduce_kernel[grid](
+    iris_launch(
+        _fused_matmul_all_reduce_kernel,
+        grid,
         A,
         B,
         C,
@@ -337,6 +356,9 @@ def matmul_all_reduce(
         config.block_size_k,
         even_k,
         config.all_reduce_variant,
+        algorithm="matmul_all_reduce",
+        rank=rank,
+        dtype=A.dtype,
     )
 
     # Mark workspace as used

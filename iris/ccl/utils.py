@@ -9,7 +9,7 @@ from enum import IntEnum
 from typing import Tuple
 import triton
 import triton.language as tl
-from iris._distributed_helpers import extract_group_info as _extract_group_info
+from iris.host.distributed.helpers import extract_group_info as _extract_group_info
 
 
 @triton.jit()
@@ -58,13 +58,13 @@ class ReduceOp(IntEnum):
     BXOR = 6
 
 
-def extract_group_info(group, shmem) -> Tuple[int, int, int, int, int]:
+def extract_group_info(group, ctx) -> Tuple[int, int, int, int, int]:
     """
     Extract group information for collective operations.
 
     Args:
-        group: ProcessGroup or None. If None, uses all ranks in shmem context.
-        shmem: Iris shmem context
+        group: ProcessGroup or None. If None, uses all ranks in ctx.
+        ctx: Iris context
 
     Returns:
         Tuple of (rank_in_group, rank_global, world_size, rank_start, rank_stride)
@@ -75,4 +75,4 @@ def extract_group_info(group, shmem) -> Tuple[int, int, int, int, int]:
         - rank_stride: Stride between consecutive ranks in the group
     """
 
-    return _extract_group_info(group, shmem.get_rank(), shmem.get_num_ranks())
+    return _extract_group_info(group, ctx.get_rank(), ctx.get_num_ranks())

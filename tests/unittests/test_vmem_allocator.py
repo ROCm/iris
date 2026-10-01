@@ -161,7 +161,7 @@ def test_vmem_rma_compatibility():
 
 def test_vmem_granularity_alignment():
     """Test that VMem allocations respect granularity."""
-    from iris.hip import get_allocation_granularity
+    from iris.host.platform.hip import get_allocation_granularity
 
     # Cleanup GPU state from previous tests
     torch.cuda.synchronize()

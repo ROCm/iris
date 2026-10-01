@@ -30,9 +30,13 @@ def all_reduce(state, ctx):
     config = Config(all_reduce_variant=variant)
     workspace = ctx.ccl.all_reduce_preamble(out, inp, config=config)
 
+    def preamble():
+        out.zero_()
+        ctx.ccl.all_reduce_preamble(out, inp, config=config, workspace=workspace)
+
     state.exec(
         lambda: ctx.ccl.all_reduce(out, inp, config=config, workspace=workspace),
-        preamble_fn=lambda: out.zero_(),
+        preamble_fn=preamble,
     )
 
 

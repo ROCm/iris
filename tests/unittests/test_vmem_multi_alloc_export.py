@@ -10,7 +10,7 @@ multiple separate physical allocations only exports the first one.
 
 import torch
 import os
-from iris.hip import (
+from iris.host.platform.hip import (
     get_allocation_granularity,
     mem_address_reserve,
     mem_address_free,

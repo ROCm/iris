@@ -22,7 +22,7 @@ INSTALL_METHOD=${4:-"editable"}
 if [ -z "$TEST_DIR" ] || [ -z "$NUM_RANKS" ]; then
     echo "[ERROR] Missing required arguments"
     echo "Usage: $0 <test_dir> <num_ranks> [gpu_devices] [install_method]"
-    echo "  test_dir: examples, unittests, x or ccl"
+    echo "  test_dir: examples, unittests, context, ccl, or ops"
     echo "  num_ranks: 1, 2, 4, or 8"
     echo "  install_method: git, editable, or install (default: editable)"
     exit 1

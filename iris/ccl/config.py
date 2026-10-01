@@ -58,7 +58,7 @@ class Config:
     Example:
         >>> import iris
         >>> from iris.ccl import Config
-        >>> shmem = iris.iris()
+        >>> ctx = iris.iris()
         >>> config = Config(
         ...     block_size_m=128,
         ...     block_size_n=32,
@@ -66,15 +66,15 @@ class Config:
         ...     comm_sms=64,
         ...     use_gluon=True
         ... )
-        >>> shmem.ccl.all_to_all(output_tensor, input_tensor, config=config)
+        >>> ctx.ccl.all_to_all(output_tensor, input_tensor, config=config)
 
         >>> # All-reduce with ring variant
         >>> config = Config(all_reduce_variant="ring")
-        >>> shmem.ccl.all_reduce(output_tensor, input_tensor, config=config)
+        >>> ctx.ccl.all_reduce(output_tensor, input_tensor, config=config)
 
         >>> # All-gather with partitioned variant
         >>> config = Config(all_gather_variant="partitioned")
-        >>> shmem.ccl.all_gather(output_tensor, input_tensor, config=config)
+        >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
     """
 
     block_size_m: int = 32

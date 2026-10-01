@@ -12,7 +12,7 @@ This is the foundation for multi-rank RMA with VMem allocator.
 import torch
 import torch.distributed as dist
 import pytest
-from iris.hip import (
+from iris.host.platform.hip import (
     mem_address_reserve,
     mem_address_free,
     mem_create,
@@ -207,7 +207,7 @@ def test_vmem_peer_dmabuf_exchange_multi_rank():
         print(f"Rank {cur_rank}: Exported DMA-BUF fd={dmabuf_fd}")
 
         # Step 3: Exchange FDs using Unix domain sockets
-        from iris.fd_passing import setup_fd_infrastructure, send_fd, recv_fd, managed_fd
+        from iris.host.distributed.fd_passing import setup_fd_infrastructure, send_fd, recv_fd, managed_fd
 
         fd_conns = setup_fd_infrastructure(cur_rank, num_ranks)
 

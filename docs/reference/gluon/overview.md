@@ -26,12 +26,13 @@ The Gluon API provides a Triton Gluon-based implementation of Iris that uses the
 ## Usage Example
 
 ```python
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.gluon import IrisDeviceCtx
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
 # Host-side: Initialize Iris Gluon context
-ctx = iris_gl.iris(heap_size=2**30)  # 1GB heap
+ctx = iris.iris(heap_size=2**30)  # 1GB heap
 context_tensor = ctx.get_device_context()
 
 # Device-side: Use in Gluon kernels
@@ -49,10 +50,10 @@ def kernel(IrisDeviceCtx: gl.constexpr, context_tensor, buffer):
 
 Explore the API by section:
 
-- [Iris Class](class.md)
-- [Tensor Creation](tensor-creation.md)
+- [Iris Class](../host/class.md)
+- [Tensor Creation](../host/tensor-creation.md)
 - [Device Functions](device-functions.md)
-- [Collective Communication (CCL)](ccl.md)
+- [Collective Communication (CCL)](../host/ccl.md)
 
 ## Complete Example: Producer-Consumer Pattern
 
@@ -64,7 +65,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.gluon import IrisDeviceCtx
 
 @gluon.jit
 def producer_kernel(
@@ -137,7 +139,7 @@ def worker(rank, world_size):
     )
     
     # Initialize Iris Gluon
-    ctx = iris_gl.iris(heap_size=2**30)
+    ctx = iris.iris(heap_size=2**30)
     context_tensor = ctx.get_device_context()
     
     # Allocate buffers
@@ -159,7 +161,7 @@ def worker(rank, world_size):
     if rank == producer_rank:
         ctx.info(f"Rank {rank} producing data...")
         producer_kernel[grid](
-            iris_gl.IrisDeviceCtx,
+            IrisDeviceCtx,
             context_tensor,
             source,
             target,
@@ -173,7 +175,7 @@ def worker(rank, world_size):
     else:
         ctx.info(f"Rank {rank} consuming data...")
         consumer_kernel[grid](
-            iris_gl.IrisDeviceCtx,
+            IrisDeviceCtx,
             context_tensor,
             target,
             flag,

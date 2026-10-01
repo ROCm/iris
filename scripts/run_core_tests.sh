@@ -4,6 +4,43 @@
 
 set -e
 
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+else
+    echo "Python interpreter not found" >&2
+    exit 1
+fi
+
+count_visible_gpus() {
+    local visible_devices="$1"
+
+    if [ -z "$visible_devices" ]; then
+        echo 0
+        return
+    fi
+
+    IFS=',' read -r -a devices <<< "$visible_devices"
+    echo "${#devices[@]}"
+}
+
+MAX_NUM_RANKS=${IRIS_MAX_NUM_RANKS:-0}
+if [ "$MAX_NUM_RANKS" -eq 0 ]; then
+    MAX_NUM_RANKS=$(count_visible_gpus "${ROCR_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}")
+fi
+if [ "$MAX_NUM_RANKS" -eq 0 ]; then
+    MAX_NUM_RANKS=$("$PYTHON_BIN" - <<'PY'
+try:
+    import torch
+
+    print(torch.cuda.device_count())
+except Exception:
+    print(0)
+PY
+)
+fi
+
 # Get timestamp for this run
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
@@ -31,6 +68,9 @@ echo "========================================"
 echo "Timestamp: $TIMESTAMP"
 echo "Test directories: examples, unittests"
 echo "Rank configurations: 1, 2, 4, 8"
+if [ "$MAX_NUM_RANKS" -gt 0 ]; then
+    echo "Visible GPU limit: $MAX_NUM_RANKS"
+fi
 echo "Logs: $LOG_DIR/"
 echo "  Main log: $MAIN_LOG"
 echo "  Individual logs: ${LOG_DIR}/<test_dir>_<test_name>_rank*.log"
@@ -41,6 +81,17 @@ echo ""
 # Run each test configuration
 for config in "${TEST_CONFIGS[@]}"; do
     IFS=',' read -r test_dir num_ranks <<< "$config"
+
+    if [ "$MAX_NUM_RANKS" -gt 0 ] && [ "$num_ranks" -gt "$MAX_NUM_RANKS" ]; then
+        {
+        echo ""
+        echo "========================================"
+        echo "Skipping tests: $test_dir with $num_ranks ranks"
+        echo "Reason: visible GPU limit is $MAX_NUM_RANKS"
+        echo "========================================"
+        } | tee -a "$MAIN_LOG"
+        continue
+    fi
     
     {
     echo ""
@@ -58,16 +109,12 @@ for config in "${TEST_CONFIGS[@]}"; do
             echo "  Ranks: $num_ranks"
             echo "  Logs: ${log_prefix}_rank*.log"
             
-            # Run the test and capture output per rank
-            # The run_tests_distributed.py spawns processes, so we need to modify it
-            # or use a wrapper. For now, let's run it and tee the output.
-            
             if [ "$num_ranks" -eq 1 ]; then
                 # Single rank - direct log
-                python tests/run_tests_distributed.py --num_ranks $num_ranks "$test_file" -v --tb=short 2>&1 | tee "${log_prefix}_rank0.log"
+                "$PYTHON_BIN" tests/run_tests_distributed.py --num_ranks $num_ranks "$test_file" -v --tb=short 2>&1 | tee "${log_prefix}_rank0.log"
             else
                 # Multi-rank - combined log
-                python tests/run_tests_distributed.py --num_ranks $num_ranks "$test_file" -v --tb=short 2>&1 | tee "${log_prefix}_all_ranks.log"
+                "$PYTHON_BIN" tests/run_tests_distributed.py --num_ranks $num_ranks "$test_file" -v --tb=short 2>&1 | tee "${log_prefix}_all_ranks.log"
             fi
             
             # Check exit code

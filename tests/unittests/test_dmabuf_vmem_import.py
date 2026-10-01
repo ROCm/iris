@@ -11,7 +11,7 @@ Verifies:
 
 import torch
 import torch.distributed as dist
-from iris.hip import (
+from iris.host.platform.hip import (
     get_allocation_granularity,
     get_address_range,
     export_dmabuf_handle,

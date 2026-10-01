@@ -11,7 +11,7 @@ import iris
 
 def test_dmabuf_export():
     """Test exporting a DMA-BUF file descriptor."""
-    from iris.hip import export_dmabuf_handle
+    from iris.host.platform.hip import export_dmabuf_handle
 
     tensor = torch.zeros(1024, dtype=torch.float32, device="cuda")
     ptr = tensor.data_ptr()
@@ -29,7 +29,7 @@ def test_dmabuf_export():
 
 def test_dmabuf_import():
     """Test importing a DMA-BUF file descriptor."""
-    from iris.hip import export_dmabuf_handle, import_dmabuf_handle, destroy_external_memory
+    from iris.host.platform.hip import export_dmabuf_handle, import_dmabuf_handle, destroy_external_memory
     import os
 
     # Create a simple GPU tensor
@@ -57,7 +57,7 @@ def test_dmabuf_import():
 
 def test_dmabuf_export_import_roundtrip():
     """Test export/import roundtrip with actual memory access."""
-    from iris.hip import export_dmabuf_handle, import_dmabuf_handle, destroy_external_memory
+    from iris.host.platform.hip import export_dmabuf_handle, import_dmabuf_handle, destroy_external_memory
     import os
 
     # Create a GPU tensor and fill it with test data
@@ -118,7 +118,7 @@ def test_iris_symmetric_heap_creation():
 
 def test_dmabuf_with_offset():
     """Test DMA-BUF with non-zero offset (caching allocator suballocation)."""
-    from iris.hip import export_dmabuf_handle, import_dmabuf_handle, destroy_external_memory
+    from iris.host.platform.hip import export_dmabuf_handle, import_dmabuf_handle, destroy_external_memory
     import os
 
     torch.cuda.empty_cache()

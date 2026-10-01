@@ -5,7 +5,8 @@ import torch
 import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-import iris.experimental.iris_gluon as iris_gl
+import iris
+from iris.gluon import IrisDeviceCtx
 
 
 @gluon.jit
@@ -100,7 +101,7 @@ def copy_local_kernel(
 )
 def test_copy_get(dtype, BLOCK_SIZE):
     """Test GET operation: cur_rank == to_rank"""
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
@@ -113,7 +114,7 @@ def test_copy_get(dtype, BLOCK_SIZE):
     results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=dtype)
     grid = (1,)
     copy_get_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         data,
         results,
@@ -168,7 +169,7 @@ def test_copy_get(dtype, BLOCK_SIZE):
 )
 def test_copy_put(dtype, BLOCK_SIZE):
     """Test PUT operation: cur_rank == from_rank"""
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
@@ -181,7 +182,7 @@ def test_copy_put(dtype, BLOCK_SIZE):
     results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=dtype)
     grid = (1,)
     copy_put_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         data,
         results,
@@ -238,7 +239,7 @@ def test_copy_put(dtype, BLOCK_SIZE):
 )
 def test_copy_local(dtype, BLOCK_SIZE):
     """Test LOCAL operation: from_rank == to_rank == cur_rank"""
-    shmem = iris_gl.iris(1 << 20)
+    shmem = iris.iris(1 << 20)
     num_ranks = shmem.get_num_ranks()
     context_tensor = shmem.get_device_context()
     cur_rank = shmem.get_rank()
@@ -251,7 +252,7 @@ def test_copy_local(dtype, BLOCK_SIZE):
     results = shmem.zeros((num_ranks, BLOCK_SIZE), dtype=dtype)
     grid = (1,)
     copy_local_kernel[grid](
-        iris_gl.IrisDeviceCtx,
+        IrisDeviceCtx,
         context_tensor,
         data,
         results,

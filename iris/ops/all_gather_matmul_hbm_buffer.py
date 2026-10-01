@@ -14,9 +14,8 @@ import torch
 import triton
 import triton.language as tl
 import iris
-import iris.x
 
-from iris.tracing.events import TraceEvent
+from iris.host.tracing.events import TraceEvent
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 
@@ -271,7 +270,7 @@ def _hbm_buffer_all_gather_matmul_kernel(
                 pid_n=my_stage,
             )
 
-        src_view = iris.x.make_tensor_view(A_sharded, M, K_local, stride_am, stride_ak)
+        src_view = iris.make_tensor_view(A_sharded, M, K_local, stride_am, stride_ak)
 
         tiles_per_m_group = NUM_FLAG_GROUPS_K * GROUP_SIZE_M
 
@@ -303,7 +302,7 @@ def _hbm_buffer_all_gather_matmul_kernel(
 
                         pid_m_t = zero + m_tile
                         tile_k_t = zero + k_block_local
-                        k_tile = iris.x.TileView(pid_m_t, tile_k_t, BLOCK_SIZE_M, BLOCK_SIZE_K)
+                        k_tile = iris.TileView(pid_m_t, tile_k_t, BLOCK_SIZE_M, BLOCK_SIZE_K)
 
                         rk = k_block_global * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
                         rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
@@ -313,7 +312,7 @@ def _hbm_buffer_all_gather_matmul_kernel(
 
                         for compile_rank in range(world_size):
                             if src_rank_idx == compile_rank:
-                                a_tile = iris.x.gather(k_tile, src_view, compile_rank, ctx, hint=(1, BLOCK_SIZE_K))
+                                a_tile = ctx.gather(k_tile, src_view, compile_rank, ctx, hint=(1, BLOCK_SIZE_K))
                                 tl.store(staged_ptrs, a_tile, cache_modifier=".cg")
 
                     flag_idx = m_tile * NUM_FLAG_GROUPS_K + k_flag_group
@@ -654,7 +653,9 @@ def all_gather_matmul_hbm_buffer(
         else:
             ctx.tracing.reset()
 
-    launch_kwargs = {"matrix_instr_nonkdim": 16}
+    launch_kwargs = {}
+    if getattr(torch.version, "hip", None):
+        launch_kwargs["matrix_instr_nonkdim"] = 16
     if num_warps is not None:
         launch_kwargs["num_warps"] = num_warps
     if num_stages is not None:

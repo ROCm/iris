@@ -48,12 +48,7 @@ def main():
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="gloo")
 
-    if args["use_gluon"]:
-        import iris.experimental.iris_gluon as iris_gluon
-
-        ctx = iris_gluon.iris(heap_size=args["heap_size"])
-    else:
-        ctx = iris.iris(heap_size=args["heap_size"])
+    ctx = iris.iris(heap_size=args["heap_size"])
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
 
