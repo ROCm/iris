@@ -194,14 +194,14 @@ def main():
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--heap", type=int, default=8 << 30)
     ap.add_argument("--gluon", action="store_true")
-    ap.add_argument(
-        "--backend",
-        default="nccl",
-        choices=["nccl", "gloo"],
-        help="process-group backend. nccl has no cross-node transport "
-        "configured on this fabric, so use gloo for world>4; the "
-        "RCCL baseline is then skipped rather than faked.",
-    )
+    ap.add_argument("--tdm", action="store_true",
+                    help="use the gfx1250 TDM engine for all_gather / all_to_all "
+                         "(implies --gluon). all_reduce and reduce_scatter have no "
+                         "TDM variant and stay on their normal path.")
+    ap.add_argument("--backend", default="nccl", choices=["nccl", "gloo"],
+                    help="process-group backend. nccl has no cross-node transport "
+                         "configured on this fabric, so use gloo for world>4; the "
+                         "RCCL baseline is then skipped rather than faked.")
     ap.add_argument("--json", default="")
     args = ap.parse_args()
 
@@ -217,7 +217,7 @@ def main():
     if rank == 0:
         props = torch.cuda.get_device_properties(0)
         print(
-            f"# {props.gcnArchName} warp={props.warp_size} world={world} dtype={args.dtype} gluon={args.gluon}",
+            f"# {props.gcnArchName} warp={props.warp_size} world={world} dtype={args.dtype} gluon={args.gluon or args.tdm} tdm={args.tdm}",
             flush=True,
         )
         print(
@@ -231,12 +231,18 @@ def main():
             if M < world or M % world:
                 M = max(world, (M // world) * world)
             for csm in (int(x) for x in args.comm_sms.split(",")):
+                kw = {}
+                if args.tdm and coll == "all_gather":
+                    kw["all_gather_variant"] = "tdm"
+                if args.tdm and coll == "all_to_all":
+                    kw["all_to_all_variant"] = "tdm"
                 cfg = Config(
                     comm_sms=csm,
                     block_size_m=args.block_m,
                     block_size_n=args.block_n,
                     num_warps=args.num_warps,
-                    use_gluon=args.gluon,
+                    use_gluon=args.gluon or args.tdm,
+                    **kw,
                 )
                 rec = dict(
                     collective=coll,
