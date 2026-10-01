@@ -194,10 +194,14 @@ def main():
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--heap", type=int, default=8 << 30)
     ap.add_argument("--gluon", action="store_true")
-    ap.add_argument("--backend", default="nccl", choices=["nccl", "gloo"],
-                    help="process-group backend. nccl has no cross-node transport "
-                         "configured on this fabric, so use gloo for world>4; the "
-                         "RCCL baseline is then skipped rather than faked.")
+    ap.add_argument(
+        "--backend",
+        default="nccl",
+        choices=["nccl", "gloo"],
+        help="process-group backend. nccl has no cross-node transport "
+        "configured on this fabric, so use gloo for world>4; the "
+        "RCCL baseline is then skipped rather than faked.",
+    )
     ap.add_argument("--json", default="")
     args = ap.parse_args()
 
