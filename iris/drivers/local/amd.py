@@ -12,6 +12,7 @@ import struct
 from collections.abc import Callable
 from typing import Any, Optional
 
+from iris._libpath import in_process_library
 from iris.drivers.base import (
     BaseDriver,
     DriverError,
@@ -33,7 +34,7 @@ __all__ = [
 
 _hip = None
 try:
-    _hip = ctypes.cdll.LoadLibrary("libamdhip64.so")
+    _hip = ctypes.cdll.LoadLibrary(in_process_library("libamdhip64") or "libamdhip64.so")
 except OSError:
     pass
 
