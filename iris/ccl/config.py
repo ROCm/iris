@@ -49,7 +49,8 @@ class Config:
                    this also sets WARPS_PER_CTA in the BlockedLayout. The product
                    threads_per_warp * num_warps determines the minimum tile size
                    (block_size_m * block_size_n for flat-2D, or block_size_n for 1D).
-        threads_per_warp: Threads per warp/wavefront (default: 64). Must match the
+        threads_per_warp: Threads per warp/wavefront. Defaults to the device's
+            actual warp_size; both 32 and 64 occur on AMD. Must match the
                           hardware wavefront size: 64 for AMD GPUs, 32 for NVIDIA.
                           Used by gluon kernels to construct BlockedLayout for
                           vectorized memory access.
@@ -85,6 +86,7 @@ class Config:
     chunk_size: int | None = None
     use_gluon: bool = False
     all_gather_variant: str = "persistent"
+    all_to_all_variant: str = "default"
     all_reduce_variant: str = "two_shot"
     all_reduce_distribution: int = 1
     all_reduce_num_rings: int = 1
@@ -114,6 +116,10 @@ class Config:
             raise ValueError(f"comm_sms must be positive, got {self.comm_sms}")
         if self.num_xcds <= 0:
             raise ValueError(f"num_xcds must be positive, got {self.num_xcds}")
+        if self.all_to_all_variant not in ["default", "tdm"]:
+            raise ValueError(
+                f"all_to_all_variant must be 'default' or 'tdm' (gluon only), got {self.all_to_all_variant}"
+            )
         if self.all_gather_variant not in ["persistent", "partitioned", "tdm"]:
             raise ValueError(
                 "all_gather_variant must be one of: 'persistent', 'partitioned', "
@@ -182,7 +188,7 @@ class Config:
         # all_gather_variant='tdm' is only safe for all_gather -- reusing it
         # for a register-path collective would skip a check that collective
         # still needs.
-        tdm_path = self.use_gluon and self.all_gather_variant == "tdm"
+        tdm_path = self.use_gluon and (self.all_gather_variant == "tdm" or self.all_to_all_variant == "tdm")
         threads = self.num_warps * self.threads_per_warp
         per_thread = (self.block_size_m * self.block_size_n) / threads
         if per_thread >= 32 and not tdm_path:

@@ -14,6 +14,8 @@ try:
 except ImportError as e:
     raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False.") from e
 
+from triton.language.extra.hip import utils as hip_utils
+
 from iris.mem.gluon.context import Context as IrisDeviceCtx
 from iris.host.tracing.kernel_artifacts import iris_launch
 
@@ -83,12 +85,17 @@ def persistent_all_to_all_gluon(
         pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
         pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        # Optimized layout for maximum VGPR usage and dwordx4 vectorization
-        # Use layout that maximizes register utilization and enables wider loads
-        # For AMD: 64 threads/warp, 4 warps = 256 threads total
         # BlockedLayout: [size_per_thread], [threads_per_warp], [warps_per_cta], [order]
-        layout_col: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])  # Column access
-        layout_row: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])  # Row indices
+        #
+        # Take the wavefront width from the compiler's own launch options via
+        # hip_utils, not from a literal and not from a caller-supplied value.
+        # These were hardcoded [64] and [4]; gfx1250 is a 32-wide part, so a
+        # literal 64 describes a workgroup twice the size of the one actually
+        # launched. Deriving it here cannot drift from the real launch.
+        WARPS: gl.constexpr = hip_utils.num_warps()
+        LANES: gl.constexpr = hip_utils.num_threads() // WARPS
+        layout_col: gl.constexpr = gl.BlockedLayout([1], [LANES], [WARPS], [0])
+        layout_row: gl.constexpr = gl.BlockedLayout([1], [LANES], [WARPS], [0])
 
         rm = (pid_m * BLOCK_SIZE_M + gl.arange(0, BLOCK_SIZE_M, layout=layout_row)) % M
         rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=layout_col)) % N
