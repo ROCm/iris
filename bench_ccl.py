@@ -194,14 +194,21 @@ def main():
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--heap", type=int, default=8 << 30)
     ap.add_argument("--gluon", action="store_true")
-    ap.add_argument("--tdm", action="store_true",
-                    help="use the gfx1250 TDM engine for all_gather / all_to_all "
-                         "(implies --gluon). all_reduce and reduce_scatter have no "
-                         "TDM variant and stay on their normal path.")
-    ap.add_argument("--backend", default="nccl", choices=["nccl", "gloo"],
-                    help="process-group backend. nccl has no cross-node transport "
-                         "configured on this fabric, so use gloo for world>4; the "
-                         "RCCL baseline is then skipped rather than faked.")
+    ap.add_argument(
+        "--tdm",
+        action="store_true",
+        help="use the gfx1250 TDM engine for all_gather / all_to_all "
+        "(implies --gluon). all_reduce and reduce_scatter have no "
+        "TDM variant and stay on their normal path.",
+    )
+    ap.add_argument(
+        "--backend",
+        default="nccl",
+        choices=["nccl", "gloo"],
+        help="process-group backend. nccl has no cross-node transport "
+        "configured on this fabric, so use gloo for world>4; the "
+        "RCCL baseline is then skipped rather than faked.",
+    )
     ap.add_argument("--json", default="")
     args = ap.parse_args()
 
