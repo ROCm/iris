@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 import torch
 
+from iris._libpath import in_process_library
 from iris.drivers.base import (
     BaseDriver,
     DriverError,
@@ -50,11 +51,13 @@ def _load_cdll(*names: Optional[str]) -> Any:
 
 
 _hip = _load_cdll(
+    in_process_library("libamdhip64"),
     ctypes.util.find_library("amdhip64"),
     "libamdhip64.so",
     "/opt/rocm/lib/libamdhip64.so",
 )
 _amdsmi = _load_cdll(
+    in_process_library("libamd_smi"),
     ctypes.util.find_library("amd_smi"),
     "libamd_smi.so",
     "/opt/rocm/lib/libamd_smi.so",
