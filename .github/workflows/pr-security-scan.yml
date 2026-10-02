@@ -29,7 +29,7 @@ concurrency:
 jobs:
   security:
     name: Security scan
-    uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@62c2c4f3effcd47711da28276815c90cb4aa6444 # v1.0.2
+    uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@213048f7d31ea455ad7d77cc689533afdd950e89 # v1.0.3
     with:
       report_formats: human
       bandit_config_path: .github/scan_tools_configs/bandit.yml
