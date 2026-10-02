@@ -10,8 +10,9 @@ These are the module-level functional API. For the OO API, see DeviceContext.
 import triton
 import triton.language as tl
 from iris.mem.triton.context import __translate
-from xio import sdma_ep
 from iris.device import sdma_utils
+
+sdma_ep = None
 
 
 @triton.jit

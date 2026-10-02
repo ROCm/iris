@@ -94,6 +94,42 @@ pip install -e .
 ```
 
 
+## Optional: SDMA copy engine
+
+Shader load/store, atomics, and collectives work with the base install. The SDMA
+copy engine (`use_copy_engine=True` in device code, and host-initiated `put`,
+`put_tile`, `put_tiles`, and `quiet`) needs [rocm-xio](https://github.com/ROCm/rocm-xio),
+which is an optional extra:
+
+```shell
+pip install "iris[sdma] @ git+https://github.com/ROCm/iris.git"
+# or, from a checkout
+pip install -e ".[sdma]"
+```
+
+To add SDMA to an existing Iris install, install rocm-xio on its own. Use the
+commit pinned by the `sdma` extra in `pyproject.toml`, since Iris builds SDMA
+packets against that rocm-xio version:
+
+```shell
+pip install "rocm-xio @ git+https://github.com/ROCm/rocm-xio.git@cbe97e6392066bef7901121965ffadad19404da4"
+```
+
+No Iris reinstall is needed; the next `iris.iris()` picks it up in auto mode.
+
+`iris.iris()` decides whether to initialize SDMA queues as follows:
+
+| `enable_copy_engine` argument | `IRIS_ENABLE_COPY_ENGINE` | Result |
+|---|---|---|
+| `True` | any | SDMA on; error if rocm-xio is not installed |
+| `False` | any | SDMA off; rocm-xio is never imported |
+| `None` (default) | `1`, `true`, `yes`, `on` | SDMA on; error if rocm-xio is not installed |
+| `None` (default) | `0`, `false`, `no`, `off` | SDMA off |
+| `None` (default) | unset, empty, or `auto` | SDMA on only if rocm-xio is installed |
+
+Any other value of `IRIS_ENABLE_COPY_ENGINE` raises `ValueError`. With SDMA off,
+`get_copy_engine_ctx()` returns `None` and the host SDMA APIs raise `RuntimeError`.
+
 ## Selecting the AMD runtime for fabric communication
 
 When multiple ROCm versions are installed, set `LD_LIBRARY_PATH` before starting
