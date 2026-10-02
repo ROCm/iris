@@ -15,6 +15,7 @@ the logic lives in exactly one place.
 
 import math
 
+
 import torch
 
 from iris.host.logging.logging import logger
@@ -302,14 +303,17 @@ def zeros(heap, iris_device, size, *, out=None, dtype=None, layout=torch.strided
     from iris.host.platform.utils import is_simulation_env
 
     if is_simulation_env():
-        # Allocate and leave as-is (memory is already zero-initialized)
+        # Freshly faulted pages are zero, but heap memory is reused, and once
+        # peer access maps a peer's heap a buffer can hold that peer's stale
+        # data. zero_() was skipped here to avoid launching a GPU kernel, but
+        # the simulator does execute compute kernels, so zero explicitly.
         if out is not None:
             throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
-            # Don't call zero_() - memory is already zeroed, avoid GPU kernel
+            out.zero_()
             tensor = out.view(size)
         else:
             tensor = allocate(heap, num_elements, dtype)
-            # Don't call zero_() - memory is already zeroed, avoid GPU kernel
+            tensor.zero_()
             tensor = tensor.reshape(size)
     else:
         if out is not None:
@@ -600,23 +604,20 @@ def randn(
     throw_if_invalid_device(device, iris_device)
     size, num_elements = parse_size(size)
 
-    # In simulation, avoid GPU kernel operations which trigger HIP errors
-    # Create data on CPU and copy to GPU to avoid kernel execution
     from iris.host.platform.utils import is_simulation_env
 
     if is_simulation_env():
+        # This staged through host memory to avoid launching a GPU kernel, but
+        # it filled with torch.ones -- so randn() returned constants under
+        # simulation and any validation built on it compared constant data.
+        # Device RNG works in the simulator, so generate normally; only the
+        # allocation differs, since the tensor must live on the symmetric heap.
         if out is not None:
             throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
-            # Create on CPU and copy to avoid GPU kernels
-            cpu_data = torch.ones(num_elements, dtype=dtype, device="cpu")
-            out.copy_(cpu_data)
             tensor = out.view(size)
         else:
-            tensor = allocate(heap, num_elements, dtype)
-            # Create on CPU and copy to avoid GPU kernels
-            cpu_data = torch.ones(num_elements, dtype=dtype, device="cpu")
-            tensor.copy_(cpu_data)
-            tensor = tensor.reshape(size)
+            tensor = allocate(heap, num_elements, dtype).reshape(size)
+        tensor.normal_(generator=generator)
     else:
         if out is not None:
             throw_if_invalid_output_tensor(heap, out, num_elements, dtype)

@@ -434,16 +434,10 @@ class SymmetricHeap:
 
     def _refresh_peer_access_torch(self, dist, all_bases_arr):
         """Peer access for TorchAllocator (IPC-based)."""
-        from iris.host.platform.utils import is_simulation_env
-
-        if is_simulation_env():
-            for r in range(self.num_ranks):
-                self.heap_bases[r] = int(all_bases_arr[r])
-        else:
-            all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
-            self.allocator.establish_peer_access(all_bases, self.fd_conns)
-            for r in range(self.num_ranks):
-                self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
+        all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
+        self.allocator.establish_peer_access(all_bases, self.fd_conns)
+        for r in range(self.num_ranks):
+            self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
 
     def _get_collective_device(self, dist) -> torch.device:
         """Choose a safe device for small distributed tensor collectives."""
