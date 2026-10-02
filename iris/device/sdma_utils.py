@@ -202,6 +202,10 @@ def place_nop_packet(queue_ptr_u32, offset_bytes: tl.uint64, padding_bytes):
 @triton.jit
 def place_copy_packet(queue_ptr_u32, offset_bytes: tl.uint64, size_bytes: tl.uint32, src_ptr_val, dst_ptr_val):
     """Place a SDMA_PKT_COPY_LINEAR packet for 1D linear memory copy."""
+    # count is size_bytes - 1, so a zero-size copy would underflow to a maximal-length copy
+    if size_bytes == 0:
+        place_nop_packet(queue_ptr_u32, offset_bytes, tl.full((), sdma_ep.COPY_LINEAR_COMMAND_BYTES, tl.uint64))
+        return
     slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
     # offset 0: op + sub_op
     tl.store(slot_ptr_u32 + 0, 1, cache_modifier=".wt")
@@ -222,12 +226,12 @@ def place_copy_packet(queue_ptr_u32, offset_bytes: tl.uint64, size_bytes: tl.uin
 # atomic op codes and operation
 # atomic add 32bit w/rtn: op 10, operation 15
 # atomic add 64bit w/rtn: op 10, operation: 47 -> 32 + 15
-# atomic add 32bit w/o rtn: op 10, operation: 31 -> 64 + 15
-# atomic add 64bit w/o rtn: op 10, operation: 63 -> 96 + 15
+# atomic add 32bit w/o rtn: op 10, operation: 79 -> 64 + 15
+# atomic add 64bit w/o rtn: op 10, operation: 111 -> 96 + 15
 # atomic cmp&swap 32bit w/rtn: op 10, operation: 8
 # atomic cmp&swap 64bit w/rtn: op 10, operation: -> 32 + 8
 # atomic cmp&swap 32bit w/o rtn: op 10, operation -> 64 + 8
-# atomic cmp&swap 64bit w/o rtn: op 10, operation 56 -> 06 + 8
+# atomic cmp&swap 64bit w/o rtn: op 10, operation 104 -> 96 + 8
 @triton.jit
 def place_atomic_packet(
     queue_ptr_u32,
@@ -245,13 +249,13 @@ def place_atomic_packet(
     OP codes:
         15: atomic add (32/64-bit with/without return)
         8: atomic compare-and-swap (32/64-bit with/without return)
-    Flags are encoded via IS_64_BIT (bit 4) and RETURN (bit 5).
+    Flags are encoded via IS_64_BIT (bit 5) and RETURN (bit 6).
     """
     slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
     if IS_64_BIT:
-        OP = OP | (0x1 << 4)
-    if not RETURN:
         OP = OP | (0x1 << 5)
+    if not RETURN:
+        OP = OP | (0x1 << 6)
     tl.store(slot_ptr_u32 + 0, ((OP & 0x7F) << 25) | (0xA & 0xFF), cache_modifier=".wt")
     # offset 1: dst address 31:0
     tl.store(slot_ptr_u32 + 1, dst_ptr_val.to(tl.uint32), cache_modifier=".wt")
@@ -353,6 +357,12 @@ def place_sub_window_copy_packet(
         dst_x: Destination X offset in bytes
         dst_y: Destination Y offset in rows
     """
+    # rect fields are 1-based, so an empty tile would underflow to a maximal-size rectangle
+    if (tile_width == 0) | (tile_height == 0):
+        place_nop_packet(
+            queue_ptr_u32, offset_bytes, tl.full((), sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES, tl.uint64)
+        )
+        return
     slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
 
     # DW 0: Header (op=1, sub_op=0x24)
