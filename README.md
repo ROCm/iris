@@ -202,6 +202,12 @@ For a quick installation directly from the repository:
 pip install git+https://github.com/ROCm/iris.git
 ```
 
+The SDMA copy engine needs the optional `sdma` extra (rocm-xio):
+
+```shell
+pip install "iris[sdma] @ git+https://github.com/ROCm/iris.git"
+```
+
 ### Docker Compose (Recommended for Development)
 
 The recommended way to get started is using Docker Compose, which provides a development environment with the Iris directory mounted inside the container. This allows you to make changes to the code outside the container and see them reflected inside.

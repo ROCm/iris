@@ -73,15 +73,15 @@ fi
 
 case "$INSTALL_METHOD" in
     editable)
-        INSTALL_CMD='python3 -m pip install -e ".[dev]"'
+        INSTALL_CMD='python3 -m pip install -e ".[dev,sdma]"'
         ;;
     install)
-        INSTALL_CMD='python3 -m pip install .'
+        INSTALL_CMD='python3 -m pip install ".[sdma]"'
         ;;
     git)
         REPO=${GITHUB_REPOSITORY:-ROCm/iris}
         SHA=${GITHUB_SHA:-HEAD}
-        INSTALL_CMD="python3 -m pip install git+https://github.com/${REPO}.git@${SHA}"
+        INSTALL_CMD="python3 -m pip install 'iris[sdma] @ git+https://github.com/${REPO}.git@${SHA}'"
         ;;
     *)
         echo "Unsupported INSTALL_METHOD: $INSTALL_METHOD" >&2

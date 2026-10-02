@@ -8,9 +8,9 @@
 #   num_ranks: number of GPU ranks (1, 2, 4, or 8)
 #   gpu_devices: comma-separated GPU device IDs (optional, if not provided will use allocator)
 #   install_method: pip install method - "git", "editable", or "install" (optional, default: "editable")
-#     - "git": pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
-#     - "editable": pip install -e .
-#     - "install": pip install .
+#     - "git": pip install 'iris[sdma] @ git+https://github.com/${{ github.repository }}.git@${{ github.sha }}'
+#     - "editable": pip install -e '.[sdma]'
+#     - "install": pip install '.[sdma]'
 
 set -e
 
@@ -62,11 +62,11 @@ if [ "$INSTALL_METHOD" = "git" ]; then
     # For git install, we need the repository and SHA from environment or use defaults
     REPO=${GITHUB_REPOSITORY:-"ROCm/iris"}
     SHA=${GITHUB_SHA:-"HEAD"}
-    INSTALL_CMD="pip install git+https://github.com/${REPO}.git@${SHA}"
+    INSTALL_CMD="pip install 'iris[sdma] @ git+https://github.com/${REPO}.git@${SHA}'"
 elif [ "$INSTALL_METHOD" = "editable" ]; then
-    INSTALL_CMD="pip install -e ."
+    INSTALL_CMD="pip install -e '.[sdma]'"
 elif [ "$INSTALL_METHOD" = "install" ]; then
-    INSTALL_CMD="pip install ."
+    INSTALL_CMD="pip install '.[sdma]'"
 fi
 
 # Run tests in container
