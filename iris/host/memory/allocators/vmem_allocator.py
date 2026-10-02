@@ -77,7 +77,7 @@ class VMemAllocator(BaseAllocator):
         self.va_size = self.aligned_heap_size
         self.base_va = mem_address_reserve(self.va_size, self.granularity, 0)
 
-        self.minimal_size = min(2 << 20, self.aligned_heap_size // 2)
+        self.minimal_size = min(2 << 20, self.aligned_heap_size // 2) & ~(self.granularity - 1)
         if self.minimal_size < self.granularity:
             self.minimal_size = self.granularity
 
