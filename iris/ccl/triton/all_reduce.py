@@ -24,6 +24,10 @@ VARIANT_TWO_SHOT = "two_shot"
 VARIANT_ONE_SHOT_LEGACY = "one_shot_legacy"
 VARIANT_SPINLOCK = "spinlock"
 VARIANT_ONE_SHOT = "one_shot"
+VARIANT_LL128 = "ll128"
+# 31 f32 payload + 1 f32 flag = 32 f32 = 128 B. Not tunable: it is the
+# cache-line width the atomicity guarantee is tied to.
+LL128_PAYLOAD = 31
 
 
 @dataclass
@@ -52,6 +56,10 @@ class AllReduceWorkspace:
     start_flags: Optional[torch.Tensor] = None
     end_flags: Optional[torch.Tensor] = None
     prepared: bool = False
+    # LL128 only: monotonically increasing epoch stamped into each cache
+    # line's flag word. Must outlive a single call -- a reader waits for
+    # flag >= epoch, so a counter that reset would deadlock the next call.
+    ll_epoch: int = 0
 
 
 def all_reduce_preamble(
@@ -79,6 +87,7 @@ def all_reduce_preamble(
         VARIANT_TWO_SHOT,
         VARIANT_ONE_SHOT_LEGACY,
         VARIANT_SPINLOCK,
+        VARIANT_LL128,
         VARIANT_ONE_SHOT,
     ]:
         raise ValueError(
@@ -126,6 +135,18 @@ def all_reduce_preamble(
 
     elif variant == VARIANT_TWO_SHOT:
         pass
+
+    elif variant == VARIANT_LL128:
+        # 31 f32 data + 1 f32 flag = 32 f32 = exactly one 128-byte cache line.
+        # The flag travels INSIDE the line it guards, so a reader that sees the
+        # flag has, by cache-line write atomicity, already seen the data. That
+        # is the whole point of LL128 -- it removes the separate flag poll.
+        payload = LL128_PAYLOAD
+        total_elems = M * N
+        num_lines = (total_elems + payload - 1) // payload
+        staging_size = num_lines * (payload + 1)
+        if workspace.ring_buffer is None or workspace.ring_buffer.numel() != staging_size:
+            workspace.ring_buffer = ctx.zeros((staging_size,), dtype=torch.float32)
 
     elif variant == VARIANT_ONE_SHOT:
         num_ranks = ctx.get_num_ranks()
@@ -592,6 +613,107 @@ def persistent_all_reduce_ring(
 
 
 @triton.jit
+def persistent_all_reduce_ll128(
+    input_ptr,
+    output_ptr,
+    staging_ptr,
+    epoch,
+    total_elems,
+    num_lines,
+    heap_bases: tl.tensor,
+    group_rank: tl.constexpr,
+    iris_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    rank_start: tl.constexpr,
+    rank_stride: tl.constexpr,
+    COMM_SMS: tl.constexpr,
+    PAYLOAD: tl.constexpr,
+):
+    """
+    LL128-style all-reduce: data+flag in same 128-byte cache line.
+
+    Each rank stages its input (upcast to f32) into a buffer where every
+    128-byte cache line contains 31 f32 data words + 1 f32 flag.  A
+    coalesced 32×f32 write lands atomically on a cache line.  Readers
+    poll the flag word; when it matches, the 31 data words are valid.
+    No explicit atomics needed — relies on cache-line write atomicity.
+    """
+    pid = tl.program_id(0)
+
+    LINE: tl.constexpr = PAYLOAD + 1  # 32 f32 = 128 bytes = one cache line
+    line_offsets = tl.arange(0, LINE)
+    # Vectorization hint: offsets are contiguous and aligned to LINE
+    line_offsets = tl.max_contiguous(tl.multiple_of(line_offsets, LINE), LINE)
+    is_data = line_offsets < PAYLOAD
+
+    # --- Phase 1: Stage local data with embedded flag per cache line ---
+    for line_idx in range(pid, num_lines, COMM_SMS):
+        data_start = line_idx * PAYLOAD
+        line_base = line_idx * LINE
+        # Load input elems, upcast to f32; use LINE-sized vector with masking
+        full_offsets = data_start + line_offsets
+        full_mask = is_data & (full_offsets < total_elems)
+        safe_offsets = tl.where(is_data, full_offsets, 0)
+        line = tl.load(input_ptr + safe_offsets, mask=full_mask, other=0.0).to(tl.float32)
+        # Set element PAYLOAD (idx 31) to epoch flag; keep data in 0..30
+        line = tl.where(is_data, line, epoch)
+        # Single coalesced 128-byte store — atomic on cache line boundary
+        staging_line_ptr = staging_ptr + line_base + line_offsets
+        staging_line_ptr = tl.max_contiguous(tl.multiple_of(staging_line_ptr, LINE), LINE)
+        tl.store(staging_line_ptr, line, cache_modifier=".wt")
+
+    # --- Phase 2: Read from all peers, poll flag (via full cache line read), reduce ---
+    for line_idx in range(pid, num_lines, COMM_SMS):
+        data_start = line_idx * PAYLOAD
+        line_base = line_idx * LINE
+
+        acc = tl.zeros((LINE,), dtype=tl.float32)
+
+        # Pointer to this cache line in the staging buffer (contiguous, aligned)
+        staging_line_ptr = staging_ptr + line_base + line_offsets
+        staging_line_ptr = tl.max_contiguous(tl.multiple_of(staging_line_ptr, LINE), LINE)
+
+        for r in tl.static_range(world_size):
+            remote_rank = rank_start + r * rank_stride
+
+            # Read the full 128-byte cache line (32 f32) and check flag (element 31)
+            # Use cache_modifier=".cv" to bypass all GPU caches for cross-GPU coherence
+            # hint=LINE tells iris.load to apply vectorization hints to the translated ptr
+            remote_line = iris.load(
+                staging_line_ptr,
+                iris_rank,
+                remote_rank,
+                heap_bases,
+                cache_modifier=".cv",
+                hint=LINE,
+            )
+            # Extract flag value (element PAYLOAD = element 31)
+            flag_vals = tl.where(line_offsets == PAYLOAD, remote_line, 0.0)
+            flag_val = tl.sum(flag_vals)
+            while flag_val < epoch:
+                remote_line = iris.load(
+                    staging_line_ptr,
+                    iris_rank,
+                    remote_rank,
+                    heap_bases,
+                    cache_modifier=".cv",
+                    hint=LINE,
+                )
+                flag_vals = tl.where(line_offsets == PAYLOAD, remote_line, 0.0)
+                flag_val = tl.sum(flag_vals)
+
+            # Flag matched — data words 0..30 are valid (same cache line load)
+            # Mask out flag position so it doesn't pollute the sum
+            acc += tl.where(is_data, remote_line, 0.0)
+
+        # Write reduced data to output (downcast f32 → bf16)
+        out_offsets = data_start + line_offsets
+        out_mask = is_data & (out_offsets < total_elems)
+        safe_out = tl.where(is_data, out_offsets, 0)
+        tl.store(output_ptr + safe_out, acc.to(output_ptr.type.element_ty), mask=out_mask)
+
+
+@triton.jit
 def persistent_all_reduce_two_shot(
     input_ptr,
     output_ptr,
@@ -1050,6 +1172,37 @@ def launch(
             rank=rank_global,
             dtype=input_tensor.dtype,
         )
+    elif variant == VARIANT_LL128:
+        # Epoch must advance every call. A reader spins until the flag word it
+        # reads is >= the epoch it expects; reusing an epoch lets a stale line
+        # from the previous call satisfy the wait and be reduced as if fresh.
+        workspace.ll_epoch += 1
+        total_elems = M * N
+        num_lines = (total_elems + LL128_PAYLOAD - 1) // LL128_PAYLOAD
+        iris_launch(
+            persistent_all_reduce_ll128,
+            (config.comm_sms,),
+            input_tensor,
+            output_tensor,
+            workspace.ring_buffer,
+            float(workspace.ll_epoch),
+            total_elems,
+            num_lines,
+            heap_bases,
+            rank_in_group,
+            rank_global,
+            world_size,
+            rank_start,
+            rank_stride,
+            config.comm_sms,
+            LL128_PAYLOAD,
+            num_warps=8,
+            num_stages=1,
+            algorithm="all_reduce",
+            rank=rank_global,
+            dtype=input_tensor.dtype,
+        )
+
     elif variant == VARIANT_ONE_SHOT_LEGACY:
         iris_launch(
             persistent_all_reduce_one_shot_legacy,
