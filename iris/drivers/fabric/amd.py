@@ -50,13 +50,16 @@ def _load_cdll(*names: Optional[str]) -> Any:
 
 
 _hip = _load_cdll(
-    ctypes.util.find_library("amdhip64"),
+    # Let LD_LIBRARY_PATH select the active ROCm SDK before consulting ldconfig.
+    # find_library can return a stale system SONAME (e.g. HIP 5 beside HIP 7),
+    # and loading both runtimes can abort inside hipSetDevice.
     "libamdhip64.so",
+    ctypes.util.find_library("amdhip64"),
     "/opt/rocm/lib/libamdhip64.so",
 )
 _amdsmi = _load_cdll(
-    ctypes.util.find_library("amd_smi"),
     "libamd_smi.so",
+    ctypes.util.find_library("amd_smi"),
     "/opt/rocm/lib/libamd_smi.so",
 )
 
