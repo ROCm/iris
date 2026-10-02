@@ -1,0 +1,3 @@
+[submodule "ext/shader_sdma"]
+	path = ext/shader_sdma
+	url = https://github.com/AARInternal/shader_sdma.git

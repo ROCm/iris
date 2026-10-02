@@ -1,30 +1,54 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
-"""
-Host-Initiated Message Passing Example
-
-This example demonstrates message passing where the producer (GPU 0) is
-controlled by the HOST (Python/CPU) instead of a device kernel, while
-the consumer (GPU 1) remains a device kernel.
-
-Key difference from message_passing_put.py:
-- Producer: Host uses sdma_ep (rocm-xio) to initiate SDMA transfers from Python
-- Consumer: Same device kernel waiting for data
-
-This shows how to orchestrate GPU-to-GPU transfers from Python without
-requiring kernel launches on the source GPU.
-"""
 
 import argparse
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import triton
 import triton.language as tl
 import random
 
+from mpi4py import MPI
+
 import iris
+
+
+@triton.jit
+def producer_kernel(
+    source_buffer,  # tl.tensor: pointer to source data
+    target_buffer,  # tl.tensor: pointer to target data
+    flag,  # tl.tensor: pointer to flags
+    buffer_size,  # int32: total number of elements
+    producer_rank: tl.constexpr,
+    consumer_rank: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    heap_bases_ptr: tl.tensor,  # tl.tensor: pointer to heap bases pointers
+    copy_engine_handle_ptr,
+):
+    pid = tl.program_id(0)
+
+    # Compute start index of this block
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+
+    # Guard for out-of-bounds accesses
+    mask = offsets < buffer_size
+
+    # Put chunk into remote buffer
+    iris.put(
+        source_buffer + offsets,
+        target_buffer + offsets,
+        producer_rank,
+        consumer_rank,
+        heap_bases_ptr,
+        copy_engine_handle_ptr,
+        mask=mask,
+        USE_COPY_ENGINE=True,
+    )
+
+    # Set flag to signal completion
+    iris.signal_ce(flag + pid, producer_rank, consumer_rank, heap_bases_ptr, copy_engine_handle_ptr)
 
 
 @triton.jit
@@ -43,7 +67,9 @@ def consumer_kernel(
     mask = offsets < buffer_size
 
     # Spin-wait until writer sets flag[pid] = 1
-    done = 0
+    # zero_u64 = tl.zeros((1,), tl.uint64)
+    # one_u64 = tl.full((1,), 1, tl.uint64)
+    done = 0  # zero_u64
     while done == 0:
         done = iris.atomic_cas(
             flag + pid, 1, 0, consumer_rank, consumer_rank, heap_bases_ptr, sem="acquire", scope="sys"
@@ -87,7 +113,7 @@ def torch_dtype_from_str(datatype: str) -> torch.dtype:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Host-Initiated SDMA Message Passing Example",
+        description="Parse Message Passing configuration.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -100,66 +126,10 @@ def parse_args():
     )
     parser.add_argument("-s", "--buffer_size", type=int, default=4096, help="Buffer Size")
     parser.add_argument("-b", "--block_size", type=int, default=512, help="Block Size")
+
     parser.add_argument("-p", "--heap_size", type=int, default=1 << 33, help="Iris heap size")
-    parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
 
     return vars(parser.parse_args())
-
-
-def host_initiated_producer(shmem, source_buffer, destination_buffer, flags, consumer_rank, block_size, verbose=True):
-    """
-    Producer rank logic for host-initiated SDMA transfers.
-
-    Args:
-        shmem: Iris instance
-        source_buffer: Source buffer (symmetric)
-        destination_buffer: Destination buffer (symmetric)
-        flags: Flag buffer for synchronization (symmetric)
-        consumer_rank: Destination rank
-        block_size: Block size for chunking
-        verbose: Whether to print timing information
-    """
-    n_elements = source_buffer.numel()
-    num_blocks = triton.cdiv(n_elements, block_size)
-
-    if verbose:
-        shmem.info(f"Rank {shmem.get_rank()} (HOST) is sending data to rank {consumer_rank}.")
-
-    # Initialize CUDA context even though we're doing host-side operations
-    # This is needed for the barrier to work
-    torch.cuda.current_device()
-
-    if verbose:
-        import time
-
-        start_time = time.time()
-
-    for block_id in range(num_blocks):
-        block_start = block_id * block_size
-        block_end = min(block_start + block_size, n_elements)
-        block_slice = slice(block_start, block_end)
-
-        # Views remain symmetric, so Iris can translate remote pointers automatically
-        src_chunk = source_buffer[block_slice]
-        dst_chunk = destination_buffer[block_slice]
-        flag_view = flags[block_id : block_id + 1]
-
-        shmem.put(
-            src_chunk,
-            to_rank=consumer_rank,
-            to_tensor=dst_chunk,
-            signal_flag=flag_view,
-            async_op=True,
-        )
-
-    shmem.quiet(to_rank=consumer_rank)
-
-    if verbose:
-        end_time = time.time()
-        elapsed_ms = (end_time - start_time) * 1000
-        shmem.info(
-            f"Host SDMA loop took {elapsed_ms:.2f} ms for {num_blocks} blocks ({elapsed_ms / num_blocks:.2f} ms/block)"
-        )
 
 
 def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
@@ -194,21 +164,29 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     consumer_rank = 1
 
     n_elements = source_buffer.numel()
-    BLOCK_SIZE = args["block_size"]
-    num_blocks = triton.cdiv(n_elements, BLOCK_SIZE)
-    grid = (num_blocks,)
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+    num_blocks = triton.cdiv(n_elements, args["block_size"])
 
     # Allocate flags on the symmetric heap
     flags = shmem.zeros((num_blocks,), device="cuda", dtype=torch.int32)
 
     if cur_rank == producer_rank:
-        host_initiated_producer(
-            shmem, source_buffer, destination_buffer, flags, consumer_rank, BLOCK_SIZE, verbose=True
+        shmem.info(f"Rank {cur_rank} is sending data to rank {consumer_rank}.")
+        kk = producer_kernel[grid](
+            source_buffer,
+            destination_buffer,
+            flags,
+            n_elements,
+            producer_rank,
+            consumer_rank,
+            args["block_size"],
+            shmem.get_heap_bases(),
+            shmem.get_copy_engine_handle(consumer_rank),
         )
     else:
         shmem.info(f"Rank {cur_rank} is receiving data from rank {producer_rank}.")
         kk = consumer_kernel[grid](
-            destination_buffer, flags, n_elements, consumer_rank, BLOCK_SIZE, shmem.get_heap_bases()
+            destination_buffer, flags, n_elements, consumer_rank, args["block_size"], shmem.get_heap_bases()
         )
     shmem.barrier()
     shmem.info(f"Rank {cur_rank} has finished sending/receiving data.")
@@ -245,15 +223,18 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
 def main():
     args = parse_args()
 
-    num_ranks = args["num_ranks"]
+    comm = MPI.COMM_WORLD  # Communicator for all processes
+    rank = comm.Get_rank()  # Get the rank of the current process
+    num_ranks = comm.Get_size()  # Total number of processes
+    # TODO local_rank
+    torch.cuda.set_device(rank)
+
+    # Synchronize all processes
+    comm.barrier()
 
     init_url = "tcp://127.0.0.1:29500"
-    mp.spawn(
-        fn=_worker,
-        args=(num_ranks, init_url, args),
-        nprocs=num_ranks,
-        join=True,
-    )
+
+    _worker(rank, num_ranks, init_url, args)
 
 
 if __name__ == "__main__":
