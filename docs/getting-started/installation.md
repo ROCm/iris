@@ -94,6 +94,15 @@ pip install -e .
 ```
 
 
+## Selecting the AMD runtime for fabric communication
+
+When multiple ROCm versions are installed, set `LD_LIBRARY_PATH` before starting
+Python so it points to the SDK used by PyTorch. The AMD fabric driver first loads
+`libamdhip64.so` and `libamd_smi.so` through that search path, then falls back to
+system-library discovery if those names are unavailable. This prevents a stale
+system SONAME from selecting a different HIP major version alongside PyTorch's
+runtime. Mixing HIP runtimes in one process can abort during device initialization.
+
 ## Next Steps
 
 Once you have Iris running with any of these methods:
