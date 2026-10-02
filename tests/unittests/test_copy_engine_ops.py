@@ -6,6 +6,12 @@ import triton
 import triton.language as tl
 
 import iris
+from iris.host.iris import _resolve_enable_copy_engine
+
+pytestmark = pytest.mark.skipif(
+    not _resolve_enable_copy_engine(None),
+    reason="SDMA copy engine disabled (rocm-xio not installed or IRIS_ENABLE_COPY_ENGINE=0)",
+)
 
 
 @triton.jit

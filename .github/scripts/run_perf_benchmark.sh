@@ -29,7 +29,7 @@ echo "[PERF-BENCHMARK] Using GPUs: $GPU_DEVICES"
     set -e
     
     cd /iris_workspace
-    pip install -e .
+    pip install -e '.[sdma]'
     torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 --nnodes=1 --nproc_per_node=8 examples/${EXAMPLE_PATH}/benchmark.py \
         --benchmark \
         --validate \

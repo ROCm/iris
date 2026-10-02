@@ -6,11 +6,17 @@ import pytest
 import torch
 import triton
 import iris
+from iris.host.iris import _resolve_enable_copy_engine
 
 import importlib.util
 from pathlib import Path
 
 current_dir = Path(__file__).parent
+
+requires_copy_engine = pytest.mark.skipif(
+    not _resolve_enable_copy_engine(None),
+    reason="SDMA copy engine disabled (rocm-xio not installed or IRIS_ENABLE_COPY_ENGINE=0)",
+)
 
 
 def load_example_module(relative_path: str, module_name: str):
@@ -189,6 +195,7 @@ def test_message_passing_put(dtype_str, buffer_size, heap_size, block_size):
     assert success, "Message passing put validation failed"
 
 
+@requires_copy_engine
 @pytest.mark.parametrize("dtype_str", ["fp16", "fp32"])
 @pytest.mark.parametrize("buffer_size, heap_size", [(4096, 1 << 20)])
 @pytest.mark.parametrize("block_size", [512])
@@ -263,6 +270,7 @@ def run_host_initiated_copy_engine(module, args):
             gc.collect()
 
 
+@requires_copy_engine
 @pytest.mark.parametrize("dtype_str", ["fp16", "fp32"])
 @pytest.mark.parametrize("buffer_size, heap_size", [(4096, 1 << 20)])
 @pytest.mark.parametrize("block_size", [512])
