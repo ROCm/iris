@@ -7,7 +7,7 @@
 import torch.distributed as dist
 import iris.bench as bench
 from iris.ccl import Config
-from benchmark.ccl._common import DTYPES, M_VALUES, N_VALUES, NUM_RANKS, torch_tensor
+from benchmark.ccl._common import DTYPES, M_VALUES, N_VALUES, NUM_RANKS, is_fp8, torch_tensor
 
 
 @bench.register
@@ -26,6 +26,10 @@ def all_reduce(state, ctx):
     state.set_bytes(int(M * N * dtype.itemsize * 2 * (world_size - 1) / world_size))
 
     if state["backend"] == "rccl":
+        if is_fp8(dtype):
+            # fp8 is an Iris-only series: there is no RCCL baseline to
+            # compare against, so record the gap rather than inventing one.
+            state.skip("RCCL has no fp8 support; fp8 is measured for Iris only")
         # dist.all_reduce is in-place; copy in the preamble so the timed region
         # holds only the collective, matching the Iris path.
         t_in = torch_tensor(ctx, (M, N), dtype)

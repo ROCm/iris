@@ -71,7 +71,17 @@ Publishing those side by side would compare two different operations.
 The communication pattern and total bytes are identical — `W-1` peer messages of
 `M*N` elements — only the in-memory layout differs.
 
-fp8 is not swept. RCCL does not implement reductions for the fp8 types, so
-`all_reduce` and `reduce_scatter` would have no baseline to compare against;
-adding it for the movement-only collectives alone would make the table
-inconsistent across operations.
+fp8 has no RCCL baseline, so it is swept for Iris only and the rccl arm of each
+benchmark skips it.
+
+This is not limited to reductions. Measured on MI355X / ROCm 7.2.1 / PyTorch
+2.10, RCCL rejects fp8 for *every* collective here. `all_gather` and
+`all_to_all` fail with an NCCL data-type error, and `all_reduce` additionally
+reports `Unsupported Float8 type for NCCL reduction`. Both the OCP types
+(`float8_e4m3fn`, `float8_e5m2`) and the `fnuz` variants behave the same way;
+all four allocate on device without trouble, so the limitation is in the
+collective layer rather than the dtype.
+
+Consequence for the figures: the fp8 series appears in the latency and
+bandwidth plots as its own curve, and is absent from the speedup plot, which
+needs a reference to divide by.

@@ -46,6 +46,17 @@ _DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
 }
 
+# fp8 spellings depend on the build: OCP types (float8_e4m3fn) on gfx950, the
+# fnuz variants on gfx942. Register whichever this torch exposes so
+# --axis_dtype works either way, with bare "fp8" resolving to the e4m3 type
+# that benchmark/ccl/_common.py sweeps.
+for _fp8_name in ("float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2", "float8_e5m2fnuz"):
+    _fp8_dtype = getattr(torch, _fp8_name, None)
+    if _fp8_dtype is not None:
+        _DTYPE_MAP[_fp8_name] = _fp8_dtype
+        if _fp8_name.startswith("float8_e4m3"):
+            _DTYPE_MAP.setdefault("fp8", _fp8_dtype)
+
 
 def _dtype_str(v: Any) -> str:
     """Short string for a torch dtype, passthrough for anything else."""
@@ -59,7 +70,10 @@ def _dtype_str(v: Any) -> str:
             torch.int16: "int16",
             torch.int32: "int32",
             torch.int64: "int64",
-        }.get(v, str(v))
+            # Anything not listed -- the fp8 types in particular, whose spelling
+            # differs between builds -- falls through to its torch name with the
+            # module prefix dropped, e.g. "float8_e4m3fn".
+        }.get(v, str(v).removeprefix("torch."))
     return str(v)
 
 

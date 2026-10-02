@@ -101,6 +101,26 @@ _ITEMSIZE = {
     "fp32": 4,
 }
 
+# Short display tokens. fp8 spellings vary by build (OCP vs fnuz), so they are
+# matched by prefix rather than enumerated.
+_PRECISION_TOKEN = {"float16": "fp16", "bfloat16": "bf16", "float32": "fp32", "float64": "fp64"}
+
+
+def _itemsize(name):
+    """Bytes per element for a dtype name, or None if unrecognised."""
+    if name in _ITEMSIZE:
+        return _ITEMSIZE[name]
+    if name.startswith("float8") or name == "fp8":
+        return 1
+    return None
+
+
+def _precision_token(name):
+    """'fp16', 'bf16', 'fp8' -- the label used to distinguish plot series."""
+    if name.startswith("float8") or name == "fp8":
+        return "fp8"
+    return _PRECISION_TOKEN.get(name, name)
+
 
 def _message_bytes(row):
     """Bytes per rank for this point, from the M/N/dtype axes."""
@@ -108,23 +128,31 @@ def _message_bytes(row):
         elems = int(row["M"]) * int(row["N"])
     except (KeyError, TypeError, ValueError):
         return None
-    itemsize = _ITEMSIZE.get((row.get("dtype") or "").strip())
+    itemsize = _itemsize((row.get("dtype") or "").strip())
     if itemsize is None:
         return None
     return elems * itemsize
 
 
 def load_results(paths):
-    """``{(op, ranks): {(backend, variant): {size_bytes: (latency_ms, bw)}}}``.
+    """``{(op, ranks): {(backend, variant, precision): {size: (latency, bw)}}}``.
 
     Points are median-aggregated, so several (M, N) pairs with the same byte
     count collapse to one marker rather than stacking invisibly.
+
+    Series are split by *bytes per element*, not by dtype. Curves are plotted
+    against total message size, so dtypes of equal width land on the same x
+    positions and measure the same thing -- fp16 and bf16 differ by well under a
+    percent here. fp8 is half as wide, so merging it in would silently average
+    two different precisions wherever their byte counts happened to coincide.
     """
     acc = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    names = defaultdict(lambda: defaultdict(set))
     for path in paths:
         with open(path, newline="") as f:
             for row in csv.DictReader(f):
                 # The framework records skipped combinations with empty timings.
+                # The rccl arm skips fp8 this way, since RCCL has no fp8 support.
                 if (row.get("skipped") or "").strip().lower() == "true":
                     continue
                 latency = _float(row, "gpu_time_ms", "time_ms", "mean_ms")
@@ -134,29 +162,45 @@ def load_results(paths):
                 op = row.get("benchmark") or row.get("name") or os.path.basename(path).replace(".csv", "")
                 backend = (row.get("backend") or "iris").strip().lower()
                 variant = (row.get("variant") or "").strip()
+                dtype = (row.get("dtype") or "").strip()
                 try:
                     ranks = int(row.get("num_ranks") or row.get("world_size") or 0)
                 except ValueError:
                     ranks = 0
                 bw = _float(row, "bandwidth_gbps", "bandwidth", "GB/s")
-                acc[(op, ranks)][(backend, variant)][size].append((latency, bw))
+                group = (backend, variant, _itemsize(dtype))
+                acc[(op, ranks)][group][size].append((latency, bw))
+                names[(op, ranks)][group].add(_precision_token(dtype))
 
     out = {}
     for key, series in acc.items():
         out[key] = {}
-        for sk, sizes in series.items():
-            out[key][sk] = {}
-            for size, points in sizes.items():
-                lat = statistics.median(p[0] for p in points)
-                bws = [p[1] for p in points if p[1] is not None]
-                out[key][sk][size] = (lat, statistics.median(bws) if bws else None)
+        for group, sizes in series.items():
+            backend, variant, _ = group
+            # Name the series after the dtypes that actually landed in it, so a
+            # merged group reads "fp16/bf16" rather than claiming to be one.
+            precision = "/".join(sorted(names[key][group]))
+            points = {}
+            for size, samples in sizes.items():
+                lat = statistics.median(p[0] for p in samples)
+                bws = [p[1] for p in samples if p[1] is not None]
+                points[size] = (lat, statistics.median(bws) if bws else None)
+            out[key][(backend, variant, precision)] = points
     return out
 
 
-def _label(backend, variant, multi_variant):
-    """'Iris', or 'Iris (two_shot)' when a backend has several variants."""
+def _multi_precision(data):
+    """True when more than one precision group is present anywhere."""
+    return len({precision for series in data.values() for _, _, precision in series}) > 1
+
+
+def _label(series_key, multi_variant, show_precision):
+    """'Iris', or 'Iris fp8', or 'Iris (two_shot) fp8' as needed."""
+    backend, variant, precision = series_key
     base = "Iris" if backend == "iris" else backend.upper()
-    return f"{base} ({variant})" if (multi_variant and variant) else base
+    if multi_variant and variant:
+        base = f"{base} ({variant})"
+    return f"{base} {precision}" if (show_precision and precision) else base
 
 
 def _style(backend, index):
@@ -209,13 +253,22 @@ def _finish(fig, args, out_path):
 
 
 def _series_order(series):
-    """Iris first, then RCCL; stable within a backend by variant name."""
-    return sorted(series, key=lambda sk: (sk[0] != "iris", sk[1]))
+    """Iris first, then RCCL; stable within a backend by precision and variant."""
+    return sorted(series, key=lambda sk: (sk[0] != "iris", sk[2], sk[1]))
+
+
+def _variants_per_backend(series):
+    """``{backend: {variant, ...}}`` -- used to decide whether to label variants."""
+    out = defaultdict(set)
+    for backend, variant, _ in series:
+        out[backend].add(variant)
+    return out
 
 
 def plot_metric(data, args, out_path, *, index, ylabel, log_y, suptitle):
     """Latency (index 0) or bandwidth (index 1) vs message size."""
     fig, axes, ops, rank_counts = _grid(data, args, suptitle)
+    show_precision = _multi_precision(data)
 
     for r, ranks in enumerate(rank_counts):
         for c, op in enumerate(ops):
@@ -224,11 +277,9 @@ def plot_metric(data, args, out_path, *, index, ylabel, log_y, suptitle):
             if not series:
                 ax.set_visible(False)
                 continue
-            multi = {b: 0 for b, _ in series}
-            for b, _ in series:
-                multi[b] += 1
+            variants = _variants_per_backend(series)
             for i, sk in enumerate(_series_order(series)):
-                backend, variant = sk
+                backend = sk[0]
                 points = {s: v[index] for s, v in series[sk].items() if v[index] is not None}
                 if not points:
                     continue
@@ -242,7 +293,7 @@ def plot_metric(data, args, out_path, *, index, ylabel, log_y, suptitle):
                     color=color,
                     linewidth=1.8,
                     markersize=6,
-                    label=_label(backend, variant, multi[backend] > 1),
+                    label=_label(sk, len(variants[backend]) > 1, show_precision),
                 )
             ax.set_xscale("log", base=2)
             if log_y:
@@ -260,26 +311,35 @@ def plot_metric(data, args, out_path, *, index, ylabel, log_y, suptitle):
 def plot_speedup(data, args, out_path):
     """Latency ratio Iris / RCCL. Below 1.0 means Iris is faster."""
     fig, axes, ops, rank_counts = _grid(data, args, f"{args.title} — speedup vs RCCL")
+    show_precision = _multi_precision(data)
     plotted = False
+    unmatched = set()
 
     for r, ranks in enumerate(rank_counts):
         for c, op in enumerate(ops):
             ax = axes[r][c]
             series = data.get((op, ranks))
-            if not series:
+            if not series or not any(sk[0] == REFERENCE_BACKEND for sk in series):
                 ax.set_visible(False)
                 continue
-            reference = [sk for sk in series if sk[0] == REFERENCE_BACKEND]
-            if not reference:
-                ax.set_visible(False)
-                continue
-            ref = series[sorted(reference, key=lambda sk: sk[1])[0]]
 
-            multi = sum(1 for b, _ in series if b == "iris")
+            variants = _variants_per_backend(series)
             for i, sk in enumerate(_series_order(series)):
-                backend, variant = sk
+                backend, variant, precision = sk
                 if backend == REFERENCE_BACKEND:
                     continue
+                # Pair against the reference at the same precision: an fp8 curve
+                # divided by an fp16 one would be a ratio of two different
+                # workloads. RCCL has no fp8, so those series have no partner
+                # and are left out of this figure by design.
+                ref = series.get((REFERENCE_BACKEND, variant, precision))
+                if ref is None:
+                    same = [k for k in series if k[0] == REFERENCE_BACKEND and k[2] == precision]
+                    ref = series[same[0]] if len(same) == 1 else None
+                if ref is None:
+                    unmatched.add(precision or "(unlabelled)")
+                    continue
+
                 shared = sorted(s for s in series[sk] if s in ref and ref[s][0] > 0)
                 if not shared:
                     continue
@@ -292,9 +352,10 @@ def plot_speedup(data, args, out_path):
                     color=color,
                     linewidth=1.8,
                     markersize=6,
-                    label=_label(backend, variant, multi > 1),
+                    label=_label(sk, len(variants[backend]) > 1, show_precision),
                 )
                 plotted = True
+
             ax.axhline(1.0, color="black", linewidth=1.0, linestyle="--", alpha=0.7)
             ax.set_xscale("log", base=2)
             ax.set_yscale("log")
@@ -305,6 +366,9 @@ def plot_speedup(data, args, out_path):
             ax.set_title(f"{op.replace('_', '-').title()} — {ranks} ranks", fontsize=12, fontweight="bold")
             ax.legend(loc="best", fontsize=9, framealpha=0.85)
 
+    if unmatched:
+        missing = ", ".join(sorted(unmatched))
+        print(f"[speedup] no {REFERENCE_BACKEND.upper()} baseline for {missing}; omitted from this figure")
     if not plotted:
         print("[speedup] no Iris/RCCL pairs at matching shapes; skipping the speedup plot")
         plt.close(fig)
@@ -328,25 +392,28 @@ def markdown_table(data):
     would drop points whenever two variants share a message size, and which one
     survived would depend on insertion order.
     """
-    show_variant = any(variant for series in data.values() for _, variant in series)
+    show_variant = any(variant for series in data.values() for _, variant, _ in series)
+    show_precision = _multi_precision(data)
     header = (
         ["Operation", "Ranks"]
         + (["Variant"] if show_variant else [])
+        + (["Dtype"] if show_precision else [])
         + ["Size (MiB)", "Iris (ms)", "RCCL (ms)", "Iris (GB/s)", "RCCL (GB/s)", "Speedup"]
     )
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
 
     for op, ranks in sorted(data):
         series = data[(op, ranks)]
-        for variant in sorted({v for _, v in series}):
-            iris = series.get(("iris", variant), {})
-            reference = series.get((REFERENCE_BACKEND, variant))
+        for variant, precision in sorted({(v, p) for _, v, p in series}):
+            iris = series.get(("iris", variant, precision), {})
+            reference = series.get((REFERENCE_BACKEND, variant, precision))
             if reference is None:
                 # The reference may not carry the variant label at all (only the
                 # Iris path is parameterised). Pair against it when there is no
-                # ambiguity about which series is meant.
-                ref_keys = [k for k in series if k[0] == REFERENCE_BACKEND]
-                reference = series[ref_keys[0]] if len(ref_keys) == 1 else {}
+                # ambiguity, and only at the same precision -- RCCL has no fp8,
+                # so those rows are Iris-only and the RCCL cells stay empty.
+                same = [k for k in series if k[0] == REFERENCE_BACKEND and k[2] == precision]
+                reference = series[same[0]] if len(same) == 1 else {}
 
             for size in sorted(set(iris) | set(reference)):
                 il, ib = iris.get(size, (None, None))
@@ -356,6 +423,7 @@ def markdown_table(data):
                 cells = (
                     [op, str(ranks)]
                     + ([variant or "—"] if show_variant else [])
+                    + ([precision or "—"] if show_precision else [])
                     + [
                         f"{size / (1024 * 1024):.2f}",
                         _cell(il, ".4f"),
