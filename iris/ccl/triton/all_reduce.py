@@ -322,6 +322,7 @@ def persistent_all_reduce_spinlock(
                 dest_rank,
                 heap_bases,
                 mask=mask,
+                hint=(1, BLOCK_SIZE_N),
             )
 
             # Add our local contribution
@@ -414,6 +415,7 @@ def persistent_all_reduce_one_shot(
                 remote_rank,
                 heap_bases,
                 mask=mask,
+                hint=(1, BLOCK_SIZE_N),
             )
             acc += partial.to(acc_dtype)
 
