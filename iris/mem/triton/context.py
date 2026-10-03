@@ -14,8 +14,9 @@ from iris.mem.triton.types import Tile, TileView, TensorView
 
 
 @triton.jit
-def __translate(ptr, from_rank, to_rank, heap_bases, hint: tl.constexpr = None):
-    from_base = tl.load(heap_bases + from_rank)
+def __translate(ptr, from_rank, to_rank, heap_bases, hint: tl.constexpr = None, from_base=None):
+    if from_base is None:
+        from_base = tl.load(heap_bases + from_rank)
     to_base = tl.load(heap_bases + to_rank)
     ptr_int = tl.cast(ptr, tl.uint64)
     offset = ptr_int - from_base

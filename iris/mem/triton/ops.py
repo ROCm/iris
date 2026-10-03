@@ -23,6 +23,7 @@ def load(
     cache_modifier=None,
     volatile=False,
     hint: tl.constexpr = None,
+    from_base=None,
 ):
     """
     Loads a value from the specified rank's memory location.
@@ -69,7 +70,7 @@ def load(
         >>>     data = iris.load(ptr, cur_rank, remote_rank, heap_bases)
         >>>     return data
     """
-    translated_ptr = __translate(pointer, to_rank, from_rank, heap_bases, hint)
+    translated_ptr = __translate(pointer, to_rank, from_rank, heap_bases, hint, from_base)
     result = tl.load(translated_ptr, mask=mask, other=other, cache_modifier=cache_modifier, volatile=volatile)
     return result
 
@@ -84,6 +85,7 @@ def store(
     mask=None,
     hint: tl.constexpr = None,
     cache_modifier=None,
+    from_base=None,
 ):
     """
     Writes data to the specified rank's memory location.
@@ -126,7 +128,7 @@ def store(
         >>>     value = 42
         >>>     iris.store(ptr, value, cur_rank, remote_rank, heap_bases)
     """
-    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint)
+    translated_ptr = __translate(pointer, from_rank, to_rank, heap_bases, hint, from_base)
     tl.store(translated_ptr, value, mask=mask, cache_modifier=cache_modifier)
 
 
