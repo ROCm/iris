@@ -95,18 +95,10 @@ class Config:
     threads_per_warp: int = 64
     waves_per_eu: int = 0
 
-    _cached_num_xcc = None
-
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
         if self.num_xcds is None:
-            # O6: get_num_xcc() is a HIP call costing ~6.7 ms. It is a hardware
-            # constant, so cache it at class level -- one call per process, not
-            # one per Config() construction. Collectives that build Config
-            # internally (all_gather, all_to_all, ...) were paying it per call.
-            if Config._cached_num_xcc is None:
-                Config._cached_num_xcc = iris.hip.get_num_xcc()
-            self.num_xcds = Config._cached_num_xcc
+            self.num_xcds = iris.hip.get_num_xcc()
 
         if self.chunk_size is None:
             self.chunk_size = self.swizzle_size * self.swizzle_size

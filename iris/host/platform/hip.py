@@ -2,6 +2,7 @@
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 import ctypes
+import functools
 import logging
 import numpy as np
 import torch
@@ -153,6 +154,7 @@ def get_cu_count(device_id=None):
     return cu_count.value
 
 
+@functools.lru_cache(maxsize=None)
 def get_rocm_version():
     if not _is_amd_backend:
         # Not applicable for CUDA
@@ -216,9 +218,14 @@ def get_arch_string(device_id=None):
 
 
 def get_num_xcc(device_id=None):
+    # Resolve None BEFORE caching so the cache key is a concrete device, not None.
     if device_id is None:
         device_id = get_device_id()
+    return _get_num_xcc_cached(device_id)
 
+
+@functools.lru_cache(maxsize=None)
+def _get_num_xcc_cached(device_id):
     if not _is_amd_backend:
         # XCC is AMD-specific, return 1 for CUDA
         return 1
