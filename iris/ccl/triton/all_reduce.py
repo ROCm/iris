@@ -400,30 +400,52 @@ def persistent_all_reduce_one_shot(
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
         rm = tl.max_contiguous(tl.multiple_of(rm, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
 
         input_offset = rm[:, None] * stride_in_m + rn[None, :] * stride_in_n
         output_offset = rm[:, None] * stride_out_m + rn[None, :] * stride_out_n
 
         acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=acc_dtype)
 
-        for i in range(world_size):
-            remote_rank = rank_start + i * rank_stride
-            partial = iris.load(
-                input_ptr + input_offset,
-                iris_rank,
-                remote_rank,
-                heap_bases,
-                mask=mask,
-                hint=(1, BLOCK_SIZE_N),
-            )
-            acc += partial.to(acc_dtype)
+        # Fast path: NO MASKS (full tiles)
+        # The masking is problem size dependent, and the compiler does not recognize it can have two paths
+        # (one with masks and one without). Separate unmasked paths allow the compiler to generate
+        # more efficient vectorized instructions.
+        if is_full:
+            for i in range(world_size):
+                remote_rank = rank_start + i * rank_stride
+                partial = iris.load(
+                    input_ptr + input_offset,
+                    iris_rank,
+                    remote_rank,
+                    heap_bases,
+                    hint=(1, BLOCK_SIZE_N),
+                )
+                acc += partial.to(acc_dtype)
 
-        tl.store(
-            output_ptr + output_offset,
-            acc.to(output_ptr.type.element_ty),
-            mask=mask,
-        )
+            tl.store(
+                output_ptr + output_offset,
+                acc.to(output_ptr.type.element_ty),
+            )
+        else:
+            mask = (rm[:, None] < M) & (rn[None, :] < N)
+            for i in range(world_size):
+                remote_rank = rank_start + i * rank_stride
+                partial = iris.load(
+                    input_ptr + input_offset,
+                    iris_rank,
+                    remote_rank,
+                    heap_bases,
+                    mask=mask,
+                    hint=(1, BLOCK_SIZE_N),
+                )
+                acc += partial.to(acc_dtype)
+
+            tl.store(
+                output_ptr + output_offset,
+                acc.to(output_ptr.type.element_ty),
+                mask=mask,
+            )
 
 
 @triton.jit()
