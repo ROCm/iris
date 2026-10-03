@@ -57,6 +57,7 @@ initialised:
     rocshmem4py.init_rocshmem_by_uniqueid(dist.group.WORLD)
     provider = RocshmemProvider()
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

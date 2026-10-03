@@ -27,8 +27,9 @@ BLOCK_SIZE = 1024
 
 
 @triton.jit
-def _broadcast_kernel(data, results, peer_bases, n_elements, cur_rank,
-                      num_ranks: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+def _broadcast_kernel(
+    data, results, peer_bases, n_elements, cur_rank, num_ranks: tl.constexpr, BLOCK_SIZE: tl.constexpr
+):
     """Ordinary Iris device code -- unaware the table came from rocSHMEM."""
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
@@ -47,9 +48,7 @@ def provider():
     # Imported here rather than at module scope so the tests are collected and
     # individually skipped. A module-level importorskip collects zero items,
     # which makes pytest exit 5 (NO_TESTS_COLLECTED) and fails the whole run.
-    rshmem = pytest.importorskip(
-        "rocshmem4py", reason="rocSHMEM provider tests need rocshmem4py installed"
-    )
+    rshmem = pytest.importorskip("rocshmem4py", reason="rocSHMEM provider tests need rocshmem4py installed")
     from iris.experimental.rocshmem_provider import RocshmemProvider
 
     # rocSHMEM initialises once per process, hence module scope. No finalize in
@@ -129,8 +128,7 @@ def test_iris_store_over_rocshmem_memory(symmetric_pair):
 
     amap = provider.symmetric_address_map(results)
     if not amap.all_direct():
-        pytest.skip(f"peers {amap.indirect_peers()} are not directly addressable; "
-                    "this path is intra-node only")
+        pytest.skip(f"peers {amap.indirect_peers()} are not directly addressable; this path is intra-node only")
 
     data.fill_(float(me + 1))
     results.fill_(-1.0)
@@ -138,8 +136,9 @@ def test_iris_store_over_rocshmem_memory(symmetric_pair):
     provider.barrier()
 
     if me == 0:
-        _broadcast_kernel[(1,)](data, results, peer_bases, BLOCK_SIZE, me,
-                                num_ranks=ws, BLOCK_SIZE=BLOCK_SIZE, num_warps=4)
+        _broadcast_kernel[(1,)](
+            data, results, peer_bases, BLOCK_SIZE, me, num_ranks=ws, BLOCK_SIZE=BLOCK_SIZE, num_warps=4
+        )
         torch.cuda.synchronize()
     provider.barrier()
 
