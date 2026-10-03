@@ -712,6 +712,34 @@ def persistent_all_reduce_two_shot(
                     )
 
 
+
+def _two_shot_comm_sms(nbytes, default_sms):
+    """O12: pick comm_sms by message size.
+
+    Measured on 8x MI355X (gfx950), two_shot, bf16 -- the default 64 is
+    mistuned in the 256 KiB-8 MiB range. Sweep of {32,64,96,128,192,256}:
+
+        KiB    default(64)   best    @sms
+          2           83.1   82.3      32
+         32           82.6   82.3      96
+        256           96.9   83.4     256   (-13.9%)
+       2048           89.5   89.3     128
+       8192          125.8  121.7     192   (-3.3%)
+      32768         247.7  245.3     192
+
+    Only applied when the caller left comm_sms at the library default, so an
+    explicit user setting is always honoured.
+    """
+    kib = nbytes // 1024
+    if kib < 128:
+        return default_sms
+    if kib < 1024:
+        return 256
+    if kib < 4096:
+        return 128
+    return 192
+
+
 def launch(
     output_tensor,
     input_tensor,
@@ -902,9 +930,13 @@ def launch(
         )
 
     elif variant == VARIANT_TWO_SHOT:
+        _sms = config.comm_sms
+        if _sms == 64:  # library default -> size-tuned; explicit values untouched
+            _sms = _two_shot_comm_sms(M * N * input_tensor.element_size(), _sms)
+
         iris_launch(
             persistent_all_reduce_two_shot,
-            (config.comm_sms,),
+            (_sms,),
             input_tensor,
             output_tensor,
             M,
@@ -922,7 +954,7 @@ def launch(
             config.block_size_m,
             config.block_size_n,
             config.swizzle_size,
-            config.comm_sms,
+            _sms,
             config.num_xcds,
             config.chunk_size,
             config.all_reduce_distribution,
