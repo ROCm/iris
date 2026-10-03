@@ -124,7 +124,7 @@ def persistent_all_gather(
 
             if i == group_rank:
                 # Local destination (i == group_rank): use direct store
-                tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
+                tl.store(output_ptr_target, data, mask=combined_mask)
             else:
                 # Remote destination: use iris.store to send data to remote destination
                 # Use iris_rank for iris RMA operations (heap_bases indexing)
@@ -263,7 +263,7 @@ def persistent_all_gather_partitioned(
         # Send to the assigned destination rank
         if dest_rank_idx == group_rank:
             # Local destination: use direct store
-            tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
+            tl.store(output_ptr_target, data, mask=combined_mask)
         else:
             # Remote destination: use iris.store to send data to remote destination
             iris.store(

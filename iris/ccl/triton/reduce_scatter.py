@@ -115,7 +115,7 @@ def persistent_reduce_scatter_two_shot(
             reduced = acc.to(output_ptr.type.element_ty)
 
             # Store only to own rank (no broadcast)
-            tl.store(out_ptr, reduced, cache_modifier=".wt")
+            tl.store(out_ptr, reduced)
 
         # Slow path: MASKED (only boundary tiles land here)
         # This path handles tiles at tensor boundaries where not all elements are valid.
@@ -137,7 +137,7 @@ def persistent_reduce_scatter_two_shot(
             reduced = acc.to(output_ptr.type.element_ty)
 
             # Store only to own rank (no broadcast)
-            tl.store(out_ptr, reduced, mask=mask, cache_modifier=".wt")
+            tl.store(out_ptr, reduced, mask=mask)
 
 
 def launch(
