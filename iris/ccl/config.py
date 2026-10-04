@@ -9,6 +9,22 @@ from dataclasses import dataclass
 import iris
 
 
+def _is_gfx1250() -> bool:
+    """True when the current device is gfx1250.
+
+    The elements-per-thread guard below is a gfx1250 measurement and is not
+    known to hold elsewhere -- gfx942 runs the same ratios fine. Any failure to
+    identify the device returns False, so the guard stays off rather than
+    rejecting a config on a part it was never measured on.
+    """
+    try:
+        import torch
+
+        return "gfx1250" in torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName
+    except Exception:
+        return False
+
+
 @dataclass
 class Config:
     """
@@ -171,27 +187,32 @@ class Config:
         if self.num_warps <= 0:
             raise ValueError(f"num_warps must be positive, got {self.num_warps}")
 
-        # A tile spread over too few threads faults. Measured on gfx1250
+        # A tile spread over too few threads faults ON gfx1250. Measured there
         # (world=4, all_reduce two_shot, fp16): 16 elements/thread is fine and
         # 32 faults with an illegal memory access, for every combination of
-        # block_size_n and num_warps that lands on those ratios -- bn=256/nw=8
-        # and bn=512/nw=16 both fault, bn=256/nw=16 and bn=512/nw=32 both pass.
-        # The accumulator is fp32 and each rank's load is held live, so the
-        # register cost per thread scales with this ratio.
+        # block_size_n and num_warps landing on those ratios -- bn=256/nw=8 and
+        # bn=512/nw=16 both fault, bn=256/nw=16 and bn=512/nw=32 both pass.
         #
-        # Raise here rather than let it reach the GPU: the failure surfaces
+        # SCOPED TO gfx1250 DELIBERATELY. An earlier version of this check was
+        # unconditional and broke CI on gfx942, where the gluon all_gather
+        # tests run 32x256 at num_warps=4 -- 32 elements/thread on a 64-wide
+        # wavefront -- and have always passed. That is direct evidence the
+        # threshold does not generalise, so the guard must not either. The
+        # measurement only ever covered gfx1250.
+        #
+        # Raise rather than let it reach the GPU: the failure surfaces
         # asynchronously as "illegal memory access" at an unrelated later
-        # synchronize, which is extremely hard to trace back to tile shape.
+        # synchronize, which is very hard to trace back to tile shape.
+        #
         # The TDM engine stages a tile through LDS rather than registers, so
-        # the register-pressure limit below does not apply to it. Note this
-        # exemption keys off an all_gather field, so a Config carrying
-        # all_gather_variant='tdm' is only safe for all_gather -- reusing it
-        # for a register-path collective would skip a check that collective
-        # still needs.
+        # the limit does not apply to it. That exemption keys off an all_gather
+        # field, so a Config carrying all_gather_variant='tdm' is only safe for
+        # all_gather -- reusing it for a register-path collective would skip a
+        # check that collective still needs.
         tdm_path = self.use_gluon and (self.all_gather_variant == "tdm" or self.all_to_all_variant == "tdm")
         threads = self.num_warps * self.threads_per_warp
         per_thread = (self.block_size_m * self.block_size_n) / threads
-        if per_thread >= 32 and not tdm_path:
+        if per_thread >= 32 and not tdm_path and _is_gfx1250():
             raise ValueError(
                 f"block_size_m*block_size_n ({self.block_size_m}*{self.block_size_n}"
                 f" = {self.block_size_m * self.block_size_n}) over num_warps*"
