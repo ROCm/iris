@@ -8,21 +8,34 @@ import torch
 import subprocess
 import os
 
+from iris._libpath import in_process_library
 from iris.host.logging.logging import _log_rank
 
 # Auto-detect backend
 _is_amd_backend = True
-try:
-    rt_path = "libamdhip64.so"
-    gpu_runtime = ctypes.cdll.LoadLibrary(rt_path)
-except OSError:
-    try:
-        rt_path = "libcudart.so"
-        gpu_runtime = ctypes.cdll.LoadLibrary(rt_path)
-        _is_amd_backend = False
-    except OSError:
-        rt_path = "libamdhip64.so"
-        gpu_runtime = ctypes.cdll.LoadLibrary(rt_path)
+
+
+def _load_gpu_runtime():
+    """Prefer the runtime torch already mapped; see iris._libpath."""
+    for path in (in_process_library("libamdhip64"), "libamdhip64.so"):
+        if not path:
+            continue
+        try:
+            return path, ctypes.cdll.LoadLibrary(path), True
+        except OSError:
+            continue
+    for path in (in_process_library("libcudart"), "libcudart.so"):
+        if not path:
+            continue
+        try:
+            return path, ctypes.cdll.LoadLibrary(path), False
+        except OSError:
+            continue
+    # Nothing loadable: re-raise the AMD failure, which is the useful one.
+    return "libamdhip64.so", ctypes.cdll.LoadLibrary("libamdhip64.so"), True
+
+
+rt_path, gpu_runtime, _is_amd_backend = _load_gpu_runtime()
 
 
 def gpu_try(err):

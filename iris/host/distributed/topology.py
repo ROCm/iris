@@ -713,6 +713,14 @@ class TopologyMap:
             2. Same fabric domain_key -> INTRA_RACK_FABRIC (NVLink/xGMI fabric)
             3. Otherwise -> INTER_NODE_RDMA (InfiniBand)
         """
+        # Escape hatch for fabric-attached hardware (e.g. UALoE), where GPUs on the
+        # SAME host still communicate over the scale-up fabric and therefore need
+        # fabric handles rather than node-local IPC handles. The hostname-first rule
+        # below cannot express that, so allow an explicit override.
+        forced = os.environ.get("IRIS_FORCE_INTERCONNECT")
+        if forced:
+            return InterconnectLevel[forced.strip().upper()]
+
         if rank_a == rank_b:
             return InterconnectLevel.INTRA_NODE
 

@@ -9,6 +9,22 @@ from dataclasses import dataclass
 import iris
 
 
+def _is_gfx1250() -> bool:
+    """True when the current device is gfx1250.
+
+    The elements-per-thread guard below is a gfx1250 measurement and is not
+    known to hold elsewhere -- gfx942 runs the same ratios fine. Any failure to
+    identify the device returns False, so the guard stays off rather than
+    rejecting a config on a part it was never measured on.
+    """
+    try:
+        import torch
+
+        return "gfx1250" in torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName
+    except Exception:
+        return False
+
+
 @dataclass
 class Config:
     """
@@ -49,7 +65,8 @@ class Config:
                    this also sets WARPS_PER_CTA in the BlockedLayout. The product
                    threads_per_warp * num_warps determines the minimum tile size
                    (block_size_m * block_size_n for flat-2D, or block_size_n for 1D).
-        threads_per_warp: Threads per warp/wavefront (default: 64). Must match the
+        threads_per_warp: Threads per warp/wavefront. Defaults to the device's
+            actual warp_size; both 32 and 64 occur on AMD. Must match the
                           hardware wavefront size: 64 for AMD GPUs, 32 for NVIDIA.
                           Used by gluon kernels to construct BlockedLayout for
                           vectorized memory access.
@@ -85,6 +102,7 @@ class Config:
     chunk_size: int | None = None
     use_gluon: bool = False
     all_gather_variant: str = "persistent"
+    all_to_all_variant: str = "default"
     all_reduce_variant: str = "two_shot"
     all_reduce_distribution: int = 1
     all_reduce_num_rings: int = 1
@@ -92,7 +110,7 @@ class Config:
     reduce_scatter_variant: str = "two_shot"
     num_stages: int = 1
     num_warps: int = 4
-    threads_per_warp: int = 64
+    threads_per_warp: int | None = None
     waves_per_eu: int = 0
 
     def __post_init__(self):
@@ -114,9 +132,14 @@ class Config:
             raise ValueError(f"comm_sms must be positive, got {self.comm_sms}")
         if self.num_xcds <= 0:
             raise ValueError(f"num_xcds must be positive, got {self.num_xcds}")
-        if self.all_gather_variant not in ["persistent", "partitioned"]:
+        if self.all_to_all_variant not in ["default", "tdm"]:
             raise ValueError(
-                f"all_gather_variant must be one of: 'persistent', 'partitioned', got {self.all_gather_variant}"
+                f"all_to_all_variant must be 'default' or 'tdm' (gluon only), got {self.all_to_all_variant}"
+            )
+        if self.all_gather_variant not in ["persistent", "partitioned", "tdm"]:
+            raise ValueError(
+                "all_gather_variant must be one of: 'persistent', 'partitioned', "
+                f"'tdm' (gluon only), got {self.all_gather_variant}"
             )
         if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock"]:
             raise ValueError(
@@ -144,7 +167,57 @@ class Config:
         if self.reduce_scatter_variant != "two_shot":
             raise ValueError(f"reduce_scatter_variant must be 'two_shot', got '{self.reduce_scatter_variant}'")
 
+        if self.threads_per_warp is None:
+            # Do NOT assume 64 on AMD. CDNA is 64, but gfx1250 is an AMD part
+            # with a 32-wide wavefront, and assuming 64 silently halves the
+            # thread count a tile is spread over -- which doubles elements per
+            # thread and pushes configs that are fine on gfx942 into register
+            # pressure and illegal memory accesses.
+            try:
+                import torch
+
+                self.threads_per_warp = torch.cuda.get_device_properties(torch.cuda.current_device()).warp_size
+            except Exception:
+                self.threads_per_warp = 64
         if self.threads_per_warp not in (32, 64):
-            raise ValueError(f"threads_per_warp must be 32 (NVIDIA) or 64 (AMD), got {self.threads_per_warp}")
+            raise ValueError(
+                f"threads_per_warp must be 32 or 64, got {self.threads_per_warp}. "
+                "Both occur on AMD: CDNA is 64, gfx1250 is 32."
+            )
         if self.num_warps <= 0:
             raise ValueError(f"num_warps must be positive, got {self.num_warps}")
+
+        # A tile spread over too few threads faults ON gfx1250. Measured there
+        # (world=4, all_reduce two_shot, fp16): 16 elements/thread is fine and
+        # 32 faults with an illegal memory access, for every combination of
+        # block_size_n and num_warps landing on those ratios -- bn=256/nw=8 and
+        # bn=512/nw=16 both fault, bn=256/nw=16 and bn=512/nw=32 both pass.
+        #
+        # SCOPED TO gfx1250 DELIBERATELY. An earlier version of this check was
+        # unconditional and broke CI on gfx942, where the gluon all_gather
+        # tests run 32x256 at num_warps=4 -- 32 elements/thread on a 64-wide
+        # wavefront -- and have always passed. That is direct evidence the
+        # threshold does not generalise, so the guard must not either. The
+        # measurement only ever covered gfx1250.
+        #
+        # Raise rather than let it reach the GPU: the failure surfaces
+        # asynchronously as "illegal memory access" at an unrelated later
+        # synchronize, which is very hard to trace back to tile shape.
+        #
+        # The TDM engine stages a tile through LDS rather than registers, so
+        # the limit does not apply to it. That exemption keys off an all_gather
+        # field, so a Config carrying all_gather_variant='tdm' is only safe for
+        # all_gather -- reusing it for a register-path collective would skip a
+        # check that collective still needs.
+        tdm_path = self.use_gluon and (self.all_gather_variant == "tdm" or self.all_to_all_variant == "tdm")
+        threads = self.num_warps * self.threads_per_warp
+        per_thread = (self.block_size_m * self.block_size_n) / threads
+        if per_thread >= 32 and not tdm_path and _is_gfx1250():
+            raise ValueError(
+                f"block_size_m*block_size_n ({self.block_size_m}*{self.block_size_n}"
+                f" = {self.block_size_m * self.block_size_n}) over num_warps*"
+                f"threads_per_warp ({self.num_warps}*{self.threads_per_warp}"
+                f" = {threads}) is {per_thread:.0f} elements/thread; >= 32 faults "
+                f"with an illegal memory access. Raise num_warps to "
+                f"{self.num_warps * 2} or halve block_size_n."
+            )

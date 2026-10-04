@@ -32,7 +32,11 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
     if config.use_gluon:
-        from iris.ccl.gluon.all_to_all import launch
+        if getattr(config, "all_to_all_variant", "default") == "tdm":
+            # gfx1250 tensor data movement engine; see gluon/all_to_all_tdm.py
+            from iris.ccl.gluon.all_to_all_tdm import launch
+        else:
+            from iris.ccl.gluon.all_to_all import launch
     else:
         from iris.ccl.triton.all_to_all import launch
 
