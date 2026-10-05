@@ -312,7 +312,7 @@ def _hbm_buffer_all_gather_matmul_kernel(
 
                         for compile_rank in range(world_size):
                             if src_rank_idx == compile_rank:
-                                a_tile = ctx.gather(k_tile, src_view, compile_rank, ctx, hint=(1, BLOCK_SIZE_K))
+                                a_tile = ctx.gather(k_tile, src_view, compile_rank, hint=(1, BLOCK_SIZE_K))
                                 tl.store(staged_ptrs, a_tile, cache_modifier=".cg")
 
                     flag_idx = m_tile * NUM_FLAG_GROUPS_K + k_flag_group

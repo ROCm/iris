@@ -8,12 +8,25 @@ Note: This test requires tritonBLAS to be installed.
 Install with: pip install git+https://github.com/ROCm/tritonBLAS.git
 """
 
+import gc
 import pytest
 import torch
 import torch.distributed as dist
 import tritonblas
 import iris
 import os
+
+
+@pytest.fixture(autouse=True)
+def cleanup_gpu_memory():
+    """Release Python and CUDA allocations between parametrized tests."""
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    yield
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
 
 
 def _param_shapes():

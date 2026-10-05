@@ -9,6 +9,7 @@ The operation gathers A from all ranks and computes C = A_gathered @ B.
 Covers both the baseline pull kernel and the HBM-buffered kernel.
 """
 
+import gc
 import pytest
 import torch
 import torch.distributed as dist
@@ -29,10 +30,12 @@ from iris.ops.config import FusedConfig
 def cleanup_gpu_memory():
     """Fixture to clean up GPU memory before and after each test."""
     # Cleanup before test starts
+    gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
     yield  # Run the test
     # Cleanup after test completes (pass or fail)
+    gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
 
@@ -128,6 +131,12 @@ def _make_full_reference(A_sharded, B, world_size):
     ref_output = torch.matmul(A_gathered_ref, B)
     torch.cuda.synchronize()
     return ref_output
+
+
+def _make_reference(rank, world_size, M, K_local, N, dtype):
+    """Build inputs and the dense all-gather + matmul reference output."""
+    A_sharded, B = _make_inputs(rank, world_size, M, K_local, N, dtype)
+    return A_sharded, B, _make_full_reference(A_sharded, B, world_size)
 
 
 def _assert_close_tile(output_tile, ref_tile, atol, rtol, rank, row_start, col_start, context):
