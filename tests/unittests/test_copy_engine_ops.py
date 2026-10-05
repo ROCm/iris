@@ -4,10 +4,8 @@ import pytest
 import torch
 import triton
 import triton.language as tl
-from xio import sdma_ep
 
 import iris
-from iris.device import sdma_utils
 
 
 @triton.jit
@@ -270,14 +268,17 @@ def _copy_engine_atomic_kernel(
     )
 
 
-def test_copy_engine_atomic_add():
+# For int64, adding to 0xFFFFFFFF carries into the upper dword only if the SDMA add is 64-bit.
+@pytest.mark.parametrize("dtype, initial", [(torch.int32, 0), (torch.int64, 0xFFFFFFFF)])
+def test_copy_engine_atomic_add(dtype, initial):
     shmem = iris.iris(1 << 20)
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
     remote_rank = 1 - rank
 
-    flag = shmem.zeros((1,), device="cuda", dtype=torch.int32)
+    flag = shmem.full((1,), initial, device="cuda", dtype=dtype)
+    shmem.barrier()
 
     if rank == 0:
         _copy_engine_atomic_kernel[(1,)](
@@ -292,55 +293,7 @@ def test_copy_engine_atomic_add():
     shmem.barrier()
 
     if rank == 1:
-        assert flag.item() == 5
-
-    shmem.barrier()
-    del shmem
-
-
-@triton.jit
-def _copy_engine_atomic_add_64_kernel(remote_flag_addr, to_rank: tl.constexpr, copy_engine_ctx):
-    handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
-    queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
-    read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
-    write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
-    doorbell_ptr = tl.load(handle + 3).to(tl.pointer_type(tl.uint64))
-    cached_write_ptr = tl.load(handle + 4).to(tl.pointer_type(tl.uint64))
-    committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
-    dst_ptr_val = remote_flag_addr.to(tl.uint64)
-    increment = tl.full((), 1, tl.int64)
-    command_in_bytes = sdma_ep.ATOMIC_COMMAND_BYTES
-    base, offset = sdma_utils.acquire_fadd(
-        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
-    )
-    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
-    # ADD_RTN_64 (0x2f)
-    sdma_utils.place_atomic_packet(queue_ptr_u32, base + offset, dst_ptr_val, increment, 0, 15, True, True)
-    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, base + offset + command_in_bytes)
-    iris.quiet(copy_engine_ctx, to_rank)
-
-
-def test_copy_engine_atomic_add_64():
-    shmem = iris.iris(1 << 20)
-    _require_two_ranks(shmem)
-
-    rank = shmem.get_rank()
-    remote_rank = 1 - rank
-
-    # Adding 1 to 0xFFFFFFFF carries into the upper dword only if the add is 64-bit.
-    flag = shmem.full((1,), 0xFFFFFFFF, device="cuda", dtype=torch.int64)
-    assert flag.data_ptr() % 8 == 0
-
-    shmem.barrier()
-    if rank == 0:
-        remote_flag_addr = shmem.heap.translate(flag.data_ptr(), rank, remote_rank)
-        _copy_engine_atomic_add_64_kernel[(1,)](remote_flag_addr, remote_rank, shmem.get_copy_engine_ctx())
-        torch.cuda.synchronize()
-
-    shmem.barrier()
-
-    if rank == 1:
-        assert flag.item() == 0x1_00000000
+        assert flag.item() == initial + 5
 
     shmem.barrier()
     del shmem
@@ -778,6 +731,59 @@ def test_copy_engine_zero_size():
     # Destination should still be zeros
     if rank == 1:
         assert torch.all(dst == 0).item()
+
+    shmem.barrier()
+    del shmem
+
+
+def test_copy_engine_device_zero_size():
+    """Test device-side copy engine puts with fully-masked tiles (should be no-op)."""
+    shmem = iris.iris(1 << 20)
+    _require_two_ranks(shmem)
+
+    rank = shmem.get_rank()
+    remote_rank = 1 - rank
+
+    src = _allocate_symmetric_range(shmem, 128, torch.float32)
+    dst = shmem.zeros(128, device="cuda", dtype=torch.float32)
+    flag = shmem.zeros(1, device="cuda", dtype=torch.int32)
+
+    if rank == 0:
+        # Empty 1D put, followed by a signal through the same queue
+        _copy_engine_linear_kernel[(1,)](
+            src,
+            dst,
+            flag,
+            0,
+            rank,
+            remote_rank,
+            shmem.get_heap_bases(),
+            shmem.get_copy_engine_ctx(),
+            BLOCK_SIZE=128,
+        )
+        # Empty 2D put
+        _copy_engine_2d_kernel[(1, 1)](
+            src.view(8, 16),
+            dst.view(8, 16),
+            0,
+            16,
+            16,
+            16,
+            rank,
+            remote_rank,
+            shmem.get_heap_bases(),
+            shmem.get_copy_engine_ctx(),
+            BLOCK_M=8,
+            BLOCK_N=16,
+        )
+        torch.cuda.synchronize()
+
+    shmem.barrier()
+
+    # Destination should still be zeros, and the signal after the empty put should have arrived
+    if rank == 1:
+        assert torch.all(dst == 0).item()
+        assert flag.item() == 1
 
     shmem.barrier()
     del shmem

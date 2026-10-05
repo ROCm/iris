@@ -202,10 +202,6 @@ def place_nop_packet(queue_ptr_u32, offset_bytes: tl.uint64, padding_bytes):
 @triton.jit
 def place_copy_packet(queue_ptr_u32, offset_bytes: tl.uint64, size_bytes: tl.uint32, src_ptr_val, dst_ptr_val):
     """Place a SDMA_PKT_COPY_LINEAR packet for 1D linear memory copy."""
-    # count is size_bytes - 1, so a zero-size copy would underflow to a maximal-length copy
-    if size_bytes == 0:
-        place_nop_packet(queue_ptr_u32, offset_bytes, tl.full((), sdma_ep.COPY_LINEAR_COMMAND_BYTES, tl.uint64))
-        return
     slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
     # offset 0: op + sub_op
     tl.store(slot_ptr_u32 + 0, 1, cache_modifier=".wt")
@@ -265,7 +261,7 @@ def place_atomic_packet(
     tl.store(slot_ptr_u32 + 3, src_data, cache_modifier=".wt")
     # offset 4: src data 63:32
     if IS_64_BIT:
-        tl.store(slot_ptr_u32 + 4, (src_data >> 32).to(tl.uint32), cache_modifier=".wt")
+        tl.store(slot_ptr_u32 + 4, (tl.cast(src_data, tl.uint64) >> 32).to(tl.uint32), cache_modifier=".wt")
     else:
         tl.store(slot_ptr_u32 + 4, 0, cache_modifier=".wt")
     # offset 5: compare data 31:0
@@ -280,9 +276,9 @@ def place_atomic_packet(
 
 
 @triton.jit
-def place_atomic_add_packet(queue_ptr_u32, offset_bytes: tl.uint64, dst_ptr_val, val):
+def place_atomic_add_packet(queue_ptr_u32, offset_bytes: tl.uint64, dst_ptr_val, val, IS_64_BIT: tl.constexpr = False):
     """Place an atomic add packet (OP=15, with return)."""
-    place_atomic_packet(queue_ptr_u32, offset_bytes, dst_ptr_val, val, 0, 15, True)
+    place_atomic_packet(queue_ptr_u32, offset_bytes, dst_ptr_val, val, 0, 15, True, IS_64_BIT)
 
 
 @triton.jit
@@ -357,12 +353,6 @@ def place_sub_window_copy_packet(
         dst_x: Destination X offset in bytes
         dst_y: Destination Y offset in rows
     """
-    # rect fields are 1-based, so an empty tile would underflow to a maximal-size rectangle
-    if (tile_width == 0) | (tile_height == 0):
-        place_nop_packet(
-            queue_ptr_u32, offset_bytes, tl.full((), sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES, tl.uint64)
-        )
-        return
     slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
 
     # DW 0: Header (op=1, sub_op=0x24)

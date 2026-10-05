@@ -24,44 +24,9 @@ def _dwords(buf, n):
     return [v & 0xFFFFFFFF for v in buf[:n].cpu().tolist()]
 
 
-def _nop(n_dw):
-    return [(n_dw - 1) << 16] + [0] * (n_dw - 1)
-
-
-@triton.jit
-def _emit_copy(buf, addr, size):
-    sdma_utils.place_copy_packet(buf, tl.full((), 0, tl.uint64), size.to(tl.uint32), addr, addr)
-
-
-@triton.jit
-def _emit_sub_window(buf, addr, width, height):
-    sdma_utils.place_sub_window_copy_packet(
-        buf, tl.full((), 0, tl.uint64), addr, addr, width.to(tl.uint32), height.to(tl.uint32), 64, 64, 0, 0, 0, 0
-    )
-
-
 @triton.jit
 def _emit_atomic(buf, addr, src, cmp, OP: tl.constexpr, RETURN: tl.constexpr, IS_64_BIT: tl.constexpr):
     sdma_utils.place_atomic_packet(buf, tl.full((), 0, tl.uint64), addr, src, cmp, OP, RETURN, IS_64_BIT)
-
-
-def test_copy_packet():
-    buf = _buffer()
-    _emit_copy[(1,)](buf, ADDR, 4096)
-    assert _dwords(buf, 2) == [1, 4095]
-
-
-def test_zero_size_copy_emits_nop():
-    buf = _buffer()
-    _emit_copy[(1,)](buf, ADDR, 0)
-    assert _dwords(buf, 8) == _nop(7) + [SENTINEL]
-
-
-@pytest.mark.parametrize("width, height", [(0, 4), (64, 0)])
-def test_empty_sub_window_copy_emits_nop(width, height):
-    buf = _buffer()
-    _emit_sub_window[(1,)](buf, ADDR, width, height)
-    assert _dwords(buf, 21) == _nop(20) + [SENTINEL]
 
 
 # Linux amdgpu vega10_enum.h TC_OP: ATOMIC_{ADD,CMPSWAP}_{RTN_,}{32,64}
@@ -141,13 +106,14 @@ def test_put_1d_masked(n):
     dst = torch.zeros(64, dtype=torch.float32, device="cuda")
     heap_bases = torch.zeros(1, dtype=torch.int64, device="cuda")
     _put_1d_kernel[(1,)](src, dst, n, heap_bases, ctx, BLOCK=64)
-    n_dw = sdma_ep.COPY_LINEAR_COMMAND_BYTES // 4
+    n_bytes = sdma_ep.COPY_LINEAR_COMMAND_BYTES
     if n == 0:
-        assert _dwords(queue, n_dw + 1) == _nop(n_dw) + [SENTINEL]
+        # Empty put is a no-op: nothing written, queue pointers and doorbell untouched
+        assert _dwords(queue, n_bytes // 4) == [SENTINEL] * (n_bytes // 4)
+        assert ptrs.tolist() == [0] * 5
     else:
         assert _dwords(queue, 2) == [1, n * 4 - 1]
-    # wptr and doorbell advance past the packet
-    assert ptrs[1:3].tolist() == [n_dw * 4, n_dw * 4]
+        assert ptrs[1:3].tolist() == [n_bytes, n_bytes]
 
 
 @pytest.mark.parametrize("n", [0, 5])
@@ -157,10 +123,26 @@ def test_put_2d_masked(n):
     dst = torch.zeros(64 * 64, dtype=torch.float32, device="cuda")
     heap_bases = torch.zeros(1, dtype=torch.int64, device="cuda")
     _put_2d_kernel[(1,)](src, dst, n, heap_bases, ctx, STRIDE=64, BLOCK=16)
-    n_dw = sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES // 4
+    n_bytes = sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES
     if n == 0:
-        assert _dwords(queue, n_dw + 1) == _nop(n_dw) + [SENTINEL]
+        assert _dwords(queue, n_bytes // 4) == [SENTINEL] * (n_bytes // 4)
+        assert ptrs.tolist() == [0] * 5
     else:
         # DW 17-18: rect width (bytes) and height (rows), 1-based
         assert _dwords(queue, 19)[17:] == [n * 4 - 1, n - 1]
-    assert ptrs[1:3].tolist() == [n_dw * 4, n_dw * 4]
+        assert ptrs[1:3].tolist() == [n_bytes, n_bytes]
+
+
+@triton.jit
+def _atomic_add_kernel(flag, heap_bases, ctx):
+    iris.atomic_add(flag, 5, 0, 0, heap_bases, copy_engine_ctx=ctx, use_copy_engine=True)
+
+
+@pytest.mark.parametrize("dtype, opcode", [(torch.int32, 0x0F), (torch.int64, 0x2F)])
+def test_atomic_add_opcode(dtype, opcode):
+    ctx, queue, ptrs = _fake_copy_engine_ctx()
+    flag = torch.zeros(1, dtype=dtype, device="cuda")
+    heap_bases = torch.zeros(1, dtype=torch.int64, device="cuda")
+    _atomic_add_kernel[(1,)](flag, heap_bases, ctx)
+    addr = flag.data_ptr()
+    assert _dwords(queue, 9) == [(opcode << 25) | 0xA, addr & 0xFFFFFFFF, addr >> 32, 5, 0, 0, 0, 0, SENTINEL]
