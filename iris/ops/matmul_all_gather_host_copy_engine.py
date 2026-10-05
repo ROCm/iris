@@ -22,6 +22,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
+import time
 
 from .workspace import FusedWorkspace
 
@@ -30,15 +31,6 @@ from tritonblas.matmul import persistent_matmul_lt
 from tritonblas.matmul import create_counter_config
 from tritonblas.matmul import _make_matmul_selector
 from .tritonblas_launch_wave_schedule import build_launch_wave_plan
-
-# Import Tile class from anvil module
-try:
-    import anvil
-
-    Tile = anvil.Tile
-except (ImportError, AttributeError):
-    Tile = None  # Will raise error later if needed
-
 
 @triton.jit()
 def wait_cnt():
@@ -112,8 +104,6 @@ def _auto_m_tiles_per_batch(selector, M_local: int, N: int) -> int:
     num_tiles_n = (N + selector.block_n - 1) // selector.block_n
     active_cus = getattr(selector, "_ACTIVE_CU", None)
     if active_cus is None or active_cus <= 0:
-        import torch
-
         active_cus = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
     tiles_per_group = max(1, selector.group_m * num_tiles_n)
     groups_per_wave = max(1, int(active_cus) // tiles_per_group)
@@ -283,10 +273,7 @@ def matmul_all_gather_host_copy_engine(
     # Host Phase: Enqueue SDMA POLL+COPY packets for all tiles
     # (While kernel is running in parallel on device)
     # ═══════════════════════════════════════════════════════════════════════
-    import time
-
     element_size = output_tensor.element_size()
-    anvil_lib = shmem.copy_engines
 
     if verbose and rank == 0:
         shmem.info(
@@ -319,8 +306,11 @@ def matmul_all_gather_host_copy_engine(
         wait_flag_ptr = workspace.locks.data_ptr() + wave_id * workspace.locks.element_size()
         is_last_wave = wave_id == (launch_wave_plan.num_waves - 1)
 
-        tiles = []
+        src_ptrs = []
         dst_ptrs_local = []
+        tile_heights = []
+        tile_widths = []
+        src_strides = []
         dst_strides = []
 
         for transfer in wave_transfers:
@@ -329,35 +319,35 @@ def matmul_all_gather_host_copy_engine(
             batch_height = min(transfer.m_tile_count * block_size_m, M_local - m_start)
             batch_width = min(transfer.n_tile_count * block_size_n, N - n_start)
 
-            tile_obj = Tile()
-            tile_obj.pid_m = 0
-            tile_obj.pid_n = 0
-            tile_obj.block_m = batch_height
-            tile_obj.block_n = batch_width
-            tile_obj.elem_size = element_size
-            tile_obj.src_stride = stride_cm * element_size
-
             src_offset = (m_start + rank * M_local) * stride_cm + n_start * stride_cn
-            tile_obj.data = output_tensor.data_ptr() + src_offset * element_size
+            src_ptrs.append(output_tensor.data_ptr() + src_offset * element_size)
             dst_offset_local = (m_start + rank * M_local) * stride_cm + n_start * stride_cn
 
-            tiles.append(tile_obj)
             dst_ptrs_local.append(output_tensor.data_ptr() + dst_offset_local * element_size)
-            dst_strides.append(stride_cm * element_size)
+            tile_heights.append(batch_height)
+            tile_widths.append(batch_width)
+            src_strides.append(stride_cm)
+            dst_strides.append(stride_cm)
 
         for remote_rank in range(world_size):
             if remote_rank == rank:
                 continue
 
-            dst_ptrs_remote = [shmem.translate(dst_ptr_local, rank, remote_rank) for dst_ptr_local in dst_ptrs_local]
+            dst_ptrs_remote = [
+                shmem.heap.translate(dst_ptr_local, rank, remote_rank) for dst_ptr_local in dst_ptrs_local
+            ]
             signal_ptr_remote = None
             if is_last_wave:
-                signal_ptr_remote = shmem.translate(signal_ptr_local, rank, remote_rank)
+                signal_ptr_remote = shmem.heap.translate(signal_ptr_local, rank, remote_rank)
 
             shmem.put_tiles(
-                tiles,
-                dst_rank=remote_rank,
-                dst_ptrs=dst_ptrs_remote,
+                src_ptrs,
+                to_rank=remote_rank,
+                dst_addrs=dst_ptrs_remote,
+                data_size=element_size,
+                tile_heights=tile_heights,
+                tile_widths=tile_widths,
+                src_strides=src_strides,
                 dst_strides=dst_strides,
                 wait_flag=wait_flag_ptr,
                 wait_value=expected_flag_value,
