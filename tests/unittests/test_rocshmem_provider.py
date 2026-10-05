@@ -39,21 +39,16 @@ def _broadcast_kernel(
 
 
 @pytest.fixture(scope="module")
-def provider():
+def provider(rocshmem_runtime):
     if not dist.is_initialized():
         pytest.skip("needs torch.distributed; run via tests/run_tests_distributed.py")
     if dist.get_world_size() < 2:
         pytest.skip("needs at least 2 ranks (--num_ranks 2)")
 
-    # Imported here rather than at module scope so the tests are collected and
-    # individually skipped. A module-level importorskip collects zero items,
-    # which makes pytest exit 5 (NO_TESTS_COLLECTED) and fails the whole run.
-    rshmem = pytest.importorskip("rocshmem4py", reason="rocSHMEM provider tests need rocshmem4py installed")
+    # rocshmem_runtime handles the import-or-skip and initialises the runtime
+    # once per process, shared with any other module that asks for it.
     from iris.experimental.rocshmem_provider import RocshmemProvider
 
-    # rocSHMEM initialises once per process, hence module scope. No finalize in
-    # teardown: it would pull the runtime out from under anything else running.
-    rshmem.init_rocshmem_by_uniqueid(dist.group.WORLD)
     return RocshmemProvider()
 
 
