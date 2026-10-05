@@ -299,31 +299,14 @@ def zeros(heap, iris_device, size, *, out=None, dtype=None, layout=torch.strided
     throw_if_invalid_device(device, iris_device)
     size, num_elements = parse_size(size)
 
-    # In simulation, avoid GPU kernel operations which trigger HIP errors
-    from iris.host.platform.utils import is_simulation_env
-
-    if is_simulation_env():
-        # Freshly faulted pages are zero, but heap memory is reused, and once
-        # peer access maps a peer's heap a buffer can hold that peer's stale
-        # data. zero_() was skipped here to avoid launching a GPU kernel, but
-        # the simulator does execute compute kernels, so zero explicitly.
-        if out is not None:
-            throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
-            out.zero_()
-            tensor = out.view(size)
-        else:
-            tensor = allocate(heap, num_elements, dtype)
-            tensor.zero_()
-            tensor = tensor.reshape(size)
+    if out is not None:
+        throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
+        out.zero_()
+        tensor = out.view(size)
     else:
-        if out is not None:
-            throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
-            out.zero_()
-            tensor = out.view(size)
-        else:
-            tensor = allocate(heap, num_elements, dtype)
-            tensor.zero_()
-            tensor = tensor.reshape(size)
+        tensor = allocate(heap, num_elements, dtype)
+        tensor.zero_()
+        tensor = tensor.reshape(size)
 
     tensor = apply_layout(tensor, layout)
     if requires_grad:
