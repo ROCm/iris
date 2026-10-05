@@ -587,31 +587,12 @@ def randn(
     throw_if_invalid_device(device, iris_device)
     size, num_elements = parse_size(size)
 
-    from iris.host.platform.utils import is_simulation_env
-
-    if is_simulation_env():
-        # This staged through host memory to avoid launching a GPU kernel, but
-        # it filled with torch.ones -- so randn() returned constants under
-        # simulation and any validation built on it compared constant data.
-        # Device RNG works in the simulator, so generate normally; only the
-        # allocation differs, since the tensor must live on the symmetric heap.
-        if out is not None:
-            throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
-            tensor = out.view(size)
-        else:
-            tensor = allocate(heap, num_elements, dtype).reshape(size)
-        tensor.normal_(generator=generator)
+    if out is not None:
+        throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
+        tensor = out.view(size)
     else:
-        if out is not None:
-            throw_if_invalid_output_tensor(heap, out, num_elements, dtype)
-            random_data = torch.randn(num_elements, generator=generator, dtype=dtype, device=device, layout=layout)
-            out.copy_(random_data)
-            tensor = out.view(size)
-        else:
-            tensor = allocate(heap, num_elements, dtype)
-            random_data = torch.randn(num_elements, generator=generator, dtype=dtype, device=device, layout=layout)
-            tensor.copy_(random_data)
-            tensor = tensor.reshape(size)
+        tensor = allocate(heap, num_elements, dtype).reshape(size)
+    tensor.normal_(generator=generator)
 
     tensor = apply_layout(tensor, layout)
     if requires_grad:
