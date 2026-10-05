@@ -592,7 +592,7 @@ def randn(
         tensor = out.view(size)
     else:
         tensor = allocate(heap, num_elements, dtype).reshape(size)
-    tensor.normal_(generator=generator)
+    torch.randn(size, generator=generator, out=tensor, dtype=dtype, device=device)
 
     tensor = apply_layout(tensor, layout)
     if requires_grad:
