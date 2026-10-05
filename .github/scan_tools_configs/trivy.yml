@@ -1,0 +1,41 @@
+# trivy configuration for iris.
+# Reference: https://trivy.dev/latest/docs/references/configuration/config-file/
+#
+# Started from the ROCm baseline default; the skip-files block below is
+# iris-specific.
+
+scan:
+  skip-dirs:
+    - .git
+    - .venv
+    - venv
+    - build
+    - dist
+    - node_modules
+    - __pycache__
+
+  # The GPU dev images intentionally run as root and have no HEALTHCHECK,
+  # which trips DS-0002 (HIGH) and DS-0026 (LOW) on every scan.
+  #
+  # They need /dev/kfd and /dev/dri, and they bind-mount the working tree at
+  # /workspace/iris. A baked-in USER does not work here: the uid has to match
+  # whoever owns the bind mount, and the video/render gids differ per host, so
+  # no single value is correct across the clusters and developer machines that
+  # use these images. Device access is granted at run time instead, via
+  # `--group-add` with the host's numeric gids. DS-0026 does not apply at all —
+  # these are interactive shells (ENTRYPOINT bash), not long-running services.
+  #
+  # Rule-level suppression is not available to us: trivy only reads an ignore
+  # file relative to its own working directory, which for this harness is the
+  # runner directory rather than the repository, so a `.trivyignore` committed
+  # here is silently ignored. Pointing `ignorefile` at the harness's internal
+  # checkout path would work but would break whenever that path changes.
+  # Skipping the three files is therefore the narrowest option available.
+  #
+  # Cost of this: any future misconfiguration in these three files goes
+  # unreported. Re-scan them by hand when they change materially, and delete
+  # this block if a non-root user is ever made to work.
+  skip-files:
+    - docker/Dockerfile
+    - docker/Dockerfile.ccl
+    - docker/Dockerfile.dev

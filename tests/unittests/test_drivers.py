@@ -9,6 +9,8 @@ These are pure unit tests and should run without GPUs or a distributed setup.
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 import torch
 
@@ -41,6 +43,28 @@ from iris.drivers.fabric.nvidia import (
     _round_up,
 )
 from iris.host.distributed.topology import InterconnectLevel
+
+
+@pytest.mark.parametrize("unversioned_available", [True, False])
+def test_amd_fabric_library_selection_with_stale_system_soname(monkeypatch, unversioned_available):
+    """An SDK library takes precedence over a different major version in ldconfig."""
+    loaded = {}
+
+    def load(name):
+        if not unversioned_available and name.endswith(".so"):
+            raise OSError("No development symlink")
+        return loaded.setdefault(name, object())
+
+    monkeypatch.setattr(amd_driver_module.ctypes, "CDLL", load)
+    monkeypatch.setattr(amd_driver_module.ctypes.util, "find_library", lambda name: f"lib{name}.so.5")
+    spec = importlib.util.spec_from_file_location("_iris_amd_library_selection_test", amd_driver_module.__file__)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    suffix = ".so" if unversioned_available else ".so.5"
+    assert module._hip is loaded["libamdhip64" + suffix]
+    assert module._amdsmi is loaded["libamd_smi" + suffix]
+    if unversioned_available:
+        assert "libamdhip64.so.5" not in loaded
 
 
 class TestExceptions:

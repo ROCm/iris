@@ -245,7 +245,7 @@ We plan to extend Iris with the following features:
 
 # Contributing
 
-We welcome contributions! Please see our [Contributing Guide](docs/CONTRIBUTING.md) for details on how to set up your development environment and contribute to the project.
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details on how to set up your development environment and contribute to the project.
 
 ## Support
 

@@ -19,7 +19,7 @@ This directory contains various algorithm implementations for distributed comput
 
 ### GEMM Operations
 - [`07_gemm_all_scatter`](07_gemm_all_scatter): Matrix multiplication with all-scatter communication
-- [`08_gemm_atomics_all_reduce`](08_gemm_atomics_all_reduce): Matrix multiplication with all-reduce using atomics
+- [`08_gemm_all_reduce_atomics`](08_gemm_all_reduce_atomics): Matrix multiplication with all-reduce using atomics
 - [`09_gemm_one_shot_all_reduce`](09_gemm_one_shot_all_reduce): Matrix multiplication with one-shot all-reduce
 - [`10_gemm_all_scatter_wg_specialization`](10_gemm_all_scatter_wg_specialization): Matrix multiplication with all-scatter using workgroup specialization
 - [`11_gemm_all_scatter_producer_consumer`](11_gemm_all_scatter_producer_consumer): Matrix multiplication with all-scatter using producer-consumer concurrent kernels
@@ -65,7 +65,7 @@ python examples/06_message_passing/message_passing_load_store.py --num_ranks 8
 python examples/07_gemm_all_scatter/benchmark.py --benchmark --validate --num_ranks 8
 
 # Example command to run benchmark with all-reduce algorithm
-python examples/08_gemm_atomics_all_reduce/benchmark.py --benchmark --validate --num_ranks 8
+python examples/08_gemm_all_reduce_atomics/benchmark.py --benchmark --validate --num_ranks 8
 
 # Example command to run benchmark with one-shot all-reduce algorithm
 python examples/09_gemm_one_shot_all_reduce/benchmark.py --benchmark --validate --num_ranks 8
