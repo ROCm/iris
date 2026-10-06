@@ -1479,5 +1479,3 @@ def wait_then_put_signal_rects(
 
     pending_wptr = base + offset + command_in_bytes
     sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
-
-

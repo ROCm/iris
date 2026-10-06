@@ -1130,29 +1130,70 @@ class Iris:
             wait_val = int(wait_value if wait_value is not None else 0)
             signal_val = int(signal_value)
             sdma_ep.wait_flag_then_put_tile(
-                from_rank, to_rank, channel, wait_ptr, wait_val, int(dst_addr), int(global_addr),
-                int(data_size), int(tile_height), int(tile_width), int(dst_stride), int(src_stride), wait_bits
+                from_rank,
+                to_rank,
+                channel,
+                wait_ptr,
+                wait_val,
+                int(dst_addr),
+                int(global_addr),
+                int(data_size),
+                int(tile_height),
+                int(tile_width),
+                int(dst_stride),
+                int(src_stride),
+                wait_bits,
             )
             sdma_ep.signal(from_rank, to_rank, channel, signal_ptr, signal_val, signal_bits)
         elif has_wait:
             # Wait + tile copy
             wait_val = int(wait_value if wait_value is not None else 0)
             sdma_ep.wait_flag_then_put_tile(
-                from_rank, to_rank, channel, wait_ptr, wait_val, int(dst_addr), int(global_addr),
-                int(data_size), int(tile_height), int(tile_width), int(dst_stride), int(src_stride), wait_bits
+                from_rank,
+                to_rank,
+                channel,
+                wait_ptr,
+                wait_val,
+                int(dst_addr),
+                int(global_addr),
+                int(data_size),
+                int(tile_height),
+                int(tile_width),
+                int(dst_stride),
+                int(src_stride),
+                wait_bits,
             )
         elif has_signal:
             # Tile copy + signal
             signal_val = int(signal_value)
             sdma_ep.put_tile_signal(
-                from_rank, to_rank, channel, int(dst_addr), int(global_addr), int(data_size), int(tile_height),
-                int(tile_width), int(dst_stride), int(src_stride), signal_ptr, signal_val, signal_bits
+                from_rank,
+                to_rank,
+                channel,
+                int(dst_addr),
+                int(global_addr),
+                int(data_size),
+                int(tile_height),
+                int(tile_width),
+                int(dst_stride),
+                int(src_stride),
+                signal_ptr,
+                signal_val,
+                signal_bits,
             )
         else:
             # Simple tile copy
             sdma_ep.put_tile(
-                from_rank, to_rank, channel, int(dst_addr), int(global_addr), int(data_size), int(tile_height),
-                int(tile_width), int(dst_stride), int(src_stride)
+                from_rank,
+                to_rank,
+                channel,
+                int(dst_addr),
+                int(global_addr),
+                int(data_size),
+                int(tile_height),
+                int(tile_width),
+                int(dst_stride),
+                int(src_stride),
             )
 
         if not async_op:
@@ -1196,7 +1237,14 @@ class Iris:
         """
         from_rank = self.get_rank()
 
-        if not (len(global_addrs) == len(dst_addrs) == len(tile_heights) == len(tile_widths) == len(src_strides) == len(dst_strides)):
+        if not (
+            len(global_addrs)
+            == len(dst_addrs)
+            == len(tile_heights)
+            == len(tile_widths)
+            == len(src_strides)
+            == len(dst_strides)
+        ):
             raise ValueError("tile transfer arrays must have the same length")
 
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
@@ -1217,30 +1265,68 @@ class Iris:
             wait_val = int(wait_value if wait_value is not None else 0)
             signal_val = int(signal_value)
             sdma_ep.wait_flag_then_put_tiles(
-                from_rank, to_rank, channel, wait_ptr, wait_val, to_ptr_list, src_ptr_list, int(data_size),
-                tile_height_list, tile_width_list, dst_stride_list, src_stride_list, wait_bits
+                from_rank,
+                to_rank,
+                channel,
+                wait_ptr,
+                wait_val,
+                to_ptr_list,
+                src_ptr_list,
+                int(data_size),
+                tile_height_list,
+                tile_width_list,
+                dst_stride_list,
+                src_stride_list,
+                wait_bits,
             )
             sdma_ep.signal(from_rank, to_rank, channel, signal_ptr, signal_val, signal_bits)
         elif has_wait:
             # Wait + tiles copy
             wait_val = int(wait_value if wait_value is not None else 0)
             sdma_ep.wait_flag_then_put_tiles(
-                from_rank, to_rank, channel, wait_ptr, wait_val, to_ptr_list, src_ptr_list, int(data_size),
-                tile_height_list, tile_width_list, dst_stride_list, src_stride_list, wait_bits
+                from_rank,
+                to_rank,
+                channel,
+                wait_ptr,
+                wait_val,
+                to_ptr_list,
+                src_ptr_list,
+                int(data_size),
+                tile_height_list,
+                tile_width_list,
+                dst_stride_list,
+                src_stride_list,
+                wait_bits,
             )
         elif has_signal:
             # Tiles copy + signal (loop + signal)
             signal_val = int(signal_value)
             sdma_ep.put_tiles(
-                from_rank, to_rank, channel, to_ptr_list, src_ptr_list, int(data_size), tile_height_list,
-                tile_width_list, dst_stride_list, src_stride_list
+                from_rank,
+                to_rank,
+                channel,
+                to_ptr_list,
+                src_ptr_list,
+                int(data_size),
+                tile_height_list,
+                tile_width_list,
+                dst_stride_list,
+                src_stride_list,
             )
             sdma_ep.signal(from_rank, to_rank, channel, signal_ptr, signal_val, signal_bits)
         else:
             # Simple tiles copy
             sdma_ep.put_tiles(
-                from_rank, to_rank, channel, to_ptr_list, src_ptr_list, int(data_size), tile_height_list,
-                tile_width_list, dst_stride_list, src_stride_list
+                from_rank,
+                to_rank,
+                channel,
+                to_ptr_list,
+                src_ptr_list,
+                int(data_size),
+                tile_height_list,
+                tile_width_list,
+                dst_stride_list,
+                src_stride_list,
             )
 
         if not async_op:

@@ -487,10 +487,6 @@ def test_all_gather_matmul_hbm_buffer_with_bias(dtype, atol, rtol, M, K_local, N
     torch.cuda.synchronize()
 
 
-
-
-
-
 def test_all_gather_matmul_hbm_buffer_auto_workspace():
     """Test all_gather_matmul_hbm_buffer with workspace=None (auto preamble)."""
     if not dist.is_initialized():
