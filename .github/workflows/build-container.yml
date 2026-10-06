@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: [self-hosted, mi3xx, linux-mi325-8gpu-ossci-rad]
+    runs-on: [self-hosted, mi3xx, linux-mi325-8gpu-ossci-rad]  # stale label: this pool is 8x MI350X (gfx950), see .github/RUNNERS.md
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
