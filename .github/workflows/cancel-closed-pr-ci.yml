@@ -1,0 +1,49 @@
+name: Cancel CI for closed PRs
+
+# A PR's concurrency group only cancels its in-flight runs when a newer run of
+# the same PR starts. Merging or closing starts none, so without this the runs
+# keep holding the GPU runners.
+#
+# pull_request_target runs from main and is never held for fork-PR approval, so
+# this also covers first-time contributors. It gets a write token even for fork
+# PRs: it must never check out or run PR code. It only reads the event payload.
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel the PR's queued and running workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          # Older commits' runs were already cancelled by concurrency when the
+          # next commit was pushed, so the head commit's runs are all that's left.
+          # Branch and repo also have to match: two PRs can share a head commit.
+          runs=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100" \
+            --jq '.workflow_runs[]
+                  | select(.status != "completed"
+                           and .head_branch == env.HEAD_REF
+                           and .head_repository.full_name == env.HEAD_REPO)
+                  | "\(.id)\t\(.name)"')
+          if [ -z "$runs" ]; then
+            echo "No in-flight runs for $HEAD_REPO:$HEAD_REF@$HEAD_SHA"
+            exit 0
+          fi
+          while IFS=$'\t' read -r id name; do
+            # A run can finish between listing and cancelling; that's fine.
+            if gh api -X POST "repos/$REPO/actions/runs/$id/cancel" > /dev/null 2>&1; then
+              echo "Cancelled $name ($id)"
+            else
+              echo "Could not cancel $name ($id); it has probably just finished"
+            fi
+          done <<< "$runs"
