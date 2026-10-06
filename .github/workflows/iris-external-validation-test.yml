@@ -20,7 +20,7 @@ permissions:
 jobs:
   external-validation-test:
     name: External Validation Test
-    runs-on: [linux-mi325-8gpu-ossci-rad]
+    runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
 
     steps:
@@ -76,7 +76,7 @@ jobs:
 
   external-gluon-validation-test:
     name: External Gluon Validation Test
-    runs-on: [linux-mi325-8gpu-ossci-rad]
+    runs-on: [linux-mi350-8gpu-iris]
 
     steps:
       - name: Checkout repository

@@ -14,7 +14,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations on AM
 
 ## GPU Environment
 
-**You have AMD GPU access.** Your runner has 8x MI325X GPUs (gfx942) with ROCm installed. Do NOT skip GPU operations or say you lack GPU access. You can and should:
+**You have AMD GPU access.** Your runner has 8x MI350X GPUs (gfx950) with ROCm installed (confirm with `rocm-smi`). Do NOT skip GPU operations or say you lack GPU access. You can and should:
 
 - Run benchmarks and post results (charts, tables) in PR comments
 - Run tests with `torchrun --nproc_per_node=N` for multi-GPU tests

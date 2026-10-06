@@ -20,12 +20,13 @@ permissions:
 jobs:
   performance-test:
     name: ${{ matrix.example_name }}
-    runs-on: [linux-mi325-8gpu-ossci-rad]
+    runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        # Performance baselines measured on AMD Instinct MI325X (8 GPUs)
+        # Performance baselines measured on AMD Instinct MI325X (8 GPUs), before CI
+        # moved to the MI350X runners -- re-measure before tightening thresholds.
         include:
           - example_name: "GEMM All-Scatter WG Specialization"
             example_path: "10_gemm_all_scatter_wg_specialization"
