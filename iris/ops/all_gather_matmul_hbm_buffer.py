@@ -444,6 +444,10 @@ def all_gather_matmul_hbm_buffer_preamble(
 
     num_m_tiles = M // config.block_size_m
     num_k_blocks = K // config.block_size_k
+    # Keep the default valid for small and single-rank problems where fewer
+    # than eight K-blocks are available.
+    while k_per_flag > 1 and num_k_blocks % k_per_flag != 0:
+        k_per_flag //= 2
     assert num_k_blocks % k_per_flag == 0
     num_flag_groups_k = num_k_blocks // k_per_flag
 
@@ -596,6 +600,8 @@ def all_gather_matmul_hbm_buffer(
         fetch_block_k = config.block_size_k
 
     num_k_blocks = K // config.block_size_k
+    while k_per_flag > 1 and num_k_blocks % k_per_flag != 0:
+        k_per_flag //= 2
     assert num_k_blocks % k_per_flag == 0
 
     if workspace is None:
