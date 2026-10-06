@@ -20,7 +20,7 @@ permissions:
 jobs:
   test-git:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, git install)
-    runs-on: [linux-mi325-8gpu-ossci-rad]  # stale label: this pool is 8x MI350X (gfx950), see .github/RUNNERS.md
+    runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -120,7 +120,7 @@ jobs:
   test-editable:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, editable install)
     needs: [test-git]
-    runs-on: [linux-mi325-8gpu-ossci-rad]  # stale label: this pool is 8x MI350X (gfx950), see .github/RUNNERS.md
+    runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -183,7 +183,7 @@ jobs:
   test-install:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, pip install)
     needs: [test-git]
-    runs-on: [linux-mi325-8gpu-ossci-rad]  # stale label: this pool is 8x MI350X (gfx950), see .github/RUNNERS.md
+    runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -245,7 +245,7 @@ jobs:
 
   test-new-examples:
     name: New examples (${{ matrix.num_ranks }} ranks, ${{ matrix.install_method }})
-    runs-on: [linux-mi325-8gpu-ossci-rad]  # stale label: this pool is 8x MI350X (gfx950), see .github/RUNNERS.md
+    runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
     permissions:
       contents: read
