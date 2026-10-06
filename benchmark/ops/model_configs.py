@@ -56,6 +56,7 @@ class ModelConfig:
         value_head_dim: Value-head width when it differs from the Q/K head width
         intermediate_size: FFN intermediate dimension (after up-projection, before down-projection)
         expert_intermediate_size: Per-expert FFN width for MoE layers, if present
+        expert_hidden_size: Per-expert input/output width when it differs from the model hidden size
         num_routed_experts: Total number of routed experts in each MoE layer
         num_experts_per_token: Number of routed experts selected for each token
         num_shared_experts: Number of experts that process every token
@@ -64,6 +65,7 @@ class ModelConfig:
         full_name: Human-readable model name (e.g., "Llama 3 8B")
         notes: Source, estimation details, or architecture notes
     """
+
     name: str
     hidden_size: int
     attention_output_size: int
@@ -72,6 +74,7 @@ class ModelConfig:
     head_dim: int | None = None
     value_head_dim: int | None = None
     expert_intermediate_size: int | None = None
+    expert_hidden_size: int | None = None
     num_routed_experts: int = 0
     num_experts_per_token: int = 0
     num_shared_experts: int = 0
@@ -97,6 +100,7 @@ class OperationType(Enum):
     - ACTIVE_MOE_MLP_DOWN: Aggregate active routed and shared expert down-projections
     - MLP_UP: MLP up-projection from hidden to FFN
     """
+
     ATTN_OUT = "attn_out"
     MLP_DOWN = "mlp_down"
     EXPERT_MLP_DOWN = "expert_mlp_down"
@@ -113,6 +117,7 @@ class SweepOperation(Enum):
     - MATMUL_ALL_GATHER: Matmul, then all-gather output (N-sharding post-compute)
     - MATMUL_ALL_REDUCE: Matmul, then all-reduce output (N-sharding column-parallel)
     """
+
     ALL_GATHER_MATMUL = "all_gather_matmul"
     MATMUL_ALL_GATHER = "matmul_all_gather"
     MATMUL_ALL_REDUCE = "matmul_all_reduce"
@@ -144,6 +149,7 @@ class DimensionSpec:
         model_name: Source model name
         batch_size: Number of tokens (M dimension before TP)
     """
+
     m: int
     n: int
     k: int
@@ -245,6 +251,22 @@ MODELS: Dict[str, ModelConfig] = {
         full_name="GPT-OSS 120B",
         notes="Open-weight GPT model, 128-expert MoE",
     ),
+    "kimi_k3": ModelConfig(
+        name="kimi_k3",
+        hidden_size=7168,
+        attention_output_size=12288,
+        intermediate_size=33792,
+        num_attention_heads=96,
+        value_head_dim=128,
+        expert_intermediate_size=3072,
+        expert_hidden_size=3584,
+        num_routed_experts=896,
+        num_experts_per_token=16,
+        num_shared_experts=2,
+        num_dense_layers=1,
+        full_name="Kimi K3",
+        notes="2.8T params, 104B active; 3584-dimensional LatentMoE with 896 experts",
+    ),
 }
 
 
@@ -339,6 +361,8 @@ def compute_dimensions(
         ffn = model.intermediate_size
         ffn_name = "intermediate_size"
 
+    projection_hidden = (model.expert_hidden_size or h) if operation_type == OperationType.EXPERT_MLP_DOWN else h
+
     # Compute dimensions based on (operation_type, sweep_operation) combination
     if sweep_operation == SweepOperation.ALL_GATHER_MATMUL:
         # All-gather input, then matmul (K-sharding)
@@ -352,7 +376,7 @@ def compute_dimensions(
             OperationType.EXPERT_MLP_DOWN,
             OperationType.ACTIVE_MOE_MLP_DOWN,
         ):
-            m, n, k = batch_size, h, ffn
+            m, n, k = batch_size, projection_hidden, ffn
             k_local = k // tp_degree
             m_local, n_local = m, n
             _validate_tp_sharding(k, tp_degree, f"K ({ffn_name})", operation_type.value)
@@ -369,7 +393,7 @@ def compute_dimensions(
         ):
             # [batch, intermediate/tp] @ [intermediate/tp, hidden] → all-reduce SUM
             # Row-parallel: K dimension (intermediate) is sharded
-            m, n, k = batch_size, h, ffn
+            m, n, k = batch_size, projection_hidden, ffn
             k_local = k // tp_degree
             m_local, n_local = m, n
             _validate_tp_sharding(k, tp_degree, f"K ({ffn_name})", operation_type.value)
@@ -391,7 +415,7 @@ def compute_dimensions(
             OperationType.ACTIVE_MOE_MLP_DOWN,
         ):
             # Column-parallel: [batch, hidden] @ [hidden, intermediate/tp] → all-gather
-            m, n, k = batch_size, ffn, h
+            m, n, k = batch_size, ffn, projection_hidden
             n_local = n // tp_degree
             m_local, k_local = m, k
             _validate_tp_sharding(n, tp_degree, f"N ({ffn_name})", operation_type.value)
