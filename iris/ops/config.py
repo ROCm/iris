@@ -91,7 +91,18 @@ class FusedConfig:
             raise ValueError(f"chunk_size must be positive, got {self.chunk_size}")
 
         # Validate all_reduce_variant
-        valid_variants = ["atomic", "ring", "one_shot", "two_shot", "two_shot_gpu_init", "spinlock"]
+        valid_variants = [
+            "atomic",
+            "ring",
+            "one_shot",
+            "two_shot",
+            "two_shot_row_major",
+            "two_shot_auto",
+            "two_shot_compact",
+            "two_shot_gpu_init_compact",
+            "two_shot_gpu_init",
+            "spinlock",
+        ]
         if self.all_reduce_variant not in valid_variants:
             raise ValueError(f"all_reduce_variant must be one of {valid_variants}, got {self.all_reduce_variant}")
 

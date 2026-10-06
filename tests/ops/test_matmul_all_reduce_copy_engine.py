@@ -17,8 +17,10 @@ import torch.distributed as dist
 
 import iris
 from iris.ops.matmul_all_reduce_copy_engine import (
+    _select_copy_engine_variant,
     matmul_all_reduce_copy_engine,
     matmul_all_reduce_copy_engine_preamble,
+    matmul_all_reduce_copy_engine_prepost_transfers,
 )
 from tritonblas.matmul import _make_matmul_selector, persistent_matmul_lt
 
@@ -75,9 +77,26 @@ def _reference_tolerances(dtype: torch.dtype):
     return 0.3, 0.01
 
 
+@pytest.mark.parametrize(
+    "M,K,expected",
+    [
+        (128, 512, "two_shot_gpu_init_compact"),
+        (128, 2048, "two_shot"),
+        (2048, 256, "two_shot"),
+        (8192, 512, "two_shot"),
+        (32768, 512, "two_shot_gpu_init_compact"),
+        (32768, 2048, "two_shot"),
+    ],
+)
+def test_copy_engine_auto_selector(M, K, expected):
+    assert _select_copy_engine_variant(M, K) == expected
+
+
 @pytest.mark.parametrize("M,N,K", _param_shapes())
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("variant", ["one_shot", "two_shot", "two_shot_gpu_init"])
+@pytest.mark.parametrize(
+    "variant", ["one_shot", "two_shot", "two_shot_row_major", "two_shot_gpu_init", "two_shot_gpu_init_compact"]
+)
 def test_matmul_all_reduce_copy_engine(M, N, K, dtype, variant):
     """Test matmul_all_reduce_copy_engine against tritonBLAS matmul + fp32 all-reduce."""
     if not dist.is_initialized():
@@ -89,6 +108,8 @@ def test_matmul_all_reduce_copy_engine(M, N, K, dtype, variant):
 
     device = torch.device(f"cuda:{rank}")
     selector = _make_selector(M, N, K, dtype, device)
+    if variant in ("two_shot", "two_shot_gpu_init_compact") and selector.num_sms != world_size:
+        pytest.skip("compact two_shot requires the selector XCD count to equal world_size")
 
     # Create input matrices
     torch.manual_seed(123 + rank)
@@ -139,6 +160,10 @@ def test_matmul_all_reduce_copy_engine(M, N, K, dtype, variant):
     )
 
     # Use the API
+    preposted = variant == "two_shot"
+    if preposted:
+        matmul_all_reduce_copy_engine_prepost_transfers(shmem, iris_A, iris_B, workspace)
+
     matmul_all_reduce_copy_engine(
         shmem,
         iris_C,
@@ -147,6 +172,7 @@ def test_matmul_all_reduce_copy_engine(M, N, K, dtype, variant):
         async_op=False,
         config=config,
         workspace=workspace,
+        copy_engine_transfers_preposted=preposted,
     )
 
     torch.cuda.synchronize()
@@ -164,10 +190,7 @@ def test_matmul_all_reduce_copy_engine(M, N, K, dtype, variant):
     )
 
     if rank == 0:
-        print(
-            f"✓ matmul_all_reduce_copy_engine test passed: {dtype}, M={M}, N={N}, K={K}, "
-            f"variant={variant}"
-        )
+        print(f"✓ matmul_all_reduce_copy_engine test passed: {dtype}, M={M}, N={N}, K={K}, variant={variant}")
 
     shmem.barrier()
     del shmem

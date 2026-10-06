@@ -35,6 +35,10 @@ from .workspace import FusedWorkspace
 # Import operations
 # from .matmul import matmul  # Simple single-GPU GEMM - TODO: implement
 from .matmul_all_reduce import matmul_all_reduce, matmul_all_reduce_preamble
+from .matmul_all_reduce_copy_engine import (
+    matmul_all_reduce_copy_engine_auto,
+    matmul_all_reduce_copy_engine_auto_preamble,
+)
 from .all_gather_matmul import all_gather_matmul, all_gather_matmul_preamble
 from .all_gather_matmul_hbm_buffer import all_gather_matmul_hbm_buffer, all_gather_matmul_hbm_buffer_preamble
 from .matmul_all_gather import matmul_all_gather, matmul_all_gather_preamble
@@ -228,6 +232,8 @@ __all__ = [
     "matmul",  # Simple single-GPU GEMM
     "matmul_all_reduce",
     "matmul_all_reduce_preamble",
+    "matmul_all_reduce_copy_engine_auto",
+    "matmul_all_reduce_copy_engine_auto_preamble",
     "all_gather_matmul",
     "all_gather_matmul_preamble",
     "all_gather_matmul_hbm_buffer",

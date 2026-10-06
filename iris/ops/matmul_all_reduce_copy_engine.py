@@ -8,23 +8,41 @@ This module provides a torch-like interface for GEMM+All-Reduce operations,
 automatically inferring dimensions, strides, and hardware parameters.
 """
 
+from dataclasses import replace
 from typing import Optional
 import torch
 import triton
 import triton.language as tl
 from xio import sdma_ep
 
-from tritonblas.kernels.stages import GemmContext, Tile, make_input_view
+from tritonblas.kernels.stages import GemmContext, ScheduleContext, Tile, chiplet_transform_chunked, make_input_view
 from tritonblas.matmul import _make_matmul_selector
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
-from .tritonblas_launch_wave_schedule import build_launch_wave_plan
+from .tritonblas_launch_wave_schedule import build_compact_xcd_schedule, build_launch_wave_plan
 
 
 _MAX_ONE_SHOT_INBOX_ELEMENTS = 2**31
+_COMPACT_REDUCE_NUM_SMS = 64
+_COMPACT_REDUCE_BLOCK_SIZE_M = 16
+_COMPACT_REDUCE_BLOCK_SIZE_N = 256
+
+
+def _select_copy_engine_variant(M: int, K: int) -> str:
+    """Choose the compact copy-engine path from the measured M/K crossover."""
+    if 2048 <= M <= 8192:
+        return "two_shot"
+    if K <= 1024:
+        return "two_shot_gpu_init_compact"
+    return "two_shot"
+
+
+def _copy_engine_auto_config(M: int, K: int, config: Optional[FusedConfig]) -> FusedConfig:
+    config = FusedConfig() if config is None else config
+    return replace(config, all_reduce_variant=_select_copy_engine_variant(M, K))
 
 
 @triton.jit()
@@ -143,6 +161,300 @@ def _partitioned_xcd_matmul_kernel(
                     tl.debug_barrier()
                     batch_id = partition_id * MAX_BATCHES_PER_PARTITION + batch_iter
                     tl.atomic_add(locks + batch_id, 1, sem="release", scope="sys")
+
+
+@triton.jit()
+def _compact_xcd_matmul_kernel(
+    A,
+    B,
+    aux_buffer,
+    counters,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    PROGRAMS_PER_XCD: tl.constexpr,
+    SLOTS_PER_XCD: tl.constexpr,
+    NUM_WAVES: tl.constexpr,
+    SDMA_WAVE_SIZE: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+):
+    """Normal TritonBLAS persistent GEMM with a compact XCD-local epilogue."""
+    acc_dtype = tl.int32 if aux_buffer.type.element_ty == tl.int8 else tl.float32
+    gemm_ctx = GemmContext(
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=NUM_SMS,
+        num_xcds=NUM_XCDS,
+        group_size_m=GROUP_SIZE_M,
+        chunk_size=CHUNK_SIZE,
+        cache_modifier_a=None,
+        cache_modifier_b=None,
+        acc_dtype=acc_dtype,
+        even_k=EVEN_K,
+        allow_tf32=ALLOW_TF32,
+    )
+    sched = ScheduleContext(M, N, K, gemm_ctx)
+    tensor_a = make_input_view(A, M, K, stride_am, stride_ak)
+    tensor_b = make_input_view(B, K, N, stride_bk, stride_bn)
+    raw_pid = tl.program_id(0)
+    xcd_id = raw_pid % NUM_XCDS
+    local_program = raw_pid // NUM_XCDS
+    start, total, stride = sched.persistent_tile_range()
+
+    for tile_id in range(start, total, stride):
+        wave_id = raw_pid // SDMA_WAVE_SIZE
+        compact_slot = wave_id * PROGRAMS_PER_XCD + (local_program % PROGRAMS_PER_XCD)
+        out_tile = sched.get_tile_from_idx(tile_id)
+        acc = gemm_ctx.reduce_axis(tensor_a, tensor_b, out_tile)
+        rm, rn = out_tile.indices()
+        local_m = tl.arange(0, BLOCK_SIZE_M)
+        local_n = tl.arange(0, BLOCK_SIZE_N)
+        slot_offset = (xcd_id * SLOTS_PER_XCD + compact_slot) * BLOCK_SIZE_M * BLOCK_SIZE_N
+        aux_ptr = aux_buffer + slot_offset + local_m[:, None] * BLOCK_SIZE_N + local_n[None, :]
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        tl.store(aux_ptr, acc.to(aux_buffer.type.element_ty), mask=mask, cache_modifier=".wt")
+        tl.debug_barrier()
+        tl.atomic_add(counters + xcd_id * NUM_WAVES + wave_id, 1, sem="release", scope="sys")
+
+
+@triton.jit()
+def _compact_xcd_matmul_gpu_init_kernel(
+    A,
+    B,
+    aux_buffer,
+    remote_inbox,
+    counters,
+    completion_signals,
+    wave_tile_counts,
+    owner_last_wave,
+    transfer_row_offsets,
+    transfer_col_offsets,
+    transfer_width_bytes,
+    transfer_heights,
+    M,
+    N,
+    K,
+    generation,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    heap_bases: tl.tensor,
+    copy_engine_ctx: tl.tensor,
+    cur_rank: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    PROGRAMS_PER_XCD: tl.constexpr,
+    SLOTS_PER_XCD: tl.constexpr,
+    NUM_WAVES: tl.constexpr,
+    SDMA_WAVE_SIZE: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    TILE_BYTES: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+):
+    """Normal GEMM schedule with GPU-posted dense compact-wave SDMA copies."""
+    acc_dtype = tl.int32 if aux_buffer.type.element_ty == tl.int8 else tl.float32
+    gemm_ctx = GemmContext(
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=NUM_SMS,
+        num_xcds=NUM_XCDS,
+        group_size_m=GROUP_SIZE_M,
+        chunk_size=CHUNK_SIZE,
+        cache_modifier_a=None,
+        cache_modifier_b=None,
+        acc_dtype=acc_dtype,
+        even_k=EVEN_K,
+        allow_tf32=ALLOW_TF32,
+    )
+    sched = ScheduleContext(M, N, K, gemm_ctx)
+    tensor_a = make_input_view(A, M, K, stride_am, stride_ak)
+    tensor_b = make_input_view(B, K, N, stride_bk, stride_bn)
+    raw_pid = tl.program_id(0)
+    xcd_id = raw_pid % NUM_XCDS
+    local_program = raw_pid // NUM_XCDS
+    wave_id = raw_pid // SDMA_WAVE_SIZE
+    compact_slot = wave_id * PROGRAMS_PER_XCD + (local_program % PROGRAMS_PER_XCD)
+    start, total, stride = sched.persistent_tile_range()
+
+    for tile_id in range(start, total, stride):
+        out_tile = sched.get_tile_from_idx(tile_id)
+        acc = gemm_ctx.reduce_axis(tensor_a, tensor_b, out_tile)
+        rm, rn = out_tile.indices()
+        local_m = tl.arange(0, BLOCK_SIZE_M)
+        local_n = tl.arange(0, BLOCK_SIZE_N)
+        slot_offset = (xcd_id * SLOTS_PER_XCD + compact_slot) * BLOCK_SIZE_M * BLOCK_SIZE_N
+        aux_ptr = aux_buffer + slot_offset + local_m[:, None] * BLOCK_SIZE_N + local_n[None, :]
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        tl.store(aux_ptr, acc.to(aux_buffer.type.element_ty), mask=mask, cache_modifier=".wt")
+        tl.debug_barrier()
+        counter_id = xcd_id * NUM_WAVES + wave_id
+        expected_count = generation * tl.load(wave_tile_counts + counter_id)
+        old = tl.atomic_add(counters + counter_id, 1, sem="release", scope="sys")
+
+        if old + 1 == expected_count and xcd_id != cur_rank:
+            source_base = aux_buffer + xcd_id * SLOTS_PER_XCD * BLOCK_SIZE_M * BLOCK_SIZE_N
+            destination_base = remote_inbox + cur_rank * SLOTS_PER_XCD * BLOCK_SIZE_M * BLOCK_SIZE_N
+            signal_value = tl.where(tl.load(owner_last_wave + xcd_id) == wave_id, 1, 0)
+            iris.put_signal_rects(
+                source_base,
+                destination_base,
+                cur_rank,
+                xcd_id,
+                heap_bases,
+                copy_engine_ctx,
+                completion_signals + cur_rank,
+                signal_value,
+                transfer_row_offsets,
+                transfer_col_offsets,
+                transfer_width_bytes,
+                transfer_heights,
+                counter_id,
+                1,
+                TILE_BYTES,
+                TILE_BYTES,
+                TILE_BYTES,
+                1,
+            )
+
+
+@triton.jit()
+def _compact_xcd_reduce_kernel(
+    C,
+    local_aux_buffer,
+    remote_inbox,
+    completion_signals,
+    all_gather_pid_arrivals,
+    all_gather_rank_arrivals,
+    expected_completion_value,
+    barrier_generation,
+    M,
+    N,
+    stride_cm,
+    stride_cn,
+    context_tensor: tl.tensor,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    PROGRAMS_PER_XCD: tl.constexpr,
+    SLOTS_PER_XCD: tl.constexpr,
+    NUM_WAVES: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    REDUCE_NUM_PROGRAMS: tl.constexpr,
+    REDUCE_BLOCK_SIZE_M: tl.constexpr,
+    REDUCE_BLOCK_SIZE_N: tl.constexpr,
+    WAIT_FOR_COMPLETION: tl.constexpr,
+    OWNER_HAS_TILES: tl.constexpr,
+):
+    """Reduce compact slots in subtiles so remote stores have enough concurrency."""
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+    if WAIT_FOR_COMPLETION and OWNER_HAS_TILES:
+        for source_rank in tl.static_range(0, world_size):
+            if source_rank != cur_rank:
+                while (
+                    tl.load(completion_signals + source_rank, cache_modifier=".cv", volatile=True)
+                    < expected_completion_value
+                ):
+                    pass
+
+    tile_elements = BLOCK_SIZE_M * BLOCK_SIZE_N
+    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
+    local_work_id = tl.program_id(0)
+    num_subtiles_m = tl.cdiv(BLOCK_SIZE_M, REDUCE_BLOCK_SIZE_M)
+    num_subtiles_n = tl.cdiv(BLOCK_SIZE_N, REDUCE_BLOCK_SIZE_N)
+    subtiles_per_slot = num_subtiles_m * num_subtiles_n
+    local_m_offsets = tl.arange(0, REDUCE_BLOCK_SIZE_M)
+    local_n_offsets = tl.arange(0, REDUCE_BLOCK_SIZE_N)
+
+    for work_id in range(local_work_id, SLOTS_PER_XCD * subtiles_per_slot, REDUCE_NUM_PROGRAMS):
+        compact_slot = work_id // subtiles_per_slot
+        subtile_id = work_id % subtiles_per_slot
+        wave_id = compact_slot // PROGRAMS_PER_XCD
+        program_in_wave = compact_slot % PROGRAMS_PER_XCD
+        raw_pid = (wave_id * PROGRAMS_PER_XCD + program_in_wave) * NUM_XCDS + cur_rank
+        first_tile = chiplet_transform_chunked(raw_pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
+        tile_id = first_tile
+        if tile_id < tl.cdiv(M, BLOCK_SIZE_M) * tl.cdiv(N, BLOCK_SIZE_N):
+            num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = tl.minimum(tl.cdiv(M, BLOCK_SIZE_M) - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
+
+            subtile_m = subtile_id // num_subtiles_n
+            subtile_n = subtile_id % num_subtiles_n
+            local_m = subtile_m * REDUCE_BLOCK_SIZE_M + local_m_offsets
+            local_n = subtile_n * REDUCE_BLOCK_SIZE_N + local_n_offsets
+            rm = pid_m * BLOCK_SIZE_M + local_m
+            rn = pid_n * BLOCK_SIZE_N + local_n
+            mask = (
+                (local_m[:, None] < BLOCK_SIZE_M)
+                & (local_n[None, :] < BLOCK_SIZE_N)
+                & (rm[:, None] < M)
+                & (rn[None, :] < N)
+            )
+            slot_offset = compact_slot * tile_elements
+            local_ptr = (
+                local_aux_buffer
+                + (cur_rank * SLOTS_PER_XCD * tile_elements)
+                + slot_offset
+                + local_m[:, None] * BLOCK_SIZE_N
+                + local_n[None, :]
+            )
+            acc = tl.load(local_ptr, mask=mask, other=0.0).to(acc_dtype)
+            for source_rank in tl.static_range(0, world_size):
+                if source_rank != cur_rank:
+                    source_offset = (source_rank * SLOTS_PER_XCD + compact_slot) * tile_elements
+                    acc += tl.load(
+                        remote_inbox + source_offset + local_m[:, None] * BLOCK_SIZE_N + local_n[None, :],
+                        mask=mask,
+                        other=0.0,
+                    ).to(acc_dtype)
+
+            out_ptr = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+            result = acc.to(C.type.element_ty)
+            tl.store(out_ptr, result, mask=mask)
+            for destination_rank in tl.static_range(0, world_size):
+                if destination_rank != cur_rank:
+                    ctx.store(
+                        out_ptr,
+                        result,
+                        to_rank=destination_rank,
+                        mask=mask,
+                        hint=(1, REDUCE_BLOCK_SIZE_N),
+                    )
+
+    ctx.exit_barrier(
+        all_gather_pid_arrivals,
+        all_gather_rank_arrivals,
+        REDUCE_NUM_PROGRAMS,
+        barrier_generation,
+    )
 
 
 @triton.jit()
@@ -282,10 +594,7 @@ def _partitioned_xcd_matmul_gpu_init_kernel(
                         transfer_count = tl.load(wave_transfer_counts + flag_id)
 
                         if transfer_count != 0:
-                            src_base = (
-                                local_aux_buffer
-                                + partition_id * partition_rows * stride_local_aux_m
-                            )
+                            src_base = local_aux_buffer + partition_id * partition_rows * stride_local_aux_m
                             dst_base = reduce_buffer + cur_rank * partition_rows * stride_reduce_m
                             if wave_start + sms_per_xcd >= partition_tiles:
                                 iris.put_signal_rects(
@@ -382,11 +691,14 @@ def _matmul_all_reduce_copy_engine_reduce_scatter_kernel(
     if WAIT_FOR_COMPLETION:
         for wait_src_rank in tl.static_range(0, world_size):
             if wait_src_rank != cur_rank:
-                while tl.load(
-                    completion_signals + wait_src_rank,
-                    cache_modifier=".cv",
-                    volatile=True,
-                ) < expected_completion_value:
+                while (
+                    tl.load(
+                        completion_signals + wait_src_rank,
+                        cache_modifier=".cv",
+                        volatile=True,
+                    )
+                    < expected_completion_value
+                ):
                     pass
 
     rows_per_rank = M // world_size
@@ -471,11 +783,14 @@ def _matmul_all_reduce_copy_engine_local_reduce_kernel(
     if WAIT_FOR_COMPLETION:
         for wait_src_rank in tl.static_range(0, world_size):
             if wait_src_rank != cur_rank:
-                while tl.load(
-                    completion_signals + wait_src_rank,
-                    cache_modifier=".cv",
-                    volatile=True,
-                ) < expected_completion_value:
+                while (
+                    tl.load(
+                        completion_signals + wait_src_rank,
+                        cache_modifier=".cv",
+                        volatile=True,
+                    )
+                    < expected_completion_value
+                ):
                     pass
 
     pid = tl.program_id(0)
@@ -563,11 +878,14 @@ def _matmul_all_reduce_copy_engine_local_reduce_flat_kernel(
     if WAIT_FOR_COMPLETION:
         for wait_src_rank in tl.static_range(0, world_size):
             if wait_src_rank != cur_rank:
-                while tl.load(
-                    completion_signals + wait_src_rank,
-                    cache_modifier=".cv",
-                    volatile=True,
-                ) < expected_completion_value:
+                while (
+                    tl.load(
+                        completion_signals + wait_src_rank,
+                        cache_modifier=".cv",
+                        volatile=True,
+                    )
+                    < expected_completion_value
+                ):
                     pass
 
     pid = tl.program_id(0)
@@ -594,6 +912,7 @@ def _matmul_all_reduce_copy_engine_local_reduce_flat_kernel(
         out_ptr = C + linear_offsets
         out_ptr = tl.max_contiguous(tl.multiple_of(out_ptr, BLOCK_SIZE), BLOCK_SIZE)
         tl.store(out_ptr, acc.to(C.type.element_ty))
+
 
 def _default_chunk_size(total_tiles: int, group_size_m: int, num_xcds: int) -> int:
     chunk_size = group_size_m * group_size_m
@@ -812,6 +1131,43 @@ def _init_transfer_workspace(
     workspace.barrier_signals = shmem.zeros((2,), dtype=torch.int32)
 
 
+def _init_compact_xcd_transfer_workspace(
+    shmem,
+    workspace: FusedWorkspace,
+    schedule,
+    tile_elements: int,
+    element_size: int,
+    device: torch.device,
+):
+    """Initialize tile-count counters for dense compact XCD wave transfers."""
+    workspace.compact_xcd_schedule = schedule
+    workspace.num_transfer_waves = schedule.num_waves
+    workspace.num_transfer_flags = schedule.num_xcds * schedule.num_waves
+    workspace.batch_tiles_per_xcd = schedule.programs_per_xcd
+    workspace.num_transfers = sum(bool(wave) for xcd in schedule.tiles_by_xcd_wave for wave in xcd)
+    wave_counts = [len(wave) for xcd in schedule.tiles_by_xcd_wave for wave in xcd]
+    last_waves = [max((i for i, wave in enumerate(xcd) if wave), default=-1) for xcd in schedule.tiles_by_xcd_wave]
+    workspace.locks = shmem.zeros((workspace.num_transfer_flags,), dtype=torch.int32)
+    workspace.completion_signals = shmem.zeros((schedule.num_xcds,), dtype=torch.int32)
+    workspace.barrier_signals = shmem.zeros((2,), dtype=torch.int32)
+    workspace.wave_tile_counts = torch.tensor(wave_counts, device=device, dtype=torch.int32)
+    workspace.owner_last_wave = torch.tensor(last_waves, device=device, dtype=torch.int32)
+    workspace.transfer_row_offsets = torch.tensor(
+        [
+            wave_id * schedule.programs_per_xcd
+            for _ in range(schedule.num_xcds)
+            for wave_id in range(schedule.num_waves)
+        ],
+        device=device,
+        dtype=torch.int32,
+    )
+    workspace.transfer_col_offsets = torch.zeros((workspace.num_transfer_flags,), device=device, dtype=torch.int32)
+    workspace.transfer_width_bytes = torch.full(
+        (workspace.num_transfer_flags,), tile_elements * element_size, device=device, dtype=torch.int32
+    )
+    workspace.transfer_heights = torch.tensor(wave_counts, device=device, dtype=torch.int32)
+
+
 def _post_host_copy_engine_transfers(
     shmem,
     workspace: FusedWorkspace,
@@ -867,9 +1223,8 @@ def _post_host_copy_engine_transfers(
                 tile.src_stride = stride_local_aux_m * element_size
 
                 src_offset = (
-                    (dst_rank * rows_per_rank + row_offset) * stride_local_aux_m
-                    + col_offset * stride_local_aux_n
-                )
+                    dst_rank * rows_per_rank + row_offset
+                ) * stride_local_aux_m + col_offset * stride_local_aux_n
                 tile.data = local_aux_base + src_offset * element_size
 
                 dst_offset = (rank * rows_per_rank + row_offset) * stride_reduce_m + col_offset * stride_reduce_n
@@ -892,6 +1247,59 @@ def _post_host_copy_engine_transfers(
                 channel=0,
             )
 
+
+def _post_compact_xcd_transfers(
+    shmem,
+    workspace: FusedWorkspace,
+    rank: int,
+    prepost_generation: int,
+) -> float:
+    """Prepost one dense SDMA transfer for every non-empty destination XCD wave."""
+    schedule = workspace.compact_xcd_schedule
+    if schedule is None:
+        raise ValueError("compact XCD schedule is not initialized")
+
+    aux_buffer = workspace.aux_buffer
+    remote_inbox = workspace.a_inbox
+    element_size = aux_buffer.element_size()
+    tile_elements = aux_buffer.shape[1]
+    signal_ptr_local = workspace.completion_signals.data_ptr() + rank * workspace.completion_signals.element_size()
+
+    for destination_rank in range(schedule.num_xcds):
+        if destination_rank == rank:
+            continue
+        waves = schedule.tiles_by_xcd_wave[destination_rank]
+        last_wave = max((wave_id for wave_id, tiles in enumerate(waves) if tiles), default=-1)
+        for wave_id, tiles_in_wave in enumerate(waves):
+            if not tiles_in_wave:
+                continue
+            tile = sdma_ep.Tile()
+            tile.pid_m = 0
+            tile.pid_n = 0
+            tile.block_m = len(tiles_in_wave)
+            tile.block_n = tile_elements
+            tile.elem_size = element_size
+            tile.src_stride = tile_elements * element_size
+            source_row = destination_rank * schedule.slots_per_xcd + wave_id * schedule.programs_per_xcd
+            destination_row = rank * schedule.slots_per_xcd + wave_id * schedule.programs_per_xcd
+            tile.data = aux_buffer.data_ptr() + source_row * tile_elements * element_size
+            destination_ptr = remote_inbox.data_ptr() + destination_row * tile_elements * element_size
+            signal_flag = None
+            if wave_id == last_wave:
+                signal_flag = shmem.heap.translate(signal_ptr_local, rank, destination_rank)
+            shmem.put_tiles(
+                [tile],
+                dst_rank=destination_rank,
+                dst_ptrs=[shmem.heap.translate(destination_ptr, rank, destination_rank)],
+                dst_strides=[tile_elements * element_size],
+                wait_flag=workspace.locks.data_ptr()
+                + (destination_rank * schedule.num_waves + wave_id) * workspace.locks.element_size(),
+                wait_value=prepost_generation * len(tiles_in_wave),
+                signal_flag=signal_flag,
+                signal_value=1,
+                async_op=True,
+                channel=0,
+            )
 
 
 def _post_host_copy_engine_broadcast_transfers(
@@ -976,7 +1384,6 @@ def _post_host_copy_engine_broadcast_transfers(
             )
 
 
-
 def matmul_all_reduce_copy_engine_prepost_transfers(
     shmem,
     A: torch.Tensor,
@@ -992,7 +1399,7 @@ def matmul_all_reduce_copy_engine_prepost_transfers(
     prepost_generation = workspace.prepost_generation + 1
     workspace.prepost_generation = prepost_generation
 
-    if workspace.variant not in ("one_shot", "two_shot"):
+    if workspace.variant not in ("one_shot", "two_shot", "two_shot_row_major"):
         return 0.0
     if workspace.a_inbox is None:
         raise ValueError("copy-engine workspace must have a_inbox before preposting")
@@ -1005,6 +1412,8 @@ def matmul_all_reduce_copy_engine_prepost_transfers(
     launch = workspace.launch_params
     if launch is None:
         raise ValueError("workspace.launch_params must be initialized before preposting")
+    if workspace.variant == "two_shot" and workspace.compact_xcd_schedule is not None:
+        return _post_compact_xcd_transfers(shmem, workspace, shmem.get_rank(), prepost_generation)
     if workspace.transfers_by_owner_wave is None or workspace.wave_tile_counts_host is None:
         raise ValueError("copy-engine transfer workspace is not initialized; call preamble first")
 
@@ -1125,9 +1534,9 @@ def matmul_all_reduce_copy_engine_preamble(
     if config.all_reduce_variant == "one_shot":
         _validate_one_shot_inbox_size(M, N, world_size)
 
-    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init") and M % world_size != 0:
+    if config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init") and M % world_size != 0:
         raise ValueError(
-            "matmul_all_reduce_copy_engine two_shot requires M to be divisible by world_size "
+            "matmul_all_reduce_copy_engine two_shot_gpu_init requires M to be divisible by world_size "
             "because the final all-gather uses equal row shards."
         )
 
@@ -1135,8 +1544,27 @@ def matmul_all_reduce_copy_engine_preamble(
         c_dtype = dtype if out_dtype is None else out_dtype
         selector = _make_origami_selector(M, N, K, A, B, c_dtype)
     launch = _matmul_all_reduce_copy_engine_launch_params(M, N, selector, A.device)
-    launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
-    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init"):
+    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init_compact"):
+        if launch["num_xcds"] != world_size:
+            raise ValueError(
+                "compact two_shot requires selector.num_sms (the XCD count) to equal world_size; "
+                f"got num_xcds={launch['num_xcds']}, world_size={world_size}"
+            )
+        compact_schedule = build_compact_xcd_schedule(
+            launch["num_tiles_m"],
+            launch["num_tiles_n"],
+            launch["group_size_m"],
+            # The builder preserves TritonBLAS's full tile grid internally and
+            # uses this active-CU count only as the SDMA readiness-wave size.
+            launch["num_sms"],
+            world_size,
+        )
+        launch["gemm_num_sms"] = compact_schedule.launch_grid
+        launch["chunk_size"] = compact_schedule.chunk_size
+    else:
+        compact_schedule = None
+        launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
+    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init", "two_shot_gpu_init_compact"):
         launch["reduce_num_sms"] = _default_reduce_num_sms()
     else:
         launch["reduce_num_sms"] = launch["num_sms"]
@@ -1152,17 +1580,27 @@ def matmul_all_reduce_copy_engine_preamble(
     workspace.config = config
     workspace.launch_params = launch
 
-    aux_rows = M
-
-    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init"):
-        workspace.aux_buffer = shmem.empty((aux_rows, N), dtype=dtype)
-        inbox_rows = aux_rows
+    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init_compact"):
+        tile_elements = launch["block_size_m"] * launch["block_size_n"]
+        workspace.aux_buffer = shmem.empty((world_size * compact_schedule.slots_per_xcd, tile_elements), dtype=dtype)
+        workspace.a_inbox = shmem.empty((world_size * compact_schedule.slots_per_xcd, tile_elements), dtype=dtype)
+        _init_compact_xcd_transfer_workspace(
+            shmem,
+            workspace,
+            compact_schedule,
+            tile_elements,
+            A.element_size(),
+            A.device,
+        )
+    elif config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init"):
+        workspace.aux_buffer = shmem.empty((M, N), dtype=dtype)
+        workspace.a_inbox = shmem.empty((M, N), dtype=dtype)
     else:
         workspace.aux_buffer = None
-        inbox_rows = aux_rows * world_size
+        workspace.a_inbox = shmem.empty((M * world_size, N), dtype=dtype)
 
-    workspace.a_inbox = shmem.empty((inbox_rows, N), dtype=dtype)
-    _init_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
+    if config.all_reduce_variant not in ("two_shot", "two_shot_gpu_init_compact"):
+        _init_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
     workspace.locks.zero_()
     workspace.completion_signals.zero_()
     workspace.barrier_signals.zero_()
@@ -1170,6 +1608,62 @@ def matmul_all_reduce_copy_engine_preamble(
     workspace.prepost_generation = 0
 
     return workspace
+
+
+def matmul_all_reduce_copy_engine_auto_preamble(
+    shmem,
+    C: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    config: Optional[FusedConfig] = None,
+    selector=None,
+    out_dtype: Optional[torch.dtype] = None,
+) -> FusedWorkspace:
+    """Allocate a copy-engine workspace selected from the measured M/K heuristic."""
+    M, K = A.shape[:2]
+    selected_config = _copy_engine_auto_config(M, K, config)
+    return matmul_all_reduce_copy_engine_preamble(
+        shmem,
+        C,
+        A,
+        B,
+        config=selected_config,
+        selector=selector,
+        out_dtype=out_dtype,
+    )
+
+
+def matmul_all_reduce_copy_engine_auto(
+    shmem,
+    C: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    async_op: bool = False,
+    config: Optional[FusedConfig] = None,
+    workspace: Optional[FusedWorkspace] = None,
+    copy_engine_transfers_preposted: bool = False,
+    split_completion_wait: bool = False,
+) -> FusedWorkspace:
+    """Run the compact copy-engine variant selected from M and K."""
+    if workspace is None:
+        M, K = A.shape[:2]
+        selected_config = _copy_engine_auto_config(M, K, config)
+    else:
+        selected_config = workspace.config
+        if selected_config is None:
+            M, K = A.shape[:2]
+            selected_config = _copy_engine_auto_config(M, K, config)
+    return matmul_all_reduce_copy_engine(
+        shmem,
+        C,
+        A,
+        B,
+        async_op=async_op,
+        config=selected_config,
+        workspace=workspace,
+        copy_engine_transfers_preposted=copy_engine_transfers_preposted,
+        split_completion_wait=split_completion_wait,
+    )
 
 
 def matmul_all_reduce_copy_engine(
@@ -1188,8 +1682,8 @@ def matmul_all_reduce_copy_engine(
 
     Computes: C = all_reduce(A @ B) across all ranks. The one_shot variant
     broadcasts every rank's GEMM output to all peers and reduces locally; the
-    two_shot variant copies row shards to owner ranks, reduces them, then
-    all-gathers the reduced shards.
+    compact two_shot variant transfers XCD-local tile slots to their owner rank,
+    reduces them, then publishes the reduced output tiles to every rank.
 
     Args:
         shmem: Iris shmem context
@@ -1253,9 +1747,9 @@ def matmul_all_reduce_copy_engine(
 
     if config.all_reduce_variant == "one_shot":
         _validate_one_shot_inbox_size(M, N, world_size)
-    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init") and M % world_size != 0:
+    if config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init") and M % world_size != 0:
         raise ValueError(
-            "matmul_all_reduce_copy_engine two_shot requires M to be divisible by world_size "
+            "matmul_all_reduce_copy_engine two_shot_gpu_init requires M to be divisible by world_size "
             "because the final all-gather uses equal row shards."
         )
 
@@ -1316,7 +1810,91 @@ def matmul_all_reduce_copy_engine(
     if gemm_num_sms is None:
         gemm_num_sms = _partitioned_xcd_gemm_num_sms(launch, world_size)
         launch["gemm_num_sms"] = gemm_num_sms
-    if config.all_reduce_variant == "two_shot_gpu_init":
+    if config.all_reduce_variant == "two_shot":
+        compact_schedule = workspace.compact_xcd_schedule
+        if compact_schedule is None:
+            raise ValueError("two_shot workspace is missing its compact XCD schedule")
+        iris_launch(
+            _compact_xcd_matmul_kernel,
+            (compact_schedule.launch_grid,),
+            A,
+            B,
+            gemm_output_buffer,
+            workspace.locks,
+            M,
+            N,
+            K,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            block_size_m,
+            block_size_n,
+            block_size_k,
+            launch["group_size_m"],
+            compact_schedule.launch_grid,
+            world_size,
+            compact_schedule.programs_per_xcd,
+            compact_schedule.slots_per_xcd,
+            compact_schedule.num_waves,
+            compact_schedule.sdma_wave_size,
+            compact_schedule.chunk_size,
+            even_k,
+            launch["allow_tf32"],
+            algorithm="matmul_all_reduce_copy_engine_compact_xcd_gemm",
+            rank=rank,
+            dtype=A.dtype,
+            **launch_kwargs,
+        )
+    elif config.all_reduce_variant == "two_shot_gpu_init_compact":
+        compact_schedule = workspace.compact_xcd_schedule
+        tile_bytes = block_size_m * block_size_n * A.element_size()
+        iris_launch(
+            _compact_xcd_matmul_gpu_init_kernel,
+            (compact_schedule.launch_grid,),
+            A,
+            B,
+            gemm_output_buffer,
+            workspace.a_inbox,
+            workspace.locks,
+            workspace.completion_signals,
+            workspace.wave_tile_counts,
+            workspace.owner_last_wave,
+            workspace.transfer_row_offsets,
+            workspace.transfer_col_offsets,
+            workspace.transfer_width_bytes,
+            workspace.transfer_heights,
+            M,
+            N,
+            K,
+            generation,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            shmem.get_heap_bases(),
+            shmem.get_copy_engine_ctx(),
+            rank,
+            block_size_m,
+            block_size_n,
+            block_size_k,
+            launch["group_size_m"],
+            compact_schedule.launch_grid,
+            world_size,
+            compact_schedule.programs_per_xcd,
+            compact_schedule.slots_per_xcd,
+            compact_schedule.num_waves,
+            compact_schedule.sdma_wave_size,
+            compact_schedule.chunk_size,
+            tile_bytes,
+            even_k,
+            launch["allow_tf32"],
+            algorithm="matmul_all_reduce_copy_engine_compact_xcd_gpu_init_gemm",
+            rank=rank,
+            dtype=A.dtype,
+            **launch_kwargs,
+        )
+    elif config.all_reduce_variant == "two_shot_gpu_init":
         element_size = A.element_size()
         iris_launch(
             _partitioned_xcd_matmul_gpu_init_kernel,
@@ -1398,7 +1976,7 @@ def matmul_all_reduce_copy_engine(
             launch["chunk_size"],
             world_size,
             workspace.num_transfer_waves,
-            config.all_reduce_variant == "two_shot",
+            config.all_reduce_variant == "two_shot_row_major",
             True,
             even_k,
             launch["allow_tf32"],
@@ -1408,7 +1986,11 @@ def matmul_all_reduce_copy_engine(
             **launch_kwargs,
         )
 
-    if not copy_engine_transfers_preposted and config.all_reduce_variant in ("one_shot", "two_shot"):
+    if not copy_engine_transfers_preposted and config.all_reduce_variant in (
+        "one_shot",
+        "two_shot",
+        "two_shot_row_major",
+    ):
         matmul_all_reduce_copy_engine_prepost_transfers(
             shmem,
             A,
@@ -1502,7 +2084,66 @@ def matmul_all_reduce_copy_engine(
                 num_stages=1,
             )
 
-    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init"):
+    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init_compact"):
+        compact_schedule = workspace.compact_xcd_schedule
+        reduce_block_size_m = min(_COMPACT_REDUCE_BLOCK_SIZE_M, block_size_m)
+        reduce_block_size_n = min(_COMPACT_REDUCE_BLOCK_SIZE_N, block_size_n)
+        subtiles_per_slot = _ceil_div(block_size_m, reduce_block_size_m) * _ceil_div(block_size_n, reduce_block_size_n)
+        reduce_grid = (min(_COMPACT_REDUCE_NUM_SMS, compact_schedule.slots_per_xcd * subtiles_per_slot),)
+        owner_has_tiles = any(compact_schedule.tiles_by_xcd_wave[rank])
+        wait_for_completion = not split_completion_wait and owner_has_tiles
+        if split_completion_wait and owner_has_tiles:
+            iris_launch(
+                _matmul_all_reduce_copy_engine_wait_completion_kernel,
+                (world_size,),
+                workspace.completion_signals,
+                generation,
+                cur_rank=rank,
+                world_size=world_size,
+                algorithm="matmul_all_reduce_copy_engine_wait_completion",
+                rank=rank,
+                dtype=A.dtype,
+                num_warps=1,
+            )
+        iris_launch(
+            _compact_xcd_reduce_kernel,
+            reduce_grid,
+            C,
+            workspace.aux_buffer,
+            workspace.a_inbox,
+            workspace.completion_signals,
+            workspace.barrier_signals,
+            workspace.barrier_signals[1:],
+            generation,
+            generation,
+            M,
+            N,
+            C.stride(0),
+            C.stride(1),
+            shmem.get_device_context(),
+            cur_rank=rank,
+            world_size=world_size,
+            BLOCK_SIZE_M=block_size_m,
+            BLOCK_SIZE_N=block_size_n,
+            GROUP_SIZE_M=launch["group_size_m"],
+            NUM_SMS=compact_schedule.launch_grid,
+            PROGRAMS_PER_XCD=compact_schedule.programs_per_xcd,
+            SLOTS_PER_XCD=compact_schedule.slots_per_xcd,
+            NUM_WAVES=compact_schedule.num_waves,
+            NUM_XCDS=world_size,
+            CHUNK_SIZE=compact_schedule.chunk_size,
+            REDUCE_NUM_PROGRAMS=reduce_grid[0],
+            REDUCE_BLOCK_SIZE_M=reduce_block_size_m,
+            REDUCE_BLOCK_SIZE_N=reduce_block_size_n,
+            WAIT_FOR_COMPLETION=wait_for_completion,
+            OWNER_HAS_TILES=owner_has_tiles,
+            algorithm="matmul_all_reduce_copy_engine_compact_xcd_reduce",
+            rank=rank,
+            dtype=A.dtype,
+            num_warps=4,
+        )
+
+    if config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init"):
         reduce_block_size_m = launch["reduce_block_size_m"]
         reduce_block_size_n = launch["reduce_block_size_n"]
         rows_per_rank = M // world_size

@@ -8,6 +8,7 @@ This module provides a torch-like interface for GEMM+All-Reduce operations,
 automatically inferring dimensions, strides, and hardware parameters.
 """
 
+from dataclasses import replace
 from typing import Optional
 import torch
 import triton
@@ -15,16 +16,21 @@ import triton.language as tl
 
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
-from tritonblas.kernels.stages import GemmContext, Tile, make_input_view
+from tritonblas.kernels.stages import GemmContext, ScheduleContext, Tile, chiplet_transform_chunked, make_input_view
 from tritonblas.matmul import _make_matmul_selector
 
 from .config import FusedConfig
 from .workspace import FusedWorkspace
+from .tritonblas_launch_wave_schedule import build_compact_xcd_schedule
 
 
-_SUPPORTED_VARIANTS = ("one_shot", "two_shot")
+_SUPPORTED_VARIANTS = ("one_shot", "two_shot", "two_shot_auto", "two_shot_compact")
 _MAX_ONE_SHOT_INBOX_ELEMENTS = 2**31
 _MAX_GEMM_SHARED_BYTES = 64 * 1024
+_COMPACT_REDUCE_NUM_SMS = 64
+_COMPACT_REDUCE_BLOCK_SIZE_M = 16
+_COMPACT_REDUCE_BLOCK_SIZE_N = 256
+_COMPACT_AUTO_MAX_M = 512
 
 
 @triton.jit()
@@ -164,6 +170,172 @@ def _matmul_all_reduce_gemm_publish_kernel(
                         sem="release",
                         scope="sys",
                     )
+
+
+@triton.jit()
+def _matmul_all_reduce_compact_gemm_publish_kernel(
+    A,
+    B,
+    compact_inbox,
+    locks,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    context_tensor: tl.tensor,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    SDMA_WAVE_SIZE: tl.constexpr,
+    PROGRAMS_PER_XCD: tl.constexpr,
+    SLOTS_PER_XCD: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+):
+    """Publish each normal TritonBLAS GEMM tile to its XCD-owner compact inbox."""
+    acc_dtype = tl.int32 if compact_inbox.type.element_ty == tl.int8 else tl.float32
+    gemm_ctx = GemmContext(
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=NUM_SMS,
+        num_xcds=NUM_XCDS,
+        group_size_m=GROUP_SIZE_M,
+        chunk_size=CHUNK_SIZE,
+        cache_modifier_a=None,
+        cache_modifier_b=None,
+        acc_dtype=acc_dtype,
+        even_k=EVEN_K,
+        allow_tf32=ALLOW_TF32,
+    )
+    sched = ScheduleContext(M, N, K, gemm_ctx)
+    tensor_a = make_input_view(A, M, K, stride_am, stride_ak)
+    tensor_b = make_input_view(B, K, N, stride_bk, stride_bn)
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+    raw_pid = tl.program_id(0)
+    xcd_id = raw_pid % NUM_XCDS
+    local_program = raw_pid // NUM_XCDS
+    wave_id = raw_pid // SDMA_WAVE_SIZE
+    compact_slot = wave_id * PROGRAMS_PER_XCD + (local_program % PROGRAMS_PER_XCD)
+    start, total, stride = sched.persistent_tile_range()
+
+    for tile_id in range(start, total, stride):
+        out_tile = sched.get_tile_from_idx(tile_id)
+        acc = gemm_ctx.reduce_axis(tensor_a, tensor_b, out_tile)
+        rm, rn = out_tile.indices()
+        local_m = tl.arange(0, BLOCK_SIZE_M)
+        local_n = tl.arange(0, BLOCK_SIZE_N)
+        slot_offset = (cur_rank * SLOTS_PER_XCD + compact_slot) * BLOCK_SIZE_M * BLOCK_SIZE_N
+        inbox_ptr = compact_inbox + slot_offset + local_m[:, None] * BLOCK_SIZE_N + local_n[None, :]
+        mask = (rm[:, None] < M) & (rn[None, :] < N)
+        ctx.store(inbox_ptr, acc.to(compact_inbox.type.element_ty), to_rank=xcd_id, mask=mask, hint=(1, BLOCK_SIZE_N))
+        tl.debug_barrier()
+        ctx.atomic_add(locks + xcd_id, 1, to_rank=xcd_id, sem="release", scope="sys")
+
+
+@triton.jit()
+def _matmul_all_reduce_compact_reduce_kernel(
+    C,
+    compact_inbox,
+    locks,
+    all_gather_local_arrivals,
+    all_gather_rank_arrivals,
+    expected_completion_value,
+    barrier_generation,
+    M,
+    N,
+    stride_cm,
+    stride_cn,
+    context_tensor: tl.tensor,
+    cur_rank: tl.constexpr,
+    world_size: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    NUM_SMS: tl.constexpr,
+    PROGRAMS_PER_XCD: tl.constexpr,
+    SLOTS_PER_XCD: tl.constexpr,
+    NUM_XCDS: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+    REDUCE_NUM_PROGRAMS: tl.constexpr,
+    REDUCE_BLOCK_SIZE_M: tl.constexpr,
+    REDUCE_BLOCK_SIZE_N: tl.constexpr,
+):
+    """Reduce the compact slots owned by this rank and publish output subtiles."""
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
+    while tl.load(locks + cur_rank, cache_modifier=".cv", volatile=True) < expected_completion_value:
+        pass
+
+    tile_elements = BLOCK_SIZE_M * BLOCK_SIZE_N
+    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
+    local_work_id = tl.program_id(0)
+    num_subtiles_m = tl.cdiv(BLOCK_SIZE_M, REDUCE_BLOCK_SIZE_M)
+    num_subtiles_n = tl.cdiv(BLOCK_SIZE_N, REDUCE_BLOCK_SIZE_N)
+    subtiles_per_slot = num_subtiles_m * num_subtiles_n
+    local_m_offsets = tl.arange(0, REDUCE_BLOCK_SIZE_M)
+    local_n_offsets = tl.arange(0, REDUCE_BLOCK_SIZE_N)
+
+    for work_id in range(local_work_id, SLOTS_PER_XCD * subtiles_per_slot, REDUCE_NUM_PROGRAMS):
+        compact_slot = work_id // subtiles_per_slot
+        subtile_id = work_id % subtiles_per_slot
+        wave_id = compact_slot // PROGRAMS_PER_XCD
+        program_in_wave = compact_slot % PROGRAMS_PER_XCD
+        raw_pid = (wave_id * PROGRAMS_PER_XCD + program_in_wave) * NUM_XCDS + cur_rank
+        tile_id = chiplet_transform_chunked(raw_pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
+        if tile_id < tl.cdiv(M, BLOCK_SIZE_M) * tl.cdiv(N, BLOCK_SIZE_N):
+            num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+            num_pid_in_group = GROUP_SIZE_M * num_pid_n
+            group_id = tile_id // num_pid_in_group
+            first_pid_m = group_id * GROUP_SIZE_M
+            group_size_m = tl.minimum(tl.cdiv(M, BLOCK_SIZE_M) - first_pid_m, GROUP_SIZE_M)
+            pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
+            pid_n = (tile_id % num_pid_in_group) // group_size_m
+            subtile_m = subtile_id // num_subtiles_n
+            subtile_n = subtile_id % num_subtiles_n
+            local_m = subtile_m * REDUCE_BLOCK_SIZE_M + local_m_offsets
+            local_n = subtile_n * REDUCE_BLOCK_SIZE_N + local_n_offsets
+            rm = pid_m * BLOCK_SIZE_M + local_m
+            rn = pid_n * BLOCK_SIZE_N + local_n
+            mask = (
+                (local_m[:, None] < BLOCK_SIZE_M)
+                & (local_n[None, :] < BLOCK_SIZE_N)
+                & (rm[:, None] < M)
+                & (rn[None, :] < N)
+            )
+            acc = tl.zeros((REDUCE_BLOCK_SIZE_M, REDUCE_BLOCK_SIZE_N), dtype=acc_dtype)
+            for source_rank in tl.static_range(0, world_size):
+                source_offset = (source_rank * SLOTS_PER_XCD + compact_slot) * tile_elements
+                src_ptr = compact_inbox + source_offset + local_m[:, None] * BLOCK_SIZE_N + local_n[None, :]
+                acc += tl.load(src_ptr, mask=mask, other=0.0).to(acc_dtype)
+
+            out_ptr = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+            result = acc.to(C.type.element_ty)
+            tl.store(out_ptr, result, mask=mask)
+            for destination_rank in tl.static_range(0, world_size):
+                if destination_rank != cur_rank:
+                    ctx.store(
+                        out_ptr,
+                        result,
+                        to_rank=destination_rank,
+                        mask=mask,
+                        hint=(1, REDUCE_BLOCK_SIZE_N),
+                    )
+
+    ctx.exit_barrier(
+        all_gather_local_arrivals,
+        all_gather_rank_arrivals,
+        REDUCE_NUM_PROGRAMS,
+        barrier_generation,
+    )
 
 
 @triton.jit()
@@ -397,6 +569,23 @@ def _ceil_div(value: int, divisor: int) -> int:
     return (value + divisor - 1) // divisor
 
 
+def _resolve_two_shot_variant(
+    variant: str,
+    M: int,
+    world_size: int,
+    block_size_m: int,
+    num_xcds: int,
+) -> str:
+    """Select compact ownership only when it eliminates meaningful duplicate GEMM work."""
+    if variant != "two_shot_auto":
+        return variant
+    if num_xcds != world_size or M > _COMPACT_AUTO_MAX_M:
+        return "two_shot"
+    rows_per_rank = _ceil_div(M, world_size)
+    duplicate_factor = _ceil_div(block_size_m, rows_per_rank)
+    return "two_shot_compact" if duplicate_factor >= 2 else "two_shot"
+
+
 def _partitioned_xcd_gemm_num_sms(launch: dict, world_size: int) -> int:
     cached = launch.get("gemm_num_sms")
     if cached is not None:
@@ -592,12 +781,37 @@ def matmul_all_reduce_preamble(
         c_dtype = dtype if out_dtype is None else out_dtype
         selector = _make_origami_selector(M, N, K, A, B, c_dtype)
     launch = _matmul_all_reduce_launch_params(M, N, K, selector, A.device, config.all_reduce_variant, dtype)
-    launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
-    publish_counts = _partitioned_xcd_publish_counts(M, N, world_size, launch)
-    launch["publish_tiles"] = publish_counts["tiles"]
-    launch["publish_programs"] = publish_counts["programs"]
-    launch["publish_programs_by_partition"] = publish_counts["programs_by_partition"]
-    if config.all_reduce_variant == "two_shot":
+    effective_variant = _resolve_two_shot_variant(
+        config.all_reduce_variant,
+        M,
+        world_size,
+        launch["block_size_m"],
+        launch["num_xcds"],
+    )
+    effective_config = replace(config, all_reduce_variant=effective_variant)
+    if effective_variant == "two_shot_compact":
+        if launch["num_xcds"] != world_size:
+            raise ValueError(
+                "two_shot_compact requires selector.num_sms (the XCD count) to equal world_size; "
+                f"got num_xcds={launch['num_xcds']}, world_size={world_size}"
+            )
+        compact_schedule = build_compact_xcd_schedule(
+            launch["num_tiles_m"],
+            launch["num_tiles_n"],
+            launch["group_size_m"],
+            launch["num_sms"],
+            world_size,
+        )
+        launch["gemm_num_sms"] = compact_schedule.launch_grid
+        launch["chunk_size"] = compact_schedule.chunk_size
+    else:
+        compact_schedule = None
+        launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
+        publish_counts = _partitioned_xcd_publish_counts(M, N, world_size, launch)
+        launch["publish_tiles"] = publish_counts["tiles"]
+        launch["publish_programs"] = publish_counts["programs"]
+        launch["publish_programs_by_partition"] = publish_counts["programs_by_partition"]
+    if effective_variant in ("two_shot", "two_shot_compact"):
         launch["reduce_num_sms"] = _default_reduce_num_sms()
     else:
         launch["reduce_num_sms"] = launch["num_sms"]
@@ -608,18 +822,25 @@ def matmul_all_reduce_preamble(
     workspace.shape = (M, N, K)
     workspace.dtype = dtype
     workspace.world_size = world_size
-    workspace.variant = config.all_reduce_variant
+    workspace.variant = effective_variant
     workspace.selector = selector
-    workspace.config = config
+    workspace.config = effective_config
     workspace.launch_params = launch
 
-    inbox_rows = M * world_size if config.all_reduce_variant == "one_shot" else M
-    workspace.a_inbox = shmem.zeros((inbox_rows, N), dtype=dtype)
-    workspace.locks = shmem.zeros((1,), dtype=torch.int32)
-
-    if config.all_reduce_variant == "two_shot":
+    if effective_variant == "two_shot_compact":
+        tile_elements = launch["block_size_m"] * launch["block_size_n"]
+        workspace.compact_xcd_schedule = compact_schedule
+        workspace.a_inbox = shmem.empty((world_size * compact_schedule.slots_per_xcd, tile_elements), dtype=dtype)
+        workspace.locks = shmem.zeros((world_size,), dtype=torch.int32)
         workspace.completion_signals = shmem.zeros((2,), dtype=torch.int32)
     else:
+        inbox_rows = M * world_size if effective_variant == "one_shot" else M
+        workspace.a_inbox = shmem.zeros((inbox_rows, N), dtype=dtype)
+        workspace.locks = shmem.zeros((1,), dtype=torch.int32)
+
+    if effective_variant == "two_shot":
+        workspace.completion_signals = shmem.zeros((2,), dtype=torch.int32)
+    elif effective_variant != "two_shot_compact":
         workspace.completion_signals = None
 
     workspace.generation = 0
@@ -645,6 +866,8 @@ def matmul_all_reduce(
     """
     if config is None:
         config = FusedConfig()
+    if config.all_reduce_variant == "two_shot_auto" and workspace is not None and workspace.config is not None:
+        config = workspace.config
 
     # Extract dimensions
     if A.ndim != 2 or B.ndim != 2:
@@ -683,6 +906,7 @@ def matmul_all_reduce(
             config=config,
             out_dtype=C.dtype,
         )
+        config = workspace.config
 
     launch = workspace.launch_params
     block_size_m = launch["block_size_m"]
@@ -698,7 +922,10 @@ def matmul_all_reduce(
     workspace.generation = generation
     gemm_num_sms = _partitioned_xcd_gemm_num_sms(launch, world_size)
     launch["gemm_num_sms"] = gemm_num_sms
-    if config.all_reduce_variant == "one_shot":
+    if config.all_reduce_variant == "two_shot_compact":
+        compact_schedule = workspace.compact_xcd_schedule
+        signals_per_generation = world_size * sum(map(len, compact_schedule.tiles_by_xcd_wave[rank]))
+    elif config.all_reduce_variant == "one_shot":
         if "publish_programs" not in launch:
             publish_counts = _partitioned_xcd_publish_counts(M, N, world_size, launch)
             launch["publish_tiles"] = publish_counts["tiles"]
@@ -727,42 +954,118 @@ def matmul_all_reduce(
     if launch["num_stages"] is not None:
         launch_kwargs["num_stages"] = launch["num_stages"]
 
-    iris_launch(
-        _matmul_all_reduce_gemm_publish_kernel,
-        (gemm_num_sms,),
-        A,
-        B,
-        workspace.a_inbox,
-        workspace.locks,
-        M,
-        N,
-        K,
-        stride_am,
-        stride_ak,
-        stride_bk,
-        stride_bn,
-        stride_inbox_m,
-        stride_inbox_n,
-        shmem.get_device_context(),
-        rank,
-        world_size,
-        block_size_m,
-        block_size_n,
-        block_size_k,
-        launch["group_size_m"],
-        gemm_num_sms,
-        launch["num_xcds"],
-        launch["chunk_size"],
-        even_k,
-        launch["allow_tf32"],
-        config.all_reduce_variant,
-        algorithm="matmul_all_reduce_gemm_publish",
-        rank=rank,
-        dtype=A.dtype,
-        **launch_kwargs,
-    )
+    if config.all_reduce_variant == "two_shot_compact":
+        compact_schedule = workspace.compact_xcd_schedule
+        iris_launch(
+            _matmul_all_reduce_compact_gemm_publish_kernel,
+            (compact_schedule.launch_grid,),
+            A,
+            B,
+            workspace.a_inbox,
+            workspace.locks,
+            M,
+            N,
+            K,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            shmem.get_device_context(),
+            rank,
+            world_size,
+            block_size_m,
+            block_size_n,
+            block_size_k,
+            launch["group_size_m"],
+            compact_schedule.launch_grid,
+            world_size,
+            compact_schedule.sdma_wave_size,
+            compact_schedule.programs_per_xcd,
+            compact_schedule.slots_per_xcd,
+            compact_schedule.chunk_size,
+            even_k,
+            launch["allow_tf32"],
+            algorithm="matmul_all_reduce_compact_gemm_publish",
+            rank=rank,
+            dtype=A.dtype,
+            **launch_kwargs,
+        )
+    else:
+        iris_launch(
+            _matmul_all_reduce_gemm_publish_kernel,
+            (gemm_num_sms,),
+            A,
+            B,
+            workspace.a_inbox,
+            workspace.locks,
+            M,
+            N,
+            K,
+            stride_am,
+            stride_ak,
+            stride_bk,
+            stride_bn,
+            stride_inbox_m,
+            stride_inbox_n,
+            shmem.get_device_context(),
+            rank,
+            world_size,
+            block_size_m,
+            block_size_n,
+            block_size_k,
+            launch["group_size_m"],
+            gemm_num_sms,
+            launch["num_xcds"],
+            launch["chunk_size"],
+            even_k,
+            launch["allow_tf32"],
+            config.all_reduce_variant,
+            algorithm="matmul_all_reduce_gemm_publish",
+            rank=rank,
+            dtype=A.dtype,
+            **launch_kwargs,
+        )
 
-    if config.all_reduce_variant == "one_shot":
+    if config.all_reduce_variant == "two_shot_compact":
+        compact_schedule = workspace.compact_xcd_schedule
+        reduce_block_size_m = min(_COMPACT_REDUCE_BLOCK_SIZE_M, block_size_m)
+        reduce_block_size_n = min(_COMPACT_REDUCE_BLOCK_SIZE_N, block_size_n)
+        subtiles_per_slot = _ceil_div(block_size_m, reduce_block_size_m) * _ceil_div(block_size_n, reduce_block_size_n)
+        reduce_grid = (min(_COMPACT_REDUCE_NUM_SMS, compact_schedule.slots_per_xcd * subtiles_per_slot),)
+        iris_launch(
+            _matmul_all_reduce_compact_reduce_kernel,
+            reduce_grid,
+            C,
+            workspace.a_inbox,
+            workspace.locks,
+            workspace.completion_signals,
+            workspace.completion_signals[1:],
+            expected_publish_count,
+            generation,
+            M,
+            N,
+            stride_cm,
+            stride_cn,
+            shmem.get_device_context(),
+            cur_rank=rank,
+            world_size=world_size,
+            BLOCK_SIZE_M=block_size_m,
+            BLOCK_SIZE_N=block_size_n,
+            GROUP_SIZE_M=launch["group_size_m"],
+            NUM_SMS=compact_schedule.launch_grid,
+            PROGRAMS_PER_XCD=compact_schedule.programs_per_xcd,
+            SLOTS_PER_XCD=compact_schedule.slots_per_xcd,
+            NUM_XCDS=world_size,
+            CHUNK_SIZE=compact_schedule.chunk_size,
+            REDUCE_NUM_PROGRAMS=reduce_grid[0],
+            REDUCE_BLOCK_SIZE_M=reduce_block_size_m,
+            REDUCE_BLOCK_SIZE_N=reduce_block_size_n,
+            algorithm="matmul_all_reduce_compact_reduce",
+            rank=rank,
+            dtype=A.dtype,
+            num_warps=4,
+        )
+    elif config.all_reduce_variant == "one_shot":
         reduce_block_size_m = 1
         reduce_block_size_n = 512
         num_sms = max(launch["reduce_num_sms"], launch["num_sms"] * 3)

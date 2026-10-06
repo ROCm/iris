@@ -111,7 +111,7 @@ def tritonblas_rccl_matmul_all_reduce(state, ctx):
 @bench.axis("N", [3584])
 @bench.axis("K", [8192])
 @bench.axis("dtype", [torch.float16])
-@bench.axis("variant", ["one_shot", "two_shot"])
+@bench.axis("variant", ["one_shot", "two_shot", "two_shot_auto", "two_shot_compact"])
 def matmul_all_reduce(state, ctx):
     """Fused GEMM + all-reduce with configurable variant."""
     M, N, K = state["M"], state["N"], state["K"]
@@ -121,10 +121,7 @@ def matmul_all_reduce(state, ctx):
     rank = ctx.get_rank()
 
     if variant == "one_shot" and world_size * M * N > _MAX_ONE_SHOT_INBOX_ELEMENTS:
-        state.skip(
-            "one_shot requires world_size * M * N <= 2**31 elements "
-            f"(got {world_size * M * N})"
-        )
+        state.skip(f"one_shot requires world_size * M * N <= 2**31 elements (got {world_size * M * N})")
 
     torch.manual_seed(123 + rank)
     A = ctx.randn((M, K), dtype=dtype)

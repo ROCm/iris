@@ -53,6 +53,8 @@ def _heap_size() -> int:
     [
         "one_shot",
         "two_shot",
+        "two_shot_auto",
+        "two_shot_compact",
     ],
 )
 def test_matmul_all_reduce(dtype, atol, rtol, M, N, K, variant):
@@ -64,6 +66,8 @@ def test_matmul_all_reduce(dtype, atol, rtol, M, N, K, variant):
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
+    if variant == "two_shot_compact" and world_size != 8:
+        pytest.skip("two_shot_compact requires the 8-XCD selector to match an 8-rank communicator")
 
     # Match the benchmark inputs: per-rank A, replicated B.
     torch.manual_seed(123 + rank)
@@ -92,12 +96,18 @@ def test_matmul_all_reduce(dtype, atol, rtol, M, N, K, variant):
     config = FusedConfig(all_reduce_variant=variant)
 
     # Use high-level API
-    ops.matmul_all_reduce(shmem, iris_C, iris_A, iris_B, config=config)
+    workspace = ops.matmul_all_reduce(shmem, iris_C, iris_A, iris_B, config=config)
 
     torch.cuda.synchronize()
     shmem.barrier()
 
     max_diff = torch.abs(iris_C - pytorch_output).max().item()
+
+    if variant == "two_shot_auto":
+        rows_per_rank = M // world_size
+        duplicate_factor = (workspace.launch_params["block_size_m"] + rows_per_rank - 1) // rows_per_rank
+        expected_variant = "two_shot_compact" if M <= 512 and duplicate_factor >= 2 else "two_shot"
+        assert workspace.variant == expected_variant
 
     assert torch.allclose(iris_C, pytorch_output, atol=atol, rtol=rtol), (
         f"Max difference: {max_diff}, expected within atol={atol}, rtol={rtol}\n"

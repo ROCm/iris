@@ -74,6 +74,9 @@ class FusedWorkspace:
     max_rects_per_owner_wave: int = 0
     num_transfers: int = 0
 
+    # Compact XCD-local two-shot metadata.
+    compact_xcd_schedule: Optional[object] = None
+
     prepared: bool = False
 
     def matches(
@@ -135,6 +138,7 @@ class FusedWorkspace:
         self.batch_tiles_per_xcd = 0
         self.max_rects_per_owner_wave = 0
         self.num_transfers = 0
+        self.compact_xcd_schedule = None
         self.selector = None
         self.config = None
         self.launch_params = None

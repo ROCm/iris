@@ -38,24 +38,21 @@ def _register_copy_engine(state, ctx, *, variant: str, prepost: bool = False) ->
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
 
-    if variant == "two_shot_gpu_init" and prepost:
-        state.skip("two_shot_gpu_init posts SDMA transfers from the GEMM kernel; host prepost is not used")
+    if variant in ("two_shot_gpu_init", "two_shot_gpu_init_compact") and prepost:
+        state.skip(f"{variant} posts SDMA transfers from the GEMM kernel; host prepost is not used")
 
     device = torch.device(f"cuda:{torch.cuda.current_device()}")
-    selector = _make_selector(M, N, K, dtype, device)
+    # Don't create selector here - let preamble create partition-aware selector
+    # selector = _make_selector(M, N, K, dtype, device)
 
     if variant == "one_shot" and world_size * M * N > _MAX_ONE_SHOT_INBOX_ELEMENTS:
-        state.skip(
-            "one_shot requires world_size * M * N <= 2**31 elements "
-            f"(got {world_size * M * N})"
-        )
+        state.skip(f"one_shot requires world_size * M * N <= 2**31 elements (got {world_size * M * N})")
 
     torch.manual_seed(123 + rank)
     A = ctx.randn((M, K), dtype=dtype)
     torch.manual_seed(456)
     B = ctx.randn((K, N), dtype=dtype)
     C = ctx.zeros((M, N), dtype=dtype)
-
 
     config = FusedConfig(all_reduce_variant=variant)
     workspace = matmul_all_reduce_copy_engine_preamble(
@@ -64,7 +61,7 @@ def _register_copy_engine(state, ctx, *, variant: str, prepost: bool = False) ->
         A,
         B,
         config=config,
-        selector=selector,
+        # selector=selector,  # Let preamble create partition-aware selector
     )
 
     prepost_transfers = prepost
@@ -116,7 +113,7 @@ def _register_copy_engine(state, ctx, *, variant: str, prepost: bool = False) ->
     state.add_counter("group_size_m", launch["group_size_m"])
     state.add_counter("num_xcds", launch["num_xcds"])
     state.add_counter("chunk_size", launch["chunk_size"])
-    state.add_counter("grid_size", launch["num_sms"])
+    state.add_counter("grid_size", launch.get("gemm_num_sms", launch["num_sms"]))
     state.add_counter("total_tiles", launch["total_tiles"])
     state.add_counter("num_stages", launch["num_stages"] or 0)
     state.add_counter("aux_rows", workspace.aux_buffer.shape[0] if workspace.aux_buffer is not None else 0)
@@ -141,7 +138,7 @@ def _register_copy_engine(state, ctx, *, variant: str, prepost: bool = False) ->
 @bench.axis("N", [3584])
 @bench.axis("K", [8192])
 @bench.axis("dtype", [torch.float16])
-@bench.axis("variant", ["one_shot", "two_shot", "two_shot_gpu_init"])
+@bench.axis("variant", ["one_shot", "two_shot", "two_shot_row_major", "two_shot_gpu_init", "two_shot_gpu_init_compact"])
 @bench.axis("prepost", [False, True])
 def matmul_all_reduce_copy_engine(state, ctx):
     """Kernel-based matmul_all_reduce with one_shot/two_shot variants and prepost option."""
