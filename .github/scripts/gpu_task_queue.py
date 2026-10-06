@@ -69,6 +69,7 @@ class Task:
         self.proc = None
         self.mask = 0
         self.gpus = ""
+        self.tmpdir = None
         self.workdir = None
         self.logpath = None
         self.queued_at = time.time()
@@ -211,10 +212,10 @@ class Queue:
         # Private copy of the checkout: editable and pip installs write build
         # output into the source tree, which concurrent tasks would trample.
         # .git comes along because setuptools-scm needs it.
-        task.workdir = tempfile.mkdtemp(prefix="iris-task-", dir=os.environ.get("RUNNER_TEMP"))
-        shutil.rmtree(task.workdir)
+        task.tmpdir = tempfile.mkdtemp(prefix="iris-task-", dir=os.environ.get("RUNNER_TEMP"))
+        task.workdir = os.path.join(task.tmpdir, "src")
+        task.logpath = os.path.join(task.tmpdir, "task.log")
         shutil.copytree(WORKSPACE, task.workdir, symlinks=True, ignore=shutil.ignore_patterns("iris_overlay_*"))
-        task.logpath = task.workdir + ".log"
         env = dict(os.environ, GPU_DEVICES=task.gpus)
         task.started_at = time.time()
         log("start {} on GPUs {} (waited {:.0f}s)".format(task.name, task.gpus, task.started_at - task.queued_at))
@@ -239,7 +240,7 @@ class Queue:
             t.ended_at = time.time()
             self.done.append(t)
             self.report(t)
-            shutil.rmtree(t.workdir, ignore_errors=True)
+            shutil.rmtree(t.tmpdir, ignore_errors=True)
 
     def report(self, t):
         mark = "✅" if t.rc == 0 else "❌"
@@ -249,7 +250,6 @@ class Queue:
         try:
             with open(t.logpath, errors="replace") as f:
                 shutil.copyfileobj(f, sys.stdout)
-            os.remove(t.logpath)
         except OSError as e:
             print("(log unavailable: {})".format(e))
         print("::endgroup::", flush=True)
@@ -289,8 +289,8 @@ class Queue:
             t.ended_at = time.time()
             self.report(t)
         for t in stopped:
-            if t.workdir:
-                shutil.rmtree(t.workdir, ignore_errors=True)
+            if t.tmpdir:
+                shutil.rmtree(t.tmpdir, ignore_errors=True)
 
     def run(self):
         last_status = time.time()
