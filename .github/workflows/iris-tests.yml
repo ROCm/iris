@@ -5,10 +5,15 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+    # closed: the run below joins this PR's concurrency group, which cancels the
+    # PR's in-flight run instead of letting it hold the GPU runners after merge.
+    # Its jobs are skipped.
+    types: [opened, synchronize, reopened, closed]
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  # PR number, not head branch: two forks' "patch-1" branches must not cancel each other.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -21,6 +26,7 @@ jobs:
   test-git:
     name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, git install)
     runs-on: [linux-mi350-8gpu-iris]
+    if: github.event.action != 'closed'
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -246,6 +252,7 @@ jobs:
   test-new-examples:
     name: New examples (${{ matrix.num_ranks }} ranks, ${{ matrix.install_method }})
     runs-on: [linux-mi350-8gpu-iris]
+    if: github.event.action != 'closed'
     timeout-minutes: 180
     permissions:
       contents: read
