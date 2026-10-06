@@ -210,6 +210,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
         kk = consumer_kernel[grid](
             destination_buffer, flags, n_elements, consumer_rank, BLOCK_SIZE, shmem.get_heap_bases()
         )
+
     shmem.barrier()
     shmem.info(f"Rank {cur_rank} has finished sending/receiving data.")
     shmem.info("Validating output...")

@@ -58,9 +58,6 @@ def parse_args():
         help="Number of SMs for persistent GEMM algorithm (default: auto-detected)",
     )
     parser.add_argument("-r", "--num_ranks", type=int, default=2, help="Number of ranks/processes")
-    parser.add_argument(
-        "-c", "--use_copy_engine", action="store_true", help="Use copy engine for device-to-device copies"
-    )
 
     return vars(parser.parse_args())
 
@@ -127,15 +124,11 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     total_blocks_N = triton.cdiv(args["n"], args["BLK_N"])
     total_tiles = total_blocks_M * total_blocks_N
 
-    # Get copy engine context
-    copy_engine_ctx = shmem.get_copy_engine_ctx()
-
     bias = None
 
     gemm_stream = torch.cuda.Stream()
 
     json_writer.add_field("gemm_sms", args["gemm_sms"])
-    json_writer.add_field("total_tiles", total_tiles)
 
     kernel_timing = {
         "gemm": {
@@ -149,16 +142,10 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     # Allocate Timestamps
     timestamps = Timestamps(num_tiles=total_tiles)
 
-    # Allocate flags for synchronization (one flag per SM per rank)
-    flags = shmem.zeros((args["gemm_sms"] * world_size,), device="cuda", dtype=torch.int32)
-
     def run_experiment():
         nonlocal local_C
         nonlocal global_C
         nonlocal kernel_timing
-
-        # Reset flags to zero before each experiment
-        flags.zero_()
 
         shmem.barrier()
 
@@ -176,7 +163,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                 local_C,
                 global_C,
                 bias,
-                flags,
                 rank,
                 world_size,
                 args["gemm_sms"],
@@ -188,8 +174,6 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
                 shmem.get_heap_bases(),
                 "gfx942",
                 args["trace_tiles"],
-                args["use_copy_engine"],
-                copy_engine_ctx,
                 timestamps.mm_begin_timestamp,
                 timestamps.mm_end_timestamp,
             )
