@@ -717,7 +717,7 @@ class SymmetricHeap:
                 self._peer_va_ranges = {}
 
             if peer not in self._peer_va_ranges:
-                peer_va_base = mem_address_reserve(self.heap_size, self.allocator.granularity, 0)
+                peer_va_base = mem_address_reserve(self._peer_va_size(), self.allocator.granularity, 0)
                 self._peer_va_ranges[peer] = peer_va_base
             else:
                 peer_va_base = self._peer_va_ranges[peer]
