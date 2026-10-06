@@ -2,48 +2,68 @@ name: Cancel CI for closed PRs
 
 # A PR's concurrency group only cancels its in-flight runs when a newer run of
 # the same PR starts. Merging or closing starts none, so without this the runs
-# keep holding the GPU runners.
+# keep holding the GPU runners until they finish.
 #
-# pull_request_target runs from main and is never held for fork-PR approval, so
-# this also covers first-time contributors. It gets a write token even for fork
-# PRs: it must never check out or run PR code. It only reads the event payload.
+# Why a sweep rather than reacting to the close event:
+# - pull_request: closed sets GITHUB_REF to refs/heads/main on merge, so the
+#   workflows' cancel-in-progress is false in exactly the case that matters,
+#   and a fork contributor's run of it waits for maintainer approval.
+# - pull_request_target is never held for approval, but it is a HIGH
+#   dangerous-triggers finding in the security scan.
+# A scheduled run comes from main, is never held for approval, and needs no
+# exception. The cost is up to one interval before a closed PR's runs stop.
 on:
-  pull_request_target:
-    types: [closed]
+  schedule:
+    - cron: "7-59/10 * * * *"
+  workflow_dispatch:
 
 permissions:
   actions: write
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   cancel:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Cancel the PR's queued and running workflow runs
+      - name: Cancel in-flight runs of closed PRs
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          # Older commits' runs were already cancelled by concurrency when the
-          # next commit was pushed, so the head commit's runs are all that's left.
-          # Branch and repo also have to match: two PRs can share a head commit.
-          runs=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=100" \
-            --jq '.workflow_runs[]
-                  | select(.status != "completed"
-                           and .head_branch == env.HEAD_REF
-                           and .head_repository.full_name == env.HEAD_REPO)
-                  | "\(.id)\t\(.name)"')
-          if [ -z "$runs" ]; then
-            echo "No in-flight runs for $HEAD_REPO:$HEAD_REF@$HEAD_SHA"
+          set -euo pipefail
+          inflight=$(for status in queued in_progress waiting pending; do
+            gh api --paginate "repos/$REPO/actions/runs?event=pull_request&status=$status&per_page=100" \
+              --jq '.workflow_runs[] | [.id, .name, .head_repository.full_name, .head_branch, .head_sha] | @tsv'
+          done)
+          if [ -z "$inflight" ]; then
+            echo "No in-flight PR runs"
             exit 0
           fi
-          while IFS=$'\t' read -r id name; do
+
+          # Branch names come from PR authors: they are only ever data here,
+          # URL-encoded for the query and compared, never evaluated.
+          declare -A pr_state
+          while IFS=$'\t' read -r id name head_repo branch sha; do
+            key="$head_repo:$branch:$sha"
+            if [ -z "${pr_state[$key]+set}" ]; then
+              head=$(printf '%s:%s' "${head_repo%%/*}" "$branch" | jq -sRr @uri)
+              # Fork runs carry no PR number, so find the PR by its head branch.
+              # Only a PR whose head is this commit counts, and any open one wins.
+              pr_state[$key]=$(SHA="$sha" gh api "repos/$REPO/pulls?state=all&head=$head&per_page=100" \
+                --jq '[.[] | select(.head.sha == env.SHA) | .state] | if index("open") then "open" elif length > 0 then "closed" else "none" end')
+            fi
+            if [ "${pr_state[$key]}" != "closed" ]; then
+              continue
+            fi
             # A run can finish between listing and cancelling; that's fine.
             if gh api -X POST "repos/$REPO/actions/runs/$id/cancel" > /dev/null 2>&1; then
-              echo "Cancelled $name ($id)"
+              echo "Cancelled $name ($id) from closed PR $head_repo:$branch"
             else
               echo "Could not cancel $name ($id); it has probably just finished"
             fi
-          done <<< "$runs"
+          done <<< "$inflight"
