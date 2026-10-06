@@ -32,6 +32,7 @@ from tritonblas.matmul import create_counter_config
 from tritonblas.matmul import _make_matmul_selector
 from .tritonblas_launch_wave_schedule import build_launch_wave_plan
 
+
 @triton.jit()
 def wait_cnt():
     tl.inline_asm_elementwise("s_waitcnt vmcnt(0)", "=r", [], dtype=tl.int32, is_pure=False, pack=1)

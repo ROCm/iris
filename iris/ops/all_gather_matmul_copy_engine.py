@@ -32,6 +32,7 @@ from tritonblas.kernels.stages import (
 from iris.host.tracing.events import TraceEvent
 from .workspace import FusedWorkspace
 
+
 @triton.jit
 def _batch_poster_kernel(
     A_sharded,
@@ -759,7 +760,7 @@ def all_gather_matmul_copy_engine(
                     # batch once the copy for this destination rank has completed.
                     hip.stream_synchronize(hip_copy_stream)
                     # Use iris put method for atomic signal
-                    shmem.put(torch.tensor([1], dtype=torch.int32, device='cuda'), dst_rank, flag_addr_remote)
+                    shmem.put(torch.tensor([1], dtype=torch.int32, device="cuda"), dst_rank, flag_addr_remote)
                 else:
                     # Use shmem.put_tile method with signal
                     shmem.put_tile(
