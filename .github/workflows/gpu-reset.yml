@@ -25,6 +25,7 @@ jobs:
           echo "=== Before reset ==="
           echo "Bitmap: $(cat "$STATE_FILE" 2>/dev/null || echo 'file not found')"
           echo "0" > "$STATE_FILE"
+          rm -f "${STATE_FILE}.reserve"
           echo "=== After reset ==="
           echo "Bitmap: $(cat "$STATE_FILE")"
           echo "GPU allocator reset complete. All GPUs are now free."
