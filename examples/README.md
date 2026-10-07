@@ -30,6 +30,7 @@ This directory contains various algorithm implementations for distributed comput
 - [`16_all_reduce_ring_based`](16_all_reduce_ring_based): Ring-based all-reduce operation
 - [`20_gemm_all_scatter_independent`](20_gemm_all_scatter_independent): Independent GEMM and all-scatter operations with support for CSV input configurations
 - [`21_gemm_one_shot_all_reduce_independent`](21_gemm_one_shot_all_reduce_independent): Independent GEMM and all-reduce operations with support for CSV input configurations and selective execution
+- [`33_jacobi`](33_jacobi): Multi-GPU Jacobi iteration with Iris halo exchange and convergence reduction
 
 ### Collective Communication Library
 - [`ccl`](ccl): iris-ccl collective communication operations (all-to-all, etc.)
