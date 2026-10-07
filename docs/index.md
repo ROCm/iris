@@ -209,6 +209,7 @@ For other setup methods, see the [Installation Guide](getting-started/installati
 - **[Programming Model](conceptual/programming-model.md)**: How Iris works
 - **[Fine-grained Overlap](conceptual/finegrained-overlap.md)**: GEMM & communication overlap
 - **[Taxonomy](conceptual/taxonomy.md)**: Multi-GPU programming patterns
+- **[Triggered SDMA](conceptual/triggered-sdma.md)**: Copy-engine transfers released by kernels
 
 ### 📖 **Reference**
 - **[Talks and Papers](reference/talks-and-papers.md)**: Publications, conference talks, and videos
