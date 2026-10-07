@@ -10,6 +10,7 @@ subtrees:
     - file: conceptual/programming-model.md
     - file: conceptual/finegrained-overlap.md
     - file: conceptual/taxonomy.md
+    - file: conceptual/triggered-sdma.md
   - caption: Reference
     entries:
     - file: reference/talks-and-papers.md
@@ -18,6 +19,7 @@ subtrees:
       - file: reference/host/class.md
       - file: reference/host/tensor-creation.md
       - file: reference/host/ccl.md
+      - file: reference/host/triggered.md
       - file: reference/triton/overview.md
         entries:
         - file: reference/triton/device-functions.md
