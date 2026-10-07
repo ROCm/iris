@@ -268,14 +268,17 @@ def _copy_engine_atomic_kernel(
     )
 
 
-def test_copy_engine_atomic_add():
+# For int64, adding to 0xFFFFFFFF carries into the upper dword only if the SDMA add is 64-bit.
+@pytest.mark.parametrize("dtype, initial", [(torch.int32, 0), (torch.int64, 0xFFFFFFFF)])
+def test_copy_engine_atomic_add(dtype, initial):
     shmem = iris.iris(1 << 20)
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
     remote_rank = 1 - rank
 
-    flag = shmem.zeros((1,), device="cuda", dtype=torch.int32)
+    flag = shmem.full((1,), initial, device="cuda", dtype=dtype)
+    shmem.barrier()
 
     if rank == 0:
         _copy_engine_atomic_kernel[(1,)](
@@ -290,7 +293,7 @@ def test_copy_engine_atomic_add():
     shmem.barrier()
 
     if rank == 1:
-        assert flag.item() == 5
+        assert flag.item() == initial + 5
 
     shmem.barrier()
     del shmem
@@ -728,6 +731,59 @@ def test_copy_engine_zero_size():
     # Destination should still be zeros
     if rank == 1:
         assert torch.all(dst == 0).item()
+
+    shmem.barrier()
+    del shmem
+
+
+def test_copy_engine_device_zero_size():
+    """Test device-side copy engine puts with fully-masked tiles (should be no-op)."""
+    shmem = iris.iris(1 << 20)
+    _require_two_ranks(shmem)
+
+    rank = shmem.get_rank()
+    remote_rank = 1 - rank
+
+    src = _allocate_symmetric_range(shmem, 128, torch.float32)
+    dst = shmem.zeros(128, device="cuda", dtype=torch.float32)
+    flag = shmem.zeros(1, device="cuda", dtype=torch.int32)
+
+    if rank == 0:
+        # Empty 1D put, followed by a signal through the same queue
+        _copy_engine_linear_kernel[(1,)](
+            src,
+            dst,
+            flag,
+            0,
+            rank,
+            remote_rank,
+            shmem.get_heap_bases(),
+            shmem.get_copy_engine_ctx(),
+            BLOCK_SIZE=128,
+        )
+        # Empty 2D put
+        _copy_engine_2d_kernel[(1, 1)](
+            src.view(8, 16),
+            dst.view(8, 16),
+            0,
+            16,
+            16,
+            16,
+            rank,
+            remote_rank,
+            shmem.get_heap_bases(),
+            shmem.get_copy_engine_ctx(),
+            BLOCK_M=8,
+            BLOCK_N=16,
+        )
+        torch.cuda.synchronize()
+
+    shmem.barrier()
+
+    # Destination should still be zeros, and the signal after the empty put should have arrived
+    if rank == 1:
+        assert torch.all(dst == 0).item()
+        assert flag.item() == 1
 
     shmem.barrier()
     del shmem
