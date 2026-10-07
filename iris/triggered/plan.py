@@ -97,7 +97,7 @@ def ledger(ctx):
 
 def _digest(buffer_bytes, schedules):
     text = repr((buffer_bytes, schedules)).encode()
-    return np.frombuffer(hashlib.sha1(text).digest()[:8], dtype=np.int64).copy()
+    return np.frombuffer(hashlib.sha256(text).digest()[:8], dtype=np.int64).copy()
 
 
 def view_words(rank, world_size, gates_ptr, schedules):
