@@ -3,21 +3,29 @@
 
 name: Iris CCL Benchmark (Iris vs RCCL)
 
-# Deliberately not on pull_request: this is a measurement job, not a gate. It
-# sweeps shapes across three collectives twice over (Iris and RCCL) and takes
-# long enough that running it per commit would crowd out the test jobs on a
-# shared 8-GPU pool.
+# Deliberately not on pull_request: this is a measurement job, not a gate. By
+# default it sweeps the full grid -- three collectives x 2/4/8 ranks x 16 shapes
+# (2 MiB to 1 GiB) x fp16/bf16/fp8, for Iris and RCCL -- and holds all 8 GPUs
+# while it does, which per commit would crowd out the test jobs.
 on:
   workflow_dispatch:
     inputs:
       num_ranks:
-        description: "Ranks to benchmark"
+        description: "Comma-separated rank counts"
         required: false
-        default: "8"
-      sizes:
-        description: "Comma-separated M=N values, e.g. 1024,4096,16384"
+        default: "2,4,8"
+      dtypes:
+        description: "Comma-separated dtypes (fp8 is Iris-only; RCCL has no fp8)"
         required: false
-        default: "1024,4096,16384"
+        default: "fp16,bf16,fp8"
+      m_values:
+        description: "Comma-separated M values (rows, i.e. tokens)"
+        required: false
+        default: "1024,4096,16384,65536"
+      n_values:
+        description: "Comma-separated N values (columns, i.e. hidden size)"
+        required: false
+        default: "1024,2048,4096,8192"
       n_repeat:
         description: "Timed iterations per point"
         required: false
@@ -38,16 +46,18 @@ env:
 jobs:
   ccl-benchmark:
     name: CCL benchmark (Iris vs RCCL)
-    runs-on: [linux-mi325-8gpu-ossci-rad]
-    timeout-minutes: 180
+    runs-on: [linux-mi350-8gpu-iris]
+    timeout-minutes: 360
 
     # Dispatch inputs are bound to environment variables rather than
     # interpolated into run: blocks. ${{ }} expansion happens before the shell
     # sees the script, so interpolating user-controlled input directly is a
     # command-injection vector.
     env:
-      NUM_RANKS: ${{ github.event.inputs.num_ranks || '8' }}
-      SIZES: ${{ github.event.inputs.sizes || '1024,4096,16384' }}
+      NUM_RANKS: ${{ github.event.inputs.num_ranks || '2,4,8' }}
+      DTYPES: ${{ github.event.inputs.dtypes || 'fp16,bf16,fp8' }}
+      M_VALUES: ${{ github.event.inputs.m_values || '1024,4096,16384,65536' }}
+      N_VALUES: ${{ github.event.inputs.n_values || '1024,2048,4096,8192' }}
       N_REPEAT: ${{ github.event.inputs.n_repeat || '50' }}
 
     steps:
@@ -75,14 +85,18 @@ jobs:
 
       - name: Acquire GPUs
         run: |
-          bash .github/scripts/acquire_gpus.sh "$NUM_RANKS"
+          # Enough GPUs for the largest rank count; smaller ones run inside it.
+          MAX_RANKS=$(echo "$NUM_RANKS" | tr ',' '\n' | sort -n | tail -1)
+          bash .github/scripts/acquire_gpus.sh "$MAX_RANKS"
 
       - name: Run the sweep
         run: |
           set -e
           bash .github/scripts/run_ccl_benchmark.sh \
             "$NUM_RANKS" \
-            "$SIZES" \
+            "$DTYPES" \
+            "$M_VALUES" \
+            "$N_VALUES" \
             "$N_REPEAT"
 
       - name: Publish the comparison table
@@ -90,9 +104,10 @@ jobs:
         run: |
           if [ -f ccl_results/summary.md ]; then
             {
-              echo "## Iris vs RCCL — ${NUM_RANKS} ranks"
+              echo "## Iris vs RCCL — ranks ${NUM_RANKS}, ${DTYPES}"
               echo ""
-              echo "Commit \`${GITHUB_SHA::8}\`. Ratio above 1.00x means Iris is faster."
+              echo "Commit \`${GITHUB_SHA::8}\`. Speedup is RCCL latency / Iris latency: above 1.00x means Iris is faster."
+              echo "One image per collective and dtype is in the run's artifact."
               echo ""
               cat ccl_results/summary.md
             } >> "$GITHUB_STEP_SUMMARY"
