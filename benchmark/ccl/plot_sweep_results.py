@@ -19,7 +19,7 @@ count and these panels, all against message size:
 
 * bus bandwidth (GB/s), semilog-x
 * latency (ms), log-log
-* speedup, RCCL latency / Iris latency, log-log -- above 1.0 means Iris wins.
+* speedup, RCCL latency / Iris latency, semilog-x -- above 1.0 means Iris wins.
   Absent for fp8, which has no RCCL baseline.
 
 A Markdown table goes to stdout or --markdown_out, so CI can drop it into a job
@@ -43,10 +43,6 @@ import matplotlib
 matplotlib.use("Agg")  # headless: CI has no display
 
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.ticker import FuncFormatter  # noqa: E402
-
-# Ratios hover around 1, where log axes default to labels like 9x10^-1.
-_PLAIN = FuncFormatter(lambda v, _: f"{v:g}")
 
 IRIS_COLOR = "#2E86AB"
 RCCL_COLOR = "#A23B72"
@@ -322,9 +318,9 @@ def plot_one(op, dtype, by_ranks, args):
             elif not _plot_speedup(ax, series):
                 ax.set_visible(False)
             else:
-                _decorate(ax, "Speedup (RCCL / Iris latency)\nabove 1 means Iris wins", True, f"{title} — speedup")
-                ax.yaxis.set_major_formatter(_PLAIN)
-                ax.yaxis.set_minor_formatter(_PLAIN)
+                # Linear: ratios sit within a decade of 1, where a log axis only
+                # labels its minor ticks, as 9x10^-1 and the like.
+                _decorate(ax, "Speedup (RCCL / Iris latency)\nabove 1 means Iris wins", False, f"{title} — speedup")
 
     top = 1.0 - (0.82 if caption else 0.55) / fig_height
     fig.tight_layout(rect=(0, 0, 1, top))

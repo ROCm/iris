@@ -23,9 +23,10 @@ N_REPEAT=${5:-50}
 
 # These are spliced into the container command below, so only allow the
 # characters the values can legitimately contain.
-for v in "$RANKS" "$M_VALUES" "$N_VALUES" "$N_REPEAT"; do
+for v in "$RANKS" "$M_VALUES" "$N_VALUES"; do
     [[ "$v" =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "[ERROR] expected comma-separated integers, got '$v'"; exit 1; }
 done
+[[ "$N_REPEAT" =~ ^[0-9]+$ ]] || { echo "[ERROR] n_repeat must be one integer, got '$N_REPEAT'"; exit 1; }
 [[ "$DTYPES" =~ ^[a-z0-9]+(,[a-z0-9]+)*$ ]] || { echo "[ERROR] bad dtype list '$DTYPES'"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

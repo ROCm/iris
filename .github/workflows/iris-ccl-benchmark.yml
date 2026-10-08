@@ -86,6 +86,11 @@ jobs:
       - name: Acquire GPUs
         run: |
           # Enough GPUs for the largest rank count; smaller ones run inside it.
+          # Validate first: this runs before run_ccl_benchmark.sh checks inputs.
+          if ! [[ "$NUM_RANKS" =~ ^[1-8](,[1-8])*$ ]]; then
+            echo "[ERROR] num_ranks must be comma-separated integers 1-8, got '$NUM_RANKS'"
+            exit 1
+          fi
           MAX_RANKS=$(echo "$NUM_RANKS" | tr ',' '\n' | sort -n | tail -1)
           bash .github/scripts/acquire_gpus.sh "$MAX_RANKS"
 

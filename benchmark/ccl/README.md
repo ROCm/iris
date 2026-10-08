@@ -54,7 +54,7 @@ message size:
 |---|---|
 | bandwidth | bus bandwidth (GB/s), semilog-x |
 | latency | latency (ms), log-log |
-| speedup | RCCL latency / Iris latency, log-log; above the 1.0 line means Iris wins |
+| speedup | RCCL latency / Iris latency, semilog-x; above the 1.0 line means Iris wins |
 
 The table uses the same speedup definition, one section per collective.
 
