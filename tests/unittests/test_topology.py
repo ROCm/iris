@@ -627,6 +627,162 @@ class TestVendorLibraryLifecycle:
         assert topo.nodes["test-host"].num_gpus == 1
 
 
+def _block_vendor_imports(monkeypatch):
+    real_import = builtins.__import__
+
+    def blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {"pynvml", "amdsmi"}:
+            raise ImportError(f"{name} unavailable")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+
+
+def _fake_torch_pci(monkeypatch, bus_by_device):
+    def props(device_idx):
+        return types.SimpleNamespace(pci_domain_id=1, pci_bus_id=bus_by_device[device_idx], pci_device_id=0)
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", props)
+
+
+class TestAmdPciBusIdFallback:
+    def test_falls_back_to_torch_without_amdsmi_bindings(self, monkeypatch):
+        _block_vendor_imports(monkeypatch)
+        _fake_torch_pci(monkeypatch, {0: 0x01, 1: 0x21})
+
+        assert topology._get_pci_bus_id(0, "amd") == "0001:01:00.0"
+        assert topology._get_pci_bus_id(1, "amd") == "0001:21:00.0"
+
+    def test_amdsmi_bindings_still_preferred(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "amdsmi", _make_fake_amdsmi())
+        _fake_torch_pci(monkeypatch, {1: 0x99})
+
+        assert topology._get_pci_bus_id(1, "amd") == "0000:42:00.0"
+
+    def test_unknown_records_reason_without_warning(self, monkeypatch, caplog):
+        _block_vendor_imports(monkeypatch)
+
+        def no_props(device_idx):
+            raise RuntimeError("no device")
+
+        monkeypatch.setattr(torch.cuda, "get_device_properties", no_props)
+        monkeypatch.setattr(topology, "_fabric_failure", None)
+        caplog.set_level(logging.WARNING, logger="iris.topology")
+
+        assert topology._get_pci_bus_id(0, "amd") == "unknown"
+        assert "no PCI bus ID for GPU 0" in topology.fabric_failure_reason()
+        assert not caplog.records
+
+
+class TestAmdFabricFailureReason:
+    """Each way AMD fabric discovery comes back empty leaves a reason for the multi-host error."""
+
+    @staticmethod
+    def _fake_amdsmi(monkeypatch, init=0, handle=0, fabric=0, ppod=b"\xab" * 16, vpod=9):
+        class call:
+            def __init__(self, fn):
+                self.fn = fn
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, *args):
+                return self.fn(*args)
+
+        def get_handle(bdf, processor_ptr):
+            processor_ptr._obj.value = 0xABCD
+            return handle
+
+        def get_fabric(processor, info_ptr):
+            v1 = info_ptr._obj.fabric_info.fabric_version.v1
+            for idx, value in enumerate(ppod):
+                v1.ppod_id[idx] = value
+            v1.vpod_id = vpod
+            return fabric
+
+        lib = types.SimpleNamespace(
+            amdsmi_init=call(lambda flags: init),
+            amdsmi_get_processor_handle_from_bdf=call(get_handle),
+            amdsmi_get_gpu_fabric_info=call(get_fabric),
+        )
+        monkeypatch.setattr(topology, "load_vendor_library", lambda *a, **k: lib)
+        monkeypatch.setattr(topology, "_fabric_failure", None)
+
+    @pytest.mark.parametrize(
+        "kwargs, expected",
+        [
+            ({"init": 8}, "amdsmi_init() failed with status 8"),
+            ({"handle": 2}, "amdsmi_get_processor_handle_from_bdf(0000:41:00.0) failed for GPU 0 with status 2"),
+            ({"fabric": 2}, "amdsmi_get_gpu_fabric_info failed for GPU 0 with status 2"),
+            ({"ppod": b"\x99" * 16}, "amdsmi reports no pod membership for GPU 0"),
+        ],
+    )
+    def test_failure_reason(self, monkeypatch, kwargs, expected):
+        self._fake_amdsmi(monkeypatch, **kwargs)
+
+        assert topology._amd_get_gpu_fabric_info(0, "0000:41:00.0") == FabricInfo()
+        assert expected in topology.fabric_failure_reason()
+
+    def test_missing_library(self, monkeypatch):
+        monkeypatch.setattr(topology, "load_vendor_library", lambda *a, **k: None)
+        monkeypatch.setattr(topology, "_fabric_failure", None)
+
+        assert topology._amd_get_gpu_fabric_info(0, "0000:41:00.0") == FabricInfo()
+        assert topology.fabric_failure_reason() == "libamd_smi.so could not be loaded"
+
+    def test_success_leaves_no_reason(self, monkeypatch):
+        self._fake_amdsmi(monkeypatch)
+
+        assert topology._amd_get_gpu_fabric_info(0, "0000:41:00.0").domain_key == f"{'ab' * 16}:9"
+        assert topology.fabric_failure_reason() is None
+
+    def test_two_host_discovery_finds_fabric_domain_without_amdsmi_bindings(self, monkeypatch, caplog):
+        """Without the bindings, two hosts in one pod still land in the same fabric domain."""
+        _block_vendor_imports(monkeypatch)
+        _fake_torch_pci(monkeypatch, {0: 0x01})
+        monkeypatch.setattr(topology, "_detect_vendor", lambda: "amd")
+        monkeypatch.setattr(socket, "gethostname", lambda: "tray-0")
+        monkeypatch.setattr(torch.cuda, "get_device_name", lambda gpu_id: "Fake MI455X")
+        monkeypatch.setattr(topology, "_get_total_memory_mb", lambda gpu_id: 1024)
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+        monkeypatch.setattr(topology, "_get_numa_node", lambda pci_bus_id: 0)
+        monkeypatch.setattr(topology, "_detect_infiniband", lambda: (False, []))
+        monkeypatch.setattr(topology, "_detect_intra_node_topology", lambda pci_bus_ids, vendor: (None, None))
+        monkeypatch.setattr(topology, "_outer_init_vendor_lib", lambda vendor: None)
+        monkeypatch.setattr(topology, "_outer_shutdown_vendor_lib", lambda vendor: None)
+
+        def fabric(gpu_id, pci_bus_id=""):
+            if pci_bus_id in ("", "unknown"):
+                return FabricInfo()
+            return FabricInfo(cluster_uuid="3e568d58317a4bff84fcb661a751878f", clique_id=2)
+
+        monkeypatch.setattr(topology, "_amd_get_gpu_fabric_info", fabric)
+
+        def gather(payload, world_size):
+            data = json.loads(payload)
+            if "global_rank" not in data:
+                return [payload, payload]
+            peer = dict(data, global_rank=1, hostname="tray-1")
+            return [payload, json.dumps(peer)]
+
+        monkeypatch.setattr(topology, "_all_gather_strings", gather)
+        caplog.set_level(logging.INFO, logger="iris.topology")
+
+        discovery = TopologyDiscovery.__new__(TopologyDiscovery)
+        discovery.rank = 0
+        discovery.world_size = 2
+        discovery.gpu_id = 0
+        discovery._topology = None
+        topo = discovery.discover()
+
+        assert topo.gpu_info[0].pci_bus_id == "0001:01:00.0"
+        assert topo.gpu_info[0].fabric_info.domain_key == "3e568d58317a4bff84fcb661a751878f:2"
+        assert topo.get_interconnect_level(0, 1) == InterconnectLevel.INTRA_RACK_FABRIC
+        assert any(
+            "pci_bus_id=0001:01:00.0 fabric_domain=3e568d58317a4bff84fcb661a751878f:2" in r.getMessage()
+            for r in caplog.records
+        )
+
+
 class TestNodeInfo:
     """Tests for NodeInfo safe accessors."""
 
