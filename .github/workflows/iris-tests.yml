@@ -19,54 +19,16 @@ permissions:
 
 jobs:
   test-git:
-    name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, git install)
-    runs-on: [linux-mi325-8gpu-ossci-rad]
+    name: Test ${{ matrix.test_dir }} (1/2/4/8 ranks, git install)
+    runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Test each subdirectory with each rank count using git install
-          - test_dir: examples
-            num_ranks: 1
-          - test_dir: examples
-            num_ranks: 2
-          - test_dir: examples
-            num_ranks: 4
-          - test_dir: examples
-            num_ranks: 8
-          - test_dir: unittests
-            num_ranks: 1
-          - test_dir: unittests
-            num_ranks: 2
-          - test_dir: unittests
-            num_ranks: 4
-          - test_dir: unittests
-            num_ranks: 8
-          - test_dir: ccl
-            num_ranks: 1
-          - test_dir: ccl
-            num_ranks: 2
-          - test_dir: ccl
-            num_ranks: 4
-          - test_dir: ccl
-            num_ranks: 8
-          - test_dir: context
-            num_ranks: 1
-          - test_dir: context
-            num_ranks: 2
-          - test_dir: context
-            num_ranks: 4
-          - test_dir: context
-            num_ranks: 8
-          - test_dir: ops
-            num_ranks: 1
-          - test_dir: ops
-            num_ranks: 2
-          - test_dir: ops
-            num_ranks: 4
-          - test_dir: ops
-            num_ranks: 8
+        # One job per directory runs every rank count. gpu_task_queue.py takes
+        # GPUs per rank count, so these jobs pack onto the node together instead
+        # of each holding a runner slot while waiting for a fixed GPU count.
+        test_dir: [examples, unittests, ccl, context, ops]
 
     steps:
       - name: Checkout repository
@@ -89,28 +51,18 @@ jobs:
         run: |
           bash .github/scripts/container_build.sh
 
-      - name: Acquire GPUs
-        run: |
-          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
-
       - name: Report environment versions
         run: |
           bash .github/scripts/report_versions.sh
 
-      - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (git install)
+      - name: Run ${{ matrix.test_dir }} tests with 1, 2, 4 and 8 ranks (git install)
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
-          set -e
-          echo "::group::Running ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (install: git)"
-          bash .github/scripts/run_tests.sh \
-            "${{ matrix.test_dir }}" \
-            "${{ matrix.num_ranks }}" \
-            "" \
-            "git"
-          echo "::endgroup::"
-          echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (git) passed!"
+          python3 .github/scripts/gpu_task_queue.py --install git \
+            "${{ matrix.test_dir }}:8" "${{ matrix.test_dir }}:4" \
+            "${{ matrix.test_dir }}:2" "${{ matrix.test_dir }}:1"
 
       - name: Release GPUs
         if: always()
@@ -118,25 +70,11 @@ jobs:
           bash .github/scripts/release_gpus.sh
 
   test-editable:
-    name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, editable install)
+    name: Test all dirs (2 ranks, editable install)
     needs: [test-git]
-    runs-on: [linux-mi325-8gpu-ossci-rad]
+    runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Smoke test: 2 ranks per dir verifies editable install + basic distributed paths
-          - test_dir: examples
-            num_ranks: 2
-          - test_dir: unittests
-            num_ranks: 2
-          - test_dir: ccl
-            num_ranks: 2
-          - test_dir: context
-            num_ranks: 2
-          - test_dir: ops
-            num_ranks: 2
+    # Smoke test: 2 ranks per dir verifies editable install + basic distributed paths
 
     steps:
       - name: Checkout repository
@@ -159,21 +97,10 @@ jobs:
         run: |
           bash .github/scripts/container_build.sh
 
-      - name: Acquire GPUs
+      - name: Run all test dirs with 2 ranks (editable install)
         run: |
-          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
-
-      - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (editable install)
-        run: |
-          set -e
-          echo "::group::Running ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (install: editable)"
-          bash .github/scripts/run_tests.sh \
-            "${{ matrix.test_dir }}" \
-            "${{ matrix.num_ranks }}" \
-            "" \
-            "editable"
-          echo "::endgroup::"
-          echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (editable) passed!"
+          python3 .github/scripts/gpu_task_queue.py --install editable \
+            examples:2 unittests:2 ccl:2 context:2 ops:2
 
       - name: Release GPUs
         if: always()
@@ -181,25 +108,11 @@ jobs:
           bash .github/scripts/release_gpus.sh
 
   test-install:
-    name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, pip install)
+    name: Test all dirs (2 ranks, pip install)
     needs: [test-git]
-    runs-on: [linux-mi325-8gpu-ossci-rad]
+    runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Smoke test: 2 ranks per dir verifies pip install + basic distributed paths
-          - test_dir: examples
-            num_ranks: 2
-          - test_dir: unittests
-            num_ranks: 2
-          - test_dir: ccl
-            num_ranks: 2
-          - test_dir: context
-            num_ranks: 2
-          - test_dir: ops
-            num_ranks: 2
+    # Smoke test: 2 ranks per dir verifies pip install + basic distributed paths
 
     steps:
       - name: Checkout repository
@@ -222,21 +135,10 @@ jobs:
         run: |
           bash .github/scripts/container_build.sh
 
-      - name: Acquire GPUs
+      - name: Run all test dirs with 2 ranks (pip install)
         run: |
-          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
-
-      - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (pip install)
-        run: |
-          set -e
-          echo "::group::Running ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (install: install)"
-          bash .github/scripts/run_tests.sh \
-            "${{ matrix.test_dir }}" \
-            "${{ matrix.num_ranks }}" \
-            "" \
-            "install"
-          echo "::endgroup::"
-          echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (install) passed!"
+          python3 .github/scripts/gpu_task_queue.py --install install \
+            examples:2 unittests:2 ccl:2 context:2 ops:2
 
       - name: Release GPUs
         if: always()
@@ -244,21 +146,11 @@ jobs:
           bash .github/scripts/release_gpus.sh
 
   test-new-examples:
-    name: New examples (${{ matrix.num_ranks }} ranks, ${{ matrix.install_method }})
-    runs-on: [linux-mi325-8gpu-ossci-rad]
+    name: New examples (2/4/8 ranks, editable)
+    runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - num_ranks: 2
-            install_method: editable
-          - num_ranks: 4
-            install_method: editable
-          - num_ranks: 8
-            install_method: editable
 
     steps:
       - name: Checkout repository
@@ -281,22 +173,13 @@ jobs:
         run: |
           bash .github/scripts/container_build.sh
 
-      - name: Acquire GPUs
-        run: |
-          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
-
-      - name: Run new examples with ${{ matrix.num_ranks }} ranks (${{ matrix.install_method }})
+      - name: Run new examples with 2, 4 and 8 ranks (editable)
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
-          set -e
-          echo "::group::Running new examples with ${{ matrix.num_ranks }} ranks (install: ${{ matrix.install_method }})"
-          bash .github/scripts/run_new_examples.sh \
-            "${{ matrix.num_ranks }}" \
-            "${{ matrix.install_method }}"
-          echo "::endgroup::"
-          echo "✅ New examples with ${{ matrix.num_ranks }} ranks passed!"
+          python3 .github/scripts/gpu_task_queue.py --install editable \
+            new_examples:8 new_examples:4 new_examples:2
 
       - name: Release GPUs
         if: always()

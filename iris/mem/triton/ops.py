@@ -415,6 +415,11 @@ def put(
 
         is_2d_copy: tl.constexpr = len(from_ptr.shape) == 2
 
+        # Early return for zero-size transfers (no-op): the copy packets' size fields are 1-based
+        if mask is not None:
+            if tl.sum(mask.to(tl.int32)) == 0:
+                return
+
         # Determine packet size based on copy type
         # Linear copy packet: 32 bytes for 1D, Sub-window copy packet: 80 bytes for 2D
         command_in_bytes = (
@@ -582,7 +587,8 @@ def atomic_add(
         packet_offset_bytes = base + offset
 
         # Place command packet
-        sdma_utils.place_atomic_add_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, val)
+        is_64_bit: tl.constexpr = pointer.dtype.element_ty.primitive_bitwidth == 64
+        sdma_utils.place_atomic_add_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, val, is_64_bit)
 
         # Submit command
         pending_wptr = base + offset + command_in_bytes

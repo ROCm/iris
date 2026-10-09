@@ -434,16 +434,10 @@ class SymmetricHeap:
 
     def _refresh_peer_access_torch(self, dist, all_bases_arr):
         """Peer access for TorchAllocator (IPC-based)."""
-        from iris.host.platform.utils import is_simulation_env
-
-        if is_simulation_env():
-            for r in range(self.num_ranks):
-                self.heap_bases[r] = int(all_bases_arr[r])
-        else:
-            all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
-            self.allocator.establish_peer_access(all_bases, self.fd_conns)
-            for r in range(self.num_ranks):
-                self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
+        all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
+        self.allocator.establish_peer_access(all_bases, self.fd_conns)
+        for r in range(self.num_ranks):
+            self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
 
     def _get_collective_device(self, dist) -> torch.device:
         """Choose a safe device for small distributed tensor collectives."""
@@ -717,7 +711,7 @@ class SymmetricHeap:
                 self._peer_va_ranges = {}
 
             if peer not in self._peer_va_ranges:
-                peer_va_base = mem_address_reserve(self.heap_size, self.allocator.granularity, 0)
+                peer_va_base = mem_address_reserve(self._peer_va_size(), self.allocator.granularity, 0)
                 self._peer_va_ranges[peer] = peer_va_base
             else:
                 peer_va_base = self._peer_va_ranges[peer]
