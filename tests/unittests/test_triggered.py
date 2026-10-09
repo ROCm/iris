@@ -309,6 +309,21 @@ def test_misuse_raises():
     del ctx
 
 
+def test_asymmetric_buffer_raises():
+    """A buffer at different heap offsets on different ranks would send every copy to the wrong place."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    if rank == 0:
+        pad = ctx.zeros(slice_elems, dtype=torch.int32)  # noqa: F841  shifts rank 0's later allocations
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    schedules = [whole(buffer[r * slice_elems : (r + 1) * slice_elems], base=buffer) for r in range(world)]
+    with pytest.raises(RuntimeError, match="different heap offsets"):
+        TriggeredPlan(ctx, buffer, schedules, timeout=20)
+    ctx.barrier()
+    del ctx
+
+
 @triton.jit
 def _release_flag(flag, value):
     tl.atomic_xchg(flag, value, sem="release", scope="sys")
