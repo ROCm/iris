@@ -83,26 +83,23 @@ jobs:
         run: |
           bash .github/scripts/container_build.sh
 
-      - name: Acquire GPUs
+      - name: Run the sweep
         run: |
-          # Enough GPUs for the largest rank count; smaller ones run inside it.
-          # Validate first: this runs before run_ccl_benchmark.sh checks inputs.
+          # Validate first: num_ranks sizes the GPU request below, before
+          # run_ccl_benchmark.sh checks its inputs.
           if ! [[ "$NUM_RANKS" =~ ^[1-8](,[1-8])*$ ]]; then
             echo "[ERROR] num_ranks must be comma-separated integers 1-8, got '$NUM_RANKS'"
             exit 1
           fi
+          # Enough GPUs for the largest rank count; smaller ones run inside it.
           MAX_RANKS=$(echo "$NUM_RANKS" | tr ',' '\n' | sort -n | tail -1)
-          bash .github/scripts/acquire_gpus.sh "$MAX_RANKS"
-
-      - name: Run the sweep
-        run: |
-          set -e
-          bash .github/scripts/run_ccl_benchmark.sh \
-            "$NUM_RANKS" \
-            "$DTYPES" \
-            "$M_VALUES" \
-            "$N_VALUES" \
-            "$N_REPEAT"
+          # Single-quoted: the task's shell expands the inputs from the
+          # environment, so they are never spliced into the command text. The
+          # task runs in a private copy of the checkout that is deleted when it
+          # ends, so copy the results out for the steps below, even on failure.
+          python3 .github/scripts/gpu_task_queue.py --task "$MAX_RANKS" "CCL sweep" \
+            'bash .github/scripts/run_ccl_benchmark.sh "$NUM_RANKS" "$DTYPES" "$M_VALUES" "$N_VALUES" "$N_REPEAT"; rc=$?
+             cp -r ccl_results "$GITHUB_WORKSPACE/" 2>/dev/null; exit $rc'
 
       - name: Publish the comparison table
         if: always()

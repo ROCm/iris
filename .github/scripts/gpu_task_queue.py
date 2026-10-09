@@ -13,9 +13,14 @@ GPUs back the moment it finishes.
 Usage:
     gpu_task_queue.py --install git unittests:8 unittests:4 unittests:2 unittests:1
     gpu_task_queue.py --install editable new_examples:8 new_examples:2
+    gpu_task_queue.py --task 8 "GEMM All-Scatter" "bash .github/scripts/run_perf_benchmark.sh ..."
 
-Each task is <test_dir>:<num_ranks>. "new_examples" runs run_new_examples.sh;
-anything else runs run_tests.sh on tests/<test_dir>.
+A positional task is <test_dir>:<num_ranks>. "new_examples" runs
+run_new_examples.sh; anything else runs run_tests.sh on tests/<test_dir>.
+
+--task RANKS NAME COMMAND runs COMMAND with bash, for jobs that are not a test
+directory. Every task runs in a private copy of the checkout with GPU_DEVICES
+set to its GPUs, and must pass them on (container_exec.sh --gpus).
 
 Scheduling: largest task first, smaller tasks backfill whatever GPUs are free.
 If the largest pending task has waited RESERVE_AFTER seconds, it posts a
@@ -58,14 +63,14 @@ def log(msg):
 
 
 class Task:
-    def __init__(self, spec, install):
-        test_dir, _, ranks = spec.rpartition(":")
-        if not test_dir or not ranks.isdigit() or not 1 <= int(ranks) <= MAX_GPUS:
-            raise SystemExit("bad task '{}': expected <test_dir>:<1-{}>".format(spec, MAX_GPUS))
+    def __init__(self, ranks, name, test_dir=None, install=None, shell=None):
+        if not ranks.isdigit() or not 1 <= int(ranks) <= MAX_GPUS:
+            raise SystemExit("bad task '{}': ranks must be 1-{}, got '{}'".format(name, MAX_GPUS, ranks))
         self.test_dir = test_dir
         self.ranks = int(ranks)
         self.install = install
-        self.name = "{} ({} ranks, {})".format(test_dir, self.ranks, install)
+        self.shell = shell
+        self.name = name
         self.proc = None
         self.mask = 0
         self.gpus = ""
@@ -77,7 +82,17 @@ class Task:
         self.ended_at = None
         self.rc = None
 
+    @classmethod
+    def from_spec(cls, spec, install):
+        """A positional <test_dir>:<ranks> task."""
+        test_dir, _, ranks = spec.rpartition(":")
+        if not test_dir:
+            raise SystemExit("bad task '{}': expected <test_dir>:<1-{}>".format(spec, MAX_GPUS))
+        return cls(ranks, "{} ({} ranks, {})".format(test_dir, ranks, install), test_dir=test_dir, install=install)
+
     def command(self):
+        if self.shell is not None:
+            return ["bash", "-c", self.shell]
         scripts = os.path.join(self.workdir, ".github", "scripts")
         if self.test_dir == "new_examples":
             return ["bash", os.path.join(scripts, "run_new_examples.sh"), str(self.ranks), self.install]
@@ -330,11 +345,25 @@ class Queue:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--install", required=True, choices=["git", "editable", "install"])
-    parser.add_argument("tasks", nargs="+", metavar="TEST_DIR:RANKS")
+    parser.add_argument("--install", choices=["git", "editable", "install"], help="required for TEST_DIR:RANKS tasks")
+    parser.add_argument(
+        "--task",
+        nargs=3,
+        action="append",
+        default=[],
+        metavar=("RANKS", "NAME", "COMMAND"),
+        help="run COMMAND with bash on RANKS GPUs; repeatable",
+    )
+    parser.add_argument("tasks", nargs="*", metavar="TEST_DIR:RANKS")
     args = parser.parse_args()
+    if not args.tasks and not args.task:
+        parser.error("no tasks given")
+    if args.tasks and not args.install:
+        parser.error("--install is required for TEST_DIR:RANKS tasks")
 
-    queue = Queue([Task(spec, args.install) for spec in args.tasks])
+    tasks = [Task(ranks, name, shell=command) for ranks, name, command in args.task]
+    tasks += [Task.from_spec(spec, args.install) for spec in args.tasks]
+    queue = Queue(tasks)
 
     def on_signal(signum, _frame):
         raise SystemExit(128 + signum)

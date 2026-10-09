@@ -5,7 +5,7 @@
 # Release GPUs for CI workflows - to be called as a workflow step with if: always()
 # Usage: release_gpus.sh
 #
-# Reads GPU allocation details from environment variables set by acquire_gpus.sh
+# Returns whatever GPUs gpu_task_queue.py still holds if it was killed mid-run.
 
 set -e
 
