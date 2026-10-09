@@ -6,8 +6,8 @@ One kernel, two tensors, two peer tables, across providers and backends.
 
 Each tensor translates against its own table. Iris and rocSHMEM allocate from
 one heap, so the peer delta is shared and any table happens to translate any
-pointer; Torch Symmetric Memory allocates per tensor, so the deltas differ and
-reusing a table mistranslates.
+pointer; Torch Symmetric Memory's default backend maps each tensor separately,
+so the deltas need not match and reusing a table can mistranslate.
 
 Run:
     python tests/run_tests_distributed.py tests/unittests/test_provider_unified.py --num_ranks 2
@@ -89,11 +89,18 @@ def _make_rocshmem(request):
     return RocshmemProvider()
 
 
+def _make_torch_symm_mem(request):
+    # Session-scoped too: it probes with a collective allocation and skips if
+    # this torch build cannot allocate.
+    return request.getfixturevalue("torch_symm_mem_provider")
+
+
 # Needs allocate_symmetric / get_rank / get_num_ranks / barrier. An Iris
 # context already has all four, so it goes in unwrapped.
 PROVIDERS = {
     "iris": lambda request: iris.iris(1 << 24),
     "rocshmem": _make_rocshmem,
+    "torch_symm_mem": _make_torch_symm_mem,
 }
 
 
