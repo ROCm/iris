@@ -150,7 +150,6 @@ class Queue:
         self.pending = sorted(tasks, key=lambda t: -t.ranks)
         self.running = []
         self.done = []
-        self.head_waiting_since = None
         self.reserved_for = None
 
     def held_mask(self):
@@ -198,14 +197,11 @@ class Queue:
             alloc.write_bitmap(bitmap)
             self.record_held()
 
-            # Anti-starvation: track how long the largest pending task has waited.
-            # The head only changes when it launches, since nothing is added later.
-            if head is None or head in to_launch:
-                self.head_waiting_since = None
-            else:
-                if self.head_waiting_since is None:
-                    self.head_waiting_since = time.time()
-                waited = time.time() - self.head_waiting_since
+            # Anti-starvation: the largest pending task reserves the node once it
+            # has been queued for RESERVE_AFTER. Counted from when the job queued
+            # it, so a task that already waited behind a sibling does not restart.
+            if head is not None and head not in to_launch:
+                waited = time.time() - head.queued_at
                 if self.reserved_for is head:
                     alloc.reserve(head.ranks)  # refresh
                 elif self.reserved_for is None and waited >= RESERVE_AFTER and (not foreign or head.ranks > res[1]):
