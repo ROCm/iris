@@ -5,11 +5,15 @@ same timing harness, via a `backend` axis:
 
 ```bash
 python benchmark/ccl/bench_all_reduce.py --benchmark_format=csv --benchmark_out=ar.csv
-python benchmark/ccl/plot_sweep_results.py ar.csv --output ccl.png
+python benchmark/ccl/plot_sweep_results.py ar.csv --output_dir plots
 ```
 
-`.github/workflows/iris-ccl-benchmark.yml` runs the sweep on demand and publishes
-the table and plots.
+`.github/workflows/iris-ccl-benchmark.yml` runs the full grid -- 2/4/8 ranks, the
+shapes below, fp16/bf16/fp8 -- after every merge to `main` and on demand, and
+publishes the table and plots. Every axis is a `workflow_dispatch` input, so a
+narrower run needs no edits. It runs one process per collective, `M` and dtype
+with a 64 GiB heap: the benchmarks do not free symmetric buffers between points,
+and `all_to_all` at 8 ranks and `M=65536` alone needs ~30 GiB per dtype.
 
 ## The RCCL baseline uses ordinary torch tensors
 
@@ -41,17 +45,18 @@ the runner previously reported rank 0's mean.
 
 ## Figures
 
-`plot_sweep_results.py` writes three images, mirroring triton-shmem's
-`benchmark/plot_bench.py`, plus the Markdown table:
+`plot_sweep_results.py` writes one image per collective and dtype,
+`<output_dir>/<collective>_<dtype>.png` (e.g. `all_reduce_bf16.png`), plus the
+Markdown table. Each image has one row per rank count and three panels against
+message size:
 
-| file | content |
+| panel | content |
 |---|---|
-| `<output>` | bus bandwidth (GB/s) vs message size, semilog-x |
-| `<output stem>_latency` | latency (ms) vs message size, log-log |
-| `<output stem>_speedup` | latency ratio Iris / RCCL, log-log; below the 1.0 line means Iris wins |
+| bandwidth | bus bandwidth (GB/s), semilog-x |
+| latency | latency (ms), log-log |
+| speedup | RCCL latency / Iris latency, semilog-x; above the 1.0 line means Iris wins |
 
-Each is a grid with one column per collective and one row per rank count, so
-sweeping `--axis_num_ranks` grows the figure downwards.
+The table uses the same speedup definition, one section per collective.
 
 Bandwidth is **bus** bandwidth, not algorithmic: the bench scripts declare
 `state.set_bytes((W-1) * bytes)` for all_gather and all_to_all, and
@@ -82,6 +87,5 @@ reports `Unsupported Float8 type for NCCL reduction`. Both the OCP types
 all four allocate on device without trouble, so the limitation is in the
 collective layer rather than the dtype.
 
-Consequence for the figures: the fp8 series appears in the latency and
-bandwidth plots as its own curve, and is absent from the speedup plot, which
-needs a reference to divide by.
+Consequence for the figures: the fp8 images have bandwidth and latency panels
+for Iris only, and no speedup panel, which needs a reference to divide by.
