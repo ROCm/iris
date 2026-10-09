@@ -11,6 +11,9 @@
 #     - "git": pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
 #     - "editable": pip install -e .
 #     - "install": pip install .
+#
+# CONTAINER_IMAGE, if set, selects the container image (e.g. the nightly Triton
+# image) instead of the one container_build.sh produced.
 
 set -e
 
@@ -43,17 +46,20 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# GPU_DEVICES should be provided by workflow-level acquire_gpus.sh step
-# or via command-line argument for backward compatibility
+# GPU_DEVICES is set by gpu_task_queue.py, or passed as an argument
 if [ -z "$GPU_DEVICES" ]; then
     echo "[RUN-TESTS] WARNING: No GPUs allocated. GPU_DEVICES not set."
     echo "[RUN-TESTS] Tests may fail if they require GPUs."
 fi
 
-# Build GPU argument
+# Build GPU and image arguments
 GPU_ARG=""
 if [ -n "$GPU_DEVICES" ]; then
     GPU_ARG="--gpus $GPU_DEVICES"
+fi
+IMAGE_ARG=()
+if [ -n "$CONTAINER_IMAGE" ]; then
+    IMAGE_ARG=(--image "$CONTAINER_IMAGE")
 fi
 
 # Build install command based on method
@@ -72,9 +78,10 @@ fi
 # Run tests in container
 EXIT_CODE=0
 # shellcheck disable=SC2086
-"$SCRIPT_DIR/container_exec.sh" $GPU_ARG "
+"$SCRIPT_DIR/container_exec.sh" "${IMAGE_ARG[@]}" $GPU_ARG "
     set -e
     
+    echo \"Triton version: \$(pip show triton 2>/dev/null | grep Version || echo unknown)\"
     echo \"Installing iris using method: $INSTALL_METHOD\"
     $INSTALL_CMD
     
