@@ -14,7 +14,7 @@ INSTALL_METHOD=${2:-"editable"}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# GPU_DEVICES should be set by the workflow-level acquire_gpus.sh step
+# GPU_DEVICES is set by gpu_task_queue.py
 GPU_ARG=""
 if [ -n "$GPU_DEVICES" ]; then
     GPU_ARG="--gpus $GPU_DEVICES"
