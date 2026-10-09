@@ -146,3 +146,41 @@ def test_atomic_add_opcode(dtype, opcode):
     _atomic_add_kernel[(1,)](flag, heap_bases, ctx)
     addr = flag.data_ptr()
     assert _dwords(queue, 9) == [(opcode << 25) | 0xA, addr & 0xFFFFFFFF, addr >> 32, 5, 0, 0, 0, 0, SENTINEL]
+
+
+@triton.jit
+def _emit_copy(buf, size, src, dst):
+    sdma_utils.place_copy_packet(buf, tl.full((), 0, tl.uint64), size, src, dst)
+
+
+@triton.jit
+def _emit_poll(buf, flag, expected):
+    sdma_utils.place_poll_regmem_packet(buf, tl.full((), 0, tl.uint64), flag, expected)
+
+
+@triton.jit
+def _emit_nop(buf, padding_bytes):
+    sdma_utils.place_nop_packet(buf, tl.full((), 0, tl.uint64), padding_bytes)
+
+
+def test_copy_linear_packet():
+    buf = _buffer()
+    dst = ADDR + 0x1000
+    _emit_copy[(1,)](buf, 4096, ADDR, dst)
+    # op 1, sub-op 0; count = bytes - 1; parameters; src; dst
+    assert _dwords(buf, 8) == [1, 4095, 0, ADDR & 0xFFFFFFFF, ADDR >> 32, dst & 0xFFFFFFFF, dst >> 32, SENTINEL]
+
+
+def test_poll_regmem_packet():
+    buf = _buffer()
+    _emit_poll[(1,)](buf, ADDR, 7)
+    # op 8, func 5 (>=) at bits 30:28, mem_poll bit 31; addr; reference; mask; retry 0xFFF << 16 | interval 10
+    header = (1 << 31) | (5 << 28) | 8
+    assert _dwords(buf, 7) == [header, ADDR & 0xFFFFFFFF, ADDR >> 32, 7, 0xFFFFFFFF, (0xFFF << 16) | 10, SENTINEL]
+
+
+def test_nop_packet():
+    buf = _buffer()
+    _emit_nop[(1,)](buf, 5 * 4)
+    # op 0, count = dwords - 1 at bits 29:16, then zeros
+    assert _dwords(buf, 6) == [4 << 16, 0, 0, 0, 0, SENTINEL]
