@@ -86,7 +86,7 @@ class Task:
     def from_spec(cls, spec, install):
         """A positional <test_dir>:<ranks> task."""
         test_dir, _, ranks = spec.rpartition(":")
-        if not test_dir:
+        if not test_dir or not ranks.isdigit() or not 1 <= int(ranks) <= MAX_GPUS:
             raise SystemExit("bad task '{}': expected <test_dir>:<1-{}>".format(spec, MAX_GPUS))
         return cls(ranks, "{} ({} ranks, {})".format(test_dir, ranks, install), test_dir=test_dir, install=install)
 
