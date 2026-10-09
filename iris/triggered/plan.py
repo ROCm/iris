@@ -166,6 +166,12 @@ class TriggeredPlan:
 
         self.buffer = buffer
         self.gates = ctx.zeros(self.num_batches, dv.GATE_WORDS.value, dtype=torch.int64)
+        # FIXME: remove once symmetric allocation is fixed. The vmem_chunked heap frees on each rank's
+        # GC, so its free lists can diverge and place the same allocation at different offsets
+        heap_base = int(ctx.heap.heap_bases_cpu[self.rank])
+        offsets = np.array([buffer.data_ptr() - heap_base, self.gates.data_ptr() - heap_base], dtype=np.int64)
+        if not (distributed_allgather(offsets) == offsets).all():
+            raise RuntimeError("buffer or gates sit at different heap offsets on different ranks")
         words = view_words(self.rank, self.world_size, self.gates.data_ptr(), self.schedules)
         self.view = torch.tensor(words, dtype=torch.int64, device=buffer.device)
         self._own = torch.arange(
