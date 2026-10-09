@@ -25,3 +25,31 @@ def rocshmem_runtime():
     rshmem = pytest.importorskip("rocshmem4py", reason="rocSHMEM tests need rocshmem4py installed")
     rshmem.init_rocshmem_by_uniqueid(dist.group.WORLD)
     return rshmem
+
+
+@pytest.fixture(scope="session")
+def torch_symm_mem_provider():
+    """A TorchSymmMemProvider, or a skip if this torch build cannot allocate.
+
+    Availability is not an import question: the module always imports, and
+    whether an allocation backend exists is a property of the torch build. A
+    throwaway allocation is the only reliable probe. It is collective, so every
+    rank runs it and reaches the same verdict.
+    """
+    if not dist.is_initialized():
+        pytest.skip("needs torch.distributed; run via tests/run_tests_distributed.py")
+    if dist.get_world_size() < 2:
+        pytest.skip("needs at least 2 ranks (--num_ranks 2)")
+    if dist.get_backend() == "gloo":
+        pytest.skip("symmetric memory needs a device process group, not gloo")
+
+    import torch
+    from iris.experimental.torch_symm_mem_provider import TorchSymmMemProvider
+
+    provider = TorchSymmMemProvider()
+    try:
+        probe, _ = provider.allocate_symmetric(8, dtype=torch.float32)
+    except Exception as exc:
+        pytest.skip(f"torch symmetric memory cannot allocate on this build: {exc}")
+    provider.free(probe)
+    return provider

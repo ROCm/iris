@@ -3,51 +3,18 @@
 
 """PyTorch symmetric memory as an allocation provider for Iris device kernels.
 
-Lets Iris device code operate on tensors from ``torch.distributed._symmetric_memory``
-rather than from Iris's own symmetric heap. No Iris device code changes are
-needed: iris.store, load and copy take ``heap_bases`` as a plain pointer argument
-and translate with
+Setup, measured torch builds and how this differs from the rocSHMEM provider are
+in iris/experimental/README.md. What matters in the code:
 
-    remote = peer_bases[to] + (ptr - peer_bases[local_rank])
-
-so any table satisfying ``peer_bases[local_rank] == local allocation base``
-drives them.
-
-Torch hands that table over directly. Rendezvous returns a handle whose
-``buffer_ptrs`` is a per-peer list of pointers into this process's address space,
-with the local rank's entry equal to the tensor's own ``data_ptr()`` -- exactly
-the invariant Iris needs. So this provider does no pointer arithmetic at all; it
-reads the table off the handle per allocation.
-
-That is worth preferring over the alternative even though the alternative also
-works. Peer offsets happen to be constant across allocations, so one table could
-be reused for all of them, but that only holds while every rank allocates in
-lockstep: ``symm_mem.empty`` is a local call and only ``rendezvous`` is
-collective, so ranks can diverge. Reading ``buffer_ptrs`` per allocation is
-correct either way.
-
-Scope is intra-node, set by the backend torch selects. The default backend
-reports as ``'CUDA'`` and is the HIP IPC path on ROCm; it reaches peers sharing a
-node. Do not call ``set_backend`` to try to change this -- the name
-``get_backend`` returns is not one ``set_backend`` accepts, and forcing a
-different backend selects one that fails at allocation.
-
-``SymmetricAddressMap.direct`` records per-peer reachability for symmetry with
-the other providers; a peer that is not directly addressable gets a base of 0,
-which would translate to a wild pointer rather than an error, so callers are
-expected to check it before launching.
-
-This module is deliberately NOT imported by ``iris/experimental/__init__.py``.
-Torch symmetric memory is a private torch API and its availability varies by
-build, so importing it eagerly would make ``import iris`` fail on builds that
-lack it.
-
-The caller owns bootstrap and tensor lifetime; the process group must already be
-initialised on a device backend:
-
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group("nccl")
-    provider = TorchSymmMemProvider()
+- The rendezvous handle's ``buffer_ptrs`` already is the table Iris translates
+  against, with the local entry equal to the tensor's ``data_ptr()``. The
+  provider reads it per allocation and checks that invariant; it computes
+  nothing.
+- Use each table only for its own allocation. Whether peer offsets are shared
+  between allocations depends on the backend, and on the default one they need
+  not be.
+- The provider never calls ``symm_mem.set_backend``; it uses whatever backend
+  the caller selected, or torch's default.
 """
 
 from __future__ import annotations

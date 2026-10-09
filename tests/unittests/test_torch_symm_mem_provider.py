@@ -11,11 +11,13 @@ Run under the usual launcher, which sets up torch.distributed and the device:
 Skips when torch symmetric memory cannot allocate on this build, when fewer than
 2 ranks are present, or when peers are not directly addressable, so it is inert
 rather than failing in a normal CI run.
+
+The table invariant and per-allocation anchoring are covered for every provider
+by test_provider_unified.py; this module holds what is specific to this one.
 """
 
 import pytest
 import torch
-import torch.distributed as dist
 import triton
 import triton.language as tl
 
@@ -37,41 +39,19 @@ def _broadcast_kernel(
 
 
 @pytest.fixture(scope="module")
-def provider():
-    if not dist.is_initialized():
-        pytest.skip("needs torch.distributed; run via tests/run_tests_distributed.py")
-    if dist.get_world_size() < 2:
-        pytest.skip("needs at least 2 ranks (--num_ranks 2)")
-    if dist.get_backend() == "gloo":
-        pytest.skip("symmetric memory needs a device process group, not gloo")
-
-    # Imported here rather than at module scope so the tests are collected and
-    # individually skipped. A module-level importorskip collects zero items,
-    # which makes pytest exit 5 (NO_TESTS_COLLECTED) and fails the whole run.
-    from iris.experimental.torch_symm_mem_provider import TorchSymmMemProvider
-
-    p = TorchSymmMemProvider()
-    # Availability is not an import question: the module always imports, and
-    # whether an allocation backend exists is a property of the torch build. A
-    # throwaway allocation is the only reliable probe. It is collective, so
-    # every rank runs it and reaches the same verdict.
-    try:
-        probe, _ = p.allocate_symmetric(8, dtype=torch.float32)
-    except Exception as exc:
-        pytest.skip(f"torch symmetric memory cannot allocate on this build: {exc}")
-    p.free(probe)
-    del probe
-    return p
+def provider(torch_symm_mem_provider):
+    # Probe and skips live in conftest, shared with test_provider_unified.py.
+    return torch_symm_mem_provider
 
 
 @pytest.fixture
 def symmetric_pair(provider):
     """Two allocations, each with its own table.
 
-    Both tables are yielded because, unlike rocSHMEM, a table built for one
-    torch allocation does not translate another's pointers: each allocation is a
-    separate IPC mapping rather than a window onto one linear heap. A kernel must
-    translate against the table of the allocation it is addressing.
+    Both tables are yielded because a table built for one torch allocation need
+    not translate another's pointers: on the default backend each allocation is
+    a separate IPC mapping rather than a window onto one linear heap. A kernel
+    must translate against the table of the allocation it is addressing.
     """
     data, data_bases = provider.allocate_symmetric(BLOCK_SIZE, dtype=torch.float32)
     results, results_bases = provider.allocate_symmetric(BLOCK_SIZE, dtype=torch.float32)
@@ -79,39 +59,6 @@ def symmetric_pair(provider):
     provider.barrier()
     provider.free(data)
     provider.free(results)
-
-
-def test_peer_bases_shape_and_invariant(symmetric_pair):
-    """The invariant Iris device code translates against."""
-    provider, data, _results, data_bases, _results_bases = symmetric_pair
-    ws = provider.get_num_ranks()
-
-    assert data_bases.numel() == ws
-    assert data_bases.dtype == torch.int64
-    assert data_bases.is_cuda
-    # peer_bases[local_rank] is the base translation subtracts.
-    assert int(data_bases[provider.get_rank()].item()) == data.data_ptr()
-
-
-def test_table_is_per_allocation(provider):
-    """Each allocation is described by its own table, read off its own handle.
-
-    Anchoring on its own base is the whole guarantee. Peer offsets are NOT
-    guaranteed to be shared between allocations -- each one is a separate IPC
-    mapping, not a window onto a linear heap -- so a table built for one
-    allocation must not be used to translate another's pointers.
-    """
-    a, bases_a = provider.allocate_symmetric(64, dtype=torch.float32)
-    b, bases_b = provider.allocate_symmetric(64, dtype=torch.float32)
-    try:
-        me = provider.get_rank()
-        assert int(bases_a[me].item()) == a.data_ptr()
-        assert int(bases_b[me].item()) == b.data_ptr()
-        assert a.data_ptr() != b.data_ptr(), "distinct allocations must not alias"
-    finally:
-        provider.barrier()
-        provider.free(a)
-        provider.free(b)
 
 
 def test_address_map_reports_reachability(symmetric_pair):
