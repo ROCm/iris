@@ -43,6 +43,7 @@ from iris.drivers.fabric.nvidia import (
     _round_up,
 )
 from iris.host.distributed.topology import InterconnectLevel
+from iris.host.platform import libs as platform_libs
 
 
 @pytest.mark.parametrize("unversioned_available", [True, False])
@@ -57,6 +58,7 @@ def test_amd_fabric_library_selection_with_stale_system_soname(monkeypatch, unve
 
     monkeypatch.setattr(amd_driver_module.ctypes, "CDLL", load)
     monkeypatch.setattr(amd_driver_module.ctypes.util, "find_library", lambda name: f"lib{name}.so.5")
+    monkeypatch.setattr(platform_libs, "_mapped_library_paths", lambda stem: [])
     spec = importlib.util.spec_from_file_location("_iris_amd_library_selection_test", amd_driver_module.__file__)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -65,6 +67,25 @@ def test_amd_fabric_library_selection_with_stale_system_soname(monkeypatch, unve
     assert module._amdsmi is loaded["libamd_smi" + suffix]
     if unversioned_available:
         assert "libamdhip64.so.5" not in loaded
+
+
+def test_amd_fabric_library_selection_prefers_loaded_copy(monkeypatch):
+    """The HIP runtime and amd_smi torch already loaded win over any name lookup."""
+    loaded = {}
+    mapped = {
+        "libamdhip64": ["/sdk/core/lib/libamdhip64.so.7"],
+        "libamd_smi": ["/sdk/core/lib/libamd_smi.so.27"],
+    }
+
+    monkeypatch.setattr(amd_driver_module.ctypes, "CDLL", lambda name: loaded.setdefault(name, object()))
+    monkeypatch.setattr(amd_driver_module.ctypes.util, "find_library", lambda name: f"lib{name}.so.5")
+    monkeypatch.setattr(platform_libs, "_mapped_library_paths", lambda stem: mapped[stem])
+    spec = importlib.util.spec_from_file_location("_iris_amd_loaded_library_test", amd_driver_module.__file__)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module._hip is loaded["/sdk/core/lib/libamdhip64.so.7"]
+    assert module._amdsmi is loaded["/sdk/core/lib/libamd_smi.so.27"]
+    assert set(loaded) == {"/sdk/core/lib/libamdhip64.so.7", "/sdk/core/lib/libamd_smi.so.27"}
 
 
 class TestExceptions:
