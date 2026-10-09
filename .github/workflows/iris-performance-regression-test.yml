@@ -61,17 +61,13 @@ jobs:
         run: |
           python3 .github/scripts/gpu_task_queue.py \
             --task 8 "GEMM All-Scatter WG Specialization" \
-              "bash .github/scripts/run_perf_benchmark.sh 10_gemm_all_scatter_wg_specialization 1440 \
-                -m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 192" \
+              "bash .github/scripts/run_perf_benchmark.sh 10_gemm_all_scatter_wg_specialization 1440 -m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 192" \
             --task 8 "GEMM All-Scatter" \
-              "bash .github/scripts/run_perf_benchmark.sh 07_gemm_all_scatter 1000 \
-                -m 16384 -n 16384 -k 16384 --BLK_M 256 --BLK_N 64 --BLK_K 64 --gsize_m 6 --gemm_sms 256" \
+              "bash .github/scripts/run_perf_benchmark.sh 07_gemm_all_scatter 1000 -m 16384 -n 16384 -k 16384 --BLK_M 256 --BLK_N 64 --BLK_K 64 --gsize_m 6 --gemm_sms 256" \
             --task 8 "GEMM All-Scatter Producer-Consumer" \
-              "bash .github/scripts/run_perf_benchmark.sh 11_gemm_all_scatter_producer_consumer 1600 \
-                -m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256 --comm_sms 48" \
+              "bash .github/scripts/run_perf_benchmark.sh 11_gemm_all_scatter_producer_consumer 1600 -m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256 --comm_sms 48" \
             --task 8 "GEMM All-Scatter Bulk Synchronous" \
-              "bash .github/scripts/run_perf_benchmark.sh 12_gemm_all_scatter_bulk_synchronous 900 \
-                -m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
+              "bash .github/scripts/run_perf_benchmark.sh 12_gemm_all_scatter_bulk_synchronous 900 -m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
 
       - name: Release GPUs
         if: always()
