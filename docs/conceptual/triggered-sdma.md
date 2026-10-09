@@ -59,6 +59,10 @@ plan.destroy()
    contributes to.** Its wait could depend on a chain parked behind one of its own unpublished
    batches.
 4. **Segment sizes are fixed when the plan is created.**
+5. **`arrived`, `wait` and `reusable` are called uniformly across the CTA:** every wave makes the
+   same number of calls. Each is one atomic whose result reaches the other waves through a CTA
+   barrier, so a polling loop must not exit on a per-wave condition (such as a clock read):
+   waves would read the result before it is written, or deadlock. Count polls instead.
 
 Plans that share queues must begin, and be aborted, in the order they were armed. While chains
 are armed on a queue, host `Iris.put()` and `quiet()` to that peer raise rather than queue behind

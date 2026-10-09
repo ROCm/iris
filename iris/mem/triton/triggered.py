@@ -116,7 +116,12 @@ class TriggeredView:
 
     @triton.jit
     def arrived(self, batch):
-        """True once batch ``batch`` is visible here this epoch (published, for this rank's own)."""
+        """
+        True once batch ``batch`` is visible here this epoch (published, for this rank's own).
+
+        Call uniformly across the CTA: the result reaches the other waves through a CTA barrier, so
+        every wave must make the same number of calls (true of ``wait`` and ``reusable`` too).
+        """
         gate = self.gates + batch * GATE_WORDS
         word = tl.where(self._record(batch, R_OWNER) == self.rank, G_READY, G_ARRIVAL)
         return tl.atomic_add(gate + word, 0, sem="acquire", scope="sys") >= self.epoch
