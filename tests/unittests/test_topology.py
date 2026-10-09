@@ -654,6 +654,9 @@ class TestAmdPciBusIdFallback:
         assert topology._get_pci_bus_id(1, "amd") == "0001:21:00.0"
 
     def test_amdsmi_bindings_still_preferred(self, monkeypatch):
+        monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+
         monkeypatch.setitem(sys.modules, "amdsmi", _make_fake_amdsmi())
         _fake_torch_pci(monkeypatch, {1: 0x99})
 
