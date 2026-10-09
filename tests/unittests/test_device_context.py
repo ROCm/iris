@@ -478,6 +478,7 @@ def test_device_context_tracing_1d_address():
 def test_device_context_initialize():
     """Test DeviceContext.initialize() creates valid context."""
     ctx = iris.iris(1 << 20)
+    assert ctx.get_copy_engine_ctx() is None
     cur_rank = ctx.get_rank()
     num_ranks = ctx.get_num_ranks()
 

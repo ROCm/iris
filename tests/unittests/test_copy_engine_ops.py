@@ -96,7 +96,7 @@ def _make_grid(n, block):
 
 @pytest.mark.parametrize("num_elements", [256, 1024])
 def test_copy_engine_device_linear_put(num_elements):
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -136,7 +136,7 @@ def test_copy_engine_device_linear_put(num_elements):
 def test_copy_engine_device_linear_put_no_mask():
     num_elements = 512
     block_size = 128
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -172,7 +172,7 @@ def test_copy_engine_device_linear_put_no_mask():
 
 @pytest.mark.parametrize("num_elements", [512, 2048])
 def test_copy_engine_host_put(num_elements):
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -198,7 +198,7 @@ def test_copy_engine_host_put(num_elements):
 
 def test_copy_engine_host_put_loopback():
     """Test a host-initiated copy-engine put when source and destination are the same rank."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
 
     num_elements = 512
     src = _allocate_symmetric_range(shmem, num_elements, torch.float32)
@@ -224,7 +224,7 @@ def test_copy_engine_host_put_loopback():
 
 def test_copy_engine_device_linear_put_loopback():
     """Test a device-initiated copy-engine put when source and destination share one rank."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
 
     rank = shmem.get_rank()
     num_elements = 256
@@ -277,7 +277,7 @@ def _copy_engine_atomic_kernel(
 # For int64, adding to 0xFFFFFFFF carries into the upper dword only if the SDMA add is 64-bit.
 @pytest.mark.parametrize("dtype, initial", [(torch.int32, 0), (torch.int64, 0xFFFFFFFF)])
 def test_copy_engine_atomic_add(dtype, initial):
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -333,7 +333,7 @@ def _copy_engine_atomic_cas_kernel(
 
 
 def test_copy_engine_atomic_cas():
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -455,7 +455,7 @@ def _copy_engine_2d_no_mask_kernel(
 @pytest.mark.parametrize("M,N", [(16, 16), (32, 64)])
 def test_copy_engine_2d_tiled(M, N):
     """Test 2D tiled copy with strides."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -498,7 +498,7 @@ def test_copy_engine_2d_tiled(M, N):
 
 def test_copy_engine_2d_tiled_no_mask():
     """Test full-tile 2D copy using shape-inferred SDMA packet size."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -585,7 +585,7 @@ def _copy_engine_put_signal_kernel(
 
 def test_copy_engine_put_with_signal():
     """Test copy followed by atomic signal."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -673,7 +673,7 @@ def _copy_engine_multi_block_kernel(
 @pytest.mark.parametrize("num_blocks", [4, 8])
 def test_copy_engine_multi_block_concurrent(num_blocks):
     """Test multiple workgroups using copy engine concurrently."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -718,7 +718,7 @@ def test_copy_engine_multi_block_concurrent(num_blocks):
 
 def test_copy_engine_zero_size():
     """Test copy engine with zero-size transfer (should be no-op)."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -744,7 +744,7 @@ def test_copy_engine_zero_size():
 
 def test_copy_engine_device_zero_size():
     """Test device-side copy engine puts with fully-masked tiles (should be no-op)."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -798,7 +798,7 @@ def test_copy_engine_device_zero_size():
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.int32])
 def test_copy_engine_different_dtypes(dtype):
     """Test copy engine with different data types."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
@@ -837,7 +837,7 @@ def test_copy_engine_different_dtypes(dtype):
 
 def test_copy_engine_bidirectional():
     """Test both ranks doing copy engine operations simultaneously."""
-    shmem = iris.iris(1 << 20)
+    shmem = iris.iris(1 << 20, copy_engine="sdma")
     _require_two_ranks(shmem)
 
     rank = shmem.get_rank()
