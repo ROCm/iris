@@ -12,6 +12,11 @@ from pathlib import Path
 
 current_dir = Path(__file__).parent
 
+requires_copy_engine = pytest.mark.skipif(
+    importlib.util.find_spec("xio") is None,
+    reason="rocm-xio not installed (pip install iris[sdma])",
+)
+
 
 def load_example_module(relative_path: str, module_name: str):
     file_path = (current_dir / relative_path).resolve()
@@ -40,7 +45,7 @@ def run_message_passing_kernels(module, args, *, use_copy_engine: bool = False):
     """Run the core message passing logic without command line argument parsing."""
     shmem = None
     try:
-        shmem = iris.iris(args["heap_size"])
+        shmem = iris.iris(args["heap_size"], copy_engine="sdma" if use_copy_engine else None)
         dtype = module.torch_dtype_from_str(args["datatype"])
         cur_rank = shmem.get_rank()
         world_size = shmem.get_num_ranks()
@@ -189,6 +194,7 @@ def test_message_passing_put(dtype_str, buffer_size, heap_size, block_size):
     assert success, "Message passing put validation failed"
 
 
+@requires_copy_engine
 @pytest.mark.parametrize("dtype_str", ["fp16", "fp32"])
 @pytest.mark.parametrize("buffer_size, heap_size", [(4096, 1 << 20)])
 @pytest.mark.parametrize("block_size", [512])
@@ -203,7 +209,7 @@ def run_host_initiated_copy_engine(module, args):
     """Execute the host-initiated message passing example logic."""
     shmem = None
     try:
-        shmem = iris.iris(args["heap_size"])
+        shmem = iris.iris(args["heap_size"], copy_engine="sdma")
         dtype = module.torch_dtype_from_str(args["datatype"])
         cur_rank = shmem.get_rank()
         world_size = shmem.get_num_ranks()
@@ -263,6 +269,7 @@ def run_host_initiated_copy_engine(module, args):
             gc.collect()
 
 
+@requires_copy_engine
 @pytest.mark.parametrize("dtype_str", ["fp16", "fp32"])
 @pytest.mark.parametrize("buffer_size, heap_size", [(4096, 1 << 20)])
 @pytest.mark.parametrize("block_size", [512])

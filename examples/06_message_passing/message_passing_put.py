@@ -157,7 +157,7 @@ def _worker(local_rank: int, world_size: int, init_url: str, args: dict):
     )
 
     # Main benchmark logic
-    shmem = iris.iris(args["heap_size"])
+    shmem = iris.iris(args["heap_size"], copy_engine="sdma" if args["use_copy_engine"] else None)
     dtype = torch_dtype_from_str(args["datatype"])
     cur_rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()

@@ -130,7 +130,7 @@ jobs:
 
               # Install iris in editable mode
               echo \"Installing iris in editable mode\"
-              pip install -e .
+              pip install -e '.[sdma]'
 
               # Run tests in the specified directory
               for test_file in tests/${{ matrix.test_dir }}/test_*.py; do

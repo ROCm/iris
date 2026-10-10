@@ -53,7 +53,6 @@ from iris.host.platform.hip import (
     count_devices,
 )
 
-from xio import sdma_ep
 from iris.host.memory.symmetric_heap import SymmetricHeap
 import numpy as np
 from typing import Any
@@ -83,6 +82,9 @@ class Iris:
     Args:
         heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem"
+        copy_engine (str, optional): Copy engine to initialize. Use "sdma" for host- and
+            device-initiated SDMA operations (needs ``pip install iris[sdma]``). Defaults to
+            None (disabled).
 
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap with torch allocator
@@ -91,9 +93,18 @@ class Iris:
 
         >>> # Use VMem allocator for memory oversubscription
         >>> ctx = iris.iris(heap_size=2**31, allocator_type="vmem")
+
     """
 
-    def __init__(self, heap_size=1 << 30, allocator_type="torch"):
+    def __init__(self, heap_size=1 << 30, allocator_type="torch", copy_engine=None):
+        if copy_engine not in (None, "sdma"):
+            raise ValueError(f"Unsupported copy engine: {copy_engine!r}. Expected None or 'sdma'.")
+        self._sdma_ep = None
+        if copy_engine == "sdma":
+            from iris.device.sdma_utils import bind_sdma_ep
+
+            self._sdma_ep = bind_sdma_ep()
+
         # Initialize distributed environment
         comm, cur_rank, num_ranks = init_distributed()
         num_gpus = count_devices()
@@ -137,7 +148,27 @@ class Iris:
 
         distributed_barrier()
 
-        # initialize copy engines
+        self.copy_engines_device_ctx = None
+        if self._sdma_ep is not None:
+            self._init_copy_engines(num_gpus, num_ranks, cur_rank)
+
+        # Initialize CCL interface
+        self.ccl = self.CCL(self)
+
+        # Lazy initialization for ops interface
+        self._ops = None
+
+        # Device-side barrier state, keyed by process group (None = all ranks).
+        self._device_barrier_state: dict[Any, torch.Tensor] = {}
+
+        # Initialize tracing
+        self.tracing = Tracing(self)
+
+        # Pre-build the device context tensor (rebuilt when tracing is enabled)
+        self._build_device_context()
+
+    def _init_copy_engines(self, num_gpus, num_ranks, cur_rank):
+        sdma_ep = self._sdma_ep
         sdma_ep.init()
 
         context_size = sdma_ep.QUEUE_DEVICE_CTX_SIZE
@@ -167,20 +198,13 @@ class Iris:
             self.copy_engines_device_ctx[local_rank][3] = handle.doorbell
             self.copy_engines_device_ctx[local_rank][4] = handle.cached_wptr
             self.copy_engines_device_ctx[local_rank][5] = handle.committed_wptr
-        # Initialize CCL interface
-        self.ccl = self.CCL(self)
 
-        # Lazy initialization for ops interface
-        self._ops = None
-
-        # Device-side barrier state, keyed by process group (None = all ranks).
-        self._device_barrier_state: dict[Any, torch.Tensor] = {}
-
-        # Initialize tracing
-        self.tracing = Tracing(self)
-
-        # Pre-build the device context tensor (rebuilt when tracing is enabled)
-        self._build_device_context()
+    def _require_copy_engine(self):
+        if self._sdma_ep is None:
+            raise RuntimeError(
+                'SDMA is disabled; initialize Iris with copy_engine="sdma" (needs `pip install iris[sdma]`).'
+            )
+        return self._sdma_ep
 
     def __del__(self):
         """Cleanup resources on deletion."""
@@ -950,7 +974,8 @@ class Iris:
         """
         return self.heap_bases
 
-    def get_copy_engine_ctx(self):
+    def get_copy_engine_ctx(self) -> torch.Tensor | None:
+        """Return the device copy-engine context, or None when copy engines are disabled."""
         return self.copy_engines_device_ctx
 
     @staticmethod
@@ -1003,6 +1028,8 @@ class Iris:
         """
         One-sided put operation with optional wait (POLL) and signal (ATOMIC).
 
+        Requires initialization with ``copy_engine="sdma"``.
+
         Supports:
         - Simple copy: put(src, to_rank)
         - Copy + signal: put(src, to_rank, signal_flag=flag)
@@ -1035,6 +1062,7 @@ class Iris:
             ...          wait_flag=batch_ready, wait_value=256,
             ...          signal_flag=transfer_done, signal_value=1)
         """
+        sdma_ep = self._require_copy_engine()
         if to_tensor is None:
             to_tensor = from_tensor
 
@@ -1094,6 +1122,8 @@ class Iris:
         """
         2D tile transfer with optional wait/signal (sub-window copy).
 
+        Requires initialization with ``copy_engine="sdma"``.
+
         Low-level API - caller provides pre-translated pointers for performance.
 
         Args:
@@ -1125,6 +1155,7 @@ class Iris:
             >>> shmem.put_tile(tile, to_rank=1, to_ptr=dst_ptr, to_stride=dst_stride,
             ...               wait_flag=wait_ptr, wait_value=256, signal_flag=signal_ptr)
         """
+        sdma_ep = self._require_copy_engine()
         from_rank = self.get_rank()
 
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
@@ -1176,6 +1207,8 @@ class Iris:
         """
         Batched 2D tile transfer with optional shared wait/signal.
 
+        Requires initialization with ``copy_engine="sdma"``.
+
         Args:
             tiles: Sequence of pre-configured sdma_ep.Tile objects
             to_rank: Destination rank
@@ -1188,6 +1221,7 @@ class Iris:
             async_op: If True, don't wait for completion
             channel: SDMA channel to use
         """
+        sdma_ep = self._require_copy_engine()
         from_rank = self.get_rank()
 
         if len(tiles) != len(to_ptrs) or len(tiles) != len(to_strides):
@@ -1232,6 +1266,8 @@ class Iris:
         """
         Wait for all outstanding SDMA operations to complete.
 
+        Requires initialization with ``copy_engine="sdma"``.
+
         Args:
             to_rank: If specified, wait only for ops to this rank.
                      If None, wait for ops to all ranks.
@@ -1242,6 +1278,7 @@ class Iris:
             >>> shmem.quiet(to_rank=1)  # Wait for completion
             >>> shmem.quiet()  # Wait for all ranks
         """
+        sdma_ep = self._require_copy_engine()
         src_rank = self.get_rank()
         if to_rank is not None:
             sdma_ep.quiet(src_rank, to_rank, channel)
@@ -1698,7 +1735,7 @@ class Iris:
             )
 
 
-def iris(heap_size=1 << 30, allocator_type="torch"):
+def iris(heap_size=1 << 30, allocator_type="torch", copy_engine=None):
     """
     Create and return an Iris instance with the specified heap size.
 
@@ -1706,6 +1743,7 @@ def iris(heap_size=1 << 30, allocator_type="torch"):
         heap_size (int): Size of the heap in bytes. Defaults to 1GB.
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem".
                               Can be overridden with IRIS_ALLOCATOR environment variable.
+        copy_engine (str, optional): See :class:`Iris`.
 
     Returns:
         Iris: An initialized Iris instance.
@@ -1719,4 +1757,4 @@ def iris(heap_size=1 << 30, allocator_type="torch"):
         >>> iris_ctx = iris.iris(2**30, allocator_type="vmem")
         >>> tensor = iris_ctx.zeros(1024, 1024)
     """
-    return Iris(heap_size, allocator_type)
+    return Iris(heap_size, allocator_type, copy_engine=copy_engine)

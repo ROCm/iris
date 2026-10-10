@@ -94,6 +94,35 @@ pip install -e .
 ```
 
 
+## Optional: SDMA copy engine
+
+Shader load/store, atomics, and collectives work with the base install. The SDMA
+copy engine (`use_copy_engine=True` in device code, and host-initiated `put`,
+`put_tile`, `put_tiles`, and `quiet`) needs [rocm-xio](https://github.com/ROCm/rocm-xio),
+which is an optional extra:
+
+```shell
+pip install "iris[sdma] @ git+https://github.com/ROCm/iris.git"
+# or, from a checkout
+pip install -e ".[sdma]"
+```
+
+To add SDMA to an existing Iris install, install rocm-xio on its own. Use the
+commit pinned by the `sdma` extra in `pyproject.toml`, since Iris builds SDMA
+packets against that rocm-xio version:
+
+```shell
+pip install --force-reinstall --no-deps "rocm-xio @ git+https://github.com/ROCm/rocm-xio.git@cbe97e6392066bef7901121965ffadad19404da4"
+```
+
+`--force-reinstall` makes pip rebuild rocm-xio even if another commit is already
+installed, since every commit reports the same package version. `--no-deps` keeps
+pip from reinstalling unrelated packages such as PyTorch. Iris itself does not need
+to be reinstalled.
+
+Installing rocm-xio does not turn SDMA on; see [Iris Class](../reference/host/class.md)
+for enabling it.
+
 ## Selecting the AMD runtime for fabric communication
 
 When multiple ROCm versions are installed, set `LD_LIBRARY_PATH` before starting

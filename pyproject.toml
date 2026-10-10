@@ -22,7 +22,6 @@ dependencies = [
     "requests",
     "ruff<0.16",  # 0.16 formats code blocks in Markdown; see lint.yml
     "tritonblas @ git+https://github.com/ROCm/tritonBLAS.git@muhaawad/iris",
-    "rocm-xio @ git+https://github.com/ROCm/rocm-xio.git@cbe97e6392066bef7901121965ffadad19404da4",
 ]
 
 [project.urls]
@@ -37,6 +36,10 @@ nvidia = [
 amd = [
     # amdsmi is provided by the ROCm system package
     # Listed here for completeness
+]
+sdma = [
+    # SDMA copy engine (use_copy_engine=True, host-initiated put/quiet). Install via `pip install iris[sdma]`.
+    "rocm-xio @ git+https://github.com/ROCm/rocm-xio.git@cbe97e6392066bef7901121965ffadad19404da4",
 ]
 dev = [
     "pytest",
