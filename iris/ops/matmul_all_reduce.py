@@ -11,6 +11,7 @@ automatically inferring dimensions, strides, and hardware parameters.
 import logging
 from typing import Optional
 import torch
+import torch.distributed as dist
 import triton
 import triton.language as tl
 
@@ -222,14 +223,67 @@ def _allocate_workspace(shmem, A, B, config, workspace):
     return workspace
 
 
+def _gather_workspace_states(shmem, local_state):
+    world_size = shmem.get_num_ranks()
+    if world_size == 1:
+        return [local_state]
+    if not dist.is_initialized() or dist.get_world_size() != world_size:
+        raise RuntimeError("Workspace agreement requires the Iris default process group.")
+    states = [None] * world_size
+    dist.all_gather_object(states, local_state)
+    return states
+
+
+def _workspace_offsets(shmem, workspace):
+    """Compare symmetric heap offsets rather than GPU virtual addresses."""
+    base = shmem.heap.allocator.get_base_address()
+    return tuple(
+        None if buffer is None else buffer.data_ptr() - base for buffer in (workspace.locks, workspace.aux_buffer)
+    )
+
+
+def _agree_workspace(shmem, A, B, config, workspace, *, check_capacity):
+    """Make a common allocation decision before entering any collective allocation."""
+    M, K = A.shape
+    N = B.shape[1]
+    needs_allocation = not _workspace_matches(shmem, A, B, config, workspace)
+    parameters = (
+        "launch" if check_capacity else "preamble",
+        M,
+        N,
+        K,
+        str(A.dtype),
+        shmem.get_num_ranks(),
+        config.all_reduce_variant,
+        config.block_size_m,
+        config.block_size_n,
+        config.block_size_k,
+    )
+    local_state = {
+        "parameters": parameters,
+        "needs_allocation": needs_allocation,
+        "offsets": None if needs_allocation else _workspace_offsets(shmem, workspace),
+        "error": _lock_capacity_error(shmem, A, B, config, workspace) if check_capacity else None,
+    }
+    states = _gather_workspace_states(shmem, local_state)
+    if any(state["parameters"] != parameters for state in states):
+        raise ValueError("All ranks must use matching matmul_all_reduce parameters and call the same entry point.")
+    for state in states:
+        if state["error"] is not None:
+            raise ValueError(state["error"])
+    if any(state["needs_allocation"] for state in states):
+        return True
+    # Matching metadata does not guarantee that ranks chose the same allocation.
+    return len({state["offsets"] for state in states}) != 1
+
+
 def _ensure_workspace(shmem, A, B, config, workspace, *, check_capacity=False):
     config.validate(world_size=shmem.get_num_ranks())
-    if check_capacity:
-        error = _lock_capacity_error(shmem, A, B, config, workspace)
-        if error is not None:
-            raise ValueError(error)
-    if not _workspace_matches(shmem, A, B, config, workspace):
+    if _agree_workspace(shmem, A, B, config, workspace, check_capacity=check_capacity):
         workspace = _allocate_workspace(shmem, A, B, config, workspace)
+        offsets = _gather_workspace_states(shmem, _workspace_offsets(shmem, workspace))
+        if len(set(offsets)) != 1:
+            raise RuntimeError("Workspace allocations have different symmetric heap offsets.")
     return workspace
 
 
