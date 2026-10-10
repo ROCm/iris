@@ -25,8 +25,8 @@ def bind_sdma_ep():
         except ImportError as exc:
             raise ImportError(
                 "rocm-xio is required for the SDMA copy engine. "
-                "Install it with `pip install iris[sdma]`, or pass enable_copy_engine=False "
-                "to iris.iris() to use shader load/store only."
+                'Install it with `pip install iris[sdma]`, or drop copy_engine="sdma" '
+                "to use shader load/store only."
             ) from exc
         sdma_ep = imported
     import iris.mem.triton.ops as triton_ops

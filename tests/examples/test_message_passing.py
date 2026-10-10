@@ -6,7 +6,6 @@ import pytest
 import torch
 import triton
 import iris
-from iris.host.iris import _resolve_enable_copy_engine
 
 import importlib.util
 from pathlib import Path
@@ -14,7 +13,7 @@ from pathlib import Path
 current_dir = Path(__file__).parent
 
 requires_copy_engine = pytest.mark.skipif(
-    not _resolve_enable_copy_engine(None),
+    importlib.util.find_spec("xio") is None,
     reason="rocm-xio not installed (pip install iris[sdma])",
 )
 

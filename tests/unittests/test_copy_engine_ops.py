@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: MIT
 
+import importlib.util
+
 import pytest
 import torch
 import triton
 import triton.language as tl
 
 import iris
-from iris.host.iris import _resolve_enable_copy_engine
 
 pytestmark = pytest.mark.skipif(
-    not _resolve_enable_copy_engine(None),
+    importlib.util.find_spec("xio") is None,
     reason="rocm-xio not installed (pip install iris[sdma])",
 )
 

@@ -30,9 +30,9 @@ def test_import_iris_does_not_import_xio():
     subprocess.check_call([sys.executable, "-c", code], env=env)
 
 
-def test_enable_without_xio_fails_before_init(no_xio):
+def test_sdma_without_xio_fails_before_init(no_xio):
     with pytest.raises(ImportError, match=r"iris\[sdma\]"):
-        iris.iris(1 << 20, enable_copy_engine=True)
+        iris.iris(1 << 20, copy_engine="sdma")
 
 
 @triton.jit
@@ -43,8 +43,8 @@ def _store_to_peer(buffer, n_elements, cur_rank, peer_rank, heap_bases, BLOCK_SI
     iris.store(buffer + offsets, values, cur_rank, peer_rank, heap_bases, mask=mask)
 
 
-def _check_shader_store_without_sdma(shmem):
-    assert shmem.enable_copy_engine is False
+def test_default_shader_store_without_xio(no_xio):
+    shmem = iris.iris(1 << 20)
     assert shmem.get_copy_engine_ctx() is None
 
     rank = shmem.get_rank()
@@ -62,15 +62,7 @@ def _check_shader_store_without_sdma(shmem):
     writer = (rank - 1) % world_size
     torch.testing.assert_close(buffer, torch.full_like(buffer, writer + 1))
 
-    with pytest.raises(RuntimeError, match="copy engine is disabled"):
+    with pytest.raises(RuntimeError, match='copy_engine="sdma"'):
         shmem.put(buffer, to_rank=peer)
-    with pytest.raises(RuntimeError, match="copy engine is disabled"):
+    with pytest.raises(RuntimeError, match='copy_engine="sdma"'):
         shmem.quiet()
-
-
-def test_disabled_shader_store():
-    _check_shader_store_without_sdma(iris.iris(1 << 20, enable_copy_engine=False))
-
-
-def test_auto_without_xio_shader_store(no_xio):
-    _check_shader_store_without_sdma(iris.iris(1 << 20))
