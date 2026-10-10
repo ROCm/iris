@@ -45,6 +45,8 @@ class FusedWorkspace:
     prepared: bool = False
     tile_shape: Tuple[int, int] = ()
     owner: Optional[object] = field(default=None, repr=False, compare=False)
+    generation: int = 0
+    completion_locks: Optional[torch.Tensor] = None
 
     def allocation_matches(
         self,
@@ -97,3 +99,5 @@ class FusedWorkspace:
         self.prepared = False
         self.tile_shape = ()
         self.owner = None
+        self.generation = 0
+        self.completion_locks = None

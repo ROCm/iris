@@ -23,13 +23,15 @@ import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 
 
-@triton.jit()
+@triton.jit(do_not_specialize=["generation"])
 def _fused_matmul_all_reduce_kernel(
     A,
     B,
     C,
     aux_buffer,
     locks,
+    completion_locks,
+    generation,
     M,
     N,
     K,
@@ -124,25 +126,37 @@ def _fused_matmul_all_reduce_kernel(
     elif VARIANT == "spinlock":
         ctx.all_reduce_spinlock(tile_obj, dst_view, locks)
     elif VARIANT == "one_shot" or VARIANT == "two_shot":
-        # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock
-        # Store GEMM result to aux_buffer (avoid race condition with final output)
-        temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
-        tl.debug_barrier()  # Ensures all stores are visible before the atomic_xchg
-
-        # Signal tile is ready by unlocking (set lock to 1)
-        # Use atomic_xchg with release semantics to ensure memory ordering
         tile_id = pid_m * num_tiles_n + pid_n
-        lock_ptr = locks + tile_id
-        tl.atomic_xchg(lock_ptr, 1, sem="release", scope="sys")  # Release ensures prior stores visible to remote GPUs
-
-        # Create source view only when needed (aux_buffer is not None)
-        src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
+        if generation > 1:
+            previous_generation = generation - 1
+            # Previous readers and the two_shot owner's remote stores must finish
+            # before this tile's auxiliary storage or output can be reused.
+            for remote_rank in range(world_size):
+                while (
+                    ctx.atomic_cas(
+                        completion_locks + tile_id,
+                        previous_generation,
+                        previous_generation,
+                        to_rank=remote_rank,
+                        sem="acquire",
+                        scope="sys",
+                    )
+                    < previous_generation
+                ):
+                    pass
+        # The auxiliary allocation is contiguous, independently of C's strides.
+        temp_ptr = aux_buffer + rm[:, None] * N + rn[None, :]
+        tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
+        tl.debug_barrier()
+        tl.atomic_xchg(locks + tile_id, generation, sem="release", scope="sys")
+        src_view = iris.make_tensor_view(aux_buffer, M, N, N, 1)
 
         if VARIANT == "one_shot":
-            ctx.all_reduce_one_shot(tile_obj, src_view, dst_view, locks)
+            ctx.all_reduce_one_shot(tile_obj, src_view, dst_view, locks, generation=generation)
         elif VARIANT == "two_shot":
-            ctx.all_reduce_two_shot(tile_obj, src_view, dst_view, locks)
+            ctx.all_reduce_two_shot(tile_obj, src_view, dst_view, locks, generation=generation)
+        tl.debug_barrier()
+        tl.atomic_xchg(completion_locks + tile_id, generation, sem="release", scope="sys")
 
 
 def _workspace_matches(shmem, A, B, config, workspace):
@@ -166,6 +180,15 @@ def _workspace_matches(shmem, A, B, config, workspace):
             or workspace.aux_buffer.shape != (M, N)
             or workspace.aux_buffer.dtype != A.dtype
         ):
+            return False
+        if (
+            workspace.completion_locks is None
+            or workspace.completion_locks.numel() < total_tiles
+            or workspace.completion_locks.dtype != torch.int32
+        ):
+            return False
+        # Reallocate collectively before the signed int32 generation counter wraps.
+        if not 0 <= workspace.generation < 2**31 - 1:
             return False
     return True
 
@@ -203,10 +226,12 @@ def _allocate_workspace(shmem, A, B, config, workspace):
     shmem.barrier(stream=stream)
     locks = None
     aux_buffer = None
+    completion_locks = None
     if variant in ("spinlock", "one_shot", "two_shot"):
         locks = shmem.zeros((total_tiles,), dtype=torch.int32)
     if variant in ("one_shot", "two_shot"):
         aux_buffer = shmem.zeros((M, N), dtype=A.dtype)
+        completion_locks = shmem.zeros((total_tiles,), dtype=torch.int32)
     shmem.barrier(stream=stream)
     if workspace is None:
         workspace = FusedWorkspace()
@@ -219,6 +244,8 @@ def _allocate_workspace(shmem, A, B, config, workspace):
     workspace.owner = shmem
     workspace.locks = locks
     workspace.aux_buffer = aux_buffer
+    workspace.completion_locks = completion_locks
+    workspace.generation = 0
     workspace.prepared = False
     return workspace
 
@@ -238,7 +265,8 @@ def _workspace_offsets(shmem, workspace):
     """Compare symmetric heap offsets rather than GPU virtual addresses."""
     base = shmem.heap.allocator.get_base_address()
     return tuple(
-        None if buffer is None else buffer.data_ptr() - base for buffer in (workspace.locks, workspace.aux_buffer)
+        None if buffer is None else buffer.data_ptr() - base
+        for buffer in (workspace.locks, workspace.aux_buffer, workspace.completion_locks)
     )
 
 
@@ -264,6 +292,7 @@ def _agree_workspace(shmem, A, B, config, workspace, *, check_capacity):
         "needs_allocation": needs_allocation,
         "offsets": None if needs_allocation else _workspace_offsets(shmem, workspace),
         "error": _lock_capacity_error(shmem, A, B, config, workspace) if check_capacity else None,
+        "generation": None if needs_allocation else workspace.generation,
     }
     states = _gather_workspace_states(shmem, local_state)
     if any(state["parameters"] != parameters for state in states):
@@ -274,7 +303,11 @@ def _agree_workspace(shmem, A, B, config, workspace, *, check_capacity):
     if any(state["needs_allocation"] for state in states):
         return True
     # Matching metadata does not guarantee that ranks chose the same allocation.
-    return len({state["offsets"] for state in states}) != 1
+    if len({state["offsets"] for state in states}) != 1:
+        return True
+    if len({state["generation"] for state in states}) != 1:
+        raise ValueError("Workspace generations differ across ranks.")
+    return False
 
 
 def _ensure_workspace(shmem, A, B, config, workspace, *, check_capacity=False):
@@ -288,14 +321,14 @@ def _ensure_workspace(shmem, A, B, config, workspace, *, check_capacity=False):
 
 
 def _pre_kernel_sync(shmem, C, config, workspace):
-    """Prepare every invocation using the existing fixed-value ready flags."""
+    """Prepare accumulation variants; shot variants overwrite and version their buffers."""
+    if config.all_reduce_variant in ("one_shot", "two_shot"):
+        return
     stream = torch.cuda.current_stream()
     # Previous async calls may still access this rank's buffers remotely.
     shmem.barrier(stream=stream)
     if workspace.locks is not None:
         workspace.locks.zero_()
-    if workspace.aux_buffer is not None:
-        workspace.aux_buffer.zero_()
     C.zero_()
     shmem.barrier(stream=stream)
     workspace.prepared = True
@@ -428,6 +461,7 @@ def matmul_all_reduce(
     grid = (total_tiles,)
 
     even_k = K % config.block_size_k == 0
+    generation = workspace.generation + 1
 
     iris_launch(
         _fused_matmul_all_reduce_kernel,
@@ -437,6 +471,8 @@ def matmul_all_reduce(
         C,
         workspace.aux_buffer,
         workspace.locks,
+        workspace.completion_locks,
+        generation,
         M,
         N,
         K,
@@ -459,6 +495,8 @@ def matmul_all_reduce(
         dtype=A.dtype,
     )
 
+    # Advance only after a successful launch; generations are runtime kernel arguments.
+    workspace.generation = generation
     workspace.prepared = False
 
     # Barrier unless async
