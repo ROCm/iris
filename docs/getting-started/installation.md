@@ -112,23 +112,27 @@ commit pinned by the `sdma` extra in `pyproject.toml`, since Iris builds SDMA
 packets against that rocm-xio version:
 
 ```shell
-pip install "rocm-xio @ git+https://github.com/ROCm/rocm-xio.git@cbe97e6392066bef7901121965ffadad19404da4"
+pip install --force-reinstall --no-deps "rocm-xio @ git+https://github.com/ROCm/rocm-xio.git@cbe97e6392066bef7901121965ffadad19404da4"
 ```
 
-No Iris reinstall is needed; the next `iris.iris()` picks it up in auto mode.
+`--force-reinstall` makes pip rebuild rocm-xio even if another commit is already
+installed, since every commit reports the same package version. `--no-deps` keeps
+pip from reinstalling unrelated packages such as PyTorch. Iris itself does not need
+to be reinstalled; the next `iris.iris()` picks rocm-xio up.
 
-`iris.iris()` decides whether to initialize SDMA queues as follows:
+The `enable_copy_engine` argument of `iris.iris()` controls whether SDMA queues are
+initialized:
 
-| `enable_copy_engine` argument | `IRIS_ENABLE_COPY_ENGINE` | Result |
-|---|---|---|
-| `True` | any | SDMA on; error if rocm-xio is not installed |
-| `False` | any | SDMA off; rocm-xio is never imported |
-| `None` (default) | `1`, `true`, `yes`, `on` | SDMA on; error if rocm-xio is not installed |
-| `None` (default) | `0`, `false`, `no`, `off` | SDMA off |
-| `None` (default) | unset, empty, or `auto` | SDMA on only if rocm-xio is installed |
+| `enable_copy_engine` | Result |
+|---|---|
+| `None` (default) | SDMA on only if rocm-xio is installed |
+| `True` | SDMA on; `ImportError` if rocm-xio is not installed |
+| `False` | SDMA off; rocm-xio is never imported |
 
-Any other value of `IRIS_ENABLE_COPY_ENGINE` raises `ValueError`. With SDMA off,
-`get_copy_engine_ctx()` returns `None` and the host SDMA APIs raise `RuntimeError`.
+Code that only uses shader load/store should pass `enable_copy_engine=False`, so it
+does not initialize SDMA queues in environments that happen to have rocm-xio. With
+SDMA off, `get_copy_engine_ctx()` returns `None` and the host SDMA APIs raise
+`RuntimeError`.
 
 ## Selecting the AMD runtime for fabric communication
 

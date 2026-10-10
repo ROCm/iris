@@ -10,7 +10,7 @@ from iris.host.iris import _resolve_enable_copy_engine
 
 pytestmark = pytest.mark.skipif(
     not _resolve_enable_copy_engine(None),
-    reason="SDMA copy engine disabled (rocm-xio not installed or IRIS_ENABLE_COPY_ENGINE=0)",
+    reason="rocm-xio not installed (pip install iris[sdma])",
 )
 
 
