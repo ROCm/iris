@@ -15,8 +15,7 @@ initialization and queue creation, and `get_copy_engine_ctx()` returns `None`.
 Regular Triton and Gluon memory operations and collectives work without SDMA.
 
 Pass `copy_engine="sdma"` to initialize both host- and device-initiated SDMA queues.
-This needs rocm-xio (`pip install iris[sdma]`, see [Installation](../../getting-started/installation.md));
-without it, `iris.iris()` raises `ImportError`:
+This needs the `sdma` extra ([Installation](../../getting-started/installation.md)):
 
 ```python
 ctx = iris.iris(heap_size=1 << 30, copy_engine="sdma")

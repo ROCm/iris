@@ -83,8 +83,8 @@ class Iris:
         heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem"
         copy_engine (str, optional): Copy engine to initialize. Use "sdma" for host- and
-            device-initiated SDMA operations; requires rocm-xio (``pip install iris[sdma]``).
-            Defaults to None (disabled; rocm-xio is never imported).
+            device-initiated SDMA operations (needs ``pip install iris[sdma]``). Defaults to
+            None (disabled).
 
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap with torch allocator
@@ -977,10 +977,6 @@ class Iris:
     def get_copy_engine_ctx(self) -> torch.Tensor | None:
         """Return the device copy-engine context, or None when copy engines are disabled."""
         return self.copy_engines_device_ctx
-
-    def _require_copy_engine(self):
-        if self.copy_engines_device_ctx is None:
-            raise RuntimeError('SDMA is disabled; initialize Iris with copy_engine="sdma".')
 
     @staticmethod
     def _dtype_to_flag_bits(dtype: torch.dtype) -> int:

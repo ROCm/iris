@@ -203,7 +203,7 @@ For a quick installation directly from the repository:
 pip install git+https://github.com/ROCm/iris.git
 ```
 
-The SDMA copy engine is opt-in: install the optional `sdma` extra (rocm-xio) and pass `copy_engine="sdma"` to `iris.iris()`:
+The SDMA copy engine needs the optional `sdma` extra (rocm-xio):
 
 ```shell
 pip install "iris[sdma] @ git+https://github.com/ROCm/iris.git"

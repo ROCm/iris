@@ -120,9 +120,8 @@ installed, since every commit reports the same package version. `--no-deps` keep
 pip from reinstalling unrelated packages such as PyTorch. Iris itself does not need
 to be reinstalled.
 
-Installing rocm-xio does not turn SDMA on. Pass `copy_engine="sdma"` to `iris.iris()`
-to initialize the SDMA queues; see [Iris Class](../reference/host/class.md). Without
-it, Iris neither imports rocm-xio nor creates SDMA queues.
+Installing rocm-xio does not turn SDMA on; see [Iris Class](../reference/host/class.md)
+for enabling it.
 
 ## Selecting the AMD runtime for fabric communication
 
