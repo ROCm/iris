@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 import torch
 
+from iris._libpath import in_process_library
 from iris.drivers.base import (
     BaseDriver,
     DriverError,
@@ -50,14 +51,24 @@ def _load_cdll(*names: Optional[str]) -> Any:
 
 
 _hip = _load_cdll(
-    # Let LD_LIBRARY_PATH select the active ROCm SDK before consulting ldconfig.
-    # find_library can return a stale system SONAME (e.g. HIP 5 beside HIP 7),
-    # and loading both runtimes can abort inside hipSetDevice.
+    # Order matters, and each entry fixes a different failure:
+    #  1. The copy already mapped into this process. torch ships its own ROCm
+    #     now (the rocm pip SDK, under site-packages/_rocm_sdk_core/lib) and
+    #     maps it before iris loads anything; binding to that copy keeps one
+    #     runtime in the process without the caller having to set anything.
+    #  2. The bare SONAME, so LD_LIBRARY_PATH can select the active SDK when
+    #     nothing is mapped yet.
+    #  3. find_library only after those, because it consults ldconfig and can
+    #     return a stale system SONAME (e.g. HIP 5 beside HIP 7).
+    # Mixing two HIP runtimes in one process fails either at dlopen, with an
+    # undefined versioned HSA symbol, or later inside hipSetDevice.
+    in_process_library("libamdhip64"),
     "libamdhip64.so",
     ctypes.util.find_library("amdhip64"),
     "/opt/rocm/lib/libamdhip64.so",
 )
 _amdsmi = _load_cdll(
+    in_process_library("libamd_smi"),
     "libamd_smi.so",
     ctypes.util.find_library("amd_smi"),
     "/opt/rocm/lib/libamd_smi.so",

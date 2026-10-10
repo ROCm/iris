@@ -920,7 +920,13 @@ def launch(
             config.num_xcds,
             config.chunk_size,
             config.all_reduce_distribution,
-            num_warps=8,
+            # Was hardcoded to 8. With a 64-wide wavefront that is 512 threads,
+            # so a 32x256 tile is 16 elements/thread and fits. On gfx1250 the
+            # wavefront is 32, the same 8 warps are only 256 threads, and the
+            # same tile becomes 32 elements/thread -- which faults with an
+            # illegal memory access. Honour the caller's num_warps so the tile
+            # can be spread over enough threads.
+            num_warps=config.num_warps,
             num_stages=1,
             waves_per_eu=1,
             algorithm="all_reduce",

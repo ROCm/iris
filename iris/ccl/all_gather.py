@@ -40,7 +40,11 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         )
 
     if config.use_gluon:
-        from iris.ccl.gluon.all_gather import launch
+        if config.all_gather_variant == "tdm":
+            # gfx1250 tensor data movement engine; see gluon/all_gather_tdm.py
+            from iris.ccl.gluon.all_gather_tdm import launch
+        else:
+            from iris.ccl.gluon.all_gather import launch
     else:
         from iris.ccl.triton.all_gather import launch
 
