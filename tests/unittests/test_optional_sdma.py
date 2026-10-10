@@ -13,7 +13,6 @@ import triton.language as tl
 
 import iris
 import iris.device.sdma_utils as sdma_utils
-from iris.host.iris import _parse_copy_engine_env, _resolve_enable_copy_engine
 
 
 @pytest.fixture
@@ -23,63 +22,12 @@ def no_xio(monkeypatch):
     monkeypatch.setattr(sdma_utils, "sdma_ep", None)
 
 
-@pytest.mark.parametrize(
-    "value, expected",
-    [
-        ("1", True),
-        ("TRUE", True),
-        (" yes ", True),
-        ("on", True),
-        ("0", False),
-        ("False", False),
-        ("no", False),
-        ("off", False),
-        ("", None),
-        ("auto", None),
-    ],
-)
-def test_parse_copy_engine_env(value, expected):
-    assert _parse_copy_engine_env(value) is expected
-
-
-@pytest.mark.parametrize("value", ["2", "enable", "ture", "disabled"])
-def test_parse_copy_engine_env_rejects_unknown(value):
-    with pytest.raises(ValueError, match="IRIS_ENABLE_COPY_ENGINE"):
-        _parse_copy_engine_env(value)
-
-
-def test_explicit_argument_overrides_env(monkeypatch):
-    monkeypatch.setenv("IRIS_ENABLE_COPY_ENGINE", "1")
-    assert _resolve_enable_copy_engine(False) is False
-    monkeypatch.setenv("IRIS_ENABLE_COPY_ENGINE", "0")
-    assert _resolve_enable_copy_engine(True) is True
-
-
-@pytest.mark.parametrize("value", [1, 0, "yes"])
-def test_explicit_argument_must_be_bool(value):
-    with pytest.raises(TypeError, match="enable_copy_engine"):
-        _resolve_enable_copy_engine(value)
-
-
-def test_auto_follows_xio_install(monkeypatch, no_xio):
-    monkeypatch.delenv("IRIS_ENABLE_COPY_ENGINE", raising=False)
-    assert _resolve_enable_copy_engine(None) is False
-    monkeypatch.setenv("IRIS_ENABLE_COPY_ENGINE", "auto")
-    assert _resolve_enable_copy_engine(None) is False
-
-
 def test_import_iris_does_not_import_xio():
-    code = "import sys, iris; assert 'xio' not in sys.modules, 'import iris loaded rocm-xio'"
+    code = "import sys, iris; assert sys.modules.get('xio') is None, 'import iris loaded rocm-xio'"
     root = Path(__file__).resolve().parents[2]
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
     subprocess.check_call([sys.executable, "-c", code], env=env)
-
-
-def test_invalid_env_fails_before_init(monkeypatch):
-    monkeypatch.setenv("IRIS_ENABLE_COPY_ENGINE", "maybe")
-    with pytest.raises(ValueError, match="IRIS_ENABLE_COPY_ENGINE"):
-        iris.iris(1 << 20)
 
 
 def test_enable_without_xio_fails_before_init(no_xio):
@@ -120,16 +68,9 @@ def _check_shader_store_without_sdma(shmem):
         shmem.quiet()
 
 
-def test_disabled_shader_store(monkeypatch):
-    monkeypatch.delenv("IRIS_ENABLE_COPY_ENGINE", raising=False)
+def test_disabled_shader_store():
     _check_shader_store_without_sdma(iris.iris(1 << 20, enable_copy_engine=False))
 
 
-def test_env_disabled_shader_store(monkeypatch):
-    monkeypatch.setenv("IRIS_ENABLE_COPY_ENGINE", "0")
-    _check_shader_store_without_sdma(iris.iris(1 << 20))
-
-
-def test_auto_without_xio_shader_store(monkeypatch, no_xio):
-    monkeypatch.delenv("IRIS_ENABLE_COPY_ENGINE", raising=False)
+def test_auto_without_xio_shader_store(no_xio):
     _check_shader_store_without_sdma(iris.iris(1 << 20))

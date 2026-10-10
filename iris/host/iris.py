@@ -74,51 +74,15 @@ from iris.host.platform.utils import is_simulation_env
 
 _COPY_ENGINE_DISABLED = (
     "SDMA copy engine is disabled. Install rocm-xio with `pip install iris[sdma]` and "
-    "pass enable_copy_engine=True to iris.iris() (or set IRIS_ENABLE_COPY_ENGINE=1) "
-    "to use host-initiated SDMA puts and use_copy_engine=True."
+    "pass enable_copy_engine=True to iris.iris() to use host-initiated SDMA puts and use_copy_engine=True."
 )
-
-_ENV_TRUE = ("1", "true", "yes", "on")
-_ENV_FALSE = ("0", "false", "no", "off")
-_ENV_AUTO = ("", "auto")
-
-
-def _xio_installed():
-    return importlib.util.find_spec("xio") is not None
-
-
-def _parse_copy_engine_env(value):
-    """Map ``IRIS_ENABLE_COPY_ENGINE`` to True, False, or None (auto)."""
-    normalized = value.strip().lower()
-    if normalized in _ENV_TRUE:
-        return True
-    if normalized in _ENV_FALSE:
-        return False
-    if normalized in _ENV_AUTO:
-        return None
-    raise ValueError(
-        f"Invalid IRIS_ENABLE_COPY_ENGINE={value!r}. "
-        f"Expected one of {', '.join(_ENV_TRUE + _ENV_FALSE)}, or auto/empty."
-    )
 
 
 def _resolve_enable_copy_engine(enable_copy_engine):
-    """
-    Decide whether to initialize the SDMA copy engine.
-
-    An explicit argument wins over ``IRIS_ENABLE_COPY_ENGINE``. In auto mode
-    (neither set), SDMA is enabled only if rocm-xio is installed.
-    """
-    if enable_copy_engine is not None and not isinstance(enable_copy_engine, bool):
-        raise TypeError(f"enable_copy_engine must be True, False, or None, got {enable_copy_engine!r}")
-    requested = enable_copy_engine
-    if requested is None:
-        env = os.environ.get("IRIS_ENABLE_COPY_ENGINE")
-        if env is not None:
-            requested = _parse_copy_engine_env(env)
-    if requested is None:
-        return _xio_installed()
-    return requested
+    """Return ``enable_copy_engine``, or whether rocm-xio is installed if it is None."""
+    if enable_copy_engine is None:
+        return importlib.util.find_spec("xio") is not None
+    return bool(enable_copy_engine)
 
 
 class Iris:
@@ -132,8 +96,7 @@ class Iris:
         heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem"
         enable_copy_engine (bool, optional): Initialize SDMA queues via rocm-xio
-            (``pip install iris[sdma]``). None (default) reads ``IRIS_ENABLE_COPY_ENGINE``
-            (``1``/``0``/``auto``); in auto mode SDMA is enabled only if rocm-xio is
+            (``pip install iris[sdma]``). None (default) enables it only if rocm-xio is
             installed. False uses shader load/store only and never imports rocm-xio.
 
     Example:
@@ -1786,10 +1749,7 @@ def iris(heap_size=1 << 30, allocator_type="torch", enable_copy_engine=None):
         heap_size (int): Size of the heap in bytes. Defaults to 1GB.
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem".
                               Can be overridden with IRIS_ALLOCATOR environment variable.
-        enable_copy_engine (bool, optional): Initialize SDMA queues via rocm-xio
-            (``pip install iris[sdma]``). None (default) reads ``IRIS_ENABLE_COPY_ENGINE``
-            (``1``/``0``/``auto``); in auto mode SDMA is enabled only if rocm-xio is
-            installed. False uses shader load/store only and never imports rocm-xio.
+        enable_copy_engine (bool, optional): See :class:`Iris`.
 
     Returns:
         Iris: An initialized Iris instance.

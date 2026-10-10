@@ -7,10 +7,17 @@ import pytest
 import torch
 import triton
 import triton.language as tl
-from xio import sdma_ep
 
 import iris
 from iris.device import sdma_utils
+
+# The packet emitters read constants from rocm-xio, which only iris.iris() binds otherwise.
+try:
+    sdma_ep = sdma_utils.bind_sdma_ep()
+except ImportError:
+    sdma_ep = None
+
+pytestmark = pytest.mark.skipif(sdma_ep is None, reason="rocm-xio not installed (pip install iris[sdma])")
 
 SENTINEL = 0x5A5A5A5A
 ADDR = 0x00007F12_34567890
