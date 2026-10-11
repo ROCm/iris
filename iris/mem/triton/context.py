@@ -731,7 +731,7 @@ class Context:
             self.atomic_xchg(locks + tile_id, 0, to_rank=dest_rank, sem="release", scope="sys")
 
     @triton.jit
-    def all_reduce_one_shot(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks):
+    def all_reduce_one_shot(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks, signal_value=1):
         """
         Tile-level all-reduce using one-shot algorithm.
 
@@ -743,6 +743,9 @@ class Context:
             src_view: TensorView for source tensor (to load remote data).
             dst_view: TensorView for output tensor.
             locks: Pointer to lock array used as ready flags.
+            signal_value: Expected lock value indicating tile is ready.
+                Use a monotonically increasing counter to avoid zeroing
+                locks between calls.
         """
         src_tile_ptr, mask = src_view.tile_ptr(tile)
         dst_tile_ptr, _ = dst_view.tile_ptr(tile)
@@ -755,7 +758,7 @@ class Context:
         for remote_rank in range(self.world_size):
             if remote_rank != self.rank:
                 lock_ptr = locks + tile_id
-                while self.atomic_add(lock_ptr, 0, to_rank=remote_rank, sem="acquire", scope="sys") != 1:
+                while self.atomic_add(lock_ptr, 0, to_rank=remote_rank, sem="acquire", scope="sys") != signal_value:
                     pass
                 partial = self.load(src_tile_ptr, from_rank=remote_rank, mask=mask)
                 acc += partial.to(acc_dtype)
@@ -799,7 +802,7 @@ class Context:
                 tl.store(dst_tile_ptr, remote_result, mask=mask)
 
     @triton.jit
-    def all_reduce_two_shot(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks):
+    def all_reduce_two_shot(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks, signal_value=1):
         """
         Tile-level all-reduce using two-shot algorithm with work distribution.
 
@@ -811,6 +814,9 @@ class Context:
             src_view: TensorView for source tensor.
             dst_view: TensorView for output tensor.
             locks: Pointer to lock array used as ready flags.
+            signal_value: Expected lock value indicating tile is ready.
+                Use a monotonically increasing counter to avoid zeroing
+                locks between calls.
         """
         num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)
         tile_id = tile.pid_m * num_tiles_n + tile.pid_n
@@ -826,7 +832,7 @@ class Context:
             for remote_rank in range(self.world_size):
                 if remote_rank != self.rank:
                     lock_ptr = locks + tile_id
-                    while self.atomic_add(lock_ptr, 0, to_rank=remote_rank, sem="acquire", scope="sys") != 1:
+                    while self.atomic_add(lock_ptr, 0, to_rank=remote_rank, sem="acquire", scope="sys") != signal_value:
                         pass
                     partial = self.load(src_tile_ptr, from_rank=remote_rank, mask=mask)
                     acc += partial.to(acc_dtype)
@@ -954,7 +960,7 @@ class Context:
                 tl.store(dst_view.ptr + dst_offsets, data, mask=combined_mask)
 
     @triton.jit
-    def reduce_scatter(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks):
+    def reduce_scatter(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks, signal_value=1):
         """
         Tile-level reduce-scatter using contiguous work distribution.
 
@@ -966,6 +972,9 @@ class Context:
             src_view: TensorView for source tensor.
             dst_view: TensorView for output tensor.
             locks: Pointer to lock array used as ready flags.
+            signal_value: Expected lock value indicating tile is ready.
+                Use a monotonically increasing counter to avoid zeroing
+                locks between calls.
         """
         num_tiles_n = tl.cdiv(dst_view.N, tile.block_n)
         num_tiles_m = tl.cdiv(dst_view.M, tile.block_m)
@@ -991,7 +1000,7 @@ class Context:
             for remote_rank in range(self.world_size):
                 if remote_rank != self.rank:
                     lock_ptr = locks + tile_id
-                    while self.atomic_add(lock_ptr, 0, to_rank=remote_rank, sem="acquire", scope="gpu") != 1:
+                    while self.atomic_add(lock_ptr, 0, to_rank=remote_rank, sem="acquire", scope="gpu") != signal_value:
                         pass
                     partial = self.load(src_tile_ptr, from_rank=remote_rank, mask=mask)
                     acc += partial.to(acc_dtype)

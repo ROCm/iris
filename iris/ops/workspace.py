@@ -42,6 +42,11 @@ class FusedWorkspace:
     aux_buffer: Optional[torch.Tensor] = None  # Generic buffer for intermediate results
     locks: Optional[torch.Tensor] = None  # Synchronization primitives
 
+    # Monotonic call counter for producer-consumer lock signaling.
+    # Each call uses a unique signal value, eliminating the need to zero locks
+    # between calls for one_shot/two_shot/reduce_scatter variants.
+    call_counter: int = 0
+
     prepared: bool = False
 
     def matches(
@@ -82,4 +87,5 @@ class FusedWorkspace:
         """Free all allocated buffers."""
         self.aux_buffer = None
         self.locks = None
+        self.call_counter = 0
         self.prepared = False
