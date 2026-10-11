@@ -603,7 +603,7 @@ def atomic_sub(
 
     This function performs an atomic subtraction operation by translating the pointer
     from the `from_rank`'s address space to the `to_rank`'s address space and atomically
-        subtracting the provided data from the `to_rank` memory location. If the `from_rank` and `to_rank` are the same,
+    subtracting the provided data from the `to_rank` memory location. If the `from_rank` and `to_rank` are the same,
     this function performs a local atomic subtraction operation.
 
     Args:

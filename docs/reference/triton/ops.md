@@ -21,3 +21,15 @@ Fused matrix multiplication and collective communication operations accessible v
 ```{eval-rst}
 .. automethod:: iris.ops.OpsNamespace.matmul_reduce_scatter
 ```
+
+## atomic_sub
+
+```{eval-rst}
+.. autofunction:: iris.mem.triton.ops.atomic_sub
+```
+
+## quiet
+
+```{eval-rst}
+.. autofunction:: iris.mem.triton.ops.quiet
+```

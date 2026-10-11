@@ -45,3 +45,27 @@ Broadcast data from a source rank to all ranks. This method automatically detect
 ```{eval-rst}
 .. automethod:: iris.host.iris.Iris.broadcast
 ```
+
+## allocate_symmetric
+
+```{eval-rst}
+.. automethod:: iris.host.iris.Iris.allocate_symmetric
+```
+
+## device_barrier
+
+```{eval-rst}
+.. automethod:: iris.host.iris.Iris.device_barrier
+```
+
+## get_device_id
+
+```{eval-rst}
+.. automethod:: iris.host.iris.Iris.get_device_id
+```
+
+## ops
+
+```{eval-rst}
+.. autoproperty:: iris.host.iris.Iris.ops
+```

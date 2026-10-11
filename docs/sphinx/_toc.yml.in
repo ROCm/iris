@@ -19,6 +19,7 @@ subtrees:
       - file: reference/host/class.md
       - file: reference/host/tensor-creation.md
       - file: reference/host/ccl.md
+      - file: reference/host/copy-engine.md
       - file: reference/triton/overview.md
         entries:
         - file: reference/triton/device-functions.md

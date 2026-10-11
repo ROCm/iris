@@ -951,6 +951,18 @@ class Iris:
         return self.heap_bases
 
     def get_copy_engine_ctx(self):
+        """
+        Get the device-side copy engine context for SDMA operations.
+
+        The returned tensor holds the per-rank SDMA queue, read and write pointer,
+        and doorbell addresses that device-side kernels need in order to enqueue
+        copy packets. Pass it to ``iris.put`` as ``copy_engine_ctx`` when driving
+        the copy engine from inside a kernel.
+
+        Returns:
+            torch.Tensor: The copy engine device context, or ``None`` if the copy
+            engine was not initialized.
+        """
         return self.copy_engines_device_ctx
 
     @staticmethod
