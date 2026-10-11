@@ -169,6 +169,7 @@ napoleon_custom_sections = None
 # Table of contents
 external_toc_path = "./sphinx/_toc.yml"
 
+
 # Theme options for AMD ROCm theme
 html_theme_options = {
     "flavor": "instinct",

@@ -3,6 +3,7 @@ subtrees:
   - caption: Getting Started
     entries:
     - file: getting-started/installation.md
+    - file: getting-started/slurm.md
     - file: reference/examples.md
     - file: CONTRIBUTING.md
   - caption: Conceptual
