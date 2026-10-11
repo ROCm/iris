@@ -1,0 +1,11 @@
+# Runtime deps for examples/33_gpt_oss_megakernel.
+#
+# torch + triton are expected from the base image (rocm/pytorch-nightly or
+# muhaawad/iris-dev); this file covers what those images do NOT ship.
+tokenizers
+safetensors
+huggingface_hub
+
+# multi_gpu/ additionally needs the iris package itself (pip install -e . from
+# the repo root) and tritonblas. Neither is on PyPI for ROCm, so they are not
+# listed as requirements here -- install them from source.
