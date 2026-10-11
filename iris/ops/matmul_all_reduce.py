@@ -11,6 +11,7 @@ automatically inferring dimensions, strides, and hardware parameters.
 import logging
 from typing import Optional
 import torch
+import torch.distributed as dist
 import triton
 import triton.language as tl
 
@@ -22,13 +23,15 @@ import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 
 
-@triton.jit()
+@triton.jit(do_not_specialize=["generation"])
 def _fused_matmul_all_reduce_kernel(
     A,
     B,
     C,
     aux_buffer,
     locks,
+    completion_locks,
+    generation,
     M,
     N,
     K,
@@ -123,25 +126,221 @@ def _fused_matmul_all_reduce_kernel(
     elif VARIANT == "spinlock":
         ctx.all_reduce_spinlock(tile_obj, dst_view, locks)
     elif VARIANT == "one_shot" or VARIANT == "two_shot":
-        # For one_shot and two_shot: store tile to aux_buffer and signal ready with lock
-        # Store GEMM result to aux_buffer (avoid race condition with final output)
-        temp_ptr = aux_buffer + rm[:, None] * stride_cm + rn[None, :] * stride_cn
-        tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
-        tl.debug_barrier()  # Ensures all stores are visible before the atomic_xchg
-
-        # Signal tile is ready by unlocking (set lock to 1)
-        # Use atomic_xchg with release semantics to ensure memory ordering
         tile_id = pid_m * num_tiles_n + pid_n
-        lock_ptr = locks + tile_id
-        tl.atomic_xchg(lock_ptr, 1, sem="release", scope="sys")  # Release ensures prior stores visible to remote GPUs
-
-        # Create source view only when needed (aux_buffer is not None)
-        src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
+        if generation > 1:
+            previous_generation = generation - 1
+            # Previous readers and the two_shot owner's remote stores must finish
+            # before this tile's auxiliary storage or output can be reused.
+            for remote_rank in range(world_size):
+                while (
+                    ctx.atomic_cas(
+                        completion_locks + tile_id,
+                        previous_generation,
+                        previous_generation,
+                        to_rank=remote_rank,
+                        sem="acquire",
+                        scope="sys",
+                    )
+                    < previous_generation
+                ):
+                    pass
+        # The auxiliary allocation is contiguous, independently of C's strides.
+        temp_ptr = aux_buffer + rm[:, None] * N + rn[None, :]
+        tl.store(temp_ptr, c, mask=(rm[:, None] < M) & (rn[None, :] < N), cache_modifier=".wt")
+        tl.debug_barrier()
+        tl.atomic_xchg(locks + tile_id, generation, sem="release", scope="sys")
+        src_view = iris.make_tensor_view(aux_buffer, M, N, N, 1)
 
         if VARIANT == "one_shot":
-            ctx.all_reduce_one_shot(tile_obj, src_view, dst_view, locks)
+            ctx.all_reduce_one_shot(tile_obj, src_view, dst_view, locks, generation=generation)
         elif VARIANT == "two_shot":
-            ctx.all_reduce_two_shot(tile_obj, src_view, dst_view, locks)
+            ctx.all_reduce_two_shot(tile_obj, src_view, dst_view, locks, generation=generation)
+        tl.debug_barrier()
+        tl.atomic_xchg(completion_locks + tile_id, generation, sem="release", scope="sys")
+
+
+def _workspace_matches(shmem, A, B, config, workspace):
+    """Check allocation metadata and buffers, independently of prepared."""
+    M, K = A.shape
+    N = B.shape[1]
+    variant = config.all_reduce_variant
+    if workspace is None or workspace.owner is not shmem:
+        return False
+    if not workspace.allocation_matches("matmul_all_reduce", (M, N, K), A.dtype, shmem.get_num_ranks(), variant):
+        return False
+    if workspace.tile_shape != (config.block_size_m, config.block_size_n):
+        return False
+    total_tiles = triton.cdiv(M, config.block_size_m) * triton.cdiv(N, config.block_size_n)
+    if variant in ("spinlock", "one_shot", "two_shot"):
+        if workspace.locks is None or workspace.locks.numel() < total_tiles or workspace.locks.dtype != torch.int32:
+            return False
+    if variant in ("one_shot", "two_shot"):
+        if (
+            workspace.aux_buffer is None
+            or workspace.aux_buffer.shape != (M, N)
+            or workspace.aux_buffer.dtype != A.dtype
+        ):
+            return False
+        if (
+            workspace.completion_locks is None
+            or workspace.completion_locks.numel() < total_tiles
+            or workspace.completion_locks.dtype != torch.int32
+        ):
+            return False
+        # Reallocate collectively before the signed int32 generation counter wraps.
+        if not 0 <= workspace.generation < 2**31 - 1:
+            return False
+    return True
+
+
+def _lock_capacity_error(shmem, A, B, config, workspace):
+    """Preserve the error for undersized preallocated locks."""
+    M, K = A.shape
+    N = B.shape[1]
+    if (
+        workspace is None
+        or workspace.owner is not shmem
+        or not workspace.allocation_matches(
+            "matmul_all_reduce", (M, N, K), A.dtype, shmem.get_num_ranks(), config.all_reduce_variant
+        )
+        or workspace.locks is None
+    ):
+        return None
+    total_tiles = triton.cdiv(M, config.block_size_m) * triton.cdiv(N, config.block_size_n)
+    if workspace.locks.numel() < total_tiles:
+        return (
+            f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
+            "Pre-allocate workspace with the smallest block sizes you intend to use."
+        )
+    return None
+
+
+def _allocate_workspace(shmem, A, B, config, workspace):
+    """Collectively allocate buffers without per-call output preparation."""
+    M, K = A.shape
+    N = B.shape[1]
+    variant = config.all_reduce_variant
+    total_tiles = triton.cdiv(M, config.block_size_m) * triton.cdiv(N, config.block_size_n)
+    # Preserve the largest flag capacity this workspace already has.
+    flag_capacity = total_tiles
+    if workspace is not None and workspace.owner is shmem:
+        for buffer in (workspace.locks, workspace.completion_locks):
+            if buffer is not None:
+                flag_capacity = max(flag_capacity, buffer.numel())
+    # All ranks must allocate the same capacity.
+    capacities = _gather_workspace_states(shmem, flag_capacity)
+    flag_capacity = max(capacities)
+    stream = torch.cuda.current_stream()
+    # Finish previous remote accesses before replacing their buffers.
+    shmem.barrier(stream=stream)
+    locks = None
+    aux_buffer = None
+    completion_locks = None
+    if variant in ("spinlock", "one_shot", "two_shot"):
+        locks = shmem.zeros((flag_capacity,), dtype=torch.int32)
+    if variant in ("one_shot", "two_shot"):
+        aux_buffer = shmem.zeros((M, N), dtype=A.dtype)
+        completion_locks = shmem.zeros((flag_capacity,), dtype=torch.int32)
+    shmem.barrier(stream=stream)
+    if workspace is None:
+        workspace = FusedWorkspace()
+    workspace.operation = "matmul_all_reduce"
+    workspace.shape = (M, N, K)
+    workspace.dtype = A.dtype
+    workspace.world_size = shmem.get_num_ranks()
+    workspace.variant = variant
+    workspace.tile_shape = (config.block_size_m, config.block_size_n)
+    workspace.owner = shmem
+    workspace.locks = locks
+    workspace.aux_buffer = aux_buffer
+    workspace.completion_locks = completion_locks
+    workspace.generation = 0
+    workspace.prepared = False
+    return workspace
+
+
+def _gather_workspace_states(shmem, local_state):
+    world_size = shmem.get_num_ranks()
+    if world_size == 1:
+        return [local_state]
+    if not dist.is_initialized() or dist.get_world_size() != world_size:
+        raise RuntimeError("Workspace agreement requires the Iris default process group.")
+    states = [None] * world_size
+    dist.all_gather_object(states, local_state)
+    return states
+
+
+def _workspace_offsets(shmem, workspace):
+    """Compare symmetric heap offsets rather than GPU virtual addresses."""
+    base = shmem.heap.allocator.get_base_address()
+    return tuple(
+        None if buffer is None else buffer.data_ptr() - base
+        for buffer in (workspace.locks, workspace.aux_buffer, workspace.completion_locks)
+    )
+
+
+def _agree_workspace(shmem, A, B, config, workspace, *, check_capacity):
+    """Make a common allocation decision before entering any collective allocation."""
+    M, K = A.shape
+    N = B.shape[1]
+    needs_allocation = not _workspace_matches(shmem, A, B, config, workspace)
+    parameters = (
+        "launch" if check_capacity else "preamble",
+        M,
+        N,
+        K,
+        str(A.dtype),
+        shmem.get_num_ranks(),
+        config.all_reduce_variant,
+        config.block_size_m,
+        config.block_size_n,
+        config.block_size_k,
+    )
+    local_state = {
+        "parameters": parameters,
+        "needs_allocation": needs_allocation,
+        "offsets": None if needs_allocation else _workspace_offsets(shmem, workspace),
+        "error": _lock_capacity_error(shmem, A, B, config, workspace) if check_capacity else None,
+        "generation": None if needs_allocation else workspace.generation,
+    }
+    states = _gather_workspace_states(shmem, local_state)
+    if any(state["parameters"] != parameters for state in states):
+        raise ValueError("All ranks must use matching matmul_all_reduce parameters and call the same entry point.")
+    for state in states:
+        if state["error"] is not None:
+            raise ValueError(state["error"])
+    if any(state["needs_allocation"] for state in states):
+        return True
+    # Matching metadata does not guarantee that ranks chose the same allocation.
+    if len({state["offsets"] for state in states}) != 1:
+        return True
+    if len({state["generation"] for state in states}) != 1:
+        raise ValueError("Workspace generations differ across ranks.")
+    return False
+
+
+def _ensure_workspace(shmem, A, B, config, workspace, *, check_capacity=False):
+    config.validate(world_size=shmem.get_num_ranks())
+    if _agree_workspace(shmem, A, B, config, workspace, check_capacity=check_capacity):
+        workspace = _allocate_workspace(shmem, A, B, config, workspace)
+        offsets = _gather_workspace_states(shmem, _workspace_offsets(shmem, workspace))
+        if len(set(offsets)) != 1:
+            raise RuntimeError("Workspace allocations have different symmetric heap offsets.")
+    return workspace
+
+
+def _pre_kernel_sync(shmem, C, config, workspace):
+    """Prepare accumulation variants; shot variants overwrite and version their buffers."""
+    if config.all_reduce_variant in ("one_shot", "two_shot"):
+        return
+    stream = torch.cuda.current_stream()
+    # Previous async calls may still access this rank's buffers remotely.
+    shmem.barrier(stream=stream)
+    if workspace.locks is not None:
+        workspace.locks.zero_()
+    C.zero_()
+    shmem.barrier(stream=stream)
+    workspace.prepared = True
 
 
 def matmul_all_reduce_preamble(
@@ -169,53 +368,8 @@ def matmul_all_reduce_preamble(
     if config is None:
         config = FusedConfig()
 
-    M, K = A.shape[:2]
-    N = B.shape[1]
-    dtype = A.dtype
-    world_size = shmem.get_num_ranks()
-
-    # Validate config
-    config.validate(world_size=world_size)
-
-    if workspace is None:
-        workspace = FusedWorkspace()
-
-    workspace.operation = "matmul_all_reduce"
-    workspace.shape = (M, N, K)
-    workspace.dtype = dtype
-    workspace.world_size = world_size
-    workspace.variant = config.all_reduce_variant
-    workspace.prepared = False
-
-    # Allocate locks for spinlock-based all-reduce
-    num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
-    num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    total_tiles = num_pid_m * num_pid_n
-
-    # Allocate locks for spinlock, one_shot, and two_shot variants
-    if config.all_reduce_variant in ["spinlock", "one_shot", "two_shot"]:
-        if workspace.locks is None or workspace.locks.numel() != total_tiles:
-            workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
-        else:
-            workspace.locks.zero_()
-    else:
-        workspace.locks = None
-
-    # Allocate auxiliary buffer for one_shot and two_shot to avoid race conditions
-    # (GEMM results stored here, then reduced to final output)
-    if config.all_reduce_variant in ["one_shot", "two_shot"]:
-        if workspace.aux_buffer is None or workspace.aux_buffer.shape != (M, N):
-            workspace.aux_buffer = shmem.zeros((M, N), dtype=dtype)
-        else:
-            workspace.aux_buffer.zero_()
-    else:
-        workspace.aux_buffer = None
-
-    # Zero output tensor
-    C.zero_()
-    shmem.barrier()
-
-    workspace.prepared = True
+    workspace = _ensure_workspace(shmem, A, B, config, workspace)
+    _pre_kernel_sync(shmem, C, config, workspace)
     return workspace
 
 
@@ -303,13 +457,8 @@ def matmul_all_reduce(
         num_ranks=world_size,
     )
 
-    # Prepare workspace if needed
-    needs_prepare = workspace is None or not workspace.matches(
-        "matmul_all_reduce", (M, N, K), A.dtype, world_size, config.all_reduce_variant
-    )
-
-    if needs_prepare:
-        workspace = matmul_all_reduce_preamble(shmem, C, A, B, config=config, workspace=workspace)
+    workspace = _ensure_workspace(shmem, A, B, config, workspace, check_capacity=True)
+    _pre_kernel_sync(shmem, C, config, workspace)
 
     # Get device context for RMA
     device_context = shmem.get_device_context()
@@ -320,16 +469,8 @@ def matmul_all_reduce(
     total_tiles = num_pid_m * num_pid_n
     grid = (total_tiles,)
 
-    # Validate that the pre-allocated lock array is large enough for the current tile count.
-    # This can occur when the workspace was prepared with larger block sizes (fewer tiles)
-    # and is then reused with smaller block sizes (more tiles).
-    if workspace.locks is not None and workspace.locks.numel() < total_tiles:
-        raise ValueError(
-            f"Lock array too small: have {workspace.locks.numel()} but need {total_tiles}. "
-            f"Pre-allocate workspace with the smallest block sizes you intend to use."
-        )
-
     even_k = K % config.block_size_k == 0
+    generation = workspace.generation + 1
 
     iris_launch(
         _fused_matmul_all_reduce_kernel,
@@ -339,6 +480,8 @@ def matmul_all_reduce(
         C,
         workspace.aux_buffer,
         workspace.locks,
+        workspace.completion_locks,
+        generation,
         M,
         N,
         K,
@@ -361,9 +504,9 @@ def matmul_all_reduce(
         dtype=A.dtype,
     )
 
-    # Mark workspace as used
-    if workspace is not None:
-        workspace.prepared = False
+    # Advance only after a successful launch; generations are runtime kernel arguments.
+    workspace.generation = generation
+    workspace.prepared = False
 
     # Barrier unless async
     if not async_op:
