@@ -32,6 +32,11 @@ version = release
 # ones.
 extensions = [
     "rocm_docs",
+    # Sphinx removed its bundled jQuery in 6.0, but four rocm-docs-core theme
+    # scripts (code_word_breaks, renameVersionLinks, rdcMisc,
+    # theme_mode_captions) still call $(). Without this every page throws
+    # "$ is not defined" and those scripts silently do nothing.
+    "sphinxcontrib.jquery",
     "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
@@ -191,3 +196,30 @@ html_context = {
     "copybutton_hide": copybutton_hide,
     "copybutton_remove_prompts": copybutton_remove_prompts,
 }
+
+# ---------------------------------------------------------------------------
+# Copy docs/images/ verbatim into the built site.
+#
+# Several conceptual pages reference images from raw HTML blocks, e.g.
+#   <img class="dark-theme-img only-dark" src="../images/iris-model.png">
+# which is how the light/dark theme variants are selected. Sphinx only tracks
+# and copies images referenced through markdown or image directives, so every
+# raw-HTML reference 404s on the published site -- 18 of them, across
+# conceptual/programming-model, conceptual/taxonomy and index.
+#
+# Copying the directory wholesale fixes all of them without rewriting the
+# theme-switching markup.
+# ---------------------------------------------------------------------------
+import shutil as _shutil
+
+
+def _copy_images(app, exception):
+    if exception is not None or app.builder.name != "html":
+        return
+    src = os.path.join(os.path.dirname(__file__), "images")
+    if os.path.isdir(src):
+        _shutil.copytree(src, os.path.join(app.outdir, "images"), dirs_exist_ok=True)
+
+
+def setup(app):
+    app.connect("build-finished", _copy_images)
