@@ -96,6 +96,11 @@ autodoc_mock_imports = [
     "iris.host.distributed.helpers",
     "iris.host.platform.hip",
     "tritonblas",
+    # rocm-xio. iris/host/iris.py imports it unconditionally at module load, so
+    # without this every autodoc directive fails with ModuleNotFoundError and the
+    # whole API reference renders empty. The docs CI installs only
+    # docs/sphinx/requirements.txt, so xio is never present there either.
+    "xio",
 ]
 
 # Custom mocks that preserve docstrings for Triton Gluon
