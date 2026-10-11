@@ -221,6 +221,15 @@ def _allocate_workspace(shmem, A, B, config, workspace):
     N = B.shape[1]
     variant = config.all_reduce_variant
     total_tiles = triton.cdiv(M, config.block_size_m) * triton.cdiv(N, config.block_size_n)
+    # Preserve the largest flag capacity this workspace already has.
+    flag_capacity = total_tiles
+    if workspace is not None and workspace.owner is shmem:
+        for buffer in (workspace.locks, workspace.completion_locks):
+            if buffer is not None:
+                flag_capacity = max(flag_capacity, buffer.numel())
+    # All ranks must allocate the same capacity.
+    capacities = _gather_workspace_states(shmem, flag_capacity)
+    flag_capacity = max(capacities)
     stream = torch.cuda.current_stream()
     # Finish previous remote accesses before replacing their buffers.
     shmem.barrier(stream=stream)
@@ -228,10 +237,10 @@ def _allocate_workspace(shmem, A, B, config, workspace):
     aux_buffer = None
     completion_locks = None
     if variant in ("spinlock", "one_shot", "two_shot"):
-        locks = shmem.zeros((total_tiles,), dtype=torch.int32)
+        locks = shmem.zeros((flag_capacity,), dtype=torch.int32)
     if variant in ("one_shot", "two_shot"):
         aux_buffer = shmem.zeros((M, N), dtype=A.dtype)
-        completion_locks = shmem.zeros((total_tiles,), dtype=torch.int32)
+        completion_locks = shmem.zeros((flag_capacity,), dtype=torch.int32)
     shmem.barrier(stream=stream)
     if workspace is None:
         workspace = FusedWorkspace()
