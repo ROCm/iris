@@ -50,6 +50,4 @@ configuration consumed by the all-reduce methods on
 ```{eval-rst}
 .. autofunction:: iris.mem.triton.types.make_tensor_view
    :noindex:
-   :no-undoc-members:
-   :no-special-members:
 ```
