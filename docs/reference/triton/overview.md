@@ -36,5 +36,5 @@ Explore the API by section:
 - [Tensor Creation](../host/tensor-creation.md)
 - [Device Functions](device-functions.md)
 - [Collective Communication (CCL)](../host/ccl.md)
-- [Fused GEMM + CCL Operations](ops.md)
+- [Fused Communication and Compute Operations](ops.md)
 

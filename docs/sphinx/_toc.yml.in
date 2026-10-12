@@ -24,6 +24,7 @@ subtrees:
         entries:
         - file: reference/triton/device-context.md
         - file: reference/triton/device-functions.md
+        - file: reference/triton/types.md
         - file: reference/triton/ops.md
       - file: reference/gluon/overview.md
         entries:

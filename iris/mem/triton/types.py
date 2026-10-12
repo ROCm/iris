@@ -109,6 +109,7 @@ class TileView:
     TileView storing BOTH runtime coordinates AND compile-time block sizes.
 
     This class uses the @constexpr_function pattern:
+
     - Stores runtime coordinates (pid_m, pid_n) as tl.tensor (computed from tl.program_id)
     - Stores compile-time block sizes (block_m, block_n) as tl.constexpr
     - Constructor is decorated with @constexpr_function to execute at compile-time

@@ -304,6 +304,7 @@ class Iris:
 
         This method automatically detects the type of value and uses the appropriate
         broadcast mechanism:
+
         - For tensors and arrays: uses efficient PyTorch distributed tensor collectives
         - For scalars and other objects: uses object broadcast
 
@@ -1016,6 +1017,7 @@ class Iris:
         One-sided put operation with optional wait (POLL) and signal (ATOMIC).
 
         Supports:
+
         - Simple copy: put(src, to_rank)
         - Copy + signal: put(src, to_rank, signal_flag=flag)
         - Wait + copy: put(src, to_rank, wait_flag=flag, wait_value=N)
