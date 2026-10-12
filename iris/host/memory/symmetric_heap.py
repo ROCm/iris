@@ -8,6 +8,7 @@ Provides a high-level interface for distributed symmetric memory management,
 hiding the details of allocators and inter-process memory sharing.
 """
 
+import gc
 import itertools
 import logging
 import os
@@ -79,6 +80,7 @@ def _validate_local_handle(handle_bytes: bytes) -> None:
 
 
 _hostname_exchanges = itertools.count(1)
+_released_exchanges = itertools.count(1)
 
 
 def _hostnames_by_rank(num_ranks: int) -> List[str]:
@@ -89,6 +91,28 @@ def _hostnames_by_rank(num_ranks: int) -> List[str]:
     prefix = f"iris_hostname_v{next(_hostname_exchanges)}/"
     store.set(f"{prefix}{dist.get_rank()}", socket.gethostname())
     return [store.get(f"{prefix}{r}").decode("utf-8") for r in range(num_ranks)]
+
+
+def _released_by_every_rank(offsets: List[int], num_ranks: int) -> List[int]:
+    """The offsets every rank released, exchanged through the rendezvous store (a barrier, no NCCL collective)."""
+    import torch.distributed as dist
+
+    store = dist.distributed_c10d._get_default_store()
+    prefix = f"iris_released_v{next(_released_exchanges)}/"
+    store.set(f"{prefix}{dist.get_rank()}", np.asarray(offsets, dtype=np.int64).tobytes())
+    keys = [f"{prefix}{r}" for r in range(num_ranks)]
+    try:
+        store.wait(keys)
+    except Exception as exc:
+        missing = [r for r, key in enumerate(keys) if not store.check([key])]
+        raise RuntimeError(
+            f"SymmetricHeap.collect(): ranks {missing} did not reach the same allocation before the store "
+            "timed out; symmetric allocations must happen on every rank"
+        ) from exc
+    common = set(offsets)
+    for key in keys:
+        common &= set(np.frombuffer(store.get(key), dtype=np.int64).tolist())
+    return sorted(common)
 
 
 def _require_single_host(allocator_type: str, hostnames: List[str]) -> None:
@@ -317,7 +341,14 @@ class SymmetricHeap:
         is_chunked = isinstance(self.allocator, VMemChunkedAllocator)
         chunks_before = self.allocator.get_num_chunks() if is_chunked else 0
 
-        tensor = self.allocator.allocate(actual_elements, dtype, alignment)
+        if is_chunked:
+            # Every rank reaches the same branch: it depends only on state identical across ranks
+            tensor = self.allocator.allocate(actual_elements, dtype, alignment, grow=False)
+            if tensor is None:
+                self.collect()
+                tensor = self.allocator.allocate(actual_elements, dtype, alignment)
+        else:
+            tensor = self.allocator.allocate(actual_elements, dtype, alignment)
         tensor = tensor[:num_elements]
 
         if is_chunked:
@@ -426,6 +457,24 @@ class SymmetricHeap:
         to_base = int(self.heap_bases_cpu[to_rank])
         offset = ptr - from_base
         return to_base + offset
+
+    def collect(self):
+        """
+        Collective: make the heap memory that every rank has freed reusable.
+
+        Freed symmetric tensors are only reused once every rank has freed them, so that allocations
+        land at the same offset on every rank whenever each rank's garbage collector runs.
+        ``allocate()`` calls this before growing the heap; call it directly to reuse memory sooner.
+        Waits for this rank's device first, so no rank is still accessing a block it hands out.
+        """
+        if not isinstance(self.allocator, VMemChunkedAllocator):
+            return
+        gc.collect()
+        torch.cuda.synchronize(self.device_id)
+        released = self.allocator.released_offsets()
+        if self.num_ranks > 1:
+            released = _released_by_every_rank(released, self.num_ranks)
+        self.allocator.reuse(released)
 
     def refresh_peer_access(self):
         """
