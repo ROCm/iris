@@ -11,6 +11,7 @@
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
 import os
+import shutil
 import sys
 from unittest.mock import MagicMock
 
@@ -236,7 +237,6 @@ html_context = {
 # Copying the directory wholesale fixes all of them without rewriting the
 # theme-switching markup.
 # ---------------------------------------------------------------------------
-import shutil as _shutil
 
 
 def _copy_images(app, exception):
@@ -244,7 +244,7 @@ def _copy_images(app, exception):
         return
     src = os.path.join(os.path.dirname(__file__), "images")
     if os.path.isdir(src):
-        _shutil.copytree(src, os.path.join(app.outdir, "images"), dirs_exist_ok=True)
+        shutil.copytree(src, os.path.join(app.outdir, "images"), dirs_exist_ok=True)
 
 
 def setup(app):
