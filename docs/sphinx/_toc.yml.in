@@ -22,6 +22,7 @@ subtrees:
       - file: reference/host/copy-engine.md
       - file: reference/triton/overview.md
         entries:
+        - file: reference/triton/device-context.md
         - file: reference/triton/device-functions.md
         - file: reference/triton/ops.md
       - file: reference/gluon/overview.md
