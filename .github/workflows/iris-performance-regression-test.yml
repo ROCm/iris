@@ -19,36 +19,9 @@ permissions:
 
 jobs:
   performance-test:
-    name: ${{ matrix.example_name }}
+    name: GEMM All-Scatter benchmarks (8 ranks)
     runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        # Performance baselines measured on AMD Instinct MI325X (8 GPUs), before CI
-        # moved to the MI350X runners -- re-measure before tightening thresholds.
-        include:
-          - example_name: "GEMM All-Scatter WG Specialization"
-            example_path: "10_gemm_all_scatter_wg_specialization"
-            tflops_threshold: 1440  # Actual: ~1802 TFLOPs (80% regression threshold)
-            # gemm_sms must stay below the CU count -- the remainder is what runs the
-            # communication path. 256 left zero of it on a 256-CU part.
-            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 192"
-
-          - example_name: "GEMM All-Scatter"
-            example_path: "07_gemm_all_scatter"
-            tflops_threshold: 1000  # Actual: ~1407 TFLOPs
-            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 256 --BLK_N 64 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
-
-          - example_name: "GEMM All-Scatter Producer-Consumer"
-            example_path: "11_gemm_all_scatter_producer_consumer"
-            tflops_threshold: 1600  # Actual: ~2190 TFLOPs
-            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256 --comm_sms 48"
-
-          - example_name: "GEMM All-Scatter Bulk Synchronous"
-            example_path: "12_gemm_all_scatter_bulk_synchronous"
-            tflops_threshold: 900  # Actual: ~1262 TFLOPs
-            benchmark_args: "-m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
 
     steps:
       - name: Checkout repository
@@ -71,27 +44,32 @@ jobs:
         run: |
           bash .github/scripts/container_build.sh
 
-      - name: Acquire GPUs
-        run: |
-          bash .github/scripts/acquire_gpus.sh 8
-
       - name: Report environment versions
         run: |
           bash .github/scripts/report_versions.sh
 
-      - name: Run ${{ matrix.example_name }} Benchmark (8 ranks)
+      # One job runs all four benchmarks back to back. Each needs the whole node
+      # for about 75 s, but as separate jobs each held a runner slot while it
+      # waited for 8 free GPUs -- for up to 2.4 h. gpu_task_queue.py takes the
+      # GPUs per benchmark and reserves the node so they are not starved by
+      # smaller tasks.
+      #
+      # Baselines were measured on AMD Instinct MI325X (8 GPUs), before CI moved
+      # to the MI350X runners -- re-measure before tightening thresholds.
+      # Thresholds are ~80% of the measured TFLOPs noted alongside.
+      - name: Run benchmarks
         run: |
-          set -e
-          
-          echo "::group::Running performance benchmark"
-          bash .github/scripts/run_perf_benchmark.sh \
-            "${{ matrix.example_path }}" \
-            "${{ matrix.tflops_threshold }}" \
-            ${{ matrix.benchmark_args }}
-          echo "::endgroup::"
+          python3 .github/scripts/gpu_task_queue.py \
+            --task 8 "GEMM All-Scatter WG Specialization" \
+              "bash .github/scripts/run_perf_benchmark.sh 10_gemm_all_scatter_wg_specialization 1440 -m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 192" \
+            --task 8 "GEMM All-Scatter" \
+              "bash .github/scripts/run_perf_benchmark.sh 07_gemm_all_scatter 1000 -m 16384 -n 16384 -k 16384 --BLK_M 256 --BLK_N 64 --BLK_K 64 --gsize_m 6 --gemm_sms 256" \
+            --task 8 "GEMM All-Scatter Producer-Consumer" \
+              "bash .github/scripts/run_perf_benchmark.sh 11_gemm_all_scatter_producer_consumer 1600 -m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256 --comm_sms 48" \
+            --task 8 "GEMM All-Scatter Bulk Synchronous" \
+              "bash .github/scripts/run_perf_benchmark.sh 12_gemm_all_scatter_bulk_synchronous 900 -m 16384 -n 16384 -k 16384 --BLK_M 128 --BLK_N 128 --BLK_K 64 --gsize_m 6 --gemm_sms 256"
 
       - name: Release GPUs
         if: always()
         run: |
           bash .github/scripts/release_gpus.sh
-

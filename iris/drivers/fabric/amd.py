@@ -26,6 +26,7 @@ from iris.drivers.base import (
     PeerMapping,
 )
 from iris.host.distributed.topology import InterconnectLevel
+from iris.host.platform.libs import load_vendor_library
 
 logger = logging.getLogger("iris.drivers.fabric.amd")
 
@@ -38,29 +39,21 @@ __all__ = [
 ]
 
 
-def _load_cdll(*names: Optional[str]) -> Any:
-    for name in names:
-        if not name:
-            continue
-        try:
-            return ctypes.CDLL(name)
-        except OSError:
-            continue
-    return None
-
-
-_hip = _load_cdll(
-    # Let LD_LIBRARY_PATH select the active ROCm SDK before consulting ldconfig.
-    # find_library can return a stale system SONAME (e.g. HIP 5 beside HIP 7),
-    # and loading both runtimes can abort inside hipSetDevice.
+_hip = load_vendor_library(
+    "libamdhip64",
+    # When nothing is loaded yet, let LD_LIBRARY_PATH select the active ROCm SDK
+    # before consulting ldconfig. find_library can return a stale system SONAME
+    # (e.g. HIP 5 beside HIP 7), and loading both runtimes can abort inside hipSetDevice.
     "libamdhip64.so",
     ctypes.util.find_library("amdhip64"),
     "/opt/rocm/lib/libamdhip64.so",
 )
-_amdsmi = _load_cdll(
+_amdsmi = load_vendor_library(
+    "libamd_smi",
     "libamd_smi.so",
     ctypes.util.find_library("amd_smi"),
     "/opt/rocm/lib/libamd_smi.so",
+    beside="libamdhip64",
 )
 
 HIP_SUCCESS = 0

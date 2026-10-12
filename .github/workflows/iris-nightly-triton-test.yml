@@ -15,53 +15,14 @@ permissions:
 
 jobs:
   test-nightly:
-    name: Test ${{ matrix.test_dir }} (${{ matrix.num_ranks }} ranks, nightly Triton)
+    name: Test ${{ matrix.test_dir }} (1/2/4/8 ranks, nightly Triton)
     runs-on: [linux-mi350-8gpu-iris]
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - test_dir: examples
-            num_ranks: 1
-          - test_dir: examples
-            num_ranks: 2
-          - test_dir: examples
-            num_ranks: 4
-          - test_dir: examples
-            num_ranks: 8
-          - test_dir: unittests
-            num_ranks: 1
-          - test_dir: unittests
-            num_ranks: 2
-          - test_dir: unittests
-            num_ranks: 4
-          - test_dir: unittests
-            num_ranks: 8
-          - test_dir: ccl
-            num_ranks: 1
-          - test_dir: ccl
-            num_ranks: 2
-          - test_dir: ccl
-            num_ranks: 4
-          - test_dir: ccl
-            num_ranks: 8
-          - test_dir: context
-            num_ranks: 1
-          - test_dir: context
-            num_ranks: 2
-          - test_dir: context
-            num_ranks: 4
-          - test_dir: context
-            num_ranks: 8
-          - test_dir: ops
-            num_ranks: 1
-          - test_dir: ops
-            num_ranks: 2
-          - test_dir: ops
-            num_ranks: 4
-          - test_dir: ops
-            num_ranks: 8
+        # One job per directory runs every rank count, as in iris-tests.yml.
+        test_dir: [examples, unittests, ccl, context, ops]
 
     steps:
       - name: Checkout repository
@@ -102,48 +63,18 @@ jobs:
           ) 200>"$LOCK"
 
           echo "NIGHTLY_SIF=$NIGHTLY_SIF" >> "$GITHUB_ENV"
-
-      - name: Acquire GPUs
-        run: |
-          bash .github/scripts/acquire_gpus.sh "${{ matrix.num_ranks }}"
+          # run_tests.sh runs in this image instead of the container_build.sh one.
+          echo "CONTAINER_IMAGE=$NIGHTLY_SIF" >> "$GITHUB_ENV"
 
       - name: Report environment versions
         run: |
           bash .github/scripts/report_versions.sh
 
-      - name: Run ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (nightly Triton)
+      - name: Run ${{ matrix.test_dir }} tests with 1, 2, 4 and 8 ranks (nightly Triton)
         run: |
-          set -e
-          echo "::group::Running ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (nightly Triton)"
-
-          # Build GPU argument (GPU_DEVICES set by acquire_gpus.sh)
-          GPU_ARG=""
-          if [ -n "$GPU_DEVICES" ]; then
-              GPU_ARG="--gpus $GPU_DEVICES"
-          fi
-
-          # Run tests in pre-built nightly container (Triton from main already installed)
-          bash .github/scripts/container_exec.sh --image "$NIGHTLY_SIF" $GPU_ARG "
-              set -e
-
-              echo \"Triton version: \$(pip show triton 2>/dev/null | grep Version || echo unknown)\"
-
-              # Install iris in editable mode
-              echo \"Installing iris in editable mode\"
-              pip install -e .
-
-              # Run tests in the specified directory
-              for test_file in tests/${{ matrix.test_dir }}/test_*.py; do
-                  if [ -f \"\$test_file\" ]; then
-                      echo \"Testing: \$test_file with ${{ matrix.num_ranks }} ranks (nightly Triton)\"
-                      torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 \
-                          --nnodes=1 --nproc_per_node=${{ matrix.num_ranks }} \
-                          tests/run_tests_distributed.py \"\$test_file\" -v --tb=short --durations=10
-                  fi
-              done
-          "
-          echo "::endgroup::"
-          echo "✅ ${{ matrix.test_dir }} tests with ${{ matrix.num_ranks }} ranks (nightly Triton) passed!"
+          python3 .github/scripts/gpu_task_queue.py --install editable \
+            "${{ matrix.test_dir }}:8" "${{ matrix.test_dir }}:4" \
+            "${{ matrix.test_dir }}:2" "${{ matrix.test_dir }}:1"
 
       - name: Release GPUs
         if: always()

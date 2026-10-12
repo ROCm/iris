@@ -8,9 +8,12 @@ Provides a high-level interface for distributed symmetric memory management,
 hiding the details of allocators and inter-process memory sharing.
 """
 
+import itertools
 import logging
 import os
+import socket
 import struct
+from typing import List
 
 import numpy as np
 import torch
@@ -75,6 +78,55 @@ def _validate_local_handle(handle_bytes: bytes) -> None:
         )
 
 
+_hostname_exchanges = itertools.count(1)
+
+
+def _hostnames_by_rank(num_ranks: int) -> List[str]:
+    """Every rank's hostname, exchanged through the rendezvous store so no NCCL collective is issued."""
+    import torch.distributed as dist
+
+    store = dist.distributed_c10d._get_default_store()
+    prefix = f"iris_hostname_v{next(_hostname_exchanges)}/"
+    store.set(f"{prefix}{dist.get_rank()}", socket.gethostname())
+    return [store.get(f"{prefix}{r}").decode("utf-8") for r in range(num_ranks)]
+
+
+def _require_single_host(allocator_type: str, hostnames: List[str]) -> None:
+    hosts = sorted(set(hostnames))
+    if len(hosts) > 1:
+        raise RuntimeError(
+            f"IRIS_ALLOCATOR={allocator_type!r} only maps peers on the same host, but this job spans "
+            f"{len(hosts)} hosts ({', '.join(hosts)}). Use IRIS_ALLOCATOR=vmem_chunked, which maps peers "
+            "on other hosts through the GPU fabric driver."
+        )
+
+
+def _require_shared_fabric_domain(topology, cur_rank: int) -> None:
+    from iris.host.distributed.topology import fabric_failure_reason
+
+    domains = {info.fabric_info.domain_key for info in topology.gpu_info.values()}
+    if len(domains) == 1 and "" not in domains:
+        return
+
+    ranks_by_host = {}
+    for rank, info in sorted(topology.gpu_info.items()):
+        ranks_by_host.setdefault(info.hostname, []).append(rank)
+    lines = []
+    for host, ranks in sorted(ranks_by_host.items()):
+        host_domains = sorted({topology.gpu_info[r].fabric_info.domain_key or "<none>" for r in ranks})
+        lines.append(f"  {host}: ranks {ranks}, fabric domain {', '.join(host_domains)}")
+    reason = fabric_failure_reason()
+    if reason:
+        lines.append(f"Rank {cur_rank} found no fabric domain: {reason}.")
+    raise RuntimeError(
+        f"This job spans {len(ranks_by_host)} hosts, which needs every GPU in one fabric domain, but found:\n"
+        + "\n".join(lines)
+        + "\n<none> means fabric discovery failed for that GPU; each rank's own error gives its reason. "
+        "Different domains mean the hosts are not in the same pod: on AMD, `amd-smi fabric -i` must show "
+        "the same PPOD_ID and VPOD_ID and ACCEL_STATE ACTIVE on every host."
+    )
+
+
 class SymmetricHeap:
     """
     High-level symmetric heap abstraction.
@@ -134,6 +186,13 @@ class SymmetricHeap:
         if is_simulation_env():
             allocator_type = "torch"
 
+        multi_host = False
+        if num_ranks > 1 and not is_simulation_env():
+            hostnames = _hostnames_by_rank(num_ranks)
+            multi_host = len(set(hostnames)) > 1
+            if allocator_type in ("torch", "vmem"):
+                _require_single_host(allocator_type, hostnames)
+
         if allocator_type == "torch":
             self.allocator = TorchAllocator(heap_size, device_id, cur_rank, num_ranks)
         elif allocator_type == "vmem":
@@ -144,11 +203,18 @@ class SymmetricHeap:
             try:
                 topology = TopologyDiscovery().discover()
             except Exception as exc:
+                if multi_host:
+                    raise RuntimeError(
+                        f"TopologyDiscovery.discover() failed ({exc}). This job spans hosts, and "
+                        "VMemChunkedAllocator needs topology discovery to find the GPUs' fabric domain."
+                    ) from exc
                 logger.warning(
                     "TopologyDiscovery.discover() failed (%s); VMemChunkedAllocator will default to INTRA_NODE driver.",
                     exc,
                 )
                 topology = None
+            if multi_host:
+                _require_shared_fabric_domain(topology, cur_rank)
             self.allocator = VMemChunkedAllocator(
                 heap_size,
                 device_id,

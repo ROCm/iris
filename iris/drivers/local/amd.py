@@ -22,6 +22,7 @@ from iris.drivers.base import (
     PeerMapping,
 )
 from iris.host.distributed.topology import InterconnectLevel
+from iris.host.platform.libs import load_vendor_library
 
 logger = logging.getLogger("iris.drivers.local.amd")
 
@@ -31,11 +32,7 @@ __all__ = [
     "LocalHipDriver",
 ]
 
-_hip = None
-try:
-    _hip = ctypes.cdll.LoadLibrary("libamdhip64.so")
-except OSError:
-    pass
+_hip = load_vendor_library("libamdhip64", "libamdhip64.so")
 
 HIP_SUCCESS = 0
 HIP_ERROR_NOT_SUPPORTED = 801
