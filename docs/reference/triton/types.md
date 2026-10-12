@@ -14,6 +14,8 @@ configuration consumed by the all-reduce methods on
 ```{eval-rst}
 .. autoclass:: iris.mem.triton.types.TensorView
    :noindex:
+   :no-undoc-members:
+   :no-special-members:
 ```
 
 ## TileView
@@ -21,6 +23,8 @@ configuration consumed by the all-reduce methods on
 ```{eval-rst}
 .. autoclass:: iris.mem.triton.types.TileView
    :noindex:
+   :no-undoc-members:
+   :no-special-members:
 ```
 
 ## Tile
@@ -28,6 +32,8 @@ configuration consumed by the all-reduce methods on
 ```{eval-rst}
 .. autoclass:: iris.mem.triton.types.Tile
    :noindex:
+   :no-undoc-members:
+   :no-special-members:
 ```
 
 ## AllReduceConfig
@@ -35,6 +41,8 @@ configuration consumed by the all-reduce methods on
 ```{eval-rst}
 .. autoclass:: iris.mem.triton.types.AllReduceConfig
    :noindex:
+   :no-undoc-members:
+   :no-special-members:
 ```
 
 ## make_tensor_view
@@ -42,4 +50,6 @@ configuration consumed by the all-reduce methods on
 ```{eval-rst}
 .. autofunction:: iris.mem.triton.types.make_tensor_view
    :noindex:
+   :no-undoc-members:
+   :no-special-members:
 ```
