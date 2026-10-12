@@ -114,12 +114,18 @@ class TileView:
     - Stores compile-time block sizes (block_m, block_n) as tl.constexpr
     - Constructor is decorated with @constexpr_function to execute at compile-time
 
+    Attributes:
+        pid_m: Tile row index, computed from ``tl.program_id``.
+        pid_n: Tile column index, computed from ``tl.program_id``.
+        block_m: Tile height. Compile-time constant.
+        block_n: Tile width. Compile-time constant.
+
     Example:
-        pid = tl.program_id(0)
-        pid_m = pid // num_tiles_n
-        pid_n = pid % num_tiles_n
-        tile = TileView(pid_m, pid_n, BLOCK_M, BLOCK_N)
-        rm, rn, mask = tile.layout(M, N)
+        >>> pid = tl.program_id(0)
+        >>> pid_m = pid // num_tiles_n
+        >>> pid_n = pid % num_tiles_n
+        >>> tile = TileView(pid_m, pid_n, BLOCK_M, BLOCK_N)
+        >>> rm, rn, mask = tile.layout(M, N)
     """
 
     pid_m: tl.tensor
@@ -155,10 +161,17 @@ class Tile:
     Extends TileView concept to include a data field for storing computed tile data
     (e.g., GEMM results in registers).
 
+    Attributes:
+        pid_m: Tile row index, computed from ``tl.program_id``.
+        pid_n: Tile column index, computed from ``tl.program_id``.
+        block_m: Tile height. Compile-time constant.
+        block_n: Tile width. Compile-time constant.
+        data: The tile's values, for example a GEMM result held in registers.
+
     Example:
-        c = tl.dot(a, b)
-        tile = Tile(pid_m, pid_n, BLOCK_M, BLOCK_N, c)
-        ctx.all_reduce_atomic(tile, dst_view)
+        >>> c = tl.dot(a, b)
+        >>> tile = Tile(pid_m, pid_n, BLOCK_M, BLOCK_N, c)
+        >>> ctx.all_reduce_atomic(tile, dst_view)
     """
 
     pid_m: tl.tensor
@@ -219,9 +232,16 @@ class TensorView:
     """
     TensorView storing pointer and tensor metadata.
 
+    Attributes:
+        ptr: Pointer to the tensor's data.
+        M: Number of rows.
+        N: Number of columns.
+        stride_m: Stride in the M dimension.
+        stride_n: Stride in the N dimension.
+
     Example:
-        view = make_tensor_view(ptr, M, N, stride_m, stride_n)
-        tile_ptr, mask = view.tile_ptr(tile)
+        >>> view = make_tensor_view(ptr, M, N, stride_m, stride_n)
+        >>> tile_ptr, mask = view.tile_ptr(tile)
     """
 
     ptr: tl.tensor
