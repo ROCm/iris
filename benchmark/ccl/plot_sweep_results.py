@@ -34,6 +34,7 @@ directly comparable to nccl-tests output. Do not re-apply a bus factor here.
 
 import argparse
 import csv
+import math
 import os
 import statistics
 from collections import defaultdict
@@ -387,6 +388,46 @@ def markdown_table(data):
     return "\n\n".join(sections)
 
 
+def mermaid_speedup(data):
+    """One Mermaid xychart per (dtype, ranks): RCCL latency / Iris latency, >1 = Iris wins.
+
+    GitHub renders these inline in a job summary, so the figures need no hosting.
+    xychart-beta has no log axis, so the x values are tick labels rather than
+    coordinates: raw MiB would squash 2..512 MiB into the left edge of a 1 GiB span.
+    It has no gaps either, so a chart keeps only the sizes every line has; plotting a
+    missing point as 0 would read as a collapse. fp8 has no RCCL reference and drops out.
+    """
+    ops = sorted({op for op, _ in data}, key=lambda o: _sort_key(_OP_ORDER, o))
+    dtypes = sorted({d for _, d in data}, key=lambda d: _sort_key(_DTYPE_ORDER, d))
+    blocks = []
+    for dtype in dtypes:
+        for ranks in sorted({r for op in ops for r in data.get((op, dtype), {})}):
+            curves = []
+            for op in ops:
+                series = data.get((op, dtype), {}).get(ranks, {})
+                # Iterate variants as markdown_table does: all_reduce carries
+                # "two_shot" while the others carry "", so a fixed variant drops ops.
+                for variant in sorted({v for b, v in series if b != REFERENCE_BACKEND} or {""}):
+                    iris = series.get(("iris", variant), {})
+                    ref = _reference_for(series, variant) or {}
+                    ratio = {s: ref[s][0] / iris[s][0] for s in iris if s in ref and iris[s][0] > 0}
+                    if ratio:
+                        curves.append((f"{op} {variant}".strip(), ratio))
+            sizes = sorted(set.intersection(*(set(r) for _, r in curves))) if curves else []
+            if not sizes:
+                continue
+            top = max(2, math.ceil(max(r[s] for _, r in curves for s in sizes)))
+            ticks = ", ".join(f'"{s / (1024 * 1024):g}"' for s in sizes)
+            lines = [f'    line "{name}" [{", ".join(f"{r[s]:.2f}" for s in sizes)}]' for name, r in curves]
+            blocks.append(
+                "```mermaid\nxychart-beta\n"
+                f'    title "Iris speedup vs RCCL, {dtype}, {ranks} ranks (>1 = Iris faster)"\n'
+                f'    x-axis "message size (MiB)" [{ticks}]\n'
+                f'    y-axis "speedup" 0 --> {top}\n' + "\n".join(lines) + "\n```"
+            )
+    return "\n\n".join(blocks)
+
+
 def main():
     args = parse_args()
     data = load_results(args.input_csv)
@@ -397,7 +438,8 @@ def main():
     for op, dtype in sorted(data, key=lambda k: (_sort_key(_OP_ORDER, k[0]), _sort_key(_DTYPE_ORDER, k[1]))):
         plot_one(op, dtype, data[(op, dtype)], args)
 
-    table = markdown_table(data)
+    charts = mermaid_speedup(data)
+    table = (charts + "\n\n" if charts else "") + markdown_table(data)
     if args.markdown_out:
         with open(args.markdown_out, "w") as f:
             f.write(table + "\n")

@@ -56,7 +56,9 @@ message size:
 | latency | latency (ms), log-log |
 | speedup | RCCL latency / Iris latency, semilog-x; above the 1.0 line means Iris wins |
 
-The table uses the same speedup definition, one section per collective.
+The table uses the same speedup definition, one section per collective. Above it,
+one Mermaid chart per dtype and rank count plots speedup for every collective,
+so the job summary shows the comparison inline without opening the artifact.
 
 Bandwidth is **bus** bandwidth, not algorithmic: the bench scripts declare
 `state.set_bytes((W-1) * bytes)` for all_gather and all_to_all, and
