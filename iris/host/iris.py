@@ -1516,7 +1516,7 @@ class Iris:
         Collective Communication Library (CCL) interface for Iris.
 
         Provides collective operations that can be called as methods on the Iris instance.
-        Example usage:
+        Example:
             >>> ctx = iris.iris()
             >>> ctx.ccl.all_to_all(output_tensor, input_tensor)
         """

@@ -114,7 +114,7 @@ class TileView:
     - Stores compile-time block sizes (block_m, block_n) as tl.constexpr
     - Constructor is decorated with @constexpr_function to execute at compile-time
 
-    Example usage:
+    Example:
         pid = tl.program_id(0)
         pid_m = pid // num_tiles_n
         pid_n = pid % num_tiles_n
@@ -155,7 +155,7 @@ class Tile:
     Extends TileView concept to include a data field for storing computed tile data
     (e.g., GEMM results in registers).
 
-    Example usage:
+    Example:
         c = tl.dot(a, b)
         tile = Tile(pid_m, pid_n, BLOCK_M, BLOCK_N, c)
         ctx.all_reduce_atomic(tile, dst_view)
@@ -219,7 +219,7 @@ class TensorView:
     """
     TensorView storing pointer and tensor metadata.
 
-    Example usage:
+    Example:
         view = make_tensor_view(ptr, M, N, stride_m, stride_n)
         tile_ptr, mask = view.tile_ptr(tile)
     """
@@ -288,7 +288,7 @@ class AllReduceConfig:
     """
     Device-side configuration for all_reduce collective.
 
-    Fields:
+    Attributes:
         variant_code: Integer code for algorithm variant (0=atomic, 1=ring, 2=one_shot, 3=two_shot, 4=spinlock)
         locks_ptr: Pointer to locks array (ALWAYS required - pass dummy tensor if variant doesn't need locks)
     """

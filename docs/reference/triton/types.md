@@ -16,36 +16,6 @@ configuration consumed by the all-reduce methods on
    :noindex:
 ```
 
-### TensorView.tile_ptr
-```{eval-rst}
-.. automethod:: iris.mem.triton.types.TensorView.tile_ptr
-   :noindex:
-```
-
-### TensorView.tile_ptr_from_indices
-```{eval-rst}
-.. automethod:: iris.mem.triton.types.TensorView.tile_ptr_from_indices
-   :noindex:
-```
-
-### TensorView.offset_tile_ptr
-```{eval-rst}
-.. automethod:: iris.mem.triton.types.TensorView.offset_tile_ptr
-   :noindex:
-```
-
-### TensorView.offset
-```{eval-rst}
-.. automethod:: iris.mem.triton.types.TensorView.offset
-   :noindex:
-```
-
-### TensorView.number_of_tiles
-```{eval-rst}
-.. automethod:: iris.mem.triton.types.TensorView.number_of_tiles
-   :noindex:
-```
-
 ## TileView
 
 ```{eval-rst}
@@ -53,34 +23,10 @@ configuration consumed by the all-reduce methods on
    :noindex:
 ```
 
-### TileView.layout
-```{eval-rst}
-.. automethod:: iris.mem.triton.types.TileView.layout
-   :noindex:
-```
-
-### TileView.indices
-```{eval-rst}
-.. automethod:: iris.mem.triton.types.TileView.indices
-   :noindex:
-```
-
 ## Tile
 
 ```{eval-rst}
 .. autoclass:: iris.mem.triton.types.Tile
-   :noindex:
-```
-
-### Tile.layout
-```{eval-rst}
-.. automethod:: iris.mem.triton.types.Tile.layout
-   :noindex:
-```
-
-### Tile.indices
-```{eval-rst}
-.. automethod:: iris.mem.triton.types.Tile.indices
    :noindex:
 ```
 
