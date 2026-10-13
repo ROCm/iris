@@ -11,8 +11,28 @@ and submission operations.
 
 import triton
 import triton.language as tl
-from xio import sdma_ep
 from iris.mem.utils import wait_cnt
+
+sdma_ep = None
+
+
+def bind_sdma_ep():
+    """Import rocm-xio and bind ``sdma_ep`` for the SDMA device functions."""
+    global sdma_ep
+    if sdma_ep is None:
+        try:
+            from xio import sdma_ep as imported
+        except ModuleNotFoundError as exc:
+            if exc.name != "xio":
+                raise
+            raise ModuleNotFoundError(
+                "rocm-xio is required for the SDMA copy engine. "
+                'Install it with `pip install iris[sdma]`, or drop "sdma" from engines '
+                "to use shader load/store only.",
+                name="xio",
+            ) from exc
+        sdma_ep = imported
+    return sdma_ep
 
 
 @triton.jit

@@ -24,11 +24,11 @@ fi
 if [ "$INSTALL_METHOD" = "git" ]; then
     REPO=${GITHUB_REPOSITORY:-"ROCm/iris"}
     SHA=${GITHUB_SHA:-"HEAD"}
-    INSTALL_CMD="pip install git+https://github.com/${REPO}.git@${SHA}"
+    INSTALL_CMD="pip install 'iris[sdma] @ git+https://github.com/${REPO}.git@${SHA}'"
 elif [ "$INSTALL_METHOD" = "editable" ]; then
-    INSTALL_CMD="pip install -e ."
+    INSTALL_CMD="pip install -e '.[sdma]'"
 elif [ "$INSTALL_METHOD" = "install" ]; then
-    INSTALL_CMD="pip install ."
+    INSTALL_CMD="pip install '.[sdma]'"
 else
     echo "[ERROR] Invalid install_method: $INSTALL_METHOD"
     exit 1

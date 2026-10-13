@@ -10,7 +10,6 @@ These are the module-level functional API. For the OO API, see DeviceContext.
 import triton
 import triton.language as tl
 from iris.mem.triton.context import __translate
-from xio import sdma_ep
 from iris.device import sdma_utils
 
 
@@ -377,7 +376,7 @@ def put(
 
         tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
     else:
-        ctx = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        ctx = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
         queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
@@ -422,7 +421,9 @@ def put(
         # Determine packet size based on copy type
         # Linear copy packet: 32 bytes for 1D, Sub-window copy packet: 80 bytes for 2D
         command_in_bytes = (
-            sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES if is_2d_copy else sdma_ep.COPY_LINEAR_COMMAND_BYTES
+            sdma_utils.sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES
+            if is_2d_copy
+            else sdma_utils.sdma_ep.COPY_LINEAR_COMMAND_BYTES
         )
 
         # Acquire space in the queue
@@ -557,7 +558,7 @@ def atomic_add(
     if not use_copy_engine:
         return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
     else:
-        handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        handle = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
         queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
@@ -567,7 +568,7 @@ def atomic_add(
 
         dst_ptr_val = translated_ptr.to(tl.uint64)
 
-        command_in_bytes = sdma_ep.ATOMIC_COMMAND_BYTES
+        command_in_bytes = sdma_utils.sdma_ep.ATOMIC_COMMAND_BYTES
         # Acquire space (returns base index and wraparound offset)
         base, offset = sdma_utils.acquire_fadd(
             # base = sdma_utils.acquire(
@@ -690,7 +691,7 @@ def atomic_cas(
     if not use_copy_engine:
         return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
     else:
-        handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        handle = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
         queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
@@ -700,7 +701,7 @@ def atomic_cas(
 
         dst_ptr_val = translated_ptr.to(tl.uint64)
 
-        command_in_bytes = sdma_ep.ATOMIC_COMMAND_BYTES
+        command_in_bytes = sdma_utils.sdma_ep.ATOMIC_COMMAND_BYTES
         # Acquire space (returns base index and wraparound offset)
         base, offset = sdma_utils.acquire_fadd(
             queue_ptr_u32,
@@ -984,7 +985,7 @@ def quiet(copy_engine_ctx: tl.tensor, to_rank):
     """
     # Extract queue pointers from context
     # Context layout: [queue_buf, rptr, wptr, doorbell, cached_wptr, committed_wptr]
-    handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+    handle = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
     read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
     committed_wptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
 
