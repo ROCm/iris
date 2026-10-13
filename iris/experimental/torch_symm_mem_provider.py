@@ -132,11 +132,13 @@ class TorchSymmMemProvider:
         dist.barrier(self._group)
 
     def free(self, tensor: torch.Tensor):
-        """Drop this provider's reference to the allocation.
+        """Release the provider's hold on the allocation. Callers should call it.
 
-        Torch symmetric memory is reference counted like any other tensor, so
-        the storage goes away when the caller's reference does too. This only
-        forgets the handle.
+        The rendezvous handle recorded at allocation keeps the memory and its
+        peer mappings alive, so dropping the tensor alone releases nothing:
+        memory is freed only once this is called (or the provider is dropped)
+        and the caller's own references are gone. It is local, not collective,
+        but barrier first if peers may still be accessing the allocation.
         """
         self._handles.pop(tensor.data_ptr(), None)
 

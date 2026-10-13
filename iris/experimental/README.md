@@ -130,7 +130,8 @@ Nothing to install. It uses `torch.distributed._symmetric_memory`, so the only
 requirement is a torch build whose symmetric memory can allocate.
 
 That is not a given on ROCm, and the import is not a useful test of it — the
-module imports successfully on builds where allocation then fails. On gfx950:
+module imports successfully on builds where allocation then fails. Measured on
+gfx950, except the rows reported in review:
 
 | torch | backend | symmetric memory |
 | --- | --- | --- |
@@ -138,10 +139,11 @@ module imports successfully on builds where allocation then fails. On gfx950:
 | `2.13.0+rocm7.2` | default | works |
 | `2.9.1+rocm7.1` | default | no — lacks `set_signal_pad_size`, and `rendezvous` fails with `HIP error: invalid argument` |
 | `2.13.0+rocm7.15.0a` (nightly) | default | no — `hipErrorOutOfMemory` on a 4 KB allocation |
-| `2.15.0.dev20260930+rocm10.0` (nightly) | `NVSHMEM` | works, and only with this backend — reported in review of #551, not run here |
+| `2.15.0.dev20260930+rocm10.0` (nightly) | `NVSHMEM` | works, and only with this backend — standalone check, reported in review of #551 |
+| `2.13.0+rocm10.1.0a2026082` | default and `NVSHMEM` | provider tests pass on both — reported in review of #551 |
 
 So the tests probe by attempting a throwaway allocation and skip if it fails,
-rather than by importing. Only the default backend has been run through them.
+rather than by importing.
 
 **The backend is the caller's choice.** The provider never calls
 `symm_mem.set_backend()`; it reads the table off whatever handle `rendezvous`
@@ -156,6 +158,8 @@ dist.init_process_group("nccl")
 # symm_mem.set_backend("NVSHMEM")  # on builds where the default cannot allocate
 provider = TorchSymmMemProvider()
 tensor, peer_bases = provider.allocate_symmetric(n, dtype=torch.float32)
+# ... launch Iris kernels with peer_bases ...
+provider.free(tensor)
 ```
 
 ### Verifying
@@ -187,3 +191,9 @@ allocation's table happens to work; here it can mistranslate.
 is collective, so deriving a handle on demand would hang whichever ranks did not
 ask; handles are recorded at allocation time instead. Describing tensors that
 were already rendezvoused outside the provider is tracked in #577.
+
+**Call `free()` when done with an allocation.** The provider records each
+allocation's rendezvous handle, and that handle keeps the memory and its peer
+mappings alive, so dropping the tensor alone releases nothing. Unlike
+rocSHMEM's, this `free()` is local rather than collective, but barrier first if
+peers may still be accessing the allocation.
