@@ -984,7 +984,7 @@ class Iris:
         """
         return self.heap_bases
 
-    def get_copy_engine_ctx(self) -> torch.Tensor | None:
+    def get_copy_engine_ctx(self) -> "torch.Tensor | None":
         """
         Get the device-side copy engine context for SDMA operations.
 

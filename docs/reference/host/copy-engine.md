@@ -43,4 +43,5 @@ host-initiated goes through the copy engine.
 
 ```{eval-rst}
 .. automethod:: iris.host.iris.Iris.get_copy_engine_ctx
+   :no-index:
 ```
