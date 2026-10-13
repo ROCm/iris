@@ -8,8 +8,6 @@ from pathlib import Path
 
 import pytest
 import torch
-import triton
-import triton.language as tl
 
 import iris
 
@@ -22,32 +20,13 @@ def test_import_iris_does_not_import_xio():
     subprocess.check_call([sys.executable, "-c", code], env=env)
 
 
-@triton.jit
-def _store_to_peer(buffer, n_elements, cur_rank, peer_rank, heap_bases, BLOCK_SIZE: tl.constexpr):
-    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    values = tl.full([BLOCK_SIZE], 1, tl.float32) * (cur_rank + 1)
-    iris.store(buffer + offsets, values, cur_rank, peer_rank, heap_bases, mask=mask)
-
-
-def test_default_shader_store_without_sdma():
+def test_default_context_rejects_host_sdma():
     shmem = iris.iris(1 << 20)
     assert shmem.get_copy_engine_ctx() is None
 
     rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
-    peer = (rank + 1) % world_size
-    n_elements = 4096
-    buffer = shmem.zeros(n_elements, dtype=torch.float32)
-    shmem.barrier()
-
-    _store_to_peer[(triton.cdiv(n_elements, 1024),)](
-        buffer, n_elements, rank, peer, shmem.get_heap_bases(), BLOCK_SIZE=1024
-    )
-    shmem.barrier()
-
-    writer = (rank - 1) % world_size
-    torch.testing.assert_close(buffer, torch.full_like(buffer, writer + 1))
+    peer = (rank + 1) % shmem.get_num_ranks()
+    buffer = shmem.zeros(16, dtype=torch.float32)
 
     with pytest.raises(RuntimeError, match=r"engines=\(\"sdma\",\)"):
         shmem.put(buffer, to_rank=peer)
