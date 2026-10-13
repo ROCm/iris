@@ -1,6 +1,11 @@
 name: Build and Deploy Documentation
 
 on:
+  # Rebuild and republish without a commit. Needed on a fork, which gets no
+  # pushes of its own and so can never trigger the paths filter below; also
+  # useful upstream when the rendered output changes without the sources
+  # changing, e.g. a rocm-docs-core or Sphinx release.
+  workflow_dispatch:
   push:
     branches: [ main ]
     paths:
@@ -74,7 +79,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     permissions:
       contents: read
       pages: write
