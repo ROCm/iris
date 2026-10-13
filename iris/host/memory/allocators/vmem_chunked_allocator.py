@@ -127,6 +127,8 @@ class VMemChunkedAllocator(BaseAllocator):
     DEFAULT_CHUNK_SIZE = 256 * 1024 * 1024
     # Default VA size: 0 means auto-size (128 GiB)
     DEFAULT_VA_SIZE = 0
+    # Reconcile frees (SymmetricHeap.collect()) after handing out 1/COLLECT_FRACTION of the mapped heap
+    COLLECT_FRACTION = 8
 
     def __init__(
         self,
@@ -153,6 +155,8 @@ class VMemChunkedAllocator(BaseAllocator):
         self._pending_free = deque()
         # Freed on this rank but not yet reusable: offset -> size class
         self._released = {}
+        # Bytes handed out since the last reuse(): identical on every rank, like the allocation sequence
+        self._bytes_since_collect = 0
         self.chunks: List[LocalAllocation] = []
         self._shared_regions: List[ExportableMemory] = []
         self._peer_mappings: List[PeerMapping] = []
@@ -272,6 +276,11 @@ class VMemChunkedAllocator(BaseAllocator):
             self._process_pending_frees()
             return sorted(self._released)
 
+    def collect_due(self) -> bool:
+        """True once 1/COLLECT_FRACTION of the mapped heap has been handed out since the last reuse()."""
+        with self.lock:
+            return self._bytes_since_collect >= self.mapped_extent // self.COLLECT_FRACTION
+
     def reuse(self, offsets) -> None:
         """
         Make released blocks reusable. Call with the same offsets on every rank: those every rank has
@@ -279,6 +288,7 @@ class VMemChunkedAllocator(BaseAllocator):
         identical across ranks.
         """
         with self.lock:
+            self._bytes_since_collect = 0
             offsets = sorted(offsets)
             # Blocks at the top of the bump region go back to the bump pointer, not a size class
             while offsets and offsets[-1] + self._released[offsets[-1]] == self.bump:
@@ -370,6 +380,7 @@ class VMemChunkedAllocator(BaseAllocator):
 
             # Track for free
             self.alloc_sizes[offset] = aligned_size
+            self._bytes_since_collect += aligned_size
 
             # Create tensor via CUDAArrayInterface
             va = self.base_va + offset

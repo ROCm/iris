@@ -342,7 +342,9 @@ class SymmetricHeap:
         chunks_before = self.allocator.get_num_chunks() if is_chunked else 0
 
         if is_chunked:
-            # Every rank reaches the same branch: it depends only on state identical across ranks
+            # Every rank reaches the same branches: they depend only on state identical across ranks
+            if self.allocator.collect_due():
+                self.collect()
             tensor = self.allocator.allocate(actual_elements, dtype, alignment, grow=False)
             if tensor is None:
                 self.collect()
@@ -464,7 +466,8 @@ class SymmetricHeap:
 
         Freed symmetric tensors are only reused once every rank has freed them, so that allocations
         land at the same offset on every rank whenever each rank's garbage collector runs.
-        ``allocate()`` calls this before growing the heap; call it directly to reuse memory sooner.
+        ``allocate()`` calls this before growing the heap, and once 1/``COLLECT_FRACTION`` of the
+        mapped heap has been handed out since the last call; call it directly to reuse memory sooner.
         Waits for this rank's device first, so no rank is still accessing a block it hands out.
         """
         if not isinstance(self.allocator, VMemChunkedAllocator):

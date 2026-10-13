@@ -164,18 +164,25 @@ def test_chunked_free_list_size_classes():
     assert large2.data_ptr() == large_ptr
 
 
-def test_chunked_churn_then_large_allocation_does_not_grow():
-    """Freed scratch blocks at the top of the heap return to the bump pointer, so a later large allocation fits."""
+@pytest.mark.parametrize("keep_every", [0, 16])
+def test_chunked_churn_then_large_allocation_does_not_grow(keep_every):
+    """
+    A churned scratch buffer must not fragment the heap so that a later large allocation grows it:
+    freed blocks at the top return to the bump pointer, and periodic collect() calls bound the rest
+    (also when buffers kept every ``keep_every`` iterations stop the rollback).
+    """
     ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
     alloc = ctx.heap.allocator
-    scratch = (1 << 20) // 4  # 1 MiB of float32
+    scratch_bytes, keep_bytes = 2 * alloc.granularity, alloc.granularity  # different size classes
     chunks = alloc.get_num_chunks()
 
-    # Churn well past the mapped heap: freed blocks only become reusable at collect()
-    for _ in range(3 * alloc.mapped_extent // (1 << 20)):
-        t = ctx.zeros(scratch, dtype=torch.float32)
+    kept = []
+    for i in range(3 * alloc.mapped_extent // scratch_bytes):
+        t = ctx.zeros(scratch_bytes // 4, dtype=torch.float32)
         t.fill_(1.0)
         del t
+        if keep_every and i % keep_every == keep_every - 1:
+            kept.append(ctx.zeros(keep_bytes // 4, dtype=torch.float32))
 
     big = ctx.zeros(alloc.chunk_size // 2 // 4, dtype=torch.float32)  # noqa: F841
     assert alloc.get_num_chunks() == chunks
