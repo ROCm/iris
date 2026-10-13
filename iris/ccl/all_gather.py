@@ -7,7 +7,7 @@ All-gather collective operation — public API.
 Routes to triton/ or gluon/ based on config.use_gluon.
 """
 
-from iris.ccl.utils import extract_group_info
+from iris.ccl.utils import extract_group_info, _validate_output_symmetric
 
 
 def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, config=None):
@@ -16,8 +16,12 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
 
     Output is (world_size * M, N) — inputs concatenated along dim 0.
 
+    The output tensor must be on the symmetric heap (other ranks write to it
+    via RMA). The input tensor is only read locally, so it does not need to
+    be symmetric.
+
     Args:
-        output_tensor: Shape (world_size * M, N)
+        output_tensor: Shape (world_size * M, N) — must be on symmetric heap
         input_tensor: Shape (M, N)
         ctx: Iris instance
         group: ProcessGroup or None
@@ -28,6 +32,9 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
 
     if config is None:
         config = Config(block_size_m=32, block_size_n=64)
+
+    # Output is written remotely by other ranks — must be pre-allocated on symmetric heap
+    _validate_output_symmetric(ctx, output_tensor, "output_tensor")
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
