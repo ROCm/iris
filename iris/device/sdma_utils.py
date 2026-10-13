@@ -22,16 +22,16 @@ def bind_sdma_ep():
     if sdma_ep is None:
         try:
             from xio import sdma_ep as imported
-        except ImportError as exc:
-            raise ImportError(
+        except ModuleNotFoundError as exc:
+            if exc.name != "xio":
+                raise
+            raise ModuleNotFoundError(
                 "rocm-xio is required for the SDMA copy engine. "
-                'Install it with `pip install iris[sdma]`, or drop copy_engine="sdma" '
-                "to use shader load/store only."
+                'Install it with `pip install iris[sdma]`, or drop "sdma" from engines '
+                "to use shader load/store only.",
+                name="xio",
             ) from exc
         sdma_ep = imported
-    import iris.mem.triton.ops as triton_ops
-
-    triton_ops.sdma_ep = sdma_ep
     return sdma_ep
 
 

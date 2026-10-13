@@ -45,7 +45,7 @@ def run_message_passing_kernels(module, args, *, use_copy_engine: bool = False):
     """Run the core message passing logic without command line argument parsing."""
     shmem = None
     try:
-        shmem = iris.iris(args["heap_size"], copy_engine="sdma" if use_copy_engine else None)
+        shmem = iris.iris(args["heap_size"], engines=("sdma",) if use_copy_engine else ())
         dtype = module.torch_dtype_from_str(args["datatype"])
         cur_rank = shmem.get_rank()
         world_size = shmem.get_num_ranks()
@@ -209,7 +209,7 @@ def run_host_initiated_copy_engine(module, args):
     """Execute the host-initiated message passing example logic."""
     shmem = None
     try:
-        shmem = iris.iris(args["heap_size"], copy_engine="sdma")
+        shmem = iris.iris(args["heap_size"], engines=("sdma",))
         dtype = module.torch_dtype_from_str(args["datatype"])
         cur_rank = shmem.get_rank()
         world_size = shmem.get_num_ranks()

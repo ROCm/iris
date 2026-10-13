@@ -12,14 +12,6 @@ import triton
 import triton.language as tl
 
 import iris
-import iris.device.sdma_utils as sdma_utils
-
-
-@pytest.fixture
-def no_xio(monkeypatch):
-    """Make rocm-xio look uninstalled, as with a base `pip install iris`."""
-    monkeypatch.setitem(sys.modules, "xio", None)
-    monkeypatch.setattr(sdma_utils, "sdma_ep", None)
 
 
 def test_import_iris_does_not_import_xio():
@@ -30,11 +22,6 @@ def test_import_iris_does_not_import_xio():
     subprocess.check_call([sys.executable, "-c", code], env=env)
 
 
-def test_sdma_without_xio_fails_before_init(no_xio):
-    with pytest.raises(ImportError, match=r"iris\[sdma\]"):
-        iris.iris(1 << 20, copy_engine="sdma")
-
-
 @triton.jit
 def _store_to_peer(buffer, n_elements, cur_rank, peer_rank, heap_bases, BLOCK_SIZE: tl.constexpr):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -43,7 +30,7 @@ def _store_to_peer(buffer, n_elements, cur_rank, peer_rank, heap_bases, BLOCK_SI
     iris.store(buffer + offsets, values, cur_rank, peer_rank, heap_bases, mask=mask)
 
 
-def test_default_shader_store_without_xio(no_xio):
+def test_default_shader_store_without_sdma():
     shmem = iris.iris(1 << 20)
     assert shmem.get_copy_engine_ctx() is None
 
@@ -62,7 +49,7 @@ def test_default_shader_store_without_xio(no_xio):
     writer = (rank - 1) % world_size
     torch.testing.assert_close(buffer, torch.full_like(buffer, writer + 1))
 
-    with pytest.raises(RuntimeError, match='copy_engine="sdma"'):
+    with pytest.raises(RuntimeError, match=r"engines=\(\"sdma\",\)"):
         shmem.put(buffer, to_rank=peer)
-    with pytest.raises(RuntimeError, match='copy_engine="sdma"'):
+    with pytest.raises(RuntimeError, match=r"engines=\(\"sdma\",\)"):
         shmem.quiet()

@@ -71,6 +71,8 @@ from iris.mem.triton.tracing import Tracing as DeviceTracing  # noqa: F401
 from iris.host.memory import tensors as tensor_creation
 from iris.host.platform.utils import is_simulation_env
 
+_SUPPORTED_ENGINES = frozenset({"sdma"})
+
 
 class Iris:
     """
@@ -82,9 +84,9 @@ class Iris:
     Args:
         heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem"
-        copy_engine (str, optional): Copy engine to initialize. Use "sdma" for host- and
-            device-initiated SDMA operations (needs ``pip install iris[sdma]``). Defaults to
-            None (disabled).
+        engines (str or tuple of str, optional): Engine name or names to set up. Use
+            ``("sdma",)`` for host- and device-initiated SDMA operations (needs
+            ``pip install iris[sdma]``). Defaults to ``()`` (none).
 
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap with torch allocator
@@ -96,11 +98,18 @@ class Iris:
 
     """
 
-    def __init__(self, heap_size=1 << 30, allocator_type="torch", copy_engine=None):
-        if copy_engine not in (None, "sdma"):
-            raise ValueError(f"Unsupported copy engine: {copy_engine!r}. Expected None or 'sdma'.")
+    def __init__(self, heap_size=1 << 30, allocator_type="torch", engines=()):
+        if engines is None:
+            engines = ()
+        elif isinstance(engines, str):
+            engines = (engines,)
+        else:
+            engines = tuple(engines)
+        unsupported = set(engines) - _SUPPORTED_ENGINES
+        if unsupported:
+            raise ValueError(f"Unsupported engines: {sorted(unsupported)}. Supported: {sorted(_SUPPORTED_ENGINES)}.")
         self._sdma_ep = None
-        if copy_engine == "sdma":
+        if "sdma" in engines:
             from iris.device.sdma_utils import bind_sdma_ep
 
             self._sdma_ep = bind_sdma_ep()
@@ -202,7 +211,7 @@ class Iris:
     def _require_copy_engine(self):
         if self._sdma_ep is None:
             raise RuntimeError(
-                'SDMA is disabled; initialize Iris with copy_engine="sdma" (needs `pip install iris[sdma]`).'
+                'SDMA is disabled; initialize Iris with engines=("sdma",) (needs `pip install iris[sdma]`).'
             )
         return self._sdma_ep
 
@@ -1028,7 +1037,7 @@ class Iris:
         """
         One-sided put operation with optional wait (POLL) and signal (ATOMIC).
 
-        Requires initialization with ``copy_engine="sdma"``.
+        Requires initialization with ``engines=("sdma",)``.
 
         Supports:
         - Simple copy: put(src, to_rank)
@@ -1122,7 +1131,7 @@ class Iris:
         """
         2D tile transfer with optional wait/signal (sub-window copy).
 
-        Requires initialization with ``copy_engine="sdma"``.
+        Requires initialization with ``engines=("sdma",)``.
 
         Low-level API - caller provides pre-translated pointers for performance.
 
@@ -1207,7 +1216,7 @@ class Iris:
         """
         Batched 2D tile transfer with optional shared wait/signal.
 
-        Requires initialization with ``copy_engine="sdma"``.
+        Requires initialization with ``engines=("sdma",)``.
 
         Args:
             tiles: Sequence of pre-configured sdma_ep.Tile objects
@@ -1266,7 +1275,7 @@ class Iris:
         """
         Wait for all outstanding SDMA operations to complete.
 
-        Requires initialization with ``copy_engine="sdma"``.
+        Requires initialization with ``engines=("sdma",)``.
 
         Args:
             to_rank: If specified, wait only for ops to this rank.
@@ -1735,7 +1744,7 @@ class Iris:
             )
 
 
-def iris(heap_size=1 << 30, allocator_type="torch", copy_engine=None):
+def iris(heap_size=1 << 30, allocator_type="torch", engines=()):
     """
     Create and return an Iris instance with the specified heap size.
 
@@ -1743,7 +1752,7 @@ def iris(heap_size=1 << 30, allocator_type="torch", copy_engine=None):
         heap_size (int): Size of the heap in bytes. Defaults to 1GB.
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem".
                               Can be overridden with IRIS_ALLOCATOR environment variable.
-        copy_engine (str, optional): See :class:`Iris`.
+        engines (str or tuple of str, optional): See :class:`Iris`.
 
     Returns:
         Iris: An initialized Iris instance.
@@ -1757,4 +1766,4 @@ def iris(heap_size=1 << 30, allocator_type="torch", copy_engine=None):
         >>> iris_ctx = iris.iris(2**30, allocator_type="vmem")
         >>> tensor = iris_ctx.zeros(1024, 1024)
     """
-    return Iris(heap_size, allocator_type, copy_engine=copy_engine)
+    return Iris(heap_size, allocator_type, engines=engines)
