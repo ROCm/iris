@@ -263,6 +263,7 @@ class VMemChunkedAllocator(BaseAllocator):
         """Move frees from GC finalizers to the released list. Call with lock held."""
         while self._pending_free:
             offset, size_class = self._pending_free.popleft()
+            self.alloc_sizes.pop(offset, None)
             self._released[offset] = size_class
 
     def released_offsets(self) -> List[int]:
@@ -278,10 +279,13 @@ class VMemChunkedAllocator(BaseAllocator):
         identical across ranks.
         """
         with self.lock:
-            for offset in sorted(offsets):
-                size_class = self._released.pop(offset)
-                self.alloc_sizes.pop(offset, None)
-                self.free_lists[size_class].append(offset)
+            offsets = sorted(offsets)
+            # Blocks at the top of the bump region go back to the bump pointer, not a size class
+            while offsets and offsets[-1] + self._released[offsets[-1]] == self.bump:
+                self.bump = offsets[-1]
+                del self._released[offsets.pop()]
+            for offset in offsets:
+                self.free_lists[self._released.pop(offset)].append(offset)
 
     def _free_callback(self, offset, size_class):
         """Called by weakref finalizer when a tensor's storage is GC'd.
@@ -326,6 +330,8 @@ class VMemChunkedAllocator(BaseAllocator):
         with self.lock:
             if num_elements == 0:
                 return torch.empty(0, dtype=dtype, device=self.device)
+
+            self._process_pending_frees()
 
             elem_size = _element_size(dtype)
             size_bytes = num_elements * elem_size
@@ -607,20 +613,22 @@ class VMemChunkedAllocator(BaseAllocator):
 
     def get_stats(self):
         """Return allocator statistics."""
-        total_free = sum(len(v) for v in self.free_lists.values())
-        free_bytes = sum(size_class * len(offsets) for size_class, offsets in self.free_lists.items())
-        return {
-            "num_chunks": len(self.chunks),
-            "mapped_bytes": self.mapped_extent,
-            "bump": self.bump,
-            "num_active_allocs": len(self.alloc_sizes),
-            "num_free_blocks": total_free,
-            "num_released_blocks": len(self._released) + len(self._pending_free),
-            "free_bytes": free_bytes,
-            "va_size": self.va_size,
-            "chunk_size": self.chunk_size,
-            "granularity": self.granularity,
-        }
+        with self.lock:
+            self._process_pending_frees()
+            total_free = sum(len(v) for v in self.free_lists.values())
+            free_bytes = sum(size_class * len(offsets) for size_class, offsets in self.free_lists.items())
+            return {
+                "num_chunks": len(self.chunks),
+                "mapped_bytes": self.mapped_extent,
+                "bump": self.bump,
+                "num_active_allocs": len(self.alloc_sizes),
+                "num_free_blocks": total_free,
+                "num_released_blocks": len(self._released),
+                "free_bytes": free_bytes,
+                "va_size": self.va_size,
+                "chunk_size": self.chunk_size,
+                "granularity": self.granularity,
+            }
 
     def close(self):
         """Release all VMem resources."""

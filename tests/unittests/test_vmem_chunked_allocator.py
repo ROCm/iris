@@ -143,6 +143,8 @@ def test_chunked_free_list_size_classes():
     small = ctx.zeros(size_small, dtype=torch.float32)
     medium = ctx.zeros(size_medium, dtype=torch.float32)
     large = ctx.zeros(size_large, dtype=torch.float32)
+    # Keeps the freed blocks below the top of the heap, so they go to the free lists
+    sentinel = ctx.zeros(size_small, dtype=torch.float32)  # noqa: F841
 
     small_ptr = small.data_ptr()
     medium_ptr = medium.data_ptr()
@@ -160,6 +162,23 @@ def test_chunked_free_list_size_classes():
     assert small2.data_ptr() == small_ptr
     assert medium2.data_ptr() == medium_ptr
     assert large2.data_ptr() == large_ptr
+
+
+def test_chunked_churn_then_large_allocation_does_not_grow():
+    """Freed scratch blocks at the top of the heap return to the bump pointer, so a later large allocation fits."""
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    scratch = (1 << 20) // 4  # 1 MiB of float32
+    chunks = alloc.get_num_chunks()
+
+    # Churn well past the mapped heap: freed blocks only become reusable at collect()
+    for _ in range(3 * alloc.mapped_extent // (1 << 20)):
+        t = ctx.zeros(scratch, dtype=torch.float32)
+        t.fill_(1.0)
+        del t
+
+    big = ctx.zeros(alloc.chunk_size // 2 // 4, dtype=torch.float32)  # noqa: F841
+    assert alloc.get_num_chunks() == chunks
 
 
 def test_chunked_freed_block_waits_for_collect():
