@@ -46,6 +46,7 @@ def _fused_matmul_all_reduce_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     EVEN_K: tl.constexpr,
     VARIANT: tl.constexpr,
+    signal_value=1,
 ):
     """
     Fused GEMM + All-Reduce kernel with configurable all-reduce variant.
@@ -133,15 +134,17 @@ def _fused_matmul_all_reduce_kernel(
         # Use atomic_xchg with release semantics to ensure memory ordering
         tile_id = pid_m * num_tiles_n + pid_n
         lock_ptr = locks + tile_id
-        tl.atomic_xchg(lock_ptr, 1, sem="release", scope="sys")  # Release ensures prior stores visible to remote GPUs
+        tl.atomic_xchg(
+            lock_ptr, signal_value, sem="release", scope="sys"
+        )  # Release ensures prior stores visible to remote GPUs
 
         # Create source view only when needed (aux_buffer is not None)
         src_view = iris.make_tensor_view(aux_buffer, M, N, stride_cm, stride_cn)
 
         if VARIANT == "one_shot":
-            ctx.all_reduce_one_shot(tile_obj, src_view, dst_view, locks)
+            ctx.all_reduce_one_shot(tile_obj, src_view, dst_view, locks, signal_value)
         elif VARIANT == "two_shot":
-            ctx.all_reduce_two_shot(tile_obj, src_view, dst_view, locks)
+            ctx.all_reduce_two_shot(tile_obj, src_view, dst_view, locks, signal_value)
 
 
 def matmul_all_reduce_preamble(
@@ -196,7 +199,9 @@ def matmul_all_reduce_preamble(
     if config.all_reduce_variant in ["spinlock", "one_shot", "two_shot"]:
         if workspace.locks is None or workspace.locks.numel() != total_tiles:
             workspace.locks = shmem.zeros((total_tiles,), dtype=torch.int32)
-        else:
+        elif config.all_reduce_variant == "spinlock":
+            # Spinlock uses CAS(0→1) and releases back to 0, so needs zeroing.
+            # one_shot/two_shot use monotonic signal_value, no zeroing needed.
             workspace.locks.zero_()
     else:
         workspace.locks = None
@@ -331,6 +336,12 @@ def matmul_all_reduce(
 
     even_k = K % config.block_size_k == 0
 
+    # Increment call counter for producer-consumer signal value.
+    # Each call uses a unique value so consumers don't see stale signals.
+    # Wrap at INT32_MAX since locks are int32 tensors.
+    workspace.call_counter = (workspace.call_counter % 0x7FFFFFFF) + 1
+    signal_value = workspace.call_counter
+
     iris_launch(
         _fused_matmul_all_reduce_kernel,
         grid,
@@ -356,6 +367,7 @@ def matmul_all_reduce(
         config.block_size_k,
         even_k,
         config.all_reduce_variant,
+        signal_value,
         algorithm="matmul_all_reduce",
         rank=rank,
         dtype=A.dtype,
