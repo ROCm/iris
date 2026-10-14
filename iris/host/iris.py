@@ -673,6 +673,31 @@ class Iris:
         """
         return self.heap.is_symmetric(tensor)
 
+    def reclaim_freed(self):
+        """
+        Make symmetric heap memory that every rank has freed reusable.
+
+        Collective: all ranks must call it together. With `allocator_type='vmem_chunked'`, a freed
+        symmetric tensor is only reused once every rank has freed it, so that allocations land at the
+        same offset on every rank. Iris reclaims freed memory itself before growing the heap and
+        periodically as memory is allocated; call this to reuse freed memory sooner. Other
+        allocators reuse memory as soon as it is freed, so for them this does nothing.
+
+        Waits for the work queued on this rank's HIP streams before reusing memory. Copy-engine
+        transfers are not covered: call :meth:`quiet` before dropping their tensors.
+
+        Each call runs ``gc.collect()``, a device-wide ``torch.cuda.synchronize()`` that breaks
+        CPU/GPU overlap, and a round-trip with every rank. Do not call it every step.
+
+        Example:
+            >>> ctx = iris.iris(allocator_type='vmem_chunked')
+            >>> scratch = ctx.zeros(1 << 20, dtype=torch.float32)
+            >>> del scratch
+            >>> ctx.reclaim_freed()  # on every rank
+            >>> reused = ctx.zeros(1 << 20, dtype=torch.float32)  # same memory as scratch
+        """
+        self.heap.collect()
+
     def full(self, size, fill_value, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
         """
         Creates a tensor of size size filled with fill_value. The tensor's dtype is inferred from fill_value.

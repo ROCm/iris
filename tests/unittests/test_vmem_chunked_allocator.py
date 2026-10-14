@@ -95,7 +95,7 @@ def test_chunked_gc_free_reuse():
 
     # Drop the tensor and make freed memory reusable
     del t
-    ctx.heap.collect()
+    ctx.reclaim_freed()
 
     # Allocate again -- should reuse the freed block
     t2 = ctx.zeros(1024, dtype=torch.float32)
@@ -152,7 +152,7 @@ def test_chunked_free_list_size_classes():
 
     # Free all
     del small, medium, large
-    ctx.heap.collect()
+    ctx.reclaim_freed()
 
     # Re-allocate -- each should reuse from its size class
     small2 = ctx.zeros(size_small, dtype=torch.float32)
@@ -201,7 +201,7 @@ def test_chunked_freed_block_waits_for_collect():
     assert t2.data_ptr() != ptr
     assert ctx.heap.allocator.get_stats()["num_released_blocks"] >= 1
 
-    ctx.heap.collect()
+    ctx.reclaim_freed()
     t3 = ctx.zeros(1024, dtype=torch.float32)
     assert t3.data_ptr() == ptr
 
@@ -256,11 +256,16 @@ def test_chunked_offsets_symmetric_across_gc_timing():
         c_ptr = c.data_ptr()
         keep = c if ctx.cur_rank == 0 else None
         del c
-        ctx.heap.collect()
+        ctx.reclaim_freed()
         d = ctx.zeros(4096, dtype=torch.float32)
         offsets = _offsets_per_rank(ctx, d)
         assert len(set(offsets)) == 1, f"offsets differ across ranks: {offsets}"
         assert d.data_ptr() != c_ptr
+        # d reuses the block freed everywhere; had c been reused, the bump pointer would sit at c
+        e = ctx.zeros(4096, dtype=torch.float32)
+        offsets = _offsets_per_rank(ctx, e)
+        assert len(set(offsets)) == 1, f"offsets differ across ranks: {offsets}"
+        assert e.data_ptr() != c_ptr
         del keep
     finally:
         gc.enable()
