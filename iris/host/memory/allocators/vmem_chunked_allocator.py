@@ -283,9 +283,9 @@ class VMemChunkedAllocator(BaseAllocator):
 
     def reuse(self, offsets) -> None:
         """
-        Make released blocks reusable. Call with the same offsets on every rank: those every rank has
-        released (see SymmetricHeap.collect()), so the free lists, and every later offset, stay
-        identical across ranks.
+        Make released blocks reusable. Call only via SymmetricHeap.collect(), which passes the same
+        offsets on every rank: those every rank has released. That keeps the free lists, and every
+        later offset, identical across ranks.
         """
         with self.lock:
             self._bytes_since_collect = 0

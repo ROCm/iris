@@ -98,17 +98,22 @@ def _released_by_every_rank(offsets: List[int], num_ranks: int) -> List[int]:
     import torch.distributed as dist
 
     store = dist.distributed_c10d._get_default_store()
-    prefix = f"iris_released_v{next(_released_exchanges)}/"
-    store.set(f"{prefix}{dist.get_rank()}", np.asarray(offsets, dtype=np.int64).tobytes())
+    rank = dist.get_rank()
+    exchange = next(_released_exchanges)
+    prefix = f"iris_released_v{exchange}/"
+    store.set(f"{prefix}{rank}", np.asarray(offsets, dtype=np.int64).tobytes())
     keys = [f"{prefix}{r}" for r in range(num_ranks)]
     try:
         store.wait(keys)
-    except Exception as exc:
+    except dist.DistStoreError as exc:
         missing = [r for r, key in enumerate(keys) if not store.check([key])]
-        raise RuntimeError(
-            f"SymmetricHeap.collect(): ranks {missing} did not reach the same allocation before the store "
-            "timed out; symmetric allocations must happen on every rank"
+        raise TimeoutError(
+            f"SymmetricHeap.collect(): timed out after {store.timeout.total_seconds():.0f}s (the store's timeout) "
+            f"waiting for ranks {missing}; symmetric allocations and collect() must happen on every rank"
         ) from exc
+    # Every rank has published for this exchange, so all of them finished reading the previous one
+    if exchange > 1:
+        store.delete_key(f"iris_released_v{exchange - 1}/{rank}")
     common = set(offsets)
     for key in keys:
         common &= set(np.frombuffer(store.get(key), dtype=np.int64).tolist())
@@ -343,11 +348,14 @@ class SymmetricHeap:
 
         if is_chunked:
             # Every rank reaches the same branches: they depend only on state identical across ranks
-            if self.allocator.collect_due():
+            collected = self.allocator.collect_due()
+            if collected:
                 self.collect()
             tensor = self.allocator.allocate(actual_elements, dtype, alignment, grow=False)
             if tensor is None:
-                self.collect()
+                # A collect() just above found everything there is to reuse; nothing was freed since
+                if not collected:
+                    self.collect()
                 tensor = self.allocator.allocate(actual_elements, dtype, alignment)
         else:
             tensor = self.allocator.allocate(actual_elements, dtype, alignment)
@@ -468,7 +476,13 @@ class SymmetricHeap:
         land at the same offset on every rank whenever each rank's garbage collector runs.
         ``allocate()`` calls this before growing the heap, and once 1/``COLLECT_FRACTION`` of the
         mapped heap has been handed out since the last call; call it directly to reuse memory sooner.
-        Waits for this rank's device first, so no rank is still accessing a block it hands out.
+
+        Waits for the work queued on this rank's HIP streams first, so no kernel is still accessing a
+        block it hands out. Copy-engine (SDMA) transfers are not covered: quiet them with
+        ``Iris.quiet()`` before dropping their tensors.
+
+        Each call runs ``gc.collect()``, a device-wide ``torch.cuda.synchronize()`` that breaks CPU/GPU
+        overlap, and a store round-trip with every rank. Do not call it every step.
         """
         if not isinstance(self.allocator, VMemChunkedAllocator):
             return
