@@ -4,6 +4,7 @@
 
 """Benchmark for iris-ccl all-gather collective."""
 
+import torch
 import torch.distributed as dist
 import iris.bench as bench
 from iris.ccl import Config
@@ -15,7 +16,7 @@ from benchmark.ccl._common import DTYPES, M_VALUES, N_VALUES, NUM_RANKS, is_fp8,
 @bench.axis("M", M_VALUES)
 @bench.axis("N", N_VALUES)
 @bench.axis("dtype", DTYPES)
-@bench.axis("backend", ["iris", "rccl"])
+@bench.axis("backend", ["iris", "iris_tdm", "rccl"])
 def all_gather(state, ctx):
     M, N, dtype = state["M"], state["N"], state["dtype"]
     world_size = ctx.get_num_ranks()
@@ -36,11 +37,17 @@ def all_gather(state, ctx):
         )
         return
 
+    if state["backend"] == "iris_tdm":
+        if not torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName.startswith("gfx1250"):
+            state.skip("the TDM all-gather needs gfx1250")
+        config = Config(use_gluon=True, all_gather_variant="tdm", block_size_m=128, block_size_n=256, num_warps=16)
+    else:
+        config = Config()
+
     inp = ctx.zeros((M, N), dtype=dtype)
     out = ctx.zeros((world_size * M, N), dtype=dtype)
     inp.fill_(float(ctx.get_rank() + 1))
 
-    config = Config()
     state.exec(
         lambda: ctx.ccl.all_gather(out, inp, config=config),
         preamble_fn=lambda: out.zero_(),

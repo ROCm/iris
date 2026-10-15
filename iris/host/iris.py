@@ -1624,6 +1624,10 @@ class Iris:
                 >>> config = Config(block_size_m=128, block_size_n=32)
                 >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
 
+                >>> # gfx1250: move tiles with the tensor data movement engine
+                >>> config = Config(use_gluon=True, all_gather_variant="tdm", block_size_m=128, block_size_n=256, num_warps=16)
+                >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
+
                 >>> # Async operation (no barrier)
                 >>> ctx.ccl.all_gather(output_tensor, input_tensor, async_op=True)
             """
