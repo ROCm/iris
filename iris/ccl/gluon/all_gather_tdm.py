@@ -25,7 +25,14 @@ import torch
 import triton.language as tl
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-from triton.experimental.gluon.language.amd.gfx1250 import tdm
+
+try:
+    from triton.experimental.gluon.language.amd.gfx1250 import tdm
+except ImportError as e:
+    raise ImportError(
+        "all_gather_variant='tdm' needs Triton with Gluon gfx1250 TDM support: triton-lang/triton "
+        "commit b5fea1e3f4 (#8392, which added TDM stores) or later."
+    ) from e
 
 from iris.host.tracing.kernel_artifacts import iris_launch
 from iris.mem.gluon.context import Context as IrisDeviceCtx
@@ -68,15 +75,29 @@ def persistent_all_gather_tdm(
     smem_layout: gl.constexpr = gl.SwizzledSharedLayout(vec=8, per_phase=1, max_phase=1, order=[1, 0])
     buf = gl.allocate_shared_memory(input_ptr.dtype.element_ty, [BLOCK_SIZE_M, BLOCK_SIZE_N], layout=smem_layout)
 
-    # Compute each peer's address from the local heap base once, rather than
-    # loading a heap base per destination per tile.
-    local_base = gl.load(ctx.heap_bases + iris_rank)
-
     src = tdm.make_tensor_descriptor(
         input_ptr, [M, N], [stride_in_m, stride_in_n], [BLOCK_SIZE_M, BLOCK_SIZE_N], smem_layout
     )
-    # Store descriptors end at this rank's last output row, (group_rank + 1) * M.
+
+    # Build each peer's store descriptor once, before the tile loop: one heap-base
+    # load and one descriptor per destination per kernel rather than per tile.
+    # They end at this rank's last output row, (group_rank + 1) * M, so a ragged
+    # last tile is clipped at the end of this rank's shard. Destinations are in
+    # staggered order (group_rank + i) so that at any instant each rank is writing
+    # to a different peer.
+    local_base = gl.load(ctx.heap_bases + iris_rank)
     rows_through_mine = (group_rank + 1) * M
+    dsts = ()
+    for rank_idx in tl.static_range(world_size):
+        dest_idx = (group_rank + rank_idx) % world_size
+        target_iris_rank = rank_start + dest_idx * rank_stride
+        delta = gl.load(ctx.heap_bases + target_iris_rank) - local_base
+        base = tl.cast(tl.cast(output_ptr, gl.uint64) + delta, output_ptr.dtype)
+        dsts += (
+            tdm.make_tensor_descriptor(
+                base, [rows_through_mine, N], [stride_out_m, stride_out_n], [BLOCK_SIZE_M, BLOCK_SIZE_N], smem_layout
+            ),
+        )
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -91,21 +112,10 @@ def persistent_all_gather_tdm(
         tdm.async_load(src, [row, col], buf)
         tdm.async_wait(0)
 
-        # Stagger the destination order by rank so that at any instant each
-        # rank is writing to a different peer.
+        # static_range unrolls this at compile time: the world_size stores issue back
+        # to back, with the one wait below after all of them.
         for rank_idx in tl.static_range(world_size):
-            dest_idx = (group_rank + rank_idx) % world_size
-            target_iris_rank = rank_start + dest_idx * rank_stride
-            delta = gl.load(ctx.heap_bases + target_iris_rank) - local_base
-            base = tl.cast(tl.cast(output_ptr, gl.uint64) + delta, output_ptr.dtype)
-            dst = tdm.make_tensor_descriptor(
-                base,
-                [rows_through_mine, N],
-                [stride_out_m, stride_out_n],
-                [BLOCK_SIZE_M, BLOCK_SIZE_N],
-                smem_layout,
-            )
-            tdm.async_store(dst, [group_rank * M + row, col], buf)
+            tdm.async_store(dsts[rank_idx], [group_rank * M + row, col], buf)
 
         # The stores read from buf, so they must retire before it is reused.
         tdm.async_wait(0)

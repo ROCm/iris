@@ -183,7 +183,8 @@ def test_all_reduce_with_groups(variant, group_type, dtype=torch.float32, M=256,
 def test_all_gather_with_groups(group_type, variant, dtype=torch.float32, M=128, N=64):
     """Test all-gather with ProcessGroups."""
     world_size, rank = _get_world_info()
-    if variant == "tdm" and not torch.cuda.get_device_properties(rank).gcnArchName.startswith("gfx1250"):
+    device = torch.cuda.current_device()
+    if variant == "tdm" and not torch.cuda.get_device_properties(device).gcnArchName.startswith("gfx1250"):
         pytest.skip("the TDM all-gather needs gfx1250")
 
     heap_size = 2**33

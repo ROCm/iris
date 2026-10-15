@@ -125,6 +125,7 @@ Iris also provides an experimental cleaner API using Triton's Gluon with `@gluon
 
 > [!NOTE]
 > **Requirements for Gluon backend**: ROCm 7.0+ and Triton commit [aafec417bded34db6308f5b3d6023daefae43905](https://github.com/triton-lang/triton/tree/aafec417bded34db6308f5b3d6023daefae43905) or later are required to use the experimental Gluon APIs.
+> The gfx1250 TDM all-gather (`all_gather_variant="tdm"`) needs Triton commit [b5fea1e3f4c2cb0b40c0ce98261b240d8728d2f9](https://github.com/triton-lang/triton/commit/b5fea1e3f4c2cb0b40c0ce98261b240d8728d2f9) (triton-lang/triton#8392, which added TDM stores) or later; the Triton pinned in `docker/` already includes it.
 
 ```python
 import torch

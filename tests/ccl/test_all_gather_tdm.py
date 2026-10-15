@@ -18,7 +18,10 @@ from iris.ccl import Config
 
 
 def _is_gfx1250():
-    return torch.cuda.is_available() and torch.cuda.get_device_properties(0).gcnArchName.startswith("gfx1250")
+    # The device this rank runs on: the test runner sets it before collecting tests.
+    if not torch.cuda.is_available():
+        return False
+    return torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName.startswith("gfx1250")
 
 
 try:

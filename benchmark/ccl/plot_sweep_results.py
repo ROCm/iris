@@ -36,6 +36,7 @@ import argparse
 import csv
 import math
 import os
+import re
 import statistics
 from collections import defaultdict
 
@@ -154,6 +155,11 @@ def load_results(paths):
                 op = row.get("benchmark") or row.get("name") or os.path.basename(path).replace(".csv", "")
                 backend = (row.get("backend") or "iris").strip().lower()
                 variant = (row.get("variant") or "").strip()
+                # An Iris series per CU count. RCCL picks its own CU count, so it stays
+                # one series whatever comm_sms its row was recorded under.
+                comm_sms = (row.get("comm_sms") or "").strip()
+                if comm_sms and backend == "iris":
+                    variant = f"{variant}, {comm_sms} CUs" if variant else f"{comm_sms} CUs"
                 dtype = _precision_token((row.get("dtype") or "").strip())
                 try:
                     ranks = int(row.get("num_ranks") or row.get("world_size") or 0)
@@ -195,9 +201,14 @@ def _style(backend, index):
     return color, _MARKERS[index % len(_MARKERS)], _LINESTYLES[(index + offset) % len(_LINESTYLES)]
 
 
+def _natural(text):
+    """Sort key that orders embedded numbers numerically: '64 CUs' before '128 CUs'."""
+    return [(0, int(t)) if t.isdigit() else (1, t) for t in re.split(r"(\d+)", text)]
+
+
 def _series_order(series):
     """Iris first, then RCCL; stable within a backend by variant."""
-    return sorted(series, key=lambda sk: (sk[0] != "iris", sk[1]))
+    return sorted(series, key=lambda sk: (sk[0] != "iris", _natural(sk[1])))
 
 
 def _variants_per_backend(series):
