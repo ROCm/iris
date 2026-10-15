@@ -74,6 +74,22 @@ from iris.host.platform.utils import is_simulation_env
 _SUPPORTED_ENGINES = frozenset({"sdma"})
 
 
+def _resolve_gpu_id(device, cur_rank, num_gpus):
+    """The GPU index a rank uses: ``device`` if given, else ``cur_rank % num_gpus``."""
+    if device is None:
+        return cur_rank % num_gpus
+    if isinstance(device, int):
+        gpu_id = device
+    else:
+        device = torch.device(device)
+        if device.type != "cuda":
+            raise ValueError(f"Iris needs a GPU device, got {device}")
+        gpu_id = torch.cuda.current_device() if device.index is None else device.index
+    if not 0 <= gpu_id < num_gpus:
+        raise ValueError(f"GPU {gpu_id} is not one of the {num_gpus} visible GPUs")
+    return gpu_id
+
+
 class Iris:
     """
     Main Iris class for multi-GPU communication and memory management.
@@ -87,6 +103,8 @@ class Iris:
         engines (str or tuple of str, optional): Engine name or names to set up. Use
             ``("sdma",)`` for host- and device-initiated SDMA operations (needs
             ``pip install iris[sdma]``). Defaults to ``()`` (none).
+        device (int, str or torch.device, optional): GPU this rank runs on. ``None``
+            (default) uses ``rank % visible GPUs``; ``"cuda"`` uses the current device.
 
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap with torch allocator
@@ -98,7 +116,7 @@ class Iris:
 
     """
 
-    def __init__(self, heap_size=1 << 30, allocator_type="torch", engines=()):
+    def __init__(self, heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
         if engines is None:
             engines = ()
         elif isinstance(engines, str):
@@ -118,7 +136,13 @@ class Iris:
         comm, cur_rank, num_ranks = init_distributed()
         num_gpus = count_devices()
 
-        gpu_id = cur_rank % num_gpus
+        gpu_id = _resolve_gpu_id(device, cur_rank, num_gpus)
+        if "sdma" in engines and gpu_id != cur_rank % num_gpus:
+            # SDMA queues are created between local GPU ordinals derived from the rank.
+            raise ValueError(
+                f'engines=("sdma",) needs rank {cur_rank} on GPU {cur_rank % num_gpus} (rank % visible GPUs), '
+                f"but it was placed on GPU {gpu_id}."
+            )
         set_device(gpu_id)
 
         self.comm = comm
@@ -1769,7 +1793,7 @@ class Iris:
             )
 
 
-def iris(heap_size=1 << 30, allocator_type="torch", engines=()):
+def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
     """
     Create and return an Iris instance with the specified heap size.
 
@@ -1778,6 +1802,7 @@ def iris(heap_size=1 << 30, allocator_type="torch", engines=()):
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem".
                               Can be overridden with IRIS_ALLOCATOR environment variable.
         engines (str or tuple of str, optional): See :class:`Iris`.
+        device (int, str or torch.device, optional): See :class:`Iris`.
 
     Returns:
         Iris: An initialized Iris instance.
@@ -1791,4 +1816,4 @@ def iris(heap_size=1 << 30, allocator_type="torch", engines=()):
         >>> iris_ctx = iris.iris(2**30, allocator_type="vmem")
         >>> tensor = iris_ctx.zeros(1024, 1024)
     """
-    return Iris(heap_size, allocator_type, engines=engines)
+    return Iris(heap_size, allocator_type, engines=engines, device=device)
