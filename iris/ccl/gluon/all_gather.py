@@ -92,7 +92,7 @@ def persistent_all_gather_gluon(
         BLOCK_SIZE_N: Number of columns per tile.
         GROUP_SIZE_M: Swizzle group size for M-dimension tiling.
         COMM_SMS: Number of CUs used for persistent scheduling.
-        THREADS_PER_WARP: Threads per warp/wavefront: 64 on CDNA, 32 on gfx1250 and NVIDIA.
+        THREADS_PER_WARP: Threads per warp/wavefront: 64 on CDNA3/4, 32 on CDNA5.
         WARPS_PER_CTA: Number of warps per workgroup. Must match num_warps.
     """
     ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)

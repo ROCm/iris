@@ -85,7 +85,7 @@ def persistent_all_to_all_gluon(
         pid_n = (tile_id % num_pid_in_group) // group_size_m
 
         # BlockedLayout: [size_per_thread], [threads_per_warp], [warps_per_cta], [order].
-        # No literals: the wavefront is 64 wide on CDNA but 32 on gfx1250
+        # No literals: the wavefront is 64 wide on CDNA3/4 but 32 on CDNA5
         # (THREADS_PER_WARP = config.threads_per_warp, which defaults to the device's),
         # and the launch's warp count is config.num_warps.
         WARPS: gl.constexpr = gl.num_warps()
