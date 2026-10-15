@@ -6,6 +6,9 @@ Configuration structures for iris-ccl collective operations.
 """
 
 from dataclasses import dataclass
+
+import torch
+
 import iris
 
 
@@ -49,10 +52,11 @@ class Config:
                    this also sets WARPS_PER_CTA in the BlockedLayout. The product
                    threads_per_warp * num_warps determines the minimum tile size
                    (block_size_m * block_size_n for flat-2D, or block_size_n for 1D).
-        threads_per_warp: Threads per warp/wavefront (default: 64). Must match the
-                          hardware wavefront size: 64 for AMD GPUs, 32 for NVIDIA.
-                          Used by gluon kernels to construct BlockedLayout for
-                          vectorized memory access.
+        threads_per_warp: Threads per warp/wavefront (default: None, the current
+                          device's warp size). Must match the hardware wavefront
+                          size; both 32 and 64 occur on AMD GPUs (64 on CDNA, 32 on
+                          gfx1250). Used by gluon kernels to construct BlockedLayout
+                          for vectorized memory access.
         waves_per_eu: Waves per execution unit hint for occupancy (default: 0, auto)
 
     Example:
@@ -92,7 +96,7 @@ class Config:
     reduce_scatter_variant: str = "two_shot"
     num_stages: int = 1
     num_warps: int = 4
-    threads_per_warp: int = 64
+    threads_per_warp: int | None = None
     waves_per_eu: int = 0
 
     def __post_init__(self):
@@ -144,7 +148,9 @@ class Config:
         if self.reduce_scatter_variant != "two_shot":
             raise ValueError(f"reduce_scatter_variant must be 'two_shot', got '{self.reduce_scatter_variant}'")
 
+        if self.threads_per_warp is None:
+            self.threads_per_warp = torch.cuda.get_device_properties(torch.cuda.current_device()).warp_size
         if self.threads_per_warp not in (32, 64):
-            raise ValueError(f"threads_per_warp must be 32 (NVIDIA) or 64 (AMD), got {self.threads_per_warp}")
+            raise ValueError(f"threads_per_warp must be 32 or 64 (the wavefront width), got {self.threads_per_warp}")
         if self.num_warps <= 0:
             raise ValueError(f"num_warps must be positive, got {self.num_warps}")

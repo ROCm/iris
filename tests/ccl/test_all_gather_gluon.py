@@ -35,8 +35,9 @@ except ImportError:
     "M, N, block_size_m, block_size_n",
     [
         # block_size_n must be a multiple of (threads_per_warp * num_warps).
-        # With defaults (threads_per_warp=64, num_warps=4), minimum is 256.
-        # elems_per_thread = block_size_n / 256: higher = wider vector loads.
+        # With num_warps=4 the minimum is 256 on a 64-wide wavefront, 128 on a 32-wide one.
+        # elems_per_thread = block_size_n / (threads_per_warp * num_warps): higher = wider
+        # vector loads. The per-case counts below are for a 64-wide wavefront; double them at 32.
         (256, 256, 32, 256),  # Small: elems_per_thread=1 (scalar loads)
         (1024, 512, 32, 512),  # Medium: elems_per_thread=2 (dword loads)
         (8192, 8192, 32, 1024),  # Large: elems_per_thread=4 (dwordx4, optimal)
@@ -103,3 +104,13 @@ def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n):
         import gc
 
         gc.collect()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_config_threads_per_warp_follows_device():
+    """The default wavefront width is the device's, not an assumed 64: gfx1250 is 32 wide."""
+    expected = torch.cuda.get_device_properties(torch.cuda.current_device()).warp_size
+    assert Config().threads_per_warp == expected
+    assert Config(threads_per_warp=64).threads_per_warp == 64
+    with pytest.raises(ValueError, match="threads_per_warp must be 32 or 64"):
+        Config(threads_per_warp=16)
