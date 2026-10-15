@@ -681,7 +681,7 @@ class Iris:
         symmetric tensor is only reused once every rank has freed it, so that allocations land at the
         same offset on every rank. Iris reclaims freed memory itself before growing the heap and
         periodically as memory is allocated; call this to reuse freed memory sooner. Other
-        allocators reuse memory as soon as it is freed, so for them this does nothing.
+        allocators never reuse freed memory, so for them this does nothing.
 
         Waits for the work queued on this rank's HIP streams before reusing memory. Copy-engine
         transfers are not covered: call :meth:`quiet` before dropping their tensors.
