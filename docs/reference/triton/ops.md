@@ -25,15 +25,3 @@ of running as a separate kernel after it.
 ```{eval-rst}
 .. automethod:: iris.ops.OpsNamespace.matmul_reduce_scatter
 ```
-
-## atomic_sub
-
-```{eval-rst}
-.. autofunction:: iris.mem.triton.ops.atomic_sub
-```
-
-## quiet
-
-```{eval-rst}
-.. autofunction:: iris.mem.triton.ops.quiet
-```
