@@ -175,6 +175,7 @@ def test_chunked_churn_then_large_allocation_does_not_grow(keep_every):
     alloc = ctx.heap.allocator
     scratch_bytes, keep_bytes = 2 * alloc.granularity, alloc.granularity  # different size classes
     chunks = alloc.get_num_chunks()
+    bump = alloc.bump
 
     kept = []
     for i in range(3 * alloc.mapped_extent // scratch_bytes):
@@ -184,8 +185,46 @@ def test_chunked_churn_then_large_allocation_does_not_grow(keep_every):
         if keep_every and i % keep_every == keep_every - 1:
             kept.append(ctx.zeros(keep_bytes // 4, dtype=torch.float32))
 
-    big = ctx.zeros(alloc.chunk_size // 2 // 4, dtype=torch.float32)  # noqa: F841
+    big = ctx.zeros(alloc.chunk_size // 2 // 4, dtype=torch.float32)
     assert alloc.get_num_chunks() == chunks
+
+    # Once everything is freed, the whole heap returns to the bump pointer
+    del big
+    kept.clear()
+    ctx.reclaim_freed()
+    assert alloc.bump == bump
+
+
+def test_chunked_rollback_includes_earlier_free_blocks():
+    """A block freed in an earlier collect() returns to the bump pointer once the blocks above it are freed."""
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    bump = alloc.bump
+
+    a = ctx.zeros(1024, dtype=torch.float32)
+    b = ctx.zeros(1024, dtype=torch.float32)
+    del a
+    ctx.reclaim_freed()  # a is below b, so it goes to a free list
+    del b
+    ctx.reclaim_freed()  # b is at the top, and a is once b rolls back
+
+    assert alloc.bump == bump
+    assert alloc.get_stats()["num_free_blocks"] == 0
+
+
+def test_chunked_free_list_hands_out_lowest_block_first():
+    """Reusable blocks go out lowest offset first, keeping those near the top free for later rollbacks."""
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+
+    a = ctx.zeros(1024, dtype=torch.float32)
+    b = ctx.zeros(1024, dtype=torch.float32)
+    c = ctx.zeros(1024, dtype=torch.float32)  # noqa: F841 -- keeps a and b below the top
+    a_ptr = a.data_ptr()
+    del a, b
+    ctx.reclaim_freed()
+
+    d = ctx.zeros(1024, dtype=torch.float32)
+    assert d.data_ptr() == a_ptr
 
 
 def test_chunked_freed_block_waits_for_collect():
