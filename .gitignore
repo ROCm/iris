@@ -69,3 +69,6 @@ docker/rocm-systems/
 .intellikit
 .github/agents/skills/
 docs/benchmark-results/*.png
+
+# Committed concurrent tuning corpus (durable data, see iris/concurrent/tuning_data/README.md)
+!iris/concurrent/tuning_data/candidate_set.json
