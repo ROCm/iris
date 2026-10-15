@@ -5,11 +5,24 @@
 Configuration structures for iris-ccl collective operations.
 """
 
+import functools
 from dataclasses import dataclass
 
 import torch
 
 import iris
+
+
+@functools.lru_cache(maxsize=None)
+def _device_warp_size(device_index: int) -> int:
+    return torch.cuda.get_device_properties(device_index).warp_size
+
+
+def _default_threads_per_warp() -> int:
+    """The current device's wavefront width, or 64 (the previous default) without a GPU."""
+    if not torch.cuda.is_available():
+        return 64
+    return _device_warp_size(torch.cuda.current_device())
 
 
 @dataclass
@@ -53,7 +66,7 @@ class Config:
                    threads_per_warp * num_warps determines the minimum tile size
                    (block_size_m * block_size_n for flat-2D, or block_size_n for 1D).
         threads_per_warp: Threads per warp/wavefront (default: None, the current
-                          device's warp size). Must match the hardware wavefront
+                          device's warp size; 64 when no GPU is available). Must match the hardware wavefront
                           size; both 32 and 64 occur on AMD GPUs (64 on CDNA, 32 on
                           gfx1250). Used by gluon kernels to construct BlockedLayout
                           for vectorized memory access.
@@ -149,7 +162,7 @@ class Config:
             raise ValueError(f"reduce_scatter_variant must be 'two_shot', got '{self.reduce_scatter_variant}'")
 
         if self.threads_per_warp is None:
-            self.threads_per_warp = torch.cuda.get_device_properties(torch.cuda.current_device()).warp_size
+            self.threads_per_warp = _default_threads_per_warp()
         if self.threads_per_warp not in (32, 64):
             raise ValueError(f"threads_per_warp must be 32 or 64 (the wavefront width), got {self.threads_per_warp}")
         if self.num_warps <= 0:

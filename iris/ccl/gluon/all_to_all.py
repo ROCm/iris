@@ -11,7 +11,6 @@ If gluon is not installed, the import itself raises ValueError.
 try:
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
-    from triton.language.extra.hip import utils as hip_utils
 except ImportError as e:
     raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False.") from e
 
@@ -58,6 +57,7 @@ def persistent_all_to_all_gluon(
     COMM_SMS: gl.constexpr,
     NUM_XCDS: gl.constexpr,
     CHUNK_SIZE: gl.constexpr,
+    THREADS_PER_WARP: gl.constexpr,
 ):
     """
     Persistent all-to-all kernel using Gluon.
@@ -85,13 +85,12 @@ def persistent_all_to_all_gluon(
         pid_n = (tile_id % num_pid_in_group) // group_size_m
 
         # BlockedLayout: [size_per_thread], [threads_per_warp], [warps_per_cta], [order].
-        # Lanes and warps come from the compiler's launch options rather than literals:
-        # the wavefront is 64 wide on CDNA but 32 on gfx1250, and the launch's
-        # num_warps is config.num_warps.
-        WARPS: gl.constexpr = hip_utils.num_warps()
-        LANES: gl.constexpr = hip_utils.num_threads() // WARPS
-        layout_col: gl.constexpr = gl.BlockedLayout([1], [LANES], [WARPS], [0])  # Column access
-        layout_row: gl.constexpr = gl.BlockedLayout([1], [LANES], [WARPS], [0])  # Row indices
+        # No literals: the wavefront is 64 wide on CDNA but 32 on gfx1250
+        # (THREADS_PER_WARP = config.threads_per_warp, which defaults to the device's),
+        # and the launch's warp count is config.num_warps.
+        WARPS: gl.constexpr = gl.num_warps()
+        layout_col: gl.constexpr = gl.BlockedLayout([1], [THREADS_PER_WARP], [WARPS], [0])  # Column access
+        layout_row: gl.constexpr = gl.BlockedLayout([1], [THREADS_PER_WARP], [WARPS], [0])  # Row indices
 
         rm = (pid_m * BLOCK_SIZE_M + gl.arange(0, BLOCK_SIZE_M, layout=layout_row)) % M
         rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=layout_col)) % N
@@ -198,6 +197,7 @@ def launch(
         config.comm_sms,
         config.num_xcds,
         config.chunk_size,
+        config.threads_per_warp,
         num_stages=config.num_stages,
         num_warps=config.num_warps,
         waves_per_eu=config.waves_per_eu,

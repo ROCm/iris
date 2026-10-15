@@ -114,3 +114,11 @@ def test_config_threads_per_warp_follows_device():
     assert Config(threads_per_warp=64).threads_per_warp == 64
     with pytest.raises(ValueError, match="threads_per_warp must be 32 or 64"):
         Config(threads_per_warp=16)
+
+
+def test_default_threads_per_warp_without_gpu(monkeypatch):
+    """Without a GPU the default falls back to 64 instead of raising."""
+    from iris.ccl import config as config_module
+
+    monkeypatch.setattr(config_module.torch.cuda, "is_available", lambda: False)
+    assert config_module._default_threads_per_warp() == 64
