@@ -16,14 +16,19 @@ from benchmark.ccl._common import DTYPES, M_VALUES, N_VALUES, NUM_RANKS, is_fp8,
 @bench.axis("M", M_VALUES)
 @bench.axis("N", N_VALUES)
 @bench.axis("dtype", DTYPES)
-@bench.axis("backend", ["iris", "iris_tdm", "rccl"])
+@bench.axis("variant", ["persistent", "tdm"])
+@bench.axis("backend", ["iris", "rccl"])
 def all_gather(state, ctx):
     M, N, dtype = state["M"], state["N"], state["dtype"]
+    variant = state["variant"]
     world_size = ctx.get_num_ranks()
 
     state.set_bytes((world_size - 1) * M * N * dtype.itemsize)
 
     if state["backend"] == "rccl":
+        if variant != "persistent":
+            # RCCL has one implementation; measure it once, under the default variant.
+            state.skip("the variant axis selects Iris kernels; RCCL is measured under variant=persistent")
         if is_fp8(dtype):
             # fp8 is an Iris-only series: there is no RCCL baseline to
             # compare against, so record the gap rather than inventing one.
@@ -37,7 +42,7 @@ def all_gather(state, ctx):
         )
         return
 
-    if state["backend"] == "iris_tdm":
+    if variant == "tdm":
         if not torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName.startswith("gfx1250"):
             state.skip("the TDM all-gather needs gfx1250")
         config = Config(use_gluon=True, all_gather_variant="tdm", block_size_m=128, block_size_n=256, num_warps=16)
