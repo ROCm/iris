@@ -5,6 +5,7 @@ import torch
 import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+from triton.language.extra.hip import utils as hip_utils
 import iris
 from iris.gluon import IrisDeviceCtx
 
@@ -23,7 +24,7 @@ def atomic_min_kernel(
     ctx = IrisDeviceCtx.initialize(context_tensor)
     pid = gl.program_id(0)
     block_start = pid * BLOCK_SIZE
-    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    layout: gl.constexpr = gl.BlockedLayout([1], [hip_utils.num_threads()], [1], [0])
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 

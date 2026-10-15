@@ -17,6 +17,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+from triton.language.extra.hip import utils as hip_utils
 import triton
 
 import iris
@@ -42,8 +43,8 @@ def producer_kernel(
 
     # Compute start index of this block
     block_start = pid * BLOCK_SIZE
-    # Create a simple 1D layout for the arange operation (64 threads per warp for AMD)
-    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    # Create a simple 1D layout for the arange operation: one wavefront (64 lanes on CDNA3/4, 32 on CDNA5)
+    layout: gl.constexpr = gl.BlockedLayout([1], [hip_utils.num_threads()], [1], [0])
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
 
     # Guard for out-of-bounds accesses
@@ -80,8 +81,8 @@ def consumer_kernel(
     pid = gl.program_id(0)
 
     block_start = pid * BLOCK_SIZE
-    # Create a simple 1D layout for the arange operation (64 threads per warp for AMD)
-    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    # Create a simple 1D layout for the arange operation: one wavefront (64 lanes on CDNA3/4, 32 on CDNA5)
+    layout: gl.constexpr = gl.BlockedLayout([1], [hip_utils.num_threads()], [1], [0])
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < buffer_size
 

@@ -16,6 +16,7 @@ try:
     import triton.language as tl
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
+    from triton.language.extra.hip import utils as hip_utils
 except ImportError as e:
     raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False.") from e
 
@@ -44,8 +45,6 @@ def persistent_all_gather_gluon(
     BLOCK_SIZE_N: gl.constexpr,
     GROUP_SIZE_M: gl.constexpr,
     COMM_SMS: gl.constexpr,
-    THREADS_PER_WARP: gl.constexpr,
-    WARPS_PER_CTA: gl.constexpr,
     TRACING: gl.constexpr = False,
 ):
     """
@@ -60,7 +59,7 @@ def persistent_all_gather_gluon(
     Memory layout (BlockedLayout):
         A 1D BlockedLayout distributes TOTAL_ELEMS = BLOCK_SIZE_M * BLOCK_SIZE_N
         elements across the thread hierarchy:
-            ELEMS_PER_THREAD = TOTAL_ELEMS // (THREADS_PER_WARP * WARPS_PER_CTA)
+            ELEMS_PER_THREAD = TOTAL_ELEMS // (threads per warp * num_warps)
 
         Each thread handles ELEMS_PER_THREAD contiguous elements in the
         flattened row-major order. Row/col are recovered via:
@@ -69,7 +68,7 @@ def persistent_all_gather_gluon(
 
     Constraints:
         - BLOCK_SIZE_M * BLOCK_SIZE_N must be a multiple of
-          (THREADS_PER_WARP * WARPS_PER_CTA).
+          (threads per warp * num_warps), checked at compile time.
         - Optimal tile: 2048-4096 total elements (8-16 per thread).
           Larger tiles cause register spilling and performance collapse.
         - Recommended: BLOCK_SIZE_M=8, BLOCK_SIZE_N=256 (2048 elems, 8/thread).
@@ -92,8 +91,6 @@ def persistent_all_gather_gluon(
         BLOCK_SIZE_N: Number of columns per tile.
         GROUP_SIZE_M: Swizzle group size for M-dimension tiling.
         COMM_SMS: Number of CUs used for persistent scheduling.
-        THREADS_PER_WARP: Threads per warp/wavefront: 64 on CDNA3/4, 32 on CDNA5.
-        WARPS_PER_CTA: Number of warps per workgroup. Must match num_warps.
     """
     ctx = IrisDeviceCtx.initialize(context_tensor, tracing=TRACING)
 
@@ -104,9 +101,18 @@ def persistent_all_gather_gluon(
     total_tiles = num_pid_m * num_pid_n
 
     # Flat 1D layout covering BLOCK_SIZE_M * BLOCK_SIZE_N elements
+    # Lanes and warps come from the compiler's launch options: the wavefront is
+    # 64 wide on CDNA3/4 but 32 on CDNA5, and the warp count is config.num_warps.
     TOTAL_ELEMS: gl.constexpr = BLOCK_SIZE_M * BLOCK_SIZE_N
-    ELEMS_PER_THREAD: gl.constexpr = TOTAL_ELEMS // (THREADS_PER_WARP * WARPS_PER_CTA)
-    flat_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS_PER_WARP], [WARPS_PER_CTA], [0])
+    THREADS: gl.constexpr = hip_utils.num_threads()
+    WARPS: gl.constexpr = hip_utils.num_warps()
+    gl.static_assert(
+        TOTAL_ELEMS % THREADS == 0,
+        "Gluon all-gather requires block_size_m * block_size_n to be a positive multiple of "
+        "threads per warp * num_warps. Recommended: block_size_m=8, block_size_n=256.",
+    )
+    ELEMS_PER_THREAD: gl.constexpr = TOTAL_ELEMS // THREADS
+    flat_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS // WARPS], [WARPS], [0])
 
     # Hoist local heap base outside the tile loop: eliminates redundant
     # gl.load(heap_bases) calls in the inner store loop.
@@ -194,26 +200,6 @@ def launch(
         block_size_m = 8
         block_size_n = 256
 
-    # Validate flat-2D layout constraints.
-    # TOTAL_ELEMS = BLOCK_SIZE_M * BLOCK_SIZE_N must be a multiple of
-    # THREADS_PER_WARP * WARPS_PER_CTA so each thread gets a whole
-    # number of elements.
-    total_elems = block_size_m * block_size_n
-    threads_per_cta = config.threads_per_warp * config.num_warps
-    if total_elems < threads_per_cta:
-        raise ValueError(
-            f"Gluon all-gather requires block_size_m * block_size_n >= "
-            f"threads_per_warp * num_warps ({threads_per_cta}), "
-            f"got {block_size_m} * {block_size_n} = {total_elems}."
-        )
-    if total_elems % threads_per_cta != 0:
-        raise ValueError(
-            f"Gluon all-gather requires block_size_m * block_size_n to be a "
-            f"multiple of threads_per_warp * num_warps ({threads_per_cta}), "
-            f"got {block_size_m} * {block_size_n} = {total_elems}. "
-            f"Recommended: block_size_m=8, block_size_n=256."
-        )
-
     context_tensor = ctx.get_device_context()
     tracing = getattr(ctx, "tracing", None)
     tracing_enabled = bool(tracing and getattr(tracing, "enabled", False))
@@ -240,8 +226,6 @@ def launch(
         block_size_n,
         config.swizzle_size,
         config.comm_sms,
-        config.threads_per_warp,
-        config.num_warps,
         tracing_enabled,
         num_stages=config.num_stages,
         num_warps=config.num_warps,
