@@ -25,7 +25,7 @@ EMPTY = -1
 
 
 def _ctx():
-    ctx = iris.iris(1 << 26, allocator_type="vmem_chunked")
+    ctx = iris.iris(1 << 26, allocator_type="vmem_chunked", engines=("sdma",))
     if ctx.get_num_ranks() < 2:
         pytest.skip("triggered plans need at least two ranks")
     return ctx
@@ -443,8 +443,17 @@ def test_host_put_wait_flag():
     del ctx
 
 
-def test_torch_allocator_rejected():
+def test_requires_sdma_engine():
     ctx = iris.iris(1 << 20)
+    buffer = ctx.zeros(1024, dtype=torch.int32)
+    with pytest.raises(RuntimeError, match="SDMA is disabled"):
+        TriggeredPlan(ctx, buffer, [whole(buffer)] * ctx.get_num_ranks())
+    ctx.barrier()
+    del ctx
+
+
+def test_torch_allocator_rejected():
+    ctx = iris.iris(1 << 20, engines=("sdma",))
     buffer = ctx.zeros(1024, dtype=torch.int32)
     with pytest.raises(ValueError, match="vmem"):
         TriggeredPlan(ctx, buffer, [whole(buffer)] * ctx.get_num_ranks())

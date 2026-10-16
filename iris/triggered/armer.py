@@ -10,7 +10,7 @@ Per (batch, peer): POLL_REGMEM(ready >= epoch) -> one copy per segment -> ATOMIC
 import ctypes
 from dataclasses import dataclass
 
-from xio import sdma_ep
+from iris.device.sdma_utils import bind_sdma_ep
 
 CHANNEL = 0
 POLL_REGMEM_BYTES = 24
@@ -36,12 +36,14 @@ class Copy:
 
 
 def chain_bytes(batch):
+    sdma_ep = bind_sdma_ep()
     copy_bytes = sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES if batch.is_2d else sdma_ep.COPY_LINEAR_COMMAND_BYTES
     return POLL_REGMEM_BYTES + len(batch.segments) * copy_bytes + sdma_ep.ATOMIC_COMMAND_BYTES
 
 
 def arm_chain(src_device, dst_device, ready_addr, epoch, copies, arrival_addr, is_2d):
     """Arm one chain on the host queue from ``src_device`` to ``dst_device``."""
+    sdma_ep = bind_sdma_ep()
     if is_2d:
         tiles = []
         for c in copies:

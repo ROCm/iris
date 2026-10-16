@@ -161,8 +161,6 @@ class Iris:
         self.copy_engines_device_ctx = None
         if self._sdma_ep is not None:
             self._init_copy_engines(num_gpus, num_ranks, cur_rank)
-        # Chains armed by iris.triggered plans on the host queues, per peer
-        self._triggered_ledger = None
 
         # Initialize CCL interface
         self.ccl = self.CCL(self)
