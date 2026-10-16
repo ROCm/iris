@@ -54,6 +54,7 @@ from iris.host.platform.hip import (
 )
 
 from iris.host.memory.symmetric_heap import SymmetricHeap
+from iris.host import queue_ledger
 import numpy as np
 from typing import Any
 import torch
@@ -1343,8 +1344,7 @@ class Iris:
 
     def _check_host_queue_idle(self, to_rank):
         # Chains parked on a host queue block everything queued behind them, quiet() included
-        if self._triggered_ledger is not None:
-            self._triggered_ledger.check_idle(to_rank)
+        queue_ledger.ledger().check_idle(self.get_rank(), to_rank)
 
     def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
         """

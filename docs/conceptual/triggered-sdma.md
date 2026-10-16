@@ -18,7 +18,9 @@ The API is `iris.triggered`; see the [reference](../reference/host/triggered.md)
 ## Model
 
 - A **segment** is one copy: a byte range, or a 2D sub-window (rows of a strided tensor). It is
-  written at the same offset in each peer's buffer.
+  written at the same offset in each peer's buffer. A segment is independent of how the producer
+  tiles its output: `waves()` makes one per tile, `chunks()` one per row block (more above 1 GiB),
+  and a hand-built schedule may cover part of a tile or several adjacent tiles.
 - A **batch** is an ordered group of segments behind one gate, with one arrival signal per peer.
   Batching amortizes the poll and the signal over many copies.
 - A batch has **contributors**: the number of `publish` calls that complete it each epoch. One for
@@ -44,7 +46,7 @@ for step in range(steps):
     plan.end_device_epoch()                        # every batch arrived and drained
     ...
     plan.next_epoch()                              # barrier, re-arm, barrier
-plan.destroy()
+plan.destroy()                                     # collective: peers may still touch this rank's memory
 ```
 
 ## The kernel author's contract
@@ -67,6 +69,12 @@ plan.destroy()
 Plans that share queues must begin, and be aborted, in the order they were armed. While chains
 are armed on a queue, host `Iris.put()` and `quiet()` to that peer raise rather than queue behind
 them.
+
+Creating a plan and `next_epoch()` arm on every rank or on none: if one rank cannot (for example
+its queue is full), every rank raises, and a failed construction drains what it armed. After a
+failed `next_epoch()` the plan is either still complete or `FAILED`; `abort()` a failed plan.
+`destroy()` is collective and waits for every rank, since a peer's chains and polls can still touch
+a rank's buffer and gates after its own work is done.
 
 ## Memory ordering
 
@@ -110,8 +118,8 @@ after it in the same kernel is fresh (no stale elements over 9,600 tile-epochs).
   reserved range as the heap grows. The default torch allocator re-maps peer heaps on every
   allocation and is rejected.
 - **One queue per peer.** Plans use the host-initiated copy-engine queue to each peer, shared with
-  host `Iris.put()`. Kernel-initiated copies (`put(..., use_copy_engine=True)`) use a separate
-  queue and are unaffected.
+  host `Iris.put()` and with the plans of every Iris context in the process. Kernel-initiated
+  copies (`put(..., use_copy_engine=True)`) use a separate queue and are unaffected.
 - **Ring capacity.** Armed chains may use at most half of each queue's 8 MiB ring.
 - **Single node only.**
 - **Linear segments are at most 1 GiB** (SDMA 4.4's count field is 30 bits). The schedule builders

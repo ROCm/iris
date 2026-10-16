@@ -11,7 +11,7 @@ Lifecycle:
     producer[grid](..., view)                       # TriggeredView.publish(batch)
     plan.end_device_epoch()                         # every batch complete, or TimeoutError
     plan.next_epoch()                               # barrier -> re-arm -> barrier
-    plan.destroy()
+    plan.destroy()                                  # collective
 
 All of a rank's chains to one peer share that peer's host-initiated copy-engine queue, and run in
 the order they were armed. Plans armed on the same queues must therefore be released in the order
@@ -21,11 +21,11 @@ they were armed, and nothing else may use those queues while chains are armed on
 import enum
 import hashlib
 import time
-from collections import defaultdict
 
 import numpy as np
 import torch
 
+from iris.host import queue_ledger
 from iris.host.distributed.helpers import distributed_allgather
 from iris.host.memory.allocators.torch_allocator import TorchAllocator
 from iris.mem.triton import triggered as dv
@@ -43,56 +43,6 @@ class State(enum.Enum):
     FAILED = "failed"
     ABORTED = "aborted"
     DESTROYED = "destroyed"
-
-
-class _QueueLedger:
-    """What is armed on each of this process's host queues, in arming order."""
-
-    def __init__(self, capacity):
-        self.capacity = capacity
-        self.entries = defaultdict(list)  # peer -> [(plan, epoch, nbytes)]
-
-    def reserve(self, plan, epoch, nbytes):
-        for peer, n in nbytes.items():
-            used = sum(e[2] for e in self.entries[peer])
-            if used + n > self.capacity:
-                raise RuntimeError(
-                    f"arming {n} bytes on the queue to rank {peer} would exceed {self.capacity} armed bytes "
-                    f"({used} already armed); complete or destroy other plans first"
-                )
-        for peer, n in nbytes.items():
-            self.entries[peer].append((plan, epoch, n))
-
-    def release(self, plan):
-        for peer in self.entries:
-            self.entries[peer] = [e for e in self.entries[peer] if e[0] is not plan]
-
-    def check_order(self, plan, allowed, action):
-        for peer, entries in self.entries.items():
-            for other, epoch, _ in entries:
-                if other is plan:
-                    break
-                if other.state not in allowed:
-                    raise RuntimeError(
-                        f"plan armed earlier on the queue to rank {peer} (epoch {epoch}) is {other.state.value}; "
-                        f"plans sharing queues must {action} in the order they were armed"
-                    )
-
-    def check_idle(self, peer):
-        if self.entries.get(peer):
-            raise RuntimeError(
-                f"triggered chains are armed on the copy-engine queue to rank {peer}; "
-                "complete, abort or destroy those plans before using it"
-            )
-
-
-def ledger(ctx):
-    if getattr(ctx, "_triggered_ledger", None) is None:
-        from xio import sdma_ep
-
-        # Leave half the ring for wrap padding and work queued before the plan
-        ctx._triggered_ledger = _QueueLedger(sdma_ep.SDMA_QUEUE_SIZE // 2)
-    return ctx._triggered_ledger
 
 
 def _digest(buffer_bytes, schedules):
@@ -178,32 +128,84 @@ class TriggeredPlan:
             self._first[self.rank], self._first[self.rank + 1], dtype=torch.int64, device=buffer.device
         )
         self._status = torch.zeros(self.num_batches, dtype=torch.int32, device=buffer.device)
-        self._ledger = ledger(ctx)
+        self._armed = torch.zeros(self.num_batches * self.world_size, dtype=torch.int32, device=buffer.device)
+        self._ledger = queue_ledger.ledger()
         self.epoch = 0
-        self._arm(1)
+        try:
+            self._arm(1)
+        except Exception as error:
+            self._unwind_construction(error)
         ctx.barrier()
 
     def batch_id(self, rank, index):
         """Global id of batch ``index`` in ``schedules[rank]``."""
         return self._first[rank] + index
 
+    def _agree(self, error, what):
+        """Collective: raise on every rank if any rank has an error, so none is left waiting for the others."""
+        failed = distributed_allgather(np.array([error is not None], dtype=np.int64))[:, 0].nonzero()[0].tolist()
+        if failed:
+            if error is not None:
+                raise error
+            raise RuntimeError(f"rank(s) {failed} could not {what}")
+
+    def _unwind_construction(self, error):
+        """Raise ``error`` from the constructor, after draining the chains this rank armed."""
+        if self.state is not None:
+            # No plan reaches the caller to abort(), so drain here
+            try:
+                self.abort()
+            except Exception as drain_error:
+                raise RuntimeError(f"{error}; the chains it armed could not be drained: {drain_error}") from error
+            finally:
+                # Peers may still be draining into this rank's buffer and gates
+                self.ctx.barrier()
+        raise error
+
     def _arm(self, epoch):
-        if epoch > UINT32_MAX:
-            raise RuntimeError("epoch exceeds 32 bits; destroy the plan and create a new one")
+        """Collective: every rank arms ``epoch``, or every rank raises (``FAILED`` if chains are left armed)."""
         peers = [p for p in range(self.world_size) if p != self.rank]
-        own = self.schedules[self.rank]
-        nbytes = sum(armer.chain_bytes(b) for b in own)
-        self._ledger.reserve(self, epoch, {p: nbytes for p in peers})
+        nbytes = sum(armer.chain_bytes(b) for b in self.schedules[self.rank])
+        error, reserved = None, False
+        try:
+            if epoch > UINT32_MAX:
+                raise RuntimeError("epoch exceeds 32 bits; destroy the plan and create a new one")
+            self._ledger.reserve(self, epoch, self.rank, {p: nbytes for p in peers})
+            reserved = True
+        except Exception as e:
+            error = e
+        try:
+            self._agree(error, "reserve queue space")
+        except Exception:
+            # Nothing is armed anywhere
+            if reserved:
+                self._ledger.release(self)
+            raise
         self.epoch = epoch
         self.state = State.ARMED
 
+        try:
+            self._submit(peers)
+        except Exception as e:
+            error = e
+        try:
+            self._agree(error, "arm its chains")
+        except Exception:
+            # Chains armed so far stay parked: abort() releases them
+            self.state = State.FAILED
+            raise
+
+    def _submit(self, peers):
         heap = self.ctx.heap
         self._heap_bases = heap.heap_bases_cpu.copy()
         base = self.buffer.data_ptr()
         gate_row = self.gates.element_size() * dv.GATE_WORDS.value
+        # Which chains exist, so a failed arm drains only those
+        armed = np.zeros(self.num_batches * self.world_size, dtype=np.int32)
         try:
-            for i, batch in enumerate(own):
-                gate = self.gates.data_ptr() + self.batch_id(self.rank, i) * gate_row
+            for i, batch in enumerate(self.schedules[self.rank]):
+                batch_id = self.batch_id(self.rank, i)
+                gate = self.gates.data_ptr() + batch_id * gate_row
                 for peer in peers:
                     copies = [
                         armer.Copy(
@@ -217,10 +219,9 @@ class TriggeredPlan:
                     ]
                     arrival = heap.translate(gate + 8 * dv.G_ARRIVAL.value, self.rank, peer)
                     armer.arm_chain(self.rank, peer, gate, self.epoch, copies, arrival, batch.is_2d)
-        except Exception:
-            # Chains armed so far stay parked: abort() releases them
-            self.state = State.FAILED
-            raise
+                    armed[batch_id * self.world_size + peer] = 1
+        finally:
+            self._armed.copy_(torch.from_numpy(armed))
 
     def _require(self, *states):
         if self.state not in states:
@@ -243,6 +244,7 @@ class TriggeredPlan:
             kernels.progress_kernel[(self.num_batches,)](
                 self.view,
                 self.ctx.get_heap_bases(),
+                self._armed,
                 self._status,
                 BUDGET=_PROGRESS_BUDGET,
                 WORLD_SIZE=self.world_size,
@@ -269,7 +271,7 @@ class TriggeredPlan:
         self.state = State.COMPLETE
 
     def next_epoch(self):
-        """Collective: re-arm every chain for the next epoch."""
+        """Collective: re-arm every chain for the next epoch. If any rank cannot, every rank raises."""
         self._require(State.COMPLETE)
         self.ctx.barrier()
         self._arm(self.epoch + 1)
@@ -299,9 +301,16 @@ class TriggeredPlan:
         self._ledger.release(self)
 
     def destroy(self):
-        """Forget the plan. Its chains must have drained: abort() an armed or failed plan first."""
+        """
+        Collective: wait until every rank is done with the plan, then forget it. Its chains must have
+        drained: abort() an armed or failed plan first. A peer's chains and polls may still touch this
+        rank's buffer and gates, so every rank must call destroy() before any of them is freed.
+        """
+        if self.state is State.DESTROYED:
+            return
         if self.state in (State.ARMED, State.ACTIVE, State.FAILED):
             raise RuntimeError(f"plan is {self.state.value}; abort() it before destroying")
         self._ledger.release(self)
+        self.ctx.barrier()
         self.state = State.DESTROYED
         self.gates = self.view = self.buffer = None

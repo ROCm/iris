@@ -8,6 +8,7 @@
 
 import time
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -15,9 +16,10 @@ import triton
 import triton.language as tl
 
 import iris
+from iris.host import queue_ledger
 from iris.mem.triton import triggered as dv
 from iris.mem.utils import read_realtime
-from iris.triggered import Batch, Segment, State, TriggeredPlan, TriggeredView, chunks, waves, whole
+from iris.triggered import Batch, Segment, State, TriggeredPlan, TriggeredView, armer, chunks, waves, whole
 
 EMPTY = -1
 
@@ -320,6 +322,81 @@ def test_asymmetric_buffer_raises():
     schedules = [whole(buffer[r * slice_elems : (r + 1) * slice_elems], base=buffer) for r in range(world)]
     with pytest.raises(RuntimeError, match="different heap offsets"):
         TriggeredPlan(ctx, buffer, schedules, timeout=20)
+    ctx.barrier()
+    del ctx
+
+
+def test_capacity_failure_fails_every_rank():
+    """A rank that cannot reserve queue space fails all ranks before anything is armed."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    schedules = [whole(buffer[r * slice_elems : (r + 1) * slice_elems], base=buffer) for r in range(world)]
+    ledger = queue_ledger.ledger()
+    assert ledger is queue_ledger.ledger()
+
+    hog = SimpleNamespace(state=State.ARMED)
+    if rank == 0:
+        ledger.reserve(hog, 1, rank, {p: ledger.capacity for p in range(world) if p != rank})
+    try:
+        with pytest.raises(RuntimeError, match="would exceed" if rank == 0 else "could not reserve"):
+            TriggeredPlan(ctx, buffer, schedules, timeout=20)
+    finally:
+        ledger.release(hog)
+    assert not any(ledger.entries.values())
+
+    with _armed(TriggeredPlan(ctx, buffer, schedules, timeout=20)) as plan:
+        plan.run()
+    ctx.barrier()
+    del ctx
+
+
+def test_arm_failure_drains_and_fails_every_rank(monkeypatch):
+    """A failure while arming raises on every rank and drains what was armed, leaving the queues usable."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    schedules = [chunks(buffer[r * slice_elems : (r + 1) * slice_elems], 4, base=buffer) for r in range(world)]
+
+    arm_chain, armed = armer.arm_chain, []
+
+    def flaky(*args, **kwargs):
+        if rank == 0 and len(armed) == 2:
+            raise RuntimeError("injected arm failure")
+        armed.append(args)
+        return arm_chain(*args, **kwargs)
+
+    monkeypatch.setattr(armer, "arm_chain", flaky)
+    with pytest.raises(RuntimeError, match="injected arm failure" if rank == 0 else "could not arm"):
+        TriggeredPlan(ctx, buffer, schedules, timeout=20)
+    monkeypatch.undo()
+    assert not any(queue_ledger.ledger().entries.values())
+
+    with _armed(TriggeredPlan(ctx, buffer, schedules, timeout=20)) as plan:
+        plan.run()
+    ctx.barrier()
+    del ctx
+
+
+def test_destroy_waits_for_every_rank():
+    """Peers may still touch a rank's buffer and gates, so destroy() returns only once all ranks call it."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    schedules = [whole(buffer[r * slice_elems : (r + 1) * slice_elems], base=buffer) for r in range(world)]
+    plan = TriggeredPlan(ctx, buffer, schedules, timeout=20)
+    plan.run()
+    if rank != 0:
+        time.sleep(1.0)
+    start = time.monotonic()
+    plan.destroy()
+    if rank == 0:
+        assert time.monotonic() - start > 0.5
+    assert plan.state is State.DESTROYED
+    plan.destroy()  # idempotent
     ctx.barrier()
     del ctx
 
