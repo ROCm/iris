@@ -36,11 +36,13 @@ def _reached(ptr, epoch, budget: tl.constexpr):
 
 
 @triton.jit
-def progress_kernel(view, heap_bases, status, BUDGET: tl.constexpr, WORLD_SIZE: tl.constexpr, OWN_ONLY: tl.constexpr):
+def progress_kernel(
+    view, heap_bases, armed, status, BUDGET: tl.constexpr, WORLD_SIZE: tl.constexpr, OWN_ONLY: tl.constexpr
+):
     """
     Mark batch ``pid`` complete once it is done this epoch: for this rank's own batches, published
-    and arrived at every peer (each chain ends with that signal, so it has fully run); for the
-    others, arrived here. Writes 1 to ``status[pid]`` when complete, 0 if ``BUDGET`` ran out.
+    and arrived at every peer it was armed for (``armed[batch * WORLD_SIZE + peer]``; each chain
+    ends with that signal, so it has fully run); for the others, arrived here. Writes 1 to ``status[pid]`` when complete, 0 if ``BUDGET`` ran out.
     """
     batch = tl.program_id(0)
     tv = TriggeredView.initialize(view)
@@ -50,7 +52,7 @@ def progress_kernel(view, heap_bases, status, BUDGET: tl.constexpr, WORLD_SIZE: 
     if own:
         done = _reached(gate + G_READY, tv.epoch, BUDGET)
         for peer in tl.static_range(WORLD_SIZE):
-            if done & (peer != tv.rank):
+            if done & (peer != tv.rank) & (tl.load(armed + batch * WORLD_SIZE + peer) != 0):
                 done = _reached(__translate(gate + G_ARRIVAL, tv.rank, peer, heap_bases), tv.epoch, BUDGET)
     elif not OWN_ONLY:
         done = _reached(gate + G_ARRIVAL, tv.epoch, BUDGET)
