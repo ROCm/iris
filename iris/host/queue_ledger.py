@@ -9,7 +9,7 @@ The queues belong to the process, not to an Iris instance, so the ledger does to
 
 from collections import defaultdict
 
-from xio import sdma_ep
+from iris.device.sdma_utils import bind_sdma_ep
 
 
 class QueueLedger:
@@ -60,5 +60,5 @@ def ledger():
     global _ledger
     if _ledger is None:
         # Leave half the ring for wrap padding and work queued before the plan
-        _ledger = QueueLedger(sdma_ep.SDMA_QUEUE_SIZE // 2)
+        _ledger = QueueLedger(bind_sdma_ep().SDMA_QUEUE_SIZE // 2)
     return _ledger

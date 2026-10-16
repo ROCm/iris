@@ -93,6 +93,7 @@ class TriggeredPlan:
         self.world_size = ctx.get_num_ranks()
         self.timeout = timeout
         self.state = None
+        ctx._require_copy_engine()
 
         # Armed chains hold peer addresses; the torch allocator re-maps peer heaps on every allocation
         if isinstance(ctx.heap.allocator, TorchAllocator):
