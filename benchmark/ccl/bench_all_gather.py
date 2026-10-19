@@ -55,8 +55,10 @@ def all_gather(state, ctx):
             num_warps=16,
             comm_sms=comm_sms,
         )
+    elif variant == "gluon":
+        config = Config(use_gluon=True, block_size_m=8, block_size_n=256, comm_sms=comm_sms)
     else:
-        config = Config(use_gluon=variant == "gluon", comm_sms=comm_sms)
+        config = Config(comm_sms=comm_sms)
 
     inp = ctx.zeros((M, N), dtype=dtype)
     out = ctx.zeros((world_size * M, N), dtype=dtype)

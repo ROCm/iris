@@ -13,7 +13,6 @@ per tile while staying within gluon's 1D BlockedLayout framework.
 """
 
 try:
-    import triton.language as tl
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
     from triton.language.extra.hip import utils as hip_utils
@@ -117,11 +116,11 @@ def persistent_all_gather_gluon(
     # Heap bases do not change between tiles.
     local_base = gl.load(ctx.heap_bases + iris_rank)
     output_bases = (output_ptr,)
-    for rank_idx in tl.static_range(1, world_size):
+    for rank_idx in gl.static_range(1, world_size):
         dest_idx = (group_rank + rank_idx) % world_size
         target_iris_rank = rank_start + dest_idx * rank_stride
         ptr_delta = gl.load(ctx.heap_bases + target_iris_rank) - local_base
-        remote_base = tl.cast(tl.cast(output_ptr, gl.uint64) + ptr_delta, output_ptr.dtype)
+        remote_base = gl.cast(gl.cast(output_ptr, gl.uint64) + ptr_delta, output_ptr.dtype)
         output_bases += (remote_base,)
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
@@ -157,7 +156,7 @@ def persistent_all_gather_gluon(
         # Traffic-shaped stores to all ranks: stagger write order per rank
         # so each rank writes to a different target at any given moment,
         # avoiding memory controller contention on the receiver side.
-        for rank_idx in tl.static_range(world_size):
+        for rank_idx in gl.static_range(world_size):
             if rank_idx == 0:
                 gl.store(output_ptrs, data, mask=mask, cache_modifier=".wt")
             else:
