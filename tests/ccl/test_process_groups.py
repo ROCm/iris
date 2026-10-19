@@ -178,7 +178,7 @@ def test_all_reduce_with_groups(variant, group_type, dtype=torch.float32, M=256,
 # =============================================================================
 
 
-@pytest.mark.parametrize("variant", ["persistent", "tdm"])
+@pytest.mark.parametrize("variant", ["persistent", "gluon", "tdm"])
 @pytest.mark.parametrize("group_type", ["consecutive", "strided"])
 def test_all_gather_with_groups(group_type, variant, dtype=torch.float32, M=128, N=64):
     """Test all-gather with ProcessGroups."""
@@ -222,7 +222,7 @@ def test_all_gather_with_groups(group_type, variant, dtype=torch.float32, M=128,
         # N=64 fp32 is a 256-byte row: one 32 x 64 tile per 32 rows.
         config = Config(use_gluon=True, all_gather_variant="tdm", block_size_m=32, block_size_n=64)
     else:
-        config = Config()
+        config = Config(use_gluon=variant == "gluon")
     shmem.ccl.all_gather(iris_output_tensor, iris_input_tensor, group=my_group, config=config)
     torch.cuda.synchronize()
 

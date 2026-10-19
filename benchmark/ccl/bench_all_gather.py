@@ -16,7 +16,7 @@ from benchmark.ccl._common import DTYPES, M_VALUES, N_VALUES, NUM_RANKS, is_fp8,
 @bench.axis("M", M_VALUES)
 @bench.axis("N", N_VALUES)
 @bench.axis("dtype", DTYPES)
-@bench.axis("variant", ["persistent", "tdm"])
+@bench.axis("variant", ["persistent", "gluon", "tdm"])
 @bench.axis("comm_sms", [64, 128, 256])
 @bench.axis("backend", ["iris", "rccl"])
 def all_gather(state, ctx):
@@ -56,7 +56,7 @@ def all_gather(state, ctx):
             comm_sms=comm_sms,
         )
     else:
-        config = Config(comm_sms=comm_sms)
+        config = Config(use_gluon=variant == "gluon", comm_sms=comm_sms)
 
     inp = ctx.zeros((M, N), dtype=dtype)
     out = ctx.zeros((world_size * M, N), dtype=dtype)

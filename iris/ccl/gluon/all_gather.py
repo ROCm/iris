@@ -114,9 +114,15 @@ def persistent_all_gather_gluon(
     ELEMS_PER_THREAD: gl.constexpr = TOTAL_ELEMS // THREADS
     flat_layout: gl.constexpr = gl.BlockedLayout([ELEMS_PER_THREAD], [THREADS // WARPS], [WARPS], [0])
 
-    # Hoist local heap base outside the tile loop: eliminates redundant
-    # gl.load(heap_bases) calls in the inner store loop.
+    # Heap bases do not change between tiles.
     local_base = gl.load(ctx.heap_bases + iris_rank)
+    output_bases = (output_ptr,)
+    for rank_idx in tl.static_range(1, world_size):
+        dest_idx = (group_rank + rank_idx) % world_size
+        target_iris_rank = rank_start + dest_idx * rank_stride
+        ptr_delta = gl.load(ctx.heap_bases + target_iris_rank) - local_base
+        remote_base = tl.cast(tl.cast(output_ptr, gl.uint64) + ptr_delta, output_ptr.dtype)
+        output_bases += (remote_base,)
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
         # Swizzled tile index computation for better L2 locality
@@ -146,26 +152,16 @@ def persistent_all_gather_gluon(
         # Output: this rank's data goes to output[group_rank * M + row, col]
         output_row = group_rank * M + row
         output_offsets = output_row * stride_out_m + col * stride_out_n
+        output_ptrs = output_ptr + output_offsets
 
         # Traffic-shaped stores to all ranks: stagger write order per rank
         # so each rank writes to a different target at any given moment,
         # avoiding memory controller contention on the receiver side.
-        for rank_idx in range(world_size):
-            dest_idx = (group_rank + rank_idx) % world_size
-            target_iris_rank = rank_start + dest_idx * rank_stride
-            output_ptrs = output_ptr + output_offsets
-
-            if dest_idx == group_rank:
+        for rank_idx in tl.static_range(world_size):
+            if rank_idx == 0:
                 gl.store(output_ptrs, data, mask=mask, cache_modifier=".wt")
             else:
-                # Hoisted translation: compute ptr_delta from pre-loaded
-                # local_base rather than calling ctx.store() which would
-                # do 2x gl.load(heap_bases) per call.
-                target_base = gl.load(ctx.heap_bases + target_iris_rank)
-                ptr_delta = target_base - local_base
-                output_ptrs_int = tl.cast(output_ptrs, gl.uint64)
-                remote_ptrs_int = output_ptrs_int + ptr_delta
-                remote_ptrs = tl.cast(remote_ptrs_int, output_ptrs.dtype)
+                remote_ptrs = output_bases[rank_idx] + output_offsets
                 gl.store(remote_ptrs, data, mask=mask)
 
 
