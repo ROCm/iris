@@ -3,7 +3,6 @@
 
 from unittest import mock
 
-import iris
 from iris.host.platform import hip
 
 
