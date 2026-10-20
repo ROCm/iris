@@ -147,6 +147,8 @@ def persistent_all_gather_tdm(
     # max_phase must be 1 for a descriptor's shared layout. No swizzle is wanted
     # anyway: the only consumer of this LDS is the TDM engine itself.
     smem_layout: gl.constexpr = gl.SwizzledSharedLayout(vec=8, per_phase=1, max_phase=1, order=[1, 0])
+    # A layout may have one rank fewer than its allocation: the leading stage dimension
+    # is outermost, and bufs.index(i) is a 2D tile with smem_layout, as the descriptors expect.
     bufs = gl.allocate_shared_memory(
         input_ptr.dtype.element_ty, [NUM_STAGES, BLOCK_SIZE_M, BLOCK_SIZE_N], layout=smem_layout
     )
@@ -255,8 +257,6 @@ def _check_supported(input_tensor, config):
     for name, value in (("block_size_m", config.block_size_m), ("block_size_n", config.block_size_n)):
         if value > TDM_MAX_BLOCK_DIM:
             raise ValueError(f"TDM {name} must be <= {TDM_MAX_BLOCK_DIM}, got {value}")
-    if config.num_stages < 1:
-        raise ValueError(f"TDM num_stages must be >= 1, got {config.num_stages}")
     ring_bytes = config.num_stages * config.block_size_m * config.block_size_n * input_tensor.element_size()
     max_lds = torch.cuda.get_device_properties(input_tensor.device).shared_memory_per_block
     if ring_bytes > max_lds:
@@ -280,6 +280,9 @@ def launch(
     """Launch the TDM all-gather kernel."""
     _check_supported(input_tensor, config)
     M, N = input_tensor.shape[:2]
+    if M == 0 or N == 0:
+        # Nothing to move. The kernel's tile arithmetic assumes at least one tile.
+        return
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 

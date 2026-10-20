@@ -123,9 +123,29 @@ def test_all_gather_tdm_repeated_calls(num_stages):
         del shmem
 
 
+@pytest.mark.parametrize("M, N", [(0, 4096), (64, 0)])
+def test_all_gather_tdm_empty(M, N):
+    """An empty shard launches nothing and leaves the (empty) output alone."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+    shmem = iris.iris(2**30)
+    try:
+        config = Config(use_gluon=True, all_gather_variant="tdm", block_size_m=64, block_size_n=256, num_stages=3)
+        out = _run(shmem, M, N, torch.bfloat16, config)
+        assert out.shape == (shmem.get_num_ranks() * M, N)
+    finally:
+        shmem.barrier()
+        del shmem
+
+
 def test_all_gather_tdm_requires_gluon():
     with pytest.raises(ValueError, match="use_gluon=True"):
         Config(all_gather_variant="tdm")
+
+
+def test_num_stages_must_be_positive():
+    with pytest.raises(ValueError, match="num_stages must be positive"):
+        Config(use_gluon=True, all_gather_variant="tdm", num_stages=0)
 
 
 def test_all_gather_tdm_rejects_ring_larger_than_lds():

@@ -115,6 +115,8 @@ class Config:
             raise ValueError(f"comm_sms must be positive, got {self.comm_sms}")
         if self.num_xcds <= 0:
             raise ValueError(f"num_xcds must be positive, got {self.num_xcds}")
+        if self.num_stages <= 0:
+            raise ValueError(f"num_stages must be positive, got {self.num_stages}")
         if self.all_gather_variant not in ["persistent", "partitioned", "tdm"]:
             raise ValueError(
                 f"all_gather_variant must be one of: 'persistent', 'partitioned', 'tdm', got {self.all_gather_variant}"
