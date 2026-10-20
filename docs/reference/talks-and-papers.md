@@ -84,7 +84,7 @@ A lightning talk at the Triton Developer Conference in San Jose, covering the Ir
 programming model, CU-driven and SDMA-based collectives, and end-to-end results
 serving Kimi K3 on TokenSpeed with every collective running on Iris.
 
-- 📊 [Slides (PDF)](https://github.com/ROCm/iris/blob/main/docs/slides/AMD%20-%20Iris%20First-Class%20Multi-GPU%20Programming%20Experience%20in%20Triton%20(Triton%20Developer%20Conference%202026).pdf)
+- 📊 [Slides (PDF)](https://github.com/ROCm/iris/blob/main/docs/slides/iris-triton-conf-2026.pdf)
 
 ---
 

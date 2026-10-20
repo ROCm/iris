@@ -21,7 +21,7 @@ Iris is a Triton-based framework for Remote Memory Access (RMA) operations devel
 
 ## Latest with Iris 🔥
 
-- [19/10/2026] Presented Iris at the Triton Developer Conference [[slides](https://github.com/ROCm/iris/blob/main/docs/slides/AMD%20-%20Iris%20First-Class%20Multi-GPU%20Programming%20Experience%20in%20Triton%20(Triton%20Developer%20Conference%202026).pdf)]
+- [19/10/2026] Presented Iris at the Triton Developer Conference [[slides](https://github.com/ROCm/iris/blob/main/docs/slides/iris-triton-conf-2026.pdf)]
 - [09/10/2026] Technical article: _[Serving Kimi K3 on AMD Instinct MI355Xx with TokenSpeed using Iris](https://www.amd.com/en/developer/resources/technical-articles/2026/kimi-k3-on-amd-instinct-gpus-with-tokenspeed.html)_ 
 - [16/11/2025] Paper released: _[Iris: First-Class Multi-GPU Programming Experience in Triton](https://arxiv.org/abs/2511.12500)_
 - [04/11/2025] Paper released: _[Eliminating Multi-GPU Performance Taxes: A Systems Approach to Efficient Distributed LLMs](https://arxiv.org/abs/2511.02168)_
