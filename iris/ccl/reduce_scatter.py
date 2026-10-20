@@ -20,7 +20,11 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         ctx: Iris instance
         op: ReduceOp (only SUM supported)
         group: ProcessGroup or None
-        async_op: If True, skip trailing barrier
+        async_op: If False (default), end with a device-side barrier on the current
+            stream: work queued after this call runs only once every rank's part of
+            the collective is done. The host does not wait. If True, skip the
+            barrier; the caller must synchronize the ranks before reading the
+            output or reusing the buffers
         config: Config with kernel parameters
     """
     from iris.ccl.config import Config
@@ -70,4 +74,4 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
     )
 
     if not async_op:
-        ctx.barrier()
+        ctx.device_barrier(group=group)
