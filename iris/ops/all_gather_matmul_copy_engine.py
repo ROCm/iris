@@ -18,7 +18,8 @@ import triton
 import triton.language as tl
 import iris
 import iris.host.platform.hip as hip
-from tritonblas.matmul import persistent_matmul_lt, create_wait_config
+from tritonblas.matmul import persistent_matmul_lt
+from tritonblas.config import PrologueConfig
 from tritonblas.kernels.stages import (
     Tile as StageTile,
     GemmContext,
@@ -652,7 +653,7 @@ def all_gather_matmul_copy_engine(
         )
 
     tb_block_m = selector.block_m
-    wait_config = create_wait_config(
+    prologue_config = PrologueConfig(
         wait_buffer=workspace.locks,
         expected_buffer=workspace.wait_expected,
         expected_inc=world_size,
@@ -708,7 +709,7 @@ def all_gather_matmul_copy_engine(
             output_tensor,
             selector,
             bias=None,
-            wait_config=wait_config,
+            prologue_config=prologue_config,
         )
     else:
         # Host-initiated:
@@ -820,7 +821,7 @@ def all_gather_matmul_copy_engine(
                 output_tensor,
                 selector,
                 bias=None,
-                wait_config=wait_config,
+                prologue_config=prologue_config,
             )
         else:
             if verbose and rank == 0:
@@ -832,7 +833,7 @@ def all_gather_matmul_copy_engine(
                 output_tensor,
                 selector,
                 bias=None,
-                wait_config=wait_config,
+                prologue_config=prologue_config,
             )
 
             # Post the remaining batches while GEMM is already running.

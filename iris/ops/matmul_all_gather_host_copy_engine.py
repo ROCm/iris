@@ -28,7 +28,7 @@ from .workspace import FusedWorkspace
 
 # Import tritonBLAS
 from tritonblas.matmul import persistent_matmul_lt
-from tritonblas.matmul import create_counter_config
+from tritonblas.config import EpilogueConfig
 from tritonblas.matmul import _make_matmul_selector
 from .tritonblas_launch_wave_schedule import build_launch_wave_plan
 
@@ -243,7 +243,7 @@ def matmul_all_gather_host_copy_engine(
     # Create a view of output_tensor at this rank's position
     C_local_view = output_tensor[rank * M_local : (rank + 1) * M_local, :]
 
-    counter_config = create_counter_config(
+    epilogue_config = EpilogueConfig(
         workspace.locks,
         map_type="launch_wave",
         block_group_m=launch_wave_plan.wave_size,
@@ -267,7 +267,7 @@ def matmul_all_gather_host_copy_engine(
         config=tritonblas_config,
         bias=None,
         work_stealing=False,
-        counter_config=counter_config,
+        epilogue_config=epilogue_config,
     )
 
     # ═══════════════════════════════════════════════════════════════════════

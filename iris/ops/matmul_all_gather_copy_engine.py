@@ -18,7 +18,8 @@ import triton.language as tl
 import iris
 
 from .workspace import FusedWorkspace
-from tritonblas.matmul import persistent_matmul_lt, create_counter_config
+from tritonblas.matmul import persistent_matmul_lt
+from tritonblas.config import EpilogueConfig
 from .tritonblas_launch_wave_schedule import build_launch_wave_plan
 
 
@@ -424,7 +425,7 @@ def matmul_all_gather_copy_engine(
             "matmul_all_gather_copy_engine. Ignoring bias for this launch."
         )
 
-    counter_config = create_counter_config(
+    epilogue_config = EpilogueConfig(
         workspace.locks,
         map_type="launch_wave",
         block_group_m=launch_wave_plan.wave_size,
@@ -437,7 +438,7 @@ def matmul_all_gather_copy_engine(
         selector,
         bias=None,
         work_stealing=False,
-        counter_config=counter_config,
+        epilogue_config=epilogue_config,
     )
     if cpu_timing is not None:
         cpu_timing["main_launch_ms"] = (time.perf_counter() - main_launch_start) * 1000.0
