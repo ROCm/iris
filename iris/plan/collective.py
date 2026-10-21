@@ -31,7 +31,7 @@ from iris.host.distributed.helpers import distributed_allgather
 from iris.host.memory.allocators.torch_allocator import TorchAllocator
 from iris.mem.triton import plan as dv
 from iris.plan import armer, kernels
-from iris.plan.schedule import validate
+from iris.plan.schedule import check_disjoint, validate
 
 UINT32_MAX = (1 << 32) - 1
 _PROGRESS_BUDGET = 100_000
@@ -78,7 +78,8 @@ class CollectivePlan:
     Each rank passes its own ``schedule``: the chunks it writes, in the order its producer completes
     them. Every chunk is copied to the same offsets in each peer's ``buffer``. Chunk ids are global:
     rank ``r``'s chunks come after those of ranks ``0..r-1`` (see ``chunk_id``), and ``schedules[r]``
-    holds rank ``r``'s schedule. A rank that writes nothing passes ``[]``.
+    holds rank ``r``'s schedule. A rank that writes nothing passes ``[]``. No byte may be in two
+    ranks' schedules.
 
     Collective: every rank creates the plan for the same symmetric ``buffer``. Use it as a context
     manager, or call ``close()`` on every rank when done.
@@ -118,6 +119,7 @@ class CollectivePlan:
         if any(nbytes != buffer_bytes for nbytes, _ in gathered):
             raise ValueError("ranks passed buffers of different sizes")
         self.schedules = [s for _, s in gathered]
+        check_disjoint(self.schedules)
 
         self._first = np.cumsum([0] + [len(s) for s in self.schedules]).tolist()
         self.num_chunks = self._first[-1]

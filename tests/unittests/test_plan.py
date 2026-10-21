@@ -401,6 +401,18 @@ def test_invalid_schedule_fails_every_rank():
     del ctx
 
 
+def test_overlapping_schedules_rejected():
+    """Every rank describing the whole buffer, not its own slice, fails on every rank before anything is prepared."""
+    ctx = _ctx()
+    world = ctx.get_num_ranks()
+    buffer = ctx.zeros(world * 1024, dtype=torch.int32)
+    with pytest.raises(ValueError, match="ranks 0 and 1 both send"):
+        CollectivePlan(ctx, buffer, chunks(buffer, 2), timeout=20)
+    assert not any(queue_ledger.ledger().entries.values())
+    ctx.barrier()
+    del ctx
+
+
 def test_capacity_failure_fails_every_rank():
     """A rank that cannot reserve queue space fails all ranks before anything is prepared."""
     ctx = _ctx()

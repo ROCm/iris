@@ -161,7 +161,9 @@ after it in the same kernel is fresh (no stale elements over 9,600 tile-rounds).
   copies (`put(..., use_copy_engine=True)`) use a separate queue and are unaffected.
 - **Ring capacity.** Prepared copies may use at most half of each queue's 8 MiB ring.
 - **Same offsets everywhere.** Every chunk is copied to the same offsets in each peer's buffer,
-  so plans express all-gather and broadcast (ranks that send nothing pass an empty schedule).
+  so plans express all-gather and broadcast (ranks that send nothing pass an empty schedule). Two
+  ranks may not send the same bytes: the plan checks this when it is created, which catches a
+  schedule built from the whole buffer instead of the rank's own part.
 - **Single node only.**
 - **Linear regions are at most 1 GiB** (SDMA 4.4's count field is 30 bits). The schedule builders
   split larger ranges.

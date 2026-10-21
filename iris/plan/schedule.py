@@ -14,6 +14,8 @@ every chunk before it. Order the schedule the way the producer finishes its work
 
 from dataclasses import dataclass
 
+import numpy as np
+
 # COPY_LINEAR's count field is 30 bits on SDMA 4.4.x
 MAX_LINEAR_BYTES = 1 << 30
 
@@ -152,3 +154,53 @@ def validate(schedule, buffer_bytes):
             if not chunk.is_2d and r.row_bytes > MAX_LINEAR_BYTES:
                 raise ValueError(f"chunk {i}: linear region over {MAX_LINEAR_BYTES} bytes; split it")
     return schedule
+
+
+def _rows(schedule):
+    """Every row of every region in ``schedule``, merged into sorted disjoint [start, end) byte ranges."""
+    regions = [r for chunk in schedule for r in chunk.regions]
+    offset, width, rows, stride = (
+        np.array(v, dtype=np.int64)
+        for v in zip(*((r.offset_bytes, r.row_bytes, r.rows, r.row_stride) for r in regions))
+    )
+    region = np.repeat(np.arange(len(regions)), rows)
+    row = np.arange(len(region)) - np.repeat(np.cumsum(rows) - rows, rows)
+    starts = offset[region] + row * stride[region]
+    order = np.argsort(starts, kind="stable")
+    starts, ends = starts[order], starts[order] + width[region][order]
+    # A row starts a new range unless it begins inside the ranges before it
+    first = np.flatnonzero(np.r_[True, starts[1:] >= np.maximum.accumulate(ends)[:-1]])
+    return starts[first], np.maximum.reduceat(ends, first)
+
+
+def check_disjoint(schedules):
+    """
+    Check that no byte belongs to the schedules of two different ranks: every chunk is copied to the
+    same offsets on every peer, so two senders of one byte race, and each overwrites the other's own
+    data. Regions of one rank may overlap.
+    """
+    owners = [rank for rank, schedule in enumerate(schedules) if schedule]
+    extents = sorted(
+        (
+            min(r.offset_bytes for c in schedules[rank] for r in c.regions),
+            max(r.end for c in schedules[rank] for r in c.regions),
+        )
+        for rank in owners
+    )
+    if all(prev[1] <= cur[0] for prev, cur in zip(extents, extents[1:])):
+        return
+    # Ranks' extents interleave (e.g. they own column blocks): compare their rows exactly
+    ranges = [_rows(schedules[rank]) for rank in owners]
+    starts = np.concatenate([s for s, _ in ranges])
+    ends = np.concatenate([e for _, e in ranges])
+    rank = np.repeat(owners, [len(s) for s, _ in ranges])
+    order = np.argsort(starts, kind="stable")
+    starts, ends, rank = starts[order], ends[order], rank[order]
+    # Each rank's ranges are disjoint, so any overlap shows up between neighbors
+    clash = np.flatnonzero(starts[1:] < ends[:-1])
+    if len(clash):
+        i = clash[0]
+        raise ValueError(
+            f"ranks {rank[i]} and {rank[i + 1]} both send bytes {starts[i + 1]} to {min(ends[i], ends[i + 1])} of the "
+            "buffer; each rank's schedule must cover only the part of the buffer it writes"
+        )

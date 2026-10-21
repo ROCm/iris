@@ -9,7 +9,7 @@ import triton
 import triton.language as tl
 
 from iris.plan import Chunk, Region, chunks, tile_chunks, whole
-from iris.plan.schedule import MAX_LINEAR_BYTES, validate
+from iris.plan.schedule import MAX_LINEAR_BYTES, check_disjoint, validate
 
 
 def test_whole():
@@ -88,3 +88,32 @@ def test_region_stride_defaults_to_packed():
 def test_validate_rejects(chunk, buffer_bytes):
     with pytest.raises(ValueError):
         validate([chunk], buffer_bytes)
+
+
+def test_check_disjoint_row_slices():
+    out = torch.zeros(4 * 16, 32, dtype=torch.float32)
+    check_disjoint([chunks(out[r * 16 : (r + 1) * 16], 2, base=out) for r in range(4)] + [[]])
+
+
+def test_check_disjoint_rejects_whole_buffer_on_every_rank():
+    """The usual slip: every rank describes all of the buffer instead of its own slice."""
+    out = torch.zeros(4 * 16, 32, dtype=torch.float32)
+    with pytest.raises(ValueError, match="ranks 0 and 1 both send bytes 0 to"):
+        check_disjoint([chunks(out, 2) for _ in range(4)])
+
+
+def test_check_disjoint_interleaved_columns():
+    """Ranks owning column blocks of the same rows interleave in extent but not in bytes."""
+    out = torch.zeros(48, 4 * 32, dtype=torch.float32)
+    columns = [tile_chunks(out[:, r * 32 : (r + 1) * 32], (16, 32), 3, base=out) for r in range(4)]
+    check_disjoint(columns)
+
+    # Rank 1 one column too wide: its last column overlaps rank 2's first
+    wide = tile_chunks(out[:, 32 : 2 * 32 + 1], (16, 33), 3, base=out)
+    with pytest.raises(ValueError, match="ranks 1 and 2 both send bytes 256 to 260"):
+        check_disjoint([columns[0], wide, columns[2], columns[3]])
+
+
+def test_check_disjoint_allows_overlap_within_a_rank():
+    one = [Chunk((Region(0, 64),)), Chunk((Region(32, 64, 2, 128),))]
+    check_disjoint([one, [Chunk((Region(256, 64),))]])
