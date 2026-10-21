@@ -60,6 +60,8 @@ with CollectivePlan(ctx, out, schedule) as plan:   # collective: allocates gates
    in order, chunks complete in order by construction.
 2. **Each chunk is marked ready exactly `writers` times per round,** each after the caller's
    writes to that chunk. `mark_ready` must be called by the whole CTA, outside divergent branches.
+   `wait()` checks the count for this rank's chunks: it raises if a chunk got extra marks (which
+   would otherwise open later rounds' gates early), and a timeout names the chunks still short.
 3. **A producer never waits on its own plan's arrivals before it has marked ready everything it
    writes.** Its wait could depend on a copy queued behind one of its own unfinished chunks.
 4. **Region sizes are fixed when the plan is created.**

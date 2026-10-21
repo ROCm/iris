@@ -125,6 +125,7 @@ class CollectivePlan:
         self._own = torch.arange(
             self._first[self.rank], self._first[self.rank + 1], dtype=torch.int64, device=buffer.device
         )
+        self._writers = [c.writers for c in self.schedules[self.rank]]
         self._status = torch.zeros(self.num_chunks, dtype=torch.int32, device=buffer.device)
         self._armed = torch.zeros(self.num_chunks * self.world_size, dtype=torch.int32, device=buffer.device)
         self._ledger = queue_ledger.ledger()
@@ -261,7 +262,18 @@ class CollectivePlan:
                 return
             if time.monotonic() > deadline:
                 missing = (pending.nonzero().flatten() + (mine.start if own_only else 0)).tolist()
-                raise TimeoutError(f"round {self.round}: chunks {missing[:16]} not complete")
+                short = [
+                    f"{self._first[self.rank] + i}: {m} of {w}"
+                    for i, (m, w) in enumerate(zip(self._marks(), self._writers))
+                    if m < w
+                ]
+                detail = f"; own chunks short of writers' marks: {', '.join(short[:16])}" if short else ""
+                raise TimeoutError(f"round {self.round}: chunks {missing[:16]} not complete{detail}")
+
+    def _marks(self):
+        """How many times each own chunk has been marked ready this round."""
+        counters = self.gates[self._first[self.rank] : self._first[self.rank + 1], dv.G_COUNTER.value].tolist()
+        return [c - w * (self.round - 1) for c, w in zip(counters, self._writers)]
 
     def wait(self, timeout=None):
         """Wait until every chunk is delivered this round: own ones at every peer, others here."""
@@ -271,6 +283,14 @@ class CollectivePlan:
         except TimeoutError:
             self.state = State.FAILED
             raise
+        # Extra marks open later rounds' gates early, so data would go out before it is written
+        wrong = [(i, m, w) for i, (m, w) in enumerate(zip(self._marks(), self._writers)) if m != w]
+        if wrong:
+            self.state = State.FAILED
+            i, m, w = wrong[0]
+            raise RuntimeError(
+                f"round {self.round}: chunk {self._first[self.rank] + i} was marked ready {m} times, but has {w} writers"
+            )
         self._ledger.release(self)
         self.state = State.DONE
 

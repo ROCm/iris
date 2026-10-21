@@ -9,18 +9,25 @@ import triton.language as tl
 from iris.mem.triton.context import __translate
 from iris.mem.triton.plan import (
     G_ARRIVAL,
+    G_COUNTER,
     G_READY,
     GATE_WORDS,
+    HEADER_WORDS,
+    R_WRITERS,
+    RECORD_WORDS,
     CollectiveView,
 )
 
 
 @triton.jit
 def release_kernel(view, chunks):
-    """Open the gate of chunk ``chunks[pid]``, as its last writer would."""
+    """Open the gate of chunk ``chunks[pid]``, counting a mark from each of its writers."""
     cv = CollectiveView.initialize(view)
     chunk = tl.load(chunks + tl.program_id(0))
-    tl.atomic_xchg(cv.gates + chunk * GATE_WORDS + G_READY, cv.round, sem="release", scope="sys")
+    gate = cv.gates + chunk * GATE_WORDS
+    writers = tl.load(view + HEADER_WORDS + chunk * RECORD_WORDS + R_WRITERS)
+    tl.atomic_add(gate + G_COUNTER, writers, sem="relaxed", scope="sys")
+    tl.atomic_xchg(gate + G_READY, cv.round, sem="release", scope="sys")
 
 
 @triton.jit

@@ -268,6 +268,29 @@ def test_head_of_line_order():
     del ctx
 
 
+@pytest.mark.parametrize("marks", [1, 3])
+def test_wrong_mark_count_raises(marks):
+    """A chunk marked ready too few or too many times fails wait() with the counts, instead of hanging or shipping early."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    schedule = whole(_slice(buffer, rank, slice_elems), base=buffer, writers=2)
+
+    with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+        handle = plan.start()
+        _mark_ready_kernel[(marks,)](handle, plan.chunk_id(rank, 0))
+        if marks < 2:
+            with pytest.raises(TimeoutError, match="1 of 2"):
+                plan.wait(timeout=2)
+        else:
+            with pytest.raises(RuntimeError, match="marked ready 3 times, but has 2 writers"):
+                plan.wait()
+        assert plan.state is State.FAILED
+    ctx.barrier()
+    del ctx
+
+
 def test_misuse_raises():
     ctx = _ctx()
     rank, world = ctx.get_rank(), ctx.get_num_ranks()

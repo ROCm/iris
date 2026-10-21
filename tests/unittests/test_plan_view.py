@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from iris.mem.triton import plan as dv
-from iris.plan import Chunk, CollectiveView, Region
+from iris.plan import Chunk, CollectiveView, Region, kernels
 from iris.plan.collective import view_words
 
 
@@ -63,3 +63,20 @@ def test_arrived_reads_ready_for_own_chunks_and_arrival_for_others():
     gates[1, dv.G_READY.value] = 3
     _arrived_kernel[(1,)](view, out, 2)
     assert out.tolist() == [1, 3]
+
+
+def test_release_counts_every_writer():
+    """run() and close() open gates directly; the counter must still advance by writers per round."""
+    k = 3
+    view, gates = _view(0, [[Chunk((Region(0, 64),), writers=k)]], round=1)
+    chunks = torch.zeros(1, dtype=torch.int64, device="cuda")
+    kernels.release_kernel[(1,)](view, chunks)
+    assert gates[0, dv.G_READY.value].item() == 1
+    assert gates[0, dv.G_COUNTER.value].item() == k
+
+    # Writers' marks in the next round still open the gate on the k-th mark
+    view[dv.H_ROUND.value] = 2
+    _mark_ready_kernel[(k - 1,)](view, 0)
+    assert gates[0, dv.G_READY.value].item() == 1
+    _mark_ready_kernel[(1,)](view, 0)
+    assert gates[0, dv.G_READY.value].item() == 2
