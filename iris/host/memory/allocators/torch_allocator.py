@@ -145,20 +145,19 @@ class TorchAllocator(BaseAllocator):
         """
         Establish access to peer memory for symmetric addressing.
 
+        Peers are imported once. The pool is a single fixed buffer, so later calls keep the
+        existing imports, and peer addresses stay stable for the allocator's lifetime.
+
         Args:
             all_bases: Dictionary mapping rank -> base address
             connections: Optional peer connections for handle exchange
         """
+        if self._peer_ext_mem_handles:
+            return
+
         heap_bases_array = np.zeros(self.num_ranks, dtype=np.uint64)
 
         if connections is not None:
-            for handle in self._peer_ext_mem_handles.values():
-                try:
-                    destroy_external_memory(handle)
-                except Exception:
-                    pass
-            self._peer_ext_mem_handles.clear()
-
             my_fd, my_base, my_size = self.get_shareable_handle()
             heap_base = self.get_base_address()
             my_metadata = struct.pack("QQQ", my_base, my_size, heap_base)
