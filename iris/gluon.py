@@ -6,8 +6,9 @@ Convenience re-exports for Gluon device-side API.
 
 Usage::
 
-    from iris.gluon import IrisDeviceCtx, GluonDeviceTracing
+    from iris.gluon import IrisDeviceCtx, GluonDeviceTracing, CollectiveView
 """
 
 from iris.mem.gluon.context import Context as IrisDeviceCtx  # noqa: F401
 from iris.mem.gluon.tracing import Tracing as GluonDeviceTracing  # noqa: F401
+from iris.mem.gluon.plan import CollectiveView  # noqa: F401

@@ -6,3 +6,4 @@ from .context import Context  # noqa: F401
 from .context import Context as IrisDeviceCtx  # noqa: F401  backward compat
 from .tracing import Tracing  # noqa: F401
 from .tracing import Tracing as GluonDeviceTracing  # noqa: F401  backward compat
+from .plan import CollectiveView  # noqa: F401

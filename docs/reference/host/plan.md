@@ -23,3 +23,9 @@ Copy-engine transfers prepared once and released by kernels, every round. See
 .. autoclass:: iris.plan.CollectiveView
    :members: initialize, mark_ready, arrived, wait, owns
 ```
+
+## CollectiveView (Gluon device)
+```{eval-rst}
+.. autoclass:: iris.gluon.CollectiveView
+   :members: initialize, mark_ready, arrived, wait, owns
+```
