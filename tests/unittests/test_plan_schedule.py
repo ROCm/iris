@@ -5,6 +5,8 @@
 
 import pytest
 import torch
+import triton
+import triton.language as tl
 
 from iris.plan import Chunk, Region, chunks, tile_chunks, whole
 from iris.plan.schedule import MAX_LINEAR_BYTES, validate
@@ -48,6 +50,23 @@ def test_tile_chunks_order():
     assert result[0].regions[0].offset_bytes == 16 * 64 + 32
     with pytest.raises(ValueError):
         tile_chunks(base, (16, 16), tiles_per_chunk=2, order=[0, 1, 2])
+
+
+@triton.jit
+def _grouped(i, tiles_m, tiles_n, GROUP_M: tl.constexpr):
+    group = i // (GROUP_M * tiles_n)
+    size_m = min(tiles_m - group * GROUP_M, GROUP_M)
+    within = i % (GROUP_M * tiles_n)
+    return (group * GROUP_M + within % size_m) * tiles_n + within // size_m
+
+
+def test_tile_chunks_order_from_kernel_mapping():
+    """The kernel's own @triton.jit tile mapping gives the same schedule as the list it produces."""
+    base = torch.zeros(5 * 16, 3 * 16, dtype=torch.float16)
+    order = [_grouped.fn(i, 5, 3, 2) for i in range(15)]
+    assert order != list(range(15))
+    by_fn = tile_chunks(base, (16, 16), tiles_per_chunk=4, order=lambda i: _grouped.fn(i, 5, 3, 2))
+    assert by_fn == tile_chunks(base, (16, 16), tiles_per_chunk=4, order=order)
 
 
 def test_region_stride_defaults_to_packed():

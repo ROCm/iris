@@ -34,6 +34,25 @@ The API is `iris.plan`; see the [reference](../reference/host/plan.md).
 once per program at the end), `chunks()` (row blocks completed in order) and `tile_chunks()`
 (consecutive tiles of a tiled kernel, such as a GEMM). Any list of chunks works.
 
+A schedule and its producer must agree on which tiles each chunk holds. `tile_chunks()` takes
+the producer's step-to-tile mapping as `order`; pass the kernel's own mapping rather than a copy
+of it, so the two cannot drift:
+
+```python
+@triton.jit
+def tile_of(step, tiles_m, tiles_n, GROUP_M: tl.constexpr):   # plain integer arithmetic only
+    ...
+
+# Host: the same function, run in Python
+schedule = tile_chunks(mine, (BM, BN), num_programs, order=lambda i: tile_of.fn(i, tiles_m, tiles_n, 8), base=out)
+
+# Kernel: program p takes steps p, p + num_programs, ...
+for step in range(tl.program_id(0), num_tiles, num_programs):
+    tile = tile_of(step, tiles_m, tiles_n, 8)
+    ...                                               # compute and store the tile
+    cv.mark_ready(first_chunk + step // num_programs)
+```
+
 ```python
 from iris.plan import CollectivePlan, CollectiveView, tile_chunks
 
@@ -58,8 +77,9 @@ with CollectivePlan(ctx, out, schedule) as plan:   # collective: allocates gates
    before it. Out-of-order completion is still correct, only slower. With `tiles_per_chunk` equal
    to the number of programs of a persistent kernel whose programs each work through their tiles
    in order, chunks complete in order by construction.
-2. **Each chunk is marked ready exactly `writers` times per round,** each after the caller's
-   writes to that chunk. `mark_ready` must be called by the whole CTA, outside divergent branches.
+2. **Each chunk is marked ready exactly `writers` times per round, by the programs that write its
+   regions,** each after the caller's writes to that chunk. `mark_ready` must be called by the
+   whole CTA, outside divergent branches.
    `wait()` checks the count for this rank's chunks: it raises if a chunk got extra marks (which
    would otherwise open later rounds' gates early), and a timeout names the chunks still short.
 3. **A producer never waits on its own plan's arrivals before it has marked ready everything it
@@ -75,6 +95,10 @@ with CollectivePlan(ctx, out, schedule) as plan:   # collective: allocates gates
 
 Plans that share queues must start in the order they were prepared. While copies are prepared
 on a queue, host `Iris.put()` and `quiet()` to that peer raise rather than queue behind them.
+
+A chunk marked ready by programs that did not write all of its regions is sent before its data is
+written. The mark count cannot catch this (the count is right, the tiles are wrong), which is why
+`order` should come from the kernel's own mapping.
 
 Creating a plan and `next_round()` prepare on every rank or on none: if one rank cannot (for
 example its queue is full, or its schedule is invalid), every rank raises, and a failed

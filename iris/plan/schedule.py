@@ -95,12 +95,16 @@ def tile_chunks(view, block_shape, tiles_per_chunk, order=None, base=None):
     Group the tiles of a tiled producer into chunks of ``tiles_per_chunk``, in completion order.
 
     ``view`` is a 2D tensor with unit column stride, split into ``block_shape`` tiles (edge tiles
-    clipped). ``order`` lists the tile ids (row-major by default) in the order they complete; each
-    chunk holds the next ``tiles_per_chunk`` of them, one region per tile, and is marked ready once
-    per tile.
+    clipped; tile ids are row-major). ``order`` gives the tile the producer makes at each step
+    ``i``: a list of tile ids, or a function of ``i``. Chunk ``k`` holds the tiles of steps
+    ``k * tiles_per_chunk`` up to the next chunk, one region per tile, and is marked ready once per
+    tile. The producer must mark the tile of step ``i`` ready as part of chunk
+    ``i // tiles_per_chunk``, so pass the mapping the kernel itself uses: a ``@triton.jit`` mapping
+    written with plain integer arithmetic runs on the host as ``lambda i: mapping.fn(i, ...)``.
 
-    For a persistent kernel of ``P`` programs that each work through their tiles in order, use
-    ``tiles_per_chunk=P``: chunk ``k`` is every program's ``k``-th tile, so chunks complete in order.
+    For a persistent kernel of ``P`` programs where program ``p`` takes steps ``p``, ``p + P``, ...,
+    use ``tiles_per_chunk=P``: chunk ``k`` is every program's ``k``-th tile, so chunks complete in
+    order.
     """
     if view.dim() != 2 or view.stride(1) != 1:
         raise ValueError("tile_chunks() needs a 2D view with unit column stride")
@@ -108,7 +112,12 @@ def tile_chunks(view, block_shape, tiles_per_chunk, order=None, base=None):
     block_m, block_n = block_shape
     tiles_n = -(-cols // block_n)
     num_tiles = -(-rows // block_m) * tiles_n
-    order = range(num_tiles) if order is None else list(order)
+    if order is None:
+        order = range(num_tiles)
+    elif callable(order):
+        order = [int(order(i)) for i in range(num_tiles)]
+    else:
+        order = list(order)
     if sorted(order) != list(range(num_tiles)):
         raise ValueError(f"order must be a permutation of the {num_tiles} tile ids")
 

@@ -152,27 +152,52 @@ def test_heap_growth_while_prepared():
 
 
 @triton.jit
+def _grouped(i, tiles_m, tiles_n, GROUP_M: tl.constexpr):
+    """Step -> tile id with a GROUP_M-row swizzle; also called on the host for the schedule."""
+    if GROUP_M == 0:
+        return i
+    group = i // (GROUP_M * tiles_n)
+    size_m = min(tiles_m - group * GROUP_M, GROUP_M)
+    within = i % (GROUP_M * tiles_n)
+    return (group * GROUP_M + within % size_m) * tiles_n + within // size_m
+
+
+@triton.jit
 def _tiled_producer(
-    buf, handle, first, round, row0, M, N, BM: tl.constexpr, BN: tl.constexpr, NUM_PROGRAMS: tl.constexpr
+    buf,
+    handle,
+    first,
+    round,
+    row0,
+    M,
+    N,
+    BM: tl.constexpr,
+    BN: tl.constexpr,
+    NUM_PROGRAMS: tl.constexpr,
+    GROUP_M: tl.constexpr,
 ):
-    """Persistent tiled producer: program p makes tiles p, p + NUM_PROGRAMS, ... and marks each tile's chunk ready."""
+    """Persistent tiled producer: program p takes steps p, p + NUM_PROGRAMS, ... and marks each step's chunk ready."""
     cv = CollectiveView.initialize(handle)
-    tiles_n = tl.cdiv(N, BN)
-    for i in range(tl.program_id(0), tl.cdiv(M, BM) * tiles_n, NUM_PROGRAMS):
-        rows = (i // tiles_n) * BM + tl.arange(0, BM)[:, None]
-        cols = (i % tiles_n) * BN + tl.arange(0, BN)[None, :]
+    tiles_m, tiles_n = tl.cdiv(M, BM), tl.cdiv(N, BN)
+    for i in range(tl.program_id(0), tiles_m * tiles_n, NUM_PROGRAMS):
+        tile = _grouped(i, tiles_m, tiles_n, GROUP_M)
+        rows = (tile // tiles_n) * BM + tl.arange(0, BM)[:, None]
+        cols = (tile % tiles_n) * BN + tl.arange(0, BN)[None, :]
         idx = (row0 + rows) * N + cols
         tl.store(buf + idx, (round << 24) | idx, mask=(rows < M) & (cols < N))
         cv.mark_ready(first + i // NUM_PROGRAMS)
 
 
-def test_tile_chunks_2d_unaligned():
+@pytest.mark.parametrize("group_m", [0, 2])
+def test_tile_chunks_2d_unaligned(group_m):
+    """Row-major and grouped tile orders; the schedule takes its order from the kernel's own mapping."""
     ctx = _ctx()
     rank, world = ctx.get_rank(), ctx.get_num_ranks()
     m, n, bm, bn, programs = 40, 72, 16, 32, 4  # 3 x 3 tiles, clipped at the edges; chunks of 4, 4, 1
     buffer = ctx.zeros(world * m, n, dtype=torch.int32)
     buffer.fill_(EMPTY)
-    schedule = tile_chunks(buffer[rank * m : (rank + 1) * m], (bm, bn), programs, base=buffer)
+    order = lambda i: _grouped.fn(i, 3, 3, group_m)  # noqa: E731
+    schedule = tile_chunks(buffer[rank * m : (rank + 1) * m], (bm, bn), programs, order=order, base=buffer)
 
     with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
         for round in range(1, 4):
@@ -181,7 +206,17 @@ def test_tile_chunks_2d_unaligned():
             handle = plan.start()
             _check_before_release(ctx, plan, buffer, m * n)
             _tiled_producer[(programs,)](
-                buffer, handle, plan.chunk_id(rank, 0), round, rank * m, m, n, BM=bm, BN=bn, NUM_PROGRAMS=programs
+                buffer,
+                handle,
+                plan.chunk_id(rank, 0),
+                round,
+                rank * m,
+                m,
+                n,
+                BM=bm,
+                BN=bn,
+                NUM_PROGRAMS=programs,
+                GROUP_M=group_m,
             )
             plan.wait()
             _check_and_wipe(ctx, buffer, round, m * n)
