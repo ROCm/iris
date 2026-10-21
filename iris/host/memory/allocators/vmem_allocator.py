@@ -9,6 +9,7 @@ enabling features like memory oversubscription and on-demand paging.
 """
 
 import logging
+import numpy as np
 import torch
 import os
 from typing import Dict
@@ -32,6 +33,16 @@ from iris.host.platform.hip import (
     hipMemLocationTypeDevice,
     hipMemAccessFlagsProtReadWrite,
 )
+
+
+def _rank_device_ids(device_id: int, world_size: int) -> list:
+    """The distinct GPUs the world's ranks run on; a collective when there is more than one rank."""
+    if world_size == 1:
+        return [device_id]
+    from iris.host.distributed.helpers import distributed_allgather
+
+    gathered = distributed_allgather(np.array([device_id], dtype=np.int64))
+    return sorted({int(peer) for peer in gathered.reshape(-1)})
 
 
 class VMemAllocator(BaseAllocator):
@@ -61,7 +72,7 @@ class VMemAllocator(BaseAllocator):
         va_multiplier: float = 1.0,
     ):
         super().__init__(heap_size, device_id, rank, world_size)
-        # Peer access is granted to local device ids 0..world_size-1.
+        # Peer access is granted to every rank's GPU, all of which this single-host allocator must see.
         local_devices = torch.cuda.device_count()
         if world_size > local_devices:
             self._closed = True
@@ -70,6 +81,11 @@ class VMemAllocator(BaseAllocator):
                 f"this process sees {local_devices} GPUs. It is single-host; use IRIS_ALLOCATOR=vmem_chunked "
                 "for multi-host jobs."
             )
+        try:
+            peer_device_ids = _rank_device_ids(device_id, world_size)
+        except BaseException:
+            self._closed = True
+            raise
         _log_rank(
             logging.INFO,
             "VMemAllocator: init heap_size=%.1fGB device=%d",
@@ -95,7 +111,7 @@ class VMemAllocator(BaseAllocator):
 
         # ROCm: mem_set_access must be called cumulatively from base_va (see rocm-systems#2667)
         self.access_descs = []
-        for peer_device_id in range(world_size):
+        for peer_device_id in peer_device_ids:
             desc = hipMemAccessDesc()
             desc.location.type = hipMemLocationTypeDevice
             desc.location.id = peer_device_id

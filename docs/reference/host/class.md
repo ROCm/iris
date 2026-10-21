@@ -8,6 +8,24 @@ Prefer using the convenience factory over calling the constructor directly:
 .. autofunction:: iris.host.iris.iris
 ```
 
+## Device Placement
+
+By default each rank runs on GPU `rank % torch.cuda.device_count()`, and Iris
+calls `torch.cuda.set_device` on it. If your launcher puts ranks on other GPUs,
+for example ranks 0-1 on GPUs 2-3, pass the GPU explicitly. It must be the
+device the process group was initialized with, because Iris runs its
+collectives on that device:
+
+```python
+torch.cuda.set_device(gpu)
+dist.init_process_group("nccl", device_id=torch.device("cuda", gpu))
+ctx = iris.iris(heap_size=1 << 30, device=gpu)  # or device="cuda" for the current device
+```
+
+`device` accepts a GPU index, `"cuda"`, `"cuda:N"`, or a `torch.device`.
+`engines=("sdma",)` still requires the default placement and raises `ValueError`
+otherwise.
+
 ## Optional SDMA Copy Engine
 
 The `engines` parameter defaults to `()`. In this mode, Iris skips SDMA
