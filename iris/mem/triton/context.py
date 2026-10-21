@@ -733,7 +733,7 @@ class Context:
             self.atomic_xchg(locks + tile_id, 0, to_rank=dest_rank, sem="release", scope="sys")
 
     @triton.jit
-    def all_reduce_one_shot(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks):
+    def all_reduce_one_shot(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks, generation=1):
         """
         Tile-level all-reduce using one-shot algorithm.
 
@@ -757,7 +757,10 @@ class Context:
         for remote_rank in range(self.world_size):
             if remote_rank != self.rank:
                 lock_ptr = locks + tile_id
-                while self.atomic_add(lock_ptr, 0, to_rank=remote_rank, sem="acquire", scope="sys") != 1:
+                while (
+                    self.atomic_cas(lock_ptr, generation, generation, to_rank=remote_rank, sem="acquire", scope="sys")
+                    != generation
+                ):
                     pass
                 partial = self.load(src_tile_ptr, from_rank=remote_rank, mask=mask)
                 acc += partial.to(acc_dtype)
@@ -801,7 +804,7 @@ class Context:
                 tl.store(dst_tile_ptr, remote_result, mask=mask)
 
     @triton.jit
-    def all_reduce_two_shot(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks):
+    def all_reduce_two_shot(self, tile: Tile, src_view: TensorView, dst_view: TensorView, locks, generation=1):
         """
         Tile-level all-reduce using two-shot algorithm with work distribution.
 
@@ -828,7 +831,12 @@ class Context:
             for remote_rank in range(self.world_size):
                 if remote_rank != self.rank:
                     lock_ptr = locks + tile_id
-                    while self.atomic_add(lock_ptr, 0, to_rank=remote_rank, sem="acquire", scope="sys") != 1:
+                    while (
+                        self.atomic_cas(
+                            lock_ptr, generation, generation, to_rank=remote_rank, sem="acquire", scope="sys"
+                        )
+                        != generation
+                    ):
                         pass
                     partial = self.load(src_tile_ptr, from_rank=remote_rank, mask=mask)
                     acc += partial.to(acc_dtype)
