@@ -2,9 +2,9 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Arms triggered chains on the host-initiated copy-engine queue through rocm-xio.
+Arms collective-plan chains on the host-initiated copy-engine queue through rocm-xio.
 
-Per (batch, peer): POLL_REGMEM(ready >= epoch) -> one copy per segment -> ATOMIC ADD_RTN_64(arrival += 1).
+Per (chunk, peer): POLL_REGMEM(ready >= round) -> one copy per region -> ATOMIC ADD_RTN_64(arrival += 1).
 """
 
 import ctypes
@@ -35,13 +35,13 @@ class Copy:
     pitch: int
 
 
-def chain_bytes(batch):
+def chain_bytes(chunk):
     sdma_ep = bind_sdma_ep()
-    copy_bytes = sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES if batch.is_2d else sdma_ep.COPY_LINEAR_COMMAND_BYTES
-    return POLL_REGMEM_BYTES + len(batch.segments) * copy_bytes + sdma_ep.ATOMIC_COMMAND_BYTES
+    copy_bytes = sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES if chunk.is_2d else sdma_ep.COPY_LINEAR_COMMAND_BYTES
+    return POLL_REGMEM_BYTES + len(chunk.regions) * copy_bytes + sdma_ep.ATOMIC_COMMAND_BYTES
 
 
-def arm_chain(src_device, dst_device, ready_addr, epoch, copies, arrival_addr, is_2d):
+def arm_chain(src_device, dst_device, ready_addr, round, copies, arrival_addr, is_2d):
     """Arm one chain on the host queue from ``src_device`` to ``dst_device``."""
     sdma_ep = bind_sdma_ep()
     if is_2d:
@@ -59,7 +59,7 @@ def arm_chain(src_device, dst_device, ready_addr, epoch, copies, arrival_addr, i
             dst_device,
             CHANNEL,
             ready_addr,
-            epoch,
+            round,
             tiles,
             [c.dst for c in copies],
             [c.pitch for c in copies],
@@ -67,7 +67,7 @@ def arm_chain(src_device, dst_device, ready_addr, epoch, copies, arrival_addr, i
     else:
         first, *rest = copies
         sdma_ep.wait_flag_then_put(
-            src_device, dst_device, CHANNEL, ready_addr, epoch, first.src, first.dst, first.width, 32
+            src_device, dst_device, CHANNEL, ready_addr, round, first.src, first.dst, first.width, 32
         )
         for c in rest:
             sdma_ep.put(src_device, dst_device, CHANNEL, c.src, c.dst, c.width)

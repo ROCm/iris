@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-What iris.triggered plans have armed on this process's host copy-engine queues.
+What collective plans (iris.plan) have armed on this process's host copy-engine queues.
 
 The queues belong to the process, not to an Iris instance, so the ledger does too.
 """
@@ -17,18 +17,18 @@ class QueueLedger:
 
     def __init__(self, capacity):
         self.capacity = capacity
-        self.entries = defaultdict(list)  # (src, dst) -> [(plan, epoch, nbytes)]
+        self.entries = defaultdict(list)  # (src, dst) -> [(plan, round, nbytes)]
 
-    def reserve(self, plan, epoch, src, nbytes):
+    def reserve(self, plan, round, src, nbytes):
         for peer, n in nbytes.items():
             used = sum(e[2] for e in self.entries[(src, peer)])
             if used + n > self.capacity:
                 raise RuntimeError(
-                    f"arming {n} bytes on the queue to rank {peer} would exceed {self.capacity} armed bytes "
-                    f"({used} already armed); complete or destroy other plans first"
+                    f"preparing {n} bytes of copies on the queue to rank {peer} would exceed {self.capacity} bytes "
+                    f"({used} already prepared); wait for or close other plans first"
                 )
         for peer, n in nbytes.items():
-            self.entries[(src, peer)].append((plan, epoch, n))
+            self.entries[(src, peer)].append((plan, round, n))
 
     def release(self, plan):
         for key in self.entries:
@@ -36,20 +36,20 @@ class QueueLedger:
 
     def check_order(self, plan, allowed, action):
         for (_, peer), entries in self.entries.items():
-            for other, epoch, _ in entries:
+            for other, round, _ in entries:
                 if other is plan:
                     break
                 if other.state not in allowed:
                     raise RuntimeError(
-                        f"plan armed earlier on the queue to rank {peer} (epoch {epoch}) is {other.state.value}; "
-                        f"plans sharing queues must {action} in the order they were armed"
+                        f"plan prepared earlier on the queue to rank {peer} (round {round}) is {other.state.value}; "
+                        f"plans sharing queues must {action} in the order they were prepared"
                     )
 
     def check_idle(self, src, dst):
         if self.entries.get((src, dst)):
             raise RuntimeError(
-                f"triggered chains are armed on the copy-engine queue to rank {dst}; "
-                "complete, abort or destroy those plans before using it"
+                f"collective plans have copies prepared on the copy-engine queue to rank {dst}; "
+                "wait for or close those plans before using it"
             )
 
 
