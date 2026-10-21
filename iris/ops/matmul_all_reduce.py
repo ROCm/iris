@@ -24,7 +24,7 @@ from .workspace import FusedWorkspace
 from .tritonblas_launch_wave_schedule import build_compact_xcd_schedule
 
 
-_SUPPORTED_VARIANTS = ("one_shot", "two_shot", "two_shot_auto", "two_shot_compact")
+_SUPPORTED_VARIANTS = ("one_shot", "two_shot", "two_shot_row_major", "two_shot_compact")
 _MAX_ONE_SHOT_INBOX_ELEMENTS = 2**31
 _MAX_GEMM_SHARED_BYTES = 64 * 1024
 _COMPACT_REDUCE_NUM_SMS = 64
@@ -68,7 +68,7 @@ def _matmul_all_reduce_gemm_publish_kernel(
     one_shot:
       a_inbox[src_rank * M + row, col] on every rank.
 
-    two_shot:
+    two_shot_row_major:
       on owner rank, a_inbox[src_rank * rows_per_rank + owner_local_row, col].
     """
     acc_dtype = tl.int32 if a_inbox.type.element_ty == tl.int8 else tl.float32
@@ -576,14 +576,14 @@ def _resolve_two_shot_variant(
     block_size_m: int,
     num_xcds: int,
 ) -> str:
-    """Select compact ownership only when it eliminates meaningful duplicate GEMM work."""
-    if variant != "two_shot_auto":
+    """Resolve ``two_shot`` to compact ownership only when it eliminates meaningful duplicate GEMM work."""
+    if variant != "two_shot":
         return variant
     if num_xcds != world_size or M > _COMPACT_AUTO_MAX_M:
-        return "two_shot"
+        return "two_shot_row_major"
     rows_per_rank = _ceil_div(M, world_size)
     duplicate_factor = _ceil_div(block_size_m, rows_per_rank)
-    return "two_shot_compact" if duplicate_factor >= 2 else "two_shot"
+    return "two_shot_compact" if duplicate_factor >= 2 else "two_shot_row_major"
 
 
 def _partitioned_xcd_gemm_num_sms(launch: dict, world_size: int) -> int:
@@ -771,9 +771,9 @@ def matmul_all_reduce_preamble(
     if config.all_reduce_variant == "one_shot":
         _validate_one_shot_inbox_size(M, N, world_size)
 
-    if config.all_reduce_variant == "two_shot" and M % world_size != 0:
+    if config.all_reduce_variant == "two_shot_row_major" and M % world_size != 0:
         raise ValueError(
-            "matmul_all_reduce two_shot requires M to be divisible by world_size "
+            "matmul_all_reduce two_shot_row_major requires M to be divisible by world_size "
             "because the final all-gather uses equal row shards."
         )
 
@@ -811,7 +811,7 @@ def matmul_all_reduce_preamble(
         launch["publish_tiles"] = publish_counts["tiles"]
         launch["publish_programs"] = publish_counts["programs"]
         launch["publish_programs_by_partition"] = publish_counts["programs_by_partition"]
-    if effective_variant in ("two_shot", "two_shot_compact"):
+    if effective_variant in ("two_shot_row_major", "two_shot_compact"):
         launch["reduce_num_sms"] = _default_reduce_num_sms()
     else:
         launch["reduce_num_sms"] = launch["num_sms"]
@@ -838,7 +838,7 @@ def matmul_all_reduce_preamble(
         workspace.a_inbox = shmem.zeros((inbox_rows, N), dtype=dtype)
         workspace.locks = shmem.zeros((1,), dtype=torch.int32)
 
-    if effective_variant == "two_shot":
+    if effective_variant == "two_shot_row_major":
         workspace.completion_signals = shmem.zeros((2,), dtype=torch.int32)
     elif effective_variant != "two_shot_compact":
         workspace.completion_signals = None
@@ -861,12 +861,14 @@ def matmul_all_reduce(
 
     Computes C = all_reduce(A @ B) across all ranks. The one_shot variant
     publishes every rank's partial GEMM result to every rank and reduces
-    locally. The two_shot variant stores row shards to owner ranks, reduces
-    those shards, and stores the reduced result to every rank.
+    locally. The two_shot variants store row shards to owner ranks, reduce
+    those shards, and store the reduced result to every rank. ``two_shot``
+    picks the compact or row-major shard layout automatically;
+    ``two_shot_compact`` and ``two_shot_row_major`` force one of them.
     """
     if config is None:
         config = FusedConfig()
-    if config.all_reduce_variant == "two_shot_auto" and workspace is not None and workspace.config is not None:
+    if config.all_reduce_variant == "two_shot" and workspace is not None and workspace.config is not None:
         config = workspace.config
 
     # Extract dimensions
@@ -913,9 +915,9 @@ def matmul_all_reduce(
     block_size_n = launch["block_size_n"]
     block_size_k = launch["block_size_k"]
 
-    if config.all_reduce_variant == "two_shot" and M % world_size != 0:
+    if config.all_reduce_variant == "two_shot_row_major" and M % world_size != 0:
         raise ValueError(
-            "matmul_all_reduce two_shot requires M to be divisible by world_size "
+            "matmul_all_reduce two_shot_row_major requires M to be divisible by world_size "
             "because the final all-gather uses equal row shards."
         )
     generation = workspace.generation + 1

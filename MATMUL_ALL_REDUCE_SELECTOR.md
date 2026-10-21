@@ -16,15 +16,16 @@ The selector has two levels:
 ```python
 if M <= 512:
     # Removes duplicate partitioned GEMM work when row shards split GEMM tiles.
-    return direct_matmul_all_reduce(config=FusedConfig(all_reduce_variant="two_shot_auto"))
+    return direct_matmul_all_reduce(config=FusedConfig(all_reduce_variant="two_shot"))
 
 # Larger M is consistently faster with a copy-engine variant in the sweep.
 return matmul_all_reduce_copy_engine_auto(...)
 ```
 
-`two_shot_auto` selects the direct compact layout only when the selected GEMM
-`BLOCK_M` spans at least two destination row shards. Otherwise it uses the
-legacy direct row-shard path.
+Direct `two_shot` selects the compact layout (`two_shot_compact`) only when the
+selected GEMM `BLOCK_M` spans at least two destination row shards. Otherwise it
+uses the row-major row-shard path (`two_shot_row_major`). Both layouts can also
+be forced explicitly by name.
 
 ## Copy-Engine Policy
 
@@ -32,7 +33,7 @@ legacy direct row-shard path.
 if 2048 <= M <= 8192:
     return "two_shot"  # compact host-posted SDMA
 if K <= 1024:
-    return "two_shot_gpu_init_compact"
+    return "two_shot_gpu_init"
 return "two_shot"
 ```
 
@@ -40,14 +41,14 @@ Variant meanings:
 
 ```text
 two_shot                         compact host-posted SDMA
-two_shot_gpu_init_compact        compact GPU-enqueued SDMA
+two_shot_gpu_init                compact GPU-enqueued SDMA
 two_shot_row_major               legacy host-posted row-major baseline
-two_shot_gpu_init                legacy GPU-enqueued row-major baseline
+two_shot_gpu_init_row_major      legacy GPU-enqueued row-major baseline
 ```
 
 ## Evidence
 
-The best copy-engine variant beats direct `two_shot_auto` for every measured
+The best copy-engine variant beats direct `two_shot` (auto layout) for every measured
 shape at `M >= 2048`:
 
 | M | Copy-engine / direct-auto geomean | Copy-engine wins |

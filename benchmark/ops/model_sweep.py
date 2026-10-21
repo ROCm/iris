@@ -55,7 +55,7 @@ from sweep_bench import (
 DECODE_BATCH_SIZES = [32, 128]  # Online inference decode
 PREFILL_BATCH_SIZES = [2048, 4096]  # Prefill / context ingestion
 TRAINING_BATCH_SIZES = [16384, 32768]  # Long-context training
-ALL_BATCH_SIZES = [32, 128, 512, 2048, 8192] #DECODE_BATCH_SIZES + PREFILL_BATCH_SIZES + TRAINING_BATCH_SIZES
+ALL_BATCH_SIZES = [128, 512, 2048, 8192, 32768] #DECODE_BATCH_SIZES + PREFILL_BATCH_SIZES + TRAINING_BATCH_SIZES
 
 # Operation mapping: sweep operation type → which OperationTypes to benchmark
 # Different sweep operations use different TP sharding patterns even for the same layer

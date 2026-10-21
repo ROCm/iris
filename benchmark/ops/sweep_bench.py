@@ -83,7 +83,6 @@ DIMENSION_CONFIGS = [
     # Llama 3/3.1 8B: hidden_size=4096, intermediate_size=14336
     {"m_local": 16384, "n": 4096, "k": 4096, "label": "llama3_8b_attn_out_16k"},
     {"m_local": 16384, "n": 4096, "k": 14336, "label": "llama3_8b_mlp_down_16k"},
-
     # {"m_local": 32768, "n": 4096, "k": 4096, "label": "llama3_8b_attn_out_32k"},
     # {"m_local": 32768, "n": 4096, "k": 14336, "label": "llama3_8b_mlp_down_32k"},
     # {"m_local": 65536, "n": 4096, "k": 4096, "label": "llama3_8b_attn_out_64k"},
@@ -91,7 +90,6 @@ DIMENSION_CONFIGS = [
     # Llama 3/3.1 70B: hidden_size=8192, intermediate_size=28672 (same as Llama 2 70B)
     {"m_local": 16384, "n": 8192, "k": 8192, "label": "llama3_70b_attn_out_16k"},
     {"m_local": 16384, "n": 8192, "k": 28672, "label": "llama3_70b_mlp_down_16k"},
-
     # {"m_local": 32768, "n": 8192, "k": 8192, "label": "llama3_70b_attn_out_32k"},
     # {"m_local": 32768, "n": 8192, "k": 28672, "label": "llama3_70b_mlp_down_32k"},
     # {"m_local": 65536, "n": 8192, "k": 8192, "label": "llama3_70b_attn_out_64k"},
@@ -171,11 +169,11 @@ BENCHMARK_CONFIGS = {
         #     "benchmark_filter": "^all_gather_matmul$",
         #     "axes": {"m": "M", "n": "N", "k": "K"},
         # },
-        "pytorchbaseline": {
-            "script": "benchmark/ops/bench_all_gather_matmul.py",
-            "benchmark_filter": "^rccl_all_gather_matmul$",
-            "axes": {"m": "M", "n": "N", "k": "K"},
-        },
+        # "pytorchbaseline": {
+        #     "script": "benchmark/ops/bench_all_gather_matmul.py",
+        #     "benchmark_filter": "^rccl_all_gather_matmul$",
+        #     "axes": {"m": "M", "n": "N", "k": "K"},
+        # },
         "tritonblas_rcclbaseline": {
             "script": "benchmark/ops/bench_all_gather_matmul.py",
             "benchmark_filter": "^tritonblas_rccl_all_gather_matmul$",
@@ -186,11 +184,11 @@ BENCHMARK_CONFIGS = {
             "benchmark_filter": "^all_gather_matmul_hbm_buffer$",
             "axes": {"m": "M", "n": "N", "k": "K"},
         },
-        "copy_engine_host": {
-            "script": "benchmark/ops/bench_all_gather_matmul_copy_engine.py",
-            "benchmark_filter": "^all_gather_matmul_copy_engine_host$",
-            "axes": {"m": "M", "n": "N", "k": "K"},
-        },
+        # "copy_engine_host": {
+        #     "script": "benchmark/ops/bench_all_gather_matmul_copy_engine.py",
+        #     "benchmark_filter": "^all_gather_matmul_copy_engine_host$",
+        #     "axes": {"m": "M", "n": "N", "k": "K"},
+        # },
         # "copy_engine_host_hip_memcpy": {
         #     "script": "benchmark/ops/bench_all_gather_matmul_copy_engine.py",
         #     "benchmark_filter": "^all_gather_matmul_copy_engine_host_hip_memcpy$",
@@ -299,11 +297,11 @@ BENCHMARK_CONFIGS = {
             "variant": "two_shot",
             "prepost": True,
         },
-        "copy_engine_partitioned_gemm": {
-            "script": "benchmark/ops/bench_matmul.py",
-            "benchmark_filter": "^matmul_copy_engine_partitioned_gemm$",
-            "axes": {"m": "M", "n": "N", "k": "K"},
-        },
+        # "copy_engine_partitioned_gemm": {
+        #     "script": "benchmark/ops/bench_matmul.py",
+        #     "benchmark_filter": "^matmul_copy_engine_partitioned_gemm$",
+        #     "axes": {"m": "M", "n": "N", "k": "K"},
+        # },
         # "matmul_only": {
         #     "script": "benchmark/ops/bench_matmul.py",
         #     "benchmark_filter": "^matmul_only$",

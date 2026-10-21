@@ -53,7 +53,7 @@ def _heap_size() -> int:
     [
         "one_shot",
         "two_shot",
-        "two_shot_auto",
+        "two_shot_row_major",
         "two_shot_compact",
     ],
 )
@@ -103,10 +103,10 @@ def test_matmul_all_reduce(dtype, atol, rtol, M, N, K, variant):
 
     max_diff = torch.abs(iris_C - pytorch_output).max().item()
 
-    if variant == "two_shot_auto":
+    if variant == "two_shot":
         rows_per_rank = M // world_size
         duplicate_factor = (workspace.launch_params["block_size_m"] + rows_per_rank - 1) // rows_per_rank
-        expected_variant = "two_shot_compact" if M <= 512 and duplicate_factor >= 2 else "two_shot"
+        expected_variant = "two_shot_compact" if M <= 512 and duplicate_factor >= 2 else "two_shot_row_major"
         assert workspace.variant == expected_variant
 
     assert torch.allclose(iris_C, pytorch_output, atol=atol, rtol=rtol), (

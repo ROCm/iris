@@ -36,7 +36,7 @@ def _select_copy_engine_variant(M: int, K: int) -> str:
     if 2048 <= M <= 8192:
         return "two_shot"
     if K <= 1024:
-        return "two_shot_gpu_init_compact"
+        return "two_shot_gpu_init"
     return "two_shot"
 
 
@@ -1534,9 +1534,9 @@ def matmul_all_reduce_copy_engine_preamble(
     if config.all_reduce_variant == "one_shot":
         _validate_one_shot_inbox_size(M, N, world_size)
 
-    if config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init") and M % world_size != 0:
+    if config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init_row_major") and M % world_size != 0:
         raise ValueError(
-            "matmul_all_reduce_copy_engine two_shot_gpu_init requires M to be divisible by world_size "
+            "matmul_all_reduce_copy_engine two_shot_gpu_init_row_major requires M to be divisible by world_size "
             "because the final all-gather uses equal row shards."
         )
 
@@ -1544,7 +1544,7 @@ def matmul_all_reduce_copy_engine_preamble(
         c_dtype = dtype if out_dtype is None else out_dtype
         selector = _make_origami_selector(M, N, K, A, B, c_dtype)
     launch = _matmul_all_reduce_copy_engine_launch_params(M, N, selector, A.device)
-    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init_compact"):
+    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init"):
         if launch["num_xcds"] != world_size:
             raise ValueError(
                 "compact two_shot requires selector.num_sms (the XCD count) to equal world_size; "
@@ -1564,7 +1564,11 @@ def matmul_all_reduce_copy_engine_preamble(
     else:
         compact_schedule = None
         launch["gemm_num_sms"] = _partitioned_xcd_gemm_num_sms(launch, world_size)
-    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init", "two_shot_gpu_init_compact"):
+    if config.all_reduce_variant in (
+        "two_shot",
+        "two_shot_gpu_init",
+        "two_shot_gpu_init_row_major",
+    ):
         launch["reduce_num_sms"] = _default_reduce_num_sms()
     else:
         launch["reduce_num_sms"] = launch["num_sms"]
@@ -1580,7 +1584,7 @@ def matmul_all_reduce_copy_engine_preamble(
     workspace.config = config
     workspace.launch_params = launch
 
-    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init_compact"):
+    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init"):
         tile_elements = launch["block_size_m"] * launch["block_size_n"]
         workspace.aux_buffer = shmem.empty((world_size * compact_schedule.slots_per_xcd, tile_elements), dtype=dtype)
         workspace.a_inbox = shmem.empty((world_size * compact_schedule.slots_per_xcd, tile_elements), dtype=dtype)
@@ -1592,14 +1596,17 @@ def matmul_all_reduce_copy_engine_preamble(
             A.element_size(),
             A.device,
         )
-    elif config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init"):
+    elif config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init_row_major"):
         workspace.aux_buffer = shmem.empty((M, N), dtype=dtype)
         workspace.a_inbox = shmem.empty((M, N), dtype=dtype)
     else:
         workspace.aux_buffer = None
         workspace.a_inbox = shmem.empty((M * world_size, N), dtype=dtype)
 
-    if config.all_reduce_variant not in ("two_shot", "two_shot_gpu_init_compact"):
+    if config.all_reduce_variant not in (
+        "two_shot",
+        "two_shot_gpu_init",
+    ):
         _init_transfer_workspace(shmem, workspace, M, N, world_size, launch, A.element_size(), A.device)
     workspace.locks.zero_()
     workspace.completion_signals.zero_()
@@ -1747,9 +1754,9 @@ def matmul_all_reduce_copy_engine(
 
     if config.all_reduce_variant == "one_shot":
         _validate_one_shot_inbox_size(M, N, world_size)
-    if config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init") and M % world_size != 0:
+    if config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init_row_major") and M % world_size != 0:
         raise ValueError(
-            "matmul_all_reduce_copy_engine two_shot_gpu_init requires M to be divisible by world_size "
+            "matmul_all_reduce_copy_engine two_shot_gpu_init_row_major requires M to be divisible by world_size "
             "because the final all-gather uses equal row shards."
         )
 
@@ -1846,7 +1853,7 @@ def matmul_all_reduce_copy_engine(
             dtype=A.dtype,
             **launch_kwargs,
         )
-    elif config.all_reduce_variant == "two_shot_gpu_init_compact":
+    elif config.all_reduce_variant == "two_shot_gpu_init":
         compact_schedule = workspace.compact_xcd_schedule
         tile_bytes = block_size_m * block_size_n * A.element_size()
         iris_launch(
@@ -1894,7 +1901,7 @@ def matmul_all_reduce_copy_engine(
             dtype=A.dtype,
             **launch_kwargs,
         )
-    elif config.all_reduce_variant == "two_shot_gpu_init":
+    elif config.all_reduce_variant == "two_shot_gpu_init_row_major":
         element_size = A.element_size()
         iris_launch(
             _partitioned_xcd_matmul_gpu_init_kernel,
@@ -2084,7 +2091,7 @@ def matmul_all_reduce_copy_engine(
                 num_stages=1,
             )
 
-    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init_compact"):
+    if config.all_reduce_variant in ("two_shot", "two_shot_gpu_init"):
         compact_schedule = workspace.compact_xcd_schedule
         reduce_block_size_m = min(_COMPACT_REDUCE_BLOCK_SIZE_M, block_size_m)
         reduce_block_size_n = min(_COMPACT_REDUCE_BLOCK_SIZE_N, block_size_n)
@@ -2143,7 +2150,7 @@ def matmul_all_reduce_copy_engine(
             num_warps=4,
         )
 
-    if config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init"):
+    if config.all_reduce_variant in ("two_shot_row_major", "two_shot_gpu_init_row_major"):
         reduce_block_size_m = launch["reduce_block_size_m"]
         reduce_block_size_n = launch["reduce_block_size_n"]
         rows_per_rank = M // world_size

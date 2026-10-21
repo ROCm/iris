@@ -80,11 +80,11 @@ def _reference_tolerances(dtype: torch.dtype):
 @pytest.mark.parametrize(
     "M,K,expected",
     [
-        (128, 512, "two_shot_gpu_init_compact"),
+        (128, 512, "two_shot_gpu_init"),
         (128, 2048, "two_shot"),
         (2048, 256, "two_shot"),
         (8192, 512, "two_shot"),
-        (32768, 512, "two_shot_gpu_init_compact"),
+        (32768, 512, "two_shot_gpu_init"),
         (32768, 2048, "two_shot"),
     ],
 )
@@ -95,7 +95,14 @@ def test_copy_engine_auto_selector(M, K, expected):
 @pytest.mark.parametrize("M,N,K", _param_shapes())
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
-    "variant", ["one_shot", "two_shot", "two_shot_row_major", "two_shot_gpu_init", "two_shot_gpu_init_compact"]
+    "variant",
+    [
+        "one_shot",
+        "two_shot",
+        "two_shot_row_major",
+        "two_shot_gpu_init",
+        "two_shot_gpu_init_row_major",
+    ],
 )
 def test_matmul_all_reduce_copy_engine(M, N, K, dtype, variant):
     """Test matmul_all_reduce_copy_engine against tritonBLAS matmul + fp32 all-reduce."""
@@ -108,7 +115,7 @@ def test_matmul_all_reduce_copy_engine(M, N, K, dtype, variant):
 
     device = torch.device(f"cuda:{rank}")
     selector = _make_selector(M, N, K, dtype, device)
-    if variant in ("two_shot", "two_shot_gpu_init_compact") and selector.num_sms != world_size:
+    if variant in ("two_shot", "two_shot_gpu_init") and selector.num_sms != world_size:
         pytest.skip("compact two_shot requires the selector XCD count to equal world_size")
 
     # Create input matrices

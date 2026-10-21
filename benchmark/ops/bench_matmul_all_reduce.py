@@ -111,7 +111,7 @@ def tritonblas_rccl_matmul_all_reduce(state, ctx):
 @bench.axis("N", [3584])
 @bench.axis("K", [8192])
 @bench.axis("dtype", [torch.float16])
-@bench.axis("variant", ["one_shot", "two_shot", "two_shot_auto", "two_shot_compact"])
+@bench.axis("variant", ["one_shot", "two_shot", "two_shot_row_major", "two_shot_compact"])
 def matmul_all_reduce(state, ctx):
     """Fused GEMM + all-reduce with configurable variant."""
     M, N, K = state["M"], state["N"], state["K"]
@@ -143,7 +143,7 @@ def matmul_all_reduce(state, ctx):
     if variant == "one_shot":
         # One-shot: each rank broadcasts its full M×N output to (world_size-1) peers
         xgmi_bytes = (world_size - 1) * M * N * C.element_size()
-    else:  # two_shot
+    else:  # two_shot variants
         # Two-shot ring all-reduce: 2 × (world_size-1)/world_size × full_output
         xgmi_bytes = 2 * (world_size - 1) * M * N * C.element_size() // world_size
     state.add_counter("xgmi_bytes", xgmi_bytes)
