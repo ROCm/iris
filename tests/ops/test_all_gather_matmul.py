@@ -13,7 +13,8 @@ import gc
 import pytest
 import torch
 import torch.distributed as dist
-import tritonblas
+from tritonblas.config import matmul_preamble
+from tritonblas.matmul import _make_matmul_selector, matmul_lt
 
 import iris
 import os
@@ -306,7 +307,7 @@ def test_tritonblas_rccl_all_gather_matmul(dtype, atol, rtol, M, K_local, N):
 
     A_gathered_parts = [torch.empty((M, K_local), dtype=dtype, device=device) for _ in range(world_size)]
     output = ctx.zeros((M, N), dtype=dtype)
-    selector = tritonblas.OrigamiMatmulSelector(
+    selector = _make_matmul_selector(
         M,
         N,
         K,
@@ -314,12 +315,13 @@ def test_tritonblas_rccl_all_gather_matmul(dtype, atol, rtol, M, K_local, N):
         B.dtype,
         output.dtype,
         device,
+        streamk=False,
     )
-    config = tritonblas.matmul_preamble(selector)
+    config = matmul_preamble(selector)
 
     dist.all_gather(A_gathered_parts, A_sharded)
     A_gathered = torch.cat(A_gathered_parts, dim=1)
-    tritonblas.matmul_lt(A_gathered, B, output, selector, config)
+    matmul_lt(A_gathered, B, output, selector, config)
 
     torch.cuda.synchronize()
 
