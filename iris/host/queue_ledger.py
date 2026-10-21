@@ -34,6 +34,21 @@ class QueueLedger:
         for key in self.entries:
             self.entries[key] = [e for e in self.entries[key] if e[0] is not plan]
 
+    def earlier(self, plan):
+        """Plans armed before ``plan`` on the queues it uses."""
+        found = []
+        for entries in self.entries.values():
+            plans = [e[0] for e in entries]
+            for i, other in enumerate(plans):
+                if other is plan:
+                    found += plans[:i]
+                    break
+        return found
+
+    def plans(self):
+        """Every plan with chains armed, each once."""
+        return list({id(e[0]): e[0] for entries in self.entries.values() for e in entries}.values())
+
     def check_order(self, plan, allowed, action):
         for (_, peer), entries in self.entries.items():
             for other, round, _ in entries:

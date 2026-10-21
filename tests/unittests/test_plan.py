@@ -306,8 +306,6 @@ def test_misuse_raises():
             a.wait()
         with pytest.raises(RuntimeError, match="prepared earlier"):
             b.start()
-        with pytest.raises(RuntimeError, match="close in the order"):
-            b.close()
         # Used in the order they were prepared, two plans on the same queues are fine
         for round in range(1, 3):
             if round > 1:
@@ -317,6 +315,38 @@ def test_misuse_raises():
             b.run()
             with pytest.raises(RuntimeError, match="needs"):
                 a.start()
+    ctx.barrier()
+    del ctx
+
+
+def test_nested_plans_close_in_any_order():
+    """
+    Nested with blocks close the inner plan first. Its copies queue behind the outer plan's waiting
+    ones, so it stays CLOSING until the outer plan closes, which finishes both.
+    """
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 4096
+    buffers = [ctx.zeros(world * slice_elems, dtype=torch.int32) for _ in range(2)]
+    ledger = queue_ledger.ledger()
+
+    with CollectivePlan(ctx, buffers[0], chunks(_slice(buffers[0], rank, slice_elems), 2, base=buffers[0])) as a:
+        with CollectivePlan(ctx, buffers[1], whole(_slice(buffers[1], rank, slice_elems), base=buffers[1])) as b:
+            a.run()
+            b.run()
+            # Both prepared again, as at the end of a loop iteration
+            a.next_round()
+            b.next_round()
+            for buffer in buffers:
+                buffer.fill_(EMPTY)
+                _slice(buffer, rank, slice_elems).copy_(_expected(2, slice_elems, start=rank * slice_elems))
+            ctx.barrier()  # every rank's data is in place before any rank's copies are released
+        assert b.state is State.CLOSING
+        assert a.state is State.PREPARED
+    assert a.state is State.CLOSED and b.state is State.CLOSED
+    assert not any(ledger.entries.values())
+    for buffer in buffers:
+        assert torch.equal(buffer, _expected(2, buffer.numel()))
     ctx.barrier()
     del ctx
 

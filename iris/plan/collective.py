@@ -64,6 +64,12 @@ def view_words(rank, world_size, gates_ptr, schedules):
     return words
 
 
+def _mark_closed(plans):
+    for plan in plans:
+        plan.state = State.CLOSED
+        plan.gates = plan.view = plan.buffer = None
+
+
 class CollectivePlan:
     """
     Sends regions of ``buffer`` from the rank that writes them to every other rank, using copy
@@ -157,14 +163,19 @@ class CollectivePlan:
     def _unwind_construction(self, error):
         """Raise ``error`` from the constructor, after flushing the chains this rank armed."""
         if self.state is not None:
-            # No plan reaches the caller to close(), so flush here
+            # No plan reaches the caller to close(), so flush here; if queued behind an earlier plan's
+            # waiting copies, the ledger keeps this plan until that plan's close() drains it
+            drained = []
             try:
-                self._flush(None)
+                self._release_own()
+                if not self._blocked():
+                    drained = self._drain_closing(None)
             except Exception as flush_error:
                 raise RuntimeError(f"{error}; the copies it prepared could not be flushed: {flush_error}") from error
             finally:
                 # Peers may still be flushing into this rank's buffer and gates
                 self.ctx.barrier()
+            _mark_closed(drained)
         raise error
 
     def _arm(self, round):
@@ -315,31 +326,52 @@ class CollectivePlan:
             kernels.release_kernel[(len(self._own),)](self.view, self._own)
         self.wait(timeout)
 
-    def _flush(self, timeout):
-        """Release this rank's prepared chains and wait for them to drain."""
-        if self.state in (State.PREPARED, State.RUNNING, State.FAILED):
-            self._ledger.check_order(self, (State.RUNNING, State.CLOSING), "close")
-            self.view[dv.H_ROUND.value] = self.round
-            if len(self._own):
-                kernels.release_kernel[(len(self._own),)](self.view, self._own)
-            self.state = State.CLOSING
-        if self.state is State.CLOSING:
-            self._wait(own_only=True, timeout=timeout)
-            self._ledger.release(self)
+    def _release_own(self):
+        """Open this rank's gates, so its prepared chains send its chunks as they stand."""
+        self.view[dv.H_ROUND.value] = self.round
+        if len(self._own):
+            kernels.release_kernel[(len(self._own),)](self.view, self._own)
+        self.state = State.CLOSING
+
+    def _blocked(self):
+        # Chains run in order on each queue, so one parked behind an unreleased chain cannot drain
+        return any(p.state in (State.PREPARED, State.FAILED, State.CLOSING) for p in self._ledger.earlier(self))
+
+    def _drain_closing(self, timeout):
+        """Drain every closing plan whose chains can now run, in queue order. Returns them."""
+        drained = []
+        progress = True
+        while progress:
+            progress = False
+            for plan in self._ledger.plans():
+                if plan.state is State.CLOSING and not plan._blocked():
+                    plan._wait(own_only=True, timeout=timeout)
+                    self._ledger.release(plan)
+                    drained.append(plan)
+                    progress = True
+        return drained
 
     def close(self, timeout=None):
         """
         Collective: wait until every rank is done with the plan, then free it.
 
         Prepared copies cannot be withdrawn from the queue, so closing a plan whose round has not
-        finished sends this rank's chunks as they stand. Plans sharing queues must close in the
-        order they were prepared. A peer's copies and polls may still touch this rank's buffer and
-        gates, so every rank must call close() before any of them is freed.
+        finished sends this rank's chunks as they stand. A peer's copies and polls may still touch
+        this rank's buffer and gates, so every rank must call close() before any of them is freed.
+
+        Plans may be closed in any order. If a plan prepared earlier on the same queues still has
+        copies waiting, this plan's copies are queued behind them and cannot run yet: close() then
+        returns with the plan ``CLOSING``, and closing the earlier plan finishes this one too.
         """
         if self.state is State.CLOSED:
             return
-        self._flush(timeout)
+        if self.state in (State.PREPARED, State.RUNNING, State.FAILED):
+            self._release_own()
+        if self.state is State.CLOSING and self._blocked():
+            return
+        closed = self._drain_closing(timeout)
+        if self not in closed:
+            closed.append(self)
         self._ledger.release(self)
         self.ctx.barrier()
-        self.state = State.CLOSED
-        self.gates = self.view = self.buffer = None
+        _mark_closed(closed)

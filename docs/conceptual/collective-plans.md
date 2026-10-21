@@ -73,9 +73,8 @@ with CollectivePlan(ctx, out, schedule) as plan:   # collective: allocates gates
    next round, and its copies can overwrite the buffer at any time. Work queued before the call is
    covered; nothing issued after it may read the buffer until the next `wait()`.
 
-Plans that share queues must start, and close, in the order they were prepared. While copies are
-prepared on a queue, host `Iris.put()` and `quiet()` to that peer raise rather than queue behind
-them.
+Plans that share queues must start in the order they were prepared. While copies are prepared
+on a queue, host `Iris.put()` and `quiet()` to that peer raise rather than queue behind them.
 
 Creating a plan and `next_round()` prepare on every rank or on none: if one rank cannot (for
 example its queue is full, or its schedule is invalid), every rank raises, and a failed
@@ -86,6 +85,10 @@ or `FAILED`.
 a rank's buffer and gates after its own work is done. Prepared copies cannot be withdrawn from the
 queue, so closing a plan in the middle of a round (or before it starts) sends each rank's chunks
 as they stand. Leaving a `with` block closes the plan, including on an exception.
+
+Plans can be closed in any order, so `with` blocks nest. A plan whose copies are queued behind an
+earlier plan's waiting copies cannot finish first: its `close()` returns with the plan `CLOSING`,
+and closing the earlier plan finishes both.
 
 ## Memory ordering
 
