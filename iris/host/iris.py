@@ -55,7 +55,6 @@ from iris.host.platform.hip import (
 
 from iris.host.memory.symmetric_heap import SymmetricHeap
 import numpy as np
-from typing import Any
 import torch
 import logging
 
@@ -167,8 +166,9 @@ class Iris:
         # Lazy initialization for ops interface
         self._ops = None
 
-        # Device-side barrier state, keyed by process group (None = all ranks).
-        self._device_barrier_state: dict[Any, torch.Tensor] = {}
+        # Pairwise counters for device_barrier(), shared by every process group.
+        # Allocated here because heap allocation is collective over all ranks.
+        self._device_barrier_flags = self.zeros((num_ranks, num_ranks), dtype=torch.int32)
 
         # Initialize tracing
         self.tracing = Tracing(self)
@@ -1483,10 +1483,10 @@ class Iris:
 
         Unlike ``barrier()`` which uses host-side ``torch.distributed.barrier()``,
         this uses device-side atomic operations on the symmetric heap to synchronize
-        ranks. Stateless w.r.t. host-side epoch tracking: each rank's flag on
-        the heap serves as its own epoch counter, managed entirely by the GPU
-        via atomic_add. A persistent per-group flags tensor is cached in
-        ``_device_barrier_state``.
+        ranks. Stateless w.r.t. host-side epoch tracking: the counters live on
+        the heap and are managed entirely by the GPU via atomic_add. They are
+        allocated once in ``__init__`` and shared by every process group, so this
+        never allocates and needs only the group's members to take part.
 
         Args:
             group (ProcessGroup, optional): The process group to synchronize.
@@ -1496,11 +1496,8 @@ class Iris:
             >>> ctx = iris.iris(1 << 20)
             >>> ctx.device_barrier()  # Synchronize all ranks on device
         """
-        if group not in self._device_barrier_state:
-            self._device_barrier_state[group] = self.zeros((self.num_ranks,), dtype=torch.int32)
-
         distributed_device_barrier(
-            self._device_barrier_state[group],
+            self._device_barrier_flags,
             group,
             self.cur_rank,
             self.num_ranks,
