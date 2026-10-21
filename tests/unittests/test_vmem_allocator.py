@@ -225,8 +225,8 @@ def test_vmem_import_external_tensor():
     """
     import gc
 
-    # Create Iris context with large enough heap for PyTorch's 2MB allocations
-    ctx = iris.iris(4 << 20, allocator_type="vmem")
+    # Large enough for PyTorch's 2MB allocation plus the granule Iris takes for its barrier flags
+    ctx = iris.iris(8 << 20, allocator_type="vmem")
 
     # Create original PyTorch tensor on the correct device for this rank
     original_tensor = torch.randn(100, dtype=torch.float32, device=ctx.device)

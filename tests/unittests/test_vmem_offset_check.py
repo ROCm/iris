@@ -19,7 +19,7 @@ def test_vmem_imported_tensor_offset_symmetry():
     BLOCK_SIZE = 16
 
     # Use VMem allocator
-    ctx = iris.iris(4 << 20, allocator_type="vmem")  # 4 MB heap
+    ctx = iris.iris(8 << 20, allocator_type="vmem")  # 2 MB import plus the granule for the barrier flags
 
     num_ranks = ctx.get_num_ranks()
     heap_bases = ctx.get_heap_bases()
