@@ -53,7 +53,6 @@ from iris.host.platform.hip import (
     count_devices,
 )
 
-from xio import sdma_ep
 from iris.host.memory.symmetric_heap import SymmetricHeap
 import numpy as np
 from typing import Any
@@ -72,6 +71,8 @@ from iris.mem.triton.tracing import Tracing as DeviceTracing  # noqa: F401
 from iris.host.memory import tensors as tensor_creation
 from iris.host.platform.utils import is_simulation_env
 
+_SUPPORTED_ENGINES = frozenset({"sdma"})
+
 
 class Iris:
     """
@@ -83,6 +84,9 @@ class Iris:
     Args:
         heap_size (int): Size of the symmetric heap in bytes. Default: 1GB (2^30)
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem"
+        engines (str or tuple of str, optional): Engine name or names to set up. Use
+            ``("sdma",)`` for host- and device-initiated SDMA operations (needs
+            ``pip install iris[sdma]``). Defaults to ``()`` (none).
 
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap with torch allocator
@@ -91,9 +95,25 @@ class Iris:
 
         >>> # Use VMem allocator for memory oversubscription
         >>> ctx = iris.iris(heap_size=2**31, allocator_type="vmem")
+
     """
 
-    def __init__(self, heap_size=1 << 30, allocator_type="torch"):
+    def __init__(self, heap_size=1 << 30, allocator_type="torch", engines=()):
+        if engines is None:
+            engines = ()
+        elif isinstance(engines, str):
+            engines = (engines,)
+        else:
+            engines = tuple(engines)
+        unsupported = set(engines) - _SUPPORTED_ENGINES
+        if unsupported:
+            raise ValueError(f"Unsupported engines: {sorted(unsupported)}. Supported: {sorted(_SUPPORTED_ENGINES)}.")
+        self._sdma_ep = None
+        if "sdma" in engines:
+            from iris.device.sdma_utils import bind_sdma_ep
+
+            self._sdma_ep = bind_sdma_ep()
+
         # Initialize distributed environment
         comm, cur_rank, num_ranks = init_distributed()
         num_gpus = count_devices()
@@ -137,7 +157,27 @@ class Iris:
 
         distributed_barrier()
 
-        # initialize copy engines
+        self.copy_engines_device_ctx = None
+        if self._sdma_ep is not None:
+            self._init_copy_engines(num_gpus, num_ranks, cur_rank)
+
+        # Initialize CCL interface
+        self.ccl = self.CCL(self)
+
+        # Lazy initialization for ops interface
+        self._ops = None
+
+        # Device-side barrier state, keyed by process group (None = all ranks).
+        self._device_barrier_state: dict[Any, torch.Tensor] = {}
+
+        # Initialize tracing
+        self.tracing = Tracing(self)
+
+        # Pre-build the device context tensor (rebuilt when tracing is enabled)
+        self._build_device_context()
+
+    def _init_copy_engines(self, num_gpus, num_ranks, cur_rank):
+        sdma_ep = self._sdma_ep
         sdma_ep.init()
 
         context_size = sdma_ep.QUEUE_DEVICE_CTX_SIZE
@@ -167,20 +207,13 @@ class Iris:
             self.copy_engines_device_ctx[local_rank][3] = handle.doorbell
             self.copy_engines_device_ctx[local_rank][4] = handle.cached_wptr
             self.copy_engines_device_ctx[local_rank][5] = handle.committed_wptr
-        # Initialize CCL interface
-        self.ccl = self.CCL(self)
 
-        # Lazy initialization for ops interface
-        self._ops = None
-
-        # Device-side barrier state, keyed by process group (None = all ranks).
-        self._device_barrier_state: dict[Any, torch.Tensor] = {}
-
-        # Initialize tracing
-        self.tracing = Tracing(self)
-
-        # Pre-build the device context tensor (rebuilt when tracing is enabled)
-        self._build_device_context()
+    def _require_copy_engine(self):
+        if self._sdma_ep is None:
+            raise RuntimeError(
+                'SDMA is disabled; initialize Iris with engines=("sdma",) (needs `pip install iris[sdma]`).'
+            )
+        return self._sdma_ep
 
     def __del__(self):
         """Cleanup resources on deletion."""
@@ -304,6 +337,7 @@ class Iris:
 
         This method automatically detects the type of value and uses the appropriate
         broadcast mechanism:
+
         - For tensors and arrays: uses efficient PyTorch distributed tensor collectives
         - For scalars and other objects: uses object broadcast
 
@@ -673,6 +707,31 @@ class Iris:
         """
         return self.heap.is_symmetric(tensor)
 
+    def reclaim_freed(self):
+        """
+        Make symmetric heap memory that every rank has freed reusable.
+
+        Collective: all ranks must call it together. With `allocator_type='vmem_chunked'`, a freed
+        symmetric tensor is only reused once every rank has freed it, so that allocations land at the
+        same offset on every rank. Iris reclaims freed memory itself before growing the heap and
+        periodically as memory is allocated; call this to reuse freed memory sooner. Other
+        allocators never reuse freed memory, so for them this does nothing.
+
+        Waits for the work queued on this rank's HIP streams before reusing memory. Copy-engine
+        transfers are not covered: call :meth:`quiet` before dropping their tensors.
+
+        Each call runs ``gc.collect()``, a device-wide ``torch.cuda.synchronize()`` that breaks
+        CPU/GPU overlap, and a round-trip with every rank. Do not call it every step.
+
+        Example:
+            >>> ctx = iris.iris(allocator_type='vmem_chunked')
+            >>> scratch = ctx.zeros(1 << 20, dtype=torch.float32)
+            >>> del scratch
+            >>> ctx.reclaim_freed()  # on every rank
+            >>> reused = ctx.zeros(1 << 20, dtype=torch.float32)  # same memory as scratch
+        """
+        self.heap.collect()
+
     def full(self, size, fill_value, *, out=None, dtype=None, layout=torch.strided, device=None, requires_grad=False):
         """
         Creates a tensor of size size filled with fill_value. The tensor's dtype is inferred from fill_value.
@@ -950,7 +1009,19 @@ class Iris:
         """
         return self.heap_bases
 
-    def get_copy_engine_ctx(self):
+    def get_copy_engine_ctx(self) -> "torch.Tensor | None":
+        """
+        Get the device-side copy engine context for SDMA operations.
+
+        The returned tensor holds the per-rank SDMA queue, read and write pointer,
+        and doorbell addresses that device-side kernels need in order to enqueue
+        copy packets. Pass it to ``iris.put`` as ``copy_engine_ctx`` when driving
+        the copy engine from inside a kernel.
+
+        Returns:
+            torch.Tensor: The copy engine device context, or ``None`` when Iris was
+            not initialized with ``engines=("sdma",)``.
+        """
         return self.copy_engines_device_ctx
 
     @staticmethod
@@ -1003,7 +1074,10 @@ class Iris:
         """
         One-sided put operation with optional wait (POLL) and signal (ATOMIC).
 
+        Requires initialization with ``engines=("sdma",)``.
+
         Supports:
+
         - Simple copy: put(src, to_rank)
         - Copy + signal: put(src, to_rank, signal_flag=flag)
         - Wait + copy: put(src, to_rank, wait_flag=flag, wait_value=N)
@@ -1035,6 +1109,7 @@ class Iris:
             ...          wait_flag=batch_ready, wait_value=256,
             ...          signal_flag=transfer_done, signal_value=1)
         """
+        sdma_ep = self._require_copy_engine()
         if to_tensor is None:
             to_tensor = from_tensor
 
@@ -1098,6 +1173,8 @@ class Iris:
         """
         2D tile transfer with optional wait/signal (sub-window copy).
 
+        Requires initialization with ``engines=("sdma",)``.
+
         Low-level API - caller provides pre-translated pointers for performance.
 
         Args:
@@ -1117,6 +1194,7 @@ class Iris:
             channel: SDMA channel to use
 
         """
+        sdma_ep = self._require_copy_engine()
         from_rank = self.get_rank()
 
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
@@ -1219,6 +1297,8 @@ class Iris:
         """
         Batched 2D tile transfer with optional shared wait/signal.
 
+        Requires initialization with ``engines=("sdma",)``.
+
         Args:
             global_addrs: Source addresses at the first element of each tile
             to_rank: Destination rank
@@ -1235,6 +1315,7 @@ class Iris:
             async_op: If True, don't wait for completion
             channel: SDMA channel to use
         """
+        sdma_ep = self._require_copy_engine()
         from_rank = self.get_rank()
 
         if not (
@@ -1336,6 +1417,8 @@ class Iris:
         """
         Wait for all outstanding SDMA operations to complete.
 
+        Requires initialization with ``engines=("sdma",)``.
+
         Args:
             to_rank: If specified, wait only for ops to this rank.
                      If None, wait for ops to all ranks.
@@ -1346,6 +1429,7 @@ class Iris:
             >>> shmem.quiet(to_rank=1)  # Wait for completion
             >>> shmem.quiet()  # Wait for all ranks
         """
+        sdma_ep = self._require_copy_engine()
         src_rank = self.get_rank()
         if to_rank is not None:
             sdma_ep.quiet(src_rank, to_rank, channel)
@@ -1606,7 +1690,7 @@ class Iris:
         Collective Communication Library (CCL) interface for Iris.
 
         Provides collective operations that can be called as methods on the Iris instance.
-        Example usage:
+        Example:
             >>> ctx = iris.iris()
             >>> ctx.ccl.all_to_all(output_tensor, input_tensor)
         """
@@ -1680,6 +1764,10 @@ class Iris:
                 >>> # Custom configuration
                 >>> from iris.ccl import Config
                 >>> config = Config(block_size_m=128, block_size_n=32)
+                >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
+
+                >>> # gfx1250: move tiles with the tensor data movement engine
+                >>> config = Config(use_gluon=True, all_gather_variant="tdm", block_size_m=128, block_size_n=256, num_warps=16)
                 >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
 
                 >>> # Async operation (no barrier)
@@ -1802,7 +1890,7 @@ class Iris:
             )
 
 
-def iris(heap_size=1 << 30, allocator_type="torch"):
+def iris(heap_size=1 << 30, allocator_type="torch", engines=()):
     """
     Create and return an Iris instance with the specified heap size.
 
@@ -1810,6 +1898,7 @@ def iris(heap_size=1 << 30, allocator_type="torch"):
         heap_size (int): Size of the heap in bytes. Defaults to 1GB.
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem".
                               Can be overridden with IRIS_ALLOCATOR environment variable.
+        engines (str or tuple of str, optional): See :class:`Iris`.
 
     Returns:
         Iris: An initialized Iris instance.
@@ -1823,4 +1912,4 @@ def iris(heap_size=1 << 30, allocator_type="torch"):
         >>> iris_ctx = iris.iris(2**30, allocator_type="vmem")
         >>> tensor = iris_ctx.zeros(1024, 1024)
     """
-    return Iris(heap_size, allocator_type)
+    return Iris(heap_size, allocator_type, engines=engines)

@@ -179,6 +179,38 @@ def test_vmem_granularity_alignment():
     print(f"Rank {ctx.cur_rank}: VMem granularity alignment test passed!")
 
 
+@pytest.mark.parametrize("target_mib", [3, 16])
+def test_vmem_heap_size_not_multiple_of_granularity(target_mib):
+    """A heap that is not a multiple of the granularity must be usable up to its rounded-up end on every rank."""
+    from iris.host.platform.hip import get_allocation_granularity
+
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+
+    granularity = get_allocation_granularity(torch.cuda.current_device())
+    # An odd granule count makes half the heap a non-whole number of granules on small-granularity devices.
+    granules = max(3, (target_mib << 20) // granularity) | 1
+    heap_size = granules * granularity - granularity // 2
+
+    ctx = iris.iris(heap_size, allocator_type="vmem")
+    allocator = ctx.heap.allocator
+    assert allocator.aligned_heap_size == granules * granularity
+    assert allocator.minimal_size % granularity == 0
+
+    # Fill the heap so the last segment ends past heap_size, inside the rounded-up tail.
+    remaining = allocator.aligned_heap_size - allocator.current_offset
+    tensor = ctx.zeros(remaining, dtype=torch.uint8)
+    tensor.fill_(ctx.cur_rank + 1)
+    ctx.barrier()
+
+    for peer in range(ctx.num_ranks):
+        assert int(ctx.heap_bases[peer].item()) > 0, f"Peer {peer} heap base not set"
+    assert torch.all(tensor == ctx.cur_rank + 1)
+
+    del tensor, ctx
+    torch.cuda.synchronize()
+
+
 def test_vmem_import_external_tensor():
     """
     Test importing external PyTorch tensors via as_symmetric().

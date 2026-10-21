@@ -41,6 +41,7 @@ import torch
 import triton.language as tl
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+from triton.language.extra.hip import utils as hip_utils
 
 import iris
 from iris.gluon import IrisDeviceCtx
@@ -92,11 +93,12 @@ def all_gather_put_kernel(
 
     pid = gl.program_id(0)
 
-    # AMD GPUs have 64 threads per warp (wavefront size 64).
-    # Total threads per CTA = NUM_WARPS * 64.
-    # Each thread handles SPT = BLOCK_SIZE // (NUM_WARPS * 64) elements.
-    SPT: gl.constexpr = BLOCK_SIZE // (NUM_WARPS * 64)
-    layout: gl.constexpr = gl.BlockedLayout([SPT], [64], [NUM_WARPS], [0])
+    # The wavefront is 64 wide on CDNA3/4 and 32 on CDNA5, so read the CTA's
+    # thread count from the launch options. Each thread handles
+    # SPT = BLOCK_SIZE // (NUM_WARPS * wavefront) elements.
+    THREADS: gl.constexpr = hip_utils.num_threads()
+    SPT: gl.constexpr = BLOCK_SIZE // THREADS
+    layout: gl.constexpr = gl.BlockedLayout([SPT], [THREADS // NUM_WARPS], [NUM_WARPS], [0])
     offsets = pid * BLOCK_SIZE + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < num_elements
 
@@ -128,13 +130,13 @@ def all_gather_put_kernel(
 def _launch(shmem, local_buf, global_buf, context_tensor, enable_tracing: bool):
     """Launch one iteration of the all-gather kernel.
 
-    Layout constraints for AMD GPUs (warp size = 64):
-      BLOCK_SIZE = sizePerThread * 64 * NUM_WARPS
-    Here NUM_WARPS=4, sizePerThread=1 → BLOCK_SIZE = 1 * 64 * 4 = 256.
+    Layout constraint: BLOCK_SIZE = sizePerThread * wavefront * NUM_WARPS.
+    Here NUM_WARPS=4 and BLOCK_SIZE=256, so sizePerThread is 1 on a 64-wide
+    wavefront (CDNA3/4) and 2 on a 32-wide one (CDNA5).
     """
     num_elements = local_buf.numel()
     NUM_WARPS = 4
-    BLOCK_SIZE = 64 * NUM_WARPS  # 256 elements per tile (1 el/thread, 64 threads/warp, 4 warps)
+    BLOCK_SIZE = 256  # elements per tile
     grid = ((num_elements + BLOCK_SIZE - 1) // BLOCK_SIZE,)
     all_gather_put_kernel[grid](
         IrisDeviceCtx,

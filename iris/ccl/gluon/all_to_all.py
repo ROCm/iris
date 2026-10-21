@@ -11,6 +11,7 @@ If gluon is not installed, the import itself raises ValueError.
 try:
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
+    from triton.language.extra.hip import utils as hip_utils
 except ImportError as e:
     raise ValueError("Gluon is not available. Install Triton with Gluon support or set use_gluon=False.") from e
 
@@ -83,12 +84,14 @@ def persistent_all_to_all_gluon(
         pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
         pid_n = (tile_id % num_pid_in_group) // group_size_m
 
-        # Optimized layout for maximum VGPR usage and dwordx4 vectorization
-        # Use layout that maximizes register utilization and enables wider loads
-        # For AMD: 64 threads/warp, 4 warps = 256 threads total
-        # BlockedLayout: [size_per_thread], [threads_per_warp], [warps_per_cta], [order]
-        layout_col: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])  # Column access
-        layout_row: gl.constexpr = gl.BlockedLayout([1], [64], [4], [0])  # Row indices
+        # BlockedLayout: [size_per_thread], [threads_per_warp], [warps_per_cta], [order].
+        # Lanes and warps come from the compiler's launch options rather than literals:
+        # the wavefront is 64 wide on CDNA3/4 but 32 on CDNA5, and the launch's warp
+        # count is config.num_warps.
+        WARPS: gl.constexpr = hip_utils.num_warps()
+        LANES: gl.constexpr = hip_utils.num_threads() // WARPS
+        layout_col: gl.constexpr = gl.BlockedLayout([1], [LANES], [WARPS], [0])  # Column access
+        layout_row: gl.constexpr = gl.BlockedLayout([1], [LANES], [WARPS], [0])  # Row indices
 
         rm = (pid_m * BLOCK_SIZE_M + gl.arange(0, BLOCK_SIZE_M, layout=layout_row)) % M
         rn = (pid_n * BLOCK_SIZE_N + gl.arange(0, BLOCK_SIZE_N, layout=layout_col)) % N

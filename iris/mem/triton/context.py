@@ -98,9 +98,11 @@ class Context:
         """
         Initialize Context from the encoded context tensor.
 
-        The context tensor has the format:
-        - [cur_rank, num_ranks, heap_base_0, ..., heap_base_N, trace_info...]
-        - If tracing=True: extracts trace buffer pointers from context_tensor
+        The context tensor has the format::
+
+            [cur_rank, num_ranks, heap_base_0, ..., heap_base_N, trace_info...]
+
+        If ``tracing=True``, trace buffer pointers are also extracted from it.
 
         Args:
             context_tensor: Pointer to encoded context data (from Iris.get_device_context())

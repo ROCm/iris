@@ -9,20 +9,17 @@ import subprocess
 import os
 
 from iris.host.logging.logging import _log_rank
+from iris.host.platform.libs import load_vendor_library
 
 # Auto-detect backend
 _is_amd_backend = True
-try:
-    rt_path = "libamdhip64.so"
-    gpu_runtime = ctypes.cdll.LoadLibrary(rt_path)
-except OSError:
+gpu_runtime = load_vendor_library("libamdhip64", "libamdhip64.so")
+if gpu_runtime is None:
     try:
-        rt_path = "libcudart.so"
-        gpu_runtime = ctypes.cdll.LoadLibrary(rt_path)
+        gpu_runtime = ctypes.cdll.LoadLibrary("libcudart.so")
         _is_amd_backend = False
     except OSError:
-        rt_path = "libamdhip64.so"
-        gpu_runtime = ctypes.cdll.LoadLibrary(rt_path)
+        gpu_runtime = ctypes.cdll.LoadLibrary("libamdhip64.so")
 
 
 def gpu_try(err):

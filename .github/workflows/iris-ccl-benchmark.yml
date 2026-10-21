@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+name: Iris CCL Benchmark (Iris vs RCCL)
+
+# Deliberately not on pull_request: this is a measurement job, not a gate. By
+# default it sweeps the full grid -- three collectives x 2/4/8 ranks x 16 shapes
+# (2 MiB to 1 GiB) x fp16/bf16/fp8, for Iris and RCCL -- and holds all 8 GPUs
+# while it does, which per commit would crowd out the test jobs.
+on:
+  workflow_dispatch:
+    inputs:
+      num_ranks:
+        description: "Comma-separated rank counts"
+        required: false
+        default: "2,4,8"
+      dtypes:
+        description: "Comma-separated dtypes (fp8 is Iris-only; RCCL has no fp8)"
+        required: false
+        default: "fp16,bf16,fp8"
+      m_values:
+        description: "Comma-separated M values (rows, i.e. tokens)"
+        required: false
+        default: "1024,4096,16384,65536"
+      n_values:
+        description: "Comma-separated N values (columns, i.e. hidden size)"
+        required: false
+        default: "1024,2048,4096,8192"
+      n_repeat:
+        description: "Timed iterations per point"
+        required: false
+        default: "50"
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  DOCKER_IMAGE_NAME: ${{ vars.DOCKER_IMAGE_NAME || 'iris-dev-triton-aafec41' }}
+
+jobs:
+  ccl-benchmark:
+    name: CCL benchmark (Iris vs RCCL)
+    runs-on: [linux-mi350-8gpu-iris]
+    timeout-minutes: 360
+
+    # Dispatch inputs are bound to environment variables rather than
+    # interpolated into run: blocks. ${{ }} expansion happens before the shell
+    # sees the script, so interpolating user-controlled input directly is a
+    # command-injection vector.
+    env:
+      NUM_RANKS: ${{ github.event.inputs.num_ranks || '2,4,8' }}
+      DTYPES: ${{ github.event.inputs.dtypes || 'fp16,bf16,fp8' }}
+      M_VALUES: ${{ github.event.inputs.m_values || '1024,4096,16384,65536' }}
+      N_VALUES: ${{ github.event.inputs.n_values || '1024,2048,4096,8192' }}
+      N_REPEAT: ${{ github.event.inputs.n_repeat || '50' }}
+
+    steps:
+      - name: Checkout repository
+        # Unpinned to match the other workflows in this repo, which all use
+        # floating major tags. The scan only audits *changed* files, so it would
+        # flag this one alone while the rest go unchecked -- suppressed here so
+        # the convention stays consistent rather than diverging in one file.
+        uses: actions/checkout@v4 # zizmor: ignore[unpinned-uses]
+        with:
+          # Nothing here pushes, and the sweep uploads artifacts -- do not leave
+          # credentials in .git/config where they could be packaged up.
+          persist-credentials: false
+
+      - name: Setup Apptainer (if not available)
+        run: |
+          if ! command -v apptainer &> /dev/null && ! command -v docker &> /dev/null; then
+            echo "[ERROR] Neither Apptainer nor Docker is available"
+            exit 1
+          fi
+
+      - name: Build Iris container
+        run: |
+          bash .github/scripts/container_build.sh
+
+      - name: Run the sweep
+        run: |
+          # Validate first: num_ranks sizes the GPU request below, before
+          # run_ccl_benchmark.sh checks its inputs.
+          if ! [[ "$NUM_RANKS" =~ ^[1-8](,[1-8])*$ ]]; then
+            echo "[ERROR] num_ranks must be comma-separated integers 1-8, got '$NUM_RANKS'"
+            exit 1
+          fi
+          # Enough GPUs for the largest rank count; smaller ones run inside it.
+          MAX_RANKS=$(echo "$NUM_RANKS" | tr ',' '\n' | sort -n | tail -1)
+          # Single-quoted: the task's shell expands the inputs from the
+          # environment, so they are never spliced into the command text. The
+          # task runs in a private copy of the checkout that is deleted when it
+          # ends, so copy the results out for the steps below, even on failure.
+          python3 .github/scripts/gpu_task_queue.py --task "$MAX_RANKS" "CCL sweep" \
+            'bash .github/scripts/run_ccl_benchmark.sh "$NUM_RANKS" "$DTYPES" "$M_VALUES" "$N_VALUES" "$N_REPEAT"; rc=$?
+             cp -r ccl_results "$GITHUB_WORKSPACE/" 2>/dev/null; exit $rc'
+
+      - name: Publish the comparison table
+        if: always()
+        run: |
+          if [ -f ccl_results/summary.md ]; then
+            {
+              echo "## Iris vs RCCL — ranks ${NUM_RANKS}, ${DTYPES}"
+              echo ""
+              echo "Commit \`${GITHUB_SHA::8}\`. Speedup is RCCL latency / Iris latency: above 1.00x means Iris is faster."
+              echo "One image per collective and dtype is in the run's artifact."
+              echo ""
+              cat ccl_results/summary.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No summary produced; see the sweep step for why." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4 # zizmor: ignore[unpinned-uses]
+        with:
+          name: ccl-benchmark-${{ github.run_id }}
+          path: ccl_results/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Release GPUs
+        if: always()
+        run: |
+          bash .github/scripts/release_gpus.sh

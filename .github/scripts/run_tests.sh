@@ -8,9 +8,12 @@
 #   num_ranks: number of GPU ranks (1, 2, 4, or 8)
 #   gpu_devices: comma-separated GPU device IDs (optional, if not provided will use allocator)
 #   install_method: pip install method - "git", "editable", or "install" (optional, default: "editable")
-#     - "git": pip install git+https://github.com/${{ github.repository }}.git@${{ github.sha }}
-#     - "editable": pip install -e .
-#     - "install": pip install .
+#     - "git": pip install 'iris[sdma] @ git+https://github.com/${{ github.repository }}.git@${{ github.sha }}'
+#     - "editable": pip install -e '.[sdma]'
+#     - "install": pip install '.[sdma]'
+#
+# CONTAINER_IMAGE, if set, selects the container image (e.g. the nightly Triton
+# image) instead of the one container_build.sh produced.
 
 set -e
 
@@ -43,17 +46,20 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# GPU_DEVICES should be provided by workflow-level acquire_gpus.sh step
-# or via command-line argument for backward compatibility
+# GPU_DEVICES is set by gpu_task_queue.py, or passed as an argument
 if [ -z "$GPU_DEVICES" ]; then
     echo "[RUN-TESTS] WARNING: No GPUs allocated. GPU_DEVICES not set."
     echo "[RUN-TESTS] Tests may fail if they require GPUs."
 fi
 
-# Build GPU argument
+# Build GPU and image arguments
 GPU_ARG=""
 if [ -n "$GPU_DEVICES" ]; then
     GPU_ARG="--gpus $GPU_DEVICES"
+fi
+IMAGE_ARG=()
+if [ -n "$CONTAINER_IMAGE" ]; then
+    IMAGE_ARG=(--image "$CONTAINER_IMAGE")
 fi
 
 # Build install command based on method
@@ -62,19 +68,20 @@ if [ "$INSTALL_METHOD" = "git" ]; then
     # For git install, we need the repository and SHA from environment or use defaults
     REPO=${GITHUB_REPOSITORY:-"ROCm/iris"}
     SHA=${GITHUB_SHA:-"HEAD"}
-    INSTALL_CMD="pip install git+https://github.com/${REPO}.git@${SHA}"
+    INSTALL_CMD="pip install 'iris[sdma] @ git+https://github.com/${REPO}.git@${SHA}'"
 elif [ "$INSTALL_METHOD" = "editable" ]; then
-    INSTALL_CMD="pip install -e ."
+    INSTALL_CMD="pip install -e '.[sdma]'"
 elif [ "$INSTALL_METHOD" = "install" ]; then
-    INSTALL_CMD="pip install ."
+    INSTALL_CMD="pip install '.[sdma]'"
 fi
 
 # Run tests in container
 EXIT_CODE=0
 # shellcheck disable=SC2086
-"$SCRIPT_DIR/container_exec.sh" $GPU_ARG "
+"$SCRIPT_DIR/container_exec.sh" "${IMAGE_ARG[@]}" $GPU_ARG "
     set -e
     
+    echo \"Triton version: \$(pip show triton 2>/dev/null | grep Version || echo unknown)\"
     echo \"Installing iris using method: $INSTALL_METHOD\"
     $INSTALL_CMD
     

@@ -11,6 +11,7 @@
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
 import os
+import shutil
 import sys
 from unittest.mock import MagicMock
 
@@ -32,6 +33,11 @@ version = release
 # ones.
 extensions = [
     "rocm_docs",
+    # Sphinx removed its bundled jQuery in 6.0, but four rocm-docs-core theme
+    # scripts (code_word_breaks, renameVersionLinks, rdcMisc,
+    # theme_mode_captions) still call $(). Without this every page throws
+    # "$ is not defined" and those scripts silently do nothing.
+    "sphinxcontrib.jquery",
     "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
@@ -96,6 +102,11 @@ autodoc_mock_imports = [
     "iris.host.distributed.helpers",
     "iris.host.platform.hip",
     "tritonblas",
+    # rocm-xio. iris/host/iris.py imports it unconditionally at module load, so
+    # without this every autodoc directive fails with ModuleNotFoundError and the
+    # whole API reference renders empty. The docs CI installs only
+    # docs/sphinx/requirements.txt, so xio is never present there either.
+    "xio",
 ]
 
 # Custom mocks that preserve docstrings for Triton Gluon
@@ -115,6 +126,26 @@ class PreserveDocstringMock:
 
 # Mock triton.language first
 triton_language_mock = MagicMock()
+
+
+# These tl.* names are used as parameter ANNOTATIONS throughout the device APIs,
+# so autodoc resolves them and prints their repr into the rendered signature. A
+# bare MagicMock attribute reprs as
+#     <MagicMock name='mock.constexpr' id='139779281861264'>
+# which leaks into the parameter list, and the id changes on every build so the
+# HTML churns too. Giving each one a real class makes it repr as its own name.
+# The list is every `: tl.<name>` annotation appearing in iris/ -- if a new one
+# is introduced it will show up as a MagicMock on the rendered page.
+def _name_mock_types(mock, module, names):
+    """Give a mocked module real classes for the names used as annotations."""
+    for n in names:
+        cls = type(n, (), {"__doc__": "Triton %s." % n})
+        cls.__module__ = module
+        setattr(mock, n, cls)
+
+
+_name_mock_types(triton_language_mock, "triton.language", ("constexpr", "tensor"))
+
 sys.modules["triton.language"] = triton_language_mock
 sys.modules["triton.language.core"] = MagicMock()
 sys.modules["triton.language.core"]._aggregate = lambda cls: cls  # Preserve class
@@ -142,7 +173,13 @@ class GluonMock:
 sys.modules["triton.experimental"] = MagicMock()
 sys.modules["triton.experimental"].gluon = GluonMock()
 sys.modules["triton.experimental.gluon"] = GluonMock()
-sys.modules["triton.experimental.gluon"].language = MagicMock()
+_gluon_language_mock = MagicMock()
+# Gluon annotates with gl.constexpr, which resolves through a *different* mock
+# module than tl.constexpr -- so it needs the same treatment or it reprs as a
+# MagicMock in the rendered signature.
+_name_mock_types(_gluon_language_mock, "triton.experimental.gluon.language", ("constexpr", "tensor"))
+sys.modules["triton.experimental.gluon"].language = _gluon_language_mock
+sys.modules["triton.experimental.gluon.language"] = _gluon_language_mock
 
 # Napoleon settings for Google/NumPy docstring parsing
 napoleon_google_docstring = True
@@ -163,6 +200,7 @@ napoleon_custom_sections = None
 
 # Table of contents
 external_toc_path = "./sphinx/_toc.yml"
+
 
 # Theme options for AMD ROCm theme
 html_theme_options = {
@@ -185,3 +223,29 @@ html_context = {
     "copybutton_hide": copybutton_hide,
     "copybutton_remove_prompts": copybutton_remove_prompts,
 }
+
+# ---------------------------------------------------------------------------
+# Copy docs/images/ verbatim into the built site.
+#
+# Several conceptual pages reference images from raw HTML blocks, e.g.
+#   <img class="dark-theme-img only-dark" src="../images/iris-model.png">
+# which is how the light/dark theme variants are selected. Sphinx only tracks
+# and copies images referenced through markdown or image directives, so every
+# raw-HTML reference 404s on the published site -- 18 of them, across
+# conceptual/programming-model, conceptual/taxonomy and index.
+#
+# Copying the directory wholesale fixes all of them without rewriting the
+# theme-switching markup.
+# ---------------------------------------------------------------------------
+
+
+def _copy_images(app, exception):
+    if exception is not None or app.builder.name != "html":
+        return
+    src = os.path.join(os.path.dirname(__file__), "images")
+    if os.path.isdir(src):
+        shutil.copytree(src, os.path.join(app.outdir, "images"), dirs_exist_ok=True)
+
+
+def setup(app):
+    app.connect("build-finished", _copy_images)

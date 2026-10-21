@@ -1,6 +1,10 @@
-# Fused GEMM + CCL Operations
+# Fused Communication and Compute Operations
 
-Fused matrix multiplication and collective communication operations accessible via the `ops` property on the `Iris` instance (e.g. `ctx.ops.matmul_all_reduce(...)`).
+Operations that fuse communication with compute in a single kernel, accessible
+via the `ops` property on the `Iris` instance (e.g. `ctx.ops.matmul_all_reduce(...)`).
+The compute side is currently GEMM, supplied by tritonBLAS; the communication side
+is an Iris collective. Fusing them means the collective overlaps the matmul instead
+of running as a separate kernel after it.
 
 ## matmul_all_reduce
 ```{eval-rst}

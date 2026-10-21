@@ -4,6 +4,7 @@
 import torch
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+from triton.language.extra.hip import utils as hip_utils
 import iris
 from iris.gluon import IrisDeviceCtx
 from iris.host.tracing.events import TraceEvent
@@ -21,7 +22,7 @@ def device_context_tracing_1d_address_kernel(
     """Test ctx.tracing.record_event_start/end with a 1D address (block of pointers)."""
     ctx = IrisDeviceCtx.initialize(context_tensor, tracing=True)
 
-    layout: gl.constexpr = gl.BlockedLayout([1], [BLOCK_SIZE], [1], [0])
+    layout: gl.constexpr = gl.BlockedLayout([1], [hip_utils.num_threads()], [1], [0])
     offsets = gl.arange(0, BLOCK_SIZE, layout=layout)
     address_1d = dummy_buffer + offsets
 
@@ -46,7 +47,7 @@ def test_device_context_gluon_tracing_1d_address():
     source_rank = shmem.get_rank()
     num_ranks = shmem.get_num_ranks()
 
-    BLOCK_SIZE = 64  # AMD wavefront size (64 threads per warp)
+    BLOCK_SIZE = 64
     # Dummy buffer only to form 1D pointer block; never read/write
     dummy_buffer = shmem.zeros((BLOCK_SIZE,), dtype=torch.int64)
 

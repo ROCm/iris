@@ -27,8 +27,9 @@
 GPU_STATE_FILE="${GPU_STATE_FILE:-/tmp/iris_gpu_state}"
 GPU_LOCK_FILE="${GPU_STATE_FILE}.lock"
 MAX_GPUS="${MAX_GPUS:-8}"
-RETRY_DELAY="${RETRY_DELAY:-60}"   # 1 minute between checks
-MAX_RETRIES="${MAX_RETRIES:-180}"  # 3 hours total wait time (180 * 1 min)
+GPU_RESERVE_FILE="${GPU_STATE_FILE}.reserve"
+RETRY_DELAY="${RETRY_DELAY:-10}"    # 10 seconds between checks
+MAX_RETRIES="${MAX_RETRIES:-1080}"  # 3 hours total wait time (1080 * 10 s)
 
 # Initialize GPU state file and validate its contents
 # State format: 8-bit bitmap where bit N=1 means GPU N is allocated
@@ -106,6 +107,20 @@ acquire_gpus() {
             # Read current bitmap
             local bitmap
             bitmap=$(cat "$GPU_STATE_FILE")
+
+            # gpu_task_queue.py posts a reservation (owner, GPUs, timestamp) when a
+            # large task has waited too long; hold off so the node can drain for it.
+            # The owner refreshes it every few seconds; older than 10 min is stale.
+            if [ -f "$GPU_RESERVE_FILE" ]; then
+                local res_owner res_gpus res_stamp
+                read -r res_owner res_gpus res_stamp < "$GPU_RESERVE_FILE" 2>/dev/null || true
+                res_stamp="${res_stamp%.*}"
+                [[ "$res_stamp" =~ ^[0-9]+$ ]] || res_stamp=0
+                if [ $(( $(date +%s) - res_stamp )) -lt 600 ]; then
+                    echo "[GPU-ALLOC] Node reserved for a ${res_gpus}-GPU task ($res_owner); waiting" >&2
+                    exit 1
+                fi
+            fi
             
             # Find N free GPUs (bits that are 0)
             local found_gpus=()

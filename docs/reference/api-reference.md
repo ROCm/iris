@@ -7,12 +7,13 @@ Explore Iris APIs. The host-side API (class, tensor creation, CCL) is identical 
 - [Iris Class](host/class.md)
 - [Tensor Creation](host/tensor-creation.md)
 - [Collective Communication (CCL)](host/ccl.md)
+- [Copy Engine (SDMA)](host/copy-engine.md)
 
 ## Triton Backend
 
 - [Overview](triton/overview.md)
 - [Device Functions](triton/device-functions.md)
-- [Fused GEMM + CCL Operations](triton/ops.md)
+- [Fused Communication and Compute Operations](triton/ops.md)
 
 ## Gluon Backend (Experimental)
 

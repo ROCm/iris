@@ -5,6 +5,7 @@ import torch
 import pytest
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
+from triton.language.extra.hip import utils as hip_utils
 import iris
 from iris.gluon import IrisDeviceCtx
 from itertools import product
@@ -30,7 +31,7 @@ def load_cache_modifier_kernel(
 
     partner = int((source_rank + num_ranks // 2) % num_ranks)
     block_start = pid * BLOCK_SIZE
-    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    layout: gl.constexpr = gl.BlockedLayout([1], [hip_utils.num_threads()], [1], [0])
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 
@@ -53,7 +54,7 @@ def store_cache_modifier_kernel(
     pid = gl.program_id(0)
 
     block_start = pid * BLOCK_SIZE
-    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    layout: gl.constexpr = gl.BlockedLayout([1], [hip_utils.num_threads()], [1], [0])
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 
@@ -79,7 +80,7 @@ def get_cache_modifier_kernel(
     pid = gl.program_id(0)
 
     block_start = pid * BLOCK_SIZE
-    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    layout: gl.constexpr = gl.BlockedLayout([1], [hip_utils.num_threads()], [1], [0])
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 
@@ -115,7 +116,7 @@ def put_cache_modifier_kernel(
     pid = gl.program_id(0)
 
     block_start = pid * BLOCK_SIZE
-    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    layout: gl.constexpr = gl.BlockedLayout([1], [hip_utils.num_threads()], [1], [0])
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 
@@ -145,7 +146,7 @@ def copy_local_read_remote_write_cache_modifier_kernel(
     pid = gl.program_id(0)
 
     block_start = pid * BLOCK_SIZE
-    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    layout: gl.constexpr = gl.BlockedLayout([1], [hip_utils.num_threads()], [1], [0])
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 
@@ -179,7 +180,7 @@ def copy_remote_read_local_write_cache_modifier_kernel(
     pid = gl.program_id(0)
 
     block_start = pid * BLOCK_SIZE
-    layout: gl.constexpr = gl.BlockedLayout([1], [64], [1], [0])
+    layout: gl.constexpr = gl.BlockedLayout([1], [hip_utils.num_threads()], [1], [0])
     offsets = block_start + gl.arange(0, BLOCK_SIZE, layout=layout)
     mask = offsets < BLOCK_SIZE
 

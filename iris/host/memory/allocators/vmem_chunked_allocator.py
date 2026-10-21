@@ -12,11 +12,13 @@ Design:
 - Power-of-two free lists for O(1) alloc/free reuse
 - GC via weakref finalizers on tensor.untyped_storage()
 - Free/reuse is pure bookkeeping (no driver calls, no physical remap)
+- A block becomes reusable only once every rank has freed it (see reuse()),
+  so allocation offsets stay identical across ranks whenever each rank's GC runs
 
 Cost model:
 - Init: ~170us per chunk (create + map + set_access for 1 device)
 - Per-allocation: 0us (bump or free-list pop, no driver calls)
-- Per-free: 0us (push to free list, no driver calls)
+- Per-free: 0us (push to a local released list, no driver calls)
 - Chunk growth: ~170us (rare, every chunk_size bytes)
 """
 
@@ -125,6 +127,8 @@ class VMemChunkedAllocator(BaseAllocator):
     DEFAULT_CHUNK_SIZE = 256 * 1024 * 1024
     # Default VA size: 0 means auto-size (128 GiB)
     DEFAULT_VA_SIZE = 0
+    # Reconcile frees (SymmetricHeap.collect()) after handing out 1/COLLECT_FRACTION of the mapped heap
+    COLLECT_FRACTION = 8
 
     def __init__(
         self,
@@ -149,6 +153,10 @@ class VMemChunkedAllocator(BaseAllocator):
         self.free_lists = defaultdict(list)
         self.alloc_sizes = {}
         self._pending_free = deque()
+        # Freed on this rank but not yet reusable: offset -> size class
+        self._released = {}
+        # Bytes handed out since the last reuse(): identical on every rank, like the allocation sequence
+        self._bytes_since_collect = 0
         self.chunks: List[LocalAllocation] = []
         self._shared_regions: List[ExportableMemory] = []
         self._peer_mappings: List[PeerMapping] = []
@@ -256,10 +264,46 @@ class VMemChunkedAllocator(BaseAllocator):
         self.mapped_extent += self.chunk_size
 
     def _process_pending_frees(self):
-        """Process pending frees from GC finalizers. Call with lock held."""
+        """Move frees from GC finalizers to the released list. Call with lock held."""
         while self._pending_free:
             offset, size_class = self._pending_free.popleft()
-            self.free_lists[size_class].append(offset)
+            self.alloc_sizes.pop(offset, None)
+            self._released[offset] = size_class
+
+    def released_offsets(self) -> List[int]:
+        """Offsets freed on this rank that are not yet reusable, sorted."""
+        with self.lock:
+            self._process_pending_frees()
+            return sorted(self._released)
+
+    def collect_due(self) -> bool:
+        """True once 1/COLLECT_FRACTION of the mapped heap has been handed out since the last reuse()."""
+        with self.lock:
+            return self._bytes_since_collect >= self.mapped_extent // self.COLLECT_FRACTION
+
+    def reuse(self, offsets) -> None:
+        """
+        Make released blocks reusable, and return every free block at the top of the heap (released
+        this round or earlier) to the bump pointer. Call only via SymmetricHeap.collect(), which
+        passes the same offsets on every rank: those every rank has released. That keeps the free
+        lists, and every later offset, identical across ranks.
+        """
+        with self.lock:
+            self._bytes_since_collect = 0
+            candidates = {offset: self._released.pop(offset) for offset in offsets}
+            # Blocks freed in earlier rounds can reach the top once the blocks above them are freed
+            for size_class, free in self.free_lists.items():
+                candidates.update((offset, size_class) for offset in free)
+                free.clear()
+            # Blocks at the top of the bump region go back to the bump pointer, not a size class
+            by_end = {offset + size: offset for offset, size in candidates.items()}
+            while self.bump in by_end:
+                self.bump = by_end.pop(self.bump)
+                del candidates[self.bump]
+            # Highest offset first, so pop() hands out the lowest blocks and keeps those near the top
+            # free for later rollbacks
+            for offset in sorted(candidates, reverse=True):
+                self.free_lists[candidates[offset]].append(offset)
 
     def _free_callback(self, offset, size_class):
         """Called by weakref finalizer when a tensor's storage is GC'd.
@@ -294,7 +338,13 @@ class VMemChunkedAllocator(BaseAllocator):
         """
         return self._interconnect
 
-    def allocate(self, num_elements: int, dtype: torch.dtype, alignment: int = 1024) -> torch.Tensor:
+    def allocate(
+        self, num_elements: int, dtype: torch.dtype, alignment: int = 1024, grow: bool = True
+    ) -> Optional[torch.Tensor]:
+        """
+        Allocate from a free list or the bump pointer. With ``grow=False``, return None instead of
+        mapping new chunks.
+        """
         with self.lock:
             if num_elements == 0:
                 return torch.empty(0, dtype=dtype, device=self.device)
@@ -320,6 +370,8 @@ class VMemChunkedAllocator(BaseAllocator):
                 aligned_bump = (self.bump + self.min_alignment - 1) & ~(self.min_alignment - 1)
 
                 needed = aligned_bump + aligned_size - self.mapped_extent
+                if needed > 0 and not grow:
+                    return None
                 if needed > 0:
                     n_new_chunks = math.ceil(needed / self.chunk_size)
                     if self.mapped_extent + n_new_chunks * self.chunk_size > self.va_size:
@@ -336,6 +388,7 @@ class VMemChunkedAllocator(BaseAllocator):
 
             # Track for free
             self.alloc_sizes[offset] = aligned_size
+            self._bytes_since_collect += aligned_size
 
             # Create tensor via CUDAArrayInterface
             va = self.base_va + offset
@@ -579,19 +632,22 @@ class VMemChunkedAllocator(BaseAllocator):
 
     def get_stats(self):
         """Return allocator statistics."""
-        total_free = sum(len(v) for v in self.free_lists.values())
-        free_bytes = sum(size_class * len(offsets) for size_class, offsets in self.free_lists.items())
-        return {
-            "num_chunks": len(self.chunks),
-            "mapped_bytes": self.mapped_extent,
-            "bump": self.bump,
-            "num_active_allocs": len(self.alloc_sizes),
-            "num_free_blocks": total_free,
-            "free_bytes": free_bytes,
-            "va_size": self.va_size,
-            "chunk_size": self.chunk_size,
-            "granularity": self.granularity,
-        }
+        with self.lock:
+            self._process_pending_frees()
+            total_free = sum(len(v) for v in self.free_lists.values())
+            free_bytes = sum(size_class * len(offsets) for size_class, offsets in self.free_lists.items())
+            return {
+                "num_chunks": len(self.chunks),
+                "mapped_bytes": self.mapped_extent,
+                "bump": self.bump,
+                "num_active_allocs": len(self.alloc_sizes),
+                "num_free_blocks": total_free,
+                "num_released_blocks": len(self._released),
+                "free_bytes": free_bytes,
+                "va_size": self.va_size,
+                "chunk_size": self.chunk_size,
+                "granularity": self.granularity,
+            }
 
     def close(self):
         """Release all VMem resources."""
@@ -605,6 +661,7 @@ class VMemChunkedAllocator(BaseAllocator):
         with self.lock:
             # Clear allocator bookkeeping before releasing mappings/chunks.
             self._pending_free.clear()
+            self._released.clear()
             self.free_lists.clear()
             self.alloc_sizes.clear()
 

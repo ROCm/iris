@@ -8,9 +8,13 @@ Provides a high-level interface for distributed symmetric memory management,
 hiding the details of allocators and inter-process memory sharing.
 """
 
+import gc
+import itertools
 import logging
 import os
+import socket
 import struct
+from typing import List
 
 import numpy as np
 import torch
@@ -75,6 +79,83 @@ def _validate_local_handle(handle_bytes: bytes) -> None:
         )
 
 
+_hostname_exchanges = itertools.count(1)
+_released_exchanges = itertools.count(1)
+
+
+def _hostnames_by_rank(num_ranks: int) -> List[str]:
+    """Every rank's hostname, exchanged through the rendezvous store so no NCCL collective is issued."""
+    import torch.distributed as dist
+
+    store = dist.distributed_c10d._get_default_store()
+    prefix = f"iris_hostname_v{next(_hostname_exchanges)}/"
+    store.set(f"{prefix}{dist.get_rank()}", socket.gethostname())
+    return [store.get(f"{prefix}{r}").decode("utf-8") for r in range(num_ranks)]
+
+
+def _released_by_every_rank(offsets: List[int], num_ranks: int) -> List[int]:
+    """The offsets every rank released, exchanged through the rendezvous store (a barrier, no NCCL collective)."""
+    import torch.distributed as dist
+
+    store = dist.distributed_c10d._get_default_store()
+    rank = dist.get_rank()
+    exchange = next(_released_exchanges)
+    prefix = f"iris_released_v{exchange}/"
+    store.set(f"{prefix}{rank}", np.asarray(offsets, dtype=np.int64).tobytes())
+    keys = [f"{prefix}{r}" for r in range(num_ranks)]
+    try:
+        store.wait(keys)
+    except dist.DistStoreError as exc:
+        missing = [r for r, key in enumerate(keys) if not store.check([key])]
+        raise TimeoutError(
+            f"SymmetricHeap.collect(): timed out after {store.timeout.total_seconds():.0f}s (the store's timeout) "
+            f"waiting for ranks {missing}; symmetric allocations and collect() must happen on every rank"
+        ) from exc
+    # Every rank has published for this exchange, so all of them finished reading the previous one
+    if exchange > 1:
+        store.delete_key(f"iris_released_v{exchange - 1}/{rank}")
+    common = set(offsets)
+    for key in keys:
+        common &= set(np.frombuffer(store.get(key), dtype=np.int64).tolist())
+    return sorted(common)
+
+
+def _require_single_host(allocator_type: str, hostnames: List[str]) -> None:
+    hosts = sorted(set(hostnames))
+    if len(hosts) > 1:
+        raise RuntimeError(
+            f"IRIS_ALLOCATOR={allocator_type!r} only maps peers on the same host, but this job spans "
+            f"{len(hosts)} hosts ({', '.join(hosts)}). Use IRIS_ALLOCATOR=vmem_chunked, which maps peers "
+            "on other hosts through the GPU fabric driver."
+        )
+
+
+def _require_shared_fabric_domain(topology, cur_rank: int) -> None:
+    from iris.host.distributed.topology import fabric_failure_reason
+
+    domains = {info.fabric_info.domain_key for info in topology.gpu_info.values()}
+    if len(domains) == 1 and "" not in domains:
+        return
+
+    ranks_by_host = {}
+    for rank, info in sorted(topology.gpu_info.items()):
+        ranks_by_host.setdefault(info.hostname, []).append(rank)
+    lines = []
+    for host, ranks in sorted(ranks_by_host.items()):
+        host_domains = sorted({topology.gpu_info[r].fabric_info.domain_key or "<none>" for r in ranks})
+        lines.append(f"  {host}: ranks {ranks}, fabric domain {', '.join(host_domains)}")
+    reason = fabric_failure_reason()
+    if reason:
+        lines.append(f"Rank {cur_rank} found no fabric domain: {reason}.")
+    raise RuntimeError(
+        f"This job spans {len(ranks_by_host)} hosts, which needs every GPU in one fabric domain, but found:\n"
+        + "\n".join(lines)
+        + "\n<none> means fabric discovery failed for that GPU; each rank's own error gives its reason. "
+        "Different domains mean the hosts are not in the same pod: on AMD, `amd-smi fabric -i` must show "
+        "the same PPOD_ID and VPOD_ID and ACCEL_STATE ACTIVE on every host."
+    )
+
+
 class SymmetricHeap:
     """
     High-level symmetric heap abstraction.
@@ -134,6 +215,13 @@ class SymmetricHeap:
         if is_simulation_env():
             allocator_type = "torch"
 
+        multi_host = False
+        if num_ranks > 1 and not is_simulation_env():
+            hostnames = _hostnames_by_rank(num_ranks)
+            multi_host = len(set(hostnames)) > 1
+            if allocator_type in ("torch", "vmem"):
+                _require_single_host(allocator_type, hostnames)
+
         if allocator_type == "torch":
             self.allocator = TorchAllocator(heap_size, device_id, cur_rank, num_ranks)
         elif allocator_type == "vmem":
@@ -144,11 +232,18 @@ class SymmetricHeap:
             try:
                 topology = TopologyDiscovery().discover()
             except Exception as exc:
+                if multi_host:
+                    raise RuntimeError(
+                        f"TopologyDiscovery.discover() failed ({exc}). This job spans hosts, and "
+                        "VMemChunkedAllocator needs topology discovery to find the GPUs' fabric domain."
+                    ) from exc
                 logger.warning(
                     "TopologyDiscovery.discover() failed (%s); VMemChunkedAllocator will default to INTRA_NODE driver.",
                     exc,
                 )
                 topology = None
+            if multi_host:
+                _require_shared_fabric_domain(topology, cur_rank)
             self.allocator = VMemChunkedAllocator(
                 heap_size,
                 device_id,
@@ -251,7 +346,19 @@ class SymmetricHeap:
         is_chunked = isinstance(self.allocator, VMemChunkedAllocator)
         chunks_before = self.allocator.get_num_chunks() if is_chunked else 0
 
-        tensor = self.allocator.allocate(actual_elements, dtype, alignment)
+        if is_chunked:
+            # Every rank reaches the same branches: they depend only on state identical across ranks
+            collected = self.allocator.collect_due()
+            if collected:
+                self.collect()
+            tensor = self.allocator.allocate(actual_elements, dtype, alignment, grow=False)
+            if tensor is None:
+                # A collect() just above found everything there is to reuse; nothing was freed since
+                if not collected:
+                    self.collect()
+                tensor = self.allocator.allocate(actual_elements, dtype, alignment)
+        else:
+            tensor = self.allocator.allocate(actual_elements, dtype, alignment)
         tensor = tensor[:num_elements]
 
         if is_chunked:
@@ -361,6 +468,31 @@ class SymmetricHeap:
         offset = ptr - from_base
         return to_base + offset
 
+    def collect(self):
+        """
+        Collective: make the heap memory that every rank has freed reusable.
+
+        Freed symmetric tensors are only reused once every rank has freed them, so that allocations
+        land at the same offset on every rank whenever each rank's garbage collector runs.
+        ``allocate()`` calls this before growing the heap, and once 1/``COLLECT_FRACTION`` of the
+        mapped heap has been handed out since the last call; call it directly to reuse memory sooner.
+
+        Waits for the work queued on this rank's HIP streams first, so no kernel is still accessing a
+        block it hands out. Copy-engine (SDMA) transfers are not covered: quiet them with
+        ``Iris.quiet()`` before dropping their tensors.
+
+        Each call runs ``gc.collect()``, a device-wide ``torch.cuda.synchronize()`` that breaks CPU/GPU
+        overlap, and a store round-trip with every rank. Do not call it every step.
+        """
+        if not isinstance(self.allocator, VMemChunkedAllocator):
+            return
+        gc.collect()
+        torch.cuda.synchronize(self.device_id)
+        released = self.allocator.released_offsets()
+        if self.num_ranks > 1:
+            released = _released_by_every_rank(released, self.num_ranks)
+        self.allocator.reuse(released)
+
     def refresh_peer_access(self):
         """
         Refresh peer imports for the active allocator backend.
@@ -434,16 +566,10 @@ class SymmetricHeap:
 
     def _refresh_peer_access_torch(self, dist, all_bases_arr):
         """Peer access for TorchAllocator (IPC-based)."""
-        from iris.host.platform.utils import is_simulation_env
-
-        if is_simulation_env():
-            for r in range(self.num_ranks):
-                self.heap_bases[r] = int(all_bases_arr[r])
-        else:
-            all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
-            self.allocator.establish_peer_access(all_bases, self.fd_conns)
-            for r in range(self.num_ranks):
-                self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
+        all_bases = {r: int(all_bases_arr[r]) for r in range(self.num_ranks)}
+        self.allocator.establish_peer_access(all_bases, self.fd_conns)
+        for r in range(self.num_ranks):
+            self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
 
     def _get_collective_device(self, dist) -> torch.device:
         """Choose a safe device for small distributed tensor collectives."""
@@ -717,7 +843,7 @@ class SymmetricHeap:
                 self._peer_va_ranges = {}
 
             if peer not in self._peer_va_ranges:
-                peer_va_base = mem_address_reserve(self.heap_size, self.allocator.granularity, 0)
+                peer_va_base = mem_address_reserve(self._peer_va_size(), self.allocator.granularity, 0)
                 self._peer_va_ranges[peer] = peer_va_base
             else:
                 peer_va_base = self._peer_va_ranges[peer]

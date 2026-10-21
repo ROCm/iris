@@ -61,6 +61,15 @@ class VMemAllocator(BaseAllocator):
         va_multiplier: float = 1.0,
     ):
         super().__init__(heap_size, device_id, rank, world_size)
+        # Peer access is granted to local device ids 0..world_size-1.
+        local_devices = torch.cuda.device_count()
+        if world_size > local_devices:
+            self._closed = True
+            raise RuntimeError(
+                f"VMemAllocator needs every rank's GPU visible in each process, but world_size={world_size} and "
+                f"this process sees {local_devices} GPUs. It is single-host; use IRIS_ALLOCATOR=vmem_chunked "
+                "for multi-host jobs."
+            )
         _log_rank(
             logging.INFO,
             "VMemAllocator: init heap_size=%.1fGB device=%d",
@@ -77,7 +86,7 @@ class VMemAllocator(BaseAllocator):
         self.va_size = self.aligned_heap_size
         self.base_va = mem_address_reserve(self.va_size, self.granularity, 0)
 
-        self.minimal_size = min(2 << 20, self.aligned_heap_size // 2)
+        self.minimal_size = min(2 << 20, self.aligned_heap_size // 2) & ~(self.granularity - 1)
         if self.minimal_size < self.granularity:
             self.minimal_size = self.granularity
 

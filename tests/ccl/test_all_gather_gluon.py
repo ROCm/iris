@@ -32,17 +32,20 @@ except ImportError:
     ],
 )
 @pytest.mark.parametrize(
-    "M, N, block_size_m, block_size_n",
+    "M, N, block_size_m, block_size_n, comm_sms",
     [
         # block_size_n must be a multiple of (threads_per_warp * num_warps).
-        # With defaults (threads_per_warp=64, num_warps=4), minimum is 256.
-        # elems_per_thread = block_size_n / 256: higher = wider vector loads.
-        (256, 256, 32, 256),  # Small: elems_per_thread=1 (scalar loads)
-        (1024, 512, 32, 512),  # Medium: elems_per_thread=2 (dword loads)
-        (8192, 8192, 32, 1024),  # Large: elems_per_thread=4 (dwordx4, optimal)
+        # With num_warps=4 the minimum is 256 on a 64-wide wavefront, 128 on a 32-wide one.
+        # elems_per_thread = block_size_n / (threads_per_warp * num_warps): higher = wider
+        # vector loads. The per-case counts below are for a 64-wide wavefront; double them at 32.
+        (256, 256, 32, 256, 64),  # Small: elems_per_thread=1 (scalar loads)
+        (1024, 512, 32, 512, 64),  # Medium: elems_per_thread=2 (dword loads)
+        (8192, 8192, 32, 1024, 64),  # Large: elems_per_thread=4 (dwordx4, optimal)
+        (13, 300, 8, 256, 1),  # Reuse peer addresses across tiles with partial rows and columns.
+        (7, 64, 8, 256, 1),
     ],
 )
-def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n):
+def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n, comm_sms):
     """Test all-gather functionality using Gluon by comparing against PyTorch's implementation."""
     # Ensure torch.distributed is initialized (should be done by test runner)
     if not dist.is_initialized():
@@ -60,8 +63,6 @@ def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n):
     # Each rank has an M x N input tensor
     # Output is (world_size * M, N) - concatenated along dimension 0
     pytorch_input_tensor = torch.randn(M, N, dtype=dtype, device=f"cuda:{rank}")
-    # Fill with deterministic values for easier debugging
-    pytorch_input_tensor.fill_(float(rank + 1))
 
     # Create output tensor for PyTorch: (world_size * M, N)
     pytorch_output_tensor = torch.zeros(world_size * M, N, dtype=dtype, device=f"cuda:{rank}")
@@ -79,19 +80,13 @@ def test_all_gather_gluon(dtype, M, N, block_size_m, block_size_n):
 
     # Run Iris Gluon all_gather
     shmem.barrier()
-    config = Config(use_gluon=True, block_size_m=block_size_m, block_size_n=block_size_n)
+    config = Config(use_gluon=True, block_size_m=block_size_m, block_size_n=block_size_n, comm_sms=comm_sms)
     shmem.ccl.all_gather(iris_output_tensor, iris_input_tensor, config=config)
     torch.cuda.synchronize()
 
     # Compare results
-    atol = 1e-3 if dtype == torch.float16 else 1e-5
-    max_diff = torch.abs(iris_output_tensor - pytorch_output_tensor).max().item()
-
     try:
-        assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), (
-            f"Max difference: {max_diff}, expected < {atol}\n"
-            f"Rank {rank}: Iris Gluon output doesn't match PyTorch's all_gather_into_tensor"
-        )
+        torch.testing.assert_close(iris_output_tensor, pytorch_output_tensor, rtol=0, atol=0)
     finally:
         # Final barrier to ensure all ranks complete before test cleanup
         # This helps with test isolation when running multiple tests

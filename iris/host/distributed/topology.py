@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import torch
 import torch.distributed as dist
 
+from iris.host.platform.libs import load_vendor_library
+
 logger = logging.getLogger("iris.topology")
 
 
@@ -374,21 +376,15 @@ def _amd_get_gpu_fabric_info(gpu_id: int, pci_bus_id: str = "") -> FabricInfo:
         return FabricInfo()
 
     try:
-        amdsmi = None
-        for amdsmi_path in (
-            ctypes.util.find_library("amd_smi"),
+        amdsmi = load_vendor_library(
+            "libamd_smi",
             "libamd_smi.so",
+            ctypes.util.find_library("amd_smi"),
             "/opt/rocm/lib/libamd_smi.so",
-        ):
-            if not amdsmi_path:
-                continue
-            try:
-                amdsmi = ctypes.CDLL(amdsmi_path)
-                break
-            except OSError:
-                continue
+            beside="libamdhip64",
+        )
         if amdsmi is None:
-            logger.debug("libamd_smi.so not available, skipping AMD fabric info")
+            _fabric_unavailable("libamd_smi.so could not be loaded")
             return FabricInfo()
 
         amdsmi.amdsmi_init.argtypes = [ctypes.c_uint64]
@@ -406,7 +402,7 @@ def _amd_get_gpu_fabric_info(gpu_id: int, pci_bus_id: str = "") -> FabricInfo:
 
         ret = int(amdsmi.amdsmi_init(_AMDSMI_INIT_AMD_GPUS))
         if ret != _AMDSMI_STATUS_SUCCESS:
-            logger.debug("amdsmi_init() failed for AMD fabric info query with status %d", ret)
+            _fabric_unavailable("amdsmi_init() failed with status %d", ret)
             return FabricInfo()
 
         processor = ctypes.c_void_p()
@@ -417,24 +413,24 @@ def _amd_get_gpu_fabric_info(gpu_id: int, pci_bus_id: str = "") -> FabricInfo:
             )
         )
         if ret != _AMDSMI_STATUS_SUCCESS or processor.value is None:
-            logger.debug(
-                "amdsmi_get_processor_handle_from_bdf(%s) failed for GPU %d with status %d",
-                pci_bus_id,
-                gpu_id,
-                ret,
+            _fabric_unavailable(
+                "amdsmi_get_processor_handle_from_bdf(%s) failed for GPU %d with status %d", pci_bus_id, gpu_id, ret
             )
             return FabricInfo()
 
         raw = _AmdSmiFabricInfo()
         ret = int(amdsmi.amdsmi_get_gpu_fabric_info(processor, ctypes.byref(raw)))
         if ret != _AMDSMI_STATUS_SUCCESS:
-            logger.debug("amdsmi_get_gpu_fabric_info failed for GPU %d with status %d", gpu_id, ret)
+            _fabric_unavailable("amdsmi_get_gpu_fabric_info failed for GPU %d with status %d", gpu_id, ret)
             return FabricInfo()
 
         v1 = raw.fabric_info.fabric_version.v1
-        return _amd_fabric_info_from_raw({"ppod_id": bytes(v1.ppod_id), "vpod_id": int(v1.vpod_id)})
+        fabric = _amd_fabric_info_from_raw({"ppod_id": bytes(v1.ppod_id), "vpod_id": int(v1.vpod_id)})
+        if not fabric.domain_key:
+            _fabric_unavailable("amdsmi reports no pod membership for GPU %d (PPOD_ID/VPOD_ID unset)", gpu_id)
+        return fabric
     except Exception as e:
-        logger.debug("AMDSMI fabric info query failed for GPU %d: %s", gpu_id, e)
+        _fabric_unavailable("AMD fabric info query failed for GPU %d: %s", gpu_id, e)
 
     return FabricInfo()
 
@@ -885,6 +881,38 @@ def _get_total_memory_mb(gpu_id: int) -> int:
     return total_bytes // (1024 * 1024)
 
 
+_fabric_failure: Optional[str] = None
+
+
+def _fabric_unavailable(msg: str, *args) -> None:
+    # Most AMD systems have no fabric, so this is not worth a warning on its own;
+    # a multi-host job that needs the fabric puts the reason in its error.
+    global _fabric_failure
+    _fabric_failure = msg % args
+    logger.debug(msg, *args)
+
+
+def _clear_fabric_failure() -> None:
+    global _fabric_failure
+    _fabric_failure = None
+
+
+def fabric_failure_reason() -> Optional[str]:
+    """Why this process's last topology discovery found no AMD fabric domain, or None."""
+    return _fabric_failure
+
+
+def _torch_pci_bus_id(device_idx: int) -> Optional[str]:
+    try:
+        props = torch.cuda.get_device_properties(device_idx)
+        domain, bus, device = props.pci_domain_id, props.pci_bus_id, props.pci_device_id
+    except Exception as e:
+        logger.debug("torch PCI query failed for device %d: %s", device_idx, e)
+        return None
+    # torch does not report the PCI function; GPUs are function 0.
+    return f"{domain:04x}:{bus:02x}:{device:02x}.0"
+
+
 def _get_pci_bus_id(device_idx: int, vendor: str) -> str:
     """
     Get the PCI bus ID for a GPU device.
@@ -893,6 +921,9 @@ def _get_pci_bus_id(device_idx: int, vendor: str) -> str:
     logical device index to the physical index expected by NVML/AMDSMI,
     then queries NVML/AMDSMI by that physical index to obtain and
     normalize the busId/BDF string.
+
+    On AMD, falls back to torch's device properties when the amdsmi Python
+    bindings are unavailable; the ROCm SDK wheels do not put them on sys.path.
     """
     if device_idx < 0:
         logger.debug("Invalid device index: %d", device_idx)
@@ -944,6 +975,13 @@ def _get_pci_bus_id(device_idx: int, vendor: str) -> str:
                 physical_idx,
                 e,
             )
+
+        bus_id = _torch_pci_bus_id(device_idx)
+        if bus_id is not None:
+            return bus_id
+        _fabric_unavailable(
+            "no PCI bus ID for GPU %d (amdsmi Python bindings unavailable and torch reports none)", device_idx
+        )
 
     else:
         logger.debug("Unknown vendor: %s", vendor)
@@ -1394,6 +1432,7 @@ class TopologyDiscovery:
             # Probe local GPU info
             device_name = torch.cuda.get_device_name(self.gpu_id)
             total_memory_mb = _get_total_memory_mb(self.gpu_id)
+            _clear_fabric_failure()
             pci_bus_id = _get_pci_bus_id(self.gpu_id, vendor)
             # Pass PCI bus ID to UUID query for PCI-based handle resolution
             gpu_uuid = _get_gpu_uuid(self.gpu_id, vendor, pci_bus_id=pci_bus_id)
@@ -1402,9 +1441,13 @@ class TopologyDiscovery:
 
             # Query fabric info — pass PCI bus ID for PCI-based handle resolution
             fabric_info = _get_gpu_fabric_info(self.gpu_id, vendor, pci_bus_id=pci_bus_id)
-            logger.debug(
-                f"[Rank {self.rank}] Fabric info: cluster_uuid={fabric_info.cluster_uuid}, "
-                f"clique_id={fabric_info.clique_id}, domain_key={fabric_info.domain_key}"
+            logger.info(
+                "[Rank %d] %s GPU %d: pci_bus_id=%s fabric_domain=%s",
+                self.rank,
+                hostname,
+                self.gpu_id,
+                pci_bus_id,
+                fabric_info.domain_key or "none",
             )
 
             local_gpu_info = GPUInfo(

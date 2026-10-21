@@ -14,7 +14,7 @@ INSTALL_METHOD=${2:-"editable"}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# GPU_DEVICES should be set by the workflow-level acquire_gpus.sh step
+# GPU_DEVICES is set by gpu_task_queue.py
 GPU_ARG=""
 if [ -n "$GPU_DEVICES" ]; then
     GPU_ARG="--gpus $GPU_DEVICES"
@@ -24,11 +24,11 @@ fi
 if [ "$INSTALL_METHOD" = "git" ]; then
     REPO=${GITHUB_REPOSITORY:-"ROCm/iris"}
     SHA=${GITHUB_SHA:-"HEAD"}
-    INSTALL_CMD="pip install git+https://github.com/${REPO}.git@${SHA}"
+    INSTALL_CMD="pip install 'iris[sdma] @ git+https://github.com/${REPO}.git@${SHA}'"
 elif [ "$INSTALL_METHOD" = "editable" ]; then
-    INSTALL_CMD="pip install -e ."
+    INSTALL_CMD="pip install -e '.[sdma]'"
 elif [ "$INSTALL_METHOD" = "install" ]; then
-    INSTALL_CMD="pip install ."
+    INSTALL_CMD="pip install '.[sdma]'"
 else
     echo "[ERROR] Invalid install_method: $INSTALL_METHOD"
     exit 1

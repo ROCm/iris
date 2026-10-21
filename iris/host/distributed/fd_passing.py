@@ -18,6 +18,17 @@ import time
 from typing import Dict, Tuple
 from contextlib import contextmanager
 
+# Higher ranks retry connect() for 10 s after the path exchange, so a peer that
+# has not connected well past that will not.
+_ACCEPT_TIMEOUT_S = 60.0
+# The connecting side sends its rank immediately after connect().
+_HANDSHAKE_TIMEOUT_S = 10.0
+
+
+def _close_all(socks) -> None:
+    for sock in socks:
+        sock.close()
+
 
 @contextmanager
 def managed_fd(fd: int):
@@ -132,19 +143,38 @@ def setup_fd_mesh(rank: int, world_size: int, all_paths: Dict[int, str]) -> Dict
         conns[peer] = s
 
     # Accept connections from higher ranks
-    for _ in range(rank + 1, world_size):
-        client, _ = listener.accept()
-        peer_rank_bytes = recv_exact(client, 4)
-        peer_rank = int.from_bytes(peer_rank_bytes, "little", signed=False)
-        conns[peer_rank] = client
-
-    # Close listener and clean up socket path
-    listener.close()
+    listener.settimeout(_ACCEPT_TIMEOUT_S)
     try:
-        os.unlink(path)
-    except OSError:
-        # Best effort cleanup
-        pass
+        for _ in range(rank + 1, world_size):
+            try:
+                client, _ = listener.accept()
+            except socket.timeout as e:
+                missing = sorted(set(range(rank + 1, world_size)) - set(conns))
+                _close_all(conns.values())
+                raise TimeoutError(
+                    f"Timed out after {_ACCEPT_TIMEOUT_S:.0f}s waiting for ranks {missing} to connect to rank "
+                    f"{rank} at {path}. FD passing only works between ranks on the same host."
+                ) from e
+            client.settimeout(_HANDSHAKE_TIMEOUT_S)
+            try:
+                peer_rank_bytes = recv_exact(client, 4)
+            except socket.timeout as e:
+                _close_all([client, *conns.values()])
+                raise TimeoutError(
+                    f"A peer connected to rank {rank} at {path} but did not send its rank within "
+                    f"{_HANDSHAKE_TIMEOUT_S:.0f}s."
+                ) from e
+            client.settimeout(None)
+            peer_rank = int.from_bytes(peer_rank_bytes, "little", signed=False)
+            conns[peer_rank] = client
+    finally:
+        # Close listener and clean up socket path
+        listener.close()
+        try:
+            os.unlink(path)
+        except OSError:
+            # Best effort cleanup
+            pass
 
     return conns
 

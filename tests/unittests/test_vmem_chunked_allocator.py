@@ -7,7 +7,7 @@ Tests for VMemChunkedAllocator.
 Tests cover:
 - Basic allocation and data integrity
 - Multiple allocations and non-overlap
-- Power-of-two free list reuse via GC
+- Power-of-two free list reuse via GC, once every rank has freed a block
 - Chunk growth on overflow
 - as_symmetric (import external tensor)
 - owns_tensor detection
@@ -93,10 +93,9 @@ def test_chunked_gc_free_reuse():
     t = ctx.zeros(1024, dtype=torch.float32)
     ptr1 = t.data_ptr()
 
-    # Drop the tensor and trigger GC
+    # Drop the tensor and make freed memory reusable
     del t
-    gc.collect()
-    torch.cuda.synchronize()
+    ctx.reclaim_freed()
 
     # Allocate again -- should reuse the freed block
     t2 = ctx.zeros(1024, dtype=torch.float32)
@@ -144,6 +143,8 @@ def test_chunked_free_list_size_classes():
     small = ctx.zeros(size_small, dtype=torch.float32)
     medium = ctx.zeros(size_medium, dtype=torch.float32)
     large = ctx.zeros(size_large, dtype=torch.float32)
+    # Keeps the freed blocks below the top of the heap, so they go to the free lists
+    sentinel = ctx.zeros(size_small, dtype=torch.float32)  # noqa: F841
 
     small_ptr = small.data_ptr()
     medium_ptr = medium.data_ptr()
@@ -151,8 +152,7 @@ def test_chunked_free_list_size_classes():
 
     # Free all
     del small, medium, large
-    gc.collect()
-    torch.cuda.synchronize()
+    ctx.reclaim_freed()
 
     # Re-allocate -- each should reuse from its size class
     small2 = ctx.zeros(size_small, dtype=torch.float32)
@@ -162,6 +162,153 @@ def test_chunked_free_list_size_classes():
     assert small2.data_ptr() == small_ptr
     assert medium2.data_ptr() == medium_ptr
     assert large2.data_ptr() == large_ptr
+
+
+@pytest.mark.parametrize("keep_every", [0, 16])
+def test_chunked_churn_then_large_allocation_does_not_grow(keep_every):
+    """
+    A churned scratch buffer must not fragment the heap so that a later large allocation grows it:
+    freed blocks at the top return to the bump pointer, and periodic collect() calls bound the rest
+    (also when buffers kept every ``keep_every`` iterations stop the rollback).
+    """
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    scratch_bytes, keep_bytes = 2 * alloc.granularity, alloc.granularity  # different size classes
+    chunks = alloc.get_num_chunks()
+    bump = alloc.bump
+
+    kept = []
+    for i in range(3 * alloc.mapped_extent // scratch_bytes):
+        t = ctx.zeros(scratch_bytes // 4, dtype=torch.float32)
+        t.fill_(1.0)
+        del t
+        if keep_every and i % keep_every == keep_every - 1:
+            kept.append(ctx.zeros(keep_bytes // 4, dtype=torch.float32))
+
+    big = ctx.zeros(alloc.chunk_size // 2 // 4, dtype=torch.float32)
+    assert alloc.get_num_chunks() == chunks
+
+    # Once everything is freed, the whole heap returns to the bump pointer
+    del big
+    kept.clear()
+    ctx.reclaim_freed()
+    assert alloc.bump == bump
+
+
+def test_chunked_rollback_includes_earlier_free_blocks():
+    """A block freed in an earlier collect() returns to the bump pointer once the blocks above it are freed."""
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    bump = alloc.bump
+
+    a = ctx.zeros(1024, dtype=torch.float32)
+    b = ctx.zeros(1024, dtype=torch.float32)
+    del a
+    ctx.reclaim_freed()  # a is below b, so it goes to a free list
+    del b
+    ctx.reclaim_freed()  # b is at the top, and a is once b rolls back
+
+    assert alloc.bump == bump
+    assert alloc.get_stats()["num_free_blocks"] == 0
+
+
+def test_chunked_free_list_hands_out_lowest_block_first():
+    """Reusable blocks go out lowest offset first, keeping those near the top free for later rollbacks."""
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+
+    a = ctx.zeros(1024, dtype=torch.float32)
+    b = ctx.zeros(1024, dtype=torch.float32)
+    c = ctx.zeros(1024, dtype=torch.float32)  # noqa: F841 -- keeps a and b below the top
+    a_ptr = a.data_ptr()
+    del a, b
+    ctx.reclaim_freed()
+
+    d = ctx.zeros(1024, dtype=torch.float32)
+    assert d.data_ptr() == a_ptr
+
+
+def test_chunked_freed_block_waits_for_collect():
+    """A freed block is only reused after collect(), so every rank's offsets change at the same point."""
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+
+    t = ctx.zeros(1024, dtype=torch.float32)
+    ptr = t.data_ptr()
+    del t
+    gc.collect()
+
+    t2 = ctx.zeros(1024, dtype=torch.float32)
+    assert t2.data_ptr() != ptr
+    assert ctx.heap.allocator.get_stats()["num_released_blocks"] >= 1
+
+    ctx.reclaim_freed()
+    t3 = ctx.zeros(1024, dtype=torch.float32)
+    assert t3.data_ptr() == ptr
+
+
+def test_chunked_reuses_before_growing():
+    """An allocation that would grow the heap first reuses blocks freed on every rank."""
+    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    size = alloc.granularity // 4  # float32 elements in one granule
+
+    # Fill the mapped chunks, so the next allocation of this size would grow the heap
+    held = [ctx.zeros(size, dtype=torch.float32)]
+    while alloc.bump + alloc.granularity <= alloc.mapped_extent:
+        held.append(ctx.zeros(size, dtype=torch.float32))
+    chunks = alloc.get_num_chunks()
+    ptr = held[0].data_ptr()
+    del held[0]
+
+    t = ctx.zeros(size, dtype=torch.float32)
+    assert t.data_ptr() == ptr
+    assert alloc.get_num_chunks() == chunks
+
+
+def _offsets_per_rank(ctx, t):
+    offset = torch.tensor([t.data_ptr() - int(ctx.heap.heap_bases_cpu[ctx.cur_rank])], device=t.device)
+    every = [torch.empty_like(offset) for _ in range(ctx.num_ranks)]
+    torch.distributed.all_gather(every, offset)
+    return [int(o.item()) for o in every]
+
+
+def test_chunked_offsets_symmetric_across_gc_timing():
+    """GC running on one rank before another must not change where the next allocation lands."""
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+    if ctx.num_ranks < 2:
+        pytest.skip("Requires at least 2 ranks")
+
+    gc.disable()
+    try:
+        # A tensor reachable only through a reference cycle: freed when the cyclic GC runs
+        a = ctx.zeros(4096, dtype=torch.float32)
+        holder = {"t": a}
+        holder["self"] = holder
+        del a, holder
+        if ctx.cur_rank == 0:
+            gc.collect()
+        b = ctx.zeros(4096, dtype=torch.float32)
+        offsets = _offsets_per_rank(ctx, b)
+        assert len(set(offsets)) == 1, f"offsets differ across ranks: {offsets}"
+
+        # A block one rank still holds is not handed out, even after collect()
+        c = ctx.zeros(4096, dtype=torch.float32)
+        c_ptr = c.data_ptr()
+        keep = c if ctx.cur_rank == 0 else None
+        del c
+        ctx.reclaim_freed()
+        d = ctx.zeros(4096, dtype=torch.float32)
+        offsets = _offsets_per_rank(ctx, d)
+        assert len(set(offsets)) == 1, f"offsets differ across ranks: {offsets}"
+        assert d.data_ptr() != c_ptr
+        # d reuses the block freed everywhere; had c been reused, the bump pointer would sit at c
+        e = ctx.zeros(4096, dtype=torch.float32)
+        offsets = _offsets_per_rank(ctx, e)
+        assert len(set(offsets)) == 1, f"offsets differ across ranks: {offsets}"
+        assert e.data_ptr() != c_ptr
+        del keep
+    finally:
+        gc.enable()
+    ctx.barrier()
 
 
 def test_chunked_chunk_growth():

@@ -17,9 +17,10 @@
 set -euo pipefail
 
 ROCSHMEM_PREFIX="${ROCSHMEM_PREFIX:-/opt/rocshmem}"
-# Both arches on purpose. The runner label says mi325 (gfx942) but the hardware
-# reports gfx950, and rocSHMEM's device code must match the GPU it runs on: build
-# for the wrong one and hipModuleGetGlobal fails on rocSHMEM's device globals
+# Both arches on purpose. The CI runners are MI350X (gfx950), the same image
+# also serves MI300X/MI325X (gfx942), and rocSHMEM's device code must match the
+# GPU it runs on: build for the wrong one and hipModuleGetGlobal fails on
+# rocSHMEM's device globals
 # ("Cannot create GlobalVar Obj for symbol: _ZN8rocshmem14logd_constantsE") and
 # init aborts. Semicolon-separated cmake list.
 ROCSHMEM_GPU_TARGETS="${ROCSHMEM_GPU_TARGETS:-gfx942;gfx950}"

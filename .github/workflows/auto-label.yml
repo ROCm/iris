@@ -43,13 +43,19 @@ jobs:
           github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
 
   # PRs: label so the project rule moves them to In Progress.
-  # addLabels goes through the issues API, so this needs issues: write.
+  # addLabels is reached through the issues API, but the TOKEN SCOPE that
+  # governs labelling a pull request is pull-requests, not issues -- the shared
+  # REST path does not imply a shared permission. issues: write alone returns
+  # 403 "Resource not accessible by integration" here, while the same action
+  # with the same scope succeeds in label-issues above, because that one really
+  # is labelling an issue.
   label-prs:
     if: github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
+      pull-requests: write
     steps:
       - name: Add iris + in-progress labels to PR
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7

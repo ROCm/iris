@@ -37,6 +37,11 @@ Device-side functions provided by Iris for remote memory operations and atomics.
 .. autofunction:: iris.mem.triton.ops.atomic_add
 ```
 
+### atomic_sub
+```{eval-rst}
+.. autofunction:: iris.mem.triton.ops.atomic_sub
+```
+
 ### atomic_cas
 ```{eval-rst}
 .. autofunction:: iris.mem.triton.ops.atomic_cas
@@ -72,4 +77,9 @@ Device-side functions provided by Iris for remote memory operations and atomics.
 .. autofunction:: iris.mem.triton.ops.atomic_max
 ```
 
+## Synchronization
 
+### quiet
+```{eval-rst}
+.. autofunction:: iris.mem.triton.ops.quiet
+```

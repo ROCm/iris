@@ -178,10 +178,14 @@ def test_all_reduce_with_groups(variant, group_type, dtype=torch.float32, M=256,
 # =============================================================================
 
 
+@pytest.mark.parametrize("variant", ["persistent", "gluon", "tdm"])
 @pytest.mark.parametrize("group_type", ["consecutive", "strided"])
-def test_all_gather_with_groups(group_type, dtype=torch.float32, M=128, N=64):
+def test_all_gather_with_groups(group_type, variant, dtype=torch.float32, M=128, N=64):
     """Test all-gather with ProcessGroups."""
     world_size, rank = _get_world_info()
+    device = torch.cuda.current_device()
+    if variant == "tdm" and not torch.cuda.get_device_properties(device).gcnArchName.startswith("gfx1250"):
+        pytest.skip("the TDM all-gather needs gfx1250")
 
     heap_size = 2**33
     shmem = iris.iris(heap_size)
@@ -214,7 +218,11 @@ def test_all_gather_with_groups(group_type, dtype=torch.float32, M=128, N=64):
     iris_output_tensor = shmem.zeros((group_size * M, N), dtype=dtype)
 
     shmem.barrier()
-    config = Config()
+    if variant == "tdm":
+        # N=64 fp32 is a 256-byte row: one 32 x 64 tile per 32 rows.
+        config = Config(use_gluon=True, all_gather_variant="tdm", block_size_m=32, block_size_n=64)
+    else:
+        config = Config(use_gluon=variant == "gluon")
     shmem.ccl.all_gather(iris_output_tensor, iris_input_tensor, group=my_group, config=config)
     torch.cuda.synchronize()
 
@@ -225,7 +233,7 @@ def test_all_gather_with_groups(group_type, dtype=torch.float32, M=128, N=64):
         assert torch.allclose(iris_output_tensor, pytorch_output_tensor, atol=atol), (
             f"Max difference: {max_diff}, expected < {atol}\n"
             f"Rank {rank} (group {group_idx}, ranks={group_ranks}): "
-            f"Iris output doesn't match PyTorch's all_gather (group_type={group_type})"
+            f"Iris output doesn't match PyTorch's all_gather (group_type={group_type}, variant={variant})"
         )
     finally:
         shmem.barrier()

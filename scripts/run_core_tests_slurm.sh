@@ -103,6 +103,6 @@ docker run --rm \
     -w "$WORKSPACE_DIR" \
     --entrypoint bash \
     "$IMAGE_NAME" \
-    -lc 'set -euo pipefail; git config --global --add safe.directory "$PWD"; python3 -m pip install -e ".[dev]"; bash scripts/run_core_tests.sh'
+    -lc 'set -euo pipefail; git config --global --add safe.directory "$PWD"; python3 -m pip install -e ".[dev,sdma]"; bash scripts/run_core_tests.sh'
 
 echo "Logs copied to $PERSIST_LOG_ROOT"

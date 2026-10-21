@@ -10,7 +10,6 @@ These are the module-level functional API. For the OO API, see DeviceContext.
 import triton
 import triton.language as tl
 from iris.mem.triton.context import __translate
-from xio import sdma_ep
 from iris.device import sdma_utils
 
 
@@ -377,7 +376,7 @@ def put(
 
         tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
     else:
-        ctx = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        ctx = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
         queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
@@ -414,10 +413,17 @@ def put(
 
         is_2d_copy: tl.constexpr = len(from_ptr.shape) == 2
 
+        # Early return for zero-size transfers (no-op): the copy packets' size fields are 1-based
+        if mask is not None:
+            if tl.sum(mask.to(tl.int32)) == 0:
+                return
+
         # Determine packet size based on copy type
         # Linear copy packet: 32 bytes for 1D, Sub-window copy packet: 80 bytes for 2D
         command_in_bytes = (
-            sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES if is_2d_copy else sdma_ep.COPY_LINEAR_COMMAND_BYTES
+            sdma_utils.sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES
+            if is_2d_copy
+            else sdma_utils.sdma_ep.COPY_LINEAR_COMMAND_BYTES
         )
 
         # Acquire space in the queue
@@ -552,7 +558,7 @@ def atomic_add(
     if not use_copy_engine:
         return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
     else:
-        handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        handle = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
         queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
@@ -562,7 +568,7 @@ def atomic_add(
 
         dst_ptr_val = translated_ptr.to(tl.uint64)
 
-        command_in_bytes = sdma_ep.ATOMIC_COMMAND_BYTES
+        command_in_bytes = sdma_utils.sdma_ep.ATOMIC_COMMAND_BYTES
         # Acquire space (returns base index and wraparound offset)
         base, offset = sdma_utils.acquire_fadd(
             # base = sdma_utils.acquire(
@@ -581,7 +587,8 @@ def atomic_add(
         packet_offset_bytes = base + offset
 
         # Place command packet
-        sdma_utils.place_atomic_add_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, val)
+        is_64_bit: tl.constexpr = pointer.dtype.element_ty.primitive_bitwidth == 64
+        sdma_utils.place_atomic_add_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, val, is_64_bit)
 
         # Submit command
         pending_wptr = base + offset + command_in_bytes
@@ -597,7 +604,7 @@ def atomic_sub(
 
     This function performs an atomic subtraction operation by translating the pointer
     from the `from_rank`'s address space to the `to_rank`'s address space and atomically
-        subtracting the provided data from the `to_rank` memory location. If the `from_rank` and `to_rank` are the same,
+    subtracting the provided data from the `to_rank` memory location. If the `from_rank` and `to_rank` are the same,
     this function performs a local atomic subtraction operation.
 
     Args:
@@ -684,7 +691,7 @@ def atomic_cas(
     if not use_copy_engine:
         return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
     else:
-        handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        handle = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
         queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
@@ -694,7 +701,7 @@ def atomic_cas(
 
         dst_ptr_val = translated_ptr.to(tl.uint64)
 
-        command_in_bytes = sdma_ep.ATOMIC_COMMAND_BYTES
+        command_in_bytes = sdma_utils.sdma_ep.ATOMIC_COMMAND_BYTES
         # Acquire space (returns base index and wraparound offset)
         base, offset = sdma_utils.acquire_fadd(
             queue_ptr_u32,
@@ -978,7 +985,7 @@ def quiet(copy_engine_ctx: tl.tensor, to_rank):
     """
     # Extract queue pointers from context
     # Context layout: [queue_buf, rptr, wptr, doorbell, cached_wptr, committed_wptr]
-    handle = copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+    handle = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
     read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
     committed_wptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
 

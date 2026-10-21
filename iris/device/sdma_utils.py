@@ -11,8 +11,28 @@ and submission operations.
 
 import triton
 import triton.language as tl
-from xio import sdma_ep
 from iris.mem.utils import wait_cnt
+
+sdma_ep = None
+
+
+def bind_sdma_ep():
+    """Import rocm-xio and bind ``sdma_ep`` for the SDMA device functions."""
+    global sdma_ep
+    if sdma_ep is None:
+        try:
+            from xio import sdma_ep as imported
+        except ModuleNotFoundError as exc:
+            if exc.name != "xio":
+                raise
+            raise ModuleNotFoundError(
+                "rocm-xio is required for the SDMA copy engine. "
+                'Install it with `pip install iris[sdma]`, or drop "sdma" from engines '
+                "to use shader load/store only.",
+                name="xio",
+            ) from exc
+        sdma_ep = imported
+    return sdma_ep
 
 
 @triton.jit
@@ -222,12 +242,12 @@ def place_copy_packet(queue_ptr_u32, offset_bytes: tl.uint64, size_bytes: tl.uin
 # atomic op codes and operation
 # atomic add 32bit w/rtn: op 10, operation 15
 # atomic add 64bit w/rtn: op 10, operation: 47 -> 32 + 15
-# atomic add 32bit w/o rtn: op 10, operation: 31 -> 64 + 15
-# atomic add 64bit w/o rtn: op 10, operation: 63 -> 96 + 15
+# atomic add 32bit w/o rtn: op 10, operation: 79 -> 64 + 15
+# atomic add 64bit w/o rtn: op 10, operation: 111 -> 96 + 15
 # atomic cmp&swap 32bit w/rtn: op 10, operation: 8
 # atomic cmp&swap 64bit w/rtn: op 10, operation: -> 32 + 8
 # atomic cmp&swap 32bit w/o rtn: op 10, operation -> 64 + 8
-# atomic cmp&swap 64bit w/o rtn: op 10, operation 56 -> 06 + 8
+# atomic cmp&swap 64bit w/o rtn: op 10, operation 104 -> 96 + 8
 @triton.jit
 def place_atomic_packet(
     queue_ptr_u32,
@@ -245,13 +265,13 @@ def place_atomic_packet(
     OP codes:
         15: atomic add (32/64-bit with/without return)
         8: atomic compare-and-swap (32/64-bit with/without return)
-    Flags are encoded via IS_64_BIT (bit 4) and RETURN (bit 5).
+    Flags are encoded via IS_64_BIT (bit 5) and RETURN (bit 6).
     """
     slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
     if IS_64_BIT:
-        OP = OP | (0x1 << 4)
-    if not RETURN:
         OP = OP | (0x1 << 5)
+    if not RETURN:
+        OP = OP | (0x1 << 6)
     tl.store(slot_ptr_u32 + 0, ((OP & 0x7F) << 25) | (0xA & 0xFF), cache_modifier=".wt")
     # offset 1: dst address 31:0
     tl.store(slot_ptr_u32 + 1, dst_ptr_val.to(tl.uint32), cache_modifier=".wt")
@@ -261,7 +281,7 @@ def place_atomic_packet(
     tl.store(slot_ptr_u32 + 3, src_data, cache_modifier=".wt")
     # offset 4: src data 63:32
     if IS_64_BIT:
-        tl.store(slot_ptr_u32 + 4, (src_data >> 32).to(tl.uint32), cache_modifier=".wt")
+        tl.store(slot_ptr_u32 + 4, (tl.cast(src_data, tl.uint64) >> 32).to(tl.uint32), cache_modifier=".wt")
     else:
         tl.store(slot_ptr_u32 + 4, 0, cache_modifier=".wt")
     # offset 5: compare data 31:0
@@ -276,9 +296,9 @@ def place_atomic_packet(
 
 
 @triton.jit
-def place_atomic_add_packet(queue_ptr_u32, offset_bytes: tl.uint64, dst_ptr_val, val):
+def place_atomic_add_packet(queue_ptr_u32, offset_bytes: tl.uint64, dst_ptr_val, val, IS_64_BIT: tl.constexpr = False):
     """Place an atomic add packet (OP=15, with return)."""
-    place_atomic_packet(queue_ptr_u32, offset_bytes, dst_ptr_val, val, 0, 15, True)
+    place_atomic_packet(queue_ptr_u32, offset_bytes, dst_ptr_val, val, 0, 15, True, IS_64_BIT)
 
 
 @triton.jit

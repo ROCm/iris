@@ -21,4 +21,5 @@ APIs on `Iris` that create and initialize tensors on the Iris symmetric heap.
 ```{eval-rst}
 .. automethod:: iris.host.iris.Iris.as_symmetric
 .. automethod:: iris.host.iris.Iris.is_symmetric
+.. automethod:: iris.host.iris.Iris.reclaim_freed
 ```
