@@ -25,3 +25,9 @@ Copy-engine transfers prepared once and released by kernels, every round. See
 .. autoclass:: iris.experimental.plan.TriggeredView
    :members: initialize, mark_ready, arrived, wait, owns
 ```
+
+## TriggeredView (Gluon device)
+```{eval-rst}
+.. autoclass:: iris.experimental.plan.gluon.TriggeredView
+   :members: initialize, mark_ready, arrived, wait, owns
+```
