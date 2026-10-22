@@ -101,6 +101,20 @@ def test_barrier_state_reuse(barrier_type, n):
         gc.collect()
 
 
+def test_device_barrier_flags_do_not_use_heap_size():
+    """The barrier flags Iris allocates for itself must not come out of the caller's heap_size."""
+    heap_size = 1 << 20
+    shmem = iris.iris(heap_size, allocator_type="torch")
+    try:
+        whole_heap = shmem.zeros((heap_size,), dtype=torch.int8)
+        assert whole_heap.numel() == heap_size
+        shmem.device_barrier()
+    finally:
+        shmem.barrier()
+        del shmem
+        gc.collect()
+
+
 def _heap_offset(shmem, tensor):
     return tensor.data_ptr() - int(shmem.get_heap_bases()[shmem.get_rank()].item())
 

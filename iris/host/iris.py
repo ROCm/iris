@@ -133,7 +133,11 @@ class Iris:
             )
 
         # Initialize symmetric heap with specified allocator
-        self.heap = SymmetricHeap(heap_size, gpu_id, cur_rank, num_ranks, allocator_type)
+        # Room for the device barrier's flags (allocated below) on top of the caller's heap_size.
+        barrier_flags_bytes = num_ranks * num_ranks * torch.int32.itemsize
+        self.heap = SymmetricHeap(
+            heap_size, gpu_id, cur_rank, num_ranks, allocator_type, reserved_bytes=barrier_flags_bytes
+        )
         self.device = f"cuda:{gpu_id}"
         self.heap_bases = self.heap.get_heap_bases()
 
@@ -166,8 +170,8 @@ class Iris:
         # Lazy initialization for ops interface
         self._ops = None
 
-        # Pairwise counters for device_barrier(), shared by every process group.
-        # Allocated here because heap allocation is collective over all ranks.
+        # Pairwise counters for device_barrier(), shared by every process group. Allocated
+        # here because heap allocation is collective over all ranks; the heap was sized for it.
         self._device_barrier_flags = self.zeros((num_ranks, num_ranks), dtype=torch.int32)
 
         # Initialize tracing
