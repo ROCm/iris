@@ -19,8 +19,9 @@ The API is `iris.plan`; see the [reference](../reference/host/plan.md).
 
 - A **region** is one copy: a byte range, or a 2D sub-window (rows of a strided tensor). It is
   written at the same offset in each peer's buffer. A region is independent of how the producer
-  tiles its output: `tile_chunks()` makes one per tile, `chunks()` one per row block (more above
-  1 GiB), and a hand-built schedule may cover part of a tile or several adjacent tiles.
+  tiles its output: `tile_chunks()` makes one per tile, `chunks()` one per row block (split into
+  1 GiB pieces, the largest single linear copy on these copy engines), and a hand-built schedule
+  may cover part of a tile or several adjacent tiles.
 - A **chunk** is an ordered group of regions sent together, with one arrival signal per peer.
   Grouping amortizes the poll and the signal over many copies.
 - A chunk has **writers**: the number of `mark_ready` calls that complete it each round. One for
@@ -56,7 +57,7 @@ for step in range(tl.program_id(0), num_tiles, num_programs):
 ```python
 from iris.plan import CollectivePlan, CollectiveView, tile_chunks
 
-ctx = iris.iris(heap_size, allocator_type="vmem_chunked", engines=("sdma",))
+ctx = iris.iris(heap_size, engines=("sdma",))
 out = ctx.zeros(world_size * M, N, dtype=torch.bfloat16)
 mine = out[rank * M : (rank + 1) * M]
 schedule = tile_chunks(mine, (BM, BN), tiles_per_chunk=num_programs, base=out)
@@ -116,28 +117,25 @@ and closing the earlier plan finishes both.
 
 ## Memory ordering
 
-Measured on 8× MI350X (gfx950) and 8× MI300X (gfx942).
-
 **Producer.** Copy engines read memory behind the GPU's L2, so a chunk's data must be written
-back before its gate opens. A release fence only covers the issuing wave, so every wave of the
-CTA must first complete its stores. `mark_ready` does this:
+back to memory before its gate opens. The release on the gate does that write-back, but a release
+only orders the stores of the thread that performs it, and `mark_ready` performs it on one thread
+for the whole CTA. The other waves' stores are ordered before it with a CTA barrier that waits for
+every wave's stores, as HIP's `__syncthreads()` does:
 
 ```python
 wait_cnt()                 # s_waitcnt vmcnt(0): this wave's stores are done
-tl.debug_barrier()         # every wave's stores are done
+tl.debug_barrier()         # every wave has got here, so every store of the CTA is done
 tl.atomic_add(counter, 1, sem="acq_rel", scope="sys")   # the last writer then:
 tl.atomic_xchg(ready, round, sem="release", scope="sys")
 ```
 
-| Release recipe                                  | Stale data at the peer (256 KiB and 4 MiB) |
-| ----------------------------------------------- | ------------------------------------------ |
-| `wait_cnt` + barrier + release (`gpu` or `sys`) | none in 350 rounds                         |
-| release without the barrier                     | 80–100% of rounds                          |
-| `.wt` store of the gate                         | every element, every round                 |
-| plain store                                     | none, but the gate stays in L2 until kernel exit |
+Recent Triton versions already wait for outstanding stores in `tl.debug_barrier()`; `wait_cnt()`
+keeps the barrier a memory barrier on versions where it only synchronizes execution. Without the
+barrier, the copy engine sends stale data for most chunks.
 
 **Consumer.** `arrived` / `wait` read the arrival gate with an acquire at system scope; data read
-after it in the same kernel is fresh (no stale elements over 9,600 tile-rounds).
+after it in the same kernel is fresh.
 
 ## Gates and rounds
 
@@ -150,10 +148,6 @@ after it in the same kernel is fresh (no stale elements over 9,600 tile-rounds).
 
 ## Requirements and limits
 
-- **Stable peer mappings.** Prepared copies hold peer addresses, so the heap must not re-map peers
-  while copies are prepared. Every allocator keeps peer addresses fixed: the torch allocator imports
-  each peer's pool once, and the chunked allocator maps new heap chunks into each peer's reserved
-  range as the heap grows.
 - **SDMA engine.** Create the context with `engines=("sdma",)` (needs `pip install iris[sdma]`).
 - **One queue per peer.** Plans use the host-initiated copy-engine queue to each peer, shared with
   host `Iris.put()` and with the plans of every Iris context in the process. Kernel-initiated
