@@ -559,10 +559,26 @@ def test_requires_sdma_engine():
     del ctx
 
 
-def test_torch_allocator_rejected():
-    ctx = iris.iris(1 << 20, engines=("sdma",))
-    buffer = ctx.zeros(1024, dtype=torch.int32)
-    with pytest.raises(ValueError, match="vmem"):
-        CollectivePlan(ctx, buffer, whole(buffer))
+def test_torch_allocator():
+    """The torch allocator imports peers once, so allocating while copies are prepared is safe."""
+    ctx = iris.iris(1 << 26, engines=("sdma",))
+    if ctx.get_num_ranks() < 2:
+        pytest.skip("collective plans need at least two ranks")
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 4096
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    buffer.fill_(EMPTY)
+    schedule = chunks(_slice(buffer, rank, slice_elems), 2, base=buffer)
+    regs, max_regs = _region_table(schedule, 4)
+
+    with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+        for round in range(1, 3):
+            if round > 1:
+                plan.next_round()
+            ctx.zeros(1 << 20, dtype=torch.int8)  # allocated on every rank while copies are prepared
+            handle = plan.start()
+            _regions_producer[(2,)](buffer, regs, max_regs, handle, plan.chunk_id(rank, 0), round, BLOCK=1024)
+            plan.wait()
+            _check_and_wipe(ctx, buffer, round, slice_elems)
     ctx.barrier()
     del ctx

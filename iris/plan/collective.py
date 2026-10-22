@@ -28,7 +28,6 @@ import torch.distributed as dist
 
 from iris.host import queue_ledger
 from iris.host.distributed.helpers import distributed_allgather
-from iris.host.memory.allocators.torch_allocator import TorchAllocator
 from iris.mem.triton import plan as dv
 from iris.plan import armer, kernels
 from iris.plan.schedule import check_disjoint, validate
@@ -86,8 +85,7 @@ class CollectivePlan:
 
     Args:
         ctx: Iris instance, created with ``engines=("sdma",)``.
-        buffer: Contiguous tensor on the symmetric heap. The heap must keep peer mappings stable while
-            copies are prepared, which rules out the default torch allocator: use ``allocator_type="vmem_chunked"`` (or ``"vmem"``).
+        buffer: Contiguous tensor on the symmetric heap.
         schedule: This rank's list of ``Chunk``, in the order it completes them.
         timeout: Seconds ``wait()`` and ``close()`` wait before raising.
     """
@@ -100,11 +98,6 @@ class CollectivePlan:
         self.state = None
         ctx._require_copy_engine()
 
-        # Armed chains hold peer addresses; the torch allocator re-maps peer heaps on every allocation
-        if isinstance(ctx.heap.allocator, TorchAllocator):
-            raise ValueError(
-                "collective plans need stable peer mappings: create the Iris context with allocator_type='vmem_chunked' (or 'vmem')"
-            )
         if not ctx.heap.is_symmetric(buffer) or not buffer.is_contiguous():
             raise ValueError("buffer must be a contiguous tensor on the symmetric heap")
         buffer_bytes = buffer.numel() * buffer.element_size()

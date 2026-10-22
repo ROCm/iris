@@ -151,10 +151,9 @@ after it in the same kernel is fresh (no stale elements over 9,600 tile-rounds).
 ## Requirements and limits
 
 - **Stable peer mappings.** Prepared copies hold peer addresses, so the heap must not re-map peers
-  while copies are prepared. Create the context with `allocator_type="vmem_chunked"` (or `"vmem"`):
-  both keep peer addresses fixed, and the chunked allocator maps new heap chunks into each peer's
-  reserved range as the heap grows. The default torch allocator re-maps peer heaps on every
-  allocation and is rejected.
+  while copies are prepared. Every allocator keeps peer addresses fixed: the torch allocator imports
+  each peer's pool once, and the chunked allocator maps new heap chunks into each peer's reserved
+  range as the heap grows.
 - **SDMA engine.** Create the context with `engines=("sdma",)` (needs `pip install iris[sdma]`).
 - **One queue per peer.** Plans use the host-initiated copy-engine queue to each peer, shared with
   host `Iris.put()` and with the plans of every Iris context in the process. Kernel-initiated
