@@ -78,6 +78,16 @@ If you use the Iris software directly, please also cite the software release:
 
 ## Talks and Videos
 
+### Iris at the Triton Developer Conference — October 2026
+
+A lightning talk at the Triton Developer Conference in San Jose, covering the Iris
+programming model, CU-driven and SDMA-based collectives, and end-to-end results
+serving Kimi K3 on TokenSpeed with every collective running on Iris.
+
+- 📊 [Slides (PDF)](https://github.com/ROCm/iris/blob/main/docs/slides/iris-triton-conf-2026.pdf)
+
+---
+
 ### Iris at GPU Mode — September 2025
 
 Iris was presented at the GPU Mode meetup, covering the design of the RMA API, the symmetric heap, and performance results on multi-GPU workloads.
