@@ -181,6 +181,7 @@ class SymmetricHeap:
         cur_rank: int,
         num_ranks: int,
         allocator_type: str = "torch",
+        reserved_bytes: int = 0,
     ):
         """
         Initialize symmetric heap.
@@ -192,6 +193,9 @@ class SymmetricHeap:
             num_ranks: Total number of ranks
             allocator_type: Type of allocator ("torch", "vmem", or
                 "vmem_chunked"); default "torch"
+            reserved_bytes: Bytes Iris allocates on the heap for itself. The torch and vmem
+                heaps grow by this much, rounded up to the allocator's allocation unit, so
+                that all of ``heap_size`` stays available to the caller.
 
         Raises:
             ValueError: If allocator_type is not supported
@@ -214,6 +218,20 @@ class SymmetricHeap:
 
         if is_simulation_env():
             allocator_type = "torch"
+
+        # Bytes added on top of heap_size for Iris's own allocations. vmem_chunked grows on
+        # demand (and needs a power-of-two chunk size), so it is left alone.
+        self.reserved_size = 0
+        if reserved_bytes > 0 and allocator_type in ("torch", "vmem"):
+            if allocator_type == "torch":
+                unit = 1024  # allocate()'s default alignment
+            else:
+                from iris.host.platform.hip import get_allocation_granularity
+
+                unit = get_allocation_granularity(device_id)
+            self.reserved_size = -(-reserved_bytes // unit) * unit
+            heap_size += self.reserved_size
+            self.heap_size = heap_size
 
         multi_host = False
         if num_ranks > 1 and not is_simulation_env():
