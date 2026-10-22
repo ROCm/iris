@@ -10,7 +10,7 @@ These are the module-level functional API. For the OO API, see DeviceContext.
 import triton
 import triton.language as tl
 from iris.mem.triton.context import __translate
-from iris.device import sdma_utils
+from iris.device import sdma_utils, rdma_utils
 
 
 @triton.jit
@@ -995,3 +995,46 @@ def quiet(copy_engine_ctx: tl.tensor, to_rank):
     # Poll until hardware read pointer catches up
     while tl.load(read_ptr, cache_modifier=".cv", volatile=True) < target:
         pass
+
+
+@triton.jit
+def rdma_put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, nbytes, rdma_ctx):
+    """
+    GPU-initiated RDMA WRITE of ``nbytes`` contiguous bytes from this rank's heap at ``from_ptr`` to ``to_rank``'s heap
+    at the matching address ``to_ptr`` (symmetric, like ``put``). The kernel builds the NIC work request itself; the
+    context must come from ``Iris(engines=("rdma",))`` (``ctx.rdma_device_ctx``), whose ``heap_bases`` hold every
+    rank's real base so the translated address is the remote address the NIC writes to.
+
+    Returns the work-queue index; ``rdma_quiet`` waits for it to complete. Needs mlx5.
+    """
+    remote = __translate(to_ptr, from_rank, to_rank, heap_bases)
+    ctx = rdma_ctx + rdma_utils.DEVICE_CTX_WORDS * to_rank
+    return rdma_utils.put(ctx, tl.cast(from_ptr, tl.uint64), tl.cast(remote, tl.uint64), nbytes)
+
+
+@triton.jit
+def rdma_atomic_add(to_ptr, from_rank, to_rank, heap_bases, value, rdma_ctx):
+    """
+    GPU-initiated RDMA atomic fetch-add of ``value`` to the 8-byte-aligned word at ``to_ptr`` on ``to_rank`` (the old
+    value is discarded). Returns the work-queue index, as ``rdma_put`` does.
+    """
+    remote = __translate(to_ptr, from_rank, to_rank, heap_bases)
+    ctx = rdma_ctx + rdma_utils.DEVICE_CTX_WORDS * to_rank
+    return rdma_utils.atomic_add(ctx, tl.cast(remote, tl.uint64), value)
+
+
+@triton.jit
+def rdma_put_signal(from_ptr, to_ptr, signal_ptr, from_rank, to_rank, heap_bases, nbytes, signal_value, rdma_ctx):
+    """
+    ``rdma_put`` followed by ``rdma_atomic_add(signal_ptr, signal_value)`` on the same queue pair: a rank that sees the
+    signal also sees the data. Returns the work-queue index of the signal.
+    """
+    rdma_put(from_ptr, to_ptr, from_rank, to_rank, heap_bases, nbytes, rdma_ctx)
+    return rdma_atomic_add(signal_ptr, from_rank, to_rank, heap_bases, signal_value, rdma_ctx)
+
+
+@triton.jit
+def rdma_quiet(to_rank, index, rdma_ctx):
+    """Wait until the RDMA work request ``index`` to ``to_rank`` has completed. Returns the error word (0 = fine)."""
+    ctx = rdma_ctx + rdma_utils.DEVICE_CTX_WORDS * to_rank
+    return rdma_utils.quiet(ctx, index)

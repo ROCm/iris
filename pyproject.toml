@@ -39,7 +39,7 @@ amd = [
 ]
 sdma = [
     # SDMA copy engine (use_copy_engine=True, host-initiated put/quiet). Install via `pip install iris[sdma]`.
-    "rocm-xio @ git+https://github.com/ROCm/rocm-xio.git@808560e79d03ab761856cf1f4f59ce1dbb0713eb",
+    "rocm-xio @ git+https://github.com/ROCm/rocm-xio.git@31c41021a32aec01f7f0216766fa41ccc89245ee",
 ]
 dev = [
     "pytest",
