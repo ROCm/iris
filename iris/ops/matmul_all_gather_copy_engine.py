@@ -234,6 +234,8 @@ def matmul_all_gather_copy_engine_preamble(
     selector=None,
 ) -> FusedWorkspace:
     """Allocate workspace for matmul_all_gather_copy_engine including per-batch flags."""
+    shmem._require_copy_engine()
+
     from tritonblas.matmul import _make_matmul_selector
 
     M_local, K = A.shape
@@ -328,6 +330,9 @@ def matmul_all_gather_copy_engine(
     Returns:
         FusedWorkspace object
     """
+    # Fail fast: without the SDMA engine the GEMM launched below would wait forever on flags.
+    shmem._require_copy_engine()
+
     M_local, K = A.shape
     K2, N = B.shape
     world_size = shmem.get_num_ranks()

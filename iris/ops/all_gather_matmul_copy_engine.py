@@ -350,6 +350,8 @@ def all_gather_matmul_copy_engine_preamble(
         staged_a_layout: "k_contiguous" (default, row-major (M,K)) or
                          "m_contiguous" (col-major, stored as (K,M) transposed).
     """
+    shmem._require_copy_engine()
+
     from tritonblas.matmul import _make_matmul_selector
 
     M, K_local = A_sharded.shape
@@ -548,6 +550,9 @@ def all_gather_matmul_copy_engine(
         device_initiated: If True, use device-side WGs to initiate SDMA transfers instead of host.
         k_per_flag: Retained for call compatibility; ignored by the current per-batch design.
     """
+    # Fail fast: without the SDMA engine the GEMM launched below would wait forever on flags.
+    shmem._require_copy_engine()
+
     M, K_local = A_sharded.shape
     K, N = B.shape
     world_size = shmem.get_num_ranks()

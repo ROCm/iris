@@ -120,6 +120,8 @@ def matmul_all_gather_host_copy_engine_preamble(
     selector=None,
 ) -> FusedWorkspace:
     """Allocate workspace for matmul_all_gather_host_copy_engine."""
+    shmem._require_copy_engine()
+
     M_local, K = A.shape
     K2, N = B.shape
     world_size = shmem.get_num_ranks()
@@ -209,6 +211,9 @@ def matmul_all_gather_host_copy_engine(
     Returns:
         FusedWorkspace object
     """
+    # Fail fast: without the SDMA engine the GEMM launched below would wait forever on flags.
+    shmem._require_copy_engine()
+
     M_local, K = A.shape
     K2, N = B.shape
     world_size = shmem.get_num_ranks()

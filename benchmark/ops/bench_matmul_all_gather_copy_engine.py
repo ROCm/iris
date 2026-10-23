@@ -32,6 +32,8 @@ def _make_selector(M_local: int, N: int, K: int, dtype: torch.dtype, device: tor
 
 
 def _register_copy_engine(state, ctx, *, device_initiated: bool) -> None:
+    if ctx.get_copy_engine_ctx() is None:
+        state.skip("SDMA engine is not enabled; run with --engines sdma")
     M_local, N, K = state["M_local"], state["N"], state["K"]
     dtype = state["dtype"]
     rank = ctx.get_rank()
