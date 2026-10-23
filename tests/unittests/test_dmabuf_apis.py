@@ -5,6 +5,7 @@
 Test basic DMA-BUF export/import APIs.
 """
 
+import pytest
 import torch
 import iris
 
@@ -192,3 +193,22 @@ def test_dmabuf_multirank_exchange():
     assert torch.all(tensor == float(ctx.cur_rank * 100))
 
     print(f"Rank {ctx.cur_rank}: Multi-rank FD exchange test passed!")
+
+
+def test_torch_allocator_peer_bases_stable():
+    """The torch allocator imports each peer's pool once: allocations and refreshes keep peer addresses."""
+    ctx = iris.iris(1 << 20)
+    if ctx.num_ranks < 2:
+        pytest.skip("needs peers to import")
+    bases = ctx.heap.heap_bases_cpu.copy()
+    handles = dict(ctx.heap.allocator._peer_ext_mem_handles)
+    assert len(handles) == ctx.num_ranks - 1
+
+    ctx.zeros(1024, dtype=torch.float32)
+    ctx.as_symmetric(torch.ones(256, device=ctx.device))
+    ctx.heap.refresh_peer_access()
+
+    assert (ctx.heap.heap_bases_cpu == bases).all()
+    assert (ctx.get_heap_bases().cpu().numpy() == bases).all()
+    assert ctx.heap.allocator._peer_ext_mem_handles == handles
+    ctx.barrier()
