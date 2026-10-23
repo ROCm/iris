@@ -188,7 +188,7 @@ def test_matmul_all_gather_copy_engine(dtype, atol, rtol, copy_engine_mode, M, N
         pytest.skip("torch.distributed not initialized")
 
     heap_size = _heap_size()
-    shmem = iris.iris(heap_size)
+    shmem = iris.iris(heap_size, engines=("sdma",))
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
     device = torch.device(f"cuda:{rank}")

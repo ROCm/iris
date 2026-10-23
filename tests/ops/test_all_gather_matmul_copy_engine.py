@@ -58,13 +58,6 @@ def _device_initiated_modes():
     return [False, True]
 
 
-def _host_transfer_backends():
-    backend = os.environ.get("IRIS_TEST_HOST_TRANSFER_BACKEND")
-    if backend:
-        return [backend]
-    return ["anvil"]
-
-
 def _heap_size() -> int:
     return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 1 << 34))
 
@@ -220,15 +213,14 @@ def _make_selector(M, N, K, dtype, device):
 
 @pytest.mark.parametrize("dtype, atol, rtol", [(torch.float16, 5e-2, 5e-2)])
 @pytest.mark.parametrize("device_initiated", _device_initiated_modes())
-@pytest.mark.parametrize("host_transfer_backend", _host_transfer_backends())
 @pytest.mark.parametrize("M,K_local,N", _param_shapes())
-def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, host_transfer_backend, M, K_local, N):
+def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, M, K_local, N):
     """Test all_gather_matmul_copy_engine against torch all_gather + matmul."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
     heap_size = _heap_size()
-    ctx = iris.iris(heap_size)
+    ctx = iris.iris(heap_size, engines=("sdma",))
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
     K = K_local * world_size
@@ -265,7 +257,6 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, host
         B_shmem,
         workspace=workspace,
         device_initiated=device_initiated,
-        host_transfer_backend=host_transfer_backend,
         trace=False,
     )
 
@@ -280,10 +271,7 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, host
         world_size,
         atol,
         rtol,
-        (
-            f"device_initiated={device_initiated}, host_transfer_backend={host_transfer_backend}, "
-            f"M={M}, K_local={K_local}, N={N}"
-        ),
+        f"device_initiated={device_initiated}, M={M}, K_local={K_local}, N={N}",
     )
 
     # Clean up to prevent OOM in subsequent tests
