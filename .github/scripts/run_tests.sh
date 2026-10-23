@@ -14,6 +14,11 @@
 #
 # CONTAINER_IMAGE, if set, selects the container image (e.g. the nightly Triton
 # image) instead of the one container_build.sh produced.
+#
+# A test file that needs environment variables of its own declares them on a
+# line of the form
+#   # iris-ci-env: KEY=VALUE [KEY=VALUE ...]
+# and they are set for that file's run only. Only KEY=VALUE words are accepted.
 
 set -e
 
@@ -89,7 +94,14 @@ EXIT_CODE=0
     for test_file in tests/$TEST_DIR/test_*.py; do
         if [ -f \"\$test_file\" ]; then
             echo \"Testing: \$test_file with $NUM_RANKS ranks (install: $INSTALL_METHOD)\"
-            torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 --nnodes=1 --nproc_per_node=$NUM_RANKS tests/run_tests_distributed.py \"\$test_file\" -v --tb=short --durations=10
+            file_env=\$(sed -n 's/^# iris-ci-env: *//p' \"\$test_file\" | tr '\\n' ' ')
+            for kv in \$file_env; do
+                if ! [[ \"\$kv\" =~ ^[A-Z_][A-Z0-9_]*=[A-Za-z0-9_.,:/=-]*$ ]]; then
+                    echo \"[ERROR] \$test_file: bad iris-ci-env entry '\$kv'\"; exit 1
+                fi
+            done
+            if [ -n \"\$file_env\" ]; then echo \"  with \$file_env (iris-ci-env)\"; fi
+            env \$file_env torchrun --rdzv-backend=c10d --rdzv-endpoint=localhost:0 --nnodes=1 --nproc_per_node=$NUM_RANKS tests/run_tests_distributed.py \"\$test_file\" -v --tb=short --durations=10
         fi
     done
 " || { EXIT_CODE=$?; }
