@@ -53,6 +53,10 @@ package-dir = { "" = "." }
 [tool.setuptools.packages.find]
 include = ["iris*"]
 
+[tool.setuptools.package-data]
+# Sources of the RCCL GIN shim, which iris.experimental.rccl_gin builds on first use
+iris = ["csrc/rccl_gin/*.sh", "csrc/rccl_gin/*.hip", "csrc/rccl_gin/*.cpp"]
+
 # ---- setuptools-scm versioning ----
 [tool.setuptools_scm]
 version_scheme = "post-release"   # .postN after last tag
