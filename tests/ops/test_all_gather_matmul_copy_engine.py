@@ -46,7 +46,8 @@ def _param_shapes():
                 int(os.environ["IRIS_TEST_N"]),
             )
         ]
-    return [(256, 128, 256)]
+    # (1024, 512, 1024) stays divisible by any selector block size at 1-8 ranks (K_local % block_k, M % block_m)
+    return [(256, 128, 256), (1024, 512, 1024)]
 
 
 def _device_initiated_modes():
@@ -59,7 +60,7 @@ def _device_initiated_modes():
 
 
 def _heap_size() -> int:
-    return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 1 << 34))
+    return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 1 << 33))
 
 
 def _full_validation_threshold_bytes() -> int:

@@ -46,7 +46,7 @@ def _param_shapes():
 
 
 def _heap_size() -> int:
-    return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 1 << 34))
+    return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 1 << 33))
 
 
 def _full_validation_threshold_bytes() -> int:

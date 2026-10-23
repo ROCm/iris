@@ -57,7 +57,7 @@ def _param_shapes():
 
 
 def _heap_size() -> int:
-    return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 1 << 34))
+    return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 1 << 33))
 
 
 def _full_validation_threshold_bytes() -> int:
@@ -494,7 +494,7 @@ def test_all_gather_matmul_hbm_buffer_auto_workspace():
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33
+    heap_size = _heap_size()
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
@@ -547,7 +547,7 @@ def test_all_gather_matmul_hbm_buffer_workspace_reuse():
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33
+    heap_size = _heap_size()
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
@@ -605,7 +605,7 @@ def test_all_gather_matmul_hbm_buffer_trace():
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33
+    heap_size = _heap_size()
     ctx = iris.iris(heap_size)
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
