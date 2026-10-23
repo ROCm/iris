@@ -19,17 +19,7 @@ import triton.language as tl
 import iris
 from tritonblas.matmul import persistent_matmul_lt
 from tritonblas.config import PrologueConfig
-from tritonblas.kernels.stages import (
-    Tile as StageTile,
-    GemmContext,
-    chiplet_transform_chunked,
-    make_bias_view,
-    make_input_view,
-    make_output_view,
-    make_wait_view,
-)
 
-from iris.host.tracing.events import TraceEvent
 from .workspace import FusedWorkspace
 
 
@@ -52,23 +42,12 @@ def _batch_poster_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     NUM_M_TILES: tl.constexpr,
     M_TILES_PER_BATCH: tl.constexpr,
-    TRACE: tl.constexpr,
 ):
     """Post one SDMA transfer per (batch, rank) including local copy."""
-    zero = tl.program_id(0) * 0
-    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size, tracing=TRACE)
+    ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size)
 
     pid = tl.program_id(0)
     dst_rank = pid
-
-    if TRACE:
-        _trace_handle = ctx.tracing.record_event_start(
-            event_id=TraceEvent().wg_sdma,
-            target_rank=dst_rank,
-            address=flags_ptr + tl.arange(0, 1),
-            pid_m=pid,
-            pid_n=zero,
-        )
 
     ptr_dtype = A_sharded.dtype.element_ty
     if ptr_dtype == tl.float16 or ptr_dtype == tl.bfloat16:
@@ -118,221 +97,6 @@ def _batch_poster_kernel(
             src_pitch=src_pitch_bytes,
             dst_pitch=dst_pitch_bytes,
         )
-
-    if TRACE:
-        ctx.tracing.record_event_end(_trace_handle)
-
-
-@triton.jit
-def _nonpersistent_xcd_comm_gemm_kernel(
-    A_sharded,
-    staged_a,
-    B,
-    C,
-    bias_ptr,
-    wait_ptr,
-    wait_expected_ptr,
-    M,
-    N,
-    K,
-    K_local,
-    stride_am,
-    stride_ak,
-    stride_sa_m,
-    stride_sa_k,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
-    stride_bias,
-    context_tensor: tl.tensor,
-    heap_bases_ptr: tl.tensor,
-    copy_engine_ctx: tl.tensor,
-    cur_rank: tl.constexpr,
-    world_size: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
-    COMPUTE_WGS: tl.constexpr,
-    M_TILES_PER_BATCH: tl.constexpr = 1,
-    COMM_WGS: tl.constexpr = 8,
-    WAIT_NUM: tl.constexpr = 0,
-    WAIT_MAP_TYPE: tl.constexpr = 0,
-    WAIT_BLOCK_GROUP_M: tl.constexpr = 1,
-    WAIT_BLOCK_GROUP_N: tl.constexpr = 1,
-    WAIT_EXPECTED_INC: tl.constexpr = 1,
-    BIAS: tl.constexpr = False,
-    EVEN_K: tl.constexpr = True,
-    ALLOW_TF32: tl.constexpr = True,
-    TRACE: tl.constexpr = False,
-):
-    """Template kernel: reserve leading comm WGs, remap compute WGs across XCDs.
-
-    This kernel is intentionally not wired into the production launch path yet.
-    It sketches the structure needed for:
-
-    - ``COMM_WGS`` front-loaded workgroups, typically one per XCD
-    - XCD-aware remapping over the compute-only PID space
-    - non-persistent GEMM execution (one compute WG per tile)
-
-    The comm branch mirrors the current host path's transfer pattern:
-
-    - one poster WG per remote rank when available
-    - batched copies across M tiles
-    - full local K shard copied into the rank's global-K slot in ``staged_a``
-    - one readiness flag signal per batch
-
-    The compute branch is functional and can be used as a reference for
-    launch-time experimentation.
-    """
-    raw_pid = tl.program_id(0)
-    zero = raw_pid * 0
-
-    if raw_pid < COMM_WGS:
-        # Map poster WG to one rank (including local). Extra COMM_WGS beyond
-        # world_size simply go idle.
-        dst_rank = raw_pid
-        if dst_rank >= world_size:
-            return
-
-        ctx = None
-        if TRACE:
-            ctx = iris.DeviceContext.initialize(context_tensor, cur_rank, world_size, tracing=True)
-            _trace_handle = ctx.tracing.record_event_start(
-                event_id=TraceEvent().wg_sdma,
-                target_rank=dst_rank,
-                address=wait_ptr + tl.arange(0, 1),
-                pid_m=raw_pid,
-                pid_n=zero,
-            )
-
-        # Element size for pointer arithmetic
-        ptr_dtype = A_sharded.dtype.element_ty
-        if ptr_dtype == tl.float16 or ptr_dtype == tl.bfloat16:
-            elem_size = 2
-        elif ptr_dtype == tl.float32 or ptr_dtype == tl.int32:
-            elem_size = 4
-        elif ptr_dtype == tl.float64 or ptr_dtype == tl.int64:
-            elem_size = 8
-        else:
-            elem_size = 4
-
-        num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-        num_batches = (num_pid_m + M_TILES_PER_BATCH - 1) // M_TILES_PER_BATCH
-        rows_per_batch = M_TILES_PER_BATCH * BLOCK_SIZE_M
-
-        # Mirror the current host path: for each batch, transfer the entire
-        # local K shard into the current rank's global-K slot in staged_a and
-        # signal one per-batch readiness flag.
-        for batch_id in range(num_batches):
-            src_m_offset = batch_id * rows_per_batch
-            remaining_rows = M - src_m_offset
-            tile_height = tl.minimum(remaining_rows, rows_per_batch)
-
-            src_m_offset_i64 = (src_m_offset + 0 * stride_am).to(tl.int64)
-            stride_am_i64 = (stride_am + 0 * src_m_offset).to(tl.int64)
-            src_ptr = A_sharded + src_m_offset_i64 * stride_am_i64
-            dst_m_offset = src_m_offset
-            dst_k_offset = cur_rank * K_local
-            dst_m_offset_i64 = (dst_m_offset + 0 * stride_sa_m).to(tl.int64)
-            dst_k_offset_i64 = (dst_k_offset + 0 * stride_sa_k).to(tl.int64)
-            stride_sa_m_i64 = (stride_sa_m + 0 * dst_m_offset).to(tl.int64)
-            stride_sa_k_i64 = (stride_sa_k + 0 * dst_m_offset).to(tl.int64)
-            dst_ptr = staged_a + (dst_m_offset_i64 * stride_sa_m_i64 + dst_k_offset_i64 * stride_sa_k_i64)
-
-            tile_width_bytes = K_local * elem_size
-            src_pitch_bytes = stride_am * elem_size
-            dst_pitch_bytes = stride_sa_m * elem_size
-
-            iris.put_signal_rect(
-                src_ptr,
-                dst_ptr,
-                cur_rank,
-                dst_rank,
-                heap_bases_ptr,
-                copy_engine_ctx,
-                wait_ptr + batch_id,
-                1,
-                width_bytes=tile_width_bytes,
-                height=tile_height,
-                src_pitch=src_pitch_bytes,
-                dst_pitch=dst_pitch_bytes,
-            )
-
-        if TRACE and ctx is not None:
-            ctx.tracing.record_event_end(_trace_handle)
-        return
-
-    compute_pid = raw_pid - COMM_WGS
-    if compute_pid >= COMPUTE_WGS:
-        return
-
-    if NUM_XCDS != 1:
-        compute_pid = chiplet_transform_chunked(
-            compute_pid,
-            COMPUTE_WGS,
-            NUM_XCDS,
-            GROUP_SIZE_M * GROUP_SIZE_M,
-        )
-
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    total_tiles = num_pid_m * num_pid_n
-    tile_id = compute_pid
-    if tile_id >= total_tiles:
-        return
-
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = tile_id // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
-    pid_n = (tile_id % num_pid_in_group) // group_size_m
-
-    tensorA = make_input_view(staged_a, M, K, stride_sa_m, stride_sa_k)
-    tensorB = make_input_view(B, K, N, stride_bk, stride_bn)
-    tensorC = make_output_view(C, M, N, stride_cm, stride_cn)
-    bias_view = make_bias_view(bias_ptr, N, stride_bias) if BIAS else None
-    wait_view = make_wait_view(wait_ptr, wait_expected_ptr) if WAIT_NUM > 0 else None
-    out_tile = StageTile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N)
-
-    if wait_view is not None:
-        wait_view.wait_for_tile(
-            out_tile,
-            M,
-            N,
-            num_flags=WAIT_NUM,
-            map_type=WAIT_MAP_TYPE,
-            block_group_m=WAIT_BLOCK_GROUP_M,
-            block_group_n=WAIT_BLOCK_GROUP_N,
-            expected_inc=WAIT_EXPECTED_INC,
-        )
-
-    acc_dtype = tl.int32 if C.type.element_ty == tl.int8 else tl.float32
-    ctx = GemmContext(
-        BLOCK_SIZE_M,
-        BLOCK_SIZE_N,
-        BLOCK_SIZE_K,
-        COMPUTE_WGS,
-        NUM_XCDS,
-        GROUP_SIZE_M,
-        GROUP_SIZE_M * GROUP_SIZE_M,
-        None,
-        None,
-        acc_dtype,
-        ALLOW_TF32,
-        EVEN_K,
-        False,
-    )
-    acc = ctx.reduce_axis(tensorA, tensorB, out_tile)
-    tensorC.store(acc, out_tile, bias=bias_view)
-
-
-# ==========================================================================
-# Python API
-# ==========================================================================
 
 
 def all_gather_matmul_copy_engine_preamble(
@@ -453,72 +217,6 @@ def all_gather_matmul_copy_engine_preamble(
     return ws
 
 
-_WG_GEMM = 15
-_WG_GEMM_WAIT = 16
-_WG_SDMA = 17
-
-
-def _extract_wg_trace(shmem, grid_size, num_tiles, **metadata):
-    """Reconstruct per-tile and per-SDMA-WG trace arrays from DeviceTracing events.
-
-    For copy_engine with device-initiated mode:
-    - grid_size includes both GEMM tiles + SDMA WGs
-    - num_tiles is the number of GEMM tiles only
-    - SDMA WGs are stored separately in sdma_* arrays
-    """
-    import numpy as np
-
-    bufs = shmem.tracing.trace_buffers
-    n = min(shmem.tracing.trace_counter.item(), shmem.tracing.max_events)
-
-    event_ids = bufs["event_id"][:n].cpu().numpy()
-    pid_ms = bufs["pid_m"][:n].cpu().numpy()  # tile_id or SDMA WG pid
-    timestamps = bufs["timestamp"][:n].cpu().numpy().astype(np.int64)
-    end_ts = bufs["duration_cycles"][:n].cpu().numpy().astype(np.int64)
-    xcc_ids = bufs["xcc_id"][:n].cpu().numpy().astype(np.int32)
-    pid_ns = bufs["pid_n"][:n].cpu().numpy()
-
-    # GEMM tile traces
-    starts = torch.zeros(num_tiles, dtype=torch.int64)
-    ends = torch.zeros(num_tiles, dtype=torch.int64)
-    waits = torch.zeros(num_tiles, dtype=torch.int64)
-    xcds = torch.zeros(num_tiles, dtype=torch.int32)
-
-    # SDMA WG traces (if device-initiated)
-    num_sdma = grid_size - num_tiles  # Number of SDMA WGs
-    sdma_starts = torch.zeros(num_sdma, dtype=torch.int64) if num_sdma > 0 else None
-    sdma_ends = torch.zeros(num_sdma, dtype=torch.int64) if num_sdma > 0 else None
-    sdma_xcds = torch.zeros(num_sdma, dtype=torch.int32) if num_sdma > 0 else None
-
-    for i in range(n):
-        eid = int(event_ids[i])
-        pid = int(pid_ms[i])
-
-        if eid == _WG_GEMM:
-            starts[pid] = int(timestamps[i])
-            ends[pid] = int(end_ts[i])
-            xcds[pid] = int(xcc_ids[i])
-        elif eid == _WG_GEMM_WAIT:
-            waits[pid] = int(pid_ns[i])
-        elif eid == _WG_SDMA:
-            if num_sdma > 0:
-                sdma_starts[pid] = int(timestamps[i])
-                sdma_ends[pid] = int(end_ts[i])
-                sdma_xcds[pid] = int(xcc_ids[i])
-
-    result = {"start": starts, "end": ends, "wait": waits, "xcd": xcds, "grid_size": num_tiles, **metadata}
-    if num_sdma > 0:
-        result.update(
-            {
-                "sdma_start": sdma_starts,
-                "sdma_end": sdma_ends,
-                "sdma_xcd": sdma_xcds,
-                "num_sdma": num_sdma,
-            }
-        )
-    return result
-
-
 def all_gather_matmul_copy_engine(
     shmem,
     output_tensor: torch.Tensor,
@@ -548,10 +246,13 @@ def all_gather_matmul_copy_engine(
             "k_contiguous" — (M,K) row-major, K is fast dim.
             "m_contiguous" — (M,K) with M as fast dim.
         device_initiated: If True, use device-side WGs to initiate SDMA transfers instead of host.
+        trace: Not supported yet; must be False.
         k_per_flag: Retained for call compatibility; ignored by the current per-batch design.
     """
     # Fail fast: without the SDMA engine the GEMM launched below would wait forever on flags.
     shmem._require_copy_engine()
+    if trace:
+        raise NotImplementedError("trace=True is not supported for all_gather_matmul_copy_engine yet")
 
     M, K_local = A_sharded.shape
     K, N = B.shape
@@ -593,13 +294,6 @@ def all_gather_matmul_copy_engine(
 
     # num_m_tiles, num_tiles_n already calculated above
     total_tiles = num_m_tiles * num_tiles_n
-
-    # if trace:
-    #     if rank == 0:
-    #         shmem.info(
-    #             "Tracing is not yet supported for the persistent tritonBLAS path here; running without trace capture."
-    #         )
-    #     trace = False
 
     # Auto-detect num_sms from device if not specified
     num_comm_wgs = selector._hardware.NUM_XCD if device_initiated else 0
@@ -690,7 +384,6 @@ def all_gather_matmul_copy_engine(
             selector.block_m,
             num_m_tiles,
             m_tiles_per_batch,
-            False,
         )
         persistent_matmul_lt(
             workspace.aux_buffer,
@@ -815,16 +508,5 @@ def all_gather_matmul_copy_engine(
     if not async_op:
         torch.cuda.synchronize()  # Wait for kernel completion
         shmem.barrier()
-
-    # if trace:
-    #     torch.cuda.synchronize()
-    #     total_tiles = num_m_tiles * num_tiles_n
-    #     workspace.trace_data = _extract_wg_trace(
-    #         shmem,
-    #         grid_size,
-    #         total_tiles,
-    #         num_m_tiles=num_m_tiles,
-    #         num_tiles_n=num_tiles_n,
-    #     )
 
     return workspace

@@ -38,10 +38,6 @@ def wait_cnt():
     tl.inline_asm_elementwise("s_waitcnt vmcnt(0)", "=r", [], dtype=tl.int32, is_pure=False, pack=1)
 
 
-# Event IDs (must match iris.tracing.events.TraceEvent)
-_WG_GEMM = 15
-
-
 @triton.jit()
 def _wait_completion_signals_kernel(
     completion_signals,
@@ -55,48 +51,6 @@ def _wait_completion_signals_kernel(
     # while tl.atomic_add(completion_signals + src_rank, 0, sem="acquire", scope="sys") < expected_value:
     while tl.load(completion_signals + src_rank, cache_modifier=".cv", volatile=True) < expected_value:
         pass
-
-
-def _extract_wg_trace(shmem, grid_size, num_tiles, sdma_timestamps=None, **metadata):
-    """Extract per-tile trace data from DeviceTracing events.
-
-    For host-initiated SDMA:
-    - Each tile generates trace events (not per workgroup)
-    - SDMA timestamps captured by host via timestamp packets
-    """
-    import numpy as np
-
-    bufs = shmem.tracing.trace_buffers
-    n = min(shmem.tracing.trace_counter.item(), shmem.tracing.max_events)
-
-    event_ids = bufs["event_id"][:n].cpu().numpy()
-    pid_ms = bufs["pid_m"][:n].cpu().numpy()  # tile_id (not workgroup pid)
-    timestamps = bufs["timestamp"][:n].cpu().numpy().astype(np.int64)
-    end_ts = bufs["duration_cycles"][:n].cpu().numpy().astype(np.int64)
-    xcc_ids = bufs["xcc_id"][:n].cpu().numpy().astype(np.int32)
-
-    # Per-tile traces
-    starts = torch.zeros(num_tiles, dtype=torch.int64)
-    ends = torch.zeros(num_tiles, dtype=torch.int64)
-    waits = torch.zeros(num_tiles, dtype=torch.int64)  # Not used but needed for plot
-    xcds = torch.zeros(num_tiles, dtype=torch.int32)
-
-    for i in range(n):
-        eid = int(event_ids[i])
-        tile_id = int(pid_ms[i])
-
-        if eid == _WG_GEMM and tile_id < num_tiles:
-            starts[tile_id] = int(timestamps[i])
-            ends[tile_id] = int(end_ts[i])
-            xcds[tile_id] = int(xcc_ids[i])
-
-    result = {"start": starts, "end": ends, "wait": waits, "xcd": xcds, "grid_size": num_tiles, **metadata}
-
-    # Add SDMA timestamps if available (world_size x 2: start/end per rank)
-    if sdma_timestamps is not None:
-        result["sdma_timestamps"] = sdma_timestamps.cpu()
-
-    return result
 
 
 def _auto_m_tiles_per_batch(selector, M_local: int, N: int) -> int:
@@ -119,8 +73,13 @@ def matmul_all_gather_host_copy_engine_preamble(
     trace: bool = False,
     selector=None,
 ) -> FusedWorkspace:
-    """Allocate workspace for matmul_all_gather_host_copy_engine."""
+    """Allocate workspace for matmul_all_gather_host_copy_engine.
+
+    ``trace`` is not supported yet and must be False.
+    """
     shmem._require_copy_engine()
+    if trace:
+        raise NotImplementedError("trace=True is not supported for matmul_all_gather_host_copy_engine yet")
 
     M_local, K = A.shape
     K2, N = B.shape
@@ -207,12 +166,15 @@ def matmul_all_gather_host_copy_engine(
         bias: Optional bias vector (M_local,)
         async_op: If False, performs barrier at end
         workspace: Optional pre-allocated workspace
+        trace: Not supported yet; must be False.
 
     Returns:
         FusedWorkspace object
     """
     # Fail fast: without the SDMA engine the GEMM launched below would wait forever on flags.
     shmem._require_copy_engine()
+    if trace:
+        raise NotImplementedError("trace=True is not supported for matmul_all_gather_host_copy_engine yet")
 
     M_local, K = A.shape
     K2, N = B.shape
