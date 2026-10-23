@@ -45,11 +45,18 @@ class Config:
         all_reduce_ring_slice_n: Column slice size for ring reduce-scatter/all-gather
                                  (default: auto-set to block_size_n // world_size at runtime)
         reduce_scatter_variant: Variant for reduce-scatter operation (default: "two_shot")
-                                Only "two_shot" is supported
-        num_stages: Number of pipeline stages for the kernel (default: 1). For the TDM
-                    all-gather, the number of tiles each workgroup keeps in LDS: loads run
-                    num_stages - 1 tiles ahead of stores, and num_stages x block_size_m x
-                    block_size_n elements must fit in LDS
+                                Options: "two_shot", "tdm"
+                                - "two_shot": Triton kernel; pulls each owned tile from every rank
+                                - "tdm": Gluon only, gfx1250 only. Pulls each owned tile with the
+                                  tensor data movement engine, one peer->LDS load per rank, and
+                                  stores the sum with one LDS->HBM store
+        num_stages: Number of pipeline stages for the kernel (default: 1).
+                    - TDM all-gather: the number of tiles each workgroup keeps in LDS: loads
+                      run num_stages - 1 tiles ahead of stores, and num_stages x
+                      block_size_m x block_size_n elements must fit in LDS
+                    - TDM reduce-scatter: loads run num_stages tiles ahead of the
+                      reduction, and num_stages x (world_size + 1) x block_size_m x
+                      block_size_n elements must fit in LDS
         num_warps: Number of warps per workgroup (default: 4). For gluon kernels,
                    this also sets the warps of the BlockedLayout. The product of
                    the wavefront width (64 on CDNA3/4, 32 on CDNA5, read in-kernel)
@@ -146,8 +153,12 @@ class Config:
             raise ValueError(f"all_reduce_ring_slice_n must be a power of two, got {self.all_reduce_ring_slice_n}")
 
         # Validate reduce_scatter_variant
-        if self.reduce_scatter_variant != "two_shot":
-            raise ValueError(f"reduce_scatter_variant must be 'two_shot', got '{self.reduce_scatter_variant}'")
+        if self.reduce_scatter_variant not in ["two_shot", "tdm"]:
+            raise ValueError(
+                f"reduce_scatter_variant must be one of: 'two_shot', 'tdm', got '{self.reduce_scatter_variant}'"
+            )
+        if self.reduce_scatter_variant == "tdm" and not self.use_gluon:
+            raise ValueError("reduce_scatter_variant='tdm' is a Gluon kernel; set use_gluon=True")
 
         if self.num_warps <= 0:
             raise ValueError(f"num_warps must be positive, got {self.num_warps}")
