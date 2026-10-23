@@ -283,6 +283,7 @@ def _hbm_buffer_all_gather_matmul_kernel(
                 for fg_idx in range(stage_pid, total_fg_stage, stage_fetch_sms):
                     m_group = fg_idx // tiles_per_m_group
                     within_group = fg_idx % tiles_per_m_group
+                    # TODO there is a bug if #M-Tiles is not multiple of GROUP_SIZE_M
                     k_flag_group = within_group // GROUP_SIZE_M
                     m_in_group = within_group % GROUP_SIZE_M
                     m_tile = stage_m_start + m_group * GROUP_SIZE_M + m_in_group
@@ -304,7 +305,9 @@ def _hbm_buffer_all_gather_matmul_kernel(
 
                         rk = k_block_global * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
                         rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
-                        staged_ptrs = staged_a + rm.to(tl.int64)[:, None] * stride_sa_m + rk[None, :] * stride_sa_k
+                        staged_ptrs = (
+                            staged_a + rm.to(tl.int64)[:, None] * stride_sa_m + rk.to(tl.int64)[None, :] * stride_sa_k
+                        )
 
                         for compile_rank in range(world_size):
                             if src_rank_idx == compile_rank:
@@ -373,7 +376,7 @@ def _hbm_buffer_all_gather_matmul_kernel(
                 rk = k_block * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
                 rk = tl.max_contiguous(tl.multiple_of(rk, BLOCK_SIZE_K), BLOCK_SIZE_K)
 
-                a_ptrs = staged_a + rm.to(tl.int64)[:, None] * stride_sa_m + rk[None, :] * stride_sa_k
+                a_ptrs = staged_a + rm.to(tl.int64)[:, None] * stride_sa_m + rk.to(tl.int64)[None, :] * stride_sa_k
                 a = tl.load(a_ptrs)
 
                 B_ptrs = B + rk[:, None] * stride_bk + rn[None, :] * stride_bn
@@ -389,7 +392,9 @@ def _hbm_buffer_all_gather_matmul_kernel(
             acc = acc + bias_val[:, None]
 
         c = acc.to(C.type.element_ty)
-        C_ptrs = C + rm[:, None] * stride_cm + rn[None, :] * stride_cn
+        stride_cm_i64 = tl.cast(stride_cm, tl.int64)
+        stride_cn_i64 = tl.cast(stride_cn, tl.int64)
+        C_ptrs = C + rm.to(tl.int64)[:, None] * stride_cm_i64 + rn.to(tl.int64)[None, :] * stride_cn_i64
         c_mask = (rm[:, None] < M) & (rn[None, :] < N)
         tl.store(C_ptrs, c, mask=c_mask, cache_modifier=".wt")
 
@@ -436,6 +441,10 @@ def all_gather_matmul_hbm_buffer_preamble(
 
     num_m_tiles = M // config.block_size_m
     num_k_blocks = K // config.block_size_k
+    # Keep the default valid for small and single-rank problems where fewer
+    # than eight K-blocks are available.
+    while k_per_flag > 1 and num_k_blocks % k_per_flag != 0:
+        k_per_flag //= 2
     assert num_k_blocks % k_per_flag == 0
     num_flag_groups_k = num_k_blocks // k_per_flag
 
@@ -587,6 +596,8 @@ def all_gather_matmul_hbm_buffer(
         fetch_block_k = config.block_size_k
 
     num_k_blocks = K // config.block_size_k
+    while k_per_flag > 1 and num_k_blocks % k_per_flag != 0:
+        k_per_flag //= 2
     assert num_k_blocks % k_per_flag == 0
 
     if workspace is None:

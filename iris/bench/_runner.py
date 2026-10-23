@@ -336,6 +336,7 @@ def _run_benchmarks_worker(
     skip_overrides: dict[str, list[Any]],
     heap_size: int,
     use_gluon: bool,
+    engines: tuple[str, ...],
     n_warmup: int,
     n_repeat: int,
     benchmark_filter: str | None,
@@ -355,7 +356,7 @@ def _run_benchmarks_worker(
     dist.init_process_group(backend=backend)
 
     # Create iris context
-    ctx = _iris.iris(heap_size)
+    ctx = _iris.iris(heap_size, engines=engines)
 
     rank = ctx.get_rank()
 
@@ -529,6 +530,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Use Gluon backend",
     )
     parser.add_argument(
+        "--engines",
+        type=str,
+        default="",
+        help="Comma-separated Iris copy engines to set up, e.g. 'sdma' (needs `pip install iris[sdma]`)",
+    )
+    parser.add_argument(
         "--n_warmup",
         type=int,
         default=25,
@@ -564,6 +571,7 @@ def main(argv: list[str] | None = None) -> None:
     """
     parser = _build_parser()
     args, remaining = parser.parse_known_args(argv)
+    engines = tuple(e.strip() for e in args.engines.split(",") if e.strip())
 
     # Parse --axis_<name>=<value> and --skip_<name>=<value> from remaining args
     axis_overrides: dict[str, list[Any]] = {}
@@ -625,6 +633,7 @@ def main(argv: list[str] | None = None) -> None:
             skip_overrides,
             args.heap_size,
             args.use_gluon,
+            engines,
             args.n_warmup,
             args.n_repeat,
             args.benchmark_filter,
@@ -663,6 +672,7 @@ def main(argv: list[str] | None = None) -> None:
             skip_overrides,
             args.heap_size,
             args.use_gluon,
+            engines,
             args.n_warmup,
             args.n_repeat,
             args.benchmark_filter,
