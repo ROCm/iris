@@ -147,8 +147,6 @@ def all_gather_matmul_hbm_buffer(state, ctx):
     state.set_flops(2 * M * N * K)
     state.set_bytes((world_size - 1) * M * K_local * A_sharded.element_size())
 
-    flag_iter = [0]  # Mutable counter for flag_iteration
-
     def _run():
         _hbm_buffer(
             ctx,
@@ -157,7 +155,6 @@ def all_gather_matmul_hbm_buffer(state, ctx):
             B,
             config=config,
             workspace=workspace,
-            flag_iteration=flag_iter[0],
             num_fetch_sms=hbm.get("num_fetch_sms", 16),
             k_per_flag=hbm.get("k_per_flag", 8),
             fetch_block_m=hbm.get("fetch_block_m"),
@@ -167,7 +164,6 @@ def all_gather_matmul_hbm_buffer(state, ctx):
             num_fetch_stages=hbm.get("num_fetch_stages"),
             first_stage_fetch_sms=hbm.get("first_stage_fetch_sms"),
         )
-        flag_iter[0] += 1
 
     state.exec(_run)
 

@@ -194,7 +194,6 @@ def _hbm_buffer_all_gather_matmul_kernel(
     bias_ptr,
     staged_a,
     flags_ptr,
-    flag_iteration,
     M,
     N,
     K,
@@ -316,8 +315,8 @@ def _hbm_buffer_all_gather_matmul_kernel(
                                 tl.store(staged_ptrs, a_tile, cache_modifier=".cg")
 
                     flag_idx = m_tile * NUM_FLAG_GROUPS_K + k_flag_group
-                    tl.debug_barrier()
-                    tl.atomic_add(flags_ptr + flag_idx, 1, sem="release", scope="gpu")
+                    tl.debug_barrier()  # ensure all per-block stores are visible before setting the flag
+                    tl.atomic_xchg(flags_ptr + flag_idx, 1, sem="release", scope="gpu")
 
         if TRACE:
             ctx.tracing.record_event_end(_trace_handle)
@@ -354,8 +353,6 @@ def _hbm_buffer_all_gather_matmul_kernel(
                 pid_n=my_stage,
             )
 
-        expected_flag_value = flag_iteration + 1
-
         for k_fg in range(NUM_FLAG_GROUPS_K):
             if TRACE:
                 _wait_handle = ctx.tracing.record_event_start(
@@ -367,7 +364,7 @@ def _hbm_buffer_all_gather_matmul_kernel(
                 )
 
             flag_idx = pid_m * NUM_FLAG_GROUPS_K + k_fg
-            while tl.atomic_add(flags_ptr + flag_idx, 0, sem="acquire", scope="gpu") < expected_flag_value:
+            while tl.atomic_add(flags_ptr + flag_idx, 0, sem="acquire", scope="gpu") == 0:
                 pass
 
             if TRACE:
@@ -531,7 +528,6 @@ def all_gather_matmul_hbm_buffer(
     async_op: bool = False,
     config: Optional[FusedConfig] = None,
     workspace: Optional[FusedWorkspace] = None,
-    flag_iteration: int = 0,
     num_fetch_sms: Optional[int] = None,
     k_per_flag: Optional[int] = None,
     fetch_block_m: Optional[int] = None,
@@ -607,6 +603,8 @@ def all_gather_matmul_hbm_buffer(
     if workspace is None:
         workspace = all_gather_matmul_hbm_buffer_preamble(ctx, A_sharded, B, config, k_per_flag, staged_a_layout)
 
+    workspace.locks.zero_()
+
     stride_am, stride_ak = A_sharded.stride()
     stride_bk, stride_bn = B.stride()
     stride_cm, stride_cn = output_tensor.stride()
@@ -674,7 +672,6 @@ def all_gather_matmul_hbm_buffer(
         bias_ptr,
         workspace.aux_buffer,
         workspace.locks,
-        flag_iteration,
         M,
         N,
         K,
