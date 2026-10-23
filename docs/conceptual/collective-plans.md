@@ -118,16 +118,19 @@ and closing the earlier plan finishes both.
 ## Memory ordering
 
 **Producer.** Copy engines read memory behind the GPU's L2, so a chunk's data must be written
-back to memory before its gate opens. The release on the gate does that write-back, but a release
-only orders the stores of the thread that performs it, and `mark_ready` performs it on one thread
-for the whole CTA. The other waves' stores are ordered before it with a CTA barrier that waits for
-every wave's stores, as HIP's `__syncthreads()` does:
+back to memory before its gate opens. Each writer does that with a release on the chunk's writer
+counter, and the writers may run on different XCDs, each with its own L2. A release only orders
+the stores of the thread that performs it, and `mark_ready` performs it on one thread for the whole
+CTA, so the other waves' stores are ordered before it with a CTA barrier that waits for every
+wave's stores, as HIP's `__syncthreads()` does. The last writer's increment follows every other
+writer's, and it opens the gate only after its increment returns, so the gate itself needs no
+release:
 
 ```python
 wait_cnt()                 # s_waitcnt vmcnt(0): this wave's stores are done
 tl.debug_barrier()         # every wave has got here, so every store of the CTA is done
-tl.atomic_add(counter, 1, sem="acq_rel", scope="sys")   # the last writer then:
-tl.atomic_xchg(ready, round, sem="release", scope="sys")
+tl.atomic_add(counter, 1, sem="release", scope="sys")   # write back this XCD's L2; the last writer then:
+tl.atomic_xchg(ready, round, sem="relaxed", scope="sys")
 ```
 
 Recent Triton versions already wait for outstanding stores in `tl.debug_barrier()`; `wait_cnt()`

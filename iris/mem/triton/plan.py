@@ -101,9 +101,10 @@ class CollectiveView:
         tl.debug_barrier()
         gate = self.gates + chunk * GATE_WORDS
         writers = self._record(chunk, R_WRITERS)
-        ticket = tl.atomic_add(gate + G_COUNTER, 1, sem="acq_rel", scope="sys")
+        # Each writer's release writes back its own L2; the last writer's ticket follows all of them
+        ticket = tl.atomic_add(gate + G_COUNTER, 1, sem="release", scope="sys")
         if ticket % writers == writers - 1:
-            tl.atomic_xchg(gate + G_READY, self.round, sem="release", scope="sys")
+            tl.atomic_xchg(gate + G_READY, self.round, sem="relaxed", scope="sys")
 
     @triton.jit
     def arrived(self, chunk):
