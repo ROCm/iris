@@ -14,9 +14,9 @@ there is no load to amortize, and a program moves one (tile, destination) pair
 per load-store.
 
 A remote store does not retire early, so the pairs are pipelined through an LDS
-ring of ``Config.num_stages`` tiles, as in the TDM all-gather: loads run
-``num_stages - 1`` pairs ahead of their stores and stores of consecutive pairs
-overlap. ``num_stages = 1`` is the unpipelined load, store, wait loop.
+ring of ``Config.num_stages`` tiles: loads run ``ceil(num_stages / 2)`` pairs
+ahead of their stores and the rest of the ring holds stores in flight.
+``num_stages = 1`` is the unpipelined load, store, wait loop.
 
 The pair order is tile-major: for each of a program's tiles, every destination
 in staggered order (group_rank + i), so at any instant each rank writes to a
@@ -192,7 +192,13 @@ def persistent_all_to_all_tdm(
     # The first LOOKAHEAD - 1 pairs have fewer ops behind their loads and get exact
     # counts. They are peeled in whole tiles (PEEL_K of them) so the main loop starts
     # at i = 0; pairs past a program's last tile are clipped to nothing.
-    LOOKAHEAD: gl.constexpr = NUM_STAGES - 1 if NUM_STAGES > 1 else 1
+    #
+    # TDM ops retire in order, so waiting for pair j's load also waits for every store
+    # issued before it: at most LOOKAHEAD stores are in flight, and at most
+    # NUM_STAGES - LOOKAHEAD by the buffer wait. Half the ring each maximizes that.
+    # With LOOKAHEAD = NUM_STAGES - 1, as in the all-gather, the buffer wait drains all
+    # but the newest store, and a deeper ring adds nothing (measured on gfx1250).
+    LOOKAHEAD: gl.constexpr = (NUM_STAGES + 1) // 2
     OPS_PER_PAIR: gl.constexpr = 2
     WAIT_LOAD: gl.constexpr = (LOOKAHEAD - 1) * OPS_PER_PAIR
     WAIT_BUF: gl.constexpr = (NUM_STAGES - LOOKAHEAD) * OPS_PER_PAIR

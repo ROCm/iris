@@ -54,8 +54,9 @@ class Config:
                                 Only "two_shot" is supported
         num_stages: Number of pipeline stages for the kernel (default: 1). For the TDM
                     all-to-all, the number of tiles each workgroup keeps in LDS: loads run
-                    num_stages - 1 tiles ahead of stores, and num_stages x block_size_m x
-                    block_size_n elements must fit in LDS
+                    ceil(num_stages / 2) tiles ahead of stores, the rest hold stores in
+                    flight, and num_stages x block_size_m x block_size_n elements must fit
+                    in LDS
         num_warps: Number of warps per workgroup (default: 4). For gluon kernels,
                    this also sets the warps of the BlockedLayout. The product of
                    the wavefront width (64 on CDNA3/4, 32 on CDNA5, read in-kernel)

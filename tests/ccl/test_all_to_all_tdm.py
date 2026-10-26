@@ -84,13 +84,19 @@ def _check(shmem, M, N, dtype, config, calls=1):
         (32, 256, 4, 8, 2),
         (64, 128, 16, 8, 3),
         (128, 128, 16, 4, 6),
-        # LOOKAHEAD - 1 is more than world_size: the peel spans several tiles.
-        (32, 128, 8, 4, 12),
+        # LOOKAHEAD - 1 = 9 is more than world_size: the peel spans several tiles.
+        (16, 128, 4, 4, 20),
     ],
 )
 def test_all_to_all_tdm(dtype, M, N, block_size_m, block_size_n, num_warps, comm_sms, num_stages):
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
+    ring_bytes = num_stages * block_size_m * block_size_n * dtype.itemsize
+    max_lds = torch.cuda.get_device_properties(torch.cuda.current_device()).shared_memory_per_block
+    if ring_bytes > max_lds:
+        # e.g. 6 x 128 x 128 fp32 is 384 KiB; gfx1250 has 320 KiB. The launcher rejects it,
+        # which test_all_to_all_tdm_rejects_oversized_ring covers.
+        pytest.skip(f"a {ring_bytes}-byte LDS ring does not fit in {max_lds} bytes")
     shmem = iris.iris(2**30)
     try:
         config = Config(
