@@ -151,6 +151,25 @@ def test_all_to_all_tdm_rejects_oversized_ring():
         del shmem
 
 
+def test_all_to_all_tdm_rejects_bad_shapes():
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+    shmem = iris.iris(2**30)
+    try:
+        world_size = shmem.get_num_ranks()
+        config = Config(use_gluon=True, all_to_all_variant="tdm", block_size_m=128, block_size_n=128)
+        if world_size > 1:
+            src = shmem.zeros((128, world_size * 128 + 1), dtype=torch.bfloat16)
+            with pytest.raises(ValueError, match="not a multiple of world_size"):
+                shmem.ccl.all_to_all(shmem.zeros_like(src), src, config=config)
+        src = shmem.zeros((128, world_size * 128), dtype=torch.bfloat16)
+        with pytest.raises(ValueError, match="output shape"):
+            shmem.ccl.all_to_all(shmem.zeros((64, world_size * 128), dtype=torch.bfloat16), src, config=config)
+    finally:
+        shmem.barrier()
+        del shmem
+
+
 def test_all_to_all_tdm_requires_gluon():
     with pytest.raises(ValueError, match="use_gluon=True"):
         Config(all_to_all_variant="tdm")

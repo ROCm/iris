@@ -310,6 +310,12 @@ def launch(
     """Launch the TDM all-to-all kernel."""
     _check_supported(input_tensor, config)
     M, total_N = input_tensor.shape[:2]
+    if total_N % world_size != 0:
+        raise ValueError(f"all-to-all input has {total_N} columns, not a multiple of world_size {world_size}")
+    if output_tensor.shape != input_tensor.shape:
+        raise ValueError(
+            f"all-to-all output shape {tuple(output_tensor.shape)} != input shape {tuple(input_tensor.shape)}"
+        )
     N = total_N // world_size
     if M == 0 or N == 0:
         # Nothing to move. The kernel's tile arithmetic assumes at least one tile.
