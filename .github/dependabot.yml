@@ -32,6 +32,11 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    # ruff is pinned below 0.16 here and in lint.yml (#547): 0.16 formats code
+    # blocks in Markdown. Dependabot can only bump the pyproject.toml copy, which
+    # silently splits local and CI formatting (#560, #601). Move both by hand.
+    ignore:
+      - dependency-name: "ruff"
     commit-message:
       prefix: "chore"
       include: "scope"
