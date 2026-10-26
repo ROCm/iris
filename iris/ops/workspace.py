@@ -42,6 +42,18 @@ class FusedWorkspace:
     aux_buffer: Optional[torch.Tensor] = None  # Generic buffer for intermediate results
     locks: Optional[torch.Tensor] = None  # Synchronization primitives
 
+    # Copy-engine workspace
+    completion_signals: Optional[torch.Tensor] = None  # (world_size,) sender-completion slots
+
+    # Launch-wave copy-engine metadata
+    wave_tile_counts: Optional[torch.Tensor] = None
+    wave_transfer_offsets: Optional[torch.Tensor] = None
+    wave_transfer_counts: Optional[torch.Tensor] = None
+    transfer_row_offsets: Optional[torch.Tensor] = None
+    transfer_col_offsets: Optional[torch.Tensor] = None
+    transfer_width_bytes: Optional[torch.Tensor] = None
+    transfer_heights: Optional[torch.Tensor] = None
+
     prepared: bool = False
 
     def matches(
@@ -82,4 +94,12 @@ class FusedWorkspace:
         """Free all allocated buffers."""
         self.aux_buffer = None
         self.locks = None
+        self.completion_signals = None
+        self.wave_tile_counts = None
+        self.wave_transfer_offsets = None
+        self.wave_transfer_counts = None
+        self.transfer_row_offsets = None
+        self.transfer_col_offsets = None
+        self.transfer_width_bytes = None
+        self.transfer_heights = None
         self.prepared = False
