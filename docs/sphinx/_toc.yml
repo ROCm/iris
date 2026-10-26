@@ -11,7 +11,7 @@ subtrees:
     - file: conceptual/programming-model.md
     - file: conceptual/finegrained-overlap.md
     - file: conceptual/taxonomy.md
-    - file: conceptual/collective-plans.md
+    - file: conceptual/triggered-plans.md
   - caption: Reference
     entries:
     - file: reference/talks-and-papers.md

@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Schedules for collective plans.
+Schedules for triggered plans.
 
 A schedule is the list of chunks one rank sends, in the order its producer completes them. Once a
 chunk has been marked ready by all of its ``writers``, the copy engine copies every region of the

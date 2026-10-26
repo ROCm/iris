@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Device side of collective plans (see ``iris.experimental.plan``).
+Device side of triggered plans (see ``iris.experimental.plan``).
 
 For each (chunk, peer), the host arms a chain on the copy engine: poll the chunk's ``ready`` gate,
 copy the chunk's regions to the peer, then add 1 to the chunk's ``arrival`` gate on the peer.
@@ -42,21 +42,21 @@ G_COUNTER = tl.constexpr(2)
 
 
 @aggregate
-class CollectiveView:
+class TriggeredView:
     """
-    Device handle for one round of a collective plan.
+    Device handle for one round of a triggered plan.
 
     Usage::
 
         @triton.jit
         def producer(out, handle, ...):
-            cv = CollectiveView.initialize(handle)
+            cv = TriggeredView.initialize(handle)
             ...                          # write this program's part of chunk c
             cv.mark_ready(c)             # whole CTA, after its writes
 
         @triton.jit
         def consumer(out, handle, ...):
-            cv = CollectiveView.initialize(handle)
+            cv = TriggeredView.initialize(handle)
             cv.wait(c)                   # chunk c's data is now visible
             x = tl.load(out + ...)
     """
@@ -76,9 +76,9 @@ class CollectiveView:
     @staticmethod
     @triton.jit
     def initialize(handle):
-        """Read the plan's handle tensor (from ``CollectivePlan.start()``)."""
+        """Read the plan's handle tensor (from ``TriggeredPlan.start()``)."""
         gates = tl.cast(tl.load(handle + H_GATES), tl.pointer_type(tl.int64))
-        return CollectiveView(handle, gates, tl.load(handle + H_ROUND), tl.load(handle + H_RANK))
+        return TriggeredView(handle, gates, tl.load(handle + H_ROUND), tl.load(handle + H_RANK))
 
     @triton.jit
     def _record(self, chunk, word):

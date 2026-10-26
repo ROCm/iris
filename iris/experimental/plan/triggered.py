@@ -2,14 +2,14 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Collective plans: the host prepares copy-engine chains, a kernel releases them.
+Triggered plans: the host prepares copy-engine chains, a kernel releases them.
 
 Lifecycle:
 
-    with CollectivePlan(ctx, buffer, schedule) as plan:   # collective: allocate gates, prepare round 1
+    with TriggeredPlan(ctx, buffer, schedule) as plan:   # collective: allocate gates, prepare round 1
         for step in range(steps):
             handle = plan.start()
-            producer[grid](..., handle)                   # CollectiveView.mark_ready(chunk)
+            producer[grid](..., handle)                   # TriggeredView.mark_ready(chunk)
             plan.wait()                                   # every chunk delivered, or TimeoutError
             ...                                           # read this round's data
             plan.next_round()                             # collective: barrier -> prepare -> barrier
@@ -69,7 +69,7 @@ def _mark_closed(plans):
         plan.gates = plan.view = plan.buffer = None
 
 
-class CollectivePlan:
+class TriggeredPlan:
     """
     Sends regions of ``buffer`` from the rank that writes them to every other rank, using copy
     engines that a kernel releases chunk by chunk.

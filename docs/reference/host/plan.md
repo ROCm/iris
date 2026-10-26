@@ -1,13 +1,13 @@
-# Collective Plans
+# Triggered Plans
 
 Experimental (`iris.experimental.plan`): may change between releases without deprecation.
 
 Copy-engine transfers prepared once and released by kernels, every round. See
-[Collective Plans](../../conceptual/collective-plans.md) for the model and its ordering rules.
+[Triggered Plans](../../conceptual/triggered-plans.md) for the model and its ordering rules.
 
-## CollectivePlan
+## TriggeredPlan
 ```{eval-rst}
-.. autoclass:: iris.experimental.plan.CollectivePlan
+.. autoclass:: iris.experimental.plan.TriggeredPlan
    :members: start, wait, next_round, run, close, chunk_id
 ```
 
@@ -20,8 +20,8 @@ Copy-engine transfers prepared once and released by kernels, every round. See
 .. autofunction:: iris.experimental.plan.tile_chunks
 ```
 
-## CollectiveView (device)
+## TriggeredView (device)
 ```{eval-rst}
-.. autoclass:: iris.experimental.plan.CollectiveView
+.. autoclass:: iris.experimental.plan.TriggeredView
    :members: initialize, mark_ready, arrived, wait, owns
 ```

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
-# Collective plans on the copy engines. Each rank owns a slice of a symmetric buffer and sends it to
-# every peer; chunks are released by kernels with CollectiveView.mark_ready.
+# Triggered plans on the copy engines. Each rank owns a slice of a symmetric buffer and sends it to
+# every peer; chunks are released by kernels with TriggeredView.mark_ready.
 #
 # Every test uses its plans as context managers, so no chain is left parked on a queue.
 
@@ -20,10 +20,10 @@ from iris.experimental.plan import triton as dv
 from iris.mem.utils import read_realtime
 from iris.experimental.plan import (
     Chunk,
-    CollectivePlan,
-    CollectiveView,
     Region,
     State,
+    TriggeredPlan,
+    TriggeredView,
     armer,
     chunks,
     tile_chunks,
@@ -36,7 +36,7 @@ EMPTY = -1
 def _ctx():
     ctx = iris.iris(1 << 26, allocator_type="vmem_chunked", engines=("sdma",))
     if ctx.get_num_ranks() < 2:
-        pytest.skip("collective plans need at least two ranks")
+        pytest.skip("triggered plans need at least two ranks")
     return ctx
 
 
@@ -78,7 +78,7 @@ def _regions_producer(buf, regs, max_regs, handle, first, round, BLOCK: tl.const
         for off in range(0, count, BLOCK):
             idx = start + off + tl.arange(0, BLOCK)
             tl.store(buf + idx, (round << 24) | idx, mask=off + tl.arange(0, BLOCK) < count)
-    CollectiveView.initialize(handle).mark_ready(first + c)
+    TriggeredView.initialize(handle).mark_ready(first + c)
 
 
 def _region_table(schedule, elem):
@@ -113,7 +113,7 @@ def test_linear_chunks_across_rounds(kind):
         schedule = _strided(slice_elems, rank, 4, 4)
     regs, max_regs = _region_table(schedule, 4)
 
-    with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         for round in range(1, 4):
             if round > 1:
                 plan.next_round()
@@ -139,7 +139,7 @@ def test_heap_growth_while_prepared():
     schedule = chunks(_slice(buffer, rank, slice_elems), 2, base=buffer)
     regs, max_regs = _region_table(schedule, 4)
 
-    with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         num_chunks = alloc.get_num_chunks()
         ctx.zeros(alloc.chunk_size, dtype=torch.int8)  # mapped on every rank while copies are prepared
         assert alloc.get_num_chunks() > num_chunks
@@ -154,7 +154,7 @@ def test_heap_growth_while_prepared():
     buffer.fill_(EMPTY)
     mine = _slice(buffer, rank, slice_elems)
     mine.copy_(torch.arange(rank * slice_elems, (rank + 1) * slice_elems, dtype=torch.int32, device=mine.device))
-    with CollectivePlan(ctx, buffer, whole(mine, base=buffer), timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, whole(mine, base=buffer), timeout=20) as plan:
         plan.run()
         assert torch.equal(buffer, torch.arange(buffer.numel(), dtype=torch.int32, device=buffer.device))
     ctx.barrier()
@@ -187,7 +187,7 @@ def _tiled_producer(
     GROUP_M: tl.constexpr,
 ):
     """Persistent tiled producer: program p takes steps p, p + NUM_PROGRAMS, ... and marks each step's chunk ready."""
-    cv = CollectiveView.initialize(handle)
+    cv = TriggeredView.initialize(handle)
     tiles_m, tiles_n = tl.cdiv(M, BM), tl.cdiv(N, BN)
     for i in range(tl.program_id(0), tiles_m * tiles_n, NUM_PROGRAMS):
         tile = _grouped(i, tiles_m, tiles_n, GROUP_M)
@@ -209,7 +209,7 @@ def test_tile_chunks_2d_unaligned(group_m):
     order = lambda i: _grouped.fn(i, 3, 3, group_m)  # noqa: E731
     schedule = tile_chunks(buffer[rank * m : (rank + 1) * m], (bm, bn), programs, order=order, base=buffer)
 
-    with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         for round in range(1, 4):
             if round > 1:
                 plan.next_round()
@@ -244,7 +244,7 @@ def _staggered_producer(buf, handle, chunk, round, start, part, delay, BLOCK: tl
     for off in range(0, part, BLOCK):
         idx = start + pid * part + off + tl.arange(0, BLOCK)
         tl.store(buf + idx, (round << 24) | idx)
-    CollectiveView.initialize(handle).mark_ready(chunk)
+    TriggeredView.initialize(handle).mark_ready(chunk)
 
 
 def test_many_writers_one_chunk():
@@ -256,7 +256,7 @@ def test_many_writers_one_chunk():
     buffer.fill_(EMPTY)
     schedule = whole(_slice(buffer, rank, slice_elems), base=buffer, writers=programs)
 
-    with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         for round in range(1, 11):
             if round > 1:
                 plan.next_round()
@@ -279,7 +279,7 @@ def test_many_writers_one_chunk():
 
 @triton.jit
 def _mark_ready_kernel(handle, chunk):
-    CollectiveView.initialize(handle).mark_ready(chunk)
+    TriggeredView.initialize(handle).mark_ready(chunk)
 
 
 def test_head_of_line_order():
@@ -293,7 +293,7 @@ def test_head_of_line_order():
         buffer[:slice_elems] = _expected(1, slice_elems)
     schedule = chunks(buffer[:slice_elems], 2) if rank == 0 else []
 
-    with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         handle = plan.start()
         if rank == 0:
             _mark_ready_kernel[(1,)](handle, 1)
@@ -322,7 +322,7 @@ def test_wrong_mark_count_raises(marks):
     buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
     schedule = whole(_slice(buffer, rank, slice_elems), base=buffer, writers=2)
 
-    with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         handle = plan.start()
         _mark_ready_kernel[(marks,)](handle, plan.chunk_id(rank, 0))
         if marks < 2:
@@ -344,7 +344,7 @@ def test_misuse_raises():
     schedule = whole(_slice(buffer, rank, slice_elems), base=buffer)
     peer = (rank + 1) % world
 
-    with CollectivePlan(ctx, buffer, schedule, timeout=20) as a, CollectivePlan(ctx, buffer, schedule, timeout=20) as b:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as a, TriggeredPlan(ctx, buffer, schedule, timeout=20) as b:
         with pytest.raises(RuntimeError, match="copies prepared"):
             ctx.put(buffer[:slice_elems], to_rank=peer)
         with pytest.raises(RuntimeError, match="needs"):
@@ -375,8 +375,8 @@ def test_nested_plans_close_in_any_order():
     buffers = [ctx.zeros(world * slice_elems, dtype=torch.int32) for _ in range(2)]
     ledger = queue_ledger.ledger()
 
-    with CollectivePlan(ctx, buffers[0], chunks(_slice(buffers[0], rank, slice_elems), 2, base=buffers[0])) as a:
-        with CollectivePlan(ctx, buffers[1], whole(_slice(buffers[1], rank, slice_elems), base=buffers[1])) as b:
+    with TriggeredPlan(ctx, buffers[0], chunks(_slice(buffers[0], rank, slice_elems), 2, base=buffers[0])) as a:
+        with TriggeredPlan(ctx, buffers[1], whole(_slice(buffers[1], rank, slice_elems), base=buffers[1])) as b:
             a.run()
             b.run()
             # Both prepared again, as at the end of a loop iteration
@@ -406,7 +406,7 @@ def test_invalid_schedule_fails_every_rank():
     if rank == 0:
         schedule = [Chunk((Region(0, world * slice_elems * 4 + 4),))]  # runs past the buffer
     with pytest.raises(ValueError if rank == 0 else RuntimeError, match="past the buffer" if rank == 0 else "validate"):
-        CollectivePlan(ctx, buffer, schedule, timeout=20)
+        TriggeredPlan(ctx, buffer, schedule, timeout=20)
     ctx.barrier()
     del ctx
 
@@ -417,7 +417,7 @@ def test_overlapping_schedules_rejected():
     world = ctx.get_num_ranks()
     buffer = ctx.zeros(world * 1024, dtype=torch.int32)
     with pytest.raises(ValueError, match="ranks 0 and 1 both send"):
-        CollectivePlan(ctx, buffer, chunks(buffer, 2), timeout=20)
+        TriggeredPlan(ctx, buffer, chunks(buffer, 2), timeout=20)
     assert not any(queue_ledger.ledger().entries.values())
     ctx.barrier()
     del ctx
@@ -438,12 +438,12 @@ def test_capacity_failure_fails_every_rank():
         ledger.reserve(hog, 1, rank, {p: ledger.capacity for p in range(world) if p != rank})
     try:
         with pytest.raises(RuntimeError, match="would exceed" if rank == 0 else "could not reserve"):
-            CollectivePlan(ctx, buffer, schedule, timeout=20)
+            TriggeredPlan(ctx, buffer, schedule, timeout=20)
     finally:
         ledger.release(hog)
     assert not any(ledger.entries.values())
 
-    with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         plan.run()
     ctx.barrier()
     del ctx
@@ -467,11 +467,11 @@ def test_prepare_failure_flushes_and_fails_every_rank(monkeypatch):
 
     monkeypatch.setattr(armer, "arm_chain", flaky)
     with pytest.raises(RuntimeError, match="injected arm failure" if rank == 0 else "could not prepare"):
-        CollectivePlan(ctx, buffer, schedule, timeout=20)
+        TriggeredPlan(ctx, buffer, schedule, timeout=20)
     monkeypatch.undo()
     assert not any(queue_ledger.ledger().entries.values())
 
-    with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         plan.run()
     ctx.barrier()
     del ctx
@@ -488,7 +488,7 @@ def test_close_flushes_unfinished_round():
     schedule = chunks(_slice(buffer, rank, slice_elems), 2, base=buffer)
 
     with pytest.raises(KeyError):
-        with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+        with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
             assert plan.state is State.PREPARED
             raise KeyError("leave the block without running the round")
     assert plan.state is State.CLOSED
@@ -504,7 +504,7 @@ def test_close_waits_for_every_rank():
     rank, world = ctx.get_rank(), ctx.get_num_ranks()
     slice_elems = 1024
     buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
-    plan = CollectivePlan(ctx, buffer, whole(_slice(buffer, rank, slice_elems), base=buffer), timeout=20)
+    plan = TriggeredPlan(ctx, buffer, whole(_slice(buffer, rank, slice_elems), base=buffer), timeout=20)
     plan.run()
     if rank != 0:
         time.sleep(1.0)
@@ -564,7 +564,7 @@ def test_requires_sdma_engine():
     ctx = iris.iris(1 << 20)
     buffer = ctx.zeros(1024, dtype=torch.int32)
     with pytest.raises(RuntimeError, match="SDMA is disabled"):
-        CollectivePlan(ctx, buffer, whole(buffer))
+        TriggeredPlan(ctx, buffer, whole(buffer))
     ctx.barrier()
     del ctx
 
@@ -573,7 +573,7 @@ def test_torch_allocator():
     """The torch allocator imports peers once, so allocating while copies are prepared is safe."""
     ctx = iris.iris(1 << 26, engines=("sdma",))
     if ctx.get_num_ranks() < 2:
-        pytest.skip("collective plans need at least two ranks")
+        pytest.skip("triggered plans need at least two ranks")
     rank, world = ctx.get_rank(), ctx.get_num_ranks()
     slice_elems = 4096
     buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
@@ -581,7 +581,7 @@ def test_torch_allocator():
     schedule = chunks(_slice(buffer, rank, slice_elems), 2, base=buffer)
     regs, max_regs = _region_table(schedule, 4)
 
-    with CollectivePlan(ctx, buffer, schedule, timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         for round in range(1, 3):
             if round > 1:
                 plan.next_round()

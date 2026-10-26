@@ -1,9 +1,9 @@
-# Collective Plans
+# Triggered Plans
 
-A collective plan sends data that a running kernel produces to every other rank without spending
+A triggered plan sends data that a running kernel produces to every other rank without spending
 compute units on the transfer. The host prepares copy-engine (SDMA) transfers ahead of time; the
 kernel marks each chunk of its output ready once it is written, and the copy engine copies the
-chunk to every peer and signals its arrival there. This technique is often called *triggered SDMA*.
+chunk to every peer and signals its arrival there: *triggered SDMA*, hence the name.
 
 ```
 kernel writes a chunk ──► mark_ready(chunk) opens the chunk's gate
@@ -56,17 +56,17 @@ for step in range(tl.program_id(0), num_tiles, num_programs):
 ```
 
 ```python
-from iris.experimental.plan import CollectivePlan, CollectiveView, tile_chunks
+from iris.experimental.plan import TriggeredPlan, TriggeredView, tile_chunks
 
 ctx = iris.iris(heap_size, engines=("sdma",))
 out = ctx.zeros(world_size * M, N, dtype=torch.bfloat16)
 mine = out[rank * M : (rank + 1) * M]
 schedule = tile_chunks(mine, (BM, BN), tiles_per_chunk=num_programs, base=out)
 
-with CollectivePlan(ctx, out, schedule) as plan:   # collective: allocates gates, prepares round 1
+with TriggeredPlan(ctx, out, schedule) as plan:   # collective: allocates gates, prepares round 1
     for step in range(steps):
         handle = plan.start()
-        producer[(num_programs,)](..., handle)     # CollectiveView.initialize(handle).mark_ready(chunk)
+        producer[(num_programs,)](..., handle)     # TriggeredView.initialize(handle).mark_ready(chunk)
         plan.wait()                                # every chunk delivered everywhere
         ...                                        # read this round's data
         plan.next_round()                          # collective: barrier, prepare, barrier

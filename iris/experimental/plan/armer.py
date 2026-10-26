@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Arms collective-plan chains on the host-initiated copy-engine queue through rocm-xio.
+Arms triggered-plan chains on the host-initiated copy-engine queue through rocm-xio.
 
 Per (chunk, peer): POLL_REGMEM(ready >= round) -> one copy per region -> ATOMIC ADD_RTN_64(arrival += 1).
 """

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
-"""Kernels a collective plan launches itself: sending its own chunks and checking completion."""
+"""Kernels a triggered plan launches itself: sending its own chunks and checking completion."""
 
 import triton
 import triton.language as tl
@@ -15,14 +15,14 @@ from iris.experimental.plan.triton import (
     HEADER_WORDS,
     R_WRITERS,
     RECORD_WORDS,
-    CollectiveView,
+    TriggeredView,
 )
 
 
 @triton.jit
 def release_kernel(view, chunks):
     """Open the gate of chunk ``chunks[pid]``, counting a mark from each of its writers."""
-    cv = CollectiveView.initialize(view)
+    cv = TriggeredView.initialize(view)
     chunk = tl.load(chunks + tl.program_id(0))
     gate = cv.gates + chunk * GATE_WORDS
     writers = tl.load(view + HEADER_WORDS + chunk * RECORD_WORDS + R_WRITERS)
@@ -49,7 +49,7 @@ def progress_kernel(
     ``status[pid]`` when complete, 0 if ``BUDGET`` ran out.
     """
     chunk = tl.program_id(0)
-    cv = CollectiveView.initialize(view)
+    cv = TriggeredView.initialize(view)
     gate = cv.gates + chunk * GATE_WORDS
     done = tl.full((), True, tl.int1)
     if cv.owns(chunk):

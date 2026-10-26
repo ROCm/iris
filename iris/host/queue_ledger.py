@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-What collective plans (iris.experimental.plan) have armed on this process's host copy-engine queues.
+What triggered plans (iris.experimental.plan) have armed on this process's host copy-engine queues.
 
 The queues belong to the process, not to an Iris instance, so the ledger does too.
 """
@@ -63,7 +63,7 @@ class QueueLedger:
     def check_idle(self, src, dst):
         if self.entries.get((src, dst)):
             raise RuntimeError(
-                f"collective plans have copies prepared on the copy-engine queue to rank {dst}; "
+                f"triggered plans have copies prepared on the copy-engine queue to rank {dst}; "
                 "wait for or close those plans before using it"
             )
 

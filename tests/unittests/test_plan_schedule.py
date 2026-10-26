@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
-# Schedule builders and validation for collective plans (host only).
+# Schedule builders and validation for triggered plans (host only).
 
 import pytest
 import torch

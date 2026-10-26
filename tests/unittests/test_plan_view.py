@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
-# CollectiveView against an ordinary gate table: no copy engine involved.
+# TriggeredView against an ordinary gate table: no copy engine involved.
 
 import torch
 import triton
 import triton.language as tl
 
 from iris.experimental.plan import triton as dv
-from iris.experimental.plan import Chunk, CollectiveView, Region, kernels
-from iris.experimental.plan.collective import view_words
+from iris.experimental.plan import Chunk, Region, TriggeredView, kernels
+from iris.experimental.plan.triggered import view_words
 
 
 def _view(rank, schedules, round):
@@ -22,12 +22,12 @@ def _view(rank, schedules, round):
 
 @triton.jit
 def _mark_ready_kernel(handle, chunk):
-    CollectiveView.initialize(handle).mark_ready(chunk)
+    TriggeredView.initialize(handle).mark_ready(chunk)
 
 
 @triton.jit
 def _arrived_kernel(handle, out, n):
-    cv = CollectiveView.initialize(handle)
+    cv = TriggeredView.initialize(handle)
     for c in range(n):
         tl.store(out + c, cv.arrived(c).to(tl.int32) + 2 * cv.owns(c).to(tl.int32))
 
