@@ -24,10 +24,17 @@ class FusedWorkspace:
         dtype: Data type of tensors
         world_size: Number of ranks in the communicator
         variant: Algorithm variant (for operations that support multiple variants)
+        selector: Optional tritonBLAS tile selector used to derive launch parameters
+        config: Optional resolved config (e.g. with ``two_shot`` resolved to a concrete variant)
+        launch_params: Cached launch metadata derived during preamble
+        generation: Number of launches so far; cumulative signal counters are compared against it
 
         # Temporary buffers
         aux_buffer: Generic auxiliary buffer for intermediate results (gathered data, temp results, etc.)
         locks: Lock array for spinlock synchronization
+        a_inbox: Receiver-side inbox holding partial results published by other ranks
+        completion_signals: Cumulative arrival counters for the kernel exit barrier
+        compact_xcd_schedule: Compact XCD-local tile schedule (``two_shot_compact`` only)
 
         prepared: Whether workspace has been initialized for current operation
     """
@@ -37,10 +44,17 @@ class FusedWorkspace:
     dtype: Optional[torch.dtype] = None
     world_size: int = 1
     variant: str = ""
+    selector: Optional[object] = None
+    config: Optional[object] = None
+    launch_params: Optional[dict] = None
+    generation: int = 0
 
     # Temporary buffers (allocated as needed)
     aux_buffer: Optional[torch.Tensor] = None  # Generic buffer for intermediate results
     locks: Optional[torch.Tensor] = None  # Synchronization primitives
+    a_inbox: Optional[torch.Tensor] = None  # Receiver-side inbox/reduction buffer
+    completion_signals: Optional[torch.Tensor] = None  # Exit-barrier arrival counters
+    compact_xcd_schedule: Optional[object] = None  # Compact XCD-local two-shot schedule
 
     prepared: bool = False
 
@@ -82,4 +96,11 @@ class FusedWorkspace:
         """Free all allocated buffers."""
         self.aux_buffer = None
         self.locks = None
+        self.a_inbox = None
+        self.completion_signals = None
+        self.compact_xcd_schedule = None
+        self.selector = None
+        self.config = None
+        self.launch_params = None
+        self.generation = 0
         self.prepared = False
