@@ -21,8 +21,8 @@ experimental: it may change between releases without deprecation.
 - A **region** is one copy: a byte range, or a 2D sub-window (rows of a strided tensor). It is
   written at the same offset in each peer's buffer. A region is independent of how the producer
   tiles its output: `tile_chunks()` makes one per tile, `chunks()` one per row block (split into
-  1 GiB pieces, the largest single linear copy on these copy engines), and a hand-built schedule
-  may cover part of a tile or several adjacent tiles.
+  1 GiB pieces: a linear copy packet's byte count is a 30-bit field, so one copy moves at most
+  1 GiB), and a hand-built schedule may cover part of a tile or several adjacent tiles.
 - A **chunk** is an ordered group of regions sent together, with one arrival signal per peer.
   Grouping amortizes the poll and the signal over many copies.
 - A chunk has **writers**: the number of `mark_ready` calls that complete it each round. One for
@@ -156,11 +156,14 @@ after it in the same kernel is fresh.
 - **One queue per peer.** Plans use the host-initiated copy-engine queue to each peer, shared with
   host `Iris.put()` and with the plans of every Iris context in the process. Kernel-initiated
   copies (`put(..., use_copy_engine=True)`) use a separate queue and are unaffected.
-- **Ring capacity.** Prepared copies may use at most half of each queue's 8 MiB ring.
+- **Ring capacity.** Prepared copies may use at most half of each queue's 8 MiB ring. They hold
+  their ring space until their gates open, and a submit that does not fit waits for space, so a
+  full ring could hang the host before any kernel opens a gate. The other half covers wrap padding
+  and work queued before them. Half is a conservative margin, not a measured bound.
 - **Same offsets everywhere.** Every chunk is copied to the same offsets in each peer's buffer,
   so plans express all-gather and broadcast (ranks that send nothing pass an empty schedule). Two
   ranks may not send the same bytes: the plan checks this when it is created, which catches a
   schedule built from the whole buffer instead of the rank's own part.
 - **Single node only.**
-- **Linear regions are at most 1 GiB** (SDMA 4.4's count field is 30 bits). The schedule builders
-  split larger ranges.
+- **Linear regions are at most 1 GiB** (`COPY_LINEAR`'s byte count is 30 bits on SDMA 4.4). The
+  schedule builders split larger ranges.

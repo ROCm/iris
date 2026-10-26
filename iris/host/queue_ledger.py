@@ -74,6 +74,9 @@ _ledger = None
 def ledger():
     global _ledger
     if _ledger is None:
-        # Leave half the ring for wrap padding and work queued before the plan
+        # Prepared copies hold their ring space until their gate opens, and rocm-xio's host submit
+        # spins until the ring has room: one that does not fit behind them would hang the host before
+        # any kernel opens a gate. Plans get half the ring; the rest covers wrap padding and work
+        # queued before them. Half is a conservative margin, not a measured bound.
         _ledger = QueueLedger(bind_sdma_ep().SDMA_QUEUE_SIZE // 2)
     return _ledger
