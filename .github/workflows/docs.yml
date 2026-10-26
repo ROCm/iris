@@ -51,10 +51,19 @@ jobs:
           pip install -r docs/sphinx/requirements.txt
           
       - name: Build documentation
+        shell: bash
         run: |
+          set -o pipefail
           cd docs
           chmod +x build_docs.sh
-          ./build_docs.sh
+          ./build_docs.sh 2>&1 | tee build.log
+          # A module autodoc cannot import renders as an empty page but is only a warning to
+          # Sphinx, so fail the build on it here
+          if grep -q "autodoc: failed to import" build.log; then
+            grep -A3 "autodoc: failed to import" build.log
+            echo "::error::autodoc could not import a documented module; its reference renders empty"
+            exit 1
+          fi
           
       - name: Upload documentation artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
