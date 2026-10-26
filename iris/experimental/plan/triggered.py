@@ -12,7 +12,7 @@ Lifecycle:
             producer[grid](..., handle)                   # TriggeredView.mark_ready(chunk)
             plan.wait()                                   # every chunk delivered, or TimeoutError
             ...                                           # read this round's data
-            plan.next_round()                             # collective: barrier -> prepare -> barrier
+            plan.next_round()                             # collective: prepare -> barrier
 
 All of a rank's chains to one peer share that peer's host-initiated copy-engine queue, and run in
 the order they were prepared. Plans sharing queues must therefore start and close in the order they
@@ -306,11 +306,12 @@ class TriggeredPlan:
 
         Calling it declares that this rank is done reading the current round's data: once it
         returns, a peer may start the next round, and its copies can overwrite ``buffer`` at any
-        time. Work queued before the call is covered (it synchronizes the device first); anything
-        issued after it must not read ``buffer`` until the next ``wait()``.
+        time. Work queued before the call is covered (the barrier synchronizes the device first);
+        anything issued after it must not read ``buffer`` until the next ``wait()``.
         """
         self._require(State.DONE)
-        self.ctx.barrier()
+        # Preparing only parks copies behind gates that open in the next round, which no rank starts
+        # before this barrier: every rank's reads of this round are done by then
         self._arm(self.round + 1)
         self.ctx.barrier()
 

@@ -69,7 +69,7 @@ with TriggeredPlan(ctx, out, schedule) as plan:   # collective: allocates gates,
         producer[(num_programs,)](..., handle)     # TriggeredView.initialize(handle).mark_ready(chunk)
         plan.wait()                                # every chunk delivered everywhere
         ...                                        # read this round's data
-        plan.next_round()                          # collective: barrier, prepare, barrier
+        plan.next_round()                          # collective: prepare, barrier
 ```
 
 ## The kernel author's contract
