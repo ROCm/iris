@@ -167,3 +167,15 @@ after it in the same kernel is fresh.
 - **Single node only.**
 - **Linear regions are at most 1 GiB** (`COPY_LINEAR`'s byte count is 30 bits on SDMA 4.4). The
   schedule builders split larger ranges.
+
+## Not supported yet
+
+- **Other destinations.** A copy always lands at its source's offset in the same buffer on every
+  peer: it cannot change offset, pitch or buffer (for example to gather into a staging buffer), and
+  a chunk cannot go to only some peers. Reduce-scatter and two-shot all-reduce need both.
+- **Waiting on a group.** A consumer waits on each chunk's arrival in turn; no single counter
+  covers several chunks or several source ranks.
+- **Overlapping rounds.** `wait()` must return before `next_round()` prepares the next round, and
+  preparing synchronizes the ranks. The host's work per round grows with regions × peers, so a
+  plan suits producers whose rounds are long next to that, rather than an op called many times
+  per step.
