@@ -16,9 +16,19 @@ import triton.language as tl
 
 import iris
 from iris.host import queue_ledger
-from iris.mem.triton import plan as dv
+from iris.experimental.plan import triton as dv
 from iris.mem.utils import read_realtime
-from iris.plan import Chunk, CollectivePlan, CollectiveView, Region, State, armer, chunks, tile_chunks, whole
+from iris.experimental.plan import (
+    Chunk,
+    CollectivePlan,
+    CollectiveView,
+    Region,
+    State,
+    armer,
+    chunks,
+    tile_chunks,
+    whole,
+)
 
 EMPTY = -1
 

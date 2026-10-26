@@ -13,7 +13,8 @@ kernel writes a chunk ──► mark_ready(chunk) opens the chunk's gate
 peer kernel:  wait(chunk) ◄────┘
 ```
 
-The API is `iris.plan`; see the [reference](../reference/host/plan.md).
+The API is `iris.experimental.plan`; see the [reference](../reference/host/plan.md). It is
+experimental: it may change between releases without deprecation.
 
 ## Model
 
@@ -31,7 +32,7 @@ The API is `iris.plan`; see the [reference](../reference/host/plan.md).
 - A **round** is one use of the plan: `start()`, the producer marks every chunk ready, `wait()`.
   The plan is prepared once and reused for every round.
 
-`iris.plan.schedule` builds schedules for common producers: `whole()` (one chunk, marked ready
+`iris.experimental.plan.schedule` builds schedules for common producers: `whole()` (one chunk, marked ready
 once per program at the end), `chunks()` (row blocks completed in order) and `tile_chunks()`
 (consecutive tiles of a tiled kernel, such as a GEMM). Any list of chunks works.
 
@@ -55,7 +56,7 @@ for step in range(tl.program_id(0), num_tiles, num_programs):
 ```
 
 ```python
-from iris.plan import CollectivePlan, CollectiveView, tile_chunks
+from iris.experimental.plan import CollectivePlan, CollectiveView, tile_chunks
 
 ctx = iris.iris(heap_size, engines=("sdma",))
 out = ctx.zeros(world_size * M, N, dtype=torch.bfloat16)

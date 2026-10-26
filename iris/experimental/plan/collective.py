@@ -28,9 +28,9 @@ import torch.distributed as dist
 
 from iris.host import queue_ledger
 from iris.host.distributed.helpers import distributed_allgather
-from iris.mem.triton import plan as dv
-from iris.plan import armer, kernels
-from iris.plan.schedule import check_disjoint, validate
+from iris.experimental.plan import triton as dv
+from iris.experimental.plan import armer, kernels
+from iris.experimental.plan.schedule import check_disjoint, validate
 
 UINT32_MAX = (1 << 32) - 1
 _PROGRESS_BUDGET = 100_000
@@ -46,7 +46,7 @@ class State(enum.Enum):
 
 
 def view_words(rank, world_size, gates_ptr, schedules):
-    """The device view (see ``iris.mem.triton.plan``) as a list of int64 words."""
+    """The device view (see ``iris.experimental.plan.triton``) as a list of int64 words."""
     num_chunks = sum(len(s) for s in schedules)
     words = [0] * (dv.HEADER_WORDS.value + num_chunks * dv.RECORD_WORDS.value)
     words[dv.H_VERSION.value] = dv.ABI_VERSION

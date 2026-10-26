@@ -4,12 +4,12 @@
 """
 Collective plans: copy engines send data to every peer as a kernel marks it ready.
 
-Host side: ``CollectivePlan`` and the schedule builders in ``iris.plan.schedule``.
+Host side: ``CollectivePlan`` and the schedule builders in ``iris.experimental.plan.schedule``.
 Device side: ``CollectiveView`` (``mark_ready``, ``arrived``, ``wait``, ``owns``).
 """
 
-from iris.mem.triton.plan import CollectiveView
-from iris.plan.collective import CollectivePlan, State
-from iris.plan.schedule import Chunk, Region, chunks, tile_chunks, whole
+from iris.experimental.plan.triton import CollectiveView
+from iris.experimental.plan.collective import CollectivePlan, State
+from iris.experimental.plan.schedule import Chunk, Region, chunks, tile_chunks, whole
 
 __all__ = ["CollectivePlan", "CollectiveView", "State", "Chunk", "Region", "whole", "chunks", "tile_chunks"]

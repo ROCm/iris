@@ -8,8 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
-from iris.plan import Chunk, Region, chunks, tile_chunks, whole
-from iris.plan.schedule import MAX_LINEAR_BYTES, check_disjoint, validate
+from iris.experimental.plan import Chunk, Region, chunks, tile_chunks, whole
+from iris.experimental.plan.schedule import MAX_LINEAR_BYTES, check_disjoint, validate
 
 
 def test_whole():

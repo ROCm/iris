@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 
 from iris.mem.triton.context import __translate
-from iris.mem.triton.plan import (
+from iris.experimental.plan.triton import (
     G_ARRIVAL,
     G_COUNTER,
     G_READY,

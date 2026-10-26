@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Device side of collective plans (see ``iris.plan``).
+Device side of collective plans (see ``iris.experimental.plan``).
 
 For each (chunk, peer), the host arms a chain on the copy engine: poll the chunk's ``ready`` gate,
 copy the chunk's regions to the peer, then add 1 to the chunk's ``arrival`` gate on the peer.

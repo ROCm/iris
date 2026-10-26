@@ -7,9 +7,9 @@ import torch
 import triton
 import triton.language as tl
 
-from iris.mem.triton import plan as dv
-from iris.plan import Chunk, CollectiveView, Region, kernels
-from iris.plan.collective import view_words
+from iris.experimental.plan import triton as dv
+from iris.experimental.plan import Chunk, CollectiveView, Region, kernels
+from iris.experimental.plan.collective import view_words
 
 
 def _view(rank, schedules, round):
