@@ -74,7 +74,7 @@ with TriggeredPlan(ctx, out, schedule) as plan:   # collective: allocates gates,
 
 For this in-place all-gather, `ctx.ccl.prepare_all_gather(out, schedule)` builds the same plan and
 also checks that each rank's schedule stays inside its own rows of `out` (by default it sends them as
-one chunk, `whole()`).
+one chunk, `whole()`). See `examples/34_sdma_all_gather`.
 
 ### Gluon
 
