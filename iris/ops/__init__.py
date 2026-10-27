@@ -142,17 +142,18 @@ class OpsNamespace:
         """
         return matmul_all_gather(self._shmem, output_tensor, A, B, bias, async_op, config, workspace)
 
-    def matmul_reduce_scatter(self, output_tensor, A, B, bias=None, async_op=False, config=None, workspace=None):
+    def matmul_reduce_scatter(self, output_tensor, A, B, async_op=False, config=None, workspace=None):
         """
         Fused matrix multiplication and reduce-scatter.
 
-        Computes: output = reduce_scatter(A @ B + bias) along N dimension
+        Computes the sum of ``A @ B`` over all ranks, tile by tile: the tiles are numbered
+        row-major, and each rank keeps a contiguous block of them (the last rank also takes the
+        remainder), written in place in ``output_tensor``; its other tiles are zeroed.
 
         Args:
-            output_tensor: Output tensor (M, N_local) where N_local = N / world_size
+            output_tensor: Output tensor (M, N)
             A: Input matrix A (M, K)
             B: Input matrix B (K, N)
-            bias: Optional bias vector (M,) or (N,)
             async_op: If False, performs barrier at end
             config: Optional FusedConfig for tuning
             workspace: Optional pre-allocated workspace
@@ -161,11 +162,10 @@ class OpsNamespace:
             workspace: Updated workspace object
 
         Example:
-            >>> N_local = N // world_size
-            >>> output = shmem.zeros((M, N_local), dtype=torch.float16)
+            >>> output = shmem.zeros((M, N), dtype=torch.float16)
             >>> shmem.ops.matmul_reduce_scatter(output, A, B)
         """
-        return matmul_reduce_scatter(self._shmem, output_tensor, A, B, bias, async_op, config, workspace)
+        return matmul_reduce_scatter(self._shmem, output_tensor, A, B, async_op, config, workspace)
 
 
 # Export public API
