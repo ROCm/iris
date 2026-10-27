@@ -31,6 +31,11 @@ class Config:
         num_xcds: Number of XCCs. If None, auto-detected from system (default: None)
         use_gluon: If True, use Gluon-based implementation (default: False)
                    Gluon provides better control over warp-level traffic shaping
+        engine: What moves the data (default: "cu")
+                Options: "cu", "sdma"
+                - "cu": Compute-unit kernels load and store the data
+                - "sdma": Copy engines move the data; needs a context created with
+                  engines=("sdma",). all_gather only; the variant and tiling fields are unused
         all_gather_variant: Variant for all-gather operation (default: "persistent")
                            Options: "persistent", "partitioned", "tdm"
                            - "persistent": Each PID handles multiple tiles and sends to all ranks
@@ -77,6 +82,11 @@ class Config:
         >>> # All-gather with partitioned variant
         >>> config = Config(all_gather_variant="partitioned")
         >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
+
+        >>> # All-gather on the SDMA copy engines
+        >>> ctx = iris.iris(engines=("sdma",))
+        >>> config = Config(engine="sdma")
+        >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
     """
 
     block_size_m: int = 32
@@ -86,6 +96,7 @@ class Config:
     num_xcds: int | None = None
     chunk_size: int | None = None
     use_gluon: bool = False
+    engine: str = "cu"
     all_gather_variant: str = "persistent"
     all_reduce_variant: str = "two_shot"
     all_reduce_distribution: int = 1
@@ -117,6 +128,8 @@ class Config:
             raise ValueError(f"num_xcds must be positive, got {self.num_xcds}")
         if self.num_stages <= 0:
             raise ValueError(f"num_stages must be positive, got {self.num_stages}")
+        if self.engine not in ["cu", "sdma"]:
+            raise ValueError(f"engine must be one of: 'cu', 'sdma', got {self.engine}")
         if self.all_gather_variant not in ["persistent", "partitioned", "tdm"]:
             raise ValueError(
                 f"all_gather_variant must be one of: 'persistent', 'partitioned', 'tdm', got {self.all_gather_variant}"

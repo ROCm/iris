@@ -43,6 +43,8 @@ def all_reduce(output_tensor, input_tensor, ctx, op=None, group=None, async_op=F
         )
     if config is None:
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+    if config.engine != "cu":
+        raise ValueError(f"all_reduce does not support engine={config.engine!r}; only all_gather runs on 'sdma'")
     if config.use_gluon:
         raise ValueError(
             "all_reduce does not support use_gluon=True. "

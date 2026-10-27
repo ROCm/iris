@@ -35,6 +35,8 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         )
     if config is None:
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
+    if config.engine != "cu":
+        raise ValueError(f"reduce_scatter does not support engine={config.engine!r}; only all_gather runs on 'sdma'")
     if config.use_gluon:
         raise ValueError(
             "reduce_scatter does not support use_gluon=True. "

@@ -4,7 +4,7 @@
 """
 All-gather collective operation — public API.
 
-Routes to triton/ or gluon/ based on config.use_gluon.
+Routes to sdma/ for config.engine == "sdma", otherwise to triton/ or gluon/ based on config.use_gluon.
 """
 
 from iris.ccl.utils import extract_group_info
@@ -38,6 +38,14 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
             f"Output tensor shape {output_tensor.shape[:2]} does not match expected shape "
             f"{expected_output_shape}. Expected (world_size * M, N) = ({world_size * M}, {N})"
         )
+
+    if config.engine == "sdma":
+        from iris.ccl.sdma.all_gather import launch
+
+        launch(input_tensor, output_tensor, ctx, rank_in_group, rank_global, world_size, rank_start, rank_stride)
+        if not async_op:
+            ctx.barrier()
+        return
 
     if config.use_gluon and config.all_gather_variant == "tdm":
         # gfx1250 tensor data movement engine; see gluon/all_gather_tdm.py

@@ -159,8 +159,15 @@ class Iris:
         distributed_barrier()
 
         self.copy_engines_device_ctx = None
+        self._sdma_all_gather_counters = None
         if self._sdma_ep is not None:
             self._init_copy_engines(num_gpus, num_ranks, cur_rank)
+            # all_gather(engine="sdma") arrival counters, one per source rank; allocated here since
+            # allocation is collective over all ranks, and a call may come from a subgroup
+            self._sdma_all_gather_counters = (
+                self.zeros((num_ranks,), dtype=torch.int64),
+                torch.zeros(num_ranks, dtype=torch.int64, device=self.device),
+            )
 
         # Initialize CCL interface
         self.ccl = self.CCL(self)
@@ -1675,6 +1682,10 @@ class Iris:
                 >>> # gfx1250: move tiles with the tensor data movement engine
                 >>> config = Config(use_gluon=True, all_gather_variant="tdm", block_size_m=128, block_size_n=256, num_warps=16)
                 >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
+
+                >>> # Move the data with the SDMA copy engines instead of compute units
+                >>> ctx = iris.iris(engines=("sdma",))
+                >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=Config(engine="sdma"))
 
                 >>> # Async operation (no barrier)
                 >>> ctx.ccl.all_gather(output_tensor, input_tensor, async_op=True)
