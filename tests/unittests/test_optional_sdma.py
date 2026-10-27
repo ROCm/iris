@@ -43,3 +43,5 @@ def test_default_context_rejects_sdma_all_gather():
 
     with pytest.raises(RuntimeError, match=r"engines=\(\"sdma\",\)"):
         shmem.ccl.all_gather(out, inp, config=Config(engine="sdma"))
+    with pytest.raises(RuntimeError, match=r"engines=\(\"sdma\",\)"):
+        shmem.ccl.prepare_all_gather(out)

@@ -72,6 +72,10 @@ with TriggeredPlan(ctx, out, schedule) as plan:   # collective: allocates gates,
         plan.next_round()                          # collective: prepare, barrier
 ```
 
+For this in-place all-gather, `ctx.ccl.prepare_all_gather(out, schedule)` builds the same plan and
+also checks that each rank's schedule stays inside its own rows of `out` (by default it sends them as
+one chunk, `whole()`).
+
 ### Gluon
 
 Gluon kernels use `iris.experimental.plan.gluon.TriggeredView`. It reads the same handle and has

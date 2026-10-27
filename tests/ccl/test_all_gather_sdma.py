@@ -2,7 +2,8 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-All-gather on the SDMA copy engines: ``all_gather(config=Config(engine="sdma"))``.
+All-gather on the SDMA copy engines: ``all_gather(config=Config(engine="sdma"))`` and the
+triggered ``prepare_all_gather``.
 """
 
 import gc
@@ -11,10 +12,13 @@ import importlib.util
 import pytest
 import torch
 import torch.distributed as dist
+import triton
+import triton.language as tl
 
 import iris
 import iris.ccl.sdma.all_gather as sdma_all_gather
 from iris.ccl import Config
+from iris.experimental.plan import TriggeredView, chunks, tile_chunks, whole
 
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("xio") is None,
@@ -111,4 +115,85 @@ def test_engine_validation(ctx):
             collective(out, t, config=config)
     with pytest.raises(ValueError, match="contiguous"):
         ctx.ccl.all_gather(ctx.zeros((world_size * 64, 64), dtype=torch.float32), t[:, :64].t(), config=config)
+    ctx.barrier()
+
+
+@triton.jit
+def _fill_rows(out, start, n, round, handle, chunk, BLOCK: tl.constexpr):
+    """One program writes elements [start, start + n) of ``out``, then marks ``chunk`` ready."""
+    for off in range(0, n, BLOCK):
+        idx = start + off + tl.arange(0, BLOCK)
+        tl.store(out + idx, (round << 24) | idx, mask=off + tl.arange(0, BLOCK) < n)
+    TriggeredView.initialize(handle).mark_ready(chunk)
+
+
+@triton.jit
+def _tile_producer(
+    out, row0, rows, cols, round, handle, first, num_tiles, BM: tl.constexpr, BN: tl.constexpr, P: tl.constexpr
+):
+    """Persistent tiled producer: program p writes tiles p, p + P, ... and marks each one ready."""
+    view = TriggeredView.initialize(handle)
+    tiles_n = tl.cdiv(cols, BN)
+    for step in range(tl.program_id(0), num_tiles, P):
+        r = row0 + (step // tiles_n) * BM + tl.arange(0, BM)[:, None]
+        c = (step % tiles_n) * BN + tl.arange(0, BN)[None, :]
+        idx = r * cols + c
+        tl.store(out + idx, (round << 24) | idx, mask=(r < row0 + rows) & (c < cols))
+        view.mark_ready(first + step // P)
+
+
+def _check_round(out, round):
+    expected = (round << 24) | torch.arange(out.numel(), dtype=torch.int32, device=out.device)
+    assert torch.equal(out.view(-1), expected), f"round {round}: {(out.view(-1) != expected).sum()} elements wrong"
+
+
+def test_prepare_all_gather_whole(ctx):
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
+    M, N = 100, 37
+    out = ctx.zeros((world_size * M, N), dtype=torch.int32)
+    out.fill_(EMPTY)
+    with ctx.ccl.prepare_all_gather(out) as plan:
+        for round in range(1, 4):
+            handle = plan.start()
+            _fill_rows[(1,)](out, rank * M * N, M * N, round, handle, plan.chunk_id(rank, 0), BLOCK=1024)
+            plan.wait()
+            _check_round(out, round)
+            out.fill_(EMPTY)
+            plan.next_round()
+
+
+def test_prepare_all_gather_tiles(ctx):
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
+    M, N, BM, BN, P = 96, 80, 32, 32, 4  # Edge tiles clipped; 9 tiles, so the last chunk has one
+    out = ctx.zeros((world_size * M, N), dtype=torch.int32)
+    out.fill_(EMPTY)
+    num_tiles = triton.cdiv(M, BM) * triton.cdiv(N, BN)
+    schedule = tile_chunks(out[rank * M : (rank + 1) * M], (BM, BN), tiles_per_chunk=P, base=out)
+    with ctx.ccl.prepare_all_gather(out, schedule) as plan:
+        for round in range(1, 4):
+            handle = plan.start()
+            _tile_producer[(P,)](
+                out, rank * M, M, N, round, handle, plan.chunk_id(rank, 0), num_tiles, BM=BM, BN=BN, P=P
+            )
+            plan.wait()
+            _check_round(out, round)
+            out.fill_(EMPTY)
+            plan.next_round()
+
+
+def test_prepare_all_gather_rejects_bad_schedule(ctx):
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
+    if world_size < 2:
+        pytest.skip("needs another rank's rows")
+    M, N = 16, 16
+    out = ctx.zeros((world_size * M, N), dtype=torch.int32)
+    # Rank 0 builds its schedule from the whole buffer instead of its own rows
+    schedule = chunks(out, 2, base=out) if rank == 0 else whole(out[rank * M : (rank + 1) * M], base=out)
+    with pytest.raises(ValueError if rank == 0 else RuntimeError, match="slice" if rank == 0 else "rank"):
+        ctx.ccl.prepare_all_gather(out, schedule)
+    with pytest.raises(ValueError, match="multiple"):
+        ctx.ccl.prepare_all_gather(ctx.zeros((world_size * M + 1, N), dtype=torch.int32))
     ctx.barrier()

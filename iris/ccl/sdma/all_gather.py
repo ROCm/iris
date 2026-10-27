@@ -5,14 +5,17 @@
 All-gather on the SDMA copy engines.
 
 ``launch`` backs ``all_gather(config=Config(engine="sdma"))``: a kernel queues each rank's slice
-to every peer on the device-initiated copy-engine queues.
+to every peer on the device-initiated copy-engine queues. ``prepare`` backs
+``prepare_all_gather``: a triggered plan whose copies the producer kernel releases.
 """
 
+import numpy as np
 import triton
 import triton.language as tl
 
 import iris
 from iris.device import sdma_utils
+from iris.host.distributed.helpers import distributed_allgather
 from iris.host.tracing.kernel_artifacts import iris_launch
 from iris.mem.triton.context import __translate
 
@@ -125,3 +128,40 @@ def launch(input_tensor, output_tensor, ctx, rank_in_group, rank_global, world_s
         rank=rank_global,
         dtype=input_tensor.dtype,
     )
+
+
+def prepare(output_tensor, ctx, schedule=None, timeout=30.0):
+    """Collective: a triggered plan that gathers ``output_tensor`` in place. See ``CCL.prepare_all_gather``."""
+    from iris.experimental.plan import TriggeredPlan, whole
+
+    rank, world_size = ctx.get_rank(), ctx.get_num_ranks()
+    error = None
+    try:
+        if not output_tensor.is_contiguous() or output_tensor.dim() == 0:
+            raise ValueError("output_tensor must be contiguous with at least one dimension")
+        if output_tensor.shape[0] % world_size:
+            raise ValueError(
+                f"output_tensor's first dimension {output_tensor.shape[0]} is not a multiple of {world_size}"
+            )
+        rows = output_tensor.shape[0] // world_size
+        mine = output_tensor[rank * rows : (rank + 1) * rows]
+        if schedule is None:
+            schedule = whole(mine, base=output_tensor)
+        slice_bytes = mine.numel() * mine.element_size()
+        lo, hi = rank * slice_bytes, (rank + 1) * slice_bytes
+        for i, chunk in enumerate(schedule):
+            for region in chunk.regions:
+                if region.offset_bytes < lo or region.end > hi:
+                    raise ValueError(
+                        f"chunk {i}: region {region} lies outside rank {rank}'s slice (bytes {lo} to {hi}); "
+                        f"build the schedule from output_tensor[{rank * rows}:{(rank + 1) * rows}]"
+                    )
+    except Exception as e:
+        error = e
+    # Agree before the plan's own collectives, so a rank that raised leaves none waiting
+    failed = distributed_allgather(np.array([error is not None], dtype=np.int64))[:, 0].nonzero()[0].tolist()
+    if error is not None:
+        raise error
+    if failed:
+        raise RuntimeError(f"rank(s) {failed} could not prepare the all-gather")
+    return TriggeredPlan(ctx, output_tensor, schedule, timeout=timeout)
