@@ -36,8 +36,6 @@ except ImportError:
 
 pytestmark = pytest.mark.skipif(not TDM_AVAILABLE, reason="needs a gfx1250 GPU and Gluon TDM support")
 
-GROUP_SIZE_M = 4  # Config.swizzle_size default
-
 
 def _shard(rank, M, N, dtype):
     g = torch.Generator(device="cuda").manual_seed(1000 + rank)
@@ -47,8 +45,10 @@ def _shard(rank, M, N, dtype):
     return x.to(dtype)
 
 
-def _owned(rank, world_size, M, N, block_size_m, block_size_n, distribution):
+def _owned(rank, world_size, M, N, config):
     """Mask of the output elements this rank owns, mirroring the kernel's tile assignment."""
+    block_size_m, block_size_n, group_size_m_max = config.block_size_m, config.block_size_n, config.swizzle_size
+    distribution = config.all_reduce_distribution
     num_pid_m, num_pid_n = -(-M // block_size_m), -(-N // block_size_n)
     total = num_pid_m * num_pid_n
     if distribution == 0:
@@ -58,9 +58,9 @@ def _owned(rank, world_size, M, N, block_size_m, block_size_n, distribution):
         tiles = range(rank * per_rank, min(total, (rank + 1) * per_rank))
     mask = torch.zeros(M, N, dtype=torch.bool, device="cuda")
     for t in tiles:
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        first_pid_m = (t // num_pid_in_group) * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        num_pid_in_group = group_size_m_max * num_pid_n
+        first_pid_m = (t // num_pid_in_group) * group_size_m_max
+        group_size_m = min(num_pid_m - first_pid_m, group_size_m_max)
         pid_m = first_pid_m + (t % num_pid_in_group) % group_size_m
         pid_n = (t % num_pid_in_group) // group_size_m
         mask[pid_m * block_size_m : (pid_m + 1) * block_size_m, pid_n * block_size_n : (pid_n + 1) * block_size_n] = (
@@ -83,7 +83,7 @@ def _check(shmem, M, N, dtype, config, calls=1):
 
     acc_dtype = torch.int32 if dtype == torch.int8 else torch.float32
     expected = sum(_shard(r, M, N, dtype).to(acc_dtype) for r in range(world_size)).to(dtype)
-    mask = _owned(rank, world_size, M, N, config.block_size_m, config.block_size_n, config.all_reduce_distribution)
+    mask = _owned(rank, world_size, M, N, config)
     if dtype == torch.int8:
         assert torch.equal(dst[mask], expected[mask]), f"rank {rank}: owned tiles differ"
         assert (dst[~mask] == sentinel).all(), f"rank {rank}: wrote outside its tiles"
@@ -130,6 +130,30 @@ def test_reduce_scatter_tdm(dtype, M, N, block_size_m, block_size_n, num_warps, 
             all_reduce_distribution=distribution,
         )
         _check(shmem, M, N, dtype, config)
+    finally:
+        shmem.barrier()
+        del shmem
+
+
+@pytest.mark.parametrize("swizzle_size", [1, 3, 8])
+@pytest.mark.parametrize("distribution", [0, 1])
+def test_reduce_scatter_tdm_swizzle(swizzle_size, distribution):
+    """The tile order follows Config.swizzle_size, including a partial last group."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+    shmem = iris.iris(2**30)
+    try:
+        config = Config(
+            use_gluon=True,
+            reduce_scatter_variant="tdm",
+            block_size_m=32,
+            block_size_n=128,
+            comm_sms=8,
+            num_stages=2,
+            swizzle_size=swizzle_size,
+            all_reduce_distribution=distribution,
+        )
+        _check(shmem, 513, 1030, torch.bfloat16, config)
     finally:
         shmem.barrier()
         del shmem

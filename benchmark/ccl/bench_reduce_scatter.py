@@ -10,7 +10,9 @@ from iris.ccl import Config
 
 # The symmetric heap never frees, and every variant, comm_sms and num_stages point of a
 # shape would otherwise allocate its own pair: a comm_sms sweep multiplies heap use by its
-# length. Points of one shape run back to back, so they share the last pair allocated.
+# length. M, N and dtype are the outermost axes below, and the outermost @bench.axis varies
+# slowest (iris/bench/_core.py), so the points of one shape run back to back and share the
+# last pair allocated. Keep those three axes outermost.
 _iris_buffers = {}
 
 # Default TDM ring depth per world size for 64 x 128 tiles, measured on gfx1250.
