@@ -9,6 +9,7 @@ Install with: pip install git+https://github.com/ROCm/tritonBLAS.git
 """
 
 import pytest
+import importlib
 import torch
 import torch.distributed as dist
 import iris
@@ -153,9 +154,8 @@ def test_matmul_all_reduce_via_shmem_ops():
 def test_matmul_all_reduce_lock_too_small():
     """Test that ValueError is raised when the lock array is too small for current tile count.
 
-    Scenario: workspace is prepared with larger block sizes (fewer tiles), then reused
-    with smaller block sizes (more tiles). The workspace.matches() call skips the preamble,
-    leaving the undersized lock array in place.
+    A workspace allocated with larger block sizes is too small for a launch
+    using smaller block sizes. All ranks must reject it before launching.
     """
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
@@ -180,12 +180,10 @@ def test_matmul_all_reduce_lock_too_small():
     config_large = FusedConfig(block_size_m=128, block_size_n=128, block_size_k=32, all_reduce_variant=variant)
     workspace = ops.matmul_all_reduce_preamble(shmem, iris_C, iris_A, iris_B, config=config_large)
 
-    # Step 2: manually mark workspace as prepared so matmul_all_reduce skips the preamble
+    # Preparation state must not hide allocation capacity errors.
     workspace.prepared = True
 
-    # Step 3: call matmul_all_reduce with smaller block sizes that need more tiles —
-    # workspace.matches() returns True (same shape/dtype/variant), preamble is skipped,
-    # and the undersized lock array is detected.
+    # Smaller block sizes require more locks than the preallocated workspace has.
     config_small = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant=variant)
     with pytest.raises(ValueError, match="Lock array too small"):
         ops.matmul_all_reduce(shmem, iris_C, iris_A, iris_B, config=config_small, workspace=workspace)
@@ -195,3 +193,155 @@ def test_matmul_all_reduce_lock_too_small():
     import gc
 
     gc.collect()
+
+
+def test_workspace_reallocation_is_collective(monkeypatch):
+    """Rebuild on every rank when only one rank has mismatched metadata."""
+    from iris.ops import FusedConfig
+
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    shmem = iris.iris(1 << 26)
+    device = shmem.get_device()
+    A = torch.ones((128, 32), device=device, dtype=torch.float16)
+    B = torch.ones((32, 128), device=device, dtype=torch.float16)
+    C = shmem.zeros((128, 128), dtype=torch.float16)
+    config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant="one_shot")
+    workspace = ops.matmul_all_reduce(shmem, C, A, B, config=config)
+    if shmem.get_rank() == 0:
+        workspace.shape = (128, 128, 64)
+
+    allocations = []
+    original_zeros = shmem.zeros
+
+    def tracked_zeros(*args, **kwargs):
+        allocations.append(args)
+        return original_zeros(*args, **kwargs)
+
+    monkeypatch.setattr(shmem, "zeros", tracked_zeros)
+    workspace = ops.matmul_all_reduce(shmem, C, A, B, config=config, workspace=workspace)
+    assert allocations
+    assert workspace.shape == (128, 128, 32)
+    torch.testing.assert_close(C, torch.full_like(C, 32 * shmem.get_num_ranks()))
+    shmem.barrier()
+
+
+@pytest.mark.parametrize("variant", ["atomic", "one_shot", "two_shot"])
+@pytest.mark.parametrize("async_op", [False, True])
+def test_matmul_all_reduce_repeated_calls(variant, async_op, monkeypatch):
+    """Reuse buffers with changing inputs, including without host agreement synchronization."""
+    from iris.ops import FusedConfig
+
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    shmem = iris.iris(1 << 26)
+    device = shmem.get_device()
+    rank = shmem.get_rank()
+    config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant=variant)
+    A = torch.empty((128, 32), device=device, dtype=torch.float16)
+    B = torch.ones((32, 128), device=device, dtype=torch.float16)
+    outputs = [shmem.zeros((128, 128), dtype=torch.float16) for _ in range(3)]
+    workspace = ops.matmul_all_reduce_preamble(shmem, outputs[0], A, B, config=config)
+
+    if async_op and variant in ("one_shot", "two_shot"):
+        # Allocation was completed collectively above. Remove host agreement only
+        # for these matching launches so it cannot conceal a device protocol race.
+        operation = importlib.import_module("iris.ops.matmul_all_reduce")
+        monkeypatch.setattr(operation, "_gather_workspace_states", lambda ctx, state: [state] * ctx.get_num_ranks())
+
+    original_pointers = tuple(
+        None if buffer is None else buffer.data_ptr()
+        for buffer in (workspace.locks, workspace.aux_buffer, workspace.completion_locks)
+    )
+    references = []
+    for step, output in enumerate(outputs, start=1):
+        A.fill_(float((rank + 1) * step))
+        output.fill_(float("nan"))
+        references.append(torch.matmul(A, B))
+        workspace.prepared = rank % 2 == 0
+        workspace = ops.matmul_all_reduce(shmem, output, A, B, config=config, workspace=workspace, async_op=async_op)
+        pointers = tuple(
+            None if buffer is None else buffer.data_ptr()
+            for buffer in (workspace.locks, workspace.aux_buffer, workspace.completion_locks)
+        )
+        assert pointers == original_pointers
+
+    shmem.barrier()
+
+    for output, reference in zip(outputs, references):
+        dist.all_reduce(reference, op=dist.ReduceOp.SUM)
+        torch.testing.assert_close(output, reference)
+    assert workspace.generation == len(outputs)
+    if variant in ("one_shot", "two_shot"):
+        assert torch.all(workspace.locks == len(outputs)).item()
+        assert torch.all(workspace.completion_locks == len(outputs)).item()
+    shmem.barrier()
+
+
+@pytest.mark.parametrize("variant", ["one_shot", "two_shot"])
+def test_matmul_all_reduce_preserves_flag_capacity(variant):
+    """Changing tile sizes must not shrink previously sufficient flags."""
+    from iris.ops import FusedConfig
+
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    shmem = iris.iris(1 << 26)
+    device = shmem.get_device()
+    A = torch.ones((128, 32), device=device, dtype=torch.float16)
+    B = torch.ones((32, 128), device=device, dtype=torch.float16)
+    outputs = [shmem.zeros((128, 128), dtype=torch.float16) for _ in range(3)]
+
+    config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant=variant)
+    workspace = ops.matmul_all_reduce_preamble(shmem, outputs[0], A, B, config=config)
+    assert workspace.locks.numel() == 4
+
+    for step, (tile_size, output) in enumerate(zip((64, 128, 64), outputs), start=1):
+        config = FusedConfig(
+            block_size_m=tile_size,
+            block_size_n=tile_size,
+            block_size_k=32,
+            all_reduce_variant=variant,
+        )
+        A.fill_(float(step))
+        workspace = ops.matmul_all_reduce(shmem, output, A, B, config=config, workspace=workspace, async_op=True)
+        assert workspace.locks.numel() >= 4
+        assert workspace.completion_locks.numel() >= 4
+        assert workspace.generation == 1
+
+    shmem.barrier()
+
+    for step, output in enumerate(outputs, start=1):
+        expected = torch.full_like(output, 32 * step * shmem.get_num_ranks())
+        torch.testing.assert_close(output, expected)
+
+    shmem.barrier()
+
+
+@pytest.mark.parametrize("variant", ["one_shot", "two_shot"])
+def test_shot_async_calls_reuse_output(variant, monkeypatch):
+    """Previous remote stores must finish before a later call writes the same output."""
+    from iris.ops import FusedConfig
+
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    shmem = iris.iris(1 << 26)
+    device = shmem.get_device()
+    A = torch.empty((128, 32), device=device, dtype=torch.float16)
+    B = torch.ones((32, 128), device=device, dtype=torch.float16)
+    C = shmem.zeros((128, 128), dtype=torch.float16)
+    config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant=variant)
+    workspace = ops.matmul_all_reduce_preamble(shmem, C, A, B, config=config)
+    operation = importlib.import_module("iris.ops.matmul_all_reduce")
+    monkeypatch.setattr(operation, "_gather_workspace_states", lambda ctx, state: [state] * ctx.get_num_ranks())
+    for step in range(1, 5):
+        A.fill_(float((shmem.get_rank() + 1) * step))
+        workspace = ops.matmul_all_reduce(shmem, C, A, B, config=config, workspace=workspace, async_op=True)
+    shmem.barrier()
+    reference = torch.matmul(A, B)
+    dist.all_reduce(reference, op=dist.ReduceOp.SUM)
+    torch.testing.assert_close(C, reference)
+    shmem.barrier()
