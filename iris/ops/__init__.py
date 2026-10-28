@@ -146,24 +146,25 @@ class OpsNamespace:
         """
         Fused matrix multiplication and reduce-scatter.
 
-        Computes the sum of ``A @ B`` over all ranks, tile by tile: the tiles are numbered
-        row-major, and each rank keeps a contiguous block of them (the last rank also takes the
-        remainder), written in place in ``output_tensor``; its other tiles are zeroed.
+        Computes ``A @ B`` on every rank and gives rank ``r`` rows ``[r * M / W, (r + 1) * M / W)``
+        of their sum over the ``W`` ranks, like ``torch.distributed.reduce_scatter_tensor`` of
+        ``A @ B``. ``M`` must be a multiple of ``W``.
 
         Args:
-            output_tensor: Output tensor (M, N)
+            output_tensor: Output tensor (M / world_size, N)
             A: Input matrix A (M, K)
             B: Input matrix B (K, N)
             async_op: If False, performs barrier at end
             config: Optional FusedConfig for tuning
-            workspace: Optional pre-allocated workspace
+            workspace: Optional workspace from an earlier call (reuse it: a new one synchronizes ranks)
 
         Returns:
             workspace: Updated workspace object
 
         Example:
-            >>> output = shmem.zeros((M, N), dtype=torch.float16)
-            >>> shmem.ops.matmul_reduce_scatter(output, A, B)
+            >>> output = shmem.zeros((M // world_size, N), dtype=torch.float16)
+            >>> workspace = shmem.ops.matmul_reduce_scatter(output, A, B)
+            >>> shmem.ops.matmul_reduce_scatter(output, A, B, workspace=workspace)
         """
         return matmul_reduce_scatter(self._shmem, output_tensor, A, B, async_op, config, workspace)
 
