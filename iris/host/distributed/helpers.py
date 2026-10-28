@@ -359,6 +359,10 @@ def _device_barrier_kernel(
     1. Atomically increments its counter for every peer in the group (atomic_add, release)
     2. Polls every peer's counter for this rank until all have caught up (acquire)
     """
+    # Every extra CTA would bump the counters again and desynchronize the ranks.
+    if tl.program_id(0) != 0:
+        return
+
     offsets = tl.arange(0, BLOCK)
     peers = rank_start + offsets * rank_stride
     is_peer = (offsets < world_size) & (peers != iris_rank)
