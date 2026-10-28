@@ -28,8 +28,8 @@ class FusedWorkspace:
         # Temporary buffers
         aux_buffer: Generic auxiliary buffer for intermediate results (gathered data, temp results, etc.)
         locks: Lock array for spinlock synchronization
-        inbox, arrivals, partition_counters, round, rs_key: buffers, counters and call count of
-            matmul_reduce_scatter (counters only grow, so pass the workspace back in)
+        inbox, staging, arrivals, strip_counters, partition_counters, round, rs_key: buffers, counters
+            and call count of matmul_reduce_scatter (counters only grow, so pass the workspace back in)
 
         prepared: Whether workspace has been initialized for current operation
     """
@@ -46,7 +46,9 @@ class FusedWorkspace:
 
     # matmul_reduce_scatter
     inbox: Optional[torch.Tensor] = None  # Symmetric: every rank's partial of this rank's rows, by source
+    staging: Optional[torch.Tensor] = None  # Local (engine="sdma"): partials for other ranks
     arrivals: Optional[torch.Tensor] = None  # Symmetric: per source rank, one per call
+    strip_counters: Optional[torch.Tensor] = None
     partition_counters: Optional[torch.Tensor] = None
     round: int = 0
     rs_key: Optional[tuple] = None
@@ -91,7 +93,7 @@ class FusedWorkspace:
         """Free all allocated buffers."""
         self.aux_buffer = None
         self.locks = None
-        self.inbox = self.arrivals = self.partition_counters = None
+        self.inbox = self.staging = self.arrivals = self.strip_counters = self.partition_counters = None
         self.round = 0
         self.rs_key = None
         self.prepared = False

@@ -3,10 +3,11 @@
 
 """
 Test suite for matmul_reduce_scatter: rank r gets rows [r * M / W, (r + 1) * M / W) of the sum of
-A @ B over the ranks.
+A @ B over the ranks, with the partials moved by compute units or by the SDMA copy engines.
 """
 
 import gc
+import importlib.util
 
 import pytest
 import torch
@@ -15,12 +16,15 @@ import torch.distributed as dist
 import iris
 import iris.ops as ops
 
+HAS_SDMA = importlib.util.find_spec("xio") is not None
+ENGINES = ["cu", pytest.param("sdma", marks=pytest.mark.skipif(not HAS_SDMA, reason="rocm-xio not installed"))]
+
 
 @pytest.fixture(scope="module")
 def ctx():
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
-    ctx = iris.iris(1 << 30)
+    ctx = iris.iris(1 << 30, engines=("sdma",) if HAS_SDMA else ())
     yield ctx
     ctx.barrier()
     del ctx
@@ -52,6 +56,7 @@ def _run_and_check(ctx, M, N, K, dtype, config, calls=3, namespace=False, async_
     ctx.barrier()
 
 
+@pytest.mark.parametrize("engine", ENGINES)
 @pytest.mark.parametrize(
     "dtype, block",
     [
@@ -67,21 +72,24 @@ def _run_and_check(ctx, M, N, K, dtype, config, calls=3, namespace=False, async_
         ("tile + 37", 200, 100),  # Rows straddle tile rows; N and K not multiples of the blocks
     ],
 )
-def test_matmul_reduce_scatter(ctx, dtype, block, rows_per_rank, N, K):
+def test_matmul_reduce_scatter(ctx, engine, dtype, block, rows_per_rank, N, K):
     block_m, block_n, block_k = block
     rows = 2 * block_m if rows_per_rank == "2 tiles" else block_m + 37
-    config = ops.FusedConfig(block_size_m=block_m, block_size_n=block_n, block_size_k=block_k)
+    config = ops.FusedConfig(engine=engine, block_size_m=block_m, block_size_n=block_n, block_size_k=block_k)
     _run_and_check(ctx, ctx.get_num_ranks() * rows, N, K, dtype, config)
 
 
-def test_matmul_reduce_scatter_namespace_async(ctx):
+@pytest.mark.parametrize("engine", ENGINES)
+def test_matmul_reduce_scatter_namespace_async(ctx, engine):
     """shmem.ops forwards to iris.ops.matmul_reduce_scatter; async_op leaves synchronization to the caller."""
-    config = ops.FusedConfig(block_size_m=128, block_size_n=128, block_size_k=64)
+    config = ops.FusedConfig(engine=engine, block_size_m=128, block_size_n=128, block_size_k=64)
     _run_and_check(ctx, ctx.get_num_ranks() * 256, 384, 128, torch.bfloat16, config, namespace=True, async_op=True)
 
 
 def test_matmul_reduce_scatter_validation(ctx):
     world_size = ctx.get_num_ranks()
+    with pytest.raises(ValueError, match="engine"):
+        ops.FusedConfig(engine="dma").validate()
 
     A = torch.zeros(64 * world_size, 32, dtype=torch.float16, device=ctx.get_device())
     B = torch.zeros(32, 64, dtype=torch.float16, device=ctx.get_device())
@@ -91,4 +99,9 @@ def test_matmul_reduce_scatter_validation(ctx):
         with pytest.raises(ValueError, match="multiple of the number of ranks"):
             ops.matmul_reduce_scatter(ctx, torch.zeros(1, 64, dtype=torch.float16, device=A.device), A[:-1], B)
 
+    config = ops.FusedConfig(engine="sdma")
+    C = torch.zeros(64, 64, dtype=torch.float16, device=A.device)
+    for op in [ops.matmul_all_reduce, ops.matmul_all_gather]:
+        with pytest.raises(ValueError, match="only matmul_reduce_scatter"):
+            op(ctx, C, A[:64], B, config=config)
     ctx.barrier()

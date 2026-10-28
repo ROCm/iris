@@ -19,7 +19,7 @@ from iris.host.tracing.kernel_artifacts import iris_launch
 
 from tritonblas.kernels.stages import GemmContext, ScheduleContext
 
-from .config import FusedConfig
+from .config import FusedConfig, require_cu_engine
 from .workspace import FusedWorkspace
 
 
@@ -200,6 +200,7 @@ def all_gather_matmul(
     """Fused all-gather and matrix multiplication using pull pattern."""
     if config is None:
         config = FusedConfig()
+    require_cu_engine(config, "all_gather_matmul")
 
     M, K_local = A_sharded.shape
     K, N = B.shape
