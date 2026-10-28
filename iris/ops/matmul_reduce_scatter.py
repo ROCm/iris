@@ -7,10 +7,11 @@ Fused matrix multiplication and reduce-scatter.
 Rank ``r`` owns rows ``[r * M / W, (r + 1) * M / W)`` of ``A @ B`` (``W`` ranks) and gets their
 sum over all ranks. Two stages, which the two-shot ``matmul_all_reduce`` can share:
 
-1. ``_publish_kernel``: the GEMM stores each owner's partial rows into this rank's slot of the
+1. ``_publish_kernel``: the GEMM sends each owner its partial rows, into this rank's slot of the
    owner's inbox (``inbox[src * M / W + row]``). Owners take turns one strip (``BLOCK_SIZE_M`` rows,
-   all of N) at a time, this rank's own rows last. Each rank signals each owner once its partials
-   have all arrived.
+   all of N) at a time, this rank's own rows last. ``FusedConfig.engine`` decides how a strip
+   travels: compute-unit stores (``"cu"``), or a copy-engine copy once the whole strip is written
+   (``"sdma"``). Each rank signals each owner once its partials have all arrived.
 2. ``wait_inbox`` + ``sum_inbox_tile``: wait for every rank's partials, then sum the slots in rank
    order, in fp32.
 """
@@ -27,12 +28,41 @@ from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
 from .config import FusedConfig
 from .workspace import FusedWorkspace
 import iris
+from iris.device import sdma_utils
 from iris.host.tracing.kernel_artifacts import iris_launch
 from iris.mem.triton.context import __translate
 from iris.mem.utils import wait_cnt
 
+# COPY_LINEAR's count field is 30 bits on SDMA 4.4.x
+MAX_COPY_BYTES = 1 << 30
 REDUCE_BLOCK_SIZE_M = 32
 REDUCE_BLOCK_SIZE_N = 256
+
+
+@triton.jit
+def _copy(copy_engine_ctx, to_rank, src, dst, nbytes):
+    """One COPY_LINEAR of ``nbytes`` (at most 1 GiB) on the device-initiated queue to ``to_rank``."""
+    handle = copy_engine_ctx + sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank
+    queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(handle + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(handle + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
+
+    command_in_bytes = sdma_utils.sdma_ep.COPY_LINEAR_COMMAND_BYTES
+    base, offset = sdma_utils.acquire_fadd(
+        queue_ptr_u32,
+        read_ptr,
+        write_ptr,
+        doorbell_ptr,
+        cached_write_ptr,
+        committed_write_ptr,
+        command_in_bytes,
+    )
+    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+    sdma_utils.place_copy_packet(queue_ptr_u32, base + offset, nbytes.to(tl.uint32), src, dst)
+    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, base + offset + command_in_bytes)
 
 
 @triton.jit
@@ -40,6 +70,7 @@ def _publish_kernel(
     A,
     B,
     inbox,
+    staging,
     M,
     N,
     K,
@@ -49,7 +80,9 @@ def _publish_kernel(
     stride_bn,
     max_strips,
     heap_bases,
+    copy_engine_ctx,
     arrivals,
+    strip_counters,
     partition_counters,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
@@ -57,6 +90,7 @@ def _publish_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     EVEN_K: tl.constexpr,
+    USE_COPY_ENGINE: tl.constexpr,
 ):
     """
     Program ``i`` computes the ``i``-th tile of this rank's order: owners' strips round-robin
@@ -108,6 +142,34 @@ def _publish_kernel(
 
         if owner == cur_rank:
             tl.store(inbox + slot_offsets, c_tile, mask=mask)
+        elif USE_COPY_ENGINE:
+            # The copy engine reads memory behind L2: write the tile through, wait for every wave's stores
+            tl.store(staging + rows[:, None] * N + cols[None, :], c_tile, mask=mask, cache_modifier=".wt")
+            wait_cnt()
+            tl.debug_barrier()
+            ticket = tl.atomic_add(strip_counters + owner * max_strips + strip, 1, sem="relaxed", scope="sys")
+            if ticket % num_pid_n == num_pid_n - 1:
+                # The owner's rows of this strip are contiguous in both buffers
+                lo = tl.maximum(pid_m * BLOCK_SIZE_M, part_start)
+                hi = tl.minimum(pid_m * BLOCK_SIZE_M + BLOCK_SIZE_M, part_end)
+                elem = inbox.type.element_ty.primitive_bitwidth // 8
+                src = (staging + lo * N).to(tl.uint64)
+                dst_local = inbox + (cur_rank * rows_per_rank + lo - part_start) * N
+                dst = __translate(dst_local, cur_rank, owner, heap_bases).to(tl.uint64)
+                _copy(copy_engine_ctx, owner, src, dst, (hi - lo) * N * elem)
+                # Every strip to this owner is queued before its counter's last ticket, so the signal,
+                # on the same queue, follows all of them
+                done = tl.atomic_add(partition_counters + owner, 1, sem="acq_rel", scope="gpu")
+                if done % num_strips == num_strips - 1:
+                    iris.atomic_add(
+                        arrivals + cur_rank,
+                        1,
+                        cur_rank,
+                        owner,
+                        heap_bases,
+                        copy_engine_ctx=copy_engine_ctx,
+                        use_copy_engine=True,
+                    )
         else:
             dst = __translate(inbox, cur_rank, owner, heap_bases)
             tl.store(dst + slot_offsets, c_tile, mask=mask)
@@ -181,7 +243,8 @@ def matmul_reduce_scatter_preamble(
     workspace: Optional[FusedWorkspace] = None,
 ) -> FusedWorkspace:
     """
-    Allocate the inbox and counters, unless ``workspace`` already fits. Collective when it allocates.
+    Allocate the inbox, counters and (for ``engine="sdma"``) staging buffer, unless ``workspace``
+    already fits. Collective when it allocates.
 
     Args:
         shmem: Iris shmem context
@@ -198,6 +261,9 @@ def matmul_reduce_scatter_preamble(
         config = FusedConfig()
     world_size = shmem.get_num_ranks()
     config.validate(world_size=world_size)
+    use_copy_engine = config.engine == "sdma"
+    if use_copy_engine:
+        shmem._require_copy_engine()
     if workspace is None:
         workspace = FusedWorkspace()
 
@@ -209,8 +275,11 @@ def matmul_reduce_scatter_preamble(
         raise ValueError(f"C has shape {tuple(C.shape)}, expected (M / world_size, N) = ({M // world_size}, {N})")
     if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise ValueError(f"matmul_reduce_scatter supports float16, bfloat16 and float32 outputs, got {C.dtype}")
+    if use_copy_engine:
+        if config.block_size_m * N * C.element_size() > MAX_COPY_BYTES:
+            raise ValueError(f"a {config.block_size_m} x {N} strip exceeds the {MAX_COPY_BYTES}-byte copy limit")
 
-    key = ((M, N, K), config.block_size_m, C.dtype, world_size)
+    key = ((M, N, K), config.block_size_m, C.dtype, world_size, config.engine)
     if workspace.operation == "matmul_reduce_scatter" and workspace.rs_key == key:
         return workspace
     rows_per_rank = M // world_size
@@ -218,9 +287,12 @@ def matmul_reduce_scatter_preamble(
     workspace.shape = (M, N, K)
     workspace.dtype = C.dtype
     workspace.world_size = world_size
-    workspace.variant = "two_shot"
+    workspace.variant = config.engine
     workspace.inbox = shmem.zeros((world_size * rows_per_rank, N), dtype=C.dtype)
     workspace.arrivals = shmem.zeros((world_size,), dtype=torch.int64)
+    workspace.staging = torch.empty((M, N), dtype=C.dtype, device=A.device) if use_copy_engine else None
+    max_strips = _max_strips(rows_per_rank, config.block_size_m)
+    workspace.strip_counters = torch.zeros(world_size * max_strips, dtype=torch.int64, device=A.device)
     workspace.partition_counters = torch.zeros(world_size, dtype=torch.int64, device=A.device)
     workspace.round = 0
     workspace.rs_key = key
@@ -246,8 +318,10 @@ def matmul_reduce_scatter(
     their sum over the ``W`` ranks, like ``torch.distributed.reduce_scatter_tensor`` of ``A @ B``.
     ``M`` must be a multiple of ``W``.
 
-    Pass the returned workspace back in on later calls: a new one allocates buffers and synchronizes
-    the ranks. With ``async_op=True``, synchronize the ranks before reusing the workspace.
+    ``config.engine`` decides what moves the partial results: compute units (``"cu"``) or the SDMA
+    copy engines (``"sdma"``; needs a context created with ``engines=("sdma",)``). Pass the returned
+    workspace back in on later calls: a new one allocates buffers and synchronizes the ranks. With
+    ``async_op=True``, synchronize the ranks before reusing the workspace.
 
     Args:
         shmem: Iris shmem context
@@ -271,17 +345,19 @@ def matmul_reduce_scatter(
     world_size = shmem.get_num_ranks()
     rows_per_rank = M // world_size
     max_strips = _max_strips(rows_per_rank, config.block_size_m)
+    use_copy_engine = config.engine == "sdma"
     workspace.round += 1
 
     from iris.host.logging.logging import _log_rank
 
     _log_rank(
         logging.DEBUG,
-        "matmul_reduce_scatter: shape=(%d,%d,%d) dtype=%s rank=%d/%d",
+        "matmul_reduce_scatter: shape=(%d,%d,%d) dtype=%s engine=%s rank=%d/%d",
         M,
         N,
         K,
         A.dtype,
+        config.engine,
         rank,
         world_size,
         rank=rank,
@@ -289,12 +365,14 @@ def matmul_reduce_scatter(
     )
 
     heap_bases = shmem.get_heap_bases()
+    unused = workspace.partition_counters
     iris_launch(
         _publish_kernel,
         (world_size * max_strips * triton.cdiv(N, config.block_size_n),),
         A,
         B,
         workspace.inbox,
+        workspace.staging if use_copy_engine else unused,
         M,
         N,
         K,
@@ -304,7 +382,9 @@ def matmul_reduce_scatter(
         B.stride(1),
         max_strips,
         heap_bases,
+        shmem.get_copy_engine_ctx() if use_copy_engine else unused,
         workspace.arrivals,
+        workspace.strip_counters,
         workspace.partition_counters,
         rank,
         world_size,
@@ -312,6 +392,7 @@ def matmul_reduce_scatter(
         config.block_size_n,
         config.block_size_k,
         K % config.block_size_k == 0,
+        use_copy_engine,
         num_warps=8,
         num_stages=2,
         matrix_instr_nonkdim=16,

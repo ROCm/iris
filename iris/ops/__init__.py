@@ -155,7 +155,7 @@ class OpsNamespace:
             A: Input matrix A (M, K)
             B: Input matrix B (K, N)
             async_op: If False, performs barrier at end
-            config: Optional FusedConfig for tuning
+            config: Optional FusedConfig for tuning; ``engine`` picks compute units or SDMA
             workspace: Optional workspace from an earlier call (reuse it: a new one synchronizes ranks)
 
         Returns:
@@ -165,6 +165,10 @@ class OpsNamespace:
             >>> output = shmem.zeros((M // world_size, N), dtype=torch.float16)
             >>> workspace = shmem.ops.matmul_reduce_scatter(output, A, B)
             >>> shmem.ops.matmul_reduce_scatter(output, A, B, workspace=workspace)
+
+            >>> # Move the partials with the SDMA copy engines (context created with engines=("sdma",))
+            >>> config = FusedConfig(engine="sdma", block_size_m=256, block_size_n=256)
+            >>> workspace = shmem.ops.matmul_reduce_scatter(output, A, B, config=config)
         """
         return matmul_reduce_scatter(self._shmem, output_tensor, A, B, async_op, config, workspace)
 

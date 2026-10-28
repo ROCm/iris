@@ -20,7 +20,7 @@ from iris.host.tracing.kernel_artifacts import iris_launch
 
 from tritonblas.kernels.stages import GemmContext, ScheduleContext, make_tensor_view
 
-from .config import FusedConfig
+from .config import FusedConfig, require_cu_engine
 from .workspace import FusedWorkspace
 
 
@@ -169,6 +169,7 @@ def matmul_all_gather(
     """
     if config is None:
         config = FusedConfig()
+    require_cu_engine(config, "matmul_all_gather")
 
     M_local, K = A.shape
     K2, N = B.shape

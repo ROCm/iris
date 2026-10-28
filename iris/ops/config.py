@@ -31,6 +31,8 @@ class FusedConfig:
         allow_tf32: Whether to allow TF32 precision. Default: True.
 
     CCL Parameters (for operations that need collective communication):
+        engine: What moves the data. Options: "cu" (compute units), "sdma" (copy engines; needs
+                a context created with engines=("sdma",); matmul_reduce_scatter only). Default: "cu".
         all_reduce_variant: All-reduce algorithm variant. Options: "atomic", "ring",
                            "one_shot", "two_shot", "spinlock". Default: "two_shot".
         all_reduce_num_rings: Number of concurrent rings (for ring variant). Default: 1.
@@ -44,6 +46,9 @@ class FusedConfig:
         >>>
         >>> # Use ring all-reduce
         >>> config = FusedConfig(all_reduce_variant="ring", all_reduce_num_rings=2)
+        >>>
+        >>> # Reduce-scatter on the SDMA copy engines
+        >>> config = FusedConfig(engine="sdma", block_size_m=256, block_size_n=256)
     """
 
     # GEMM parameters
@@ -59,6 +64,7 @@ class FusedConfig:
     allow_tf32: bool = True
 
     # CCL-specific parameters
+    engine: str = "cu"  # cu, sdma
     all_reduce_variant: str = "two_shot"  # atomic, ring, one_shot, two_shot, spinlock
     all_reduce_num_rings: int = 1
 
@@ -87,6 +93,9 @@ class FusedConfig:
         if self.chunk_size <= 0:
             raise ValueError(f"chunk_size must be positive, got {self.chunk_size}")
 
+        if self.engine not in ["cu", "sdma"]:
+            raise ValueError(f"engine must be one of ['cu', 'sdma'], got {self.engine}")
+
         # Validate all_reduce_variant
         valid_variants = ["atomic", "ring", "one_shot", "two_shot", "spinlock"]
         if self.all_reduce_variant not in valid_variants:
@@ -102,3 +111,9 @@ class FusedConfig:
 
         if self.all_reduce_num_rings <= 0:
             raise ValueError(f"all_reduce_num_rings must be positive, got {self.all_reduce_num_rings}")
+
+
+def require_cu_engine(config, op):
+    """Raise for ops that have no SDMA path."""
+    if config.engine != "cu":
+        raise ValueError(f"{op} does not support engine={config.engine!r}; only matmul_reduce_scatter runs on 'sdma'")
