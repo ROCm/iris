@@ -1,268 +1,94 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 """
-Test suite for high-level matmul_reduce_scatter API.
+Test suite for matmul_reduce_scatter: rank r gets rows [r * M / W, (r + 1) * M / W) of the sum of
+A @ B over the ranks.
 """
+
+import gc
 
 import pytest
 import torch
 import torch.distributed as dist
+
 import iris
 import iris.ops as ops
 
 
-@pytest.mark.parametrize(
-    "dtype, atol, rtol",
-    [
-        (torch.float16, 2e-1, 1e-2),
-        (torch.float32, 1e-1, 1e-2),
-    ],
-)
-@pytest.mark.parametrize("M, N, K", [(128, 128, 32)])
-def test_matmul_reduce_scatter(dtype, atol, rtol, M, N, K):
-    """
-    Test matmul_reduce_scatter by comparing against torch matmul + all_reduce.
-
-    Note: We use all_reduce for reference because our tile-based reduce_scatter
-    is semantically equivalent to: matmul -> all_reduce -> each rank keeps assigned tiles.
-    PyTorch's reduce_scatter operates on different semantics (scatter along dimensions).
-    """
+@pytest.fixture(scope="module")
+def ctx():
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
-
-    heap_size = 2**33
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
-
-    A = torch.randn(M, K, dtype=dtype, device=f"cuda:{rank}")
-    B = torch.randn(K, N, dtype=dtype, device=f"cuda:{rank}")
-
-    C_local = torch.matmul(A, B)
-    C_reduced = C_local.clone()
-    dist.all_reduce(C_reduced, op=dist.ReduceOp.SUM)
-    torch.cuda.synchronize()
-
-    config = ops.FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
-    num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
-    num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    total_tiles = num_pid_m * num_pid_n
-    tiles_per_rank = total_tiles // world_size
-    start_tile = rank * tiles_per_rank
-    if rank == world_size - 1:
-        tiles_per_rank = total_tiles - start_tile
-
-    iris_A = shmem.zeros((M, K), dtype=dtype)
-    iris_A.copy_(A)
-    iris_B = shmem.zeros((K, N), dtype=dtype)
-    iris_B.copy_(B)
-    iris_C = shmem.zeros((M, N), dtype=dtype)
-
-    shmem.barrier()
-
-    ops.matmul_reduce_scatter(shmem, iris_C, iris_A, iris_B, config=config)
-
-    torch.cuda.synchronize()
-    shmem.barrier()
-
-    # Adjust tolerance for 8 ranks due to accumulation error
-    if world_size == 8 and dtype == torch.float32:
-        atol = 2e-1
-
-    for local_tile_idx in range(tiles_per_rank):
-        tile_id = start_tile + local_tile_idx
-        pid_m = tile_id // num_pid_n
-        pid_n = tile_id % num_pid_n
-
-        m_start = pid_m * config.block_size_m
-        m_end = min(m_start + config.block_size_m, M)
-        n_start = pid_n * config.block_size_n
-        n_end = min(n_start + config.block_size_n, N)
-
-        iris_tile = iris_C[m_start:m_end, n_start:n_end]
-        ref_tile = C_reduced[m_start:m_end, n_start:n_end]
-
-        max_diff = torch.abs(iris_tile - ref_tile).max().item()
-        assert torch.allclose(iris_tile, ref_tile, atol=atol, rtol=rtol), (
-            f"Rank {rank}, tile {tile_id} ({pid_m},{pid_n}): Max diff: {max_diff}, expected < {atol}"
-        )
-
-    if rank == 0:
-        print(f"matmul_reduce_scatter: {dtype}, M={M}, N={N}, K={K}")
-
-    shmem.barrier()
-    del shmem
-    import gc
-
+    ctx = iris.iris(1 << 30)
+    yield ctx
+    ctx.barrier()
+    del ctx
     gc.collect()
 
 
-@pytest.mark.parametrize(
-    "dtype, atol, rtol",
-    [
-        (torch.float16, 2e-1, 1e-2),
-        (torch.float32, 1e-1, 1e-2),
-    ],
-)
-def test_matmul_reduce_scatter_semantics(dtype, atol, rtol):
-    """
-    Test that matmul_reduce_scatter is equivalent to:
-    result = matmul(A, B)
-    reduced = all_reduce(result)
-    each rank keeps its assigned tile block
-    """
-    if not dist.is_initialized():
-        pytest.skip("torch.distributed not initialized")
-
-    heap_size = 2**33
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
-
-    M, N, K = 128, 128, 32
-
-    A = shmem.randn((M, K), dtype=dtype)
-    B = shmem.randn((K, N), dtype=dtype)
-    output = shmem.zeros((M, N), dtype=dtype)
-
-    A_ref = A.clone()
-    B_ref = B.clone()
-    C_ref = torch.matmul(A_ref, B_ref)
-    dist.all_reduce(C_ref, op=dist.ReduceOp.SUM)
-    torch.cuda.synchronize()
-
-    config = ops.FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
-    from iris.ops.matmul_reduce_scatter import matmul_reduce_scatter
-
-    matmul_reduce_scatter(shmem, output, A, B, config=config)
-
-    torch.cuda.synchronize()
-    shmem.barrier()
-
-    num_pid_m = (M + config.block_size_m - 1) // config.block_size_m
-    num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    total_tiles = num_pid_m * num_pid_n
-    tiles_per_rank = total_tiles // world_size
-    start_tile = rank * tiles_per_rank
-    if rank == world_size - 1:
-        tiles_per_rank = total_tiles - start_tile
-
-    # Adjust tolerance for 8 ranks
-    if world_size == 8 and dtype == torch.float32:
-        atol = 2e-1
-
-    for local_tile_idx in range(tiles_per_rank):
-        tile_id = start_tile + local_tile_idx
-        pid_m = tile_id // num_pid_n
-        pid_n = tile_id % num_pid_n
-
-        m_start = pid_m * config.block_size_m
-        m_end = min(m_start + config.block_size_m, M)
-        n_start = pid_n * config.block_size_n
-        n_end = min(n_start + config.block_size_n, N)
-
-        output_tile = output[m_start:m_end, n_start:n_end]
-        ref_tile = C_ref[m_start:m_end, n_start:n_end]
-
-        assert torch.allclose(output_tile, ref_tile, atol=atol, rtol=rtol), f"Rank {rank}, tile {tile_id}: mismatch"
-
-    if rank == 0:
-        print("matmul_reduce_scatter semantics verified")
-
-    shmem.barrier()
-    del shmem
-    import gc
-
-    gc.collect()
-
-
-def test_matmul_reduce_scatter_lock_too_small():
-    """Test that ValueError is raised when the lock array is too small for current tile count.
-
-    Scenario: workspace is prepared with larger block sizes (fewer tiles), then the
-    preamble is called again with smaller block sizes (more tiles). The undersized
-    lock array is detected and a ValueError is raised.
-    """
-    if not dist.is_initialized():
-        pytest.skip("torch.distributed not initialized")
-
-    heap_size = 2**33
-    shmem = iris.iris(heap_size)
-
-    from iris.ops.config import FusedConfig
-    from iris.ops.matmul_reduce_scatter import matmul_reduce_scatter_preamble
-
-    M, N, K = 512, 512, 64
-    dtype = torch.float16
-
-    iris_A = shmem.zeros((M, K), dtype=dtype)
-    iris_B = shmem.zeros((K, N), dtype=dtype)
-    iris_C = shmem.zeros((M, N), dtype=dtype)
-
-    shmem.barrier()
-
-    # Step 1: run preamble with larger block sizes → allocates a smaller lock array
-    config_large = FusedConfig(block_size_m=128, block_size_n=128, block_size_k=32)
-    workspace = matmul_reduce_scatter_preamble(shmem, iris_C, iris_A, iris_B, config=config_large)
-
-    # Step 2: call preamble again with smaller block sizes that need more tiles —
-    # the preamble detects that workspace.locks is too small and raises ValueError.
-    config_small = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
-    with pytest.raises(ValueError, match="Lock array too small"):
-        matmul_reduce_scatter_preamble(shmem, iris_C, iris_A, iris_B, config=config_small, workspace=workspace)
-
-    shmem.barrier()
-    del shmem
-    import gc
-
-    gc.collect()
-
-
-def test_matmul_reduce_scatter_namespace():
-    """shmem.ops.matmul_reduce_scatter forwards to iris.ops.matmul_reduce_scatter."""
-    if not dist.is_initialized():
-        pytest.skip("torch.distributed not initialized")
-
-    heap_size = 2**33
-    shmem = iris.iris(heap_size)
-    rank = shmem.get_rank()
-    world_size = shmem.get_num_ranks()
-
-    M, N, K = 128, 128, 32
-    dtype = torch.float16
-    A = shmem.randn((M, K), dtype=dtype)
-    B = shmem.randn((K, N), dtype=dtype)
-    output = shmem.zeros((M, N), dtype=dtype)
-
-    C_ref = torch.matmul(A.clone(), B.clone())
-    dist.all_reduce(C_ref, op=dist.ReduceOp.SUM)
-    torch.cuda.synchronize()
-
-    config = ops.FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
-    output.fill_(1)
-    shmem.ops.matmul_reduce_scatter(output, A, B, config=config)
-    torch.cuda.synchronize()
-    shmem.barrier()
-
-    num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
-    total_tiles = ((M + config.block_size_m - 1) // config.block_size_m) * num_pid_n
-    tiles_per_rank = total_tiles // world_size
-    start_tile = rank * tiles_per_rank
-    if rank == world_size - 1:
-        tiles_per_rank = total_tiles - start_tile
-    for tile_id in range(total_tiles):
-        rows = slice((tile_id // num_pid_n) * config.block_size_m, (tile_id // num_pid_n + 1) * config.block_size_m)
-        cols = slice((tile_id % num_pid_n) * config.block_size_n, (tile_id % num_pid_n + 1) * config.block_size_n)
-        if start_tile <= tile_id < start_tile + tiles_per_rank:
-            assert torch.allclose(output[rows, cols], C_ref[rows, cols], atol=2e-1, rtol=1e-2), (
-                f"Rank {rank}, tile {tile_id}: mismatch"
-            )
+def _run_and_check(ctx, M, N, K, dtype, config, calls=3, namespace=False, async_op=False):
+    """Run ``calls`` times on one workspace with fresh inputs, against reduce_scatter(A @ B) in fp32."""
+    rank, world_size = ctx.get_rank(), ctx.get_num_ranks()
+    rows = slice(rank * M // world_size, (rank + 1) * M // world_size)
+    C = torch.empty(M // world_size, N, dtype=dtype, device=ctx.get_device())
+    workspace = None
+    for call in range(calls):
+        A = (torch.randn(M, K, device=C.device) / 4).to(dtype)
+        B = (torch.randn(K, N, device=C.device) / 4).to(dtype)
+        ref = A.float() @ B.float()
+        dist.all_reduce(ref)
+        C.fill_(float("nan"))
+        if namespace:
+            workspace = ctx.ops.matmul_reduce_scatter(C, A, B, async_op=async_op, config=config, workspace=workspace)
         else:
-            assert (output[rows, cols] == 0).all(), f"Rank {rank}, tile {tile_id}: not owned, but not zeroed"
+            workspace = ops.matmul_reduce_scatter(ctx, C, A, B, async_op=async_op, config=config, workspace=workspace)
+        torch.cuda.synchronize()
+        if async_op:
+            ctx.barrier()
+        torch.testing.assert_close(
+            C.float(), ref[rows], atol=2e-2 * float(ref.abs().max()), rtol=0, msg=lambda m: f"call {call}: {m}"
+        )
+    ctx.barrier()
 
-    shmem.barrier()
-    del shmem
-    import gc
 
-    gc.collect()
+@pytest.mark.parametrize(
+    "dtype, block",
+    [
+        (torch.float16, (64, 64, 32)),
+        (torch.bfloat16, (256, 256, 64)),
+        (torch.float32, (128, 128, 32)),
+    ],
+)
+@pytest.mark.parametrize(
+    "rows_per_rank, N, K",
+    [
+        ("2 tiles", 512, 256),  # Each rank's rows are whole tile rows
+        ("tile + 37", 200, 100),  # Rows straddle tile rows; N and K not multiples of the blocks
+    ],
+)
+def test_matmul_reduce_scatter(ctx, dtype, block, rows_per_rank, N, K):
+    block_m, block_n, block_k = block
+    rows = 2 * block_m if rows_per_rank == "2 tiles" else block_m + 37
+    config = ops.FusedConfig(block_size_m=block_m, block_size_n=block_n, block_size_k=block_k)
+    _run_and_check(ctx, ctx.get_num_ranks() * rows, N, K, dtype, config)
+
+
+def test_matmul_reduce_scatter_namespace_async(ctx):
+    """shmem.ops forwards to iris.ops.matmul_reduce_scatter; async_op leaves synchronization to the caller."""
+    config = ops.FusedConfig(block_size_m=128, block_size_n=128, block_size_k=64)
+    _run_and_check(ctx, ctx.get_num_ranks() * 256, 384, 128, torch.bfloat16, config, namespace=True, async_op=True)
+
+
+def test_matmul_reduce_scatter_validation(ctx):
+    world_size = ctx.get_num_ranks()
+
+    A = torch.zeros(64 * world_size, 32, dtype=torch.float16, device=ctx.get_device())
+    B = torch.zeros(32, 64, dtype=torch.float16, device=ctx.get_device())
+    with pytest.raises(ValueError, match="expected"):
+        ops.matmul_reduce_scatter(ctx, torch.zeros(65, 64, dtype=torch.float16, device=A.device), A, B)
+    if world_size > 1:
+        with pytest.raises(ValueError, match="multiple of the number of ranks"):
+            ops.matmul_reduce_scatter(ctx, torch.zeros(1, 64, dtype=torch.float16, device=A.device), A[:-1], B)
+
+    ctx.barrier()
