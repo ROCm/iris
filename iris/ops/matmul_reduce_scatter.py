@@ -279,8 +279,11 @@ def matmul_reduce_scatter_preamble(
         if config.block_size_m * N * C.element_size() > MAX_COPY_BYTES:
             raise ValueError(f"a {config.block_size_m} x {N} strip exceeds the {MAX_COPY_BYTES}-byte copy limit")
 
-    key = ((M, N, K), config.block_size_m, C.dtype, world_size, config.engine)
-    if workspace.operation == "matmul_reduce_scatter" and workspace.rs_key == key:
+    # The counters only grow and find a strip's last tile modulo the tile grid, so a workspace is
+    # only reusable with the same tile sizes
+    block_sizes = (config.block_size_m, config.block_size_n, config.block_size_k)
+    key = ((M, N, K), block_sizes, C.dtype, world_size, config.engine)
+    if workspace.operation == "matmul_reduce_scatter" and workspace.prepared and workspace.rs_key == key:
         return workspace
     rows_per_rank = M // world_size
     workspace.operation = "matmul_reduce_scatter"
