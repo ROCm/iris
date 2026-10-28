@@ -80,6 +80,30 @@ def test_matmul_reduce_scatter(ctx, engine, dtype, block, rows_per_rank, N, K):
 
 
 @pytest.mark.parametrize("engine", ENGINES)
+def test_matmul_reduce_scatter_workspace_reuse(ctx, engine):
+    """One workspace across calls whose tile grid changes, and after reset()."""
+    rank, world_size = ctx.get_rank(), ctx.get_num_ranks()
+    M, N, K = world_size * 192, 384, 128
+    rows = slice(rank * M // world_size, (rank + 1) * M // world_size)
+    C = torch.empty(M // world_size, N, dtype=torch.bfloat16, device=ctx.get_device())
+    workspace = None
+    # 3 tile columns, then 2: counters left from the first grid do not line up with the second
+    for call, block_n in enumerate([128, 256, 128, 128]):
+        config = ops.FusedConfig(engine=engine, block_size_m=64, block_size_n=block_n, block_size_k=64)
+        if call == 3:
+            workspace.reset()
+        A = (torch.randn(M, K, device=C.device) / 4).to(torch.bfloat16)
+        B = (torch.randn(K, N, device=C.device) / 4).to(torch.bfloat16)
+        ref = A.float() @ B.float()
+        dist.all_reduce(ref)
+        workspace = ops.matmul_reduce_scatter(ctx, C, A, B, config=config, workspace=workspace)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(C.float(), ref[rows], atol=2e-2 * float(ref.abs().max()), rtol=0)
+    assert workspace.round == 1, "reset() did not make the next call prepare a new workspace"
+    ctx.barrier()
+
+
+@pytest.mark.parametrize("engine", ENGINES)
 def test_matmul_reduce_scatter_namespace_async(ctx, engine):
     """shmem.ops forwards to iris.ops.matmul_reduce_scatter; async_op leaves synchronization to the caller."""
     config = ops.FusedConfig(engine=engine, block_size_m=128, block_size_n=128, block_size_k=64)
