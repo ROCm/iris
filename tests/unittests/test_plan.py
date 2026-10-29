@@ -20,7 +20,6 @@ from triton.language.extra.hip import utils as hip_utils
 import iris
 from iris.experimental.plan.gluon import TriggeredView as GluonView
 from iris.host import queue_ledger
-from iris.experimental.plan import triton as dv
 from iris.mem.utils import read_realtime
 from iris.experimental.plan import (
     Chunk,
@@ -35,6 +34,7 @@ from iris.experimental.plan import (
 )
 
 EMPTY = -1
+EMPTY_VALUE = tl.constexpr(EMPTY)
 
 
 def _ctx(allocator_type="vmem_chunked"):
@@ -59,7 +59,7 @@ def _check_before_release(ctx, plan, buffer, slice_elems):
     rank = ctx.get_rank()
     others = [p for p in range(ctx.get_num_ranks()) if p != rank]
     consume = [plan.chunk_id(p, i) for p in others for i in range(len(plan.schedules[p]))]
-    assert (plan.gates[consume, dv.G_ARRIVAL.value] == plan.round - 1).all()
+    assert (plan.arrivals[consume] == plan.round - 1).all()
     for p in others:
         assert (_slice(buffer, p, slice_elems) == EMPTY).all()
     ctx.barrier()
@@ -281,6 +281,97 @@ def test_many_writers_one_chunk():
     del ctx
 
 
+@triton.jit
+def _epilogue_producer(buf, counters, round, start, part, BLOCK: tl.constexpr):
+    """Like a GEMM epilogue that signals per tile: each program writes its part, then adds 1 to the chunk's counter."""
+    pid = tl.program_id(0)
+    for off in range(0, part, BLOCK):
+        idx = start + pid * part + off + tl.arange(0, BLOCK)
+        tl.store(buf + idx, (round << 24) | idx)
+    tl.debug_barrier()
+    tl.atomic_add(counters, 1, scope="gpu")
+
+
+def test_counters_incremented_by_another_kernel():
+    """A kernel that knows nothing of TriggeredView drives the plan through plan.counters."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    programs, slice_elems = 8, 1 << 20
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    buffer.fill_(EMPTY)
+    schedule = whole(_slice(buffer, rank, slice_elems), base=buffer, writers=programs)
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
+        own = plan.counters[plan.chunk_id(rank, 0) :]
+        for round in range(1, 11):
+            if round > 1:
+                plan.next_round()
+            plan.start()
+            _epilogue_producer[(programs,)](buffer, own, round, rank * slice_elems, slice_elems // programs, BLOCK=1024)
+            plan.wait()
+            _check_and_wipe(ctx, buffer, round, slice_elems)
+    ctx.barrier()
+    del ctx
+
+
+@triton.jit
+def _overwrite_when_sent(buf, handle, start, n, BLOCK: tl.constexpr):
+    """Once every peer has this rank's chunks, the source may be reused: overwrite it."""
+    TriggeredView.initialize(handle).wait_sent()
+    for off in range(0, n, BLOCK):
+        idx = start + off + tl.arange(0, BLOCK)
+        tl.store(buf + idx, EMPTY_VALUE, mask=off + tl.arange(0, BLOCK) < n)
+
+
+def test_wait_sent_before_reusing_source():
+    """A kernel waits for this rank's copies to finish everywhere, then overwrites the source."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 64 * 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    buffer.fill_(EMPTY)
+    schedule = chunks(_slice(buffer, rank, slice_elems), 4, base=buffer)
+    regs, max_regs = _region_table(schedule, 4)
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
+        for round in range(1, 4):
+            if round > 1:
+                plan.next_round()
+            handle = plan.start()
+            _regions_producer[(len(schedule),)](
+                buffer, regs, max_regs, handle, plan.chunk_id(rank, 0), round, BLOCK=1024
+            )
+            _overwrite_when_sent[(1,)](buffer, handle, rank * slice_elems, slice_elems, BLOCK=1024)
+            plan.wait()
+            assert (plan.completion[[p for p in range(world) if p != rank]] == round).all()
+            assert (_slice(buffer, rank, slice_elems) == EMPTY).all()
+            ctx.barrier()
+            for p in range(world):
+                if p != rank:
+                    expected = _expected(round, slice_elems, start=p * slice_elems)
+                    assert torch.equal(_slice(buffer, p, slice_elems), expected)
+            ctx.barrier()
+            buffer.fill_(EMPTY)
+    ctx.barrier()
+    del ctx
+
+
+def test_round_limit():
+    """Counters are never reset: preparing past writers x round = 2^31 - 1 fails on every rank."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    buffer = ctx.zeros(world * 1024, dtype=torch.int32)
+    schedule = whole(_slice(buffer, rank, 1024), base=buffer, writers=1 << 30)
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
+        plan.run()
+        with pytest.raises(RuntimeError, match="exceeds"):
+            plan.next_round()
+        assert plan.state is State.DONE
+    ctx.barrier()
+    del ctx
+
+
 @gluon.jit
 def _flat_layout(BLOCK: gl.constexpr):
     THREADS: gl.constexpr = hip_utils.num_threads()
@@ -384,7 +475,7 @@ def test_head_of_line_order():
         ctx.barrier()
         if rank != 0:
             time.sleep(0.1)
-            assert (plan.gates[:, dv.G_ARRIVAL.value] == 0).all()
+            assert (plan.arrivals == 0).all()
             assert (buffer[:slice_elems] == EMPTY).all()
         ctx.barrier()
         if rank == 0:
@@ -392,7 +483,7 @@ def test_head_of_line_order():
         plan.wait()
         assert torch.equal(buffer[:slice_elems], _expected(1, slice_elems))
         if rank != 0:
-            assert (plan.gates[:, dv.G_ARRIVAL.value] == 1).all()
+            assert (plan.arrivals == 1).all()
     ctx.barrier()
     del ctx
 
