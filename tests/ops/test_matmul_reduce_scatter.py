@@ -217,3 +217,52 @@ def test_matmul_reduce_scatter_lock_too_small():
     import gc
 
     gc.collect()
+
+
+def test_matmul_reduce_scatter_namespace():
+    """shmem.ops.matmul_reduce_scatter forwards to iris.ops.matmul_reduce_scatter."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**33
+    shmem = iris.iris(heap_size)
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+
+    M, N, K = 128, 128, 32
+    dtype = torch.float16
+    A = shmem.randn((M, K), dtype=dtype)
+    B = shmem.randn((K, N), dtype=dtype)
+    output = shmem.zeros((M, N), dtype=dtype)
+
+    C_ref = torch.matmul(A.clone(), B.clone())
+    dist.all_reduce(C_ref, op=dist.ReduceOp.SUM)
+    torch.cuda.synchronize()
+
+    config = ops.FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
+    output.fill_(1)
+    shmem.ops.matmul_reduce_scatter(output, A, B, config=config)
+    torch.cuda.synchronize()
+    shmem.barrier()
+
+    num_pid_n = (N + config.block_size_n - 1) // config.block_size_n
+    total_tiles = ((M + config.block_size_m - 1) // config.block_size_m) * num_pid_n
+    tiles_per_rank = total_tiles // world_size
+    start_tile = rank * tiles_per_rank
+    if rank == world_size - 1:
+        tiles_per_rank = total_tiles - start_tile
+    for tile_id in range(total_tiles):
+        rows = slice((tile_id // num_pid_n) * config.block_size_m, (tile_id // num_pid_n + 1) * config.block_size_m)
+        cols = slice((tile_id % num_pid_n) * config.block_size_n, (tile_id % num_pid_n + 1) * config.block_size_n)
+        if start_tile <= tile_id < start_tile + tiles_per_rank:
+            assert torch.allclose(output[rows, cols], C_ref[rows, cols], atol=2e-1, rtol=1e-2), (
+                f"Rank {rank}, tile {tile_id}: mismatch"
+            )
+        else:
+            assert (output[rows, cols] == 0).all(), f"Rank {rank}, tile {tile_id}: not owned, but not zeroed"
+
+    shmem.barrier()
+    del shmem
+    import gc
+
+    gc.collect()

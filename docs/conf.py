@@ -136,10 +136,18 @@ triton_language_mock = MagicMock()
 # HTML churns too. Giving each one a real class makes it repr as its own name.
 # The list is every `: tl.<name>` annotation appearing in iris/ -- if a new one
 # is introduced it will show up as a MagicMock on the rendered page.
+# The classes also take a value, as the real ones do: module-level constants such
+# as `GATE_WORDS = tl.constexpr(8)` (iris/experimental/plan/triton.py) are built at
+# import time, and a class that takes no arguments fails that import, so autodoc
+# renders the module's whole reference page empty.
+def _mock_type_init(self, value=None, *args, **kwargs):
+    self.value = value
+
+
 def _name_mock_types(mock, module, names):
     """Give a mocked module real classes for the names used as annotations."""
     for n in names:
-        cls = type(n, (), {"__doc__": "Triton %s." % n})
+        cls = type(n, (), {"__doc__": "Triton %s." % n, "__init__": _mock_type_init})
         cls.__module__ = module
         setattr(mock, n, cls)
 

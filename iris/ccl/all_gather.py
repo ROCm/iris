@@ -21,7 +21,12 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         input_tensor: Shape (M, N)
         ctx: Iris instance
         group: ProcessGroup or None
-        async_op: If True, skip trailing barrier
+        async_op: If False (default), end with a device-side barrier on the current
+            stream: work queued after this call runs only once every rank's part of
+            the collective is done. The host does not wait. If True, skip the
+            barrier; the caller must synchronize the ranks, e.g. with
+            ``ctx.device_barrier(group=group)``, before reading the output or
+            reusing the buffers
         config: Config with kernel parameters
     """
     from iris.ccl.config import Config
@@ -60,4 +65,4 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     )
 
     if not async_op:
-        ctx.barrier()
+        ctx.device_barrier(group=group)

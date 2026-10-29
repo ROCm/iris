@@ -54,8 +54,8 @@ from iris.host.platform.hip import (
 )
 
 from iris.host.memory.symmetric_heap import SymmetricHeap
+from iris.host import queue_ledger
 import numpy as np
-from typing import Any
 import torch
 import logging
 
@@ -134,7 +134,11 @@ class Iris:
             )
 
         # Initialize symmetric heap with specified allocator
-        self.heap = SymmetricHeap(heap_size, gpu_id, cur_rank, num_ranks, allocator_type)
+        # Room for the device barrier's flags (allocated below) on top of the caller's heap_size.
+        barrier_flags_bytes = num_ranks * num_ranks * torch.int32.itemsize
+        self.heap = SymmetricHeap(
+            heap_size, gpu_id, cur_rank, num_ranks, allocator_type, reserved_bytes=barrier_flags_bytes
+        )
         self.device = f"cuda:{gpu_id}"
         self.heap_bases = self.heap.get_heap_bases()
 
@@ -167,8 +171,9 @@ class Iris:
         # Lazy initialization for ops interface
         self._ops = None
 
-        # Device-side barrier state, keyed by process group (None = all ranks).
-        self._device_barrier_state: dict[Any, torch.Tensor] = {}
+        # Pairwise counters for device_barrier(), shared by every process group. Allocated
+        # here because heap allocation is collective over all ranks; the heap was sized for it.
+        self._device_barrier_flags = self.zeros((num_ranks, num_ranks), dtype=torch.int32)
 
         # Initialize tracing
         self.tracing = Tracing(self)
@@ -1113,6 +1118,7 @@ class Iris:
         if to_tensor is None:
             to_tensor = from_tensor
 
+        self._check_host_queue_idle(to_rank)
         from_rank = self.get_rank()
         from_ptr = from_tensor.data_ptr()
         to_ptr = self.heap.translate(to_tensor.data_ptr(), from_rank, to_rank)
@@ -1203,6 +1209,7 @@ class Iris:
             ...               wait_flag=wait_ptr, wait_value=256, signal_flag=signal_ptr)
         """
         sdma_ep = self._require_copy_engine()
+        self._check_host_queue_idle(to_rank)
         from_rank = self.get_rank()
 
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
@@ -1269,6 +1276,7 @@ class Iris:
             channel: SDMA channel to use
         """
         sdma_ep = self._require_copy_engine()
+        self._check_host_queue_idle(to_rank)
         from_rank = self.get_rank()
 
         if len(tiles) != len(to_ptrs) or len(tiles) != len(to_strides):
@@ -1328,11 +1336,17 @@ class Iris:
         sdma_ep = self._require_copy_engine()
         src_rank = self.get_rank()
         if to_rank is not None:
+            self._check_host_queue_idle(to_rank)
             sdma_ep.quiet(src_rank, to_rank, channel)
         else:
             # Quiet to all ranks
             for rank in range(self.get_num_ranks()):
+                self._check_host_queue_idle(rank)
                 sdma_ep.quiet(src_rank, rank, channel)
+
+    def _check_host_queue_idle(self, to_rank):
+        # Chains parked on a host queue block everything queued behind them, quiet() included
+        queue_ledger.ledger().check_idle(self.get_rank(), to_rank)
 
     def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -1483,10 +1497,10 @@ class Iris:
 
         Unlike ``barrier()`` which uses host-side ``torch.distributed.barrier()``,
         this uses device-side atomic operations on the symmetric heap to synchronize
-        ranks. Stateless w.r.t. host-side epoch tracking: each rank's flag on
-        the heap serves as its own epoch counter, managed entirely by the GPU
-        via atomic_add. A persistent per-group flags tensor is cached in
-        ``_device_barrier_state``.
+        ranks. Stateless w.r.t. host-side epoch tracking: the counters live on
+        the heap and are managed entirely by the GPU via atomic_add. They are
+        allocated once in ``__init__`` and shared by every process group, so this
+        never allocates and needs only the group's members to take part.
 
         Args:
             group (ProcessGroup, optional): The process group to synchronize.
@@ -1496,11 +1510,8 @@ class Iris:
             >>> ctx = iris.iris(1 << 20)
             >>> ctx.device_barrier()  # Synchronize all ranks on device
         """
-        if group not in self._device_barrier_state:
-            self._device_barrier_state[group] = self.zeros((self.num_ranks,), dtype=torch.int32)
-
         distributed_device_barrier(
-            self._device_barrier_state[group],
+            self._device_barrier_flags,
             group,
             self.cur_rank,
             self.num_ranks,
