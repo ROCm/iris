@@ -668,3 +668,45 @@ def test_all_gather_strided_data_placement():
     import gc
 
     gc.collect()
+
+
+@pytest.mark.parametrize("op", ["all_gather", "reduce_scatter"])
+def test_collective_in_one_group_only(op, dtype=torch.float32, M=256, N=128, iters=3):
+    """Run a collective in group [0, 1] while the other ranks do not take part.
+
+    The trailing barrier must involve only the group's ranks: it must neither
+    wait on the others nor need them to allocate anything.
+    """
+    world_size, rank = _get_world_info()
+
+    shmem = iris.iris(2**33)
+    group_ranks = [0, 1]
+    group = dist.new_group(group_ranks)
+
+    input_tensor = shmem.zeros((M, N), dtype=dtype)
+    input_tensor.fill_(float(rank + 1))
+    out_rows = len(group_ranks) * M if op == "all_gather" else M
+    output_tensor = shmem.zeros((out_rows, N), dtype=dtype)
+    shmem.barrier()
+
+    try:
+        if rank in group_ranks:
+            for _ in range(iters):
+                getattr(shmem.ccl, op)(output_tensor, input_tensor, group=group, config=Config())
+            torch.cuda.synchronize()
+
+            if op == "all_gather":
+                expected = torch.cat(
+                    [torch.full((M, N), float(r + 1), dtype=dtype, device="cuda") for r in group_ranks]
+                )
+                torch.testing.assert_close(output_tensor, expected, rtol=0, atol=1e-5)
+            else:
+                values = output_tensor[output_tensor != 0]
+                assert values.numel() > 0, f"Rank {rank}: reduce_scatter wrote no tiles"
+                torch.testing.assert_close(values, torch.full_like(values, float(sum(r + 1 for r in group_ranks))))
+    finally:
+        shmem.barrier()
+        del shmem
+        import gc
+
+        gc.collect()
