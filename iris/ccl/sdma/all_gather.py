@@ -73,6 +73,8 @@ def sdma_all_gather(
 
     src = input_ptr.to(tl.uint64)
     dst = __translate(slice_ptr, iris_rank, peer, heap_bases).to(tl.uint64)
+    # nbytes arrives as i32 when it fits, and an i32 offset would wrap past 2 GiB
+    nbytes = tl.cast(nbytes, tl.int64)
     for start in range(0, nbytes, MAX_COPY):
         _copy(copy_engine_ctx, peer, src + start, dst + start, tl.minimum(nbytes - start, MAX_COPY))
     # Runs after the copies on the same queue

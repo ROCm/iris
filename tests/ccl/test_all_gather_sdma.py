@@ -26,13 +26,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 EMPTY = -1
+# test_all_gather_sdma_large_slice: 1536 rows of 1 MiB per rank, at 2 ranks
+LARGE_ROWS, LARGE_ROW_BYTES = 1536, 1 << 20
 
 
 @pytest.fixture(scope="module")
 def ctx():
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
-    ctx = iris.iris(1 << 30, engines=("sdma",))
+    large = 2 * LARGE_ROWS * LARGE_ROW_BYTES if dist.get_world_size() == 2 else 0
+    ctx = iris.iris((1 << 30) + large, engines=("sdma",))
     yield ctx
     ctx.barrier()
     del ctx
@@ -101,6 +104,25 @@ def test_all_gather_sdma_split_copies(ctx, monkeypatch):
     # Slices above the per-copy limit go as several copies: 4 KiB copies, one partial
     monkeypatch.setattr(sdma_all_gather, "MAX_COPY_BYTES", 4096)
     _gather_and_check(ctx, 33, 1000, torch.float32)
+
+
+def test_all_gather_sdma_large_slice(ctx):
+    # A 1.5 GiB slice goes as two copies per peer; the copy loop's byte offset must be 64-bit, since
+    # an i32 offset wraps to a negative value past 2 GiB
+    world_size = ctx.get_num_ranks()
+    if world_size != 2:
+        pytest.skip("3 GiB of output per rank: run at 2 ranks only")
+    rank = ctx.get_rank()
+
+    def pattern(r):
+        return ((torch.arange(LARGE_ROWS, device=ctx.get_device()) * 7 + r) % 127).to(torch.int8)
+
+    inp = pattern(rank)[:, None].expand(LARGE_ROWS, LARGE_ROW_BYTES).contiguous()
+    out = ctx.zeros((world_size * LARGE_ROWS, LARGE_ROW_BYTES), dtype=torch.int8)
+    ctx.ccl.all_gather(out, inp, config=Config(engine="sdma"))
+    expected = torch.cat([pattern(r) for r in range(world_size)])
+    assert torch.equal(out, expected[:, None].expand_as(out))
+    ctx.barrier()
 
 
 def test_engine_validation(ctx):
