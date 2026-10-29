@@ -137,6 +137,14 @@ def test_engine_validation(ctx):
             collective(out, t, config=config)
     with pytest.raises(ValueError, match="contiguous"):
         ctx.ccl.all_gather(ctx.zeros((world_size * 64, 64), dtype=torch.float32), t[:, :64].t(), config=config)
+    gathered = ctx.zeros((world_size * 64, 64), dtype=torch.float32)
+    for ignored in [
+        dict(use_gluon=True),
+        dict(all_gather_variant="partitioned"),
+        dict(all_gather_variant="persistent"),
+    ]:
+        with pytest.raises(ValueError, match="does not take"):
+            ctx.ccl.all_gather(gathered, t[:, :64].contiguous(), config=Config(engine="sdma", **ignored))
     ctx.barrier()
 
 

@@ -42,6 +42,10 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     if config.engine == "sdma":
         from iris.ccl.sdma.all_gather import launch
 
+        # The copy engines have no algorithm variants or Gluon kernel
+        if config.use_gluon or config.all_gather_variant is not None:
+            raise ValueError("engine='sdma' does not take use_gluon or all_gather_variant; leave them unset")
+
         launch(input_tensor, output_tensor, ctx, rank_in_group, rank_global, world_size, rank_start, rank_stride)
         if not async_op:
             ctx.barrier()

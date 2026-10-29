@@ -35,8 +35,10 @@ class Config:
                 Options: "cu", "sdma"
                 - "cu": Compute-unit kernels load and store the data
                 - "sdma": Copy engines move the data; needs a context created with
-                  engines=("sdma",). all_gather only; the variant and tiling fields are unused
-        all_gather_variant: Variant for all-gather operation (default: "persistent")
+                  engines=("sdma",). all_gather only; use_gluon and all_gather_variant must be
+                  left unset, and the tiling fields are unused
+        all_gather_variant: Variant for all-gather operation (default: None, which means
+                           "persistent" for the CU kernels)
                            Options: "persistent", "partitioned", "tdm"
                            - "persistent": Each PID handles multiple tiles and sends to all ranks
                            - "partitioned": PIDs partitioned across ranks, eliminates inner loop
@@ -97,7 +99,7 @@ class Config:
     chunk_size: int | None = None
     use_gluon: bool = False
     engine: str = "cu"
-    all_gather_variant: str = "persistent"
+    all_gather_variant: str | None = None
     all_reduce_variant: str = "two_shot"
     all_reduce_distribution: int = 1
     all_reduce_num_rings: int = 1
@@ -130,7 +132,7 @@ class Config:
             raise ValueError(f"num_stages must be positive, got {self.num_stages}")
         if self.engine not in ["cu", "sdma"]:
             raise ValueError(f"engine must be one of: 'cu', 'sdma', got {self.engine}")
-        if self.all_gather_variant not in ["persistent", "partitioned", "tdm"]:
+        if self.all_gather_variant not in [None, "persistent", "partitioned", "tdm"]:
             raise ValueError(
                 f"all_gather_variant must be one of: 'persistent', 'partitioned', 'tdm', got {self.all_gather_variant}"
             )
