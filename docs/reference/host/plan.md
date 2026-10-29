@@ -8,7 +8,7 @@ Copy-engine transfers prepared once and released by kernels, every round. See
 ## TriggeredPlan
 ```{eval-rst}
 .. autoclass:: iris.experimental.plan.TriggeredPlan
-   :members: start, wait, next_round, run, close, chunk_id
+   :members: start, wait, prepare_next, next_round, run, close, chunk_id
 ```
 
 ## Schedules
