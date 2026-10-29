@@ -23,6 +23,7 @@ class Copy:
     width: int
     height: int
     pitch: int
+    dst_pitch: int
 
 
 def chain_bytes(chunk):
@@ -31,11 +32,13 @@ def chain_bytes(chunk):
     return POLL_REGMEM_BYTES + len(chunk.regions) * copy_bytes + sdma_ep.ATOMIC_COMMAND_BYTES
 
 
-def round_bytes(schedule):
-    """Bytes one round of ``schedule`` takes on each peer's queue: its chains, then the completion signal."""
-    if not schedule:
-        return 0
-    return sum(chain_bytes(c) for c in schedule) + bind_sdma_ep().ATOMIC_COMMAND_BYTES
+def round_bytes(schedule, sender, world_size):
+    """Bytes one round of ``sender``'s ``schedule`` takes on each peer's queue: its chains, then the completion signal."""
+    nbytes = {}
+    for chunk in schedule:
+        for peer in chunk.recipients(sender, world_size):
+            nbytes[peer] = nbytes.get(peer, bind_sdma_ep().ATOMIC_COMMAND_BYTES) + chain_bytes(chunk)
+    return nbytes
 
 
 class Chain:
@@ -55,7 +58,7 @@ class Chain:
                 1,
                 [c.height for c in copies],
                 [c.width for c in copies],
-                [c.pitch for c in copies],
+                [c.dst_pitch for c in copies],
                 [c.pitch for c in copies],
             )
 

@@ -6,7 +6,15 @@
 import triton
 import triton.language as tl
 
-from iris.experimental.plan.triton import H_WORLD_SIZE, HEADER_WORDS, R_WRITERS, RECORD_WORDS, TriggeredView
+from iris.experimental.plan.triton import (
+    H_WORLD_SIZE,
+    HEADER_WORDS,
+    R_ARRIVAL,
+    R_EXPECTED,
+    R_WRITERS,
+    RECORD_WORDS,
+    TriggeredView,
+)
 from iris.mem.triton.context import __translate
 from iris.mem.utils import read_realtime
 
@@ -87,11 +95,12 @@ def _record_error(error, code, round, index, value):
 @triton.jit
 def wait_kernel(view, status, error, ticks, OWN_ONLY: tl.constexpr, STREAM: tl.constexpr):
     """
-    Program ``pid < num_chunks``: chunk ``pid`` has arrived here this round, or for this rank's own
-    chunks, been marked ready by all of its writers (other ranks' chunks are skipped if
-    ``OWN_ONLY``). Program ``num_chunks + p``: the queue to peer ``p`` has finished this round
-    (always true if this rank's chains do not go to ``p``). Reads only this rank's gates, for up to
-    ``ticks`` of the read_realtime() clock. Launch with one warp, since the loop exits on a clock read.
+    Program ``pid < num_chunks``: chunk ``pid`` has arrived here this round (always true of chunks
+    not sent here), or for this rank's own chunks, been marked ready by all of its writers (other
+    ranks' chunks are skipped if ``OWN_ONLY``). Program ``num_chunks + p``: the queue to peer ``p``
+    has finished this round (always true if this rank's chains do not go to ``p``). Reads only this
+    rank's gates, for up to ``ticks`` of the read_realtime() clock. Launch with one warp, since the
+    loop exits on a clock read.
 
     Writes 1 to ``status[pid]`` when done, 0 if not. Unless ``OWN_ONLY`` (a flush, which must wait
     for this rank's queues whatever its peers did), stops at and records in ``error`` a peer that
@@ -123,7 +132,9 @@ def wait_kernel(view, status, error, ticks, OWN_ONLY: tl.constexpr, STREAM: tl.c
                 if done & (marks != writers):
                     _record_error(error, WRONG_MARKS, cv.round, pid, marks)
         elif not OWN_ONLY:
-            done = _reached(cv.gates + cv.num_chunks + pid, cv.round, t0, ticks, abort, abort_round)
+            record = view + HEADER_WORDS + pid * RECORD_WORDS
+            target = tl.load(record + R_EXPECTED) * cv.round
+            done = _reached(cv.gates + tl.load(record + R_ARRIVAL), target, t0, ticks, abort, abort_round)
     else:
         peer = pid - cv.num_chunks
         if cv._sends_to(peer):
