@@ -42,11 +42,15 @@ def ctx():
     gc.collect()
 
 
-def _gather_and_check(ctx, M, N, dtype, calls=3, async_op=False, config=None):
+def _gather_and_check(ctx, M, N, dtype, calls=3, async_op=False, config=None, input_on_heap=True):
     """Run ``calls`` all-gathers with fresh input and a wiped output each time, against RCCL."""
     rank = ctx.get_rank()
     world_size = ctx.get_num_ranks()
-    inp = ctx.zeros((M, N), dtype=dtype)
+    if input_on_heap:
+        inp = ctx.zeros((M, N), dtype=dtype)
+    else:
+        inp = torch.zeros(M, N, dtype=dtype, device=ctx.get_device())
+        assert not ctx.heap.is_symmetric(inp)
     out = ctx.zeros((world_size * M, N), dtype=dtype)
     ref = torch.empty_like(out)
     for call in range(calls):
@@ -77,6 +81,11 @@ def test_all_gather_sdma(ctx, dtype, M, N):
 def test_all_gather_sdma_async(ctx):
     # async_op skips the trailing barrier: completion is stream-ordered
     _gather_and_check(ctx, 256, 128, torch.float32, calls=5, async_op=True)
+
+
+def test_all_gather_sdma_input_off_heap(ctx):
+    # The copy engines read the input at its local address, so it need not be on the symmetric heap
+    _gather_and_check(ctx, 300, 70, torch.bfloat16, input_on_heap=False)
 
 
 def test_all_gather_sdma_after_cu(ctx):
