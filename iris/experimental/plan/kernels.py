@@ -6,28 +6,16 @@
 import triton
 import triton.language as tl
 
-from iris.mem.triton.context import __translate
-from iris.experimental.plan.triton import (
-    G_ARRIVAL,
-    G_COUNTER,
-    G_READY,
-    GATE_WORDS,
-    HEADER_WORDS,
-    R_WRITERS,
-    RECORD_WORDS,
-    TriggeredView,
-)
+from iris.experimental.plan.triton import HEADER_WORDS, R_WRITERS, RECORD_WORDS, TriggeredView
 
 
 @triton.jit
 def release_kernel(view, chunks):
-    """Open the gate of chunk ``chunks[pid]``, counting a mark from each of its writers."""
+    """Open the gate of chunk ``chunks[pid]`` this round, however many of its writers have marked it."""
     cv = TriggeredView.initialize(view)
     chunk = tl.load(chunks + tl.program_id(0))
-    gate = cv.gates + chunk * GATE_WORDS
     writers = tl.load(view + HEADER_WORDS + chunk * RECORD_WORDS + R_WRITERS)
-    tl.atomic_add(gate + G_COUNTER, writers, sem="relaxed", scope="sys")
-    tl.atomic_xchg(gate + G_READY, cv.round, sem="release", scope="sys")
+    tl.atomic_max(cv.gates + chunk, (writers * cv.round).to(tl.int32), sem="release", scope="sys")
 
 
 @triton.jit
@@ -39,24 +27,22 @@ def _reached(ptr, round, budget: tl.constexpr):
 
 
 @triton.jit
-def progress_kernel(
-    view, heap_bases, armed, status, BUDGET: tl.constexpr, WORLD_SIZE: tl.constexpr, OWN_ONLY: tl.constexpr
-):
+def wait_kernel(view, sent_to, status, BUDGET: tl.constexpr, OWN_ONLY: tl.constexpr):
     """
-    Mark chunk ``pid`` complete once it is done this round: for this rank's own chunks, marked ready
-    and arrived at every peer it was armed for (``armed[chunk * WORLD_SIZE + peer]``; each chain
-    ends with that signal, so it has fully run); for the others, arrived here. Writes 1 to
-    ``status[pid]`` when complete, 0 if ``BUDGET`` ran out.
+    Program ``pid < num_chunks``: chunk ``pid`` has arrived here this round (always true of this
+    rank's own chunks, and of every chunk if ``OWN_ONLY``). Program ``num_chunks + p``: the queue to
+    peer ``p`` has finished this round (always true if bit ``p`` of ``sent_to`` is clear). Writes 1 to
+    ``status[pid]`` when done, 0 if ``BUDGET`` ran out. Reads only this rank's gates.
     """
-    chunk = tl.program_id(0)
+    pid = tl.program_id(0)
     cv = TriggeredView.initialize(view)
-    gate = cv.gates + chunk * GATE_WORDS
     done = tl.full((), True, tl.int1)
-    if cv.owns(chunk):
-        done = _reached(gate + G_READY, cv.round, BUDGET)
-        for peer in tl.static_range(WORLD_SIZE):
-            if done & (peer != cv.rank) & (tl.load(armed + chunk * WORLD_SIZE + peer) != 0):
-                done = _reached(__translate(gate + G_ARRIVAL, cv.rank, peer, heap_bases), cv.round, BUDGET)
-    elif not OWN_ONLY:
-        done = _reached(gate + G_ARRIVAL, cv.round, BUDGET)
-    tl.store(status + chunk, done.to(tl.int32))
+    if pid < cv.num_chunks:
+        if not OWN_ONLY:
+            if cv.owns(pid) == 0:
+                done = _reached(cv.gates + cv.num_chunks + pid, cv.round, BUDGET)
+    else:
+        peer = pid - cv.num_chunks
+        if ((sent_to >> peer) & 1) != 0:
+            done = _reached(cv.gates + 2 * cv.num_chunks + peer, cv.round, BUDGET)
+    tl.store(status + pid, done.to(tl.int32))

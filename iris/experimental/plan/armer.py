@@ -4,7 +4,8 @@
 """
 Arms triggered-plan chains on the host-initiated copy-engine queue through rocm-xio.
 
-Per (chunk, peer): POLL_REGMEM(ready >= round) -> one copy per region -> ATOMIC ADD_RTN_64(arrival += 1).
+Per (chunk, peer): POLL_REGMEM(counter >= writers * round) -> one copy per region -> ATOMIC ADD_RTN_32(arrival += 1).
+After a round's last chain to a peer: ATOMIC ADD_RTN_32(completion += 1), on this rank.
 """
 
 from dataclasses import dataclass
@@ -30,7 +31,14 @@ def chain_bytes(chunk):
     return POLL_REGMEM_BYTES + len(chunk.regions) * copy_bytes + sdma_ep.ATOMIC_COMMAND_BYTES
 
 
-def arm_chain(src_device, dst_device, ready_addr, round, copies, arrival_addr, is_2d):
+def round_bytes(schedule):
+    """Bytes one round of ``schedule`` takes on each peer's queue: its chains, then the completion signal."""
+    if not schedule:
+        return 0
+    return sum(chain_bytes(c) for c in schedule) + bind_sdma_ep().ATOMIC_COMMAND_BYTES
+
+
+def arm_chain(src_device, dst_device, counter_addr, threshold, copies, arrival_addr, is_2d):
     """Arm one chain on the host queue from ``src_device`` to ``dst_device``."""
     sdma_ep = bind_sdma_ep()
     if is_2d:
@@ -39,8 +47,8 @@ def arm_chain(src_device, dst_device, ready_addr, round, copies, arrival_addr, i
             src_device,
             dst_device,
             CHANNEL,
-            ready_addr,
-            round,
+            counter_addr,
+            threshold,
             [c.dst for c in copies],
             [c.src for c in copies],
             1,
@@ -52,8 +60,13 @@ def arm_chain(src_device, dst_device, ready_addr, round, copies, arrival_addr, i
     else:
         first, *rest = copies
         sdma_ep.wait_flag_then_put(
-            src_device, dst_device, CHANNEL, ready_addr, round, first.dst, first.src, first.width, 32
+            src_device, dst_device, CHANNEL, counter_addr, threshold, first.dst, first.src, first.width, 32
         )
         for c in rest:
             sdma_ep.put(src_device, dst_device, CHANNEL, c.dst, c.src, c.width)
-    sdma_ep.signal(src_device, dst_device, CHANNEL, arrival_addr, 1, 64)
+    sdma_ep.signal(src_device, dst_device, CHANNEL, arrival_addr, 1, 32)
+
+
+def signal_completion(src_device, dst_device, completion_addr):
+    """Queue ``completion += 1`` behind every chain armed so far from ``src_device`` to ``dst_device``."""
+    bind_sdma_ep().signal(src_device, dst_device, CHANNEL, completion_addr, 1, 32)

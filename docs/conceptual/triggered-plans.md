@@ -6,12 +6,15 @@ kernel marks each chunk of its output ready once it is written, and the copy eng
 chunk to every peer and signals its arrival there: *triggered SDMA*, hence the name.
 
 ```
-kernel writes a chunk ──► mark_ready(chunk) opens the chunk's gate
+kernel writes a chunk ──► mark_ready(chunk): counter += 1
                                │
-          copy engine:  POLL_REGMEM(ready >= round) ─► COPY × regions ─► ATOMIC(peer arrival += 1)
+          copy engine:  POLL_REGMEM(counter >= writers × round) ─► COPY × regions ─► ATOMIC(peer arrival += 1)
                                │
 peer kernel:  wait(chunk) ◄────┘
 ```
+
+After a round's copies to a peer, the copy engine also adds 1 to the sending rank's completion
+counter for that peer, which `wait()` and the device-side `wait_sent()` read.
 
 The API is `iris.experimental.plan`; see the [reference](../reference/host/plan.md). It is
 experimental: it may change between releases without deprecation.
@@ -105,13 +108,15 @@ after `gl.warp_specialize` returns, not inside a partition.
    whole CTA, outside divergent branches.
    `wait()` checks the count for this rank's chunks: it raises if a chunk got extra marks (which
    would otherwise open later rounds' gates early), and a timeout names the chunks still short.
+   A kernel that is not written against `TriggeredView` may mark chunks ready itself; see
+   [Driving the counters from another kernel](#driving-the-counters-from-another-kernel).
 3. **A producer never waits on its own plan's arrivals before it has marked ready everything it
    writes.** Its wait could depend on a copy queued behind one of its own unfinished chunks.
 4. **Region sizes are fixed when the plan is created.**
-5. **`arrived` and `wait` are called uniformly across the CTA:** every wave makes the same number
-   of calls. Each is one atomic whose result reaches the other waves through a CTA barrier, so a
-   polling loop must not exit on a per-wave condition (such as a clock read): waves would read the
-   result before it is written, or deadlock. Count polls instead.
+5. **`arrived`, `wait`, `sent` and `wait_sent` are called uniformly across the CTA:** every wave
+   makes the same number of calls. Each is one atomic whose result reaches the other waves through
+   a CTA barrier, so a polling loop must not exit on a per-wave condition (such as a clock read):
+   waves would read the result before it is written, or deadlock. Count polls instead.
 6. **`next_round()` means "done reading this round's data".** Once it returns, a peer may start the
    next round, and its copies can overwrite the buffer at any time. Work queued before the call is
    covered; nothing issued after it may read the buffer until the next `wait()`.
@@ -140,36 +145,48 @@ and closing the earlier plan finishes both.
 ## Memory ordering
 
 **Producer.** Copy engines read memory behind the GPU's L2, so a chunk's data must be written
-back to memory before its gate opens. Each writer does that with a release on the chunk's writer
-counter, and the writers may run on different XCDs, each with its own L2. A release only orders
-the stores of the thread that performs it, and `mark_ready` performs it on one thread for the whole
-CTA, so the other waves' stores are ordered before it with a CTA barrier that waits for every
-wave's stores, as HIP's `__syncthreads()` does. The last writer's increment follows every other
-writer's, and it opens the gate only after its increment returns, so the gate itself needs no
-release:
+back to memory before its gate opens. Each writer does that with a release on the chunk's counter,
+and the writers may run on different XCDs, each with its own L2. A release only orders the stores
+of the thread that performs it, and `mark_ready` performs it on one thread for the whole CTA, so
+the other waves' stores are ordered before it with a CTA barrier that waits for every wave's
+stores, as HIP's `__syncthreads()` does. The increment that brings the counter to
+`writers × round` comes after every other writer's increment, each of which followed that writer's
+write-back, so the copy engine sees every writer's data once it sees the count:
 
 ```python
 wait_cnt()                 # s_waitcnt vmcnt(0): this wave's stores are done
 tl.debug_barrier()         # every wave has got here, so every store of the CTA is done
-tl.atomic_add(counter, 1, sem="release", scope="sys")   # write back this XCD's L2; the last writer then:
-tl.atomic_xchg(ready, round, sem="relaxed", scope="sys")
+tl.atomic_add(counter, 1, sem="release", scope="sys")   # write back this XCD's L2, then count
 ```
 
 Recent Triton versions already wait for outstanding stores in `tl.debug_barrier()`; `wait_cnt()`
 keeps the barrier a memory barrier on versions where it only synchronizes execution. Without the
 barrier, the copy engine sends stale data for most chunks.
 
-**Consumer.** `arrived` / `wait` read the arrival gate with an acquire at system scope; data read
-after it in the same kernel is fresh.
+**Consumer.** `arrived` / `wait` read the arrival counter, and `sent` / `wait_sent` the completion
+counters, with an acquire at system scope; data read after it in the same kernel is fresh.
+
+### Driving the counters from another kernel
+
+`plan.counters` is a contiguous int32 tensor with one counter per chunk id; adding 1 to a chunk's
+counter is all `mark_ready` does. A kernel that signals per tile, such as a GEMM epilogue, can
+therefore take this rank's counters (`plan.counters[plan.chunk_id(rank, 0):]`, indexed by the chunk's
+position in the schedule) and increment them itself. The same rules apply: one increment per writer
+per round, by the whole CTA after every wave's stores are done, with release semantics (at `gpu` or
+`sys` scope).
 
 ## Gates and rounds
 
-- Each chunk has a 64-byte gate row: `ready`, `arrival` and a writer counter. The copy engine
-  polls the low 32 bits of `ready` with `>=`.
-- Rounds start at 1 and add 1 per `next_round()`. Gates are never reset, so a plan is limited to
-  2³² − 1 rounds.
-- `wait()` checks completion with a kernel: this rank's chunks marked ready and arrived at every
-  peer (each copy chain ends with that signal), and every other chunk arrived here.
+- The gates are one int32 tensor on the symmetric heap: a counter and an arrival counter per
+  chunk, then a completion counter per peer. The copy engine polls a chunk's counter with
+  `>=` against `writers × round`, so no writer has to tell which mark is the last one.
+- Every round, a rank's copies to a peer end with one signal on the sending rank's completion
+  counter for that peer. `wait()` and `sent()` / `wait_sent()` read it: once it reaches the round,
+  every copy to that peer has landed, and the source may be overwritten.
+- Rounds start at 1 and add 1 per `next_round()`. Counters are never reset, so a plan is limited
+  to rounds with `writers × round` up to 2³¹ − 1 (over 7 million rounds at 304 writers).
+- `wait()` reads only this rank's gates: the completion counter of every peer it sends to, and the
+  arrival counter of every other rank's chunk.
 
 ## Requirements and limits
 
