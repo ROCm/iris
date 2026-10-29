@@ -212,10 +212,20 @@ def test_prepare_all_gather_rejects_bad_schedule(ctx):
         pytest.skip("needs another rank's rows")
     M, N = 16, 16
     out = ctx.zeros((world_size * M, N), dtype=torch.int32)
-    # Rank 0 builds its schedule from the whole buffer instead of its own rows
-    schedule = chunks(out, 2, base=out) if rank == 0 else whole(out[rank * M : (rank + 1) * M], base=out)
-    with pytest.raises(ValueError if rank == 0 else RuntimeError, match="slice" if rank == 0 else "rank"):
-        ctx.ccl.prepare_all_gather(out, schedule)
+    mine = out[rank * M : (rank + 1) * M]
+    theirs = (rank + 1) % world_size
+    cases = [
+        # (what is wrong, this rank's schedule, whether this rank's schedule is the bad one)
+        ("whole buffer on rank 0", chunks(out, 2, base=out) if rank == 0 else whole(mine, base=out), rank == 0),
+        # Offsets from mine itself: right on rank 0 only
+        ("forgotten base", whole(mine), rank != 0),
+        ("another rank's rows", whole(out[theirs * M : (theirs + 1) * M], base=out), True),
+        ("partial", whole(mine[:-1], base=out), True),
+        ("empty", [], True),
+    ]
+    for what, schedule, bad in cases:
+        with pytest.raises(ValueError if bad else RuntimeError, match=None if bad else "could not prepare"):
+            ctx.ccl.prepare_all_gather(out, schedule)
     with pytest.raises(ValueError, match="multiple"):
         ctx.ccl.prepare_all_gather(ctx.zeros((world_size * M + 1, N), dtype=torch.int32))
     ctx.barrier()

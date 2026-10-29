@@ -109,6 +109,7 @@ def launch(input_tensor, output_tensor, ctx, rank_in_group, rank_global, world_s
 def prepare(output_tensor, ctx, schedule=None, timeout=30.0):
     """Collective: a triggered plan that gathers ``output_tensor`` in place. See ``CCL.prepare_all_gather``."""
     from iris.experimental.plan import TriggeredPlan, whole
+    from iris.experimental.plan.schedule import _rows
 
     rank, world_size = ctx.get_rank(), ctx.get_num_ranks()
     error = None
@@ -123,15 +124,23 @@ def prepare(output_tensor, ctx, schedule=None, timeout=30.0):
         mine = output_tensor[rank * rows : (rank + 1) * rows]
         if schedule is None:
             schedule = whole(mine, base=output_tensor)
-        slice_bytes = mine.numel() * mine.element_size()
-        lo, hi = rank * slice_bytes, (rank + 1) * slice_bytes
-        for i, chunk in enumerate(schedule):
-            for region in chunk.regions:
-                if region.offset_bytes < lo or region.end > hi:
-                    raise ValueError(
-                        f"chunk {i}: region {region} lies outside rank {rank}'s slice (bytes {lo} to {hi}); "
-                        f"build the schedule from output_tensor[{rank * rows}:{(rank + 1) * rows}]"
-                    )
+        else:
+            # A caller's schedule must cover exactly this rank's rows
+            slice_bytes = mine.numel() * mine.element_size()
+            lo, hi = rank * slice_bytes, (rank + 1) * slice_bytes
+            hint = f"build the schedule from output_tensor[{rank * rows}:{(rank + 1) * rows}], with base=output_tensor"
+            if not any(chunk.regions for chunk in schedule):
+                raise ValueError(f"rank {rank}'s schedule is empty; {hint}")
+            for i, chunk in enumerate(schedule):
+                for region in chunk.regions:
+                    if region.offset_bytes < lo or region.end > hi:
+                        raise ValueError(
+                            f"chunk {i}: region {region} lies outside rank {rank}'s slice (bytes {lo} to {hi}); {hint}"
+                        )
+            # Sorted, disjoint byte ranges (touching ones are kept apart): no gap from lo to hi
+            starts, ends = _rows(schedule)
+            if starts[0] != lo or ends[-1] != hi or (starts[1:] != ends[:-1]).any():
+                raise ValueError(f"the schedule leaves part of rank {rank}'s slice (bytes {lo} to {hi}) out; {hint}")
     except Exception as e:
         error = e
     # Agree before the plan's own collectives, so a rank that raised leaves none waiting
