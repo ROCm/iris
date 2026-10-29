@@ -6,7 +6,7 @@
 import triton
 import triton.language as tl
 
-from iris.experimental.plan.triton import HEADER_WORDS, R_WRITERS, RECORD_WORDS, TriggeredView
+from iris.experimental.plan.triton import HEADER_WORDS, R_ARRIVAL, R_EXPECTED, R_WRITERS, RECORD_WORDS, TriggeredView
 from iris.mem.utils import read_realtime
 
 # Error word codes (see wait_kernel)
@@ -44,7 +44,7 @@ def _record_error(error, code, round, index, value):
 def wait_kernel(view, sent_to, status, error, ticks, OWN_ONLY: tl.constexpr, STREAM: tl.constexpr):
     """
     Program ``pid < num_chunks``: chunk ``pid`` has arrived here this round (always true of this
-    rank's own chunks, and of every chunk if ``OWN_ONLY``). Program ``num_chunks + p``: the queue to
+    rank's own chunks, of chunks not sent here, and of every chunk if ``OWN_ONLY``). Program ``num_chunks + p``: the queue to
     peer ``p`` has finished this round (always true if bit ``p`` of ``sent_to`` is clear). Reads only
     this rank's gates, for up to ``ticks`` of the 100 MHz clock. Launch with one warp, since the
     loop exits on a clock read.
@@ -65,7 +65,9 @@ def wait_kernel(view, sent_to, status, error, ticks, OWN_ONLY: tl.constexpr, STR
                 if marks != writers:
                     _record_error(error, WRONG_MARKS, cv.round, pid, marks)
         elif not OWN_ONLY:
-            done = _reached(cv.gates + cv.num_chunks + pid, cv.round, t0, ticks)
+            record = view + HEADER_WORDS + pid * RECORD_WORDS
+            target = tl.load(record + R_EXPECTED) * cv.round
+            done = _reached(cv.gates + tl.load(record + R_ARRIVAL), target, t0, ticks)
     else:
         peer = pid - cv.num_chunks
         if ((sent_to >> peer) & 1) != 0:

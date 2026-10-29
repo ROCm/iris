@@ -23,13 +23,13 @@ Copy-engine transfers prepared once and released by kernels, every round. See
 ## TriggeredView (device)
 ```{eval-rst}
 .. autoclass:: iris.experimental.plan.TriggeredView
-   :members: initialize, mark_ready, arrived, wait, sent, wait_sent, owns
+   :members: initialize, mark_ready, arrived, wait, group_arrived, wait_group, sent, wait_sent, owns
    :exclude-members: __init__, view, gates, round, rank, num_chunks
 ```
 
 ## TriggeredView (Gluon device)
 ```{eval-rst}
 .. autoclass:: iris.experimental.plan.gluon.TriggeredView
-   :members: initialize, mark_ready, arrived, wait, sent, wait_sent, owns
+   :members: initialize, mark_ready, arrived, wait, group_arrived, wait_group, sent, wait_sent, owns
    :exclude-members: __init__, view, gates, round, rank, num_chunks
 ```

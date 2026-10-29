@@ -19,8 +19,9 @@ from iris.experimental.plan.triton import (
     H_SENDS_TO,
     H_WORLD_SIZE,
     HEADER_WORDS,
+    R_ARRIVAL,
+    R_EXPECTED,
     R_OWNER,
-    R_WRITERS,
     RECORD_WORDS,
 )
 from iris.mem.utils import wait_cnt
@@ -96,20 +97,33 @@ class TriggeredView:
     @gluon.jit
     def arrived(self, chunk):
         """
-        True once chunk ``chunk`` is visible here this round (marked ready, for this rank's own).
+        True once chunk ``chunk`` is visible here this round: marked ready, for this rank's own; for a
+        chunk in a group, once the whole group is. Always true of chunks not sent to this rank.
 
         Call uniformly across the CTA: the result reaches the other waves through a CTA barrier, so
-        every wave must make the same number of calls (true of ``wait``, ``sent`` and ``wait_sent`` too).
+        every wave must make the same number of calls (true of the other waits too).
         """
-        own = self.owns(chunk)
-        word = gl.where(own, chunk, self.num_chunks + chunk)
-        target = gl.where(own, self._record(chunk, R_WRITERS) * self.round, self.round)
+        word = self._record(chunk, R_ARRIVAL)
+        target = self._record(chunk, R_EXPECTED) * self.round
         return gl.atomic_add(self.gates + word, 0, sem="acquire", scope="sys") >= target
 
     @gluon.jit
     def wait(self, chunk):
         """Spin until ``arrived(chunk)``."""
         while self.arrived(chunk) == 0:
+            pass
+
+    @gluon.jit
+    def group_arrived(self, group):
+        """True once every chunk of ``group`` sent to this rank has arrived this round."""
+        expected = gl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + group)
+        word = 2 * self.num_chunks + gl.load(self.view + H_WORLD_SIZE) + group
+        return gl.atomic_add(self.gates + word, 0, sem="acquire", scope="sys") >= expected * self.round
+
+    @gluon.jit
+    def wait_group(self, group):
+        """Spin until ``group_arrived(group)``."""
+        while self.group_arrived(group) == 0:
             pass
 
     @gluon.jit

@@ -46,51 +46,80 @@ class State(enum.Enum):
     CLOSED = "closed"
 
 
+def group_counts(schedules, world_size):
+    """``counts[rank][group]``: how many chunks of each group are sent to each rank, per round."""
+    num_groups = 1 + max((c.group for s in schedules for c in s if c.group is not None), default=-1)
+    counts = np.zeros((world_size, num_groups), dtype=np.int64)
+    for sender, schedule in enumerate(schedules):
+        for chunk in schedule:
+            if chunk.group is not None:
+                for peer in chunk.recipients(sender, world_size):
+                    counts[peer, chunk.group] += 1
+    return counts
+
+
 def view_words(rank, world_size, gates_ptr, schedules):
     """The device view (see ``iris.experimental.plan.triton``) as a list of int64 words."""
     num_chunks = sum(len(s) for s in schedules)
-    words = [0] * (dv.HEADER_WORDS.value + num_chunks * dv.RECORD_WORDS.value)
+    expected = group_counts(schedules, world_size)[rank].tolist()
+    words = [0] * (dv.HEADER_WORDS.value + num_chunks * dv.RECORD_WORDS.value + len(expected))
     words[dv.H_VERSION.value] = dv.ABI_VERSION
     words[dv.H_NUM_CHUNKS.value] = num_chunks
     words[dv.H_RANK.value] = rank
     words[dv.H_GATES.value] = gates_ptr
     words[dv.H_WORLD_SIZE.value] = world_size
-    if schedules[rank]:
-        words[dv.H_SENDS_TO.value] = ((1 << world_size) - 1) & ~(1 << rank)
-    rec = dv.HEADER_WORDS.value
+    words[dv.H_SENDS_TO.value] = sum({1 << p for chunk in schedules[rank] for p in chunk.recipients(rank, world_size)})
+    words[dv.H_NUM_GROUPS.value] = len(expected)
+    rec, chunk_id = dv.HEADER_WORDS.value, 0
     for owner, schedule in enumerate(schedules):
         for chunk in schedule:
+            if owner == rank:
+                arrival, per_round = chunk_id, chunk.writers  # its counter
+            elif rank not in chunk.recipients(owner, world_size):
+                arrival, per_round = 0, 0
+            elif chunk.group is None:
+                arrival, per_round = num_chunks + chunk_id, 1
+            else:
+                arrival, per_round = 2 * num_chunks + world_size + chunk.group, expected[chunk.group]
             words[rec + dv.R_WRITERS.value] = chunk.writers
             words[rec + dv.R_OWNER.value] = owner
+            words[rec + dv.R_ARRIVAL.value] = arrival
+            words[rec + dv.R_EXPECTED.value] = per_round
             rec += dv.RECORD_WORDS.value
+            chunk_id += 1
+    words[rec:] = expected
     return words
 
 
 def _mark_closed(plans):
     for plan in plans:
         plan.state = State.CLOSED
-        plan.gates = plan.counters = plan.arrivals = plan.completion = plan.view = plan.buffer = None
+        plan.gates = plan.counters = plan.arrivals = plan.completion = plan.group_arrivals = None
+        plan.view = plan.buffer = plan.destination = None
 
 
 class TriggeredPlan:
     """
-    Sends regions of ``buffer`` from the rank that writes them to every other rank, using copy
-    engines that a kernel releases chunk by chunk.
+    Sends regions of ``buffer`` from the rank that writes them to other ranks, using copy engines
+    that a kernel releases chunk by chunk.
 
     Each rank passes its own ``schedule``: the chunks it writes, in the order its producer completes
-    them. Every chunk is copied to the same offsets in each peer's ``buffer``. Chunk ids are global:
-    rank ``r``'s chunks come after those of ranks ``0..r-1`` (see ``chunk_id``), and ``schedules[r]``
-    holds rank ``r``'s schedule. A rank that writes nothing passes ``[]``. No byte may be in two
-    ranks' schedules.
+    them. A chunk goes to its ``peers`` (by default every other rank) and lands at each region's
+    destination offset in their ``destination`` (by default the same offset in their ``buffer``).
+    Chunk ids are global: rank ``r``'s chunks come after those of ranks ``0..r-1`` (see
+    ``chunk_id``), and ``schedules[r]`` holds rank ``r``'s schedule. A rank that writes nothing
+    passes ``[]``. No two ranks may write the same bytes of a rank's destination.
 
-    Collective: every rank creates the plan for the same symmetric ``buffer``. Use it as a context
-    manager, or call ``close()`` on every rank when done.
+    Collective: every rank creates the plan for the same symmetric ``buffer`` and ``destination``.
+    Use it as a context manager, or call ``close()`` on every rank when done.
 
     Args:
         ctx: Iris instance, created with ``engines=("sdma",)``.
         buffer: Contiguous tensor on the symmetric heap.
         schedule: This rank's list of ``Chunk``, in the order it completes them.
         timeout: Seconds ``wait()`` and ``close()`` wait before raising.
+        destination: Contiguous tensor on the symmetric heap that peers' chunks land in; ``buffer``
+            if ``None``. It must not overlap ``buffer`` unless it is ``buffer``.
 
     Attributes:
         counters: Contiguous int32 tensor, one counter per chunk id. Adding 1 to a chunk's counter is
@@ -98,7 +127,7 @@ class TriggeredPlan:
             tile) may increment this rank's counters directly, under the same rules.
     """
 
-    def __init__(self, ctx, buffer, schedule, timeout=30.0):
+    def __init__(self, ctx, buffer, schedule, timeout=30.0, destination=None):
         self.ctx = ctx
         self.rank = ctx.get_rank()
         self.world_size = ctx.get_num_ranks()
@@ -109,40 +138,52 @@ class TriggeredPlan:
         if self.world_size > 63:
             raise ValueError(f"triggered plans support at most 63 ranks, not {self.world_size}")
 
-        if not ctx.heap.is_symmetric(buffer) or not buffer.is_contiguous():
-            raise ValueError("buffer must be a contiguous tensor on the symmetric heap")
+        destination = buffer if destination is None else destination
+        for name, t in (("buffer", buffer), ("destination", destination)):
+            if not ctx.heap.is_symmetric(t) or not t.is_contiguous():
+                raise ValueError(f"{name} must be a contiguous tensor on the symmetric heap")
         buffer_bytes = buffer.numel() * buffer.element_size()
+        destination_bytes = destination.numel() * destination.element_size()
+        same = destination.data_ptr() == buffer.data_ptr() and destination_bytes == buffer_bytes
+        if not same and max(buffer.data_ptr(), destination.data_ptr()) < min(
+            buffer.data_ptr() + buffer_bytes, destination.data_ptr() + destination_bytes
+        ):
+            raise ValueError("destination overlaps buffer; pass the same tensor, or memory apart from it")
         error = None
         try:
-            schedule = list(validate(schedule, buffer_bytes))
+            schedule = list(validate(schedule, buffer_bytes, destination_bytes, self.rank, self.world_size))
         except Exception as e:
             error = e
         self._agree(error, "validate its schedule")
         gathered = [None] * self.world_size
-        dist.all_gather_object(gathered, (buffer_bytes, schedule))
-        if any(nbytes != buffer_bytes for nbytes, _ in gathered):
-            raise ValueError("ranks passed buffers of different sizes")
-        self.schedules = [s for _, s in gathered]
-        check_disjoint(self.schedules)
+        dist.all_gather_object(gathered, (buffer_bytes, destination_bytes, schedule))
+        if any(g[:2] != (buffer_bytes, destination_bytes) for g in gathered):
+            raise ValueError("ranks passed buffers or destinations of different sizes")
+        self.schedules = [s for *_, s in gathered]
+        check_disjoint(self.schedules, same)
 
         self._first = np.cumsum([0] + [len(s) for s in self.schedules]).tolist()
         self.num_chunks = self._first[-1]
         if self.num_chunks == 0:
             raise ValueError("no rank's schedule has any chunks")
 
-        self.buffer = buffer
-        # Each chunk's counter (marks) and arrival, then each peer queue's completion, all int32
-        self.gates = ctx.zeros(2 * self.num_chunks + self.world_size, dtype=torch.int32)
-        self.counters = self.gates[: self.num_chunks]
-        self.arrivals = self.gates[self.num_chunks : 2 * self.num_chunks]
-        self.completion = self.gates[2 * self.num_chunks :]
+        self.buffer, self.destination = buffer, destination
+        counts = group_counts(self.schedules, self.world_size)
+        # Each chunk's counter (marks) and arrival, each peer queue's completion, each group's arrival
+        n, w = self.num_chunks, self.world_size
+        self.gates = ctx.zeros(2 * n + w + counts.shape[1], dtype=torch.int32)
+        self.counters = self.gates[:n]
+        self.arrivals = self.gates[n : 2 * n]
+        self.completion = self.gates[2 * n : 2 * n + w]
+        self.group_arrivals = self.gates[2 * n + w :]
         words = view_words(self.rank, self.world_size, self.gates.data_ptr(), self.schedules)
         self.view = torch.tensor(words, dtype=torch.int64, device=buffer.device)
         self._own = torch.arange(
             self._first[self.rank], self._first[self.rank + 1], dtype=torch.int64, device=buffer.device
         )
         self._writers = [c.writers for c in self.schedules[self.rank]]
-        self._max_writers = max(c.writers for s in self.schedules for c in s)
+        # The most any gate grows per round, on any rank
+        self._max_per_round = max(max(c.writers for s in self.schedules for c in s), int(counts.max(initial=0)))
         self._status = torch.zeros(self.num_chunks + self.world_size, dtype=torch.int32, device=buffer.device)
         # Peers this rank's chains go to; each round ends with a completion signal to each of them
         self._sent_to = words[dv.H_SENDS_TO.value]
@@ -198,14 +239,13 @@ class TriggeredPlan:
 
     def _arm_first(self):
         """Collective: hold queue space for two rounds and prepare round 1 on every rank, or raise on every rank."""
-        peers = [p for p in range(self.world_size) if p != self.rank]
-        nbytes = armer.round_bytes(self.schedules[self.rank])
+        nbytes = armer.round_bytes(self.schedules[self.rank], self.rank, self.world_size)
         error, held = None, False
         try:
             # With prepare_next(), a round may be prepared while the one before it still is
-            self._ledger.hold(self, self.rank, {p: 2 * nbytes for p in peers})
+            self._ledger.hold(self, self.rank, {p: 2 * n for p, n in nbytes.items()})
             held = True
-            self._ledger.reserve(self, 1, self.rank, {p: nbytes for p in peers})
+            self._ledger.reserve(self, 1, self.rank, nbytes)
         except Exception as e:
             error = e
         try:
@@ -219,7 +259,7 @@ class TriggeredPlan:
         self.state = State.PREPARED
 
         try:
-            self._submit(peers, 1)
+            self._submit(1)
         except Exception as e:
             error = e
         try:
@@ -231,7 +271,7 @@ class TriggeredPlan:
 
     def _check_round(self, round):
         # Counters are never reset and the copy engine compares 32 bits; the same on every rank
-        if self._max_writers * round > INT32_MAX:
+        if self._max_per_round * round > INT32_MAX:
             raise RuntimeError(
                 f"writers x round exceeds {INT32_MAX} at round {round}; close the plan and create a new one"
             )
@@ -241,51 +281,52 @@ class TriggeredPlan:
         if self._next_prepared or self._prepare_error is not None:
             return
         try:
-            peers = [p for p in range(self.world_size) if p != self.rank]
-            nbytes = armer.round_bytes(self.schedules[self.rank])
-            self._ledger.reserve(self, self.round + 1, self.rank, {p: nbytes for p in peers})
+            nbytes = armer.round_bytes(self.schedules[self.rank], self.rank, self.world_size)
+            self._ledger.reserve(self, self.round + 1, self.rank, nbytes)
             # From here close() must flush this round too (the completion signals follow even a failed submit)
             self._next_prepared = True
-            self._submit(peers, self.round + 1)
+            self._submit(self.round + 1)
         except Exception as e:
             self._prepare_error = e
 
-    def _build_chains(self, peers):
+    def _build_chains(self):
         """Every (chunk, peer) chain of this rank, in arming order; the same every round."""
         heap = self.ctx.heap
         self._heap_bases = heap.heap_bases_cpu.copy()
-        base = self.buffer.data_ptr()
+        src, dst = self.buffer.data_ptr(), self.destination.data_ptr()
         word = self.gates.element_size()
-        counters, arrivals = self.counters.data_ptr(), self.arrivals.data_ptr()
+        n, w = self.num_chunks, self.world_size
         chains = []
         for i, chunk in enumerate(self.schedules[self.rank]):
             chunk_id = self.chunk_id(self.rank, i)
-            for peer in peers:
+            arrival = n + chunk_id if chunk.group is None else 2 * n + w + chunk.group
+            for peer in chunk.recipients(self.rank, w):
                 copies = [
                     armer.Copy(
-                        base + r.offset_bytes,
-                        heap.translate(base + r.offset_bytes, self.rank, peer),
+                        src + r.offset_bytes,
+                        heap.translate(dst + r.dst_offset, self.rank, peer),
                         r.row_bytes,
                         r.rows,
                         r.row_stride,
+                        r.dst_row_stride,
                     )
                     for r in chunk.regions
                 ]
-                arrival = heap.translate(arrivals + word * chunk_id, self.rank, peer)
-                chain = armer.Chain(self.rank, peer, counters + word * chunk_id, copies, arrival, chunk.is_2d)
-                chains.append((chain, chunk.writers))
+                counter = self.counters.data_ptr() + word * chunk_id
+                arrival_addr = heap.translate(self.gates.data_ptr() + word * arrival, self.rank, peer)
+                chains.append((armer.Chain(self.rank, peer, counter, copies, arrival_addr, chunk.is_2d), chunk.writers))
         self._chains = chains
 
-    def _submit(self, peers, round):
+    def _submit(self, round):
         completion, word = self.completion.data_ptr(), self.gates.element_size()
         try:
             if self._chains is None:
-                self._build_chains(peers)
+                self._build_chains()
             for chain, writers in self._chains:
                 armer.arm_chain(chain, writers * round)
         finally:
             # Even if a chain failed to arm, so the completion counters still count rounds for a flush
-            for peer in peers:
+            for peer in range(self.world_size):
                 if (self._sent_to >> peer) & 1:
                     armer.signal_completion(self.rank, peer, completion + word * peer)
 
