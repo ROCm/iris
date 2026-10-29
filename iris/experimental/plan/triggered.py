@@ -104,6 +104,9 @@ class TriggeredPlan:
         self.timeout = timeout
         self.state = None
         ctx._require_copy_engine()
+        # The device view holds the peers a rank sends to as bits of one int64 word
+        if self.world_size > 63:
+            raise ValueError(f"triggered plans support at most 63 ranks, not {self.world_size}")
 
         if not ctx.heap.is_symmetric(buffer) or not buffer.is_contiguous():
             raise ValueError("buffer must be a contiguous tensor on the symmetric heap")
