@@ -7,6 +7,11 @@ import triton
 import triton.language as tl
 
 from iris.experimental.plan.triton import HEADER_WORDS, R_WRITERS, RECORD_WORDS, TriggeredView
+from iris.mem.utils import read_realtime
+
+# Error word codes (see wait_kernel)
+TIMED_OUT = tl.constexpr(1)
+WRONG_MARKS = tl.constexpr(2)
 
 
 @triton.jit
@@ -19,33 +24,54 @@ def release_kernel(view, chunks):
 
 
 @triton.jit
-def _reached(ptr, round, budget: tl.constexpr):
-    i = 0
-    while (tl.atomic_add(ptr, 0, sem="acquire", scope="sys") < round) & (i < budget):
-        i += 1
-    return tl.atomic_add(ptr, 0, sem="acquire", scope="sys") >= round
+def _reached(ptr, target, t0, ticks):
+    while (tl.atomic_add(ptr, 0, sem="acquire", scope="sys") < target) & (read_realtime() - t0 < ticks):
+        pass
+    return tl.atomic_add(ptr, 0, sem="acquire", scope="sys") >= target
 
 
 @triton.jit
-def wait_kernel(view, status, BUDGET: tl.constexpr, OWN_ONLY: tl.constexpr):
+def _record_error(error, code, round, index, value):
+    """Keep the error with the highest code (the most specific) as ``[code, round, index, value]``."""
+    zero = tl.zeros((), tl.int64)
+    if tl.atomic_max(error, zero + code) < code:
+        tl.store(error + 1, round)
+        tl.store(error + 2, index)
+        tl.store(error + 3, value)
+
+
+@triton.jit
+def wait_kernel(view, status, error, ticks, OWN_ONLY: tl.constexpr, STREAM: tl.constexpr):
     """
     Program ``pid < num_chunks``: chunk ``pid`` has arrived here this round, or for this rank's own
-    chunks, been marked ready by all of its writers (other ranks' chunks are skipped if ``OWN_ONLY``). Program ``num_chunks + p``: the queue to
-    peer ``p`` has finished this round (always true if this rank's chains do not go to ``p``). Writes 1 to
-    ``status[pid]`` when done, 0 if ``BUDGET`` ran out. Reads only this rank's gates.
+    chunks, been marked ready by all of its writers (other ranks' chunks are skipped if
+    ``OWN_ONLY``). Program ``num_chunks + p``: the queue to peer ``p`` has finished this round
+    (always true if this rank's chains do not go to ``p``). Reads only this rank's gates, for up to
+    ``ticks`` of the 100 MHz clock. Launch with one warp, since the loop exits on a clock read.
+
+    Writes 1 to ``status[pid]`` when done, 0 if the time ran out. With ``STREAM`` (queued behind the
+    producer, nobody waiting on the host), records a timeout or a wrong mark count in ``error``.
     """
     pid = tl.program_id(0)
     cv = TriggeredView.initialize(view)
+    t0 = read_realtime()
     done = tl.full((), True, tl.int1)
     if pid < cv.num_chunks:
         if cv.owns(pid):
             # So wait() checks the mark count after the producer, even with no peers or on another stream
             writers = tl.load(view + HEADER_WORDS + pid * RECORD_WORDS + R_WRITERS)
-            done = _reached(cv.gates + pid, writers * cv.round, BUDGET)
+            done = _reached(cv.gates + pid, writers * cv.round, t0, ticks)
+            if STREAM:
+                marks = tl.atomic_add(cv.gates + pid, 0, sem="acquire", scope="sys") - writers * (cv.round - 1)
+                if marks != writers:
+                    _record_error(error, WRONG_MARKS, cv.round, pid, marks)
         elif not OWN_ONLY:
-            done = _reached(cv.gates + cv.num_chunks + pid, cv.round, BUDGET)
+            done = _reached(cv.gates + cv.num_chunks + pid, cv.round, t0, ticks)
     else:
         peer = pid - cv.num_chunks
         if cv._sends_to(peer):
-            done = _reached(cv.gates + 2 * cv.num_chunks + peer, cv.round, BUDGET)
+            done = _reached(cv.gates + 2 * cv.num_chunks + peer, cv.round, t0, ticks)
     tl.store(status + pid, done.to(tl.int32))
+    if STREAM:
+        if not done:
+            _record_error(error, TIMED_OUT, cv.round, pid, 0)
