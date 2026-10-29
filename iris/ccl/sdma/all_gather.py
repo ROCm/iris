@@ -24,32 +24,6 @@ MAX_COPY_BYTES = 1 << 30
 
 
 @triton.jit
-def _copy(copy_engine_ctx, to_rank, src, dst, nbytes):
-    """One COPY_LINEAR of ``nbytes`` (at most 1 GiB) on the device-initiated queue to ``to_rank``."""
-    handle = copy_engine_ctx + sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank
-    queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
-    read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
-    write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
-    doorbell_ptr = tl.load(handle + 3).to(tl.pointer_type(tl.uint64))
-    cached_write_ptr = tl.load(handle + 4).to(tl.pointer_type(tl.uint64))
-    committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
-
-    command_in_bytes = sdma_utils.sdma_ep.COPY_LINEAR_COMMAND_BYTES
-    base, offset = sdma_utils.acquire_fadd(
-        queue_ptr_u32,
-        read_ptr,
-        write_ptr,
-        doorbell_ptr,
-        cached_write_ptr,
-        committed_write_ptr,
-        command_in_bytes,
-    )
-    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
-    sdma_utils.place_copy_packet(queue_ptr_u32, base + offset, nbytes.to(tl.uint32), src, dst)
-    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, base + offset + command_in_bytes)
-
-
-@triton.jit
 def sdma_all_gather(
     input_ptr,
     slice_ptr,
@@ -76,7 +50,7 @@ def sdma_all_gather(
     # nbytes arrives as i32 when it fits, and an i32 offset would wrap past 2 GiB
     nbytes = tl.cast(nbytes, tl.int64)
     for start in range(0, nbytes, MAX_COPY):
-        _copy(copy_engine_ctx, peer, src + start, dst + start, tl.minimum(nbytes - start, MAX_COPY))
+        sdma_utils.copy_linear(copy_engine_ctx, peer, src + start, dst + start, tl.minimum(nbytes - start, MAX_COPY))
     # Runs after the copies on the same queue
     iris.atomic_add(
         counters + iris_rank, 1, iris_rank, peer, heap_bases, copy_engine_ctx=copy_engine_ctx, use_copy_engine=True
