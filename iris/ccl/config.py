@@ -31,12 +31,6 @@ class Config:
         num_xcds: Number of XCCs. If None, auto-detected from system (default: None)
         use_gluon: If True, use Gluon-based implementation (default: False)
                    Gluon provides better control over warp-level traffic shaping
-        engine: What moves the data (default: "cu")
-                Options: "cu", "sdma"
-                - "cu": Compute-unit kernels load and store the data
-                - "sdma": Copy engines move the data; needs a context created with
-                  engines=("sdma",). all_gather only; use_gluon and all_gather_variant must be
-                  left unset, and the tiling fields are unused
         all_gather_variant: Variant for all-gather operation (default: None, which means
                            "persistent" for the CU kernels)
                            Options: "persistent", "partitioned", "tdm"
@@ -63,6 +57,12 @@ class Config:
                    and num_warps determines the minimum tile size
                    (block_size_m * block_size_n for flat-2D, or block_size_n for 1D).
         waves_per_eu: Waves per execution unit hint for occupancy (default: 0, auto)
+        engine: What moves the data (default: "cu")
+                Options: "cu", "sdma"
+                - "cu": Compute-unit kernels load and store the data
+                - "sdma": Copy engines move the data; needs a context created with
+                  engines=("sdma",). all_gather only; use_gluon and all_gather_variant must be
+                  left unset, and the tiling fields are unused
 
     Example:
         >>> import iris
@@ -98,7 +98,6 @@ class Config:
     num_xcds: int | None = None
     chunk_size: int | None = None
     use_gluon: bool = False
-    engine: str = "cu"
     all_gather_variant: str | None = None
     all_reduce_variant: str = "two_shot"
     all_reduce_distribution: int = 1
@@ -108,6 +107,7 @@ class Config:
     num_stages: int = 1
     num_warps: int = 4
     waves_per_eu: int = 0
+    engine: str = "cu"
 
     def __post_init__(self):
         """Validate and auto-detect num_xcds if not set."""
