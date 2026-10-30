@@ -32,8 +32,8 @@ from iris.experimental.plan import triton as dv
 from iris.experimental.plan import armer, kernels
 from iris.experimental.plan.schedule import check_disjoint, validate
 
-UINT32_MAX = (1 << 32) - 1
-_PROGRESS_BUDGET = 100_000
+INT32_MAX = (1 << 31) - 1
+_WAIT_BUDGET = 100_000
 
 
 class State(enum.Enum):
@@ -54,6 +54,8 @@ def view_words(rank, world_size, gates_ptr, schedules):
     words[dv.H_RANK.value] = rank
     words[dv.H_GATES.value] = gates_ptr
     words[dv.H_WORLD_SIZE.value] = world_size
+    if schedules[rank]:
+        words[dv.H_SENDS_TO.value] = ((1 << world_size) - 1) & ~(1 << rank)
     rec = dv.HEADER_WORDS.value
     for owner, schedule in enumerate(schedules):
         for chunk in schedule:
@@ -66,7 +68,7 @@ def view_words(rank, world_size, gates_ptr, schedules):
 def _mark_closed(plans):
     for plan in plans:
         plan.state = State.CLOSED
-        plan.gates = plan.view = plan.buffer = None
+        plan.gates = plan.counters = plan.arrivals = plan.completion = plan.view = plan.buffer = None
 
 
 class TriggeredPlan:
@@ -88,6 +90,11 @@ class TriggeredPlan:
         buffer: Contiguous tensor on the symmetric heap.
         schedule: This rank's list of ``Chunk``, in the order it completes them.
         timeout: Seconds ``wait()`` and ``close()`` wait before raising.
+
+    Attributes:
+        counters: Contiguous int32 tensor, one counter per chunk id. Adding 1 to a chunk's counter is
+            what ``mark_ready`` does, so another kernel (such as a GEMM epilogue that signals per
+            tile) may increment this rank's counters directly, under the same rules.
     """
 
     def __init__(self, ctx, buffer, schedule, timeout=30.0):
@@ -97,6 +104,9 @@ class TriggeredPlan:
         self.timeout = timeout
         self.state = None
         ctx._require_copy_engine()
+        # The device view holds the peers a rank sends to as bits of one int64 word
+        if self.world_size > 63:
+            raise ValueError(f"triggered plans support at most 63 ranks, not {self.world_size}")
 
         if not ctx.heap.is_symmetric(buffer) or not buffer.is_contiguous():
             raise ValueError("buffer must be a contiguous tensor on the symmetric heap")
@@ -120,15 +130,20 @@ class TriggeredPlan:
             raise ValueError("no rank's schedule has any chunks")
 
         self.buffer = buffer
-        self.gates = ctx.zeros(self.num_chunks, dv.GATE_WORDS.value, dtype=torch.int64)
+        # Each chunk's counter (marks) and arrival, then each peer queue's completion, all int32
+        self.gates = ctx.zeros(2 * self.num_chunks + self.world_size, dtype=torch.int32)
+        self.counters = self.gates[: self.num_chunks]
+        self.arrivals = self.gates[self.num_chunks : 2 * self.num_chunks]
+        self.completion = self.gates[2 * self.num_chunks :]
         words = view_words(self.rank, self.world_size, self.gates.data_ptr(), self.schedules)
         self.view = torch.tensor(words, dtype=torch.int64, device=buffer.device)
         self._own = torch.arange(
             self._first[self.rank], self._first[self.rank + 1], dtype=torch.int64, device=buffer.device
         )
         self._writers = [c.writers for c in self.schedules[self.rank]]
-        self._status = torch.zeros(self.num_chunks, dtype=torch.int32, device=buffer.device)
-        self._armed = torch.zeros(self.num_chunks * self.world_size, dtype=torch.int32, device=buffer.device)
+        self._max_writers = max(c.writers for s in self.schedules for c in s)
+        self._status = torch.zeros(self.num_chunks + self.world_size, dtype=torch.int32, device=buffer.device)
+        self._sent_to = 0
         self._ledger = queue_ledger.ledger()
         self.round = 0
         try:
@@ -176,11 +191,14 @@ class TriggeredPlan:
     def _arm(self, round):
         """Collective: every rank arms ``round``, or every rank raises (``FAILED`` if chains are left armed)."""
         peers = [p for p in range(self.world_size) if p != self.rank]
-        nbytes = sum(armer.chain_bytes(c) for c in self.schedules[self.rank])
+        nbytes = armer.round_bytes(self.schedules[self.rank])
         error, reserved = None, False
         try:
-            if round > UINT32_MAX:
-                raise RuntimeError("round exceeds 32 bits; close the plan and create a new one")
+            # Counters are never reset and the copy engine compares 32 bits; same on every rank
+            if self._max_writers * round > INT32_MAX:
+                raise RuntimeError(
+                    f"writers x round exceeds {INT32_MAX} at round {round}; close the plan and create a new one"
+                )
             self._ledger.reserve(self, round, self.rank, {p: nbytes for p in peers})
             reserved = True
         except Exception as e:
@@ -210,13 +228,14 @@ class TriggeredPlan:
         heap = self.ctx.heap
         self._heap_bases = heap.heap_bases_cpu.copy()
         base = self.buffer.data_ptr()
-        gate_row = self.gates.element_size() * dv.GATE_WORDS.value
-        # Which chains exist, so a failed arm flushes only those
-        armed = np.zeros(self.num_chunks * self.world_size, dtype=np.int32)
+        word = self.gates.element_size()
+        counters, arrivals, completion = (t.data_ptr() for t in (self.counters, self.arrivals, self.completion))
+        # Peers with chains this round get the completion signal, even if a later chain fails to arm,
+        # so a flush can tell when the queue has drained
+        sent_to = 0
         try:
             for i, chunk in enumerate(self.schedules[self.rank]):
                 chunk_id = self.chunk_id(self.rank, i)
-                gate = self.gates.data_ptr() + chunk_id * gate_row
                 for peer in peers:
                     copies = [
                         armer.Copy(
@@ -228,16 +247,27 @@ class TriggeredPlan:
                         )
                         for r in chunk.regions
                     ]
-                    arrival = heap.translate(gate + 8 * dv.G_ARRIVAL.value, self.rank, peer)
-                    armer.arm_chain(self.rank, peer, gate, self.round, copies, arrival, chunk.is_2d)
-                    armed[chunk_id * self.world_size + peer] = 1
+                    arrival = heap.translate(arrivals + word * chunk_id, self.rank, peer)
+                    threshold = chunk.writers * self.round
+                    armer.arm_chain(
+                        self.rank, peer, counters + word * chunk_id, threshold, copies, arrival, chunk.is_2d
+                    )
+                    sent_to |= 1 << peer
         finally:
-            self._armed.copy_(torch.from_numpy(armed))
+            self._sent_to = 0
+            for peer in peers:
+                if (sent_to >> peer) & 1:
+                    armer.signal_completion(self.rank, peer, completion + word * peer)
+                    self._sent_to |= 1 << peer
 
     def _require(self, *states):
         if self.state not in states:
             names = " or ".join(s.value for s in states)
             raise RuntimeError(f"plan is {self.state.value if self.state else 'uninitialized'}, needs {names}")
+
+    def _set_round(self, round):
+        # fill_ is queued on the stream; assigning an element copies from the host and waits for the stream
+        self.view.narrow(0, dv.H_ROUND.value, 1).fill_(round)
 
     def start(self):
         """Start the prepared round and return the handle tensor its kernels take."""
@@ -245,40 +275,36 @@ class TriggeredPlan:
         if not np.array_equal(self.ctx.heap.heap_bases_cpu, self._heap_bases):
             raise RuntimeError("symmetric heap was re-mapped since the plan was prepared")
         self._ledger.check_order(self, (State.RUNNING,), "start")
-        self.view[dv.H_ROUND.value] = self.round
+        self._set_round(self.round)
         self.state = State.RUNNING
         return self.view
 
     def _wait(self, own_only, timeout):
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         while True:
-            kernels.progress_kernel[(self.num_chunks,)](
-                self.view,
-                self.ctx.get_heap_bases(),
-                self._armed,
-                self._status,
-                BUDGET=_PROGRESS_BUDGET,
-                WORLD_SIZE=self.world_size,
-                OWN_ONLY=own_only,
+            kernels.wait_kernel[(self.num_chunks + self.world_size,)](
+                self.view, self._sent_to, self._status, BUDGET=_WAIT_BUDGET, OWN_ONLY=own_only
             )
             status = self._status.cpu()
-            mine = slice(self._first[self.rank], self._first[self.rank + 1])
-            pending = (status[mine] if own_only else status) == 0
+            pending = status == 0
             if not pending.any():
                 return
             if time.monotonic() > deadline:
-                missing = (pending.nonzero().flatten() + (mine.start if own_only else 0)).tolist()
+                missing = pending[: self.num_chunks].nonzero().flatten().tolist()
+                queues = pending[self.num_chunks :].nonzero().flatten().tolist()
                 short = [
                     f"{self._first[self.rank] + i}: {m} of {w}"
                     for i, (m, w) in enumerate(zip(self._marks(), self._writers))
                     if m < w
                 ]
                 detail = f"; own chunks short of writers' marks: {', '.join(short[:16])}" if short else ""
-                raise TimeoutError(f"round {self.round}: chunks {missing[:16]} not complete{detail}")
+                if queues:
+                    detail = f"; copies to ranks {queues} not finished{detail}"
+                raise TimeoutError(f"round {self.round}: chunks {missing[:16]} not arrived{detail}")
 
     def _marks(self):
         """How many times each own chunk has been marked ready this round."""
-        counters = self.gates[self._first[self.rank] : self._first[self.rank + 1], dv.G_COUNTER.value].tolist()
+        counters = self.counters[self._first[self.rank] : self._first[self.rank + 1]].tolist()
         return [c - w * (self.round - 1) for c, w in zip(counters, self._writers)]
 
     def wait(self, timeout=None):
@@ -324,7 +350,7 @@ class TriggeredPlan:
 
     def _release_own(self):
         """Open this rank's gates, so its prepared chains send its chunks as they stand."""
-        self.view[dv.H_ROUND.value] = self.round
+        self._set_round(self.round)
         if len(self._own):
             kernels.release_kernel[(len(self._own),)](self.view, self._own)
         self.state = State.CLOSING

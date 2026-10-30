@@ -12,13 +12,12 @@ from triton.experimental.gluon import language as gl
 from triton.language.core import _aggregate as aggregate
 
 from iris.experimental.plan.triton import (
-    G_ARRIVAL,
-    G_COUNTER,
-    G_READY,
-    GATE_WORDS,
     H_GATES,
+    H_NUM_CHUNKS,
     H_RANK,
     H_ROUND,
+    H_SENDS_TO,
+    H_WORLD_SIZE,
     HEADER_WORDS,
     R_OWNER,
     R_WRITERS,
@@ -51,20 +50,24 @@ class TriggeredView:
     gates: gl.tensor
     round: gl.tensor
     rank: gl.tensor
+    num_chunks: gl.tensor
 
     @gluon.constexpr_function
-    def __init__(self, view, gates, round, rank):
+    def __init__(self, view, gates, round, rank, num_chunks):
         self.view = view
         self.gates = gates
         self.round = round
         self.rank = rank
+        self.num_chunks = num_chunks
 
     @staticmethod
     @gluon.jit
     def initialize(handle):
         """Read the plan's handle tensor (from ``TriggeredPlan.start()``)."""
-        gates = gl.cast(gl.load(handle + H_GATES), gl.pointer_type(gl.int64))
-        return TriggeredView(handle, gates, gl.load(handle + H_ROUND), gl.load(handle + H_RANK))
+        gates = gl.cast(gl.load(handle + H_GATES), gl.pointer_type(gl.int32))
+        return TriggeredView(
+            handle, gates, gl.load(handle + H_ROUND), gl.load(handle + H_RANK), gl.load(handle + H_NUM_CHUNKS)
+        )
 
     @gluon.jit
     def _record(self, chunk, word):
@@ -78,7 +81,7 @@ class TriggeredView:
     @gluon.jit
     def mark_ready(self, chunk):
         """
-        Declare this CTA's writes to chunk ``chunk`` done; the last of its writers sends it.
+        Declare this CTA's writes to chunk ``chunk`` done; the chunk is sent once all of its writers have.
 
         Call from the whole CTA, after the CTA's writes to the chunk: outside divergent branches and
         outside ``gl.warp_specialize`` partitions.
@@ -86,12 +89,9 @@ class TriggeredView:
         # Copy engines read behind L2: every wave's stores must land before the release writes back
         wait_cnt()
         gl.barrier()
-        gate = self.gates + chunk * GATE_WORDS
-        writers = self._record(chunk, R_WRITERS)
-        # Each writer's release writes back its own L2; the last writer's ticket follows all of them
-        ticket = gl.atomic_add(gate + G_COUNTER, 1, sem="release", scope="sys")
-        if ticket % writers == writers - 1:
-            gl.atomic_xchg(gate + G_READY, self.round, sem="relaxed", scope="sys")
+        # Each writer's release writes back its own L2 before its increment, so the increment that
+        # reaches writers * round follows every writer's data
+        gl.atomic_add(self.gates + chunk, 1, sem="release", scope="sys")
 
     @gluon.jit
     def arrived(self, chunk):
@@ -99,14 +99,32 @@ class TriggeredView:
         True once chunk ``chunk`` is visible here this round (marked ready, for this rank's own).
 
         Call uniformly across the CTA: the result reaches the other waves through a CTA barrier, so
-        every wave must make the same number of calls (true of ``wait`` too).
+        every wave must make the same number of calls (true of ``wait``, ``sent`` and ``wait_sent`` too).
         """
-        gate = self.gates + chunk * GATE_WORDS
-        word = gl.where(self.owns(chunk), G_READY, G_ARRIVAL)
-        return gl.atomic_add(gate + word, 0, sem="acquire", scope="sys") >= self.round
+        own = self.owns(chunk)
+        word = gl.where(own, chunk, self.num_chunks + chunk)
+        target = gl.where(own, self._record(chunk, R_WRITERS) * self.round, self.round)
+        return gl.atomic_add(self.gates + word, 0, sem="acquire", scope="sys") >= target
 
     @gluon.jit
     def wait(self, chunk):
         """Spin until ``arrived(chunk)``."""
         while self.arrived(chunk) == 0:
+            pass
+
+    @gluon.jit
+    def sent(self):
+        """True once every peer has received this rank's chunks this round, so they may be overwritten."""
+        sends_to = gl.load(self.view + H_SENDS_TO)
+        pending = 0
+        for peer in range(gl.load(self.view + H_WORLD_SIZE)):
+            if ((sends_to >> peer) & 1) != 0:
+                completion = self.gates + 2 * self.num_chunks + peer
+                pending += (gl.atomic_add(completion, 0, sem="acquire", scope="sys") < self.round).to(gl.int32)
+        return pending == 0
+
+    @gluon.jit
+    def wait_sent(self):
+        """Spin until ``sent()``."""
+        while self.sent() == 0:
             pass
