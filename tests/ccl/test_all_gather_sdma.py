@@ -239,6 +239,8 @@ def test_prepare_all_gather_rejects_bad_schedule(ctx):
         ("another rank's rows", whole(out[theirs * M : (theirs + 1) * M], base=out), True),
         ("partial", whole(mine[:-1], base=out), True),
         ("empty", [], True),
+        ("some peers", whole(mine, base=out, peers=[theirs]), True),
+        ("other destination", whole(mine, base=out, dst=out[theirs * M : (theirs + 1) * M], dst_base=out), True),
     ]
     for what, schedule, bad in cases:
         with pytest.raises(ValueError if bad else RuntimeError, match=None if bad else "could not prepare"):

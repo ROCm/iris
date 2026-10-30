@@ -254,7 +254,7 @@ def validate(schedule, buffer_bytes, destination_bytes=None, rank=None, world_si
     return schedule
 
 
-def _rows(regions, dst):
+def _region_rows(regions, dst):
     """Every row of ``regions`` (at the destination if ``dst``), merged into sorted disjoint [start, end) byte ranges."""
     offset, width, rows, stride = (
         np.array(v, dtype=np.int64)
@@ -275,6 +275,11 @@ def _rows(regions, dst):
     # A row starts a new range unless it begins inside the ranges before it
     first = np.flatnonzero(np.r_[True, starts[1:] >= np.maximum.accumulate(ends)[:-1]])
     return starts[first], np.maximum.reduceat(ends, first)
+
+
+def _rows(schedule):
+    """Every row of every region in ``schedule``, at the source, merged into sorted disjoint [start, end) byte ranges."""
+    return _region_rows([r for chunk in schedule for r in chunk.regions], dst=False)
 
 
 def _first_clash(parts, rows):
@@ -313,7 +318,7 @@ def check_disjoint(schedules, same_buffer=True):
     def rows(key):
         if key not in cache:
             sender, dst, indices = key
-            cache[key] = _rows([r for i in indices for r in schedules[sender][i].regions], dst)
+            cache[key] = _region_rows([r for i in indices for r in schedules[sender][i].regions], dst)
         return cache[key]
 
     for receiver in range(world_size):
