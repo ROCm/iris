@@ -34,10 +34,12 @@ def chain_bytes(chunk):
 
 def round_bytes(schedule, sender, world_size):
     """Bytes one round of ``sender``'s ``schedule`` takes on each peer's queue: its chains, then the completion signal."""
+    signal_bytes = bind_sdma_ep().ATOMIC_COMMAND_BYTES
     nbytes = {}
     for chunk in schedule:
+        chain = chain_bytes(chunk)
         for peer in chunk.recipients(sender, world_size):
-            nbytes[peer] = nbytes.get(peer, bind_sdma_ep().ATOMIC_COMMAND_BYTES) + chain_bytes(chunk)
+            nbytes[peer] = nbytes.get(peer, signal_bytes) + chain
     return nbytes
 
 
