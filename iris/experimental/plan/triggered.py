@@ -265,13 +265,17 @@ class TriggeredPlan:
             names = " or ".join(s.value for s in states)
             raise RuntimeError(f"plan is {self.state.value if self.state else 'uninitialized'}, needs {names}")
 
+    def _set_round(self, round):
+        # fill_ is queued on the stream; assigning an element copies from the host and waits for the stream
+        self.view.narrow(0, dv.H_ROUND.value, 1).fill_(round)
+
     def start(self):
         """Start the prepared round and return the handle tensor its kernels take."""
         self._require(State.PREPARED)
         if not np.array_equal(self.ctx.heap.heap_bases_cpu, self._heap_bases):
             raise RuntimeError("symmetric heap was re-mapped since the plan was prepared")
         self._ledger.check_order(self, (State.RUNNING,), "start")
-        self.view[dv.H_ROUND.value] = self.round
+        self._set_round(self.round)
         self.state = State.RUNNING
         return self.view
 
@@ -346,7 +350,7 @@ class TriggeredPlan:
 
     def _release_own(self):
         """Open this rank's gates, so its prepared chains send its chunks as they stand."""
-        self.view[dv.H_ROUND.value] = self.round
+        self._set_round(self.round)
         if len(self._own):
             kernels.release_kernel[(len(self._own),)](self.view, self._own)
         self.state = State.CLOSING
