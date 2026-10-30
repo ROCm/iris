@@ -162,8 +162,15 @@ class Iris:
         distributed_barrier()
 
         self.copy_engines_device_ctx = None
+        self._sdma_all_gather_counters = None
         if self._sdma_ep is not None:
             self._init_copy_engines(num_gpus, num_ranks, cur_rank)
+            # all_gather(engine="sdma") arrival counters, one per source rank; allocated here since
+            # allocation is collective over all ranks, and a call may come from a subgroup
+            self._sdma_all_gather_counters = (
+                self.zeros((num_ranks,), dtype=torch.int64),
+                torch.zeros(num_ranks, dtype=torch.int64, device=self.device),
+            )
 
         # Initialize CCL interface
         self.ccl = self.CCL(self)
@@ -1691,12 +1698,58 @@ class Iris:
                 >>> config = Config(use_gluon=True, all_gather_variant="tdm", block_size_m=128, block_size_n=256, num_warps=16)
                 >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=config)
 
+                >>> # Move the data with the SDMA copy engines instead of compute units
+                >>> ctx = iris.iris(engines=("sdma",))
+                >>> ctx.ccl.all_gather(output_tensor, input_tensor, config=Config(engine="sdma"))
+
                 >>> # Async operation (no barrier)
                 >>> ctx.ccl.all_gather(output_tensor, input_tensor, async_op=True)
             """
             from iris.ccl.all_gather import all_gather
 
             all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
+
+        def prepare_all_gather(self, output_tensor, schedule=None, timeout=30.0):
+            """
+            Prepare an in-place all-gather that a producer kernel triggers on the SDMA copy engines.
+
+            Experimental: returns an ``iris.experimental.plan.TriggeredPlan``, which may change
+            between releases without deprecation. Collective, and needs a context created with
+            ``engines=("sdma",)``.
+
+            Rank ``r`` owns rows ``[r * M, (r + 1) * M)`` of ``output_tensor``, where ``M`` is its
+            first dimension divided by the number of ranks. Each round, the producer writes its rows
+            and marks each chunk of ``schedule`` ready; the copy engine sends the chunk to every peer
+            while the producer keeps running. See the Triggered Plans guide.
+
+            Args:
+                output_tensor: Contiguous tensor on the symmetric heap of shape (world_size * M, ...).
+                schedule: This rank's chunks, built from its own rows with the
+                    ``iris.experimental.plan`` builders (``whole``, ``chunks``, ``tile_chunks``) and
+                    ``base=output_tensor``. Default: ``whole()`` of its rows, one chunk marked ready
+                    once per round.
+                timeout: Seconds the plan's ``wait()`` and ``close()`` wait before raising.
+
+            Returns:
+                TriggeredPlan, prepared for its first round.
+
+            Example:
+                >>> from iris.experimental.plan import tile_chunks
+                >>> ctx = iris.iris(heap_size, engines=("sdma",))
+                >>> out = ctx.zeros(world_size * M, N, dtype=torch.bfloat16)
+                >>> mine = out[rank * M : (rank + 1) * M]
+                >>> schedule = tile_chunks(mine, (BM, BN), tiles_per_chunk=num_programs, base=out)
+                >>> with ctx.ccl.prepare_all_gather(out, schedule) as plan:
+                ...     for step in range(steps):
+                ...         handle = plan.start()
+                ...         producer[(num_programs,)](..., handle)  # TriggeredView.mark_ready(chunk)
+                ...         plan.wait()
+                ...         ...  # read out
+                ...         plan.next_round()
+            """
+            from iris.ccl.sdma.all_gather import prepare
+
+            return prepare(output_tensor, self._iris, schedule=schedule, timeout=timeout)
 
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """

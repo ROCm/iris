@@ -10,6 +10,7 @@ import pytest
 import torch
 
 import iris
+from iris.ccl import Config
 
 
 def test_import_iris_does_not_import_xio():
@@ -32,3 +33,15 @@ def test_default_context_rejects_host_sdma():
         shmem.put(buffer, to_rank=peer)
     with pytest.raises(RuntimeError, match=r"engines=\(\"sdma\",\)"):
         shmem.quiet()
+
+
+def test_default_context_rejects_sdma_all_gather():
+    shmem = iris.iris(1 << 20)
+    world_size = shmem.get_num_ranks()
+    inp = shmem.zeros(4, 4, dtype=torch.float32)
+    out = shmem.zeros(world_size * 4, 4, dtype=torch.float32)
+
+    with pytest.raises(RuntimeError, match=r"engines=\(\"sdma\",\)"):
+        shmem.ccl.all_gather(out, inp, config=Config(engine="sdma"))
+    with pytest.raises(RuntimeError, match=r"engines=\(\"sdma\",\)"):
+        shmem.ccl.prepare_all_gather(out)

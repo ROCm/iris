@@ -10,6 +10,8 @@ ProcessGroups, including both consecutive and strided rank patterns.
 Requires at least 4 GPUs to run (for meaningful subgroup testing).
 """
 
+import importlib.util
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -178,7 +180,7 @@ def test_all_reduce_with_groups(variant, group_type, dtype=torch.float32, M=256,
 # =============================================================================
 
 
-@pytest.mark.parametrize("variant", ["persistent", "gluon", "tdm"])
+@pytest.mark.parametrize("variant", ["persistent", "gluon", "tdm", "sdma"])
 @pytest.mark.parametrize("group_type", ["consecutive", "strided"])
 def test_all_gather_with_groups(group_type, variant, dtype=torch.float32, M=128, N=64):
     """Test all-gather with ProcessGroups."""
@@ -186,9 +188,11 @@ def test_all_gather_with_groups(group_type, variant, dtype=torch.float32, M=128,
     device = torch.cuda.current_device()
     if variant == "tdm" and not torch.cuda.get_device_properties(device).gcnArchName.startswith("gfx1250"):
         pytest.skip("the TDM all-gather needs gfx1250")
+    if variant == "sdma" and importlib.util.find_spec("xio") is None:
+        pytest.skip("rocm-xio not installed (pip install iris[sdma])")
 
     heap_size = 2**33
-    shmem = iris.iris(heap_size)
+    shmem = iris.iris(heap_size, engines=("sdma",) if variant == "sdma" else ())
 
     if group_type == "consecutive":
         groups = _create_consecutive_groups(world_size, group_size=2)
@@ -221,6 +225,8 @@ def test_all_gather_with_groups(group_type, variant, dtype=torch.float32, M=128,
     if variant == "tdm":
         # N=64 fp32 is a 256-byte row: one 32 x 64 tile per 32 rows.
         config = Config(use_gluon=True, all_gather_variant="tdm", block_size_m=32, block_size_n=64)
+    elif variant == "sdma":
+        config = Config(engine="sdma")
     else:
         config = Config(use_gluon=variant == "gluon")
     shmem.ccl.all_gather(iris_output_tensor, iris_input_tensor, group=my_group, config=config)

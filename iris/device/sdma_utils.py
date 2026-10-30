@@ -239,6 +239,35 @@ def place_copy_packet(queue_ptr_u32, offset_bytes: tl.uint64, size_bytes: tl.uin
     tl.store(slot_ptr_u32 + 6, (dst_ptr_val >> 32).to(tl.uint32), cache_modifier=".wt")
 
 
+@triton.jit
+def copy_linear(copy_engine_ctx, to_rank, src, dst, nbytes):
+    """
+    Queue one COPY_LINEAR of ``nbytes`` from address ``src`` to address ``dst`` on this rank's
+    device-initiated queue to ``to_rank``. ``nbytes`` is at most 1 GiB (a 30-bit count on SDMA 4.4).
+    """
+    handle = copy_engine_ctx + sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank
+    queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(handle + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(handle + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
+
+    command_in_bytes = sdma_ep.COPY_LINEAR_COMMAND_BYTES
+    base, offset = acquire_fadd(
+        queue_ptr_u32,
+        read_ptr,
+        write_ptr,
+        doorbell_ptr,
+        cached_write_ptr,
+        committed_write_ptr,
+        command_in_bytes,
+    )
+    place_nop_packet(queue_ptr_u32, base, offset)
+    place_copy_packet(queue_ptr_u32, base + offset, nbytes.to(tl.uint32), src, dst)
+    submit(write_ptr, doorbell_ptr, committed_write_ptr, base, base + offset + command_in_bytes)
+
+
 # atomic op codes and operation
 # atomic add 32bit w/rtn: op 10, operation 15
 # atomic add 64bit w/rtn: op 10, operation: 47 -> 32 + 15

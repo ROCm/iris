@@ -31,6 +31,7 @@ This directory contains various algorithm implementations for distributed comput
 - [`20_gemm_all_scatter_independent`](20_gemm_all_scatter_independent): Independent GEMM and all-scatter operations with support for CSV input configurations
 - [`21_gemm_one_shot_all_reduce_independent`](21_gemm_one_shot_all_reduce_independent): Independent GEMM and all-reduce operations with support for CSV input configurations and selective execution
 - [`33_jacobi`](33_jacobi): Multi-GPU Jacobi iteration with Iris halo exchange and convergence reduction
+- [`34_sdma_all_gather`](34_sdma_all_gather): All-gather on the SDMA copy engines, as a collective and triggered by a tiled producer kernel
 
 ### Collective Communication Library
 - [`ccl`](ccl): iris-ccl collective communication operations (all-to-all, etc.)

@@ -181,7 +181,7 @@ def launch(
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
     # Gluon only supports the persistent variant
-    if config.all_gather_variant != "persistent":
+    if config.all_gather_variant not in (None, "persistent"):
         raise ValueError(
             f"Gluon all_gather only supports all_gather_variant='persistent', got '{config.all_gather_variant}'."
         )

@@ -33,6 +33,8 @@ def all_to_all(output_tensor, input_tensor, ctx, group=None, async_op=False, con
 
     if config is None:
         config = Config(block_size_m=32, block_size_n=128)
+    if config.engine != "cu":
+        raise ValueError(f"all_to_all does not support engine={config.engine!r}; only all_gather runs on 'sdma'")
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
 
