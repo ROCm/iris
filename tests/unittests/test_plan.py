@@ -543,6 +543,13 @@ def _snapshot(buf, out, n, BLOCK: tl.constexpr):
     tl.store(out + idx, tl.load(buf + idx, mask=idx < n), mask=idx < n)
 
 
+@triton.jit
+def _sleep(ticks):
+    t0 = read_realtime()
+    while read_realtime() - t0 < ticks:
+        pass
+
+
 def test_stream_ordered_rounds():
     """prepare_next(), wait(blocking=False) and next_round() never synchronize the host with the GPU."""
     ctx = _ctx()
@@ -556,6 +563,10 @@ def test_stream_ordered_rounds():
 
     with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         for round in range(1, rounds + 1):
+            if round == 2:
+                # Round 1 compiled every kernel. Every call from here on queues behind this one; none may wait for it
+                _sleep[(1,)](50_000_000)  # 0.5 s of the 100 MHz clock
+                start = time.monotonic()
             handle = plan.start()
             _regions_producer[(len(schedule),)](
                 buffer, regs, max_regs, handle, plan.chunk_id(rank, 0), round, BLOCK=block
@@ -565,6 +576,7 @@ def test_stream_ordered_rounds():
             _snapshot[(triton.cdiv(buffer.numel(), block),)](buffer, snaps[round - 1], buffer.numel(), BLOCK=block)
             if round < rounds:
                 plan.next_round()
+        assert time.monotonic() - start < 0.25, "a plan call synchronized the host with the GPU"
     for round in range(1, rounds + 1):
         assert torch.equal(snaps[round - 1], _expected(round, buffer.numel())), f"round {round}"
     ctx.barrier()
