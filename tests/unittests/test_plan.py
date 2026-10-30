@@ -598,7 +598,9 @@ def test_stream_ordered_wait_defers_errors():
             handle = plan.start()
             if rank == 0:
                 _mark_ready_kernel[(2,)](handle, plan.chunk_id(rank, 0))
-            plan.wait(blocking=False, timeout=1)
+            # The others flush their chunks in close(), queued after their own wait: keep it longer than
+            # rank 0's, so rank 0 times out first
+            plan.wait(blocking=False, timeout=1 if rank == 0 else 3)
             assert plan.state is State.DONE
     assert plan.state is State.CLOSED
     assert not any(queue_ledger.ledger().entries.values())
