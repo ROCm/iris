@@ -72,12 +72,34 @@ with TriggeredPlan(ctx, out, schedule) as plan:   # collective: allocates gates,
         producer[(num_programs,)](..., handle)     # TriggeredView.initialize(handle).mark_ready(chunk)
         plan.wait()                                # every chunk delivered everywhere
         ...                                        # read this round's data
-        plan.next_round()                          # collective: prepare, barrier
+        plan.next_round()                          # collective: prepare, device barrier
 ```
 
 For this in-place all-gather, `ctx.ccl.prepare_all_gather(out, schedule)` builds the same plan and
 also checks that each rank's schedule stays inside its own rows of `out` (by default it sends them as
 one chunk, `whole()`). See `examples/34_sdma_all_gather`.
+
+### Overlapping rounds
+
+Preparing a round costs host time that grows with regions × peers. `prepare_next()` does it while
+the current round runs, so `next_round()` is left with a device-side barrier on the current
+stream, and `wait(blocking=False)` queues the wait on that stream too. A loop written this way
+never synchronizes the host with the GPU:
+
+```python
+with TriggeredPlan(ctx, out, schedule) as plan:
+    for step in range(steps):
+        handle = plan.start()
+        producer[(num_programs,)](..., handle)
+        plan.prepare_next()                        # host prepares round + 1 while the GPU works
+        plan.wait(blocking=False)                  # queued: kernels after it see every chunk
+        consumer[grid](out, ...)                   # read this round's data
+        plan.next_round()                          # queued device barrier: done reading
+```
+
+The next round's copies wait behind gates that no producer can open before every rank has passed
+`next_round()`. A stream-ordered `wait()` cannot raise: a timeout or a wrong mark count is
+recorded on the GPU and raised by the next blocking `wait()`, or by `close()`.
 
 ### Gluon
 
@@ -108,6 +130,8 @@ after `gl.warp_specialize` returns, not inside a partition.
    whole CTA, outside divergent branches.
    `wait()` checks the count for this rank's chunks: it raises if a chunk got extra marks (which
    would otherwise open later rounds' gates early), and a timeout names the chunks still short.
+   Once the next round is prepared (`prepare_next()`), extra marks send its copies before the check
+   can stop them.
    A kernel that is not written against `TriggeredView` may mark chunks ready itself; see
    [Driving the counters from another kernel](#driving-the-counters-from-another-kernel).
 3. **A producer never waits on its own plan's arrivals before it has marked ready everything it
@@ -117,9 +141,11 @@ after `gl.warp_specialize` returns, not inside a partition.
    makes the same number of calls. Each is one atomic whose result reaches the other waves through
    a CTA barrier, so a polling loop must not exit on a per-wave condition (such as a clock read):
    waves would read the result before it is written, or deadlock. Count polls instead.
-6. **`next_round()` means "done reading this round's data".** Once it returns, a peer may start the
-   next round, and its copies can overwrite the buffer at any time. Work queued before the call is
-   covered; nothing issued after it may read the buffer until the next `wait()`.
+6. **`next_round()` means "done reading this round's data".** It is a device-side barrier on the
+   current stream: once every rank's stream has passed it, a peer may start the next round, and
+   its copies can overwrite the buffer at any time. Work queued on that stream before the call is
+   covered (work on other streams is not); nothing issued after it may read the buffer until the
+   next `wait()`.
 
 Plans that share queues must start in the order they were prepared. While copies are prepared
 on a queue, host `Iris.put()` and `quiet()` to that peer raise rather than queue behind them.
@@ -128,10 +154,11 @@ A chunk marked ready by programs that did not write all of its regions is sent b
 written. The mark count cannot catch this (the count is right, the tiles are wrong), which is why
 `order` should come from the kernel's own mapping.
 
-Creating a plan and `next_round()` prepare on every rank or on none: if one rank cannot (for
-example its queue is full, or its schedule is invalid), every rank raises, and a failed
-construction flushes what it prepared. After a failed `next_round()` the plan is either still done
-or `FAILED`.
+Creating a plan prepares on every rank or on none: if one rank cannot (for example its queue is
+full, or its schedule is invalid), every rank raises, and a failed construction flushes what it
+prepared. The plan holds queue space for two rounds from then on, so preparing later rounds
+(`prepare_next()` or `next_round()`) does not involve the other ranks. If it fails on one rank
+anyway, only that rank raises, and the others time out waiting for its chunks.
 
 `close()` is collective and waits for every rank, since a peer's copies and polls can still touch
 a rank's buffer and gates after its own work is done. Prepared copies cannot be withdrawn from the
@@ -194,10 +221,13 @@ per round, by the whole CTA after every wave's stores are done, with release sem
 - **One queue per peer.** Plans use the host-initiated copy-engine queue to each peer, shared with
   host `Iris.put()` and with the plans of every Iris context in the process. Kernel-initiated
   copies (`put(..., use_copy_engine=True)`) use a separate queue and are unaffected.
-- **Ring capacity.** Prepared copies may use at most half of each queue's 8 MiB ring. They hold
-  their ring space until their gates open, and a submit that does not fit waits for space, so a
-  full ring could hang the host before any kernel opens a gate. The other half covers wrap padding
-  and work queued before them. Half is a conservative margin, not a measured bound.
+- **Ring capacity.** Prepared copies may use at most half of each queue's 8 MiB ring, and each
+  plan holds room for two rounds of its copies. Copies hold their ring space until their gates
+  open, and a submit that does not fit waits for space, so a full ring could hang the host before
+  any kernel opens a gate. The other half covers wrap padding, work queued before them, and
+  earlier rounds still draining. Half is a conservative margin, not a measured bound. A loop that
+  never synchronizes can run ahead of the GPU; preparing then waits for earlier rounds' copies to
+  drain, which they do, since their producers are already queued.
 - **Same offsets everywhere.** Every chunk is copied to the same offsets in each peer's buffer,
   so plans express all-gather and broadcast (ranks that send nothing pass an empty schedule). Two
   ranks may not send the same bytes: the plan checks this when it is created, which catches a
@@ -213,7 +243,3 @@ per round, by the whole CTA after every wave's stores are done, with release sem
   a chunk cannot go to only some peers. Reduce-scatter and two-shot all-reduce need both.
 - **Waiting on a group.** A consumer waits on each chunk's arrival in turn; no single counter
   covers several chunks or several source ranks.
-- **Overlapping rounds.** `wait()` must return before `next_round()` prepares the next round, and
-  preparing synchronizes the ranks. The host's work per round grows with regions × peers, so a
-  plan suits producers whose rounds are long next to that, rather than an op called many times
-  per step.
