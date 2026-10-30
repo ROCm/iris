@@ -4,7 +4,8 @@
 """
 Reduce-scatter collective operation — public API.
 
-Triton only (no gluon support).
+Routes to the Triton two-shot kernel, or with use_gluon and
+reduce_scatter_variant="tdm" to the gfx1250 TDM kernel in gluon/.
 """
 
 from iris.ccl.utils import extract_group_info
@@ -42,16 +43,14 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         config = Config(block_size_m=32, block_size_n=64, all_reduce_distribution=1)
     if config.engine != "cu":
         raise ValueError(f"reduce_scatter does not support engine={config.engine!r}; only all_gather runs on 'sdma'")
-    if config.use_gluon:
-        raise ValueError(
-            "reduce_scatter does not support use_gluon=True. "
-            "Gluon implementation is not available for reduce_scatter. "
-            "Use default config (use_gluon=False)."
-        )
-
     variant = getattr(config, "reduce_scatter_variant", "two_shot")
-    if variant != "two_shot":
-        raise ValueError(f"reduce_scatter only supports variant='two_shot', got '{variant}'.")
+    if variant not in ("two_shot", "tdm"):
+        raise ValueError(f"reduce_scatter supports variant='two_shot' or 'tdm', got '{variant}'.")
+    if config.use_gluon and variant != "tdm":
+        raise ValueError(
+            "reduce_scatter with use_gluon=True needs reduce_scatter_variant='tdm'; "
+            "the two-shot kernel is Triton only. Use use_gluon=False."
+        )
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
     M, N = input_tensor.shape[:2]
@@ -62,7 +61,11 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
             f"For reduce-scatter, output should have the same shape as input."
         )
 
-    from iris.ccl.triton.reduce_scatter import launch
+    if variant == "tdm":
+        # gfx1250 tensor data movement engine; see gluon/reduce_scatter_tdm.py
+        from iris.ccl.gluon.reduce_scatter_tdm import launch
+    else:
+        from iris.ccl.triton.reduce_scatter import launch
 
     launch(
         output_tensor,
