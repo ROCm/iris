@@ -8,8 +8,23 @@ Collective communication operations accessible via the `ccl` attribute on the `I
 ```
 
 ## all_gather
+
+`Config(engine="sdma")` moves the data with the SDMA copy engines instead of compute units. The
+context must be created with `engines=("sdma",)`; that only sets the copy engines up, and each call
+still picks its engine (the default is `"cu"`).
+
 ```{eval-rst}
 .. automethod:: iris.host.iris.Iris.CCL.all_gather
+```
+
+## prepare_all_gather
+
+```{note}
+Experimental: returns a [triggered plan](plan.md), which may change between releases without deprecation.
+```
+
+```{eval-rst}
+.. automethod:: iris.host.iris.Iris.CCL.prepare_all_gather
 ```
 
 ## all_reduce_preamble

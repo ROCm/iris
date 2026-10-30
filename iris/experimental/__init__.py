@@ -9,6 +9,9 @@ or may undergo breaking changes in future releases.
 
 Current experimental features:
 - Gluon backend: @aggregate-based implementation via iris.mem.gluon
+- Triggered plans: copy-engine transfers released by kernels, via iris.experimental.plan
+  (not imported here: ``from iris.experimental.plan import TriggeredPlan, TriggeredView``; the Gluon
+  device view is ``iris.experimental.plan.gluon.TriggeredView``)
 
 Usage:
     >>> import iris

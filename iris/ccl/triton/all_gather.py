@@ -293,8 +293,10 @@ def launch(
     stride_in_m, stride_in_n = input_tensor.stride(0), input_tensor.stride(1)
     stride_out_m, stride_out_n = output_tensor.stride(0), output_tensor.stride(1)
 
+    variant = config.all_gather_variant or "persistent"
+
     # Validate COMM_SMS divisibility for partitioned variant
-    if config.all_gather_variant == "partitioned" and config.comm_sms % world_size != 0:
+    if variant == "partitioned" and config.comm_sms % world_size != 0:
         raise ValueError(
             f"For all_gather_variant='partitioned', COMM_SMS ({config.comm_sms}) must be divisible by world_size ({world_size}). "
             f"Please adjust config.comm_sms to be a multiple of {world_size}."
@@ -303,12 +305,12 @@ def launch(
     heap_bases = ctx.get_heap_bases()
 
     # Dispatch to the appropriate kernel based on variant
-    if config.all_gather_variant == "persistent":
+    if variant == "persistent":
         kernel_fn = persistent_all_gather
-    elif config.all_gather_variant == "partitioned":
+    elif variant == "partitioned":
         kernel_fn = persistent_all_gather_partitioned
     else:
-        raise ValueError(f"Unknown all_gather_variant: {config.all_gather_variant}")
+        raise ValueError(f"Unknown all_gather_variant: {variant}")
 
     iris_launch(
         kernel_fn,

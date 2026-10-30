@@ -2,6 +2,7 @@
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 import ctypes
+import functools
 import logging
 import numpy as np
 import torch
@@ -150,6 +151,7 @@ def get_cu_count(device_id=None):
     return cu_count.value
 
 
+@functools.lru_cache(maxsize=None)
 def get_rocm_version():
     if not _is_amd_backend:
         # Not applicable for CUDA

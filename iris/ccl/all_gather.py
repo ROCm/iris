@@ -4,7 +4,7 @@
 """
 All-gather collective operation — public API.
 
-Routes to triton/ or gluon/ based on config.use_gluon.
+Routes to sdma/ for config.engine == "sdma", otherwise to triton/ or gluon/ based on config.use_gluon.
 """
 
 from iris.ccl.utils import extract_group_info
@@ -21,7 +21,12 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
         input_tensor: Shape (M, N)
         ctx: Iris instance
         group: ProcessGroup or None
-        async_op: If True, skip trailing barrier
+        async_op: If False (default), end with a device-side barrier on the current
+            stream: work queued after this call runs only once every rank's part of
+            the collective is done. The host does not wait. If True, skip the
+            barrier; the caller must synchronize the ranks, e.g. with
+            ``ctx.device_barrier(group=group)``, before reading the output or
+            reusing the buffers
         config: Config with kernel parameters
     """
     from iris.ccl.config import Config
@@ -38,6 +43,18 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
             f"Output tensor shape {output_tensor.shape[:2]} does not match expected shape "
             f"{expected_output_shape}. Expected (world_size * M, N) = ({world_size * M}, {N})"
         )
+
+    if config.engine == "sdma":
+        from iris.ccl.sdma.all_gather import launch
+
+        # The copy engines have no algorithm variants or Gluon kernel
+        if config.use_gluon or config.all_gather_variant is not None:
+            raise ValueError("engine='sdma' does not take use_gluon or all_gather_variant; leave them unset")
+
+        launch(input_tensor, output_tensor, ctx, rank_in_group, rank_global, world_size, rank_start, rank_stride)
+        if not async_op:
+            ctx.barrier()
+        return
 
     if config.use_gluon and config.all_gather_variant == "tdm":
         # gfx1250 tensor data movement engine; see gluon/all_gather_tdm.py
@@ -60,4 +77,4 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
     )
 
     if not async_op:
-        ctx.barrier()
+        ctx.device_barrier(group=group)

@@ -194,7 +194,8 @@ def test_vmem_heap_size_not_multiple_of_granularity(target_mib):
 
     ctx = iris.iris(heap_size, allocator_type="vmem")
     allocator = ctx.heap.allocator
-    assert allocator.aligned_heap_size == granules * granularity
+    # Iris grows the heap by what it reserves for its own allocations.
+    assert allocator.aligned_heap_size == granules * granularity + ctx.heap.reserved_size
     assert allocator.minimal_size % granularity == 0
 
     # Fill the heap so the last segment ends past heap_size, inside the rounded-up tail.
