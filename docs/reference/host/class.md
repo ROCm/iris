@@ -22,7 +22,10 @@ dist.init_process_group("nccl", device_id=torch.device("cuda", gpu))
 ctx = iris.iris(heap_size=1 << 30, device=gpu)  # or device="cuda" for the current device
 ```
 
-`device` accepts a GPU index, `"cuda"`, `"cuda:N"`, or a `torch.device`.
+`device` accepts a GPU index, `"cuda"`, `"cuda:N"`, or a `torch.device`. `"cuda"`
+means the current device, so set it with `torch.cuda.set_device` first. If the
+process group was initialized with `device_id`, Iris raises `ValueError` when
+the GPU it would use, whether from `device` or the default, is a different one.
 
 Ranks find each other's GPUs by PCI address, so processes may see the GPUs in a
 different order (different `HIP_VISIBLE_DEVICES`). The `vmem` allocator and the

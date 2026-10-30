@@ -38,10 +38,12 @@ Example (Object-Oriented DeviceContext API):
     >>>     data = device_ctx.load(buffer, from_rank=remote_rank)
 """
 
+import numbers
 import os
 
 from iris.host.distributed.helpers import (
     rank_gpu_ordinals,
+    require_process_group_device,
     distributed_allgather,
     init_distributed,
     distributed_barrier,
@@ -80,7 +82,11 @@ def _resolve_gpu_id(device, cur_rank, num_gpus):
     """The GPU index a rank uses: ``device`` if given, else ``cur_rank % num_gpus``."""
     if device is None:
         return cur_rank % num_gpus
-    if not isinstance(device, int):
+    if isinstance(device, bool):
+        raise TypeError(f"device must be a GPU index, str or torch.device, got {device!r}")
+    if isinstance(device, numbers.Integral):
+        device = int(device)
+    else:
         device = torch.device(device)
         if device.type != "cuda":
             raise ValueError(f"Iris needs a GPU device, got {device}")
@@ -121,8 +127,9 @@ class Iris:
             ``pip install iris[sdma]``). Defaults to ``()`` (none).
         device (int, str or torch.device, optional): GPU this rank runs on, as an index
             into the visible GPUs, ``"cuda:N"``, or a ``torch.device``; ``"cuda"`` uses the
-            current device. ``None`` (default) uses ``rank % visible GPUs``. It must be the
-            GPU the process group is bound to.
+            current device, so call ``torch.cuda.set_device`` first. ``None`` (default) uses
+            ``rank % visible GPUs``. It must be the GPU the process group is bound to; if the
+            group was initialized with ``device_id``, a different GPU raises ``ValueError``.
 
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap with torch allocator
@@ -155,6 +162,7 @@ class Iris:
         num_gpus = count_devices()
 
         gpu_id = _resolve_gpu_id(device, cur_rank, num_gpus)
+        require_process_group_device(gpu_id, device_given=device is not None)
         set_device(gpu_id)
 
         self.comm = comm
@@ -163,10 +171,12 @@ class Iris:
         self.gpu_id = gpu_id
         self.heap_size = heap_size
 
+        rank_gpus = None
         if self._sdma_ep is not None:
             # rocm-xio keys queues by device ordinal and only opens queues between GPUs this process can see
-            self._copy_engine_gpus = rank_gpu_ordinals(gpu_id, num_ranks)
-            _require_sdma_visibility(self._copy_engine_gpus)
+            rank_gpus = rank_gpu_ordinals(gpu_id, num_ranks)
+            _require_sdma_visibility(rank_gpus)
+            self._copy_engine_gpus = rank_gpus
 
         if logger.isEnabledFor(logging.INFO):
             self._log_with_rank(
@@ -178,7 +188,13 @@ class Iris:
         # Room for the device barrier's flags (allocated below) on top of the caller's heap_size.
         barrier_flags_bytes = num_ranks * num_ranks * torch.int32.itemsize
         self.heap = SymmetricHeap(
-            heap_size, gpu_id, cur_rank, num_ranks, allocator_type, reserved_bytes=barrier_flags_bytes
+            heap_size,
+            gpu_id,
+            cur_rank,
+            num_ranks,
+            allocator_type,
+            reserved_bytes=barrier_flags_bytes,
+            rank_gpus=rank_gpus,
         )
         self.device = f"cuda:{gpu_id}"
         self.heap_bases = self.heap.get_heap_bases()

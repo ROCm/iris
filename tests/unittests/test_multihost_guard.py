@@ -204,6 +204,7 @@ def test_vmem_allocator_rejects_more_ranks_than_local_gpus(monkeypatch):
 def test_vmem_allocator_rejects_peer_gpus_it_cannot_see(monkeypatch):
     from iris.host.memory.allocators import vmem_allocator
 
+    monkeypatch.setattr(vmem_allocator.torch.cuda, "device_count", lambda: 4)
     monkeypatch.setattr(vmem_allocator, "rank_gpu_ordinals", lambda device_id, world_size: [0, 1, None, None])
 
     with pytest.raises(RuntimeError, match=r"cannot see the GPUs of ranks \[2, 3\]"):

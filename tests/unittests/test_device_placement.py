@@ -7,6 +7,7 @@ import os
 import socket
 from datetime import timedelta
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
@@ -187,10 +188,47 @@ def test_device_cuda_uses_current_device():
     del shmem
 
 
+def test_device_accepts_numpy_integer():
+    gpu = torch.cuda.current_device()
+    shmem = iris.iris(1 << 20, device=np.int64(gpu))
+    assert shmem.gpu_id == gpu and type(shmem.gpu_id) is int
+    del shmem
+
+
 @pytest.mark.parametrize("device", [-1, 1 << 10, "cpu", torch.device("cpu")])
 def test_device_rejects_invalid(device):
     with pytest.raises(ValueError):
         iris.iris(1 << 20, device=device)
+
+
+def test_device_rejects_bool():
+    with pytest.raises(TypeError):
+        iris.iris(1 << 20, device=True)
+
+
+def test_device_must_match_process_group():
+    """The runner binds the process group to the current device; any other GPU is rejected on every rank."""
+    num_gpus = torch.cuda.device_count()
+    if num_gpus < 2:
+        pytest.skip("needs 2 GPUs")
+    other = (torch.cuda.current_device() + 1) % num_gpus
+    with pytest.raises(ValueError, match="process group is bound to"):
+        iris.iris(1 << 20, device=other)
+    assert torch.cuda.current_device() != other
+
+
+@pytest.mark.skipif(not HAS_XIO, reason="needs rocm-xio")
+def test_vmem_reuses_copy_engine_gpu_exchange(monkeypatch):
+    """With vmem and SDMA, ranks exchange their GPUs once, not once per feature."""
+    from iris.host.memory.allocators import vmem_allocator
+
+    def exchange_again(device_id, world_size):
+        raise AssertionError("VMemAllocator exchanged rank GPUs that Iris already had")
+
+    monkeypatch.setattr(vmem_allocator, "rank_gpu_ordinals", exchange_again)
+    shmem = iris.iris(1 << 20, allocator_type="vmem", engines="sdma")
+    assert shmem.heap.allocator is not None
+    del shmem
 
 
 def test_sdma_rejects_multi_host_on_every_rank(monkeypatch):

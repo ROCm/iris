@@ -51,6 +51,8 @@ class VMemAllocator(BaseAllocator):
         rank: Current rank ID
         world_size: Total number of ranks
         va_multiplier: VA space multiplier (reserve more VA than physical)
+        rank_gpus: Each rank's GPU as a device ordinal in this process, if already exchanged;
+            None exchanges it here (collective)
     """
 
     def __init__(
@@ -60,6 +62,7 @@ class VMemAllocator(BaseAllocator):
         rank: int,
         world_size: int,
         va_multiplier: float = 1.0,
+        rank_gpus=None,
     ):
         super().__init__(heap_size, device_id, rank, world_size)
         # close() releases whatever a failed __init__ got as far as creating
@@ -69,12 +72,12 @@ class VMemAllocator(BaseAllocator):
         self.allocation_order = []
         self.base_va = 0
         try:
-            self._init_heap(heap_size, device_id, rank, world_size, va_multiplier)
+            self._init_heap(heap_size, device_id, rank, world_size, va_multiplier, rank_gpus)
         except BaseException:
             self.close()
             raise
 
-    def _init_heap(self, heap_size, device_id, rank, world_size, va_multiplier):
+    def _init_heap(self, heap_size, device_id, rank, world_size, va_multiplier, rank_gpus):
         # Peer access is granted to every rank's GPU, all of which this single-host allocator must see.
         local_devices = torch.cuda.device_count()
         if world_size > local_devices:
@@ -83,7 +86,7 @@ class VMemAllocator(BaseAllocator):
                 f"this process sees {local_devices} GPUs. It is single-host; use IRIS_ALLOCATOR=vmem_chunked "
                 "for multi-host jobs."
             )
-        peer_gpus = rank_gpu_ordinals(device_id, world_size)
+        peer_gpus = rank_gpus if rank_gpus is not None else rank_gpu_ordinals(device_id, world_size)
         unseen = [r for r, gpu in enumerate(peer_gpus) if gpu is None]
         if unseen:
             raise RuntimeError(

@@ -182,6 +182,7 @@ class SymmetricHeap:
         num_ranks: int,
         allocator_type: str = "torch",
         reserved_bytes: int = 0,
+        rank_gpus=None,
     ):
         """
         Initialize symmetric heap.
@@ -196,6 +197,9 @@ class SymmetricHeap:
             reserved_bytes: Bytes Iris allocates on the heap for itself. The torch and vmem
                 heaps grow by this much, rounded up to the allocator's allocation unit, so
                 that all of ``heap_size`` stays available to the caller.
+            rank_gpus: Each rank's GPU as a device ordinal in this process, from
+                ``rank_gpu_ordinals``, if the caller already exchanged it. The vmem
+                allocator exchanges it itself when this is None.
 
         Raises:
             ValueError: If allocator_type is not supported
@@ -243,7 +247,7 @@ class SymmetricHeap:
         if allocator_type == "torch":
             self.allocator = TorchAllocator(heap_size, device_id, cur_rank, num_ranks)
         elif allocator_type == "vmem":
-            self.allocator = VMemAllocator(heap_size, device_id, cur_rank, num_ranks)
+            self.allocator = VMemAllocator(heap_size, device_id, cur_rank, num_ranks, rank_gpus=rank_gpus)
         elif allocator_type == "vmem_chunked":
             from iris.host.distributed.topology import TopologyDiscovery
 
