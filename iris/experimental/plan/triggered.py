@@ -239,7 +239,7 @@ class TriggeredPlan:
 
     def _arm_first(self):
         """Collective: hold queue space for two rounds and prepare round 1 on every rank, or raise on every rank."""
-        nbytes = armer.round_bytes(self.schedules[self.rank], self.rank, self.world_size)
+        self._round_bytes = nbytes = armer.round_bytes(self.schedules[self.rank], self.rank, self.world_size)
         error, held = None, False
         try:
             # With prepare_next(), a round may be prepared while the one before it still is
@@ -273,7 +273,8 @@ class TriggeredPlan:
         # Counters are never reset and the copy engine compares 32 bits; the same on every rank
         if self._max_per_round * round > INT32_MAX:
             raise RuntimeError(
-                f"writers x round exceeds {INT32_MAX} at round {round}; close the plan and create a new one"
+                f"a gate's growth per round (a chunk's writers, or a group's chunks) x round exceeds {INT32_MAX} "
+                f"at round {round}; close the plan and create a new one"
             )
 
     def _prepare_next(self):
@@ -281,8 +282,7 @@ class TriggeredPlan:
         if self._next_prepared or self._prepare_error is not None:
             return
         try:
-            nbytes = armer.round_bytes(self.schedules[self.rank], self.rank, self.world_size)
-            self._ledger.reserve(self, self.round + 1, self.rank, nbytes)
+            self._ledger.reserve(self, self.round + 1, self.rank, self._round_bytes)
             # From here close() must flush this round too (the completion signals follow even a failed submit)
             self._next_prepared = True
             self._submit(self.round + 1)

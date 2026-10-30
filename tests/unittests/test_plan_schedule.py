@@ -134,7 +134,10 @@ def test_builders_land_in_dst():
     assert chunk.peers == (1, 3)
     assert [c.regions[0].dst_offset for c in chunks(base, 2, dst=staging[2:6], dst_base=staging)] == [512, 1024]
     with pytest.raises(ValueError, match="shape"):
-        whole(base, dst=staging)
+        whole(base, dst=staging, dst_base=staging)
+    # Without dst_base, a slice of the destination would land at offset 0
+    with pytest.raises(ValueError, match="dst_base"):
+        whole(base, dst=staging[4:8])
 
 
 def test_tile_chunks_dst_pitch_and_group():

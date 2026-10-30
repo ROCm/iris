@@ -116,6 +116,8 @@ def _dst_offset(view, dst, dst_base, what):
         return None
     if dst.shape != view.shape or dst.element_size() != view.element_size():
         raise ValueError(f"{what}: dst must have the view's shape and element size")
+    if dst_base is None:
+        raise ValueError(f"{what}: pass dst_base, the plan's destination, with dst")
     return _byte_offset(dst, dst_base)
 
 

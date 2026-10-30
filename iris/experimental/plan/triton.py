@@ -112,8 +112,9 @@ class TriggeredView:
     @triton.jit
     def arrived(self, chunk):
         """
-        True once chunk ``chunk`` is visible here this round: marked ready, for this rank's own; for a
-        chunk in a group, once the whole group is. Always true of chunks not sent to this rank.
+        True once chunk ``chunk`` is visible here this round: for this rank's own chunks, once marked
+        ready; for another rank's chunk in a group, once the whole group has arrived here. Always
+        true of chunks not sent to this rank.
 
         Call uniformly across the CTA: the result reaches the other waves through a CTA barrier, so
         every wave must make the same number of calls (true of the other waits too).

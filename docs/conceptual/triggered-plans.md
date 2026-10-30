@@ -112,7 +112,7 @@ buffer: an all-gather or a broadcast. Three options cover other patterns:
 - **Destination.** `TriggeredPlan(..., destination=staging)` makes peers' chunks land in another
   symmetric tensor, and `Region(dst_offset_bytes=, dst_stride_bytes=)` places each region in it
   at its own offset and row pitch. The schedule builders take `dst=` (a view of the destination
-  with the same shape as the source) and `dst_base=`.
+  with the same shape as the source) together with `dst_base=` (the destination itself).
 - **Peers.** `Chunk(peers=...)` sends a chunk to only some ranks; ranks it does not go to neither
   receive nor wait for it. A chunk is never sent to its own rank.
 - **Groups.** Chunks with the same `group` (a small integer chosen by the caller, shared across
