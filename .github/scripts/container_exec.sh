@@ -81,10 +81,9 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
     # Set required RCCL environment variable for ROCm
     EXEC_CMD="$EXEC_CMD --env HSA_NO_SCRATCH_RECLAIM=1"
     
-    # Restrict ROCr to the physical GPU ordinals allocated by CI. HIP then
-    # exposes these devices as logical indices starting at zero.
+    # Add GPU selection if specified
     if [ -n "$GPU_DEVICES" ]; then
-        EXEC_CMD="$EXEC_CMD --env ROCR_VISIBLE_DEVICES=${GPU_DEVICES}"
+        EXEC_CMD="$EXEC_CMD --env HIP_VISIBLE_DEVICES=${GPU_DEVICES}"
     fi
     
     # Add standard flags
@@ -119,10 +118,9 @@ elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
     # Set required RCCL environment variable for ROCm
     RUN_CMD="$RUN_CMD -e HSA_NO_SCRATCH_RECLAIM=1"
     
-    # Restrict ROCr to the physical GPU ordinals allocated by CI. HIP then
-    # exposes these devices as logical indices starting at zero.
+    # Add GPU selection if specified
     if [ -n "$GPU_DEVICES" ]; then
-        RUN_CMD="$RUN_CMD -e ROCR_VISIBLE_DEVICES=${GPU_DEVICES}"
+        RUN_CMD="$RUN_CMD -e HIP_VISIBLE_DEVICES=${GPU_DEVICES}"
     fi
     
     # Execute and capture exit code
