@@ -38,6 +38,12 @@ class Config:
                            - "partitioned": PIDs partitioned across ranks, eliminates inner loop
                            - "tdm": Gluon only, gfx1250 only. Moves tiles with the tensor data
                              movement engine: one HBM->LDS load and one LDS->peer store per rank
+        all_to_all_variant: Variant for all-to-all operation (default: "persistent")
+                           Options: "persistent", "tdm"
+                           - "persistent": Store-based kernel (Triton, or Gluon with use_gluon)
+                           - "tdm": Gluon only, gfx1250 only. Moves tiles with the tensor data
+                             movement engine: one HBM->LDS load and one LDS->peer store per
+                             tile and destination
         all_reduce_variant: Variant for all-reduce operation (default: "atomic")
                            Options: "atomic", "ring", "two_shot", "one_shot", "spinlock"
         all_reduce_distribution: Distribution for two-shot all-reduce (default: 0)
@@ -49,8 +55,10 @@ class Config:
                                 Only "two_shot" is supported
         num_stages: Number of pipeline stages for the kernel (default: 1). For the TDM
                     all-gather, the number of tiles each workgroup keeps in LDS: loads run
-                    num_stages - 1 tiles ahead of stores, and num_stages x block_size_m x
-                    block_size_n elements must fit in LDS
+                    num_stages - 1 tiles ahead of stores. For the TDM all-to-all, loads run
+                    ceil(num_stages / 2) tiles ahead of stores and the rest hold stores in
+                    flight. For both, num_stages x block_size_m x block_size_n elements must
+                    fit in LDS
         num_warps: Number of warps per workgroup (default: 4). For gluon kernels,
                    this also sets the warps of the BlockedLayout. The product of
                    the wavefront width (64 on CDNA3/4, 32 on CDNA5, read in-kernel)
@@ -99,6 +107,7 @@ class Config:
     chunk_size: int | None = None
     use_gluon: bool = False
     all_gather_variant: str | None = None
+    all_to_all_variant: str = "persistent"
     all_reduce_variant: str = "two_shot"
     all_reduce_distribution: int = 1
     all_reduce_num_rings: int = 1
@@ -138,6 +147,10 @@ class Config:
             )
         if self.all_gather_variant == "tdm" and not self.use_gluon:
             raise ValueError("all_gather_variant='tdm' is a Gluon kernel; set use_gluon=True")
+        if self.all_to_all_variant not in ["persistent", "tdm"]:
+            raise ValueError(f"all_to_all_variant must be one of: 'persistent', 'tdm', got {self.all_to_all_variant}")
+        if self.all_to_all_variant == "tdm" and not self.use_gluon:
+            raise ValueError("all_to_all_variant='tdm' is a Gluon kernel; set use_gluon=True")
         if self.all_reduce_variant not in ["atomic", "ring", "two_shot", "one_shot", "spinlock"]:
             raise ValueError(
                 f"all_reduce_variant must be one of: 'atomic', 'ring', 'two_shot', 'one_shot', 'spinlock', got {self.all_reduce_variant}"
