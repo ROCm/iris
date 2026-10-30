@@ -117,3 +117,81 @@ def test_check_disjoint_interleaved_columns():
 def test_check_disjoint_allows_overlap_within_a_rank():
     one = [Chunk((Region(0, 64),)), Chunk((Region(32, 64, 2, 128),))]
     check_disjoint([one, [Chunk((Region(256, 64),))]])
+
+
+def test_region_destination_defaults_to_source():
+    r = Region(128, 64, 2, 256)
+    assert (r.dst_offset, r.dst_row_stride, r.dst_end) == (128, 256, r.end)
+    r = Region(128, 64, 2, 256, dst_offset_bytes=0, dst_stride_bytes=64)
+    assert (r.dst_offset, r.dst_row_stride, r.dst_end) == (0, 64, 128)
+
+
+def test_builders_land_in_dst():
+    base = torch.zeros(4, 64, dtype=torch.float32)
+    staging = torch.zeros(8, 64, dtype=torch.float32)
+    (chunk,) = whole(base[2:], base=base, dst=staging[4:6], dst_base=staging, peers=[3, 1])
+    assert chunk.regions == (Region(2 * 256, 2 * 256, dst_offset_bytes=4 * 256),)
+    assert chunk.peers == (1, 3)
+    assert [c.regions[0].dst_offset for c in chunks(base, 2, dst=staging[2:6], dst_base=staging)] == [512, 1024]
+    with pytest.raises(ValueError, match="shape"):
+        whole(base, dst=staging, dst_base=staging)
+    # Without dst_base, a slice of the destination would land at offset 0
+    with pytest.raises(ValueError, match="dst_base"):
+        whole(base, dst=staging[4:8])
+
+
+def test_tile_chunks_dst_pitch_and_group():
+    """Tiles of a (32, 48) slice land in a staging buffer with a wider row pitch, at a column offset."""
+    out = torch.zeros(32, 48, dtype=torch.float16)
+    staging = torch.zeros(32, 2 * 64, dtype=torch.float16)
+    dst = staging[:, 64 : 64 + 48]
+    result = tile_chunks(out, (16, 16), tiles_per_chunk=3, dst=dst, dst_base=staging, group=5)
+    assert all(c.group == 5 and c.peers is None for c in result)
+    tile = result[1].regions[1]  # tile 4: row block 1, column block 1
+    assert tile.offset_bytes == 16 * 96 + 32 and tile.row_stride == 96
+    assert tile.dst_offset == 16 * 256 + 128 + 32 and tile.dst_row_stride == 256
+
+
+@pytest.mark.parametrize(
+    "chunk",
+    [
+        Chunk((Region(0, 64, dst_offset_bytes=1000),)),  # past the destination
+        Chunk((Region(0, 64, 2, dst_stride_bytes=32),)),  # destination stride < row_bytes
+        Chunk((Region(0, 64),), peers=()),
+        Chunk((Region(0, 64),), peers=(0,)),  # the sending rank itself
+        Chunk((Region(0, 64),), peers=(4,)),
+        Chunk((Region(0, 64),), group=-1),
+    ],
+)
+def test_validate_rejects_destinations(chunk):
+    with pytest.raises(ValueError):
+        validate([chunk], 1024, 1024, rank=0, world_size=4)
+
+
+def _inbox_schedules(world, block, slot_of):
+    """Rank s sends block p of its buffer to rank p only, into the inbox slot ``slot_of(s)``."""
+    return [
+        [
+            Chunk((Region(p * block, block, dst_offset_bytes=slot_of(s) * block),), peers=(p,))
+            for p in range(world)
+            if p != s
+        ]
+        for s in range(world)
+    ]
+
+
+def test_check_disjoint_per_receiver():
+    """A reduce-scatter's inboxes: every sender lands in its own slot of each receiver's destination."""
+    check_disjoint(_inbox_schedules(4, 64, lambda s: s), same_buffer=False)
+    # Ranks 1 and 2 share slot 1: they would race on ranks 0 and 3
+    with pytest.raises(ValueError, match="ranks 1 and 2 both send bytes 64 to 128 of rank 0's destination"):
+        check_disjoint(_inbox_schedules(4, 64, lambda s: min(s, 1)), same_buffer=False)
+
+
+def test_check_disjoint_same_buffer_protects_own_data():
+    """With the buffer as destination, what lands on a rank may not cover the bytes it sends."""
+    check_disjoint([[Chunk((Region(0, 64),), peers=(1,))], [Chunk((Region(64, 64),), peers=(2,))], []])
+    # Rank 0's bytes land on rank 1 over rank 1's own; rank 2 does not send, so landing there is fine
+    clash = [[Chunk((Region(0, 64),), peers=(1,))], [Chunk((Region(32, 64),), peers=(2,))], []]
+    with pytest.raises(ValueError, match="ranks 0 and 1 both send bytes 32 to 64 of the buffer"):
+        check_disjoint(clash)

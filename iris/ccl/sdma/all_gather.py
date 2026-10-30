@@ -132,7 +132,11 @@ def prepare(output_tensor, ctx, schedule=None, timeout=30.0):
             if not any(chunk.regions for chunk in schedule):
                 raise ValueError(f"rank {rank}'s schedule is empty; {hint}")
             for i, chunk in enumerate(schedule):
+                if chunk.peers is not None:
+                    raise ValueError(f"chunk {i} goes to only some ranks; an all-gather sends every chunk to all")
                 for region in chunk.regions:
+                    if region.dst_offset_bytes is not None or region.dst_stride_bytes is not None:
+                        raise ValueError(f"chunk {i}: region {region} lands elsewhere; an all-gather copies in place")
                     if region.offset_bytes < lo or region.end > hi:
                         raise ValueError(
                             f"chunk {i}: region {region} lies outside rank {rank}'s slice (bytes {lo} to {hi}); {hint}"

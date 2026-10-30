@@ -6,12 +6,14 @@ Device side of triggered plans (see ``iris.experimental.plan``).
 
 For each (chunk, peer), the host arms a chain on the copy engine: wait until the chunk's counter
 reaches ``writers * round``, copy the chunk's regions to the peer, then add 1 to the chunk's arrival
-counter on the peer. After a round's last chain to a peer, the copy engine adds 1 to this rank's
-completion counter for that peer. Kernels add to the counter with ``mark_ready``, observe arrivals
-with ``arrived`` / ``wait`` and completion with ``sent`` / ``wait_sent``.
+counter on the peer (its group's, if it has one). After a round's last chain to a peer, the copy
+engine adds 1 to this rank's completion counter for that peer. Kernels add to the counter with
+``mark_ready``, observe arrivals with ``arrived`` / ``wait`` (``group_arrived`` / ``wait_group``)
+and completion with ``sent`` / ``wait_sent``.
 
-View layout (int64 words): an 8-word header, then one 2-word record per chunk. Gates (int32, one
-symmetric tensor): ``num_chunks`` counters, then ``num_chunks`` arrivals, then one completion per rank.
+View layout (int64 words): an 8-word header, one 4-word record per chunk, then one word per group.
+Gates (int32, one symmetric tensor): ``num_chunks`` counters, ``num_chunks`` arrivals, one
+completion per rank, then one arrival per group.
 """
 
 import triton
@@ -20,7 +22,7 @@ from triton.language.core import _aggregate as aggregate
 
 from iris.mem.utils import wait_cnt
 
-ABI_VERSION = 2
+ABI_VERSION = 3
 
 # Header words
 HEADER_WORDS = tl.constexpr(8)
@@ -31,11 +33,14 @@ H_ROUND = tl.constexpr(3)
 H_GATES = tl.constexpr(4)
 H_WORLD_SIZE = tl.constexpr(5)
 H_SENDS_TO = tl.constexpr(6)  # bitmask of the peers this rank's chains go to
+H_NUM_GROUPS = tl.constexpr(7)
 
 # Chunk record words
-RECORD_WORDS = tl.constexpr(2)
+RECORD_WORDS = tl.constexpr(4)
 R_WRITERS = tl.constexpr(0)
 R_OWNER = tl.constexpr(1)
+R_ARRIVAL = tl.constexpr(2)  # gate word that shows the chunk here: its counter, its arrival or its group's
+R_EXPECTED = tl.constexpr(3)  # how much that word grows per round, seen from this rank (0: not sent here)
 
 
 @aggregate
@@ -107,20 +112,34 @@ class TriggeredView:
     @triton.jit
     def arrived(self, chunk):
         """
-        True once chunk ``chunk`` is visible here this round (marked ready, for this rank's own).
+        True once chunk ``chunk`` is visible here this round: for this rank's own chunks, once marked
+        ready; for another rank's chunk in a group, once the whole group has arrived here. Always
+        true of chunks not sent to this rank.
 
         Call uniformly across the CTA: the result reaches the other waves through a CTA barrier, so
-        every wave must make the same number of calls (true of ``wait``, ``sent`` and ``wait_sent`` too).
+        every wave must make the same number of calls (true of the other waits too).
         """
-        own = self.owns(chunk)
-        word = tl.where(own, chunk, self.num_chunks + chunk)
-        target = tl.where(own, self._record(chunk, R_WRITERS) * self.round, self.round)
+        word = self._record(chunk, R_ARRIVAL)
+        target = self._record(chunk, R_EXPECTED) * self.round
         return tl.atomic_add(self.gates + word, 0, sem="acquire", scope="sys") >= target
 
     @triton.jit
     def wait(self, chunk):
         """Spin until ``arrived(chunk)``."""
         while self.arrived(chunk) == 0:
+            pass
+
+    @triton.jit
+    def group_arrived(self, group):
+        """True once every chunk of ``group`` sent to this rank has arrived this round."""
+        expected = tl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + group)
+        word = 2 * self.num_chunks + tl.load(self.view + H_WORLD_SIZE) + group
+        return tl.atomic_add(self.gates + word, 0, sem="acquire", scope="sys") >= expected * self.round
+
+    @triton.jit
+    def wait_group(self, group):
+        """Spin until ``group_arrived(group)``."""
+        while self.group_arrived(group) == 0:
             pass
 
     @triton.jit
