@@ -2,7 +2,9 @@
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 
+import itertools
 import logging
+import socket
 
 import torch
 import torch.distributed as dist
@@ -11,6 +13,30 @@ import triton
 import triton.language as tl
 from iris.host.logging.logging import _log_rank
 from iris.host.tracing.kernel_artifacts import iris_launch
+
+_gpu_exchanges = itertools.count(1)
+
+
+def _gpu_key(device_id):
+    props = torch.cuda.get_device_properties(device_id)
+    return f"{socket.gethostname()}/{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:{props.pci_device_id:02x}"
+
+
+def rank_gpu_ordinals(device_id, num_ranks):
+    """
+    Each rank's GPU as a device ordinal in this process, or None where this process cannot see it.
+
+    Collective. GPUs are matched by host and PCI address, because a device ordinal names a different
+    GPU in each process whose HIP_VISIBLE_DEVICES differs. Exchanged through the rendezvous store, so
+    no NCCL collective is issued.
+    """
+    if num_ranks == 1:
+        return [device_id]
+    store = dist.distributed_c10d._get_default_store()
+    prefix = f"iris_gpu_v{next(_gpu_exchanges)}/"
+    store.set(f"{prefix}{dist.get_rank()}", _gpu_key(device_id))
+    local = {_gpu_key(i): i for i in range(torch.cuda.device_count())}
+    return [local.get(store.get(f"{prefix}{r}").decode("utf-8")) for r in range(num_ranks)]
 
 
 def _infer_device():

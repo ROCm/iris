@@ -229,7 +229,9 @@ class TriggeredPlan:
                         for r in chunk.regions
                     ]
                     arrival = heap.translate(gate + 8 * dv.G_ARRIVAL.value, self.rank, peer)
-                    armer.arm_chain(self.rank, peer, gate, self.round, copies, arrival, chunk.is_2d)
+                    armer.arm_chain(
+                        *self.ctx._copy_engine_devices(peer), gate, self.round, copies, arrival, chunk.is_2d
+                    )
                     armed[chunk_id * self.world_size + peer] = 1
         finally:
             self._armed.copy_(torch.from_numpy(armed))
