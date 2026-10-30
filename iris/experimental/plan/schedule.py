@@ -35,10 +35,12 @@ class Region:
 
     @property
     def row_stride(self):
+        """Bytes between the starts of consecutive rows (``row_bytes`` if packed)."""
         return self.row_bytes if self.stride_bytes is None else self.stride_bytes
 
     @property
     def end(self):
+        """Byte offset one past the last byte this region copies."""
         return self.offset_bytes + (self.rows - 1) * self.row_stride + self.row_bytes
 
 
@@ -51,6 +53,7 @@ class Chunk:
 
     @property
     def is_2d(self):
+        """True if any region has more than one row."""
         return any(r.rows > 1 for r in self.regions)
 
 

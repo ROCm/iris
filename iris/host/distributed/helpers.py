@@ -335,10 +335,12 @@ def _translate_ptr(ptr, from_rank, to_rank, heap_bases):
 def _device_barrier_kernel(
     flags_ptr,
     iris_rank,
+    num_ranks,
     world_size: tl.constexpr,
     rank_start,
     rank_stride,
     heap_bases,
+    BLOCK: tl.constexpr,
     MAX_SPINS: tl.constexpr = 1_000_000_000,
 ):
     """
@@ -346,39 +348,38 @@ def _device_barrier_kernel(
     CUDA graph capturable.
 
     Stateless w.r.t. host-side epoch tracking: there is no CPU-side epoch
-    counter. Each rank's flag on the heap serves as its own epoch counter,
-    managed entirely by the GPU via atomic_add. A persistent per-group flags
-    tensor is cached in ``_device_barrier_state``.
+    counter. ``flags`` is a (num_ranks, num_ranks) table of pairwise
+    counters; entry [r, j] counts the barriers rank r has entered whose
+    group contains rank j. Only rank r writes row r, on its own heap.
+    Counting per pair rather than per rank lets one table serve every
+    group: a barrier over one group does not advance the counters that
+    ranks outside it wait on.
 
-    Launched with grid=(1,). A single CTA:
-    1. Atomically increments its own flag (atomic_add, release)
-    2. Serially polls each remote rank's flag for the same value (acquire)
+    Launched with grid=(1,). A single CTA, one lane per peer:
+    1. Atomically increments its counter for every peer in the group (atomic_add, release)
+    2. Polls every peer's counter for this rank until all have caught up (acquire)
     """
-    # Increment own flag and determine target
-    own_flag_ptr = flags_ptr + iris_rank
-    own_translated = _translate_ptr(own_flag_ptr, iris_rank, iris_rank, heap_bases)
-    old = tl.atomic_add(own_translated, 1, sem="release", scope="sys")
-    target = old + 1
+    # Every extra CTA would bump the counters again and desynchronize the ranks.
+    if tl.program_id(0) != 0:
+        return
 
-    # Poll each remote rank serially
-    for i in range(world_size):
-        remote_rank = rank_start + i * rank_stride
-        if remote_rank != iris_rank:
-            remote_flag_ptr = flags_ptr + remote_rank
-            remote_translated = _translate_ptr(remote_flag_ptr, iris_rank, remote_rank, heap_bases)
-            spin_count = 0
-            while (
-                tl.atomic_cas(
-                    remote_translated,
-                    target,
-                    target,
-                    sem="acquire",
-                    scope="sys",
-                )
-                < target
-            ):
-                spin_count += 1
-                tl.device_assert(spin_count < MAX_SPINS, "device_barrier: timeout")
+    offsets = tl.arange(0, BLOCK)
+    peers = rank_start + offsets * rank_stride
+    is_peer = (offsets < world_size) & (peers != iris_rank)
+    # Lanes that are not peers point at this rank so that every address stays in range.
+    peers = tl.where(is_peer, peers, iris_rank)
+
+    own_row = flags_ptr + iris_rank * num_ranks
+    targets = tl.atomic_add(own_row + peers, 1, mask=is_peer, sem="release", scope="sys") + 1
+
+    remote_ptrs = _translate_ptr(flags_ptr + peers * num_ranks + iris_rank, iris_rank, peers, heap_bases)
+    pending = is_peer
+    spin_count = 0
+    while tl.max(pending.to(tl.int32), axis=0) > 0:
+        seen = tl.atomic_add(remote_ptrs, 0, mask=pending, sem="acquire", scope="sys")
+        pending = pending & (seen < targets)
+        spin_count += 1
+        tl.device_assert(spin_count < MAX_SPINS, "device_barrier: timeout")
 
 
 def distributed_device_barrier(flags, group, rank, num_ranks, heap_bases):
@@ -390,13 +391,13 @@ def distributed_device_barrier(flags, group, rank, num_ranks, heap_bases):
     this launches a single-CTA Triton kernel that synchronizes via
     device-side atomics, making it safe to use during CUDA graph capture.
 
-    Stateless w.r.t. host-side epoch tracking: each rank's flag on the
-    symmetric heap serves as its own epoch counter, managed entirely by
-    the GPU via atomic_add. A persistent per-group flags tensor is cached
-    in ``_device_barrier_state``.
+    Stateless w.r.t. host-side epoch tracking: ``flags`` holds pairwise
+    counters managed entirely by the GPU via atomic_add, and one table
+    serves every process group, so nothing is allocated per call or per group.
 
     Args:
-        flags: int32 tensor on symmetric heap, one element per rank.
+        flags: int32 tensor of shape (num_ranks, num_ranks) on the symmetric heap,
+            zero-initialized and allocated collectively by all ranks.
         group: ProcessGroup or None. If None, uses all ranks.
         rank: Global rank of this process.
         num_ranks: Total number of ranks in the default group.
@@ -408,10 +409,12 @@ def distributed_device_barrier(flags, group, rank, num_ranks, heap_bases):
         (1,),
         flags,
         rank_global,
+        num_ranks,
         world_size,
         rank_start,
         rank_stride,
         heap_bases,
+        triton.next_power_of_2(world_size),
         algorithm="barrier",
         rank=rank_global,
     )

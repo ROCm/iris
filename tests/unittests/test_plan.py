@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 
 # Triggered plans on the copy engines. Each rank owns a slice of a symmetric buffer and sends it to
-# every peer; chunks are released by kernels with TriggeredView.mark_ready.
+# every peer; chunks are released by kernels with TriggeredView.mark_ready (Triton or Gluon).
 #
 # Every test uses its plans as context managers, so no chain is left parked on a queue.
 
@@ -13,8 +13,12 @@ import pytest
 import torch
 import triton
 import triton.language as tl
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+from triton.language.extra.hip import utils as hip_utils
 
 import iris
+from iris.experimental.plan.gluon import TriggeredView as GluonView
 from iris.host import queue_ledger
 from iris.experimental.plan import triton as dv
 from iris.mem.utils import read_realtime
@@ -33,8 +37,8 @@ from iris.experimental.plan import (
 EMPTY = -1
 
 
-def _ctx():
-    ctx = iris.iris(1 << 26, allocator_type="vmem_chunked", engines=("sdma",))
+def _ctx(allocator_type="vmem_chunked"):
+    ctx = iris.iris(1 << 26, allocator_type=allocator_type, engines=("sdma",))
     if ctx.get_num_ranks() < 2:
         pytest.skip("triggered plans need at least two ranks")
     return ctx
@@ -272,6 +276,86 @@ def test_many_writers_one_chunk():
                 BLOCK=1024,
             )
             plan.wait()
+            _check_and_wipe(ctx, buffer, round, slice_elems)
+    ctx.barrier()
+    del ctx
+
+
+@gluon.jit
+def _flat_layout(BLOCK: gl.constexpr):
+    THREADS: gl.constexpr = hip_utils.num_threads()
+    WARPS: gl.constexpr = hip_utils.num_warps()
+    return gl.BlockedLayout([BLOCK // THREADS], [THREADS // WARPS], [WARPS], [0])
+
+
+@gluon.jit
+def _gluon_producer(buf, handle, first, round, start, part, WRITERS: gl.constexpr, BLOCK: gl.constexpr):
+    """Program p writes part p of the slice and marks chunk p // WRITERS ready."""
+    layout: gl.constexpr = _flat_layout(BLOCK)
+    pid = gl.program_id(0)
+    for off in range(0, part, BLOCK):
+        idx = start + pid * part + off + gl.arange(0, BLOCK, layout=layout)
+        gl.store(buf + idx, (round << 24) | idx)
+    GluonView.initialize(handle).mark_ready(first + pid // WRITERS)
+
+
+@gluon.jit
+def _gluon_consumer(buf, out, status, handle, chunk_elems, budget, BLOCK: gl.constexpr):
+    """Program q waits for chunk q (up to ``budget`` polls), then copies it from ``buf`` to ``out``."""
+    layout: gl.constexpr = _flat_layout(BLOCK)
+    cv = GluonView.initialize(handle)
+    chunk = gl.program_id(0)
+    # Every wave must poll the same number of times: arrived() is a CTA-wide operation
+    i = 0
+    ok = cv.arrived(chunk)
+    while (ok == 0) & (i < budget):
+        ok = cv.arrived(chunk)
+        i += 1
+    if ok:
+        for off in range(0, chunk_elems, BLOCK):
+            idx = chunk * chunk_elems + off + gl.arange(0, BLOCK, layout=layout)
+            gl.store(out + idx, gl.load(buf + idx))
+    gl.store(status + chunk, ok.to(gl.int32))
+
+
+@pytest.mark.parametrize("allocator_type", ["torch", "vmem_chunked"])
+def test_gluon_producer_and_consumer(allocator_type):
+    """A Gluon kernel marks this rank's chunks ready; another waits for every chunk and reads it."""
+    ctx = _ctx(allocator_type)
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems, num_chunks, k, block = 16 * 1024, 4, 2, 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    buffer.fill_(EMPTY)
+    schedule = chunks(_slice(buffer, rank, slice_elems), num_chunks, base=buffer, writers=k)
+    out = torch.empty_like(buffer)
+    status = torch.zeros(world * num_chunks, dtype=torch.int32, device=buffer.device)
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
+        assert [plan.chunk_id(r, 0) for r in range(world)] == [r * num_chunks for r in range(world)]
+        for round in range(1, 4):
+            if round > 1:
+                plan.next_round()
+            out.fill_(EMPTY)
+            status.zero_()
+            handle = plan.start()
+            _check_before_release(ctx, plan, buffer, slice_elems)
+            _gluon_producer[(num_chunks * k,)](
+                buffer,
+                handle,
+                plan.chunk_id(rank, 0),
+                round,
+                rank * slice_elems,
+                slice_elems // (num_chunks * k),
+                WRITERS=k,
+                BLOCK=block,
+                num_warps=4,
+            )
+            _gluon_consumer[(world * num_chunks,)](
+                buffer, out, status, handle, slice_elems // num_chunks, 20_000_000, BLOCK=block, num_warps=4
+            )
+            plan.wait()
+            assert status.tolist() == [1] * (world * num_chunks)
+            assert torch.equal(out, _expected(round, out.numel()))
             _check_and_wipe(ctx, buffer, round, slice_elems)
     ctx.barrier()
     del ctx

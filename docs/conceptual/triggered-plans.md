@@ -72,6 +72,27 @@ with TriggeredPlan(ctx, out, schedule) as plan:   # collective: allocates gates,
         plan.next_round()                          # collective: prepare, barrier
 ```
 
+For this in-place all-gather, `ctx.ccl.prepare_all_gather(out, schedule)` builds the same plan and
+also checks that each rank's schedule stays inside its own rows of `out` (by default it sends them as
+one chunk, `whole()`). See `examples/34_sdma_all_gather`.
+
+### Gluon
+
+Gluon kernels use `iris.experimental.plan.gluon.TriggeredView`. It reads the same handle and has
+the same methods as the Triton `TriggeredView`, so the host side does not change:
+
+```python
+from iris.experimental.plan.gluon import TriggeredView
+
+@gluon.jit
+def producer(out, handle, ...):
+    ...                                            # write this program's part of the chunk
+    TriggeredView.initialize(handle).mark_ready(chunk)
+```
+
+`mark_ready` waits for vector-memory stores, including AMD buffer stores (`buffer_store`). Call it
+after `gl.warp_specialize` returns, not inside a partition.
+
 ## The kernel author's contract
 
 1. **Chunks complete in schedule order.** All of a rank's copies to one peer share one queue and
