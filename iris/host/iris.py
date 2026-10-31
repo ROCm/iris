@@ -38,9 +38,13 @@ Example (Object-Oriented DeviceContext API):
     >>>     data = device_ctx.load(buffer, from_rank=remote_rank)
 """
 
+import numbers
 import os
 
 from iris.host.distributed.helpers import (
+    rank_gpu_ordinals,
+    require_process_group_device,
+    distributed_allgather,
     init_distributed,
     distributed_barrier,
     distributed_device_barrier,
@@ -74,6 +78,40 @@ from iris.host.platform.utils import is_simulation_env
 _SUPPORTED_ENGINES = frozenset({"sdma"})
 
 
+def _resolve_gpu_id(device, cur_rank, num_gpus):
+    """The GPU index a rank uses: ``device`` if given, else ``cur_rank % num_gpus``."""
+    if device is None:
+        return cur_rank % num_gpus
+    if isinstance(device, bool):
+        raise TypeError(f"device must be a GPU index, str or torch.device, got {device!r}")
+    if isinstance(device, numbers.Integral):
+        device = int(device)
+    else:
+        device = torch.device(device)
+        if device.type != "cuda":
+            raise ValueError(f"Iris needs a GPU device, got {device}")
+        device = torch.cuda.current_device() if device.index is None else device.index
+    if not 0 <= device < num_gpus:
+        raise ValueError(f"GPU {device} is not one of the {num_gpus} visible GPUs")
+    return device
+
+
+def _require_sdma_visibility(rank_gpus):
+    """Collective: raise on every rank if any rank cannot see every rank's GPU, so no rank is left waiting."""
+    error = None
+    if any(gpu is None for gpu in rank_gpus):
+        error = (
+            "every rank's GPU must be on one host and visible to every process. The SDMA copy engine does not "
+            'reach GPUs on other hosts; drop "sdma" from engines for multi-host jobs.'
+        )
+    failed = distributed_allgather(np.array([error is not None], dtype=np.int64)).reshape(-1).nonzero()[0]
+    if len(failed):
+        raise ValueError(
+            f'engines=("sdma",) cannot run on ranks {failed.tolist()}: '
+            + (error or "see the error those ranks report.")
+        )
+
+
 class Iris:
     """
     Main Iris class for multi-GPU communication and memory management.
@@ -87,6 +125,11 @@ class Iris:
         engines (str or tuple of str, optional): Engine name or names to set up. Use
             ``("sdma",)`` for host- and device-initiated SDMA operations (needs
             ``pip install iris[sdma]``). Defaults to ``()`` (none).
+        device (int, str or torch.device, optional): GPU this rank runs on, as an index
+            into the visible GPUs, ``"cuda:N"``, or a ``torch.device``; ``"cuda"`` uses the
+            current device, so call ``torch.cuda.set_device`` first. ``None`` (default) uses
+            ``rank % visible GPUs``. It must be the GPU the process group is bound to; if the
+            group was initialized with ``device_id``, a different GPU raises ``ValueError``.
 
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap with torch allocator
@@ -98,7 +141,7 @@ class Iris:
 
     """
 
-    def __init__(self, heap_size=1 << 30, allocator_type="torch", engines=()):
+    def __init__(self, heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
         if engines is None:
             engines = ()
         elif isinstance(engines, str):
@@ -118,7 +161,8 @@ class Iris:
         comm, cur_rank, num_ranks = init_distributed()
         num_gpus = count_devices()
 
-        gpu_id = cur_rank % num_gpus
+        gpu_id = _resolve_gpu_id(device, cur_rank, num_gpus)
+        require_process_group_device(gpu_id, device_given=device is not None)
         set_device(gpu_id)
 
         self.comm = comm
@@ -126,6 +170,13 @@ class Iris:
         self.cur_rank = cur_rank
         self.gpu_id = gpu_id
         self.heap_size = heap_size
+
+        rank_gpus = None
+        if self._sdma_ep is not None:
+            # rocm-xio keys queues by device ordinal and only opens queues between GPUs this process can see
+            rank_gpus = rank_gpu_ordinals(gpu_id, num_ranks)
+            _require_sdma_visibility(rank_gpus)
+            self._copy_engine_gpus = rank_gpus
 
         if logger.isEnabledFor(logging.INFO):
             self._log_with_rank(
@@ -137,7 +188,13 @@ class Iris:
         # Room for the device barrier's flags (allocated below) on top of the caller's heap_size.
         barrier_flags_bytes = num_ranks * num_ranks * torch.int32.itemsize
         self.heap = SymmetricHeap(
-            heap_size, gpu_id, cur_rank, num_ranks, allocator_type, reserved_bytes=barrier_flags_bytes
+            heap_size,
+            gpu_id,
+            cur_rank,
+            num_ranks,
+            allocator_type,
+            reserved_bytes=barrier_flags_bytes,
+            rank_gpus=rank_gpus,
         )
         self.device = f"cuda:{gpu_id}"
         self.heap_bases = self.heap.get_heap_bases()
@@ -164,7 +221,7 @@ class Iris:
         self.copy_engines_device_ctx = None
         self._sdma_all_gather_counters = None
         if self._sdma_ep is not None:
-            self._init_copy_engines(num_gpus, num_ranks, cur_rank)
+            self._init_copy_engines(num_ranks)
             # all_gather(engine="sdma") arrival counters, one per source rank; allocated here since
             # allocation is collective over all ranks, and a call may come from a subgroup
             self._sdma_all_gather_counters = (
@@ -188,24 +245,22 @@ class Iris:
         # Pre-build the device context tensor (rebuilt when tracing is enabled)
         self._build_device_context()
 
-    def _init_copy_engines(self, num_gpus, num_ranks, cur_rank):
+    def _init_copy_engines(self, num_ranks):
         sdma_ep = self._sdma_ep
         sdma_ep.init()
 
         context_size = sdma_ep.QUEUE_DEVICE_CTX_SIZE
         self.copy_engines_device_ctx = torch.zeros((num_ranks, context_size), dtype=torch.uint64, device=self.device)
 
-        num_local_ranks = min(num_gpus, num_ranks)
-        cur_local_rank = cur_rank % num_local_ranks
-
-        for local_rank in range(num_local_ranks):
+        for peer_gpu in sorted(set(self._copy_engine_gpus)):
             # Device-initiated queues
-            sdma_ep.create_queue(cur_local_rank, local_rank)
+            sdma_ep.create_queue(self.gpu_id, peer_gpu)
             # Host-initiated queues
-            sdma_ep.create_host_queue(cur_local_rank, local_rank)
+            sdma_ep.create_host_queue(self.gpu_id, peer_gpu)
 
-            handle = sdma_ep.get_queue_device_ctx(cur_local_rank, local_rank)
-            self.debug(f"---- Queue {local_rank} ------------")
+        for peer_rank, peer_gpu in enumerate(self._copy_engine_gpus):
+            handle = sdma_ep.get_queue_device_ctx(self.gpu_id, peer_gpu)
+            self.debug(f"---- Queue {peer_rank} (GPU {self.gpu_id} -> GPU {peer_gpu}) ------------")
             self.debug(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
             self.debug(f"rptr {handle.rptr:#x} at {id(handle.rptr):#x}")
             self.debug(f"wptr {handle.wptr:#x} at {id(handle.wptr):#x}")
@@ -213,12 +268,12 @@ class Iris:
             self.debug(f"cached_write_ptr {handle.cached_wptr:#x} at {id(handle.cached_wptr):#x}")
             self.debug(f"committed_write_ptr {handle.committed_wptr:#x} at {id(handle.committed_wptr):#x}")
 
-            self.copy_engines_device_ctx[local_rank][0] = handle.queue_buf
-            self.copy_engines_device_ctx[local_rank][1] = handle.rptr
-            self.copy_engines_device_ctx[local_rank][2] = handle.wptr
-            self.copy_engines_device_ctx[local_rank][3] = handle.doorbell
-            self.copy_engines_device_ctx[local_rank][4] = handle.cached_wptr
-            self.copy_engines_device_ctx[local_rank][5] = handle.committed_wptr
+            self.copy_engines_device_ctx[peer_rank][0] = handle.queue_buf
+            self.copy_engines_device_ctx[peer_rank][1] = handle.rptr
+            self.copy_engines_device_ctx[peer_rank][2] = handle.wptr
+            self.copy_engines_device_ctx[peer_rank][3] = handle.doorbell
+            self.copy_engines_device_ctx[peer_rank][4] = handle.cached_wptr
+            self.copy_engines_device_ctx[peer_rank][5] = handle.committed_wptr
 
     def _require_copy_engine(self):
         if self._sdma_ep is None:
@@ -226,6 +281,10 @@ class Iris:
                 'SDMA is disabled; initialize Iris with engines=("sdma",) (needs `pip install iris[sdma]`).'
             )
         return self._sdma_ep
+
+    def _copy_engine_devices(self, to_rank):
+        """The (source, destination) device ordinals of this rank's copy-engine queue to ``to_rank``."""
+        return self.gpu_id, self._copy_engine_gpus[to_rank]
 
     def __del__(self):
         """Cleanup resources on deletion."""
@@ -1127,6 +1186,7 @@ class Iris:
 
         self._check_host_queue_idle(to_rank)
         from_rank = self.get_rank()
+        src_gpu, dst_gpu = self._copy_engine_devices(to_rank)
         from_ptr = from_tensor.data_ptr()
         to_ptr = self.heap.translate(to_tensor.data_ptr(), from_rank, to_rank)
         size = from_tensor.numel() * from_tensor.element_size()
@@ -1145,26 +1205,22 @@ class Iris:
             # Wait + copy + signal (two calls)
             wait_val = int(wait_value if wait_value is not None else 0)
             signal_val = int(signal_value)
-            sdma_ep.wait_flag_then_put(
-                from_rank, to_rank, channel, wait_ptr, wait_val, to_ptr, from_ptr, size, wait_bits
-            )
-            sdma_ep.signal(from_rank, to_rank, channel, signal_ptr, signal_val, signal_bits)
+            sdma_ep.wait_flag_then_put(src_gpu, dst_gpu, channel, wait_ptr, wait_val, to_ptr, from_ptr, size, wait_bits)
+            sdma_ep.signal(src_gpu, dst_gpu, channel, signal_ptr, signal_val, signal_bits)
         elif has_wait:
             # Wait + copy
             wait_val = int(wait_value if wait_value is not None else 0)
-            sdma_ep.wait_flag_then_put(
-                from_rank, to_rank, channel, wait_ptr, wait_val, to_ptr, from_ptr, size, wait_bits
-            )
+            sdma_ep.wait_flag_then_put(src_gpu, dst_gpu, channel, wait_ptr, wait_val, to_ptr, from_ptr, size, wait_bits)
         elif has_signal:
             # Copy + signal
             signal_val = int(signal_value)
-            sdma_ep.put_signal(from_rank, to_rank, channel, to_ptr, from_ptr, size, signal_ptr, signal_val, signal_bits)
+            sdma_ep.put_signal(src_gpu, dst_gpu, channel, to_ptr, from_ptr, size, signal_ptr, signal_val, signal_bits)
         else:
             # Simple copy
-            sdma_ep.put(from_rank, to_rank, channel, to_ptr, from_ptr, size)
+            sdma_ep.put(src_gpu, dst_gpu, channel, to_ptr, from_ptr, size)
 
         if not async_op:
-            sdma_ep.quiet(from_rank, to_rank, channel)
+            sdma_ep.quiet(src_gpu, dst_gpu, channel)
 
     def put_tile(
         self,
@@ -1216,7 +1272,7 @@ class Iris:
         """
         sdma_ep = self._require_copy_engine()
         self._check_host_queue_idle(to_rank)
-        from_rank = self.get_rank()
+        src_gpu, dst_gpu = self._copy_engine_devices(to_rank)
 
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
         signal_ptr, signal_bits = self._flag_pointer_and_bits(signal_flag, default_bits=32)
@@ -1237,22 +1293,22 @@ class Iris:
             # Wait + tile copy + signal (two calls)
             wait_val = int(wait_value if wait_value is not None else 0)
             signal_val = int(signal_value)
-            sdma_ep.wait_flag_then_put_tile(from_rank, to_rank, channel, wait_ptr, wait_val, *tile, wait_bits)
-            sdma_ep.signal(from_rank, to_rank, channel, signal_ptr, signal_val, signal_bits)
+            sdma_ep.wait_flag_then_put_tile(src_gpu, dst_gpu, channel, wait_ptr, wait_val, *tile, wait_bits)
+            sdma_ep.signal(src_gpu, dst_gpu, channel, signal_ptr, signal_val, signal_bits)
         elif has_wait:
             # Wait + tile copy
             wait_val = int(wait_value if wait_value is not None else 0)
-            sdma_ep.wait_flag_then_put_tile(from_rank, to_rank, channel, wait_ptr, wait_val, *tile, wait_bits)
+            sdma_ep.wait_flag_then_put_tile(src_gpu, dst_gpu, channel, wait_ptr, wait_val, *tile, wait_bits)
         elif has_signal:
             # Tile copy + signal
             signal_val = int(signal_value)
-            sdma_ep.put_tile_signal(from_rank, to_rank, channel, *tile, signal_ptr, signal_val, signal_bits)
+            sdma_ep.put_tile_signal(src_gpu, dst_gpu, channel, *tile, signal_ptr, signal_val, signal_bits)
         else:
             # Simple tile copy
-            sdma_ep.put_tile(from_rank, to_rank, channel, *tile)
+            sdma_ep.put_tile(src_gpu, dst_gpu, channel, *tile)
 
         if not async_op:
-            sdma_ep.quiet(from_rank, to_rank, channel)
+            sdma_ep.quiet(src_gpu, dst_gpu, channel)
 
     def put_tiles(
         self,
@@ -1294,7 +1350,7 @@ class Iris:
         """
         sdma_ep = self._require_copy_engine()
         self._check_host_queue_idle(to_rank)
-        from_rank = self.get_rank()
+        src_gpu, dst_gpu = self._copy_engine_devices(to_rank)
 
         per_tile = (global_addrs, dst_addrs, tile_heights, tile_widths, src_strides, dst_strides)
         if len({len(values) for values in per_tile}) != 1:
@@ -1321,22 +1377,22 @@ class Iris:
             # Wait + tiles copy + signal (two calls)
             wait_val = int(wait_value if wait_value is not None else 0)
             signal_val = int(signal_value)
-            sdma_ep.wait_flag_then_put_tiles(from_rank, to_rank, channel, wait_ptr, wait_val, *tiles, wait_bits)
-            sdma_ep.signal(from_rank, to_rank, channel, signal_ptr, signal_val, signal_bits)
+            sdma_ep.wait_flag_then_put_tiles(src_gpu, dst_gpu, channel, wait_ptr, wait_val, *tiles, wait_bits)
+            sdma_ep.signal(src_gpu, dst_gpu, channel, signal_ptr, signal_val, signal_bits)
         elif has_wait:
             # Wait + tiles copy
             wait_val = int(wait_value if wait_value is not None else 0)
-            sdma_ep.wait_flag_then_put_tiles(from_rank, to_rank, channel, wait_ptr, wait_val, *tiles, wait_bits)
+            sdma_ep.wait_flag_then_put_tiles(src_gpu, dst_gpu, channel, wait_ptr, wait_val, *tiles, wait_bits)
         elif has_signal:
             # Tiles copy + signal
             signal_val = int(signal_value)
-            sdma_ep.put_tiles_signal(from_rank, to_rank, channel, *tiles, signal_ptr, signal_val, signal_bits)
+            sdma_ep.put_tiles_signal(src_gpu, dst_gpu, channel, *tiles, signal_ptr, signal_val, signal_bits)
         else:
             # Simple tiles copy
-            sdma_ep.put_tiles(from_rank, to_rank, channel, *tiles)
+            sdma_ep.put_tiles(src_gpu, dst_gpu, channel, *tiles)
 
         if not async_op:
-            sdma_ep.quiet(from_rank, to_rank, channel)
+            sdma_ep.quiet(src_gpu, dst_gpu, channel)
 
     def quiet(self, to_rank: int = None, channel: int = 0):
         """
@@ -1355,15 +1411,14 @@ class Iris:
             >>> shmem.quiet()  # Wait for all ranks
         """
         sdma_ep = self._require_copy_engine()
-        src_rank = self.get_rank()
         if to_rank is not None:
             self._check_host_queue_idle(to_rank)
-            sdma_ep.quiet(src_rank, to_rank, channel)
+            sdma_ep.quiet(*self._copy_engine_devices(to_rank), channel)
         else:
             # Quiet to all ranks
-            for rank in range(self.get_num_ranks()):
+            for rank, peer_gpu in enumerate(self._copy_engine_gpus):
                 self._check_host_queue_idle(rank)
-                sdma_ep.quiet(src_rank, rank, channel)
+                sdma_ep.quiet(self.gpu_id, peer_gpu, channel)
 
     def _check_host_queue_idle(self, to_rank):
         # Chains parked on a host queue block everything queued behind them, quiet() included
@@ -1864,7 +1919,7 @@ class Iris:
             )
 
 
-def iris(heap_size=1 << 30, allocator_type="torch", engines=()):
+def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
     """
     Create and return an Iris instance with the specified heap size.
 
@@ -1873,6 +1928,7 @@ def iris(heap_size=1 << 30, allocator_type="torch", engines=()):
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem".
                               Can be overridden with IRIS_ALLOCATOR environment variable.
         engines (str or tuple of str, optional): See :class:`Iris`.
+        device (int, str or torch.device, optional): See :class:`Iris`.
 
     Returns:
         Iris: An initialized Iris instance.
@@ -1886,4 +1942,4 @@ def iris(heap_size=1 << 30, allocator_type="torch", engines=()):
         >>> iris_ctx = iris.iris(2**30, allocator_type="vmem")
         >>> tensor = iris_ctx.zeros(1024, 1024)
     """
-    return Iris(heap_size, allocator_type, engines=engines)
+    return Iris(heap_size, allocator_type, engines=engines, device=device)

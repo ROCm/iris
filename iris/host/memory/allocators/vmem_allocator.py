@@ -15,6 +15,7 @@ from typing import Dict
 from threading import Lock
 
 from .base import BaseAllocator
+from iris.host.distributed.helpers import rank_gpu_ordinals
 from iris.host.logging.logging import _log_rank
 from iris.host.platform.hip import (
     get_allocation_granularity,
@@ -50,6 +51,8 @@ class VMemAllocator(BaseAllocator):
         rank: Current rank ID
         world_size: Total number of ranks
         va_multiplier: VA space multiplier (reserve more VA than physical)
+        rank_gpus: Each rank's GPU as a device ordinal in this process, if already exchanged;
+            None exchanges it here (collective)
     """
 
     def __init__(
@@ -59,16 +62,36 @@ class VMemAllocator(BaseAllocator):
         rank: int,
         world_size: int,
         va_multiplier: float = 1.0,
+        rank_gpus=None,
     ):
         super().__init__(heap_size, device_id, rank, world_size)
-        # Peer access is granted to local device ids 0..world_size-1.
+        # close() releases whatever a failed __init__ got as far as creating
+        self._closed = False
+        self.lock = Lock()
+        self.allocations: Dict[int, tuple] = {}
+        self.allocation_order = []
+        self.base_va = 0
+        try:
+            self._init_heap(heap_size, device_id, rank, world_size, va_multiplier, rank_gpus)
+        except BaseException:
+            self.close()
+            raise
+
+    def _init_heap(self, heap_size, device_id, rank, world_size, va_multiplier, rank_gpus):
+        # Peer access is granted to every rank's GPU, all of which this single-host allocator must see.
         local_devices = torch.cuda.device_count()
         if world_size > local_devices:
-            self._closed = True
             raise RuntimeError(
                 f"VMemAllocator needs every rank's GPU visible in each process, but world_size={world_size} and "
                 f"this process sees {local_devices} GPUs. It is single-host; use IRIS_ALLOCATOR=vmem_chunked "
                 "for multi-host jobs."
+            )
+        peer_gpus = rank_gpus if rank_gpus is not None else rank_gpu_ordinals(device_id, world_size)
+        unseen = [r for r, gpu in enumerate(peer_gpus) if gpu is None]
+        if unseen:
+            raise RuntimeError(
+                f"VMemAllocator needs every rank's GPU visible in each process, but this process cannot see the "
+                f"GPUs of ranks {unseen}. It is single-host; use IRIS_ALLOCATOR=vmem_chunked for multi-host jobs."
             )
         _log_rank(
             logging.INFO,
@@ -80,7 +103,6 @@ class VMemAllocator(BaseAllocator):
         )
         self.va_multiplier = va_multiplier
         self.device = torch.device(f"cuda:{device_id}")
-        self.lock = Lock()
         self.granularity = get_allocation_granularity(self.device_id)
         self.aligned_heap_size = (heap_size + self.granularity - 1) & ~(self.granularity - 1)
         self.va_size = self.aligned_heap_size
@@ -91,11 +113,16 @@ class VMemAllocator(BaseAllocator):
             self.minimal_size = self.granularity
 
         self.minimal_handle = mem_create(self.minimal_size, self.device_id)
-        mem_map(self.base_va, self.minimal_size, 0, self.minimal_handle)
+        try:
+            mem_map(self.base_va, self.minimal_size, 0, self.minimal_handle)
+        except BaseException:
+            mem_release(self.minimal_handle)
+            raise
+        self._track_allocation(0, self.minimal_size, False, self.minimal_handle, self.base_va)
 
         # ROCm: mem_set_access must be called cumulatively from base_va (see rocm-systems#2667)
         self.access_descs = []
-        for peer_device_id in range(world_size):
+        for peer_device_id in sorted(set(peer_gpus)):
             desc = hipMemAccessDesc()
             desc.location.type = hipMemLocationTypeDevice
             desc.location.id = peer_device_id
@@ -104,10 +131,6 @@ class VMemAllocator(BaseAllocator):
 
         self.cumulative_mapped_size = self.minimal_size
         mem_set_access(self.base_va, self.cumulative_mapped_size, self.access_descs)
-
-        self.allocations: Dict[int, tuple] = {}
-        self.allocation_order = []
-        self._track_allocation(0, self.minimal_size, False, self.minimal_handle, self.base_va)
         self.current_offset = self.minimal_size
 
         self.world_size = world_size
