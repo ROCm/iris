@@ -2,7 +2,7 @@
 # Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 
 [build-system]
-requires = ["setuptools>=84.0.0", "wheel", "setuptools-scm>=10.3.4"]
+requires = ["setuptools>=84.2.1", "wheel", "setuptools-scm>=10.3.4"]
 build-backend = "setuptools.build_meta"
 
 [project]
