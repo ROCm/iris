@@ -595,10 +595,12 @@ def _snapshot(buf, out, n, BLOCK: tl.constexpr):
 
 
 @triton.jit
-def _sleep(ticks):
+def _hold(flag, released, ticks):
+    """Spin until the host sets ``flag``; ``released`` is 1 if it did, 0 if ``ticks`` ran out first."""
     t0 = read_realtime()
-    while read_realtime() - t0 < ticks:
+    while (tl.load(flag, volatile=True) == 0) & (read_realtime() - t0 < ticks):
         pass
+    tl.store(released, (tl.load(flag, volatile=True) != 0).to(tl.int32))
 
 
 def test_stream_ordered_rounds():
@@ -612,12 +614,16 @@ def test_stream_ordered_rounds():
     snaps = torch.full((rounds, buffer.numel()), EMPTY, dtype=torch.int32, device=buffer.device)
     ctx.barrier()
 
+    flag = torch.zeros(1, dtype=torch.int32, pin_memory=True)
+    released = torch.zeros(1, dtype=torch.int32, device=buffer.device)
+
     with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         for round in range(1, rounds + 1):
             if round == 2:
-                # Round 1 compiled every kernel. Every call from here on queues behind this one; none may wait for it
-                _sleep[(1,)](50_000_000)  # 0.5 s of the 100 MHz clock
-                start = time.monotonic()
+                # Round 1 compiled every kernel. Every call from here on queues behind this one, which
+                # runs until the host sets the flag after the loop: a call that waited for the GPU would
+                # only return once the hold gave up
+                _hold[(1,)](flag, released, 1_000_000_000, num_warps=1)  # gives up after 10 s
             handle = plan.start()
             _regions_producer[(len(schedule),)](
                 buffer, regs, max_regs, handle, plan.chunk_id(rank, 0), round, BLOCK=block
@@ -627,7 +633,8 @@ def test_stream_ordered_rounds():
             _snapshot[(triton.cdiv(buffer.numel(), block),)](buffer, snaps[round - 1], buffer.numel(), BLOCK=block)
             if round < rounds:
                 plan.next_round()
-        assert time.monotonic() - start < 0.25, "a plan call synchronized the host with the GPU"
+        flag[0] = 1
+    assert released.item() == 1, "a plan call waited for the GPU"
     for round in range(1, rounds + 1):
         assert torch.equal(snaps[round - 1], _expected(round, buffer.numel())), f"round {round}"
     ctx.barrier()
