@@ -119,6 +119,21 @@ def test_sent_waits_for_every_peer():
     assert out.item() == 1
 
 
+def test_sent_beyond_64_ranks():
+    """Each peer has its own flag in the view, so sent() is not limited to a 64-bit mask."""
+    world = 70
+    one = [Chunk((Region(0, 64),))]
+    out = torch.zeros(1, dtype=torch.int32, device="cuda")
+    view, (_, _, completion, *_) = _view(0, [one] + [[] for _ in range(world - 1)], round=1)
+    completion[1:] = 1
+    completion[world - 1] = 0  # the last peer, past bit 63, has not finished
+    _sent_kernel[(1,)](view, out)
+    assert out.item() == 0
+    completion[world - 1] = 1
+    _sent_kernel[(1,)](view, out)
+    assert out.item() == 1
+
+
 def test_wait_kernel_waits_for_own_marks():
     """wait() must not get past a rank's own chunks before all of their writers have marked them."""
     k = 3
