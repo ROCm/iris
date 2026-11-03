@@ -117,3 +117,18 @@ def test_sent_waits_for_every_peer():
     view, _ = _view(1, [one, [], []], round=2)
     _sent_kernel[(1,)](view, out)
     assert out.item() == 1
+
+
+def test_wait_kernel_waits_for_own_marks():
+    """wait() must not get past a rank's own chunks before all of their writers have marked them."""
+    k = 3
+    one = [Chunk((Region(0, 64),), writers=k)]
+    view, (counters, _, completion, *_) = _view(0, [one, []], round=1)
+    status = torch.zeros(1 + 2, dtype=torch.int32, device="cuda")  # one program per chunk, then per rank
+    completion[1] = 1  # the copy to rank 1 is done; only the marks are missing
+    counters[0] = k - 1
+    kernels.wait_kernel[(3,)](view, status, BUDGET=100, OWN_ONLY=True, num_warps=1)
+    assert status[0].item() == 0
+    counters[0] = k
+    kernels.wait_kernel[(3,)](view, status, BUDGET=100, OWN_ONLY=True, num_warps=1)
+    assert status.tolist() == [1, 1, 1]

@@ -331,7 +331,7 @@ class TriggeredPlan:
                 detail = f"; own chunks short of writers' marks: {', '.join(short[:16])}" if short else ""
                 if queues:
                     detail = f"; copies to ranks {queues} not finished{detail}"
-                raise TimeoutError(f"round {self.round}: chunks {missing[:16]} not arrived{detail}")
+                raise TimeoutError(f"round {self.round}: chunks {missing[:16]} not complete{detail}")
 
     def _marks(self):
         """How many times each own chunk has been marked ready this round."""

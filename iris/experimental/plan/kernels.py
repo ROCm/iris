@@ -29,8 +29,8 @@ def _reached(ptr, round, budget: tl.constexpr):
 @triton.jit
 def wait_kernel(view, status, BUDGET: tl.constexpr, OWN_ONLY: tl.constexpr):
     """
-    Program ``pid < num_chunks``: chunk ``pid`` has arrived here this round (always true of this
-    rank's own chunks, and of every chunk if ``OWN_ONLY``). Program ``num_chunks + p``: the queue to
+    Program ``pid < num_chunks``: chunk ``pid`` has arrived here this round, or for this rank's own
+    chunks, been marked ready by all of its writers (other ranks' chunks are skipped if ``OWN_ONLY``). Program ``num_chunks + p``: the queue to
     peer ``p`` has finished this round (always true if this rank's chains do not go to ``p``). Writes 1 to
     ``status[pid]`` when done, 0 if ``BUDGET`` ran out. Reads only this rank's gates.
     """
@@ -38,9 +38,12 @@ def wait_kernel(view, status, BUDGET: tl.constexpr, OWN_ONLY: tl.constexpr):
     cv = TriggeredView.initialize(view)
     done = tl.full((), True, tl.int1)
     if pid < cv.num_chunks:
-        if not OWN_ONLY:
-            if cv.owns(pid) == 0:
-                done = _reached(cv.gates + cv.num_chunks + pid, cv.round, BUDGET)
+        if cv.owns(pid):
+            # So wait() checks the mark count after the producer, even with no peers or on another stream
+            writers = tl.load(view + HEADER_WORDS + pid * RECORD_WORDS + R_WRITERS)
+            done = _reached(cv.gates + pid, writers * cv.round, BUDGET)
+        elif not OWN_ONLY:
+            done = _reached(cv.gates + cv.num_chunks + pid, cv.round, BUDGET)
     else:
         peer = pid - cv.num_chunks
         if cv._sends_to(peer):
