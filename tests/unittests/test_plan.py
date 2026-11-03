@@ -706,7 +706,7 @@ def test_prepare_failure_raises_after_the_fence(monkeypatch):
             plan.next_round()
             handle = plan.start()
             _regions_producer[(2,)](buffer, regs, max_regs, handle, plan.chunk_id(rank, 0), 2, BLOCK=1024)
-            with pytest.raises(TimeoutError, match="not arrived"):
+            with pytest.raises(TimeoutError, match="not complete"):
                 plan.wait(timeout=2)
         monkeypatch.undo()
     assert not any(queue_ledger.ledger().entries.values())
