@@ -75,6 +75,10 @@ with TriggeredPlan(ctx, out, schedule) as plan:   # collective: allocates gates,
         plan.next_round()                          # collective: prepare, barrier
 ```
 
+`start()` sets the round in the handle with work queued on the current stream, so launch the kernels
+that take the handle on that stream, or make their stream wait for it: a kernel on another stream
+could still see the previous round, pass `wait` on that round's arrivals and read stale data.
+
 For this in-place all-gather, `ctx.ccl.prepare_all_gather(out, schedule)` builds the same plan and
 also checks that each rank's schedule stays inside its own rows of `out` (by default it sends them as
 one chunk, `whole()`). See `examples/34_sdma_all_gather`.
@@ -112,6 +116,9 @@ after `gl.warp_specialize` returns, not inside a partition.
    [Driving the counters from another kernel](#driving-the-counters-from-another-kernel).
 3. **A producer never waits on its own plan's arrivals before it has marked ready everything it
    writes.** Its wait could depend on a copy queued behind one of its own unfinished chunks.
+   `wait_sent` waits for every chunk this rank sends, so it may only be called once all of them
+   are marked ready; inside the producer, that means every writer CTA must be running at the same
+   time (a persistent kernel), or the wait never ends.
 4. **Region sizes are fixed when the plan is created.**
 5. **`arrived`, `wait`, `sent` and `wait_sent` are called uniformly across the CTA:** every wave
    makes the same number of calls. Each is one atomic whose result reaches the other waves through
@@ -172,8 +179,24 @@ counters, with an acquire at system scope; data read after it in the same kernel
 counter is all `mark_ready` does. A kernel that signals per tile, such as a GEMM epilogue, can
 therefore take this rank's counters (`plan.counters[plan.chunk_id(rank, 0):]`, indexed by the chunk's
 position in the schedule) and increment them itself. The same rules apply: one increment per writer
-per round, by the whole CTA after every wave's stores are done, with release semantics (at `gpu` or
-`sys` scope).
+per round, by the whole CTA after every wave's stores are done, with release semantics.
+
+- **Scope.** A `gpu` (agent) scope release is enough on gfx942 and gfx950 (MI300X, MI350X): there it
+  also writes back the XCD's L2 (`buffer_wbl2 sc1`; `sys` adds `sc0`), so the copy engine sees the
+  data. Both were measured clean on both chips. Use `sys`, as `mark_ready` does, on other GPUs.
+- **Barrier.** "After every wave's stores are done" needs `s_waitcnt vmcnt(0)` before the CTA
+  barrier. `tl.debug_barrier()` emits it only on Triton versions that include triton-lang/triton#9025
+  (Iris's pinned Triton does); on older ones it is a bare `s_barrier`, and the kernel must wait for
+  its stores itself (`iris.mem.utils.wait_cnt()`), as `mark_ready` does.
+- **Chunk numbering.** The kernel must increment the counter of the chunk that holds the tile it
+  just wrote. tritonBLAS's `EpilogueConfig(counter_buffer=...)` indexes counters by tile position,
+  not by the step at which the producer finishes the tile, so it only lines up with some schedules:
+  `map_type="identity"` with `tile_chunks(view, block, 1)` in the default row-major order, and
+  `map_type="row"` with `chunks(view, num_pid_m, writers=num_pid_n)` when M is a multiple of
+  BLOCK_M. `launch_wave` counts by program id, which does not change in a persistent kernel. With a
+  swizzled `order`, a tile's counter belongs to another chunk: the chunks are sent before their
+  tiles are written, and the mark count cannot tell. The row-major pairings also mean a swizzled
+  GEMM finishes chunks out of order, which blocks each queue behind its slowest chunk.
 
 ## Gates and rounds
 

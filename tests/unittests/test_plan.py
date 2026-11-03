@@ -295,7 +295,12 @@ def _epilogue_producer(buf, counters, round, start, part, BLOCK: tl.constexpr):
 
 
 def test_counters_incremented_by_another_kernel():
-    """A kernel that knows nothing of TriggeredView drives the plan through plan.counters."""
+    """
+    A kernel that knows nothing of TriggeredView drives the plan through plan.counters, the way
+    tritonBLAS's epilogue would: debug_barrier, then a gpu-scope add, with no wait_cnt. That is only
+    safe where debug_barrier waits for stores, as on Iris's pinned Triton; on older Triton this test
+    would pass by timing, not by the memory model.
+    """
     ctx = _ctx()
     rank, world = ctx.get_rank(), ctx.get_num_ranks()
     programs, slice_elems = 8, 1 << 20
@@ -354,6 +359,50 @@ def test_wait_sent_before_reusing_source():
                     assert torch.equal(_slice(buffer, p, slice_elems), expected)
             ctx.barrier()
             buffer.fill_(EMPTY)
+    ctx.barrier()
+    del ctx
+
+
+@triton.jit
+def _write_mark_then_reuse(buf, handle, first, round, start, part, BLOCK: tl.constexpr):
+    """Program p writes part p and marks chunk p, waits until every chunk of this rank is sent, then reuses its part."""
+    cv = TriggeredView.initialize(handle)
+    pid = tl.program_id(0)
+    for off in range(0, part, BLOCK):
+        idx = start + pid * part + off + tl.arange(0, BLOCK)
+        tl.store(buf + idx, (round << 24) | idx)
+    cv.mark_ready(first + pid)
+    # Every writer CTA is resident (one per chunk, a handful of programs), so this cannot wait forever
+    cv.wait_sent()
+    for off in range(0, part, BLOCK):
+        tl.store(buf + start + pid * part + off + tl.arange(0, BLOCK), EMPTY_VALUE)
+
+
+def test_wait_sent_inside_the_producer():
+    """The producer itself waits for its sends to finish, then overwrites its source in the same kernel."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems, num_chunks = 64 * 1024, 4
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    buffer.fill_(EMPTY)
+    schedule = chunks(_slice(buffer, rank, slice_elems), num_chunks, base=buffer)
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
+        for round in range(1, 4):
+            if round > 1:
+                plan.next_round()
+            handle = plan.start()
+            _write_mark_then_reuse[(num_chunks,)](
+                buffer, handle, plan.chunk_id(rank, 0), round, rank * slice_elems, slice_elems // num_chunks, BLOCK=1024
+            )
+            plan.wait()
+            assert (_slice(buffer, rank, slice_elems) == EMPTY).all()
+            for p in range(world):
+                if p != rank:
+                    assert torch.equal(
+                        _slice(buffer, p, slice_elems), _expected(round, slice_elems, start=p * slice_elems)
+                    )
+            ctx.barrier()
     ctx.barrier()
     del ctx
 

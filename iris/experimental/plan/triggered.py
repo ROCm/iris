@@ -33,6 +33,8 @@ from iris.experimental.plan import triton as dv
 from iris.experimental.plan import armer, kernels
 from iris.experimental.plan.schedule import check_disjoint, validate
 
+# The copy engine compares the low 32 bits unsigned, but Triton's and torch's int32 compares and
+# atomic_max are signed, so counters stay below 2^31
 INT32_MAX = (1 << 31) - 1
 _WAIT_BUDGET = 100_000
 
@@ -301,7 +303,12 @@ class TriggeredPlan:
         self.view.narrow(0, dv.H_ROUND.value, 1).fill_(round)
 
     def start(self):
-        """Start the prepared round and return the handle tensor its kernels take."""
+        """
+        Start the prepared round and return the handle tensor its kernels take.
+
+        The round is set in the handle by work queued on the current stream: launch the kernels that
+        take it on that stream, or make their stream wait for it.
+        """
         self._require(State.PREPARED)
         if not np.array_equal(self.ctx.heap.heap_bases_cpu, self._heap_bases):
             raise RuntimeError("symmetric heap was re-mapped since the plan was prepared")
