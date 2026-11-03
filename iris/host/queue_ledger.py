@@ -18,11 +18,11 @@ class QueueLedger:
     def __init__(self, capacity):
         self.capacity = capacity
         self.entries = defaultdict(list)  # (src, dst) -> [(plan, round, nbytes)]
-        self.holds = defaultdict(dict)  # (src, dst) -> {id(plan): nbytes}, space kept for a plan's rounds
+        self.holds = defaultdict(dict)  # (src, dst) -> {plan: nbytes}, space kept for a plan's rounds
 
     def _used(self, key):
         held = self.holds[key]
-        return sum(held.values()) + sum(n for plan, _, n in self.entries[key] if id(plan) not in held)
+        return sum(held.values()) + sum(n for plan, _, n in self.entries[key] if plan not in held)
 
     def _check(self, src, nbytes):
         for peer, n in nbytes.items():
@@ -37,25 +37,27 @@ class QueueLedger:
         """Keep ``nbytes[peer]`` of each queue for ``plan``, so its rounds can be prepared without checking again."""
         self._check(src, nbytes)
         for peer, n in nbytes.items():
-            self.holds[(src, peer)][id(plan)] = n
+            self.holds[(src, peer)][plan] = n
 
     def reserve(self, plan, round, src, nbytes):
         for peer, n in nbytes.items():
             key = (src, peer)
-            held = self.holds[key].get(id(plan))
+            held = self.holds[key].get(plan)
             if held is not None and sum(e[2] for e in self.entries[key] if e[0] is plan) + n > held:
                 raise RuntimeError(f"preparing round {round} would exceed the queue space held for the plan")
-        self._check(src, {p: n for p, n in nbytes.items() if id(plan) not in self.holds[(src, p)]})
+        self._check(src, {p: n for p, n in nbytes.items() if plan not in self.holds[(src, p)]})
         for peer, n in nbytes.items():
             self.entries[(src, peer)].append((plan, round, n))
 
     def release(self, plan, round=None):
         """Forget ``plan``'s prepared ``round``, or all of its rounds and held space."""
         for key in self.entries:
-            self.entries[key] = [e for e in self.entries[key] if e[0] is not plan or round not in (None, e[1])]
+            self.entries[key] = [
+                e for e in self.entries[key] if e[0] is not plan or (round is not None and e[1] != round)
+            ]
         if round is None:
             for held in self.holds.values():
-                held.pop(id(plan), None)
+                held.pop(plan, None)
 
     def earlier(self, plan):
         """(plan, round) prepared before ``plan``'s last round, on the queues it uses."""
@@ -68,7 +70,7 @@ class QueueLedger:
 
     def plans(self):
         """Every plan with copies prepared, each once."""
-        return list({id(e[0]): e[0] for entries in self.entries.values() for e in entries}.values())
+        return list(dict.fromkeys(e[0] for entries in self.entries.values() for e in entries))
 
     def check_order(self, plan, round, started, action):
         """Raise unless every round prepared before ``plan``'s ``round`` has ``started(other, round)``."""

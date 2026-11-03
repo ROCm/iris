@@ -15,10 +15,16 @@ from iris.experimental.plan.triggered import view_words
 def _view(rank, schedules, round):
     """A handle and its gates, split into (counters, arrivals, completion)."""
     n = sum(len(s) for s in schedules)
-    gates = torch.zeros(2 * n + len(schedules), dtype=torch.int32, device="cuda")
+    # Counters, arrivals, completion, then the round fence and abort words the plan's kernels read
+    gates = torch.zeros(2 * n + 2 * len(schedules) + 2, dtype=torch.int32, device="cuda")
     words = view_words(rank, len(schedules), gates.data_ptr(), schedules)
     words[dv.H_ROUND.value] = round
-    return torch.tensor(words, dtype=torch.int64, device="cuda"), (gates[:n], gates[n : 2 * n], gates[2 * n :])
+    w = len(schedules)
+    return torch.tensor(words, dtype=torch.int64, device="cuda"), (
+        gates[:n],
+        gates[n : 2 * n],
+        gates[2 * n : 2 * n + w],
+    )
 
 
 @triton.jit

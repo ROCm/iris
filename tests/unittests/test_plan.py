@@ -8,7 +8,6 @@
 
 import time
 from contextlib import nullcontext
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -31,6 +30,7 @@ from iris.experimental.plan import (
     TriggeredView,
     armer,
     chunks,
+    kernels,
     tile_chunks,
     whole,
 )
@@ -572,7 +572,7 @@ def test_prepare_next_overlaps_rounds():
     schedule = chunks(_slice(buffer, rank, slice_elems), 4, base=buffer)
     regs, max_regs = _region_table(schedule, 4)
 
-    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20, prepare_ahead=True) as plan:
         for round in range(1, 5):
             if round > 1:
                 plan.next_round()
@@ -617,7 +617,7 @@ def test_stream_ordered_rounds():
     flag = torch.zeros(1, dtype=torch.int32, pin_memory=True)
     released = torch.zeros(1, dtype=torch.int32, device=buffer.device)
 
-    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20, prepare_ahead=True) as plan:
         for round in range(1, rounds + 1):
             if round == 2:
                 # Round 1 compiled every kernel. Every call from here on queues behind this one, which
@@ -649,9 +649,9 @@ def test_stream_ordered_wait_defers_errors():
     buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
     schedule = whole(_slice(buffer, rank, slice_elems), base=buffer, writers=2)
 
-    # Only rank 0 marks its chunk: it times out on the others' chunks, they see their own marks short
-    error, match = (TimeoutError, "not arrived") if rank == 0 else (RuntimeError, "marked ready 0 times")
-    with pytest.raises(error, match=match):
+    # Only rank 0 marks its chunk: it times out on the others' chunks, they on their own marks (or the
+    # copies those marks never released), as a blocking wait() would
+    with pytest.raises(TimeoutError, match="not complete"):
         with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
             handle = plan.start()
             if rank == 0:
@@ -676,7 +676,8 @@ def test_close_with_next_round_prepared():
     _slice(buffer, rank, slice_elems).copy_(_expected(1, slice_elems, start=rank * slice_elems))
     ledger = queue_ledger.ledger()
 
-    with TriggeredPlan(ctx, buffer, chunks(_slice(buffer, rank, slice_elems), 2, base=buffer), timeout=20) as plan:
+    schedule = chunks(_slice(buffer, rank, slice_elems), 2, base=buffer)
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20, prepare_ahead=True) as plan:
         plan.run()
         plan.prepare_next()
     assert plan.state is State.CLOSED
@@ -686,8 +687,13 @@ def test_close_with_next_round_prepared():
     del ctx
 
 
-def test_prepare_failure_raises_after_the_fence(monkeypatch):
-    """A rank that cannot prepare the next round raises from next_round() once every rank has passed it."""
+@pytest.mark.parametrize("failure", ["chain", "signal"])
+def test_prepare_failure_raises_after_the_fence(monkeypatch, failure):
+    """
+    A rank that cannot prepare the next round (after arming part of it, or all of it but a
+    completion signal) raises from next_round() once every rank has passed the fence, and its peers'
+    wait() for that round raises too, rather than time out or accept what its flush sends.
+    """
     ctx = _ctx()
     rank, world = ctx.get_rank(), ctx.get_num_ranks()
     slice_elems = 1024
@@ -697,26 +703,157 @@ def test_prepare_failure_raises_after_the_fence(monkeypatch):
 
     with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         plan.run()
-        arm_chain = armer.arm_chain
+        name = "arm_chain" if failure == "chain" else "signal_completion"
+        real, calls = getattr(armer, name), []
 
         def flaky(*args, **kwargs):
-            if rank == 0:
-                raise RuntimeError("injected arm failure")
-            return arm_chain(*args, **kwargs)
+            if rank == 0 and (calls or failure == "signal"):
+                raise RuntimeError("injected failure")
+            calls.append(args)
+            return real(*args, **kwargs)
 
-        monkeypatch.setattr(armer, "arm_chain", flaky)
+        monkeypatch.setattr(armer, name, flaky)
         if rank == 0:
-            with pytest.raises(RuntimeError, match="injected arm failure"):
+            with pytest.raises(RuntimeError, match="injected failure" if failure == "chain" else "completion signal"):
                 plan.next_round()
             assert plan.state is State.FAILED
         else:
             plan.next_round()
             handle = plan.start()
             _regions_producer[(2,)](buffer, regs, max_regs, handle, plan.chunk_id(rank, 0), 2, BLOCK=1024)
-            with pytest.raises(TimeoutError, match="not complete"):
-                plan.wait(timeout=2)
+            with pytest.raises(RuntimeError, match="rank 0 could not prepare"):
+                plan.wait()
         monkeypatch.undo()
     assert not any(queue_ledger.ledger().entries.values())
+    ctx.barrier()
+    del ctx
+
+
+def test_prepare_ahead_is_opt_in(monkeypatch):
+    """A plan holds one round of queue space unless created with prepare_ahead, which prepare_next() needs."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 4096
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    schedule = chunks(_slice(buffer, rank, slice_elems), 4, base=buffer)
+    ledger = queue_ledger.ledger()
+    # Room for one and a half rounds: enough for a plan that prepares each round after the last
+    monkeypatch.setattr(ledger, "capacity", armer.round_bytes(schedule) * 3 // 2)
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
+        for round in range(1, 4):
+            if round > 1:
+                plan.next_round()
+            plan.run()
+            with pytest.raises(RuntimeError, match="prepare_ahead=True"):
+                plan.prepare_next()
+    with pytest.raises(RuntimeError, match="would exceed"):
+        TriggeredPlan(ctx, buffer, schedule, timeout=20, prepare_ahead=True)
+    monkeypatch.undo()
+    assert not any(ledger.entries.values()) and not any(ledger.holds.values())
+    ctx.barrier()
+    del ctx
+
+
+def test_round_fence_times_out():
+    """A rank that never reaches next_round() makes its peers' next wait() raise, not hang."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    schedule = whole(_slice(buffer, rank, slice_elems), base=buffer)
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=2) as plan:
+        plan.run()
+        if rank != 0:
+            plan.next_round()
+            plan.start()
+            with pytest.raises(TimeoutError, match="rank 0 did not reach next_round"):
+                plan.wait()
+    # The fence's counters are the plan's own: the context's device barrier is still in step
+    ctx.device_barrier()
+    torch.cuda.synchronize()
+    ctx.barrier()
+    del ctx
+
+
+def test_recorded_error_raised_once():
+    """An error the GPU recorded is raised by the next blocking wait(), and not again by close()."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    plan = TriggeredPlan(ctx, buffer, whole(_slice(buffer, rank, slice_elems), base=buffer), timeout=20)
+    plan.start()
+    error = [kernels.TIMED_OUT.value, 1, plan.chunk_id(rank, 0), 0]
+    plan._error.copy_(torch.tensor(error, dtype=torch.int64))
+    with pytest.raises(TimeoutError, match="short of writers' marks"):
+        plan.wait()
+    assert plan.state is State.FAILED
+    plan.close()
+    assert plan.state is State.CLOSED
+    ctx.barrier()
+    del ctx
+
+
+def test_host_put_between_wait_and_next_round():
+    """Once wait() has seen every copy land, the queues are idle again until next_round() prepares."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    other = ctx.zeros(slice_elems, dtype=torch.int32)
+    peer = (rank + 1) % world
+
+    with TriggeredPlan(ctx, buffer, whole(_slice(buffer, rank, slice_elems), base=buffer), timeout=20) as plan:
+        plan.run()
+        ctx.put(other, to_rank=peer)
+        plan.next_round()
+        with pytest.raises(RuntimeError, match="copies prepared"):
+            ctx.put(other, to_rank=peer)
+        plan.run()
+    ctx.barrier()
+    del ctx
+
+
+def test_plans_share_queues_per_round():
+    """
+    Plan A prepares its round 2 early, so it sits on every queue behind plan B's round 1, and B's
+    round 2 behind it. A cannot start round 2 before B has started round 1; B, closed first, waits
+    behind A's round 2 as CLOSING, and closing A finishes both.
+    """
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 4096
+    buffers = [ctx.zeros(world * slice_elems, dtype=torch.int32) for _ in range(2)]
+    for buffer in buffers:
+        buffer.fill_(EMPTY)
+        _slice(buffer, rank, slice_elems).copy_(_expected(2, slice_elems, start=rank * slice_elems))
+    schedules = [chunks(_slice(b, rank, slice_elems), 2, base=b) for b in buffers]
+    ledger = queue_ledger.ledger()
+    ctx.barrier()
+
+    a = TriggeredPlan(ctx, buffers[0], schedules[0], timeout=20, prepare_ahead=True)
+    b = TriggeredPlan(ctx, buffers[1], schedules[1], timeout=20)
+    handle = a.start()
+    kernels.release_kernel[(len(a._own),)](handle, a._own)
+    a.prepare_next()  # A's round 2, behind B's round 1
+    a.wait()
+    a.next_round()
+    with pytest.raises(RuntimeError, match="prepared earlier"):
+        a.start()
+    b.run()  # B's round 1 starts and finishes
+    b.next_round()  # B's round 2, behind A's round 2
+    b.close()
+    assert b.state is State.CLOSING
+    a.start()  # B's round 1 has started, so A's round 2 may
+    kernels.release_kernel[(len(a._own),)](a.view, a._own)
+    a.wait()
+    a.close()
+    assert a.state is State.CLOSED and b.state is State.CLOSED
+    assert not any(ledger.entries.values()) and not any(ledger.holds.values())
+    for buffer in buffers:
+        assert torch.equal(buffer, _expected(2, buffer.numel()))
     ctx.barrier()
     del ctx
 
@@ -818,7 +955,7 @@ def test_capacity_failure_fails_every_rank():
     ledger = queue_ledger.ledger()
     assert ledger is queue_ledger.ledger()
 
-    hog = SimpleNamespace(state=State.PREPARED)
+    hog = type("Hog", (), {"state": State.PREPARED})()  # hashable by identity, like a plan
     if rank == 0:
         ledger.reserve(hog, 1, rank, {p: ledger.capacity for p in range(world) if p != rank})
     try:

@@ -13,6 +13,9 @@ import triton
 import triton.language as tl
 from triton.language.target_info import is_hip_cdna3, is_hip_cdna4
 
+# Ticks per second of the constant-frequency clock read_realtime() returns
+REALTIME_HZ = 100_000_000
+
 # Probe each intrinsic separately. They were added to
 # ``triton.language.extra.hip`` at different times, so a build can export one
 # and not the other -- upstream Triton at the pinned commit ships

@@ -33,11 +33,12 @@ from iris.host.distributed.helpers import distributed_allgather
 from iris.experimental.plan import triton as dv
 from iris.experimental.plan import armer, kernels
 from iris.experimental.plan.schedule import check_disjoint, validate
+from iris.mem.utils import REALTIME_HZ
 
 # The copy engine compares the low 32 bits unsigned, but Triton's and torch's int32 compares and
 # atomic_max are signed, so counters stay below 2^31
 INT32_MAX = (1 << 31) - 1
-_WAIT_SLICE = 1_000_000  # 10 ms of the 100 MHz clock per wait_kernel launch
+_WAIT_SLICE = REALTIME_HZ // 100  # 10 ms per wait_kernel launch
 
 
 class State(enum.Enum):
@@ -101,7 +102,10 @@ class TriggeredPlan:
         ctx: Iris instance, created with ``engines=("sdma",)``.
         buffer: Contiguous tensor on the symmetric heap.
         schedule: This rank's list of ``Chunk``, in the order it completes them.
-        timeout: Seconds ``wait()`` and ``close()`` wait before raising.
+        timeout: Seconds ``wait()``, ``close()`` and the round fence of ``next_round()`` wait before
+            raising.
+        prepare_ahead: Allow ``prepare_next()``. The plan then holds queue space for two rounds
+            instead of one, so one round may use half as much of each queue's ring.
 
     Attributes:
         counters: Contiguous int32 tensor, one counter per chunk id. Adding 1 to a chunk's counter is
@@ -109,7 +113,7 @@ class TriggeredPlan:
             tile) may increment this rank's counters directly, under the same rules.
     """
 
-    def __init__(self, ctx, buffer, schedule, timeout=30.0):
+    def __init__(self, ctx, buffer, schedule, timeout=30.0, prepare_ahead=False):
         self.ctx = ctx
         self.rank = ctx.get_rank()
         self.world_size = ctx.get_num_ranks()
@@ -139,11 +143,13 @@ class TriggeredPlan:
             raise ValueError("no rank's schedule has any chunks")
 
         self.buffer = buffer
-        # Each chunk's counter (marks) and arrival, then each peer queue's completion, all int32
-        self.gates = ctx.zeros(2 * self.num_chunks + self.world_size, dtype=torch.int32)
-        self.counters = self.gates[: self.num_chunks]
-        self.arrivals = self.gates[self.num_chunks : 2 * self.num_chunks]
-        self.completion = self.gates[2 * self.num_chunks :]
+        # Each chunk's counter (marks) and arrival, each peer queue's completion, each peer's round
+        # fence count, then the round a peer could not prepare and which peer, all int32
+        n, w = self.num_chunks, self.world_size
+        self.gates = ctx.zeros(2 * n + 2 * w + 2, dtype=torch.int32)
+        self.counters = self.gates[:n]
+        self.arrivals = self.gates[n : 2 * n]
+        self.completion = self.gates[2 * n : 2 * n + w]
         words = view_words(self.rank, self.world_size, self.gates.data_ptr(), self.schedules)
         self.view = torch.tensor(words, dtype=torch.int64, device=buffer.device)
         self._own = torch.arange(
@@ -160,6 +166,7 @@ class TriggeredPlan:
         # First error of a stream-ordered wait(): [code, round, index, value]
         self._error = torch.zeros(4, dtype=torch.int64, device=buffer.device)
         self._next_prepared = False
+        self._prepare_ahead = prepare_ahead
         self._ledger = queue_ledger.ledger()
         self.round = 0
         try:
@@ -206,13 +213,14 @@ class TriggeredPlan:
         raise error
 
     def _arm_first(self):
-        """Collective: hold queue space for two rounds and prepare round 1 on every rank, or raise on every rank."""
+        """Collective: hold queue space (two rounds with prepare_ahead) and prepare round 1 on every rank, or raise on every rank."""
         peers = [p for p in range(self.world_size) if p != self.rank]
         nbytes = armer.round_bytes(self.schedules[self.rank])
         error, held = None, False
         try:
             # With prepare_next(), a round may be prepared while the one before it still is
-            self._ledger.hold(self, self.rank, {p: 2 * nbytes for p in peers})
+            rounds = 2 if self._prepare_ahead else 1
+            self._ledger.hold(self, self.rank, {p: rounds * nbytes for p in peers})
             held = True
             self._ledger.reserve(self, 1, self.rank, {p: nbytes for p in peers})
         except Exception as e:
@@ -362,6 +370,9 @@ class TriggeredPlan:
             pending = status == 0
             if not pending.any():
                 return
+            if not own_only:
+                # A peer that could not prepare this round
+                self._raise_recorded()
             if time.monotonic() > deadline:
                 missing = pending[: self.num_chunks].nonzero().flatten().tolist()
                 queues = pending[self.num_chunks :].nonzero().flatten().tolist()
@@ -381,37 +392,52 @@ class TriggeredPlan:
         return [c - w * (self.round - 1) for c, w in zip(counters, self._writers)]
 
     def _deferred_error(self, error):
-        """The exception for an error word a stream-ordered wait() recorded, or None."""
+        """The exception for an error word the GPU recorded (see kernels.wait_kernel), or None."""
         code, round, index, value = error
         if not code:
             return None
+        if code == kernels.FENCE_TIMED_OUT.value:
+            return TimeoutError(f"round {round}: rank {index} did not reach next_round()")
+        if code == kernels.PEER_FAILED.value:
+            return RuntimeError(f"round {round}: rank {index} could not prepare this round")
+        own = self._first[self.rank] <= index < self._first[self.rank + 1]
+        writers = self.schedules[self.rank][index - self._first[self.rank]].writers if own else 0
         if code == kernels.WRONG_MARKS.value:
-            writers = self.schedules[self.rank][index - self._first[self.rank]].writers
             return RuntimeError(
                 f"round {round}: chunk {index} was marked ready {value} times, but has {writers} writers"
             )
-        if index < self.num_chunks:
-            return TimeoutError(f"round {round}: chunk {index} not arrived")
-        return TimeoutError(f"round {round}: copies to rank {index - self.num_chunks} not finished")
+        # The same text as a blocking wait()'s timeout
+        if index >= self.num_chunks:
+            return TimeoutError(
+                f"round {round}: chunks [] not complete; copies to ranks [{index - self.num_chunks}] not finished"
+            )
+        detail = f"; own chunks short of writers' marks: {index}: {value} of {writers}" if own else ""
+        return TimeoutError(f"round {round}: chunks [{index}] not complete{detail}")
+
+    def _raise_recorded(self):
+        """Raise (once) an error the GPU recorded; the plan is FAILED."""
+        error = self._deferred_error(self._error.tolist())
+        if error:
+            self._error.zero_()
+            self.state = State.FAILED
+            raise error
 
     def wait(self, timeout=None, blocking=True):
         """
         Wait until every chunk is delivered this round: own ones at every peer, others here.
 
         With ``blocking=False``, queue the wait on the current stream instead and return at once:
-        kernels queued after it see the round's data, and the host never synchronizes. A timeout or a
-        wrong mark count is then raised by the next blocking ``wait()``, or by ``close()``.
+        kernels queued after it see the round's data, and the host never synchronizes. An error (a
+        timeout, extra marks, a peer that could not prepare the round, or a round fence that timed
+        out) is then raised by the next blocking ``wait()``, or by ``close()``.
         """
         self._require(State.RUNNING)
         if not blocking:
-            ticks = int((self.timeout if timeout is None else timeout) * 1e8)
+            ticks = int((self.timeout if timeout is None else timeout) * REALTIME_HZ)
             self._launch_wait(False, True, ticks)
             self.state = State.DONE
             return
-        error = self._deferred_error(self._error.tolist())
-        if error:
-            self.state = State.FAILED
-            raise error
+        self._raise_recorded()
         try:
             self._wait(own_only=False, timeout=timeout)
         except TimeoutError:
@@ -425,16 +451,21 @@ class TriggeredPlan:
             raise RuntimeError(
                 f"round {self.round}: chunk {self._first[self.rank] + i} was marked ready {m} times, but has {w} writers"
             )
+        # Every copy of the round has landed: its ring space is free, and host put() / quiet() may run
+        self._ledger.release(self, self.round)
         self.state = State.DONE
 
     def prepare_next(self):
         """
         Prepare the next round's copies now, so ``next_round()`` does not have to. Not collective.
 
-        May be called once the current round has started. The copies wait behind gates that no
-        producer can open before every rank has passed ``next_round()``. If preparing fails,
-        ``next_round()`` raises the error after its barrier, so no rank is left waiting in it.
+        May be called once the current round has started, on a plan created with
+        ``prepare_ahead=True``. The copies wait behind gates that no producer can open before every
+        rank has passed ``next_round()``. If preparing fails, ``next_round()`` raises the error after
+        its fence, so no rank is left waiting in it.
         """
+        if not self._prepare_ahead:
+            raise RuntimeError("prepare_next() needs a plan created with prepare_ahead=True")
         self._require(State.RUNNING, State.DONE)
         self._check_round(self.round + 1)
         self._prepare_next()
@@ -445,19 +476,31 @@ class TriggeredPlan:
 
         Calling it declares that this rank is done reading the current round's data: once every rank
         has called it, a peer may start the next round, and its copies can overwrite ``buffer`` at
-        any time. It is a device-side barrier on the current stream, so the host does not wait: work
+        any time. The fence is a kernel on the current stream, so the host does not wait: work
         queued on that stream before the call is covered, and nothing issued after it may read
-        ``buffer`` until the next ``wait()``.
+        ``buffer`` until the next ``wait()``. A peer that never reaches the fence is recorded as a
+        timeout after the plan's timeout, and raised by the next blocking ``wait()`` or ``close()``.
+
+        If this rank cannot prepare the next round, it still takes part in the fence, telling its
+        peers, whose ``wait()`` for that round then raises; then this call raises.
         """
         self._require(State.DONE)
         self._check_round(self.round + 1)
-        self._prepare_next()
-        # The round's gates are open (its producer is queued), so its copies drain on their own
+        # The round's gates are open (its producer is queued), so its copies drain on their own and
+        # its queue space can go to the next round
         self._ledger.release(self, self.round)
-        self.ctx.device_barrier()
+        self._prepare_next()
         error, self._prepare_error = self._prepare_error, None
+        kernels.fence_kernel[(1,)](
+            self.view,
+            self.ctx.get_heap_bases(),
+            self._error,
+            int(self.timeout * REALTIME_HZ),
+            ABORT=error is not None,
+            num_warps=1,
+        )
         if error is not None:
-            # Chains may be left armed: close() flushes them. Peers time out waiting for this rank's chunks
+            # Chains may be left armed: close() flushes them
             self.state = State.FAILED
             raise error
         self.round += 1
@@ -522,6 +565,11 @@ class TriggeredPlan:
         self._ledger.release(self)
         self.ctx.barrier()
         error = self._deferred_error(self._error.tolist())
+        for plan in closed:
+            # Plans whose own close() returned while they were queued behind this one
+            other = plan._deferred_error(plan._error.tolist()) if plan is not self else None
+            if other:
+                warnings.warn(f"a triggered plan finished by this close() recorded an error: {other}")
         _mark_closed(closed)
         if check and error:
             raise error

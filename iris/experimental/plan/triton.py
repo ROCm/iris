@@ -12,7 +12,8 @@ with ``arrived`` / ``wait`` and completion with ``sent`` / ``wait_sent``.
 
 View layout (int64 words): an 8-word header, one 2-word record per chunk, then one word per rank:
 1 if this rank's chains go to that rank. Gates (int32, one symmetric tensor): ``num_chunks``
-counters, then ``num_chunks`` arrivals, then one completion per rank.
+counters, ``num_chunks`` arrivals, one completion per rank, one round-fence count per rank, then
+the round a peer could not prepare and that peer (see ``iris.experimental.plan.kernels``).
 """
 
 import triton

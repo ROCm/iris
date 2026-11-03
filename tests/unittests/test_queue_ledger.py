@@ -3,15 +3,20 @@
 
 # The queue ledger on its own: no GPU or copy engine involved.
 
-from types import SimpleNamespace
-
 import pytest
 
 from iris.host.queue_ledger import QueueLedger
 
 
+class _Plan:
+    """A stand-in plan: hashable by identity, like TriggeredPlan."""
+
+    def __init__(self, round, state):
+        self.round, self.state = round, state
+
+
 def _plan(round=1, state="running"):
-    return SimpleNamespace(round=round, state=state)
+    return _Plan(round, state)
 
 
 def _started(plan, round):
