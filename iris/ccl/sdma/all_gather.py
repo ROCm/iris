@@ -106,7 +106,7 @@ def launch(input_tensor, output_tensor, ctx, rank_in_group, rank_global, world_s
     )
 
 
-def prepare(output_tensor, ctx, schedule=None, timeout=30.0):
+def prepare(output_tensor, ctx, schedule=None, timeout=30.0, prepare_ahead=False):
     """Collective: a triggered plan that gathers ``output_tensor`` in place. See ``CCL.prepare_all_gather``."""
     from iris.experimental.plan import TriggeredPlan, whole
     from iris.experimental.plan.schedule import _rows
@@ -149,4 +149,4 @@ def prepare(output_tensor, ctx, schedule=None, timeout=30.0):
         raise error
     if failed:
         raise RuntimeError(f"rank(s) {failed} could not prepare the all-gather")
-    return TriggeredPlan(ctx, output_tensor, schedule, timeout=timeout)
+    return TriggeredPlan(ctx, output_tensor, schedule, timeout=timeout, prepare_ahead=prepare_ahead)
