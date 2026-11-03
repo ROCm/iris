@@ -5,7 +5,7 @@
 Triggered plans: copy engines send data to every peer as a kernel marks it ready.
 
 Host side: ``TriggeredPlan`` and the schedule builders in ``iris.experimental.plan.schedule``.
-Device side: ``TriggeredView`` (``mark_ready``, ``arrived``, ``wait``, ``owns``).
+Device side: ``TriggeredView`` (``mark_ready``, ``arrived``, ``wait``, ``sent``, ``wait_sent``, ``owns``).
 """
 
 from iris.experimental.plan.triton import TriggeredView
