@@ -21,6 +21,7 @@ were prepared, and nothing else may use those queues while copies are prepared o
 
 import enum
 import time
+import warnings
 
 import numpy as np
 import torch
@@ -48,26 +49,34 @@ class State(enum.Enum):
 def view_words(rank, world_size, gates_ptr, schedules):
     """The device view (see ``iris.experimental.plan.triton``) as a list of int64 words."""
     num_chunks = sum(len(s) for s in schedules)
-    words = [0] * (dv.HEADER_WORDS.value + num_chunks * dv.RECORD_WORDS.value)
+    words = [0] * (dv.HEADER_WORDS.value + num_chunks * dv.RECORD_WORDS.value + world_size)
     words[dv.H_VERSION.value] = dv.ABI_VERSION
     words[dv.H_NUM_CHUNKS.value] = num_chunks
     words[dv.H_RANK.value] = rank
     words[dv.H_GATES.value] = gates_ptr
     words[dv.H_WORLD_SIZE.value] = world_size
-    if schedules[rank]:
-        words[dv.H_SENDS_TO.value] = ((1 << world_size) - 1) & ~(1 << rank)
     rec = dv.HEADER_WORDS.value
     for owner, schedule in enumerate(schedules):
         for chunk in schedule:
             words[rec + dv.R_WRITERS.value] = chunk.writers
             words[rec + dv.R_OWNER.value] = owner
             rec += dv.RECORD_WORDS.value
+    # The peers this rank's chains go to
+    for peer in range(world_size):
+        words[rec + peer] = int(bool(schedules[rank]) and peer != rank)
     return words
+
+
+# Plans whose copies may still run after close(), kept so their memory is never reused
+_leaked = []
 
 
 def _mark_closed(plans):
     for plan in plans:
         plan.state = State.CLOSED
+        if plan._leaked:
+            warnings.warn("a triggered plan could not fence every copy-engine queue; its memory is kept, not freed")
+            _leaked.append((plan.gates, plan.view, plan.buffer))
         plan.gates = plan.counters = plan.arrivals = plan.completion = plan.view = plan.buffer = None
 
 
@@ -104,9 +113,6 @@ class TriggeredPlan:
         self.timeout = timeout
         self.state = None
         ctx._require_copy_engine()
-        # The device view holds the peers a rank sends to as bits of one int64 word
-        if self.world_size > 63:
-            raise ValueError(f"triggered plans support at most 63 ranks, not {self.world_size}")
 
         if not ctx.heap.is_symmetric(buffer) or not buffer.is_contiguous():
             raise ValueError("buffer must be a contiguous tensor on the symmetric heap")
@@ -143,7 +149,9 @@ class TriggeredPlan:
         self._writers = [c.writers for c in self.schedules[self.rank]]
         self._max_writers = max(c.writers for s in self.schedules for c in s)
         self._status = torch.zeros(self.num_chunks + self.world_size, dtype=torch.int32, device=buffer.device)
-        self._sent_to = 0
+        # Every round ends with a completion signal to each of these, even after a failed arm
+        self._peers = [p for p in range(self.world_size) if p != self.rank] if self.schedules[self.rank] else []
+        self._leaked = False
         self._ledger = queue_ledger.ledger()
         self.round = 0
         try:
@@ -229,10 +237,8 @@ class TriggeredPlan:
         self._heap_bases = heap.heap_bases_cpu.copy()
         base = self.buffer.data_ptr()
         word = self.gates.element_size()
-        counters, arrivals, completion = (t.data_ptr() for t in (self.counters, self.arrivals, self.completion))
-        # Peers with chains this round get the completion signal, even if a later chain fails to arm,
-        # so a flush can tell when the queue has drained
-        sent_to = 0
+        counters, arrivals = self.counters.data_ptr(), self.arrivals.data_ptr()
+        error = None
         try:
             for i, chunk in enumerate(self.schedules[self.rank]):
                 chunk_id = self.chunk_id(self.rank, i)
@@ -257,13 +263,33 @@ class TriggeredPlan:
                         arrival,
                         chunk.is_2d,
                     )
-                    sent_to |= 1 << peer
-        finally:
-            self._sent_to = 0
-            for peer in peers:
-                if (sent_to >> peer) & 1:
-                    armer.signal_completion(*self.ctx._copy_engine_devices(peer), completion + word * peer)
-                    self._sent_to |= 1 << peer
+        except Exception as e:
+            error = e
+        # Even after a failed arm, so a flush can tell when each queue has drained
+        failed = self._signal_completion()
+        if error is not None:
+            raise error
+        if failed:
+            raise RuntimeError(f"could not queue the completion signal to rank(s) {failed}")
+
+    def _signal_completion(self):
+        """
+        Queue each peer's completion signal for this round, separately. Returns the peers whose signal
+        could not be queued: nothing will tell when their queues drain, so they are no longer waited
+        for, and the plan's memory is kept for the life of the process instead of freed.
+        """
+        completion, word = self.completion.data_ptr(), self.gates.element_size()
+        failed = []
+        for peer in self._peers:
+            try:
+                armer.signal_completion(*self.ctx._copy_engine_devices(peer), completion + word * peer)
+            except Exception:
+                failed.append(peer)
+        for peer in failed:
+            self._peers.remove(peer)
+            self.view.narrow(0, dv.HEADER_WORDS.value + self.num_chunks * dv.RECORD_WORDS.value + peer, 1).fill_(0)
+            self._leaked = True
+        return failed
 
     def _require(self, *states):
         if self.state not in states:
@@ -288,7 +314,7 @@ class TriggeredPlan:
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         while True:
             kernels.wait_kernel[(self.num_chunks + self.world_size,)](
-                self.view, self._sent_to, self._status, BUDGET=_WAIT_BUDGET, OWN_ONLY=own_only
+                self.view, self._status, BUDGET=_WAIT_BUDGET, OWN_ONLY=own_only
             )
             status = self._status.cpu()
             pending = status == 0

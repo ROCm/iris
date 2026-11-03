@@ -27,11 +27,11 @@ def _reached(ptr, round, budget: tl.constexpr):
 
 
 @triton.jit
-def wait_kernel(view, sent_to, status, BUDGET: tl.constexpr, OWN_ONLY: tl.constexpr):
+def wait_kernel(view, status, BUDGET: tl.constexpr, OWN_ONLY: tl.constexpr):
     """
     Program ``pid < num_chunks``: chunk ``pid`` has arrived here this round (always true of this
     rank's own chunks, and of every chunk if ``OWN_ONLY``). Program ``num_chunks + p``: the queue to
-    peer ``p`` has finished this round (always true if bit ``p`` of ``sent_to`` is clear). Writes 1 to
+    peer ``p`` has finished this round (always true if this rank's chains do not go to ``p``). Writes 1 to
     ``status[pid]`` when done, 0 if ``BUDGET`` ran out. Reads only this rank's gates.
     """
     pid = tl.program_id(0)
@@ -43,6 +43,6 @@ def wait_kernel(view, sent_to, status, BUDGET: tl.constexpr, OWN_ONLY: tl.conste
                 done = _reached(cv.gates + cv.num_chunks + pid, cv.round, BUDGET)
     else:
         peer = pid - cv.num_chunks
-        if ((sent_to >> peer) & 1) != 0:
+        if cv._sends_to(peer):
             done = _reached(cv.gates + 2 * cv.num_chunks + peer, cv.round, BUDGET)
     tl.store(status + pid, done.to(tl.int32))

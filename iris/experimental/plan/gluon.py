@@ -16,7 +16,6 @@ from iris.experimental.plan.triton import (
     H_NUM_CHUNKS,
     H_RANK,
     H_ROUND,
-    H_SENDS_TO,
     H_WORLD_SIZE,
     HEADER_WORDS,
     R_OWNER,
@@ -113,12 +112,16 @@ class TriggeredView:
             pass
 
     @gluon.jit
+    def _sends_to(self, peer):
+        """True if this rank's chains go to rank ``peer``, so its completion counter counts rounds."""
+        return gl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + peer) != 0
+
+    @gluon.jit
     def sent(self):
         """True once every peer has received this rank's chunks this round, so they may be overwritten."""
-        sends_to = gl.load(self.view + H_SENDS_TO)
         pending = 0
         for peer in range(gl.load(self.view + H_WORLD_SIZE)):
-            if ((sends_to >> peer) & 1) != 0:
+            if self._sends_to(peer):
                 completion = self.gates + 2 * self.num_chunks + peer
                 pending += (gl.atomic_add(completion, 0, sem="acquire", scope="sys") < self.round).to(gl.int32)
         return pending == 0

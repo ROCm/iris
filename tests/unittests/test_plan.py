@@ -7,6 +7,7 @@
 # Every test uses its plans as context managers, so no chain is left parked on a queue.
 
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,7 @@ from triton.language.extra.hip import utils as hip_utils
 import iris
 from iris.experimental.plan.gluon import TriggeredView as GluonView
 from iris.host import queue_ledger
+from iris.experimental.plan import triggered
 from iris.mem.utils import read_realtime
 from iris.experimental.plan import (
     Chunk,
@@ -644,6 +646,48 @@ def test_prepare_failure_flushes_and_fails_every_rank(monkeypatch):
     with pytest.raises(RuntimeError, match="injected arm failure" if rank == 0 else "could not prepare"):
         TriggeredPlan(ctx, buffer, schedule, timeout=20)
     monkeypatch.undo()
+    assert not any(queue_ledger.ledger().entries.values())
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
+        plan.run()
+    ctx.barrier()
+    del ctx
+
+
+@pytest.mark.parametrize("arm_fails", [True, False])
+def test_completion_signal_failure(monkeypatch, arm_fails):
+    """
+    A completion signal that cannot be queued (a broken queue, say) neither hides the original error
+    nor leaves close() waiting on that queue: its peer is no longer waited for, and the memory is kept.
+    """
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    schedule = chunks(_slice(buffer, rank, slice_elems), 4, base=buffer)
+    arm_chain, signal_completion, armed = armer.arm_chain, armer.signal_completion, []
+    broken = ctx._copy_engine_devices((rank + 1) % world)[1]
+
+    def flaky_arm(*args, **kwargs):
+        if rank == 0 and arm_fails and len(armed) == 2:
+            raise RuntimeError("injected arm failure")
+        armed.append(args)
+        return arm_chain(*args, **kwargs)
+
+    def flaky_signal(src_device, dst_device, completion_addr):
+        if rank == 0 and dst_device == broken:
+            raise RuntimeError("injected signal failure")
+        return signal_completion(src_device, dst_device, completion_addr)
+
+    monkeypatch.setattr(armer, "arm_chain", flaky_arm)
+    monkeypatch.setattr(armer, "signal_completion", flaky_signal)
+    leaked = len(triggered._leaked)
+    match = ("injected arm failure" if arm_fails else "completion signal") if rank == 0 else "could not prepare"
+    with pytest.warns(UserWarning, match="memory is kept") if rank == 0 else nullcontext():
+        with pytest.raises(RuntimeError, match=match):
+            TriggeredPlan(ctx, buffer, schedule, timeout=20)
+    monkeypatch.undo()
+    assert len(triggered._leaked) == leaked + (rank == 0)
     assert not any(queue_ledger.ledger().entries.values())
 
     with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:

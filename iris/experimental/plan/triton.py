@@ -10,8 +10,9 @@ counter on the peer. After a round's last chain to a peer, the copy engine adds 
 completion counter for that peer. Kernels add to the counter with ``mark_ready``, observe arrivals
 with ``arrived`` / ``wait`` and completion with ``sent`` / ``wait_sent``.
 
-View layout (int64 words): an 8-word header, then one 2-word record per chunk. Gates (int32, one
-symmetric tensor): ``num_chunks`` counters, then ``num_chunks`` arrivals, then one completion per rank.
+View layout (int64 words): an 8-word header, one 2-word record per chunk, then one word per rank:
+1 if this rank's chains go to that rank. Gates (int32, one symmetric tensor): ``num_chunks``
+counters, then ``num_chunks`` arrivals, then one completion per rank.
 """
 
 import triton
@@ -30,7 +31,6 @@ H_RANK = tl.constexpr(2)
 H_ROUND = tl.constexpr(3)
 H_GATES = tl.constexpr(4)
 H_WORLD_SIZE = tl.constexpr(5)
-H_SENDS_TO = tl.constexpr(6)  # bitmask of the peers this rank's chains go to
 
 # Chunk record words
 RECORD_WORDS = tl.constexpr(2)
@@ -124,12 +124,16 @@ class TriggeredView:
             pass
 
     @triton.jit
+    def _sends_to(self, peer):
+        """True if this rank's chains go to rank ``peer``, so its completion counter counts rounds."""
+        return tl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + peer) != 0
+
+    @triton.jit
     def sent(self):
         """True once every peer has received this rank's chunks this round, so they may be overwritten."""
-        sends_to = tl.load(self.view + H_SENDS_TO)
         pending = 0
         for peer in range(tl.load(self.view + H_WORLD_SIZE)):
-            if ((sends_to >> peer) & 1) != 0:
+            if self._sends_to(peer):
                 completion = self.gates + 2 * self.num_chunks + peer
                 pending += (tl.atomic_add(completion, 0, sem="acquire", scope="sys") < self.round).to(tl.int32)
         return pending == 0
