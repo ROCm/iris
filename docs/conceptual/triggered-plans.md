@@ -108,9 +108,12 @@ half as much of each queue as without it.
 
 A stream-ordered `wait()` cannot raise. What goes wrong is recorded on the GPU and raised, once,
 by the next blocking `wait()` or by `close()`: a timeout (also when a chunk got too few marks, as
-with a blocking `wait()`), extra marks, a peer that could not prepare the round, or a round fence
-that a peer never reached. Once an error is recorded, later stream-ordered waits return at once
-instead of each spinning for the timeout.
+with a blocking `wait()`), extra marks, a peer that failed the round, or a round fence that a peer
+never reached. Once an error is recorded, later stream-ordered waits return at once instead of each
+spinning for the timeout, and the rank's next round fence marks the next round failed on its peers:
+their `wait()` for it fails at once rather than timing out on that rank. The rank still waits at the
+fence for its peers, so its next producer cannot overwrite a peer that is still reading, but not for
+a peer it already timed out on at an earlier fence.
 
 ### Gluon
 

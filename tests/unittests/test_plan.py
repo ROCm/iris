@@ -721,7 +721,7 @@ def test_prepare_failure_raises_after_the_fence(monkeypatch, failure):
             plan.next_round()
             handle = plan.start()
             _regions_producer[(2,)](buffer, regs, max_regs, handle, plan.chunk_id(rank, 0), 2, BLOCK=1024)
-            with pytest.raises(RuntimeError, match="rank 0 could not prepare"):
+            with pytest.raises(RuntimeError, match="rank 0 failed this round"):
                 plan.wait()
         monkeypatch.undo()
     assert not any(queue_ledger.ledger().entries.values())
@@ -773,6 +773,30 @@ def test_round_fence_times_out():
     # The fence's counters are the plan's own: the context's device barrier is still in step
     ctx.device_barrier()
     torch.cuda.synchronize()
+    ctx.barrier()
+    del ctx
+
+
+def test_failed_rank_fails_peers_at_once():
+    """
+    A rank whose plan holds an error (as a stream-ordered wait() records it) still takes part in the
+    round fence and marks the next round failed on its peers: their wait() fails at once, rather
+    than after timing out on a rank that skipped the fence.
+    """
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+
+    with TriggeredPlan(ctx, buffer, whole(_slice(buffer, rank, slice_elems), base=buffer), timeout=20) as plan:
+        plan.run()
+        if rank == 0:
+            error = [kernels.TIMED_OUT.value, 1, plan.chunk_id(rank, 0), 0]
+            plan._error.copy_(torch.tensor(error, dtype=torch.int64))
+        plan.next_round()
+        error, match = (TimeoutError, "round 1: ") if rank == 0 else (RuntimeError, "round 2: rank 0 failed this round")
+        with pytest.raises(error, match=match):
+            plan.run()
     ctx.barrier()
     del ctx
 

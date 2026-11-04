@@ -14,7 +14,7 @@ from iris.mem.utils import read_realtime
 TIMED_OUT = tl.constexpr(1)  # index: a chunk, or num_chunks + peer for a queue; value: an own chunk's marks
 WRONG_MARKS = tl.constexpr(2)  # index: a chunk marked more than writers times; value: its marks
 FENCE_TIMED_OUT = tl.constexpr(3)  # index: a peer that did not reach next_round()
-PEER_FAILED = tl.constexpr(4)  # index: a peer that could not prepare the round
+PEER_FAILED = tl.constexpr(4)  # index: a peer that failed this round or an earlier one
 
 
 @triton.jit
@@ -30,7 +30,7 @@ def _load(ptr):
 
 @triton.jit
 def _aborted(abort, round):
-    """True once a peer has said it could not prepare ``round`` (or an earlier one)."""
+    """True once a peer has said it failed ``round`` (or an earlier one)."""
     failed = _load(abort)
     return (failed != 0) & (failed <= round)
 
@@ -72,7 +72,7 @@ def wait_kernel(view, status, error, ticks, OWN_ONLY: tl.constexpr, STREAM: tl.c
 
     Writes 1 to ``status[pid]`` when done, 0 if not. Unless ``OWN_ONLY`` (a flush, which must wait
     for this rank's queues whatever its peers did), stops at and records in ``error`` a peer that
-    could not prepare the round. With ``STREAM`` (queued behind the producer, nobody waiting on the
+    failed the round (see fence_kernel). With ``STREAM`` (queued behind the producer, nobody waiting on the
     host), also records a timeout or extra marks, and returns at once if ``error`` already holds an
     error: it is reported anyway, and a loop that never synchronizes would otherwise spin a full
     timeout every round.
@@ -105,7 +105,7 @@ def wait_kernel(view, status, error, ticks, OWN_ONLY: tl.constexpr, STREAM: tl.c
         peer = pid - cv.num_chunks
         if cv._sends_to(peer):
             done = _reached(cv.gates + 2 * cv.num_chunks + peer, cv.round, t0, ticks, abort, abort_round)
-    # Even if done: the flush of a peer that could not prepare the round sends its old data
+    # Even if done: a peer that failed the round may still send it, such as its old data from a flush
     aborted = _aborted(abort, abort_round)
     done = done & (aborted == 0)
     tl.store(status + pid, done.to(tl.int32))
@@ -118,24 +118,29 @@ def wait_kernel(view, status, error, ticks, OWN_ONLY: tl.constexpr, STREAM: tl.c
 @triton.jit
 def fence_kernel(view, heap_bases, error, ticks, ABORT: tl.constexpr):
     """
-    The round fence of next_round(): tell every peer this rank is done with the round (with
-    ``ABORT``, also that it could not prepare the next one), then wait up to ``ticks`` until every
-    peer has said the same, recording a peer that has not. One program, one warp.
+    The round fence of next_round(): tell every peer this rank is done with the round, then wait up
+    to ``ticks`` until every peer has said the same, recording a peer that has not. One program, one
+    warp.
+
+    With ``ABORT`` (this rank could not prepare the next round), or once this rank's plan holds an
+    error, it also marks the next round failed on every peer, so their wait() for it fails at once
+    instead of timing out on this rank. Such a rank still waits for its peers, so its next producer
+    cannot overwrite a peer that is still reading. A rank that learned of a peer's failure
+    (``PEER_FAILED``) waits without marking, so that peers keep naming the rank that failed.
 
     The counters belong to the plan, so a fence that times out leaves no other barrier out of step.
-    A rank whose plan already holds an error skips the fence (unless it aborts): its peers then time
-    out on it and record that, rather than wait forever.
+    A peer already timed out on at an earlier fence is not waited for again: a rank that has gone
+    away costs one timeout, not one per round.
     """
     cv = TriggeredView.initialize(view)
-    if not ABORT:
-        if tl.load(error, volatile=True) != 0:
-            return
+    held = tl.load(error, volatile=True)
+    mark = ((held != 0) & (held != PEER_FAILED)) | ABORT
     world_size = tl.load(view + H_WORLD_SIZE)
     fence = _fence_words(cv)
     abort = fence + world_size
     for peer in range(world_size):
         if peer != cv.rank:
-            if ABORT:
+            if mark:
                 remote = __translate(abort, cv.rank, peer, heap_bases)
                 tl.atomic_max(remote, (cv.round + 1).to(tl.int32), sem="relaxed", scope="sys")
                 tl.atomic_xchg(remote + 1, (cv.rank + 1).to(tl.int32), sem="relaxed", scope="sys")
@@ -143,7 +148,8 @@ def fence_kernel(view, heap_bases, error, ticks, ABORT: tl.constexpr):
             tl.atomic_add(__translate(fence + cv.rank, cv.rank, peer, heap_bases), 1, sem="release", scope="sys")
     t0 = read_realtime()
     for peer in range(world_size):
-        if peer != cv.rank:
+        # Behind by a round: this rank timed out on it at an earlier fence
+        if (peer != cv.rank) & (_load(fence + peer) >= cv.round - 1):
             while (_load(fence + peer) < cv.round) & (read_realtime() - t0 < ticks):
                 pass
             if _load(fence + peer) < cv.round:
