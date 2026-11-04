@@ -103,6 +103,8 @@ def test_all_gather_sdma_in_place(ctx):
         out.fill_(EMPTY)
         mine = out[rank * M : (rank + 1) * M]
         mine.fill_(rank * 10 + call)
+        # A faster peer's copies of the next call must not land before this rank's wipe
+        ctx.barrier()
         ctx.ccl.all_gather(out, mine, config=Config(engine="sdma"))
         for r in range(world_size):
             assert (out[r * M : (r + 1) * M] == r * 10 + call).all(), f"rank {rank}: slice {r} wrong"
