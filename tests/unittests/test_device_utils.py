@@ -3,7 +3,6 @@
 
 # Device intrinsics in iris.mem.utils, on one GPU.
 
-import pytest
 import torch
 import triton
 import triton.language as tl
@@ -12,30 +11,23 @@ from iris.mem.utils import read_realtime
 
 
 @triton.jit
-def _elapsed_kernel(out, ticks):
-    """Spin until ``ticks`` have passed, then store the start and end timestamps."""
+def _spin_kernel(out, ticks):
+    """Spin until ``ticks`` have passed by read_realtime(), then store the time it measured."""
     t0 = read_realtime()
     while read_realtime() - t0 < ticks:
         pass
-    tl.store(out, t0)
-    tl.store(out + 1, read_realtime())
+    tl.store(out + tl.program_id(0), read_realtime() - t0)
 
 
 def test_read_realtime_waits_for_the_clock():
     """
-    s_memrealtime completes on lgkmcnt, which the compiler does not track inside inline asm: each
-    read must wait on it before the register is used, or a loop bounded by the clock can exit early.
+    A loop bounded by read_realtime() runs for its whole budget. s_memrealtime completes on
+    lgkmcnt, which the compiler does not track inside inline asm: a read that waits on anything else
+    can be used before the clock value lands, and a small share of such loops exit early.
     """
-    arch = triton.runtime.driver.active.get_current_target().arch
-    if not arch.startswith("gfx9"):
-        pytest.skip("s_memrealtime is the gfx9 clock read")
-    out = torch.zeros(2, dtype=torch.int64, device="cuda")
     ticks = 100_000  # 1 ms of the 100 MHz clock
-    compiled = _elapsed_kernel[(1,)](out, ticks, num_warps=1)
-    lines = [line.strip() for line in compiled.asm["amdgcn"].splitlines()]
-    reads = [i for i, line in enumerate(lines) if line.startswith("s_memrealtime")]
-    assert reads
-    for i in reads:
-        assert lines[i + 1] == "s_waitcnt lgkmcnt(0)", lines[i : i + 2]
-    t0, t1 = out.tolist()
-    assert t1 - t0 >= ticks
+    out = torch.zeros(1024, dtype=torch.int64, device="cuda")
+    for _ in range(20):
+        _spin_kernel[(out.numel(),)](out, ticks, num_warps=1)
+        early = (out < ticks).sum().item()
+        assert early == 0, f"{early} of {out.numel()} loops ended early, after {out.min().item()} ticks"
