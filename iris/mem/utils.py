@@ -35,6 +35,24 @@ except ImportError:
     _HAS_SMID = False
 
 
+@triton.jit
+def _cdna_realtime():
+    """
+    ``s_memrealtime`` on CDNA3/CDNA4. It is a scalar memory read, so it completes on lgkmcnt, and
+    the compiler does not track the counters of an instruction inside inline asm: waiting on vmcnt
+    (as ``tl.extra.hip.memrealtime`` does on gfx9) lets the next instruction read the register
+    before the clock value lands.
+    """
+    return tl.inline_asm_elementwise(
+        asm="s_memrealtime $0\n\ts_waitcnt lgkmcnt(0)",
+        constraints=("=s"),
+        args=[],
+        dtype=tl.int64,
+        is_pure=False,
+        pack=1,
+    )
+
+
 if _HAS_MEMREALTIME:
 
     @triton.jit
@@ -45,13 +63,16 @@ if _HAS_MEMREALTIME:
         Returns a 64-bit value from the GPU's constant-frequency real-time
         counter (100 MHz, unaffected by power states or clock gating).
 
-        Delegates to ``tl.extra.hip.memrealtime()`` which emits the correct
-        instruction for each architecture family.
+        Delegates to ``tl.extra.hip.memrealtime()`` except on CDNA3/CDNA4,
+        where that intrinsic waits on the wrong counter (see ``_cdna_realtime``).
 
         Returns:
             int64: Current timestamp in cycles (100 MHz constant clock)
         """
-        return _memrealtime()
+        if is_hip_cdna3() or is_hip_cdna4():
+            return _cdna_realtime()
+        else:
+            return _memrealtime()
 else:
 
     @triton.jit
@@ -67,14 +88,7 @@ else:
             int64: Timestamp in cycles, or 0 where unsupported
         """
         if is_hip_cdna3() or is_hip_cdna4():
-            return tl.inline_asm_elementwise(
-                asm="s_memrealtime $0\n\ts_waitcnt vmcnt(0)",
-                constraints=("=s"),
-                args=[],
-                dtype=tl.int64,
-                is_pure=False,
-                pack=1,
-            )
+            return _cdna_realtime()
         else:
             return tl.cast(0, tl.int64)
 
