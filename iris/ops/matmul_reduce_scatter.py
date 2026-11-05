@@ -40,29 +40,97 @@ REDUCE_BLOCK_SIZE_N = 256
 
 
 @triton.jit
-def _copy(copy_engine_ctx, to_rank, src, dst, nbytes):
-    """One COPY_LINEAR of ``nbytes`` (at most 1 GiB) on the device-initiated queue to ``to_rank``."""
-    handle = copy_engine_ctx + sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank
-    queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
-    read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
-    write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
-    doorbell_ptr = tl.load(handle + 3).to(tl.pointer_type(tl.uint64))
-    cached_write_ptr = tl.load(handle + 4).to(tl.pointer_type(tl.uint64))
-    committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
+def strip_schedule(step, cur_rank, num_pid_n, max_strips, world_size: tl.constexpr):
+    """
+    (owner, strip) of this rank's ``step``-th tile: owners' strips round-robin, starting at the next
+    rank, tiles of a strip left to right, this rank's own strips last.
+    """
+    if world_size == 1:
+        owner = cur_rank
+        strip = step // num_pid_n
+    else:
+        others = (world_size - 1) * max_strips * num_pid_n
+        c = step // num_pid_n
+        j = tl.where(step < others, c % (world_size - 1), world_size - 1)
+        strip = tl.where(step < others, c // (world_size - 1), (step - others) // num_pid_n)
+        owner = (cur_rank + 1 + j) % world_size
+    return owner, strip
 
-    command_in_bytes = sdma_utils.sdma_ep.COPY_LINEAR_COMMAND_BYTES
-    base, offset = sdma_utils.acquire_fadd(
-        queue_ptr_u32,
-        read_ptr,
-        write_ptr,
-        doorbell_ptr,
-        cached_write_ptr,
-        committed_write_ptr,
-        command_in_bytes,
+
+@triton.jit
+def _gemm_tile(
+    A, B, M, N, K, stride_am, stride_ak, stride_bk, stride_bn, pid_m, pid_n, BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr, EVEN_K: tl.constexpr,
+):  # fmt: skip
+    """Tile (``pid_m``, ``pid_n``) of ``A @ B``, in fp32."""
+    tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
+    tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
+    # No cache modifiers: ".cg" loads (GemmContext's default) make this GEMM ~10% slower
+    gemm_ctx = GemmContext(
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        num_sms=1,
+        cache_modifier_a=None,
+        cache_modifier_b=None,
+        even_k=EVEN_K,
     )
-    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
-    sdma_utils.place_copy_packet(queue_ptr_u32, base + offset, nbytes.to(tl.uint32), src, dst)
-    sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, base + offset + command_in_bytes)
+    return gemm_ctx.reduce_axis(tensorA, tensorB, Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N))
+
+
+@triton.jit
+def _publish_cu(
+    c_tile, inbox, slot_offsets, mask, owner, cur_rank, heap_bases, arrivals, partition_counters, tiles,
+):  # fmt: skip
+    """Store the tile in the owner's inbox; the owner's last tile signals its arrival."""
+    dst = __translate(inbox, cur_rank, owner, heap_bases)
+    tl.store(dst + slot_offsets, c_tile, mask=mask)
+    # Every wave's remote stores are done before the ticket
+    wait_cnt()
+    tl.debug_barrier()
+    ticket = tl.atomic_add(partition_counters + owner, 1, sem="acq_rel", scope="sys")
+    if ticket % tiles == tiles - 1:
+        iris.atomic_add(arrivals + cur_rank, 1, cur_rank, owner, heap_bases, sem="release", scope="sys")
+
+
+@triton.jit
+def _publish_sdma(
+    c_tile, staging, inbox, rows, cols, mask, N, owner, strip, part_start, part_end, rows_per_rank, cur_rank,
+    heap_bases, copy_engine_ctx, arrivals, strip_counters, partition_counters, num_pid_n, num_strips, max_strips,
+    BLOCK_SIZE_M: tl.constexpr,
+):  # fmt: skip
+    """
+    Stage the tile; the strip's last tile copies the owner's rows of the strip to its inbox, and the
+    owner's last strip signals their arrival, on the same copy-engine queue.
+    """
+    # The copy engine reads memory behind L2: write the tile through, wait for every wave's stores
+    tl.store(staging + rows[:, None] * N + cols[None, :], c_tile, mask=mask, cache_modifier=".wt")
+    wait_cnt()
+    tl.debug_barrier()
+    ticket = tl.atomic_add(strip_counters + owner * max_strips + strip, 1, sem="relaxed", scope="sys")
+    if ticket % num_pid_n == num_pid_n - 1:
+        # The owner's rows of this strip are contiguous in both buffers
+        row0 = (part_start // BLOCK_SIZE_M + strip) * BLOCK_SIZE_M
+        lo = tl.maximum(row0, part_start)
+        hi = tl.minimum(row0 + BLOCK_SIZE_M, part_end)
+        elem = inbox.type.element_ty.primitive_bitwidth // 8
+        src = (staging + lo * N).to(tl.uint64)
+        dst_local = inbox + (cur_rank * rows_per_rank + lo - part_start) * N
+        dst = __translate(dst_local, cur_rank, owner, heap_bases).to(tl.uint64)
+        sdma_utils.copy_linear(copy_engine_ctx, owner, src, dst, (hi - lo) * N * elem)
+        # Every strip to this owner is queued before its counter's last ticket, so the signal, on the
+        # same queue, follows all of them
+        done = tl.atomic_add(partition_counters + owner, 1, sem="acq_rel", scope="gpu")
+        if done % num_strips == num_strips - 1:
+            iris.atomic_add(
+                arrivals + cur_rank,
+                1,
+                cur_rank,
+                owner,
+                heap_bases,
+                copy_engine_ctx=copy_engine_ctx,
+                use_copy_engine=True,
+            )
 
 
 @triton.jit
@@ -93,22 +161,12 @@ def _publish_kernel(
     USE_COPY_ENGINE: tl.constexpr,
 ):
     """
-    Program ``i`` computes the ``i``-th tile of this rank's order: owners' strips round-robin
-    (starting at the next rank), tiles of a strip left to right, this rank's own strips last. A tile
+    Program ``i`` computes the ``i``-th tile of ``strip_schedule`` and sends it to its owner. A tile
     row that straddles two owners is computed once for each, masked to that owner's rows.
     """
-    step = tl.program_id(0)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     rows_per_rank = M // world_size
-    if world_size == 1:
-        owner = cur_rank
-        strip = step // num_pid_n
-    else:
-        others = (world_size - 1) * max_strips * num_pid_n
-        c = step // num_pid_n
-        j = tl.where(step < others, c % (world_size - 1), world_size - 1)
-        strip = tl.where(step < others, c // (world_size - 1), (step - others) // num_pid_n)
-        owner = (cur_rank + 1 + j) % world_size
+    owner, strip = strip_schedule(tl.program_id(0), cur_rank, num_pid_n, max_strips, world_size)
     part_start = owner * rows_per_rank
     part_end = part_start + rows_per_rank
     first_pid_m = part_start // BLOCK_SIZE_M
@@ -117,69 +175,32 @@ def _publish_kernel(
     # Owners whose rows span fewer tile rows than max_strips leave some programs idle
     if strip < num_strips:
         pid_m = first_pid_m + strip
-        pid_n = step % num_pid_n
-        tensorA = make_tensor_view(A, M, K, stride_am, stride_ak)
-        tensorB = make_tensor_view(B, K, N, stride_bk, stride_bn)
-        # No cache modifiers: ".cg" loads (GemmContext's default) make this GEMM ~10% slower
-        gemm_ctx = GemmContext(
-            BLOCK_SIZE_M,
-            BLOCK_SIZE_N,
-            BLOCK_SIZE_K,
-            num_sms=1,
-            cache_modifier_a=None,
-            cache_modifier_b=None,
-            even_k=EVEN_K,
-        )
-        acc = gemm_ctx.reduce_axis(tensorA, tensorB, Tile(pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N))
+        pid_n = tl.program_id(0) % num_pid_n
+        acc = _gemm_tile(
+            A, B, M, N, K, stride_am, stride_ak, stride_bk, stride_bn, pid_m, pid_n, BLOCK_SIZE_M, BLOCK_SIZE_N,
+            BLOCK_SIZE_K, EVEN_K,
+        )  # fmt: skip
         c_tile = acc.to(inbox.type.element_ty)
 
         rows = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         cols = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         mask = ((rows >= part_start) & (rows < part_end))[:, None] & (cols[None, :] < N)
         # This rank's slot in the owner's inbox
-        slot_rows = cur_rank * rows_per_rank + rows - part_start
-        slot_offsets = slot_rows[:, None] * N + cols[None, :]
+        slot_offsets = (cur_rank * rows_per_rank + rows - part_start)[:, None] * N + cols[None, :]
 
         if owner == cur_rank:
             tl.store(inbox + slot_offsets, c_tile, mask=mask)
         elif USE_COPY_ENGINE:
-            # The copy engine reads memory behind L2: write the tile through, wait for every wave's stores
-            tl.store(staging + rows[:, None] * N + cols[None, :], c_tile, mask=mask, cache_modifier=".wt")
-            wait_cnt()
-            tl.debug_barrier()
-            ticket = tl.atomic_add(strip_counters + owner * max_strips + strip, 1, sem="relaxed", scope="sys")
-            if ticket % num_pid_n == num_pid_n - 1:
-                # The owner's rows of this strip are contiguous in both buffers
-                lo = tl.maximum(pid_m * BLOCK_SIZE_M, part_start)
-                hi = tl.minimum(pid_m * BLOCK_SIZE_M + BLOCK_SIZE_M, part_end)
-                elem = inbox.type.element_ty.primitive_bitwidth // 8
-                src = (staging + lo * N).to(tl.uint64)
-                dst_local = inbox + (cur_rank * rows_per_rank + lo - part_start) * N
-                dst = __translate(dst_local, cur_rank, owner, heap_bases).to(tl.uint64)
-                _copy(copy_engine_ctx, owner, src, dst, (hi - lo) * N * elem)
-                # Every strip to this owner is queued before its counter's last ticket, so the signal,
-                # on the same queue, follows all of them
-                done = tl.atomic_add(partition_counters + owner, 1, sem="acq_rel", scope="gpu")
-                if done % num_strips == num_strips - 1:
-                    iris.atomic_add(
-                        arrivals + cur_rank,
-                        1,
-                        cur_rank,
-                        owner,
-                        heap_bases,
-                        copy_engine_ctx=copy_engine_ctx,
-                        use_copy_engine=True,
-                    )
+            _publish_sdma(
+                c_tile, staging, inbox, rows, cols, mask, N, owner, strip, part_start, part_end, rows_per_rank,
+                cur_rank, heap_bases, copy_engine_ctx, arrivals, strip_counters, partition_counters, num_pid_n,
+                num_strips, max_strips, BLOCK_SIZE_M,
+            )  # fmt: skip
         else:
-            dst = __translate(inbox, cur_rank, owner, heap_bases)
-            tl.store(dst + slot_offsets, c_tile, mask=mask)
-            # Every wave's remote stores are done before the ticket; the owner's last tile signals
-            wait_cnt()
-            tl.debug_barrier()
-            tiles = num_strips * num_pid_n
-            ticket = tl.atomic_add(partition_counters + owner, 1, sem="acq_rel", scope="sys")
-            if ticket % tiles == tiles - 1:
-                iris.atomic_add(arrivals + cur_rank, 1, cur_rank, owner, heap_bases, sem="release", scope="sys")
+            _publish_cu(
+                c_tile, inbox, slot_offsets, mask, owner, cur_rank, heap_bases, arrivals, partition_counters,
+                num_strips * num_pid_n,
+            )  # fmt: skip
 
 
 @triton.jit
