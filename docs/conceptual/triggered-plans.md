@@ -112,8 +112,12 @@ with a blocking `wait()`), extra marks, a peer that failed the round, or a round
 never reached. Once an error is recorded, later stream-ordered waits return at once instead of each
 spinning for the timeout, and the rank's next round fence marks the next round failed on its peers:
 their `wait()` for it fails at once rather than timing out on that rank. The rank still waits at the
-fence for its peers, so its next producer cannot overwrite a peer that is still reading, but not for
-a peer it already timed out on at an earlier fence.
+fence for its peers, so its next producer cannot overwrite a peer that is still reading, but only
+for the plan's timeout, and not again for a peer it already timed out on. Past that point its copies
+can land in the peer's buffer while the peer still reads, so a fence that times out on a peer also
+marks the peer's next round failed: the peer's next `wait()` raises instead of accepting the data,
+though what it was reading may already be overwritten. Do not rely on the fence for a peer that may
+be slower than the timeout.
 
 ### Gluon
 

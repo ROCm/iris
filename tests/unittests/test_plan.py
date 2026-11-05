@@ -872,6 +872,35 @@ def test_fence_waits_once_for_a_missing_rank():
     del ctx
 
 
+def test_late_rank_raises_after_peers_time_out():
+    """
+    Rank 0 reaches next_round() only after its peers' fence has timed out on it, so their next copies
+    may land in its buffer while it still reads: its wait() for that round raises.
+    """
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    timeout = 2
+
+    with TriggeredPlan(ctx, buffer, whole(_slice(buffer, rank, slice_elems), base=buffer), timeout=timeout) as plan:
+        plan.run()
+        if rank == 0:
+            time.sleep(2 * timeout)
+        plan.next_round()
+        handle = plan.start()
+        kernels.release_kernel[(len(plan._own),)](handle, plan._own)
+        if rank == 0:
+            with pytest.raises(RuntimeError, match=r"round 2: rank \d+ failed"):
+                plan.wait()
+        else:
+            plan.wait(blocking=False)
+            with pytest.raises(TimeoutError, match="round 1: rank 0 did not reach next_round"):
+                plan.close()
+    ctx.barrier()
+    del ctx
+
+
 def test_recorded_error_raised_once():
     """An error the GPU recorded is raised by the next blocking wait(), and not again by close()."""
     ctx = _ctx()

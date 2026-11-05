@@ -29,9 +29,16 @@ def _load(ptr):
 
 
 @triton.jit
+def _failed(abort):
+    """The abort pair in one load: the round a peer marked failed (0 if none), and that peer."""
+    pair = _load(abort.to(tl.pointer_type(tl.int64)))
+    return pair.to(tl.int32), (pair >> 32).to(tl.int32) - 1
+
+
+@triton.jit
 def _aborted(abort, round):
     """True once a peer has said it failed ``round`` (or an earlier one)."""
-    failed = _load(abort)
+    failed, _ = _failed(abort)
     return (failed != 0) & (failed <= round)
 
 
@@ -122,11 +129,12 @@ def wait_kernel(view, status, error, ticks, OWN_ONLY: tl.constexpr, STREAM: tl.c
         if cv._sends_to(peer):
             done = _reached(cv.gates + 2 * cv.num_chunks + peer, cv.round, t0, ticks, abort, abort_round)
     # Even if done: a peer that failed the round may still send it, such as its old data from a flush
-    aborted = _aborted(abort, abort_round)
+    failed, failed_rank = _failed(abort)
+    aborted = (failed != 0) & (failed <= abort_round)
     done = done & (aborted == 0)
     tl.store(status + pid, done.to(tl.int32))
     if aborted:
-        _record_error(error, PEER_FAILED, cv.round, _load(abort + 1) - 1, 0)
+        _record_error(error, PEER_FAILED, cv.round, failed_rank, 0)
     elif STREAM and not done:
         _record_error(error, TIMED_OUT, cv.round, pid, marks)
 
@@ -145,7 +153,8 @@ def fence_kernel(view, heap_bases, error, ticks, ABORT: tl.constexpr):
     (``PEER_FAILED``) waits without marking, so that peers keep naming the rank that failed.
 
     The counters belong to the plan, so a fence that times out leaves no other barrier out of step.
-    A peer already timed out on at an earlier fence is not waited for again: a rank that has gone
+    A peer it times out on is marked failed for the next round, since this rank's next copies may
+    land while that peer still reads; nor is that peer waited for again, so a rank that has gone
     away costs one timeout, not one per round.
     """
     cv = TriggeredView.initialize(view)
@@ -168,3 +177,5 @@ def fence_kernel(view, heap_bases, error, ticks, ABORT: tl.constexpr):
                 pass
             if _load(fence + peer) < cv.round:
                 _record_error(error, FENCE_TIMED_OUT, cv.round, peer, 0)
+                # This rank's next copies may land while that peer still reads: fail its next round
+                _mark_failed(__translate(abort, cv.rank, peer, heap_bases), cv.round + 1, cv.rank)
