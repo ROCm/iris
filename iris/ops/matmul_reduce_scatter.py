@@ -103,11 +103,13 @@ def _publish_sdma(
     Stage the tile; the strip's last tile copies the owner's rows of the strip to its inbox, and the
     owner's last strip signals their arrival, on the same copy-engine queue.
     """
-    # The copy engine reads memory behind L2: write the tile through, wait for every wave's stores
+    # The copy engine reads memory behind L2. Every wave's stores are done before the ticket, and its
+    # release writes back this XCD's L2 (little is dirty: the stores are write-through); the strip's
+    # last ticket acquires every other tile's
     tl.store(staging + rows[:, None] * N + cols[None, :], c_tile, mask=mask, cache_modifier=".wt")
     wait_cnt()
     tl.debug_barrier()
-    ticket = tl.atomic_add(strip_counters + owner * max_strips + strip, 1, sem="relaxed", scope="sys")
+    ticket = tl.atomic_add(strip_counters + owner * max_strips + strip, 1, sem="acq_rel", scope="sys")
     if ticket % num_pid_n == num_pid_n - 1:
         # The owner's rows of this strip are contiguous in both buffers
         row0 = (part_start // BLOCK_SIZE_M + strip) * BLOCK_SIZE_M
