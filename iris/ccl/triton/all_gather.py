@@ -7,6 +7,7 @@ Triton kernels for all-gather collective communication.
 
 import triton
 import triton.language as tl
+import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 
 
@@ -205,11 +206,6 @@ def persistent_all_gather_partitioned(
     total_tiles = num_pid_m * num_pid_n
     tl.assume(total_tiles > 0)
 
-    # This program writes to a single destination for all of its tiles, so translate the output base once
-    # instead of loading heap_bases after every tile's store. For the local destination the delta is zero.
-    ptr_delta = tl.load(heap_bases + target_rank) - tl.load(heap_bases + iris_rank)
-    remote_output_ptr = tl.cast(tl.cast(output_ptr, tl.uint64) + ptr_delta, output_ptr.dtype)
-
     # Iterate over tiles with this PID's offset and stride within the rank group
     for tile_id in range(pid_in_rank_group, total_tiles, pids_per_rank):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -269,10 +265,16 @@ def persistent_all_gather_partitioned(
             # Local destination: use direct store
             tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
         else:
-            # Remote destination: store through the pre-translated base
-            remote_ptr = remote_output_ptr + output_offset
-            remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, (1, BLOCK_SIZE_N)), (1, BLOCK_SIZE_N))
-            tl.store(remote_ptr, data, mask=combined_mask)
+            # Remote destination: use iris.store to send data to remote destination
+            iris.store(
+                output_ptr_target,
+                data,
+                iris_rank,
+                target_rank,
+                heap_bases,
+                mask=combined_mask,
+                hint=(1, BLOCK_SIZE_N),
+            )
 
 
 def launch(
