@@ -65,15 +65,13 @@ def persistent_all_gather(
     total_tiles = num_pid_m * num_pid_n
     tl.assume(total_tiles > 0)
 
-    # Heap bases do not change between tiles, so translate the output base once per peer up front.
-    # A heap_bases load issued after a store cannot be hoisted above it, and waiting for that load
-    # also waits for every earlier store, which would serialize the remote stores.
+    # Translate the output base once per destination up front. A heap_bases load issued after a store
+    # cannot be hoisted above it, and waiting for that load also waits for every earlier store.
     local_base = tl.load(heap_bases + iris_rank)
     output_ptr_int = tl.cast(output_ptr, tl.uint64)
     remote_output_ptrs = ()
-    for step in tl.static_range(1, world_size):
-        dest_idx = (group_rank + step) % world_size
-        ptr_delta = tl.load(heap_bases + rank_start + dest_idx * rank_stride) - local_base
+    for i in tl.static_range(world_size):
+        ptr_delta = tl.load(heap_bases + rank_start + i * rank_stride) - local_base
         remote_output_ptrs += (tl.cast(output_ptr_int + ptr_delta, output_ptr.dtype),)
 
     for tile_id in range(pid, total_tiles, COMM_SMS):
@@ -113,30 +111,33 @@ def persistent_all_gather(
         # Load local input data once for this tile
         data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
 
-        # Compute global output row indices: offset by group_rank * M
-        rm_output = rm_input + group_rank * M
+        # Send local shard data to all destination ranks
+        # Each rank's input goes to output[group_rank * M : (group_rank + 1) * M, :] on all ranks
+        for i in tl.static_range(world_size):
+            # Compute global output row indices: offset by group_rank * M
+            rm_output = rm_input + group_rank * M
 
-        # Output mask: only write where input was valid
-        output_mask = (rm_output[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
+            # Output mask: only write where input was valid
+            output_mask = (rm_output[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
 
-        # Combine masks: must be valid in both input and output
-        combined_mask = input_mask & output_mask
+            # Combine masks: must be valid in both input and output
+            combined_mask = input_mask & output_mask
 
-        # Compute output offset
-        output_base_m = rm_output[:, None] * stride_out_m
-        output_base_n = rn[None, :] * stride_out_n
-        output_offset = output_base_m + output_base_n
+            # Compute output offset
+            output_base_m = rm_output[:, None] * stride_out_m
+            output_base_n = rn[None, :] * stride_out_n
+            output_offset = output_base_m + output_base_n
+            output_ptr_target = output_ptr + output_offset
+            output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-        # Each rank's input goes to output[group_rank * M : (group_rank + 1) * M, :] on all ranks.
-        # Write the local copy first, then the peers in a per-rank rotated order so that each
-        # destination sees a different writer at any given moment.
-        output_ptr_target = output_ptr + output_offset
-        output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-        tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
-        for step in tl.static_range(1, world_size):
-            remote_ptr = remote_output_ptrs[step - 1] + output_offset
-            remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, (1, BLOCK_SIZE_N)), (1, BLOCK_SIZE_N))
-            tl.store(remote_ptr, data, mask=combined_mask)
+            if i == group_rank:
+                # Local destination (i == group_rank): use direct store
+                tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
+            else:
+                # Remote destination: store through the pre-translated output base
+                remote_ptr = remote_output_ptrs[i] + output_offset
+                remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, (1, BLOCK_SIZE_N)), (1, BLOCK_SIZE_N))
+                tl.store(remote_ptr, data, mask=combined_mask)
 
 
 @triton.jit()
