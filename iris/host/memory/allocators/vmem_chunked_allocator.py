@@ -161,6 +161,11 @@ class VMemChunkedAllocator(BaseAllocator):
         self._shared_regions: List[ExportableMemory] = []
         self._peer_mappings: List[PeerMapping] = []
         self._imported_heap_mappings: List[PeerMapping] = []
+        # Imported regions by heap VA: (source range, source storage). Peers get these
+        # regions exported from the source allocation, because HIP 7.16 and later refuse
+        # to export memory that was itself imported. Holding the storage keeps torch from
+        # freeing or reusing that allocation while it is in the heap.
+        self._import_sources = {}
         self.mapped_extent = 0
         self.base_va = 0
         self.granularity = 0
@@ -475,7 +480,8 @@ class VMemChunkedAllocator(BaseAllocator):
         for i in range(start_index, len(self._shared_regions)):
             region = self._shared_regions[i]
             offset = region.va - self.base_va
-            handle_bytes = self.driver.export_handle(region)
+            source = self._import_sources.get(region.va)
+            handle_bytes = self.driver.export_handle(source[0] if source is not None else region)
             result.append((i, offset, region.size, handle_bytes))
         return result
 
@@ -553,6 +559,10 @@ class VMemChunkedAllocator(BaseAllocator):
             )
             self._imported_heap_mappings.append(mapping)
             self._shared_regions.append(ExportableMemory(va=target_base_va, size=aligned_alloc_size))
+            self._import_sources[target_base_va] = (
+                ExportableMemory(alloc_base, alloc_size),
+                external_tensor.untyped_storage(),
+            )
             self.mapped_extent = target_offset + aligned_alloc_size
             self.bump = max(self.bump, self.mapped_extent)
 
@@ -687,6 +697,7 @@ class VMemChunkedAllocator(BaseAllocator):
                     pass
             self._imported_heap_mappings.clear()
             self._shared_regions.clear()
+            self._import_sources.clear()
 
             # Release locally-mapped chunks. Each chunk has _va_owned=False,
             # so cleanup will unmap and release the physical handle
