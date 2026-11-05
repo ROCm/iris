@@ -99,7 +99,61 @@ def test_matmul_reduce_scatter_workspace_reuse(ctx, engine):
         workspace = ops.matmul_reduce_scatter(ctx, C, A, B, config=config, workspace=workspace)
         torch.cuda.synchronize()
         torch.testing.assert_close(C.float(), ref[rows], atol=2e-2 * float(ref.abs().max()), rtol=0)
-    assert workspace.round == 1, "reset() did not make the next call prepare a new workspace"
+    assert int(workspace.calls) == 1, "reset() did not make the next call prepare a new workspace"
+    ctx.barrier()
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_matmul_reduce_scatter_back_to_back(ctx, engine):
+    """Async calls on one workspace with no synchronization between them: each uses the other inbox half."""
+    rank, world_size = ctx.get_rank(), ctx.get_num_ranks()
+    M, N, K = world_size * 256, 512, 256
+    rows = slice(rank * M // world_size, (rank + 1) * M // world_size)
+    config = ops.FusedConfig(engine=engine, block_size_m=128, block_size_n=128, block_size_k=64)
+    inputs = [
+        (
+            (torch.randn(M, K, device=ctx.get_device()) / 4).to(torch.bfloat16),
+            (torch.randn(K, N, device=ctx.get_device()) / 4).to(torch.bfloat16),
+        )
+        for _ in range(8)
+    ]
+    outputs = [torch.empty(M // world_size, N, dtype=torch.bfloat16, device=ctx.get_device()) for _ in inputs]
+    workspace = ops.matmul_reduce_scatter(ctx, outputs[0], *inputs[0], config=config)
+    ctx.barrier()
+    for C, (A, B) in zip(outputs, inputs):
+        workspace = ops.matmul_reduce_scatter(ctx, C, A, B, async_op=True, config=config, workspace=workspace)
+    torch.cuda.synchronize()
+    ctx.barrier()
+    for call, (C, (A, B)) in enumerate(zip(outputs, inputs)):
+        ref = A.float() @ B.float()
+        dist.all_reduce(ref)
+        torch.testing.assert_close(
+            C.float(), ref[rows], atol=2e-2 * float(ref.abs().max()), rtol=0, msg=lambda m: f"call {call}: {m}"
+        )
+    ctx.barrier()
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_matmul_reduce_scatter_shape_changes(ctx, engine):
+    """Smaller shapes reuse the buffers; a larger one at least doubles them."""
+    rank, world_size = ctx.get_rank(), ctx.get_num_ranks()
+    N, K = 256, 128
+    config = ops.FusedConfig(engine=engine, block_size_m=64, block_size_n=128, block_size_k=64)
+    workspace = None
+    inboxes = []
+    for rows_per_rank in [128, 64, 96, 128, 512]:
+        M = world_size * rows_per_rank
+        rows = slice(rank * rows_per_rank, (rank + 1) * rows_per_rank)
+        A = (torch.randn(M, K, device=ctx.get_device()) / 4).to(torch.bfloat16)
+        B = (torch.randn(K, N, device=ctx.get_device()) / 4).to(torch.bfloat16)
+        ref = A.float() @ B.float()
+        dist.all_reduce(ref)
+        C = torch.empty(rows_per_rank, N, dtype=torch.bfloat16, device=A.device)
+        workspace = ops.matmul_reduce_scatter(ctx, C, A, B, config=config, workspace=workspace)
+        torch.testing.assert_close(C.float(), ref[rows], atol=2e-2 * float(ref.abs().max()), rtol=0)
+        inboxes.append(workspace.inbox.data_ptr())
+    assert len(set(inboxes[:4])) == 1, "a shape no larger than the first reallocated the inbox"
+    assert inboxes[4] != inboxes[0]
     ctx.barrier()
 
 
