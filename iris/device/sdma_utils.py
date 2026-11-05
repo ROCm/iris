@@ -363,7 +363,7 @@ def place_poll_regmem_packet(
     tl.store(slot_ptr_u32 + 0, header, cache_modifier=".wt")
     tl.store(slot_ptr_u32 + 1, flag_ptr_val.to(tl.uint32), cache_modifier=".wt")
     tl.store(slot_ptr_u32 + 2, (flag_ptr_val.to(tl.uint64) >> 32).to(tl.uint32), cache_modifier=".wt")
-    tl.store(slot_ptr_u32 + 3, expected_value.to(tl.uint32), cache_modifier=".wt")
+    tl.store(slot_ptr_u32 + 3, tl.cast(expected_value, tl.uint32), cache_modifier=".wt")
     tl.store(slot_ptr_u32 + 4, 0xFFFFFFFF, cache_modifier=".wt")
     tl.store(slot_ptr_u32 + 5, dw5, cache_modifier=".wt")
 
