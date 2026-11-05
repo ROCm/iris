@@ -862,8 +862,22 @@ class Context:
         else:
             dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_n=self.rank * N_local, src_mask=None)
 
-        for dest_rank in range(self.world_size):
-            self.store(dst_ptr, tile.data, to_rank=dest_rank, mask=combined_mask, hint=(1, tile.block_n))
+        # Load every peer's heap base before the first store: a load issued after a store cannot be
+        # hoisted above it, and waiting for that load also waits for all earlier stores to complete.
+        local_base = tl.load(self.heap_bases + self.rank)
+        ptr_int = tl.cast(dst_ptr, tl.uint64)
+        ptr_deltas = ()
+        for step in tl.static_range(1, self.world_size):
+            peer = (self.rank + step) % self.world_size
+            ptr_deltas += (tl.load(self.heap_bases + peer) - local_base,)
+
+        # Start with the local copy, then write to peers in a per-rank rotated order so that each
+        # destination sees a different writer at any given moment.
+        tl.store(dst_ptr, tile.data, mask=combined_mask)
+        for step in tl.static_range(1, self.world_size):
+            remote_ptr = tl.cast(ptr_int + ptr_deltas[step - 1], dst_ptr.dtype)
+            remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, (1, tile.block_n)), (1, tile.block_n))
+            tl.store(remote_ptr, tile.data, mask=combined_mask)
 
     @triton.jit
     def gather(self, tile: TileView, src_view: TensorView, source_rank: tl.constexpr, hint: tl.constexpr = None):
