@@ -8,12 +8,14 @@ Rank ``r`` owns rows ``[r * M / W, (r + 1) * M / W)`` of ``A @ B`` (``W`` ranks)
 sum over all ranks. Two stages, which the two-shot ``matmul_all_reduce`` can share:
 
 1. ``_publish_kernel``: the GEMM sends each owner its partial rows, into this rank's slot of the
-   owner's inbox (``inbox[src * M / W + row]``). Owners take turns one strip (``BLOCK_SIZE_M`` rows,
+   owner's inbox (``inbox[src * M / W + row]``). The inbox has two halves, and calls alternate between
+   them, so a rank can start its next call while a peer still sums the previous one; the count of
+   calls lives on the device. Owners take turns one strip (``BLOCK_SIZE_M`` rows,
    all of N) at a time, this rank's own rows last. ``FusedConfig.engine`` decides how a strip
    travels: compute-unit stores (``"cu"``), or a copy-engine copy once the whole strip is written
    (``"sdma"``). Each rank signals each owner once its partials have all arrived.
-2. ``wait_inbox`` + ``sum_inbox_tile``: wait for every rank's partials, then sum the slots in rank
-   order, in fp32.
+2. ``published_inbox`` + ``wait_inbox`` + ``sum_inbox_tile``: find this call's half, wait for every
+   rank's partials, then sum the slots in rank order, in fp32.
 """
 
 import logging
@@ -149,9 +151,13 @@ def _publish_kernel(
     stride_bk,
     stride_bn,
     max_strips,
+    half_elems,
     heap_bases,
     copy_engine_ctx,
     arrivals,
+    calls,
+    publish_tickets,
+    num_programs,
     strip_counters,
     partition_counters,
     cur_rank: tl.constexpr,
@@ -164,8 +170,12 @@ def _publish_kernel(
 ):
     """
     Program ``i`` computes the ``i``-th tile of ``strip_schedule`` and sends it to its owner. A tile
-    row that straddles two owners is computed once for each, masked to that owner's rows.
+    row that straddles two owners is computed once for each, masked to that owner's rows. The last
+    program to finish counts the call.
     """
+    call = tl.load(calls)
+    inbox += (call % 2) * half_elems
+    staging += (call % 2) * half_elems
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     rows_per_rank = M // world_size
     owner, strip = strip_schedule(tl.program_id(0), cur_rank, num_pid_n, max_strips, world_size)
@@ -204,6 +214,18 @@ def _publish_kernel(
                 num_strips * num_pid_n,
             )  # fmt: skip
 
+    # Every program read ``calls`` before taking its ticket
+    ticket = tl.atomic_add(publish_tickets, 1, sem="acq_rel", scope="gpu")
+    if ticket % num_programs == num_programs - 1:
+        tl.store(calls, call + 1)
+
+
+@triton.jit
+def published_inbox(inbox, calls, half_elems):
+    """(Half of ``inbox`` the last published call wrote, that call's number from 1), after the publish kernel."""
+    call = tl.load(calls)
+    return inbox + ((call - 1) % 2) * half_elems, call
+
 
 @triton.jit
 def wait_inbox(arrivals, target, cur_rank, world_size: tl.constexpr):
@@ -231,8 +253,9 @@ def _reduce_kernel(
     N,
     stride_cm,
     stride_cn,
+    half_elems,
     arrivals,
-    target,
+    calls,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
     REDUCE_BLOCK_SIZE_M: tl.constexpr,
@@ -244,7 +267,9 @@ def _reduce_kernel(
     rows = (pid // tiles_n) * REDUCE_BLOCK_SIZE_M + tl.arange(0, REDUCE_BLOCK_SIZE_M)
     cols = (pid % tiles_n) * REDUCE_BLOCK_SIZE_N + tl.arange(0, REDUCE_BLOCK_SIZE_N)
     mask = (rows[:, None] < rows_per_rank) & (cols[None, :] < N)
-    wait_inbox(arrivals, target, cur_rank, world_size)
+    inbox, call = published_inbox(inbox, calls, half_elems)
+    # Each rank adds 1 to its arrival counter here once per call
+    wait_inbox(arrivals, call, cur_rank, world_size)
     total = sum_inbox_tile(inbox, rows_per_rank, N, rows, cols, mask, world_size)
     c_ptr = C + rows[:, None] * stride_cm + cols[None, :] * stride_cn
     tl.store(c_ptr, total.to(C.type.element_ty), mask=mask)
@@ -267,7 +292,8 @@ def matmul_reduce_scatter_preamble(
 ) -> FusedWorkspace:
     """
     Allocate the inbox, counters and (for ``engine="sdma"``) staging buffer, unless ``workspace``
-    already fits. Collective when it allocates.
+    already has room for this shape. Collective when it allocates: the first time, after
+    ``reset()``, or when a larger shape needs more room (the buffers then at least double).
 
     Args:
         shmem: Iris shmem context
@@ -302,29 +328,47 @@ def matmul_reduce_scatter_preamble(
         if config.block_size_m * N * C.element_size() > MAX_COPY_BYTES:
             raise ValueError(f"a {config.block_size_m} x {N} strip exceeds the {MAX_COPY_BYTES}-byte copy limit")
 
-    # The counters only grow and find a strip's last tile modulo the tile grid, so a workspace is
-    # only reusable with the same tile sizes
-    block_sizes = (config.block_size_m, config.block_size_n, config.block_size_k)
-    key = ((M, N, K), block_sizes, C.dtype, world_size, config.engine)
-    if workspace.operation == "matmul_reduce_scatter" and workspace.prepared and workspace.rs_key == key:
-        return workspace
-    rows_per_rank = M // world_size
-    workspace.operation = "matmul_reduce_scatter"
+    # Two halves, each with room for every rank's partials of this rank's rows (or, staged, of the others')
+    need = 2 * triton.cdiv(M * N * C.element_size(), 256) * 256
+    reuse = workspace.operation == "matmul_reduce_scatter" and workspace.prepared and workspace.world_size == world_size
+    if not reuse or workspace.inbox.numel() < need or (use_copy_engine and workspace.staging is None):
+        if workspace.inbox is not None:
+            # Peers may still be writing into the buffers being replaced, and copies reading from them
+            torch.cuda.synchronize()
+            shmem.barrier()
+        if not reuse:
+            workspace.arrivals = shmem.zeros((world_size,), dtype=torch.int64)
+            workspace.calls = torch.zeros(1, dtype=torch.int64, device=A.device)
+            workspace.publish_tickets = torch.zeros(1, dtype=torch.int64, device=A.device)
+            workspace.partition_counters = torch.zeros(world_size, dtype=torch.int64, device=A.device)
+            workspace.strip_counters = torch.zeros(0, dtype=torch.int64, device=A.device)
+            workspace.inbox = workspace.staging = workspace.rs_key = None
+        if workspace.inbox is None or workspace.inbox.numel() < need:
+            capacity = need if workspace.inbox is None else max(need, 2 * workspace.inbox.numel())
+            workspace.inbox = shmem.zeros((capacity,), dtype=torch.uint8)
+            workspace.staging = None
+        if use_copy_engine and workspace.staging is None:
+            workspace.staging = torch.empty(workspace.inbox.numel(), dtype=torch.uint8, device=A.device)
+        workspace.operation = "matmul_reduce_scatter"
+        workspace.world_size = world_size
+        workspace.prepared = True
+        # Peers may send as soon as they start the next call: every rank's buffers must be in place
+        shmem.barrier()
+
+    # The tile counters find a strip's or owner's last tile modulo the tile grid: zero them when it
+    # changes. Only this rank's kernels touch them, so zeroing on the stream is enough.
+    key = ((M, N), (config.block_size_m, config.block_size_n, config.block_size_k), C.dtype, config.engine)
+    if workspace.rs_key != key:
+        strips = world_size * _max_strips(M // world_size, config.block_size_m)
+        if workspace.strip_counters.numel() < strips:
+            workspace.strip_counters = torch.zeros(strips, dtype=torch.int64, device=A.device)
+        workspace.strip_counters.zero_()
+        workspace.partition_counters.zero_()
+        workspace.publish_tickets.zero_()
+        workspace.rs_key = key
     workspace.shape = (M, N, K)
     workspace.dtype = C.dtype
-    workspace.world_size = world_size
     workspace.variant = config.engine
-    workspace.inbox = shmem.zeros((world_size * rows_per_rank, N), dtype=C.dtype)
-    workspace.arrivals = shmem.zeros((world_size,), dtype=torch.int64)
-    workspace.staging = torch.empty((M, N), dtype=C.dtype, device=A.device) if use_copy_engine else None
-    max_strips = _max_strips(rows_per_rank, config.block_size_m)
-    workspace.strip_counters = torch.zeros(world_size * max_strips, dtype=torch.int64, device=A.device)
-    workspace.partition_counters = torch.zeros(world_size, dtype=torch.int64, device=A.device)
-    workspace.round = 0
-    workspace.rs_key = key
-    workspace.prepared = True
-    # Peers may send as soon as they start the first call: every rank's counters must be zero first
-    shmem.barrier()
     return workspace
 
 
@@ -346,8 +390,10 @@ def matmul_reduce_scatter(
 
     ``config.engine`` decides what moves the partial results: compute units (``"cu"``) or the SDMA
     copy engines (``"sdma"``; needs a context created with ``engines=("sdma",)``). Pass the returned
-    workspace back in on later calls: a new one allocates buffers and synchronizes the ranks. With
-    ``async_op=True``, synchronize the ranks before reusing the workspace.
+    workspace back in on later calls: a new one allocates buffers and synchronizes the ranks. Calls on
+    one workspace may follow each other without synchronizing, ``async_op=True`` included: they
+    alternate between two buffers, and the call count is kept on the device. The buffers are sized for
+    the largest shape so far; a larger one reallocates them, which synchronizes the ranks.
 
     Args:
         shmem: Iris shmem context
@@ -372,7 +418,8 @@ def matmul_reduce_scatter(
     rows_per_rank = M // world_size
     max_strips = _max_strips(rows_per_rank, config.block_size_m)
     use_copy_engine = config.engine == "sdma"
-    workspace.round += 1
+    inbox = workspace.inbox.view(C.dtype)
+    half_elems = inbox.numel() // 2
 
     from iris.host.logging.logging import _log_rank
 
@@ -392,13 +439,14 @@ def matmul_reduce_scatter(
 
     heap_bases = shmem.get_heap_bases()
     unused = workspace.partition_counters
+    num_programs = world_size * max_strips * triton.cdiv(N, config.block_size_n)
     iris_launch(
         _publish_kernel,
-        (world_size * max_strips * triton.cdiv(N, config.block_size_n),),
+        (num_programs,),
         A,
         B,
-        workspace.inbox,
-        workspace.staging if use_copy_engine else unused,
+        inbox,
+        workspace.staging.view(C.dtype) if use_copy_engine else unused,
         M,
         N,
         K,
@@ -407,9 +455,13 @@ def matmul_reduce_scatter(
         B.stride(0),
         B.stride(1),
         max_strips,
+        half_elems,
         heap_bases,
         shmem.get_copy_engine_ctx() if use_copy_engine else unused,
         workspace.arrivals,
+        workspace.calls,
+        workspace.publish_tickets,
+        num_programs,
         workspace.strip_counters,
         workspace.partition_counters,
         rank,
@@ -430,14 +482,15 @@ def matmul_reduce_scatter(
     iris_launch(
         _reduce_kernel,
         (triton.cdiv(rows_per_rank, REDUCE_BLOCK_SIZE_M) * triton.cdiv(N, REDUCE_BLOCK_SIZE_N),),
-        workspace.inbox,
+        inbox,
         C,
         rows_per_rank,
         N,
         C.stride(0),
         C.stride(1),
+        half_elems,
         workspace.arrivals,
-        workspace.round,
+        workspace.calls,
         rank,
         world_size,
         REDUCE_BLOCK_SIZE_M,
