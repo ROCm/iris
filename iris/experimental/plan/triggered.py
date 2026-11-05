@@ -144,7 +144,7 @@ class TriggeredPlan:
 
         self.buffer = buffer
         # Each chunk's counter (marks) and arrival, each peer queue's completion, each peer's round
-        # fence count, then the round a peer failed and which peer, all int32
+        # fence count, then the earliest round a peer failed and which peer, all int32
         n, w = self.num_chunks, self.world_size
         self.gates = ctx.zeros(2 * n + 2 * w + 2, dtype=torch.int32)
         self.counters = self.gates[:n]

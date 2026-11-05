@@ -36,6 +36,22 @@ def _aborted(abort, round):
 
 
 @triton.jit
+def _mark_failed(abort, round, rank):
+    """
+    Record in a peer's abort pair that ``rank`` failed ``round``, unless an earlier round is
+    recorded there already: a peer still waiting on that round must keep seeing it. The pair is
+    swapped as one 64-bit word (round in the low half, rank + 1 in the high half), so the rank always
+    matches the round. The plan's gates are heap-aligned and the pair starts at an even word.
+    """
+    word = abort.to(tl.pointer_type(tl.int64))
+    new = ((rank + 1).to(tl.int64) << 32) | round.to(tl.int64)
+    cur = tl.atomic_add(word, 0, sem="relaxed", scope="sys")
+    while (cur == 0) | (cur.to(tl.int32) > round):
+        seen = tl.atomic_cas(word, cur, new, sem="relaxed", scope="sys")
+        cur = tl.where(seen == cur, new, seen)
+
+
+@triton.jit
 def release_kernel(view, chunks):
     """Open the gate of chunk ``chunks[pid]`` this round, however many of its writers have marked it."""
     cv = TriggeredView.initialize(view)
@@ -141,9 +157,7 @@ def fence_kernel(view, heap_bases, error, ticks, ABORT: tl.constexpr):
     for peer in range(world_size):
         if peer != cv.rank:
             if mark:
-                remote = __translate(abort, cv.rank, peer, heap_bases)
-                tl.atomic_max(remote, (cv.round + 1).to(tl.int32), sem="relaxed", scope="sys")
-                tl.atomic_xchg(remote + 1, (cv.rank + 1).to(tl.int32), sem="relaxed", scope="sys")
+                _mark_failed(__translate(abort, cv.rank, peer, heap_bases), cv.round + 1, cv.rank)
             # Release orders the abort above first; earlier work on this stream finished before the kernel began
             tl.atomic_add(__translate(fence + cv.rank, cv.rank, peer, heap_bases), 1, sem="release", scope="sys")
     t0 = read_realtime()
