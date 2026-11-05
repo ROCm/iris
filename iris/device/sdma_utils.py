@@ -342,6 +342,10 @@ def place_atomic_cas_packet(
     place_atomic_packet(queue_ptr_u32, offset_bytes, dst_ptr_val, swap_val, compare_val, 8, True)
 
 
+# Size of one POLL_REGMEM packet (6 dwords); rocm-xio's sdma_ep does not export this one.
+POLL_REGMEM_COMMAND_BYTES = tl.constexpr(24)
+
+
 @triton.jit
 def place_poll_regmem_packet(
     queue_ptr_u32,

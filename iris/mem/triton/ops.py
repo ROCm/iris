@@ -979,7 +979,72 @@ def quiet(copy_engine_ctx: tl.tensor, to_rank):
 
 
 @triton.jit
-def put_signal_rect(
+def _load_queue_ctx(copy_engine_ctx, to_rank):
+    """Unpack the SDMA queue context of ``to_rank``.
+
+    Returns:
+        (queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr)
+    """
+    ctx = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
+    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
+    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
+    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
+    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
+    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+    return queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr
+
+
+@triton.jit
+def _place_tile_copies(
+    queue_ptr_u32,
+    first_copy_offset_bytes,
+    from_base_val,
+    to_base_val,
+    transfer_row_offsets,
+    transfer_col_offsets,
+    transfer_width_bytes,
+    transfer_heights,
+    transfer_start,
+    transfer_count,
+    stride_n_bytes,
+    src_pitch: tl.constexpr,
+    dst_pitch: tl.constexpr,
+    MAX_TILES: tl.constexpr,
+):
+    """Place ``transfer_count`` SUB_WINDOW_COPY packets, back to back, starting at ``first_copy_offset_bytes``.
+
+    Transfer ``i`` is read from the metadata arrays at ``transfer_start + i``. Its source and destination
+    are ``from_base_val`` / ``to_base_val`` plus ``row_offset * src_pitch + col_offset * stride_n_bytes``.
+    The caller must have reserved ``transfer_count * COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES`` bytes in the queue.
+    """
+    copy_packet_bytes = sdma_utils.sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES
+    for i in range(MAX_TILES):
+        if i < transfer_count:
+            transfer_idx = transfer_start + i
+            row_offset = tl.load(transfer_row_offsets + transfer_idx)
+            col_offset = tl.load(transfer_col_offsets + transfer_idx)
+            width_bytes = tl.load(transfer_width_bytes + transfer_idx)
+            height = tl.load(transfer_heights + transfer_idx)
+            byte_offset = (row_offset.to(tl.uint64) * src_pitch) + (col_offset.to(tl.uint64) * stride_n_bytes)
+            sdma_utils.place_sub_window_copy_packet(
+                queue_ptr_u32,
+                first_copy_offset_bytes + i * copy_packet_bytes,
+                from_base_val + byte_offset,
+                to_base_val + byte_offset,
+                tile_width=width_bytes,
+                tile_height=height,
+                src_buffer_pitch=src_pitch,
+                dst_buffer_pitch=dst_pitch,
+                src_x=0,
+                src_y=0,
+                dst_x=0,
+                dst_y=0,
+            )
+
+
+@triton.jit
+def put_tile_signal(
     from_ptr,
     to_ptr,
     from_rank,
@@ -995,7 +1060,7 @@ def put_signal_rect(
     hint: tl.constexpr = None,
 ):
     """
-    Combines 2D rectangular copy (put) with atomic_add signal in one SDMA submission.
+    Combines a 2D tile copy (put) with an atomic_add signal in one SDMA submission.
 
     Takes explicit dimensions instead of a mask, allowing arbitrarily large tiles
     without hitting Triton's tensor size limit.
@@ -1009,8 +1074,8 @@ def put_signal_rect(
         copy_engine_ctx: Copy engine context for SDMA operations
         flag_ptr: Pointer to flag location for signaling
         flag_value: Value to atomically add to flag (typically 1)
-        width_bytes: Width of rectangle in bytes
-        height: Height of rectangle in rows
+        width_bytes: Width of the tile in bytes
+        height: Height of the tile in rows
         src_pitch: Source row stride in bytes
         dst_pitch: Destination row stride in bytes
         hint: Vectorization hint for translated pointers
@@ -1021,7 +1086,7 @@ def put_signal_rect(
     Example:
         >>> @triton.jit
         >>> def kernel(A_sharded, staged_a, flags, heap_bases, ctx):
-        >>>     iris.put_signal_rect(
+        >>>     iris.put_tile_signal(
         >>>         src_ptr, dst_ptr, 0, 1, heap_bases, ctx, flags, 1,
         >>>         width_bytes=1024, height=256,
         >>>         src_pitch=stride_am * 2, dst_pitch=stride_sa_m * 2
@@ -1032,21 +1097,19 @@ def put_signal_rect(
     translated_flag_ptr = __translate(flag_ptr, from_rank, to_rank, heap_bases, hint)
 
     # Get copy engine context for target rank
-    ctx = copy_engine_ctx + (6 * to_rank)
-    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
-    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
-    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
-    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
-    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
-    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr = _load_queue_ctx(
+        copy_engine_ctx, to_rank
+    )
 
     # Extract addresses (scalar pointers)
     src_ptr_val = from_ptr.to(tl.uint64)
     dst_ptr_val = translated_to_ptr.to(tl.uint64)
     flag_dst_ptr_val = translated_flag_ptr.to(tl.uint64)
 
-    # Reserve space for BOTH packets: SUB_WINDOW_COPY (80 bytes) + ATOMIC (32 bytes) = 112 bytes
-    command_in_bytes = 112
+    # Reserve space for BOTH packets: SUB_WINDOW_COPY + ATOMIC
+    copy_packet_bytes = sdma_utils.sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES
+    atomic_packet_bytes = sdma_utils.sdma_ep.ATOMIC_COMMAND_BYTES
+    command_in_bytes = copy_packet_bytes + atomic_packet_bytes
 
     # Acquire space in queue
     base, offset = sdma_utils.acquire_fadd(
@@ -1073,7 +1136,7 @@ def put_signal_rect(
     )
     sdma_utils.place_atomic_add_packet(
         queue_ptr_u32,
-        packet_offset_bytes + 80,  # After SUB_WINDOW_COPY packet
+        packet_offset_bytes + copy_packet_bytes,  # After SUB_WINDOW_COPY packet
         flag_dst_ptr_val,
         flag_value,
     )
@@ -1083,7 +1146,7 @@ def put_signal_rect(
 
 
 @triton.jit
-def wait_then_put_rect(
+def wait_then_put_tile(
     from_ptr,
     to_ptr,
     from_rank,
@@ -1105,6 +1168,9 @@ def wait_then_put_rect(
     The SDMA queue waits on a local flag and performs the copy autonomously
     after the producer has completed the corresponding batch.
 
+    Like put_tile_signal(), tiles are described by explicit dimensions instead of a pointer block, so
+    they are not limited by Triton's tensor size limit.
+
     Args:
         from_ptr: Source base pointer (scalar) in current rank's local memory
         to_ptr: Destination base pointer (scalar) - will be translated to to_rank's address space
@@ -1114,8 +1180,8 @@ def wait_then_put_rect(
         copy_engine_ctx: Copy engine context for SDMA operations
         wait_flag_ptr: Local flag the SDMA queue polls before copying
         wait_value: Value the flag must reach before the copy starts
-        width_bytes: Width of rectangle in bytes
-        height: Height of rectangle in rows
+        width_bytes: Width of the tile in bytes
+        height: Height of the tile in rows
         src_pitch: Source row stride in bytes
         dst_pitch: Destination row stride in bytes
         hint: Vectorization hint for translated pointers
@@ -1125,16 +1191,12 @@ def wait_then_put_rect(
     """
     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
 
-    ctx = copy_engine_ctx + (6 * to_rank)
-    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
-    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
-    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
-    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
-    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
-    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr = _load_queue_ctx(
+        copy_engine_ctx, to_rank
+    )
 
-    poll_packet_bytes = 24
-    copy_packet_bytes = 80
+    poll_packet_bytes = sdma_utils.POLL_REGMEM_COMMAND_BYTES
+    copy_packet_bytes = sdma_utils.sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES
     command_in_bytes = poll_packet_bytes + copy_packet_bytes
 
     base, offset = sdma_utils.acquire_fadd(
@@ -1169,7 +1231,7 @@ def wait_then_put_rect(
 
 
 @triton.jit
-def wait_then_put_rects(
+def wait_then_put_tile_batch(
     from_base_ptr,
     to_base_ptr,
     from_rank,
@@ -1187,11 +1249,13 @@ def wait_then_put_rects(
     stride_n_bytes,
     src_pitch: tl.constexpr,
     dst_pitch: tl.constexpr,
-    MAX_RECTS: tl.constexpr,
+    MAX_TILES: tl.constexpr,
     hint: tl.constexpr = None,
 ):
     """
     Enqueue one POLL_REGMEM followed by many 2D SUB_WINDOW_COPY packets.
+
+    Batched form of wait_then_put_tile(): one wait, then ``transfer_count`` tiles described by metadata arrays.
 
     The copy list is provided as flattened metadata arrays plus a per-wave
     start/count pair so that an entire wave is submitted with one queue
@@ -1208,14 +1272,14 @@ def wait_then_put_rects(
         wait_value: Value the flag must reach before the copies start
         transfer_row_offsets: Per-transfer row offsets (rows, indexed by transfer_start + i)
         transfer_col_offsets: Per-transfer column offsets (scaled by stride_n_bytes)
-        transfer_width_bytes: Per-transfer rectangle width in bytes
-        transfer_heights: Per-transfer rectangle height in rows
+        transfer_width_bytes: Per-transfer tile width in bytes
+        transfer_heights: Per-transfer tile height in rows
         transfer_start: Index of the first transfer in the metadata arrays
-        transfer_count: Number of transfers to enqueue (must be <= MAX_RECTS)
+        transfer_count: Number of transfers to enqueue (must be <= MAX_TILES)
         stride_n_bytes: Byte stride of one column step in the source/destination buffers
         src_pitch: Source row stride in bytes
         dst_pitch: Destination row stride in bytes
-        MAX_RECTS: Compile-time upper bound on transfer_count (loop trip count)
+        MAX_TILES: Compile-time upper bound on transfer_count (loop trip count)
         hint: Vectorization hint for translated pointers
 
     Returns:
@@ -1223,16 +1287,12 @@ def wait_then_put_rects(
     """
     translated_to_base_ptr = __translate(to_base_ptr, from_rank, to_rank, heap_bases, hint)
 
-    ctx = copy_engine_ctx + (6 * to_rank)
-    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
-    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
-    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
-    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
-    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
-    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr = _load_queue_ctx(
+        copy_engine_ctx, to_rank
+    )
 
-    poll_packet_bytes = 24
-    copy_packet_bytes = 80
+    poll_packet_bytes = sdma_utils.POLL_REGMEM_COMMAND_BYTES
+    copy_packet_bytes = sdma_utils.sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES
     command_in_bytes = poll_packet_bytes + transfer_count * copy_packet_bytes
 
     base, offset = sdma_utils.acquire_fadd(
@@ -1248,39 +1308,29 @@ def wait_then_put_rects(
         wait_value,
     )
 
-    from_base_val = from_base_ptr.to(tl.uint64)
-    to_base_val = translated_to_base_ptr.to(tl.uint64)
-
-    for i in range(MAX_RECTS):
-        if i < transfer_count:
-            transfer_idx = transfer_start + i
-            row_offset = tl.load(transfer_row_offsets + transfer_idx)
-            col_offset = tl.load(transfer_col_offsets + transfer_idx)
-            width_bytes = tl.load(transfer_width_bytes + transfer_idx)
-            height = tl.load(transfer_heights + transfer_idx)
-            byte_offset = (row_offset.to(tl.uint64) * src_pitch) + (col_offset.to(tl.uint64) * stride_n_bytes)
-            copy_offset_bytes = packet_offset_bytes + poll_packet_bytes + i * copy_packet_bytes
-            sdma_utils.place_sub_window_copy_packet(
-                queue_ptr_u32,
-                copy_offset_bytes,
-                from_base_val + byte_offset,
-                to_base_val + byte_offset,
-                tile_width=width_bytes,
-                tile_height=height,
-                src_buffer_pitch=src_pitch,
-                dst_buffer_pitch=dst_pitch,
-                src_x=0,
-                src_y=0,
-                dst_x=0,
-                dst_y=0,
-            )
+    _place_tile_copies(
+        queue_ptr_u32,
+        packet_offset_bytes + poll_packet_bytes,
+        from_base_ptr.to(tl.uint64),
+        translated_to_base_ptr.to(tl.uint64),
+        transfer_row_offsets,
+        transfer_col_offsets,
+        transfer_width_bytes,
+        transfer_heights,
+        transfer_start,
+        transfer_count,
+        stride_n_bytes,
+        src_pitch,
+        dst_pitch,
+        MAX_TILES,
+    )
 
     pending_wptr = base + offset + command_in_bytes
     sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
 
 @triton.jit
-def wait_then_put_signal_rect(
+def wait_then_put_tile_signal(
     from_ptr,
     to_ptr,
     from_rank,
@@ -1314,8 +1364,8 @@ def wait_then_put_signal_rect(
         wait_value: Value the flag must reach before the copy starts
         signal_flag_ptr: Flag on to_rank atomically incremented after the copy
         signal_value: Value to atomically add to the signal flag (typically 1)
-        width_bytes: Width of rectangle in bytes
-        height: Height of rectangle in rows
+        width_bytes: Width of the tile in bytes
+        height: Height of the tile in rows
         src_pitch: Source row stride in bytes
         dst_pitch: Destination row stride in bytes
         hint: Vectorization hint for translated pointers
@@ -1326,17 +1376,13 @@ def wait_then_put_signal_rect(
     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
     translated_signal_ptr = __translate(signal_flag_ptr, from_rank, to_rank, heap_bases, hint)
 
-    ctx = copy_engine_ctx + (6 * to_rank)
-    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
-    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
-    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
-    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
-    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
-    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr = _load_queue_ctx(
+        copy_engine_ctx, to_rank
+    )
 
-    poll_packet_bytes = 24
-    copy_packet_bytes = 80
-    atomic_packet_bytes = 32
+    poll_packet_bytes = sdma_utils.POLL_REGMEM_COMMAND_BYTES
+    copy_packet_bytes = sdma_utils.sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES
+    atomic_packet_bytes = sdma_utils.sdma_ep.ATOMIC_COMMAND_BYTES
     command_in_bytes = poll_packet_bytes + copy_packet_bytes + atomic_packet_bytes
 
     base, offset = sdma_utils.acquire_fadd(
@@ -1377,7 +1423,7 @@ def wait_then_put_signal_rect(
 
 
 @triton.jit
-def wait_then_put_signal_rects(
+def wait_then_put_tile_batch_signal(
     from_base_ptr,
     to_base_ptr,
     from_rank,
@@ -1397,13 +1443,13 @@ def wait_then_put_signal_rects(
     stride_n_bytes,
     src_pitch: tl.constexpr,
     dst_pitch: tl.constexpr,
-    MAX_RECTS: tl.constexpr,
+    MAX_TILES: tl.constexpr,
     hint: tl.constexpr = None,
 ):
     """
     Enqueue one POLL_REGMEM, many 2D SUB_WINDOW_COPY packets, and one ATOMIC.
 
-    Batched variant of wait_then_put_signal_rect(): the copy list comes from flattened
+    Batched variant of wait_then_put_tile_signal(): the copy list comes from flattened
     metadata arrays plus a start/count pair, and one signal is raised after the last copy.
 
     Args:
@@ -1419,14 +1465,14 @@ def wait_then_put_signal_rects(
         signal_value: Value to atomically add to the signal flag (typically 1)
         transfer_row_offsets: Per-transfer row offsets (rows, indexed by transfer_start + i)
         transfer_col_offsets: Per-transfer column offsets (scaled by stride_n_bytes)
-        transfer_width_bytes: Per-transfer rectangle width in bytes
-        transfer_heights: Per-transfer rectangle height in rows
+        transfer_width_bytes: Per-transfer tile width in bytes
+        transfer_heights: Per-transfer tile height in rows
         transfer_start: Index of the first transfer in the metadata arrays
-        transfer_count: Number of transfers to enqueue (must be <= MAX_RECTS)
+        transfer_count: Number of transfers to enqueue (must be <= MAX_TILES)
         stride_n_bytes: Byte stride of one column step in the source/destination buffers
         src_pitch: Source row stride in bytes
         dst_pitch: Destination row stride in bytes
-        MAX_RECTS: Compile-time upper bound on transfer_count (loop trip count)
+        MAX_TILES: Compile-time upper bound on transfer_count (loop trip count)
         hint: Vectorization hint for translated pointers
 
     Returns:
@@ -1435,17 +1481,13 @@ def wait_then_put_signal_rects(
     translated_to_base_ptr = __translate(to_base_ptr, from_rank, to_rank, heap_bases, hint)
     translated_signal_ptr = __translate(signal_flag_ptr, from_rank, to_rank, heap_bases, hint)
 
-    ctx = copy_engine_ctx + (6 * to_rank)
-    queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
-    read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
-    write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
-    doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
-    cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
-    committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
+    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr = _load_queue_ctx(
+        copy_engine_ctx, to_rank
+    )
 
-    poll_packet_bytes = 24
-    copy_packet_bytes = 80
-    atomic_packet_bytes = 32
+    poll_packet_bytes = sdma_utils.POLL_REGMEM_COMMAND_BYTES
+    copy_packet_bytes = sdma_utils.sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES
+    atomic_packet_bytes = sdma_utils.sdma_ep.ATOMIC_COMMAND_BYTES
     command_in_bytes = poll_packet_bytes + transfer_count * copy_packet_bytes + atomic_packet_bytes
 
     base, offset = sdma_utils.acquire_fadd(
@@ -1461,31 +1503,22 @@ def wait_then_put_signal_rects(
         wait_value,
     )
 
-    from_base_val = from_base_ptr.to(tl.uint64)
-    to_base_val = translated_to_base_ptr.to(tl.uint64)
-    for i in range(MAX_RECTS):
-        if i < transfer_count:
-            transfer_idx = transfer_start + i
-            row_offset = tl.load(transfer_row_offsets + transfer_idx)
-            col_offset = tl.load(transfer_col_offsets + transfer_idx)
-            width_bytes = tl.load(transfer_width_bytes + transfer_idx)
-            height = tl.load(transfer_heights + transfer_idx)
-            byte_offset = (row_offset.to(tl.uint64) * src_pitch) + (col_offset.to(tl.uint64) * stride_n_bytes)
-            copy_offset_bytes = packet_offset_bytes + poll_packet_bytes + i * copy_packet_bytes
-            sdma_utils.place_sub_window_copy_packet(
-                queue_ptr_u32,
-                copy_offset_bytes,
-                from_base_val + byte_offset,
-                to_base_val + byte_offset,
-                tile_width=width_bytes,
-                tile_height=height,
-                src_buffer_pitch=src_pitch,
-                dst_buffer_pitch=dst_pitch,
-                src_x=0,
-                src_y=0,
-                dst_x=0,
-                dst_y=0,
-            )
+    _place_tile_copies(
+        queue_ptr_u32,
+        packet_offset_bytes + poll_packet_bytes,
+        from_base_ptr.to(tl.uint64),
+        translated_to_base_ptr.to(tl.uint64),
+        transfer_row_offsets,
+        transfer_col_offsets,
+        transfer_width_bytes,
+        transfer_heights,
+        transfer_start,
+        transfer_count,
+        stride_n_bytes,
+        src_pitch,
+        dst_pitch,
+        MAX_TILES,
+    )
 
     sdma_utils.place_atomic_add_packet(
         queue_ptr_u32,

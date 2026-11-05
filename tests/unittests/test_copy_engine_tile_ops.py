@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 
-"""Compile-and-run tests for the rectangular / wait-then-put SDMA device ops.
+"""Compile-and-run tests for the tile / wait-then-put SDMA device ops.
 
 Each exported device op gets a tiny kernel so that a broken @triton.jit body
 (which only compiles on first launch) is caught here.
@@ -27,16 +27,16 @@ ROW_BYTES = N * 4
 
 
 @triton.jit
-def _put_signal_rect_kernel(src, dst, flag, from_rank: tl.constexpr, to_rank: tl.constexpr, heap_bases, ctx):
-    iris.put_signal_rect(
+def _put_tile_signal_kernel(src, dst, flag, from_rank: tl.constexpr, to_rank: tl.constexpr, heap_bases, ctx):
+    iris.put_tile_signal(
         src, dst, from_rank, to_rank, heap_bases, ctx, flag, 1, ROW_BYTES_C, M_C, ROW_BYTES_C, ROW_BYTES_C
     )
     iris.quiet(ctx, to_rank)
 
 
 @triton.jit
-def _wait_then_put_rect_kernel(src, dst, go, from_rank: tl.constexpr, to_rank: tl.constexpr, heap_bases, ctx):
-    iris.wait_then_put_rect(
+def _wait_then_put_tile_kernel(src, dst, go, from_rank: tl.constexpr, to_rank: tl.constexpr, heap_bases, ctx):
+    iris.wait_then_put_tile(
         src, dst, from_rank, to_rank, heap_bases, ctx, go, 1, ROW_BYTES_C, M_C, ROW_BYTES_C, ROW_BYTES_C
     )
     # The SDMA queue is blocked on `go`; release it from the device.
@@ -45,10 +45,10 @@ def _wait_then_put_rect_kernel(src, dst, go, from_rank: tl.constexpr, to_rank: t
 
 
 @triton.jit
-def _wait_then_put_signal_rect_kernel(
+def _wait_then_put_tile_signal_kernel(
     src, dst, go, flag, from_rank: tl.constexpr, to_rank: tl.constexpr, heap_bases, ctx
 ):
-    iris.wait_then_put_signal_rect(
+    iris.wait_then_put_tile_signal(
         src, dst, from_rank, to_rank, heap_bases, ctx, go, 1, flag, 1, ROW_BYTES_C, M_C, ROW_BYTES_C, ROW_BYTES_C
     )
     tl.atomic_add(go, 1)
@@ -56,7 +56,7 @@ def _wait_then_put_signal_rect_kernel(
 
 
 @triton.jit
-def _wait_then_put_rects_kernel(
+def _wait_then_put_tile_batch_kernel(
     src,
     dst,
     go,
@@ -69,7 +69,7 @@ def _wait_then_put_rects_kernel(
     heap_bases,
     ctx,
 ):
-    iris.wait_then_put_rects(
+    iris.wait_then_put_tile_batch(
         src, dst, from_rank, to_rank, heap_bases, ctx, go, 1, row_offsets, col_offsets, widths, heights,
         0, 2, 4, ROW_BYTES_C, ROW_BYTES_C, 2,
     )  # fmt: skip
@@ -78,7 +78,7 @@ def _wait_then_put_rects_kernel(
 
 
 @triton.jit
-def _wait_then_put_signal_rects_kernel(
+def _wait_then_put_tile_batch_signal_kernel(
     src,
     dst,
     go,
@@ -92,7 +92,7 @@ def _wait_then_put_signal_rects_kernel(
     heap_bases,
     ctx,
 ):
-    iris.wait_then_put_signal_rects(
+    iris.wait_then_put_tile_batch_signal(
         src, dst, from_rank, to_rank, heap_bases, ctx, go, 1, flag, 1, row_offsets, col_offsets, widths, heights,
         0, 2, 4, ROW_BYTES_C, ROW_BYTES_C, 2,
     )  # fmt: skip
@@ -117,7 +117,7 @@ def _args(shmem):
     return shmem.get_heap_bases(), shmem.get_copy_engine_ctx()
 
 
-def _rect_metadata(device):
+def _tile_metadata(device):
     # Two row blocks (rows 0-1 and 2-3 of a 4-row region), full row width.
     row_offsets = torch.tensor([0, 2], dtype=torch.int32, device=device)
     col_offsets = torch.zeros(2, dtype=torch.int32, device=device)
@@ -126,10 +126,10 @@ def _rect_metadata(device):
     return row_offsets, col_offsets, widths, heights
 
 
-def test_put_signal_rect():
+def test_put_tile_signal():
     shmem, rank, peer, src, dst, _, flag = _setup()
     if rank == 0:
-        _put_signal_rect_kernel[(1,)](src, dst, flag, rank, peer, *_args(shmem))
+        _put_tile_signal_kernel[(1,)](src, dst, flag, rank, peer, *_args(shmem))
     shmem.barrier()
     if rank == 1:
         assert torch.equal(dst, src)
@@ -138,10 +138,10 @@ def test_put_signal_rect():
     del shmem
 
 
-def test_wait_then_put_rect():
+def test_wait_then_put_tile():
     shmem, rank, peer, src, dst, go, _ = _setup()
     if rank == 0:
-        _wait_then_put_rect_kernel[(1,)](src, dst, go, rank, peer, *_args(shmem))
+        _wait_then_put_tile_kernel[(1,)](src, dst, go, rank, peer, *_args(shmem))
     shmem.barrier()
     if rank == 1:
         assert torch.equal(dst, src)
@@ -149,10 +149,10 @@ def test_wait_then_put_rect():
     del shmem
 
 
-def test_wait_then_put_signal_rect():
+def test_wait_then_put_tile_signal():
     shmem, rank, peer, src, dst, go, flag = _setup()
     if rank == 0:
-        _wait_then_put_signal_rect_kernel[(1,)](src, dst, go, flag, rank, peer, *_args(shmem))
+        _wait_then_put_tile_signal_kernel[(1,)](src, dst, go, flag, rank, peer, *_args(shmem))
     shmem.barrier()
     if rank == 1:
         assert torch.equal(dst, src)
@@ -161,11 +161,11 @@ def test_wait_then_put_signal_rect():
     del shmem
 
 
-def test_wait_then_put_rects():
+def test_wait_then_put_tile_batch():
     shmem, rank, peer, src, dst, go, _ = _setup()
-    meta = _rect_metadata(src.device)
+    meta = _tile_metadata(src.device)
     if rank == 0:
-        _wait_then_put_rects_kernel[(1,)](src, dst, go, *meta, rank, peer, *_args(shmem))
+        _wait_then_put_tile_batch_kernel[(1,)](src, dst, go, *meta, rank, peer, *_args(shmem))
     shmem.barrier()
     if rank == 1:
         assert torch.equal(dst[: 4 * N], src[: 4 * N])
@@ -173,11 +173,11 @@ def test_wait_then_put_rects():
     del shmem
 
 
-def test_wait_then_put_signal_rects():
+def test_wait_then_put_tile_batch_signal():
     shmem, rank, peer, src, dst, go, flag = _setup()
-    meta = _rect_metadata(src.device)
+    meta = _tile_metadata(src.device)
     if rank == 0:
-        _wait_then_put_signal_rects_kernel[(1,)](src, dst, go, flag, *meta, rank, peer, *_args(shmem))
+        _wait_then_put_tile_batch_signal_kernel[(1,)](src, dst, go, flag, *meta, rank, peer, *_args(shmem))
     shmem.barrier()
     if rank == 1:
         assert torch.equal(dst[: 4 * N], src[: 4 * N])
@@ -187,7 +187,7 @@ def test_wait_then_put_signal_rects():
 
 
 # ============================================================================
-# Edge cases: dtype sizes, partial/offset rect lists, wait semantics
+# Edge cases: dtype sizes, partial/offset tile lists, wait semantics
 # ============================================================================
 
 
@@ -231,7 +231,7 @@ def test_put_element_size_from_dtype(dtype):
 
 
 @triton.jit
-def _partial_rects_kernel(
+def _partial_tile_batch_kernel(
     src,
     dst,
     go,
@@ -246,7 +246,7 @@ def _partial_rects_kernel(
     heap_bases,
     ctx,
 ):
-    iris.wait_then_put_rects(
+    iris.wait_then_put_tile_batch(
         src, dst, from_rank, to_rank, heap_bases, ctx, go, 1, row_offsets, col_offsets, widths, heights,
         transfer_start, transfer_count, 4, ROW_BYTES_C, ROW_BYTES_C, 4,
     )  # fmt: skip
@@ -254,8 +254,8 @@ def _partial_rects_kernel(
     iris.quiet(ctx, to_rank)
 
 
-def test_wait_then_put_rects_partial_with_offsets():
-    """transfer_count < MAX_RECTS, non-zero transfer_start and column offsets: only the selected rects are copied."""
+def test_wait_then_put_tile_batch_partial_with_offsets():
+    """transfer_count < MAX_TILES, non-zero transfer_start and column offsets: only the selected tiles are copied."""
     shmem, rank, peer, src, dst, go, _ = _setup()
     dev = src.device
     # Entry 0 must be skipped (transfer_start=1). Entries 1 and 2 are copied.
@@ -264,7 +264,7 @@ def test_wait_then_put_rects_partial_with_offsets():
     widths = torch.tensor([ROW_BYTES, 8 * 4, ROW_BYTES], dtype=torch.int32, device=dev)
     heights = torch.tensor([2, 4, 2], dtype=torch.int32, device=dev)
     if rank == 0:
-        _partial_rects_kernel[(1,)](
+        _partial_tile_batch_kernel[(1,)](
             src, dst, go, row_offsets, col_offsets, widths, heights, 1, 2, rank, peer, *_args(shmem)
         )
     shmem.barrier()
@@ -279,19 +279,19 @@ def test_wait_then_put_rects_partial_with_offsets():
 
 
 @triton.jit
-def _post_wait_then_put_rect_kernel(src, dst, go, from_rank: tl.constexpr, to_rank: tl.constexpr, heap_bases, ctx):
-    iris.wait_then_put_rect(
+def _post_wait_then_put_tile_kernel(src, dst, go, from_rank: tl.constexpr, to_rank: tl.constexpr, heap_bases, ctx):
+    iris.wait_then_put_tile(
         src, dst, from_rank, to_rank, heap_bases, ctx, go, 1, ROW_BYTES_C, M_C, ROW_BYTES_C, ROW_BYTES_C
     )
 
 
-def test_wait_then_put_rect_blocks_until_flag():
+def test_wait_then_put_tile_blocks_until_flag():
     """The copy must not happen before the wait flag is released."""
     import time
 
     shmem, rank, peer, src, dst, go, _ = _setup()
     if rank == 0:
-        _post_wait_then_put_rect_kernel[(1,)](src, dst, go, rank, peer, *_args(shmem))
+        _post_wait_then_put_tile_kernel[(1,)](src, dst, go, rank, peer, *_args(shmem))
     shmem.barrier()
     if rank == 1:
         time.sleep(0.5)
