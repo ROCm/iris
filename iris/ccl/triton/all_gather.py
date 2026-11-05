@@ -7,7 +7,6 @@ Triton kernels for all-gather collective communication.
 
 import triton
 import triton.language as tl
-import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
 
 
@@ -64,6 +63,18 @@ def persistent_all_gather(
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
     tl.assume(total_tiles > 0)
+
+    # Heap bases do not change between tiles, so translate the output base once per peer up front.
+    # A heap_bases load issued after a store cannot be hoisted above it, and waiting for that load
+    # also waits for every earlier store, which would serialize the remote stores.
+    local_base = tl.load(heap_bases + iris_rank)
+    output_ptr_int = tl.cast(output_ptr, tl.uint64)
+    remote_output_ptrs = ()
+    for step in tl.static_range(1, world_size):
+        dest_idx = (group_rank + step) % world_size
+        ptr_delta = tl.load(heap_bases + rank_start + dest_idx * rank_stride) - local_base
+        remote_output_ptrs += (tl.cast(output_ptr_int + ptr_delta, output_ptr.dtype),)
+
     for tile_id in range(pid, total_tiles, COMM_SMS):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
@@ -101,42 +112,30 @@ def persistent_all_gather(
         # Load local input data once for this tile
         data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
 
-        # Send local shard data to all destination ranks
-        # Each rank's input goes to output[group_rank * M : (group_rank + 1) * M, :] on all ranks
-        for i in tl.static_range(world_size):
-            target_rank = rank_start + i * rank_stride
+        # Compute global output row indices: offset by group_rank * M
+        rm_output = rm_input + group_rank * M
 
-            # Compute global output row indices: offset by group_rank * M
-            rm_output = rm_input + group_rank * M
+        # Output mask: only write where input was valid
+        output_mask = (rm_output[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
 
-            # Output mask: only write where input was valid
-            output_mask = (rm_output[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
+        # Combine masks: must be valid in both input and output
+        combined_mask = input_mask & output_mask
 
-            # Combine masks: must be valid in both input and output
-            combined_mask = input_mask & output_mask
+        # Compute output offset
+        output_base_m = rm_output[:, None] * stride_out_m
+        output_base_n = rn[None, :] * stride_out_n
+        output_offset = output_base_m + output_base_n
 
-            # Compute output offset
-            output_base_m = rm_output[:, None] * stride_out_m
-            output_base_n = rn[None, :] * stride_out_n
-            output_offset = output_base_m + output_base_n
-            output_ptr_target = output_ptr + output_offset
-            output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-
-            if i == group_rank:
-                # Local destination (i == group_rank): use direct store
-                tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
-            else:
-                # Remote destination: use iris.store to send data to remote destination
-                # Use iris_rank for iris RMA operations (heap_bases indexing)
-                iris.store(
-                    output_ptr_target,
-                    data,
-                    iris_rank,
-                    target_rank,
-                    heap_bases,
-                    mask=combined_mask,
-                    hint=(1, BLOCK_SIZE_N),
-                )
+        # Each rank's input goes to output[group_rank * M : (group_rank + 1) * M, :] on all ranks.
+        # Write the local copy first, then the peers in a per-rank rotated order so that each
+        # destination sees a different writer at any given moment.
+        output_ptr_target = output_ptr + output_offset
+        output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
+        tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
+        for step in tl.static_range(1, world_size):
+            remote_ptr = remote_output_ptrs[step - 1] + output_offset
+            remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, (1, BLOCK_SIZE_N)), (1, BLOCK_SIZE_N))
+            tl.store(remote_ptr, data, mask=combined_mask)
 
 
 @triton.jit()
@@ -206,6 +205,11 @@ def persistent_all_gather_partitioned(
     total_tiles = num_pid_m * num_pid_n
     tl.assume(total_tiles > 0)
 
+    # This program writes to a single destination for all of its tiles, so translate the output base once
+    # instead of loading heap_bases after every tile's store. For the local destination the delta is zero.
+    ptr_delta = tl.load(heap_bases + target_rank) - tl.load(heap_bases + iris_rank)
+    remote_output_ptr = tl.cast(tl.cast(output_ptr, tl.uint64) + ptr_delta, output_ptr.dtype)
+
     # Iterate over tiles with this PID's offset and stride within the rank group
     for tile_id in range(pid_in_rank_group, total_tiles, pids_per_rank):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -265,16 +269,10 @@ def persistent_all_gather_partitioned(
             # Local destination: use direct store
             tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
         else:
-            # Remote destination: use iris.store to send data to remote destination
-            iris.store(
-                output_ptr_target,
-                data,
-                iris_rank,
-                target_rank,
-                heap_bases,
-                mask=combined_mask,
-                hint=(1, BLOCK_SIZE_N),
-            )
+            # Remote destination: store through the pre-translated base
+            remote_ptr = remote_output_ptr + output_offset
+            remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, (1, BLOCK_SIZE_N)), (1, BLOCK_SIZE_N))
+            tl.store(remote_ptr, data, mask=combined_mask)
 
 
 def launch(
