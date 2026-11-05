@@ -1764,7 +1764,7 @@ class Iris:
 
             all_gather(output_tensor, input_tensor, self._iris, group=group, async_op=async_op, config=config)
 
-        def prepare_all_gather(self, output_tensor, schedule=None, timeout=30.0):
+        def prepare_all_gather(self, output_tensor, schedule=None, timeout=30.0, prepare_ahead=False):
             """
             Prepare an in-place all-gather that a producer kernel triggers on the SDMA copy engines.
 
@@ -1783,7 +1783,9 @@ class Iris:
                     ``iris.experimental.plan`` builders (``whole``, ``chunks``, ``tile_chunks``) and
                     ``base=output_tensor``. Default: ``whole()`` of its rows, one chunk marked ready
                     once per round.
-                timeout: Seconds the plan's ``wait()`` and ``close()`` wait before raising.
+                timeout: Seconds the plan's ``wait()``, ``close()`` and round fence wait before raising.
+                prepare_ahead: Allow the plan's ``prepare_next()``, which prepares the next round
+                    while this one runs. The plan then holds queue space for two rounds.
 
             Returns:
                 TriggeredPlan, prepared for its first round.
@@ -1804,7 +1806,7 @@ class Iris:
             """
             from iris.ccl.sdma.all_gather import prepare
 
-            return prepare(output_tensor, self._iris, schedule=schedule, timeout=timeout)
+            return prepare(output_tensor, self._iris, schedule=schedule, timeout=timeout, prepare_ahead=prepare_ahead)
 
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """

@@ -17,6 +17,11 @@ the SDMA copy engines moving the data instead of compute units. The context is c
    The copy engines send a wave to every peer as soon as all programs have marked it, while the
    kernel computes the next wave. The plan is prepared once and reused for every round. See
    [Triggered Plans](../../docs/conceptual/triggered-plans.md).
+3. **The same plan, stream-ordered** (`prepare_ahead=True`): nothing in the loop waits for the GPU.
+   The host prepares the next round with `prepare_next()` while the GPU runs this one,
+   `wait(blocking=False)` queues the wait, a consumer kernel adds each round's `out` into a sum,
+   and `next_round()` queues the round fence. The sum is checked once, after the loop, and rank 0
+   prints the host time per round (excluding round 1, which compiles the kernels).
 
 ## Run
 

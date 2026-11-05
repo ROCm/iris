@@ -15,10 +15,16 @@ from iris.experimental.plan.triggered import view_words
 def _view(rank, schedules, round):
     """A handle and its gates, split into (counters, arrivals, completion)."""
     n = sum(len(s) for s in schedules)
-    gates = torch.zeros(2 * n + len(schedules), dtype=torch.int32, device="cuda")
+    # Counters, arrivals, completion, then the round fence and abort words the plan's kernels read
+    gates = torch.zeros(2 * n + 2 * len(schedules) + 2, dtype=torch.int32, device="cuda")
     words = view_words(rank, len(schedules), gates.data_ptr(), schedules)
     words[dv.H_ROUND.value] = round
-    return torch.tensor(words, dtype=torch.int64, device="cuda"), (gates[:n], gates[n : 2 * n], gates[2 * n :])
+    w = len(schedules)
+    return torch.tensor(words, dtype=torch.int64, device="cuda"), (
+        gates[:n],
+        gates[n : 2 * n],
+        gates[2 * n : 2 * n + w],
+    )
 
 
 @triton.jit
@@ -140,10 +146,11 @@ def test_wait_kernel_waits_for_own_marks():
     one = [Chunk((Region(0, 64),), writers=k)]
     view, (counters, _, completion, *_) = _view(0, [one, []], round=1)
     status = torch.zeros(1 + 2, dtype=torch.int32, device="cuda")  # one program per chunk, then per rank
+    error = torch.zeros(4, dtype=torch.int64, device="cuda")
     completion[1] = 1  # the copy to rank 1 is done; only the marks are missing
     counters[0] = k - 1
-    kernels.wait_kernel[(3,)](view, status, BUDGET=100, OWN_ONLY=True, num_warps=1)
+    kernels.wait_kernel[(3,)](view, status, error, 1_000_000, OWN_ONLY=True, STREAM=False, num_warps=1)
     assert status[0].item() == 0
     counters[0] = k
-    kernels.wait_kernel[(3,)](view, status, BUDGET=100, OWN_ONLY=True, num_warps=1)
+    kernels.wait_kernel[(3,)](view, status, error, 1_000_000, OWN_ONLY=True, STREAM=False, num_warps=1)
     assert status.tolist() == [1, 1, 1]

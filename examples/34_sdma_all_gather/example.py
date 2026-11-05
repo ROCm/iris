@@ -10,10 +10,14 @@ All-gather on the SDMA copy engines.
 2. ``ctx.ccl.prepare_all_gather``: a persistent tiled kernel writes its rows of the output and marks
    each wave of tiles ready; the copy engines send every wave to all peers while the kernel is still
    computing the next one.
+3. The same plan in a loop that never waits for the GPU: the host prepares the next round while
+   the GPU runs this one, and a consumer kernel reads each round's output after a stream-ordered
+   wait. The results are checked once, after the loop.
 """
 
 import argparse
 import os
+import time
 
 import torch
 import torch.distributed as dist
@@ -41,6 +45,14 @@ def scale_tiles(
         tl.store(out + (row0 + rows) * N + cols, tile * scale, mask=mask)
         # Wave k (every program's k-th tile) is chunk k: it is sent once all programs have marked it
         view.mark_ready(first_chunk + step // NUM_PROGRAMS)
+
+
+@triton.jit
+def accumulate(out, acc, numel, BLOCK: tl.constexpr):
+    """``acc += out``, in float64 so that the sum over rounds is exact."""
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+    tl.store(acc + offs, tl.load(acc + offs, mask=mask) + tl.load(out + offs, mask=mask).to(tl.float64), mask=mask)
 
 
 def check(out, ref, what):
@@ -102,6 +114,36 @@ def main():
                 plan.next_round()
         if rank == 0:
             ctx.info(f"prepare_all_gather: {a.rounds} rounds of {len(schedule)} chunks per rank match")
+
+        # 3. The same rounds, stream-ordered: no host check, and nothing in the loop waits for the GPU
+        acc = torch.zeros(out.shape, dtype=torch.float64, device=out.device)
+        BLOCK = 1024
+        with ctx.ccl.prepare_all_gather(out, schedule, prepare_ahead=True) as plan:
+            for round in range(1, a.rounds + 1):
+                if round == 2:
+                    # Round 1 compiles the kernels
+                    t0 = time.perf_counter()
+                handle = plan.start()
+                scale_tiles[(a.num_programs,)](
+                    x, out, rank * M, M, N, float(round), handle, plan.chunk_id(rank, 0),
+                    BM=a.block[0], BN=a.block[1], NUM_PROGRAMS=a.num_programs,
+                )  # fmt: skip
+                # The host prepares round + 1 while the GPU runs this one
+                plan.prepare_next()
+                # Kernels queued after this see every chunk of the round
+                plan.wait(blocking=False)
+                accumulate[(triton.cdiv(out.numel(), BLOCK),)](out, acc, out.numel(), BLOCK=BLOCK)
+                # A queued round fence: once every rank is done reading, peers may overwrite out
+                plan.next_round()
+            host = time.perf_counter() - t0 if a.rounds > 1 else None
+        # close() raised any error the stream-ordered waits recorded
+        expected = torch.zeros_like(acc)
+        for round in range(1, a.rounds + 1):
+            expected += (ref * round).double()
+        check(acc, expected, "stream-ordered prepare_all_gather, summed over rounds")
+        if rank == 0:
+            per_round = f"; host time {host / (a.rounds - 1) * 1e3:.3f} ms per round" if host else ""
+            ctx.info(f"stream-ordered prepare_all_gather: {a.rounds} rounds match{per_round}")
         ctx.barrier()
     finally:
         dist.destroy_process_group()
