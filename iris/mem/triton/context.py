@@ -873,7 +873,8 @@ class Context:
 
         # Start with the local copy, then write to peers in a per-rank rotated order so that each
         # destination sees a different writer at any given moment.
-        tl.store(dst_ptr, tile.data, mask=combined_mask)
+        local_ptr = tl.max_contiguous(tl.multiple_of(dst_ptr, (1, tile.block_n)), (1, tile.block_n))
+        tl.store(local_ptr, tile.data, mask=combined_mask)
         for step in tl.static_range(1, self.world_size):
             remote_ptr = tl.cast(ptr_int + ptr_deltas[step - 1], dst_ptr.dtype)
             remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, (1, tile.block_n)), (1, tile.block_n))

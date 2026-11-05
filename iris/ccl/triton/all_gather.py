@@ -113,7 +113,9 @@ def persistent_all_gather(
 
         # Send local shard data to all destination ranks
         # Each rank's input goes to output[group_rank * M : (group_rank + 1) * M, :] on all ranks
-        for i in tl.static_range(world_size):
+        # Write the local copy first, then the peers in a per-rank rotated order so that each destination
+        # sees a different writer at any given moment.
+        for step in tl.static_range(world_size):
             # Compute global output row indices: offset by group_rank * M
             rm_output = rm_input + group_rank * M
 
@@ -130,12 +132,12 @@ def persistent_all_gather(
             output_ptr_target = output_ptr + output_offset
             output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-            if i == group_rank:
-                # Local destination (i == group_rank): use direct store
+            if step == 0:
+                # Local destination (step 0, i.e. group_rank): use direct store
                 tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
             else:
                 # Remote destination: store through the pre-translated output base
-                remote_ptr = remote_output_ptrs[i] + output_offset
+                remote_ptr = remote_output_ptrs[(group_rank + step) % world_size] + output_offset
                 remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, (1, BLOCK_SIZE_N)), (1, BLOCK_SIZE_N))
                 tl.store(remote_ptr, data, mask=combined_mask)
 
