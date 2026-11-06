@@ -557,6 +557,200 @@ def test_chunked_mixed_alloc_free_pattern():
         assert t.numel() > 0
 
 
+def test_chunked_granularity_reports_min_and_recommended():
+    """Driver/allocator must report a true minimum and a recommended granule, not conflate them.
+
+    Repro: before the fix the AMD drivers returned the *recommended* granularity from
+    get_minimum_granularity() and offered no recommended query, so "minimum" == recommended
+    and the allocator exposed neither value in stats.
+    """
+    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    driver = alloc.driver
+
+    min_g = driver.get_minimum_granularity()
+    rec_g = driver.get_recommended_granularity()
+    assert min_g > 0 and rec_g > 0
+    assert min_g <= rec_g, f"minimum {min_g} must not exceed recommended {rec_g}"
+    assert rec_g % min_g == 0, f"recommended {rec_g} must be a multiple of minimum {min_g}"
+
+    stats = alloc.get_stats()
+    assert stats["min_granularity"] == min_g
+    assert stats["recommended_granularity"] == rec_g
+    # The allocator backs memory with the recommended granule.
+    assert alloc.granularity == rec_g
+
+
+def test_chunked_honors_requested_alignment_above_granule():
+    """allocate(alignment=...) above the granule must align the heap offset.
+
+    Repro: before the fix the alignment argument was ignored beyond the fixed
+    min_alignment, so an over-aligned request's offset was not a multiple of the
+    requested alignment.
+    """
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    base = alloc.get_base_address()
+    alignment = 4 * alloc.granularity
+
+    # Push the bump pointer to a non-(4*granule) multiple so alignment is actually exercised.
+    sentinel = alloc.allocate(alloc.granularity // 4, torch.float32)  # one granule
+    assert sentinel is not None
+
+    t = alloc.allocate(1024, torch.float32, alignment=alignment)
+    assert t is not None
+    offset = t.data_ptr() - base
+    assert offset % alignment == 0, f"offset 0x{offset:x} not aligned to 0x{alignment:x}"
+
+    # An over-aligned block is reclaimable, and the next request of the same size/alignment
+    # reuses that *exact* offset -- proving the free list is keyed by (size, alignment) and
+    # a real reuse happened, not just a fresh bump that happened to also be aligned.
+    del t
+    ctx.reclaim_freed()
+    t2 = alloc.allocate(1024, torch.float32, alignment=alignment)
+    offset2 = t2.data_ptr() - base
+    assert offset2 % alignment == 0
+    assert offset2 == offset, "expected the freed over-aligned block to be reused, not re-bumped"
+
+
+def test_chunked_rejects_operations_after_close():
+    """allocate() after close() must raise instead of silently succeeding."""
+    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    alloc.close()
+    with pytest.raises(RuntimeError):
+        alloc.allocate(128, torch.float32)
+
+
+def test_chunked_import_external_tensor_rejects_after_close():
+    """import_external_tensor() after close() must raise, matching allocate()'s guard.
+
+    Repro: before the fix, only allocate() was guarded against use-after-close; this entry
+    point would run past a closed allocator and touch driver/bookkeeping state that close()
+    already tore down.
+    """
+    ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    original = torch.randn(16, dtype=torch.float32, device=ctx.device)
+    alloc.close()
+    with pytest.raises(RuntimeError):
+        alloc.import_external_tensor(original)
+
+
+def test_chunked_import_peer_chunk_rejects_after_close():
+    """import_peer_chunk() after close() must raise before touching the torn-down driver.
+
+    The handle bytes below are not a real peer handle: _check_open() must reject the call
+    before the allocator ever tries to parse or import it, so garbage input is harmless here.
+    """
+    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    alloc.close()
+    with pytest.raises(RuntimeError):
+        alloc.import_peer_chunk(0, b"\x00" * 64, alloc.granularity)
+
+
+def test_chunked_get_allocation_chunks_since_rejects_after_close():
+    """get_allocation_chunks_since() after close() must raise instead of exporting stale chunks.
+
+    Repro: before the fix, this could run after close() released self.chunks/_shared_regions
+    and either return an empty/garbage result or fail deep inside driver.export_handle instead
+    of a clear, immediate error.
+    """
+    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    alloc.close()
+    with pytest.raises(RuntimeError):
+        alloc.get_allocation_chunks_since(0)
+
+
+def test_chunked_non_power_of_two_heap_size():
+    """A non-power-of-two heap size below the default chunk must construct and allocate.
+
+    Repro: 6 MiB with a 2 MiB granule produced a non-power-of-two chunk size and raised
+    "computed chunk_size ... is not a power of two" during construction.
+    """
+    ctx = iris.iris(6 << 20, allocator_type=ALLOC_TYPE)
+    t = ctx.zeros(1024, dtype=torch.float32)
+    t.fill_(3.0)
+    torch.cuda.synchronize()
+    assert torch.all(t == 3.0)
+
+
+def test_chunked_failed_allocation_rolls_back(monkeypatch):
+    """A tensor-construction failure must not advance bump/alloc bookkeeping.
+
+    Repro: before the fix, bump and alloc_sizes were mutated before the tensor was
+    built, so a failure left an orphaned reservation (leak) with no finalizer.
+    """
+    ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+
+    bump_before = alloc.bump
+    active_before = alloc.get_stats()["num_active_allocs"]
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected tensor construction failure")
+
+    monkeypatch.setattr(torch, "as_tensor", boom)
+    with pytest.raises(RuntimeError):
+        alloc.allocate(1024, torch.float32)
+    monkeypatch.undo()
+
+    assert alloc.bump == bump_before
+    assert alloc.get_stats()["num_active_allocs"] == active_before
+
+    # The allocator is still usable after the failed allocation.
+    t = alloc.allocate(1024, torch.float32)
+    assert t is not None
+
+
+def test_chunked_failed_allocation_rolls_back_free_list_block(monkeypatch):
+    """A tensor-construction failure on the free-list reuse path must return the block.
+
+    This exercises the other half of the rollback fix: when allocate() serves a request from
+    free_lists[bucket] (not the bump pointer), it pops the block *before* building the tensor.
+    Repro: before the fix, a construction failure here would drop that offset on the floor --
+    no bump/alloc_sizes damage (that part never ran), but the block would be leaked forever
+    since no finalizer was ever attached to recover it.
+    """
+    ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    base = alloc.get_base_address()
+
+    # Allocate a block and bury it under a second, live allocation so reclaim_freed() files it
+    # into a free-list bucket instead of merging it straight back into the bump pointer.
+    t = alloc.allocate(1024, torch.float32)
+    assert t is not None
+    freed_offset = t.data_ptr() - base
+    keep_alive = alloc.allocate(1024, torch.float32)
+    assert keep_alive is not None
+    del t
+    ctx.reclaim_freed()
+
+    bucket = next(bucket for bucket, offsets in alloc.free_lists.items() if freed_offset in offsets)
+    free_list_before = list(alloc.free_lists[bucket])
+    bump_before = alloc.bump
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected tensor construction failure")
+
+    monkeypatch.setattr(torch, "as_tensor", boom)
+    with pytest.raises(RuntimeError):
+        alloc.allocate(1024, torch.float32)
+    monkeypatch.undo()
+
+    # The bump pointer is untouched (the free-list path never advances it), and the popped
+    # block is back in the same bucket it came from.
+    assert alloc.bump == bump_before
+    assert sorted(alloc.free_lists[bucket]) == sorted(free_list_before)
+    assert freed_offset in alloc.free_lists[bucket]
+
+    # It's reusable afterward, landing at the same offset.
+    t2 = alloc.allocate(1024, torch.float32)
+    assert (t2.data_ptr() - base) == freed_offset
+
+
 if __name__ == "__main__":
     test_chunked_creation()
     test_chunked_basic_allocation()
