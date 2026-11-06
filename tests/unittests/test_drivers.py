@@ -34,6 +34,8 @@ from iris.drivers.fabric.amd import (
     _round_up as _amd_round_up,
     _valid_fabric_domain,
 )
+from iris.drivers.local import amd as local_amd_driver_module
+from iris.drivers.local.amd import LocalHipDriver
 from iris.drivers.fabric.nvidia import (
     CudaFabricError,
     CudaFabricNotSupported,
@@ -288,6 +290,59 @@ class TestAmdFabricDriver:
             ("unmap", 0x1000, 8192),
             ("release", 77),
             ("free", 0x1000, 8192),
+        ]
+
+    def test_granularity_methods_route_distinct_flags(self, monkeypatch):
+        """get_minimum_granularity/get_recommended_granularity must query with the matching flag.
+
+        A flag mix-up (easy to introduce while refactoring the shared _query_granularity
+        helper) would silently make the allocator back memory with the wrong granule, or
+        report the wrong minimum in get_stats(). Returning distinct values per flag here
+        means this test fails if the two public methods ever route to the same flag or swap
+        them, which a test that only checks "some positive int came back" would not catch.
+        """
+        driver = AmdFabricDriver()
+        driver._initialized = True
+        seen_flags = []
+
+        def fake_query_granularity(granularity_flag):
+            seen_flags.append(granularity_flag)
+            return {
+                amd_driver_module.hipMemAllocationGranularityMinimum: 4096,
+                amd_driver_module.hipMemAllocationGranularityRecommended: 2 * 1024 * 1024,
+            }[granularity_flag]
+
+        monkeypatch.setattr(driver, "_query_granularity", fake_query_granularity)
+
+        assert driver.get_minimum_granularity() == 4096
+        assert driver.get_recommended_granularity() == 2 * 1024 * 1024
+        assert seen_flags == [
+            amd_driver_module.hipMemAllocationGranularityMinimum,
+            amd_driver_module.hipMemAllocationGranularityRecommended,
+        ]
+
+
+class TestLocalHipDriver:
+    def test_granularity_methods_route_distinct_flags(self, monkeypatch):
+        """Same contract as AmdFabricDriver: minimum and recommended must use distinct flags."""
+        driver = LocalHipDriver()
+        driver._initialized = True
+        seen_flags = []
+
+        def fake_query_granularity(granularity_flag):
+            seen_flags.append(granularity_flag)
+            return {
+                local_amd_driver_module.hipMemAllocationGranularityMinimum: 4096,
+                local_amd_driver_module.hipMemAllocationGranularityRecommended: 2 * 1024 * 1024,
+            }[granularity_flag]
+
+        monkeypatch.setattr(driver, "_query_granularity", fake_query_granularity)
+
+        assert driver.get_minimum_granularity() == 4096
+        assert driver.get_recommended_granularity() == 2 * 1024 * 1024
+        assert seen_flags == [
+            local_amd_driver_module.hipMemAllocationGranularityMinimum,
+            local_amd_driver_module.hipMemAllocationGranularityRecommended,
         ]
 
 
