@@ -3,6 +3,7 @@
 
 # Schedule builders and validation for triggered plans (host only).
 
+import numpy as np
 import pytest
 import torch
 import triton
@@ -195,3 +196,30 @@ def test_check_disjoint_same_buffer_protects_own_data():
     clash = [[Chunk((Region(0, 64),), peers=(1,))], [Chunk((Region(32, 64),), peers=(2,))], []]
     with pytest.raises(ValueError, match="ranks 0 and 1 both send bytes 32 to 64 of the buffer"):
         check_disjoint(clash)
+
+
+def test_whole_and_chunks_take_group():
+    buf = torch.zeros(1024, dtype=torch.int32)
+    assert [c.group for c in whole(buf, peers=(1,), group=3)] == [3]
+    assert [c.group for c in chunks(buf, 4, group=2)] == [2] * 4
+
+
+def test_group_and_peers_take_integers():
+    """numpy integers work; floats and bools do not."""
+    chunk = Chunk((Region(0, 64),), peers=np.arange(1, 3), group=np.int64(1))
+    assert chunk.peers == (1, 2) and chunk.group == 1 and type(chunk.group) is int
+    for bad in (dict(group=1.0), dict(group=True), dict(peers=(1.0,)), dict(peers=(True,))):
+        with pytest.raises(ValueError, match="integers"):
+            Chunk((Region(0, 64),), **bad)
+
+
+def test_check_disjoint_expands_rows_only_when_extents_interleave(monkeypatch):
+    """Ranks whose regions lie in separate ranges are accepted without expanding their rows."""
+    import iris.experimental.plan.schedule as sched
+
+    def no_rows(*args):
+        raise AssertionError("rows expanded")
+
+    monkeypatch.setattr(sched, "_region_rows", no_rows)
+    buf = torch.zeros(4096, dtype=torch.int8)
+    check_disjoint([chunks(buf[r * 1024 : (r + 1) * 1024], 4, base=buf) for r in range(4)])

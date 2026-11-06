@@ -1180,6 +1180,20 @@ def test_invalid_schedule_fails_every_rank():
     del ctx
 
 
+def test_sparse_group_ids_rejected():
+    """Group ids must be small: every id up to the largest gets gate and view words on every rank."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    schedule = whole(_slice(buffer, rank, slice_elems), base=buffer, group=10_000 if rank == 0 else 0)
+    with pytest.raises(ValueError, match="group ids go up to 10000"):
+        TriggeredPlan(ctx, buffer, schedule, timeout=20)
+    assert not any(queue_ledger.ledger().entries.values())
+    ctx.barrier()
+    del ctx
+
+
 def test_overlapping_schedules_rejected():
     """Every rank describing the whole buffer, not its own slice, fails on every rank before anything is prepared."""
     ctx = _ctx()

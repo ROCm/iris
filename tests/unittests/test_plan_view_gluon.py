@@ -144,3 +144,14 @@ def test_recipients_and_groups():
     assert out.item() == 1 and _arrived(view, 4) == [1, 1, 1, 0]
     arrivals[3] = 2
     assert _arrived(view, 4) == [1, 1, 1, 1]
+
+
+def test_unknown_group_has_arrived():
+    """A group no chunk uses has no chunks sent here, so it has arrived; nothing past the view or gates is read."""
+    schedules = [[Chunk((Region(0, 64),), group=0)], [Chunk((Region(64, 64),), group=0)]]
+    view, (_, _, _, groups) = _view(1, schedules, round=1)
+    assert groups.numel() == 1
+    out = torch.zeros(1, dtype=torch.int32, device="cuda")
+    for group in (0, 1, 1000, -1):
+        _group_arrived_kernel[(1,)](view, out, group)
+        assert out.item() == (group != 0), group

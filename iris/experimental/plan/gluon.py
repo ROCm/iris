@@ -14,6 +14,7 @@ from triton.language.core import _aggregate as aggregate
 from iris.experimental.plan.triton import (
     H_GATES,
     H_NUM_CHUNKS,
+    H_NUM_GROUPS,
     H_RANK,
     H_ROUND,
     H_WORLD_SIZE,
@@ -24,6 +25,12 @@ from iris.experimental.plan.triton import (
     RECORD_WORDS,
 )
 from iris.mem.utils import wait_cnt
+
+
+@gluon.jit
+def _group_word(num_chunks, world_size, group):
+    """Gate word of ``group``'s arrival, as ``triggered.group_gate`` computes it on the host."""
+    return 2 * num_chunks + 2 * world_size + 2 + group
 
 
 @aggregate
@@ -120,11 +127,20 @@ class TriggeredView:
 
     @gluon.jit
     def group_arrived(self, group):
-        """True once every chunk of ``group`` sent to this rank has arrived this round."""
+        """
+        True once every chunk of ``group`` sent to this rank has arrived this round. Always true of a
+        group with no chunks sent here, including a group no chunk uses (a debug build asserts on
+        that, since it is likely a typo).
+        """
         world_size = gl.load(self.view + H_WORLD_SIZE)
-        expected = gl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + world_size + group)
-        word = 2 * self.num_chunks + 2 * world_size + 2 + group
-        return gl.atomic_add(self.gates + word, 0, sem="acquire", scope="sys") >= expected * self.round
+        known = (group >= 0) & (group < gl.load(self.view + H_NUM_GROUPS))
+        gl.device_assert(known, "wait_group: no chunk uses this group")
+        expected = gl.load(
+            self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + world_size + group, mask=known, other=0
+        )
+        word = self.gates + _group_word(self.num_chunks, world_size, group)
+        seen = gl.atomic_add(word, 0, mask=known, sem="acquire", scope="sys")
+        return (known == 0) | (seen >= expected * self.round)
 
     @gluon.jit
     def wait_group(self, group):

@@ -51,12 +51,25 @@ class State(enum.Enum):
 
 
 def group_gate(num_chunks, world_size, group):
-    """Index in the gates of ``group``'s arrival: after the counters, arrivals, completion, fence counts and abort pair."""
+    """
+    Index in the gates of ``group``'s arrival: after the counters, arrivals, completion, fence counts
+    and abort pair. The device views compute the same in ``_group_word``.
+    """
     return 2 * num_chunks + 2 * world_size + 2 + group
 
 
 def group_counts(schedules, world_size):
-    """``counts[rank][group]``: how many chunks of each group are sent to each rank, per round."""
+    """
+    ``counts[rank][group]``: how many chunks of each group are sent to each rank, per round.
+
+    Unlike a chunk's arrival counter, which one sender's queue adds to in order, a group's counter
+    sums several senders, so reaching ``counts × round`` shows round ``round`` landed only while no
+    sender's next-round copy can arrive first. The round fence ensures that: no rank marks round
+    ``r + 1`` before every rank's ``wait()`` for round ``r`` has seen its copies land. Past a fence
+    timeout that no longer holds, and the late rank's next ``wait()`` raises instead (see
+    ``kernels.fence_kernel``). A change that loosens the fence or pipelines rounds must keep it for
+    groups.
+    """
     num_groups = 1 + max((c.group for s in schedules for c in s if c.group is not None), default=-1)
     counts = np.zeros((world_size, num_groups), dtype=np.int64)
     for sender, schedule in enumerate(schedules):
@@ -180,6 +193,11 @@ class TriggeredPlan:
             raise ValueError("ranks passed buffers or destinations of different sizes")
         self.schedules = [s for *_, s in gathered]
         check_disjoint(self.schedules, same)
+        groups = [c.group for s in self.schedules for c in s if c.group is not None]
+        total = sum(len(s) for s in self.schedules)
+        if groups and max(groups) >= total:
+            # Every id up to the largest gets a gate word and a view word on each rank
+            raise ValueError(f"group ids go up to {max(groups)}, but the plan has {total} chunks; number groups from 0")
 
         self._first = np.cumsum([0] + [len(s) for s in self.schedules]).tolist()
         self.num_chunks = self._first[-1]

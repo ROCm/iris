@@ -132,11 +132,12 @@ buffer: an all-gather or a broadcast. Three options cover other patterns:
   at its own offset and row pitch. The schedule builders take `dst=` (a view of the destination
   with the same shape as the source) together with `dst_base=` (the destination itself).
 - **Peers.** `Chunk(peers=...)` sends a chunk to only some ranks; ranks it does not go to neither
-  receive nor wait for it. A chunk is never sent to its own rank.
+  receive nor wait for it: there, `arrived()` and `wait()` on it return true at once. A chunk is
+  never sent to its own rank.
 - **Groups.** Chunks with the same `group` (a small integer chosen by the caller, shared across
   ranks) signal one arrival counter at each receiver, so a consumer waits for all of them at once
   with `wait_group(group)` instead of one `wait` per chunk. `wait(chunk)` on a chunk in a group
-  waits for its whole group.
+  waits for its whole group. Number groups from 0: each id up to the largest gets a counter.
 
 A reduce-scatter's exchange: each rank sends block `p` of its partial result to rank `p` only,
 into inbox slot `rank` there, and the reduction waits once for every source:
@@ -163,6 +164,8 @@ mine = a_local                                      # (M, K) on the heap, this r
 dst = staging[rank * M : (rank + 1) * M, :K]       # this rank's rows, in the staging pitch
 schedule = tile_chunks(mine, (BM, BK), num_programs, dst=dst, dst_base=staging)
 plan = TriggeredPlan(ctx, a_local, schedule, destination=staging)
+...                                                 # each round, after the producer writes a_local:
+dst.copy_(a_local)                                  # a chunk is never sent to its own rank
 ```
 
 ### Gluon
@@ -295,7 +298,8 @@ per round, by the whole CTA after every wave's stores are done, with release sem
   chunk, a completion counter per peer, the round fence's counters, then an arrival counter per
   group. The copy engine polls a chunk's counter with `>=` against `writers × round`, so no writer
   has to tell which mark is the last one. A group's counter grows by the number of its chunks sent
-  to the rank, per round.
+  to the rank, per round. Since several senders add to it, it counts rounds correctly only because
+  the round fence keeps every rank's round `r` copies ahead of any round `r + 1` copy.
 - Every round, a rank's copies to a peer end with one signal on the sending rank's completion
   counter for that peer. `wait()` and `sent()` / `wait_sent()` read it: once it reaches the round,
   every copy to that peer has landed, and the source may be overwritten.

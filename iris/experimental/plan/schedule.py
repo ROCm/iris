@@ -12,6 +12,7 @@ All of a rank's copies to one peer run in schedule order, so a chunk completed e
 every chunk before it. Order the schedule the way the producer finishes its work.
 """
 
+import operator
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -79,7 +80,9 @@ class Chunk:
 
     def __post_init__(self):
         if self.peers is not None:
-            object.__setattr__(self, "peers", tuple(sorted(set(self.peers))))
+            object.__setattr__(self, "peers", tuple(sorted({_index(p, "peers") for p in self.peers})))
+        if self.group is not None:
+            object.__setattr__(self, "group", _index(self.group, "group"))
 
     def recipients(self, sender, world_size):
         """The ranks this chunk goes to, when ``sender`` sends it."""
@@ -89,6 +92,16 @@ class Chunk:
     def is_2d(self):
         """True if any region has more than one row."""
         return any(r.rows > 1 for r in self.regions)
+
+
+def _index(value, what):
+    """``value`` as a Python int; accepts numpy integers, rejects floats and bools."""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{what} must be integers, not {value!r}")
+    try:
+        return operator.index(value)
+    except TypeError:
+        raise ValueError(f"{what} must be integers, not {value!r}") from None
 
 
 def _byte_offset(view, base):
@@ -121,26 +134,26 @@ def _dst_offset(view, dst, dst_base, what):
     return _byte_offset(dst, dst_base)
 
 
-def whole(view, base=None, writers=1, dst=None, dst_base=None, peers=None):
+def whole(view, base=None, writers=1, dst=None, dst_base=None, peers=None, group=None):
     """
     One chunk covering a contiguous ``view``, marked ready by ``writers`` programs per round.
 
     By default it lands where it is, in each peer's buffer. With ``dst`` (a contiguous view of the
     same shape inside ``dst_base``, the plan's destination), it lands there instead. ``peers``
-    limits the ranks it goes to.
+    limits the ranks it goes to, and ``group`` is its arrival group.
     """
     if not view.is_contiguous() or (dst is not None and not dst.is_contiguous()):
         raise ValueError("whole() needs contiguous views")
     dst_offset = _dst_offset(view, dst, dst_base, "whole()")
     nbytes = view.numel() * view.element_size()
-    return [Chunk(_linear(_byte_offset(view, base), nbytes, dst_offset), writers, peers)]
+    return [Chunk(_linear(_byte_offset(view, base), nbytes, dst_offset), writers, peers, group)]
 
 
-def chunks(view, n, base=None, writers=1, dst=None, dst_base=None, peers=None):
+def chunks(view, n, base=None, writers=1, dst=None, dst_base=None, peers=None, group=None):
     """
     Split a contiguous ``view`` along dim 0 into ``n`` chunks, in order. Suits producers that
-    finish row blocks in order: row-block, streaming and elementwise kernels. ``dst``, ``dst_base``
-    and ``peers`` are as for ``whole()``.
+    finish row blocks in order: row-block, streaming and elementwise kernels. ``dst``, ``dst_base``,
+    ``peers`` and ``group`` are as for ``whole()``; every chunk joins ``group``.
     """
     if not view.is_contiguous() or (dst is not None and not dst.is_contiguous()):
         raise ValueError("chunks() needs contiguous views")
@@ -158,6 +171,7 @@ def chunks(view, n, base=None, writers=1, dst=None, dst_base=None, peers=None):
             ),
             writers,
             peers,
+            group,
         )
         for r in range(0, rows, per_chunk)
     ]
@@ -233,7 +247,7 @@ def validate(schedule, buffer_bytes, destination_bytes=None, rank=None, world_si
             raise ValueError(f"chunk {i} has no regions")
         if chunk.writers < 1:
             raise ValueError(f"chunk {i} needs at least one writer")
-        if chunk.group is not None and (not isinstance(chunk.group, int) or chunk.group < 0):
+        if chunk.group is not None and chunk.group < 0:
             raise ValueError(f"chunk {i}: group must be a non-negative integer, not {chunk.group!r}")
         if chunk.peers is not None:
             if not chunk.peers:
@@ -282,16 +296,17 @@ def _rows(schedule):
     return _region_rows([r for chunk in schedule for r in chunk.regions], dst=False)
 
 
-def _first_clash(parts, rows):
+def _first_clash(parts, rows, extent):
     """
     The first byte range two different ranks both cover, as ``(rank, rank, start, end)``, or None.
-    ``parts`` are ``(rank, key)``; ``rows(key)`` gives that part's merged byte ranges.
+    ``parts`` are ``(rank, key)``; ``extent(key)`` gives that part's lowest and highest byte, and
+    ``rows(key)`` its merged byte ranges, needed only when extents interleave.
     """
-    ranges = {(rank, key): rows(key) for rank, key in parts}
-    extents = sorted((s[0], e.max(), rank) for (rank, _), (s, e) in ranges.items() if len(s))
+    extents = sorted((*extent(key), rank) for rank, key in parts)
     if all(prev[1] <= cur[0] for prev, cur in zip(extents, extents[1:])):
         return None
     # Extents interleave (e.g. ranks own column blocks): compare rows exactly
+    ranges = {(rank, key): rows(key) for rank, key in parts}
     starts = np.concatenate([s for s, _ in ranges.values()])
     ends = np.concatenate([e for _, e in ranges.values()])
     rank = np.repeat([r for r, _ in ranges], [len(s) for s, _ in ranges.values()])
@@ -315,11 +330,20 @@ def check_disjoint(schedules, same_buffer=True):
     world_size = len(schedules)
     cache = {}
 
+    def regions(key):
+        sender, _, indices = key
+        return [r for i in indices for r in schedules[sender][i].regions]
+
     def rows(key):
         if key not in cache:
-            sender, dst, indices = key
-            cache[key] = _region_rows([r for i in indices for r in schedules[sender][i].regions], dst)
+            cache[key] = _region_rows(regions(key), key[1])
         return cache[key]
+
+    def extent(key):
+        regs = regions(key)
+        if key[1]:
+            return min(r.dst_offset for r in regs), max(r.dst_end for r in regs)
+        return min(r.offset_bytes for r in regs), max(r.end for r in regs)
 
     for receiver in range(world_size):
         parts = []
@@ -331,7 +355,7 @@ def check_disjoint(schedules, same_buffer=True):
             )
             if addressed:
                 parts.append((sender, (sender, True, addressed)))
-        clash = _first_clash(parts, rows)
+        clash = _first_clash(parts, rows, extent)
         if clash:
             a, b, start, end = clash
             where = "the buffer" if same_buffer else f"rank {receiver}'s destination"
