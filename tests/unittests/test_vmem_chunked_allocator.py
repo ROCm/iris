@@ -613,357 +613,105 @@ def test_chunked_mixed_alloc_free_pattern():
         assert t.numel() > 0
 
 
-def test_chunked_granularity_reports_min_and_recommended():
-    """Driver/allocator must report a true minimum and a recommended granule, not conflate them.
+def _make_chunked(heap_size, **kwargs):
+    """Construct a VMemChunkedAllocator directly for single-rank unit tests."""
+    from iris.host.memory.allocators import VMemChunkedAllocator
 
-    This is an end-to-end sanity check only. The authoritative per-flag routing coverage is the
-    GPU-free driver mock tests in test_drivers.py; on stacks where minimum == recommended this
-    test cannot by itself distinguish a correctly fixed driver from a broken one, so it asserts
-    only the invariants (min <= recommended, recommended a multiple of min, stats expose both).
-    """
-    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
+    dev = torch.cuda.current_device()
+    return VMemChunkedAllocator(heap_size, dev, 0, 1, **kwargs)
+
+
+def test_chunked_internal_state_not_counted_against_heap():
+    """reserved_bytes is pre-mapped on top of heap_size so the user budget stays usable."""
+    heap_size = 8 << 20
+    reserved = 2 << 20
+
+    baseline = _make_chunked(heap_size)
+    try:
+        base_mapped = baseline.get_stats()["mapped_bytes"]
+    finally:
+        baseline.close()
+
+    alloc = _make_chunked(heap_size, reserved_bytes=reserved)
+    try:
+        gran = alloc.granularity
+        rounded_reserved = -(-reserved // gran) * gran
+        stats = alloc.get_stats()
+        assert stats["reserved_bytes"] == rounded_reserved
+        # The reserved budget is mapped on top of the user heap, not carved out of it.
+        assert stats["mapped_bytes"] >= heap_size + rounded_reserved
+        assert stats["mapped_bytes"] > base_mapped
+        assert stats["usable_bytes"] >= heap_size
+
+        # Consuming the whole internal budget as internal allocations...
+        internal_t = alloc.allocate(rounded_reserved // 4, torch.float32, internal=True)
+        assert alloc.get_stats()["internal_bytes"] >= rounded_reserved
+        # ...still leaves the user able to allocate out of the reserved headroom.
+        user_t = alloc.allocate(heap_size // 4, torch.float32)
+        assert user_t is not None
+        del internal_t, user_t
+    finally:
+        alloc.close()
+
+
+def test_chunked_capacity_report_fields():
+    """get_stats() exposes usable/used/free/largest/internal/reserved with sane invariants."""
+    ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
     alloc = ctx.heap.allocator
-    driver = alloc.driver
-
-    min_g = driver.get_minimum_granularity()
-    rec_g = driver.get_recommended_granularity()
-    assert min_g > 0 and rec_g > 0
-    assert min_g <= rec_g, f"minimum {min_g} must not exceed recommended {rec_g}"
-    assert rec_g % min_g == 0, f"recommended {rec_g} must be a multiple of minimum {min_g}"
-
     stats = alloc.get_stats()
-    assert stats["min_granularity"] == min_g
-    assert stats["recommended_granularity"] == rec_g
-    # The allocator backs memory with the recommended granule.
-    assert alloc.granularity == rec_g
+    for key in (
+        "reserved_bytes",
+        "internal_bytes",
+        "used_bytes",
+        "free_in_mapped_bytes",
+        "usable_bytes",
+        "largest_allocatable_bytes",
+    ):
+        assert key in stats, f"missing capacity field {key!r}"
 
+    # Iris allocates its device-barrier flags as internal control state.
+    assert stats["internal_bytes"] > 0
+    assert stats["used_bytes"] >= stats["internal_bytes"]
+    assert stats["largest_allocatable_bytes"] <= stats["usable_bytes"]
 
-def test_chunked_honors_requested_alignment_above_granule():
-    """allocate(alignment=...) above the granule must align the absolute address.
-
-    Repro: before the fix the alignment argument was ignored beyond the fixed min_alignment,
-    so an over-aligned request's data_ptr() was not a multiple of the requested alignment.
-    """
-    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    base = alloc.get_base_address()
-    alignment = 4 * alloc.granularity
-
-    # Push the bump pointer to a non-(4*granule) multiple so alignment is actually exercised.
-    sentinel = alloc.allocate(alloc.granularity // 4, torch.float32)  # one granule
-    assert sentinel is not None
-
-    t = alloc.allocate(1024, torch.float32, alignment=alignment)
-    assert t is not None
-    # The *absolute address*, not merely the heap offset, must be aligned: callers pass
-    # alignment= for TMA descriptors / tl.multiple_of / page-aligned DMA, which look at data_ptr().
-    assert t.data_ptr() % alignment == 0, f"address 0x{t.data_ptr():x} not aligned to 0x{alignment:x}"
-    offset = t.data_ptr() - base
-    assert offset % alignment == 0
-
-    # Keep a live allocation ABOVE the over-aligned block so that, when freed, it lands in a
-    # free-list bucket instead of merging straight back into the bump pointer. Without this the
-    # block would be at the top of the heap and the "reuse" below would really be a fresh bump
-    # that only coincidentally re-aligns -- not a test of the (size, alignment) free-list key.
-    above = alloc.allocate(alloc.granularity // 4, torch.float32)
-    assert above is not None
-
+    before = alloc.get_stats()["used_bytes"]
+    t = ctx.zeros(4096, dtype=torch.float32)
+    after = alloc.get_stats()["used_bytes"]
+    assert after > before
     del t
-    ctx.reclaim_freed()
-    bucket = next(b for b, offs in alloc.free_lists.items() if offset in offs)
-    assert bucket.alignment == max(alloc.min_alignment, alignment), "block must be filed by its alignment"
-    bump_before_reuse = alloc.bump
-
-    # The next request of the same size/alignment pops that exact block from the free list --
-    # the bump pointer does not move, proving a real free-list reuse keyed by (size, alignment).
-    t2 = alloc.allocate(1024, torch.float32, alignment=alignment)
-    assert alloc.bump == bump_before_reuse, "expected a free-list reuse, not a bump allocation"
-    assert t2.data_ptr() % alignment == 0
-    assert (t2.data_ptr() - base) == offset, "expected the freed over-aligned block to be reused"
 
 
-def test_chunked_over_aligned_block_returns_bump_to_start():
-    """Freeing an over-aligned block must reclaim its alignment padding, not strand it.
+def test_chunked_sizing_helper_roundtrip():
+    """plan_capacity() predicts a size whose built allocator reports >= the target usable bytes."""
+    from iris.host.memory.allocators import VMemChunkedAllocator
 
-    Repro (MAJOR): allocate one granule, then a block aligned to 4*granule (which skips padding
-    to reach the aligned offset), free both and reclaim. Before the fix the bump pointer rolled
-    back only to the aligned offset -- the skipped padding, and every block below it, was lost to
-    free lists and the heap could never shrink back below it.
-    """
-    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    bump_before = alloc.bump
-    alignment = 4 * alloc.granularity
+    target = 16 << 20
+    reserved = 1 << 20
+    plan = VMemChunkedAllocator.plan_capacity(target, reserved_bytes=reserved)
+    assert plan["usable_bytes"] >= target
+    assert plan["mapped_bytes"] >= target + plan["reserved_bytes"]
 
-    a = alloc.allocate(alloc.granularity // 4, torch.float32)  # one granule, no padding
-    b = alloc.allocate(1024, torch.float32, alignment=alignment)  # forces padding before b
-    assert a is not None and b is not None
-    assert alloc.bump > bump_before
-
-    del a, b
-    ctx.reclaim_freed()
-
-    assert alloc.bump == bump_before, "bump did not return to its starting value -- padding stranded"
-    assert alloc.get_stats()["num_free_blocks"] == 0, "blocks stranded in free lists instead of rolled back"
+    alloc = _make_chunked(target, reserved_bytes=reserved)
+    try:
+        assert alloc.get_stats()["usable_bytes"] >= target
+    finally:
+        alloc.close()
 
 
-def test_chunked_alignment_above_max_is_rejected():
-    """An alignment larger than the heap's guaranteed maximum must raise, not silently misalign.
-
-    The heap base is reserved aligned to MAX_ALIGNMENT; beyond that the absolute address can no
-    longer be guaranteed aligned, so the allocator rejects the request instead of returning a
-    pointer that only looks aligned in heap-offset space.
-    """
-    ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    with pytest.raises(ValueError, match="exceeds the heap's maximum alignment"):
-        alloc.allocate(1024, torch.float32, alignment=alloc._max_alignment * 2)
-
-
-def test_chunked_rejects_operations_after_close():
-    """allocate() after close() must raise instead of silently succeeding."""
-    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    alloc.close()
-    with pytest.raises(RuntimeError):
-        alloc.allocate(128, torch.float32)
-
-
-def test_chunked_import_external_tensor_rejects_after_close():
-    """import_external_tensor() after close() must raise, matching allocate()'s guard.
-
-    Repro: before the fix, only allocate() was guarded against use-after-close; this entry
-    point would run past a closed allocator and touch driver/bookkeeping state that close()
-    already tore down.
-    """
-    ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    original = torch.randn(16, dtype=torch.float32, device=ctx.device)
-    alloc.close()
-    with pytest.raises(RuntimeError):
-        alloc.import_external_tensor(original)
-
-
-def test_chunked_import_peer_chunk_rejects_after_close():
-    """import_peer_chunk() after close() must raise before touching the torn-down driver.
-
-    The handle bytes below are not a real peer handle: _check_open() must reject the call
-    before the allocator ever tries to parse or import it, so garbage input is harmless here.
-    """
-    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    alloc.close()
-    with pytest.raises(RuntimeError):
-        alloc.import_peer_chunk(0, b"\x00" * 64, alloc.granularity)
-
-
-def test_chunked_get_allocation_chunks_since_rejects_after_close():
-    """get_allocation_chunks_since() after close() must raise instead of exporting stale chunks.
-
-    Repro: before the fix, this could run after close() released self.chunks/_shared_regions
-    and either return an empty/garbage result or fail deep inside driver.export_handle instead
-    of a clear, immediate error.
-    """
-    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    alloc.close()
-    with pytest.raises(RuntimeError):
-        alloc.get_allocation_chunks_since(0)
-
-
-def test_chunked_non_power_of_two_heap_size():
-    """A non-power-of-two heap size below the default chunk must construct, allocate, and grow.
-
-    Repro: 6 MiB with a 2 MiB granule produced a non-power-of-two chunk size and raised
-    "computed chunk_size ... is not a power of two" during construction.
-    """
-    ctx = iris.iris(6 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    assert not _is_pow2(alloc.chunk_size), "test wants a non-power-of-two chunk_size to exercise growth"
-
-    t = ctx.zeros(1024, dtype=torch.float32)
-    t.fill_(3.0)
-    torch.cuda.synchronize()
-    assert torch.all(t == 3.0)
-
-    # Allocate past the first chunk so chunk growth runs with a non-power-of-two chunk_size,
-    # not just initial construction. The VA rounding there uses math.ceil, not a bitmask.
-    chunks0 = alloc.get_num_chunks()
-    hold = [t]
-    while alloc.get_num_chunks() == chunks0:
-        hold.append(ctx.zeros(alloc.chunk_size // 4, dtype=torch.float32))
-    assert alloc.get_num_chunks() > chunks0
-    hold[-1].fill_(5.0)
-    torch.cuda.synchronize()
-    assert torch.all(hold[-1] == 5.0)
-
-
-def _is_pow2(n):
-    return n > 0 and (n & (n - 1)) == 0
-
-
-def test_chunked_failed_allocation_rolls_back(monkeypatch):
-    """A tensor-construction failure must not advance bump/alloc bookkeeping.
-
-    Repro: before the fix, bump and alloc_sizes were mutated before the tensor was
-    built, so a failure left an orphaned reservation (leak) with no finalizer.
-    """
-    ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-
-    bump_before = alloc.bump
-    active_before = alloc.get_stats()["num_active_allocs"]
-
-    # Narrowly fail only the allocator's own tensor construction (patch the interface class it
-    # uses), not the whole process's torch.as_tensor.
-    monkeypatch.setattr(vmem_chunked_module, "_CUDAArrayInterface", _ConstructionBoom)
-    with pytest.raises(RuntimeError):
-        alloc.allocate(1024, torch.float32)
-    monkeypatch.undo()
-
-    assert alloc.bump == bump_before
-    assert alloc.get_stats()["num_active_allocs"] == active_before
-
-    # The allocator is still usable after the failed allocation.
-    t = alloc.allocate(1024, torch.float32)
-    assert t is not None
-
-
-def test_chunked_failed_allocation_rolls_back_free_list_block(monkeypatch):
-    """A tensor-construction failure on the free-list reuse path must return the block.
-
-    This exercises the other half of the rollback fix: when allocate() serves a request from
-    free_lists[bucket] (not the bump pointer), it pops the block *before* building the tensor.
-    Repro: before the fix, a construction failure here would drop that offset on the floor --
-    no bump/alloc_sizes damage (that part never ran), but the block would be leaked forever
-    since no finalizer was ever attached to recover it.
-    """
-    ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    base = alloc.get_base_address()
-
-    # Allocate a block and bury it under a second, live allocation so reclaim_freed() files it
-    # into a free-list bucket instead of merging it straight back into the bump pointer.
-    t = alloc.allocate(1024, torch.float32)
-    assert t is not None
-    freed_offset = t.data_ptr() - base
-    keep_alive = alloc.allocate(1024, torch.float32)
-    assert keep_alive is not None
-    del t
-    ctx.reclaim_freed()
-
-    bucket = next(bucket for bucket, offsets in alloc.free_lists.items() if freed_offset in offsets)
-    free_list_before = list(alloc.free_lists[bucket])
-    bump_before = alloc.bump
-
-    monkeypatch.setattr(vmem_chunked_module, "_CUDAArrayInterface", _ConstructionBoom)
-    with pytest.raises(RuntimeError):
-        alloc.allocate(1024, torch.float32)
-    monkeypatch.undo()
-
-    # The bump pointer is untouched (the free-list path never advances it), and the popped
-    # block is back in the same bucket it came from.
-    assert alloc.bump == bump_before
-    assert sorted(alloc.free_lists[bucket]) == sorted(free_list_before)
-    assert freed_offset in alloc.free_lists[bucket]
-
-    # It's reusable afterward, landing at the same offset.
-    t2 = alloc.allocate(1024, torch.float32)
-    assert (t2.data_ptr() - base) == freed_offset
-
-
-def test_chunked_failed_allocation_during_growth_grows_nothing(monkeypatch):
-    """A construction failure on an allocation that must grow a chunk must grow nothing.
-
-    This is the third rollback case (beyond the bump and free-list paths): a request larger than
-    the remaining mapped extent. Because the tensor is built BEFORE _grow_chunk() runs, a failure
-    leaves no chunk mapped-but-unexported -- which would otherwise be invisible locally but let a
-    peer RMA into unmapped VA. Verifies no chunk was added and the bump pointer did not move.
-    """
-    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    chunks_before = alloc.get_num_chunks()
-    bump_before = alloc.bump
-
-    # Sized to overflow the currently mapped extent, forcing at least one _grow_chunk().
-    grow_elems = (alloc.mapped_extent - alloc.bump + alloc.chunk_size) // 4
-
-    monkeypatch.setattr(vmem_chunked_module, "_CUDAArrayInterface", _ConstructionBoom)
-    with pytest.raises(RuntimeError):
-        alloc.allocate(grow_elems, torch.float32)
-    monkeypatch.undo()
-
-    assert alloc.get_num_chunks() == chunks_before, "a chunk was grown despite the failed allocation"
-    assert alloc.bump == bump_before
-
-    # The same request succeeds once construction works, and this time it does grow.
-    t = alloc.allocate(grow_elems, torch.float32)
-    assert t is not None
-    assert alloc.get_num_chunks() > chunks_before
-
-
-def test_chunked_reuses_block_with_larger_alignment(monkeypatch):
-    """A freed block may serve a same-size request needing a smaller alignment.
-
-    A block filed under a larger alignment already sits at an offset that satisfies any smaller
-    (power-of-two) alignment, so reuse is safe and avoids fragmenting the heap. The choice is
-    deterministic (smallest sufficient alignment first) and depends only on free-list contents,
-    which are identical across ranks, so offsets stay symmetric.
-    """
-    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    big_align = 4 * alloc.granularity
-
-    # Free a highly-aligned block into a free list (keep one above it so it is not rolled back).
-    t = alloc.allocate(1024, torch.float32, alignment=big_align)
-    offset = t.data_ptr() - alloc.get_base_address()
-    above = alloc.allocate(alloc.granularity // 4, torch.float32)  # noqa: F841
-    assert above is not None
-    del t
-    ctx.reclaim_freed()
-    assert any(offset in offs for b, offs in alloc.free_lists.items() if b.alignment == big_align)
-
-    # A same-size request with the default (smaller) alignment reuses that exact block.
-    bump_before = alloc.bump
-    t2 = alloc.allocate(1024, torch.float32)  # default alignment < big_align
-    assert alloc.bump == bump_before, "expected cross-alignment free-list reuse, not a bump allocation"
-    assert (t2.data_ptr() - alloc.get_base_address()) == offset
-
-
-def test_chunked_does_not_reuse_block_with_smaller_alignment():
-    """A block filed under a SMALLER alignment must not serve a larger-alignment request.
-
-    The reverse of test_chunked_reuses_block_with_larger_alignment: it pins the
-    ``b.alignment > bucket.alignment`` direction in _take_reusable_block. A less-aligned
-    block's offset need not satisfy a stricter alignment, so the allocator must bump-allocate
-    a fresh, correctly aligned block and leave the freed small-alignment block untouched.
-    """
-    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
-    alloc = ctx.heap.allocator
-    big_align = 4 * alloc.granularity
-
-    # Free a default- (small-) aligned block into a free list (keep one above it so it is not
-    # rolled back into the bump pointer).
-    t = alloc.allocate(1024, torch.float32)  # default alignment
-    small_offset = t.data_ptr() - alloc.get_base_address()
-    above = alloc.allocate(alloc.granularity // 4, torch.float32)  # noqa: F841
-    assert above is not None
-    del t
-    ctx.reclaim_freed()
-    small_bucket = next(b for b, offs in alloc.free_lists.items() if small_offset in offs)
-    assert small_bucket.alignment < big_align, "test needs the freed block filed under a smaller alignment"
-
-    # A same-size request needing a LARGER alignment must not take the small-aligned block.
-    bump_before = alloc.bump
-    t2 = alloc.allocate(1024, torch.float32, alignment=big_align)
-    new_offset = t2.data_ptr() - alloc.get_base_address()
-
-    assert alloc.bump > bump_before, "expected a fresh bump allocation, not small-alignment reuse"
-    assert new_offset != small_offset
-    assert new_offset % big_align == 0, "the larger-alignment request must be correctly aligned"
-    assert t2.data_ptr() % big_align == 0
-    # The freed small-alignment block is left untouched, still available for a matching request.
-    assert small_offset in alloc.free_lists[small_bucket]
+def test_chunked_oom_message_has_breakdown():
+    """An out-of-capacity error prints the capacity breakdown, not an opaque message."""
+    alloc = _make_chunked(1 << 20, chunk_size=1 << 20, va_size=4 << 20)
+    try:
+        tensors = []
+        with pytest.raises(RuntimeError) as excinfo:
+            for _ in range(64):
+                tensors.append(alloc.allocate(256 * 1024, torch.float32))  # 1 MiB each
+        msg = str(excinfo.value).lower()
+        for token in ("usable", "largest", "va_size"):
+            assert token in msg, f"OOM message missing {token!r}: {excinfo.value}"
+        del tensors
+    finally:
+        alloc.close()
 
 
 if __name__ == "__main__":

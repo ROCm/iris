@@ -8,6 +8,7 @@ Provides a high-level interface for distributed symmetric memory management,
 hiding the details of allocators and inter-process memory sharing.
 """
 
+import contextlib
 import gc
 import itertools
 import logging
@@ -209,6 +210,9 @@ class SymmetricHeap:
         self.cur_rank = cur_rank
         self.num_ranks = num_ranks
         self._peer_va_ranges = {}
+        # Depth counter for mark_internal(): allocations made inside it are tagged as Iris control
+        # state so they count against the reserved budget, not the user's usable space.
+        self._internal_alloc_depth = 0
         allocator_type = os.environ.get("IRIS_ALLOCATOR", allocator_type).lower()
         _log_rank(
             logging.INFO,
@@ -271,8 +275,12 @@ class SymmetricHeap:
                 device_id,
                 cur_rank,
                 num_ranks,
+                reserved_bytes=reserved_bytes,
                 topology=topology,
             )
+            # vmem_chunked reserves the internal budget itself (pre-mapped on top of heap_size),
+            # rounded to its own granularity; mirror it here for reporting.
+            self.reserved_size = self.allocator.reserved_bytes
         else:
             raise ValueError(f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem', 'vmem_chunked'")
 
@@ -329,7 +337,35 @@ class SymmetricHeap:
             return self.allocator.va_size
         return self.heap_size
 
-    def allocate(self, num_elements: int, dtype: torch.dtype, alignment: int = 1024) -> torch.Tensor:
+    @contextlib.contextmanager
+    def mark_internal(self):
+        """Tag heap allocations made in this block as Iris internal control state.
+
+        Used so Iris's own buffers (e.g. device-barrier flags) count against the allocator's
+        reserved budget rather than the caller's usable heap. No-op for allocators that do not
+        track an internal budget.
+        """
+        self._internal_alloc_depth += 1
+        try:
+            yield
+        finally:
+            self._internal_alloc_depth -= 1
+
+    def get_capacity(self) -> dict:
+        """Return capacity/accounting stats for the active allocator.
+
+        For vmem_chunked this includes usable/used/free/largest-allocatable/internal/reserved bytes.
+        Other allocators return a minimal view.
+        """
+        if hasattr(self.allocator, "get_stats"):
+            stats = dict(self.allocator.get_stats())
+            stats.setdefault("reserved_bytes", self.reserved_size)
+            return stats
+        return {"heap_size": self.heap_size, "reserved_bytes": self.reserved_size}
+
+    def allocate(
+        self, num_elements: int, dtype: torch.dtype, alignment: int = 1024, internal: bool = False
+    ) -> torch.Tensor:
         """
         Allocate a tensor on the symmetric heap.
 
@@ -367,17 +403,18 @@ class SymmetricHeap:
 
         is_chunked = isinstance(self.allocator, VMemChunkedAllocator)
 
+        mark_internal = internal or self._internal_alloc_depth > 0
         if is_chunked:
             # Every rank reaches the same branches: they depend only on state identical across ranks
             collected = self.allocator.collect_due()
             if collected:
                 self.collect()
-            tensor = self.allocator.allocate(actual_elements, dtype, alignment, grow=False)
+            tensor = self.allocator.allocate(actual_elements, dtype, alignment, grow=False, internal=mark_internal)
             if tensor is None:
                 # A collect() just above found everything there is to reuse; nothing was freed since
                 if not collected:
                     self.collect()
-                tensor = self.allocator.allocate(actual_elements, dtype, alignment)
+                tensor = self.allocator.allocate(actual_elements, dtype, alignment, internal=mark_internal)
         else:
             tensor = self.allocator.allocate(actual_elements, dtype, alignment)
         tensor = tensor[:num_elements]

@@ -224,10 +224,11 @@ class Iris:
             self._init_copy_engines(num_ranks)
             # all_gather(engine="sdma") arrival counters, one per source rank; allocated here since
             # allocation is collective over all ranks, and a call may come from a subgroup
-            self._sdma_all_gather_counters = (
-                self.zeros((num_ranks,), dtype=torch.int64),
-                torch.zeros(num_ranks, dtype=torch.int64, device=self.device),
-            )
+            with self.heap.mark_internal():
+                self._sdma_all_gather_counters = (
+                    self.zeros((num_ranks,), dtype=torch.int64),
+                    torch.zeros(num_ranks, dtype=torch.int64, device=self.device),
+                )
 
         # Initialize CCL interface
         self.ccl = self.CCL(self)
@@ -237,7 +238,9 @@ class Iris:
 
         # Pairwise counters for device_barrier(), shared by every process group. Allocated
         # here because heap allocation is collective over all ranks; the heap was sized for it.
-        self._device_barrier_flags = self.zeros((num_ranks, num_ranks), dtype=torch.int32)
+        # Tagged internal so it counts against the reserved budget, not the user's usable heap.
+        with self.heap.mark_internal():
+            self._device_barrier_flags = self.zeros((num_ranks, num_ranks), dtype=torch.int32)
 
         # Initialize tracing
         self.tracing = Tracing(self)
@@ -1607,6 +1610,24 @@ class Iris:
             >>> print(device)  # cuda:0
         """
         return self.heap.get_device()
+
+    def memory_stats(self):
+        """
+        Return capacity and accounting statistics for the symmetric heap.
+
+        For the ``vmem_chunked`` allocator this reports usable, used, free, largest-allocatable,
+        internal (Iris control state), and reserved bytes, alongside chunk/VA sizing. Figures are
+        bounded by the VA reservation and growth, not by physical HBM.
+
+        Returns:
+            dict: Capacity/accounting fields for the active allocator.
+
+        Example:
+            >>> ctx = iris.iris(1 << 30, allocator_type="vmem_chunked")
+            >>> stats = ctx.memory_stats()
+            >>> print(stats["usable_bytes"], stats["internal_bytes"])
+        """
+        return self.heap.get_capacity()
 
     def get_cu_count(self):
         """
