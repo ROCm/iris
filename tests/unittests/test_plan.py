@@ -55,6 +55,17 @@ def _slice(buffer, rank, slice_elems):
     return buffer.view(-1)[rank * slice_elems : (rank + 1) * slice_elems]
 
 
+def _record_error(plan, code, round, index, value=0):
+    """Set the plan's error word as the plan's kernels record it: ``[code, round, index, value]``."""
+    plan._error.copy_(plan._error.new_tensor([code, round, index, value]))
+
+
+def _abort_pair(plan):
+    """The earliest round a peer marked failed on this rank, and that peer + 1 (0, 0 if none)."""
+    n, w = plan.num_chunks, plan.world_size
+    return plan.gates[2 * n + 2 * w : 2 * n + 2 * w + 2].tolist()
+
+
 def _check_before_release(ctx, plan, buffer, slice_elems):
     """After start(), before any producer runs: nothing has arrived from any peer."""
     ctx.barrier()
@@ -721,7 +732,7 @@ def test_prepare_failure_raises_after_the_fence(monkeypatch, failure):
             plan.next_round()
             handle = plan.start()
             _regions_producer[(2,)](buffer, regs, max_regs, handle, plan.chunk_id(rank, 0), 2, BLOCK=1024)
-            with pytest.raises(RuntimeError, match="rank 0 could not prepare"):
+            with pytest.raises(RuntimeError, match="rank 0 failed this round"):
                 plan.wait()
         monkeypatch.undo()
     assert not any(queue_ledger.ledger().entries.values())
@@ -777,6 +788,119 @@ def test_round_fence_times_out():
     del ctx
 
 
+def test_failed_rank_fails_peers_at_once():
+    """
+    A rank whose plan holds an error (as a stream-ordered wait() records it) still takes part in the
+    round fence and marks the next round failed on its peers: their wait() fails at once, rather
+    than after timing out on a rank that skipped the fence.
+    """
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+
+    with TriggeredPlan(ctx, buffer, whole(_slice(buffer, rank, slice_elems), base=buffer), timeout=20) as plan:
+        plan.run()
+        if rank == 0:
+            _record_error(plan, kernels.TIMED_OUT.value, 1, plan.chunk_id(rank, 0))
+        plan.next_round()
+        error, match = (TimeoutError, "round 1: ") if rank == 0 else (RuntimeError, "round 2: rank 0 failed this round")
+        with pytest.raises(error, match=match):
+            plan.run()
+    ctx.barrier()
+    del ctx
+
+
+def test_failed_round_keeps_the_earliest():
+    """
+    A failed rank marks the next round failed at every fence, but its peers keep the first round it
+    marked, which a peer may still be waiting on. Peers that learned of the failure mark nothing, so
+    the failed rank's own pair stays empty and its peers keep naming it.
+    """
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+
+    error, match = (TimeoutError, "round 1: ") if rank == 0 else (RuntimeError, "round 2: rank 0 failed this round")
+    with pytest.raises(error, match=match):
+        with TriggeredPlan(ctx, buffer, whole(_slice(buffer, rank, slice_elems), base=buffer), timeout=20) as plan:
+            plan.run()
+            if rank == 0:
+                _record_error(plan, kernels.TIMED_OUT.value, 1, plan.chunk_id(rank, 0))
+            # Rounds 2 and 3, stream-ordered: rank 0 marks round 2 failed, then round 3
+            for _ in range(2):
+                plan.next_round()
+                handle = plan.start()
+                kernels.release_kernel[(len(plan._own),)](handle, plan._own)
+                plan.wait(blocking=False)
+            torch.cuda.synchronize()
+            ctx.barrier()
+            assert _abort_pair(plan) == ([0, 0] if rank == 0 else [2, 1])
+    ctx.barrier()
+    del ctx
+
+
+def test_fence_waits_once_for_a_missing_rank():
+    """A rank that never reaches next_round() costs its peers one fence timeout, not one per round."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    timeout = 2
+
+    with TriggeredPlan(ctx, buffer, whole(_slice(buffer, rank, slice_elems), base=buffer), timeout=timeout) as plan:
+        plan.run()
+        if rank != 0:
+            fences = []
+            for _ in range(2):
+                start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                start.record()
+                plan.next_round()
+                end.record()
+                fences.append((start, end))
+                handle = plan.start()
+                kernels.release_kernel[(len(plan._own),)](handle, plan._own)
+                plan.wait(blocking=False)
+            torch.cuda.synchronize()
+            first, second = (s.elapsed_time(e) / 1000 for s, e in fences)
+            # GPU time: the first fence waits out the timeout on rank 0, the second does not wait for it
+            assert first >= 0.9 * timeout and second < timeout / 2, (first, second)
+            with pytest.raises(TimeoutError, match="round 1: rank 0 did not reach next_round"):
+                plan.close()
+    ctx.barrier()
+    del ctx
+
+
+def test_late_rank_raises_after_peers_time_out():
+    """
+    Rank 0 reaches next_round() only after its peers' fence has timed out on it, so their next copies
+    may land in its buffer while it still reads: its wait() for that round raises.
+    """
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    timeout = 2
+
+    with TriggeredPlan(ctx, buffer, whole(_slice(buffer, rank, slice_elems), base=buffer), timeout=timeout) as plan:
+        plan.run()
+        if rank == 0:
+            time.sleep(2 * timeout)
+        plan.next_round()
+        handle = plan.start()
+        kernels.release_kernel[(len(plan._own),)](handle, plan._own)
+        if rank == 0:
+            with pytest.raises(RuntimeError, match=r"round 2: rank \d+ failed"):
+                plan.wait()
+        else:
+            plan.wait(blocking=False)
+            with pytest.raises(TimeoutError, match="round 1: rank 0 did not reach next_round"):
+                plan.close()
+    ctx.barrier()
+    del ctx
+
+
 def test_recorded_error_raised_once():
     """An error the GPU recorded is raised by the next blocking wait(), and not again by close()."""
     ctx = _ctx()
@@ -785,8 +909,7 @@ def test_recorded_error_raised_once():
     buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
     plan = TriggeredPlan(ctx, buffer, whole(_slice(buffer, rank, slice_elems), base=buffer), timeout=20)
     plan.start()
-    error = [kernels.TIMED_OUT.value, 1, plan.chunk_id(rank, 0), 0]
-    plan._error.copy_(torch.tensor(error, dtype=torch.int64))
+    _record_error(plan, kernels.TIMED_OUT.value, 1, plan.chunk_id(rank, 0))
     with pytest.raises(TimeoutError, match="short of writers' marks"):
         plan.wait()
     assert plan.state is State.FAILED

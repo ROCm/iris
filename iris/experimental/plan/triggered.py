@@ -144,7 +144,7 @@ class TriggeredPlan:
 
         self.buffer = buffer
         # Each chunk's counter (marks) and arrival, each peer queue's completion, each peer's round
-        # fence count, then the round a peer could not prepare and which peer, all int32
+        # fence count, then the earliest round a peer failed and which peer, all int32
         n, w = self.num_chunks, self.world_size
         self.gates = ctx.zeros(2 * n + 2 * w + 2, dtype=torch.int32)
         self.counters = self.gates[:n]
@@ -371,7 +371,7 @@ class TriggeredPlan:
             if not pending.any():
                 return
             if not own_only:
-                # A peer that could not prepare this round
+                # A peer that failed this round
                 self._raise_recorded()
             if time.monotonic() > deadline:
                 missing = pending[: self.num_chunks].nonzero().flatten().tolist()
@@ -399,7 +399,9 @@ class TriggeredPlan:
         if code == kernels.FENCE_TIMED_OUT.value:
             return TimeoutError(f"round {round}: rank {index} did not reach next_round()")
         if code == kernels.PEER_FAILED.value:
-            return RuntimeError(f"round {round}: rank {index} could not prepare this round")
+            return RuntimeError(
+                f"round {round}: rank {index} failed this round or an earlier one; its own error says why"
+            )
         own = self._first[self.rank] <= index < self._first[self.rank + 1]
         writers = self.schedules[self.rank][index - self._first[self.rank]].writers if own else 0
         if code == kernels.WRONG_MARKS.value:
@@ -428,8 +430,8 @@ class TriggeredPlan:
 
         With ``blocking=False``, queue the wait on the current stream instead and return at once:
         kernels queued after it see the round's data, and the host never synchronizes. An error (a
-        timeout, extra marks, a peer that could not prepare the round, or a round fence that timed
-        out) is then raised by the next blocking ``wait()``, or by ``close()``.
+        timeout, extra marks, a peer that failed the round, or a round fence that timed out) is then
+        raised by the next blocking ``wait()``, or by ``close()``.
         """
         self._require(State.RUNNING)
         if not blocking:
@@ -482,7 +484,8 @@ class TriggeredPlan:
         timeout after the plan's timeout, and raised by the next blocking ``wait()`` or ``close()``.
 
         If this rank cannot prepare the next round, it still takes part in the fence, telling its
-        peers, whose ``wait()`` for that round then raises; then this call raises.
+        peers, whose ``wait()`` for that round then raises; then this call raises. A rank whose plan
+        has recorded an error (from a stream-ordered ``wait()``) does the same, without raising here.
         """
         self._require(State.DONE)
         self._check_round(self.round + 1)
