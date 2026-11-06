@@ -70,6 +70,11 @@ class VMemAllocator(BaseAllocator):
         self.lock = Lock()
         self.allocations: Dict[int, tuple] = {}
         self.allocation_order = []
+        # Imported segments by heap offset: (source va, source size, source storage).
+        # Peers get these segments exported from the source allocation, not from
+        # the heap mapping (see get_allocation_segments). Holding the storage keeps
+        # torch from freeing or reusing that allocation while it is in the heap.
+        self._import_sources: Dict[int, tuple] = {}
         self.base_va = 0
         try:
             self._init_heap(heap_size, device_id, rank, world_size, va_multiplier, rank_gpus)
@@ -151,12 +156,18 @@ class VMemAllocator(BaseAllocator):
         Returns:
             List of (offset, size, va) tuples for each allocation in order.
             Each tuple describes one physically-backed segment that needs
-            to be exported/imported separately.
+            to be exported/imported separately; va and size give the range
+            to export. For imported tensors that range is the source
+            allocation rather than the heap mapping, because HIP 7.16 and
+            later refuse to export memory that was itself imported.
         """
         segments = []
         for offset, size in self.allocation_order:
-            va = self.base_va + offset
-            segments.append((offset, size, va))
+            source = self._import_sources.get(offset)
+            if source is not None:
+                segments.append((offset, source[1], source[0]))
+            else:
+                segments.append((offset, size, self.base_va + offset))
         return segments
 
     def get_minimum_allocation_size(self) -> int:
@@ -323,6 +334,7 @@ class VMemAllocator(BaseAllocator):
 
             tensor_va = target_va + offset_in_alloc
             self._track_allocation(aligned_offset, aligned_export_size, True, imported_handle, target_va)
+            self._import_sources[aligned_offset] = (export_base, export_size, external_tensor.untyped_storage())
             self.current_offset = aligned_offset + aligned_export_size
 
             tensor_size = external_tensor.numel() * external_tensor.element_size()
@@ -364,6 +376,7 @@ class VMemAllocator(BaseAllocator):
                         mem_release(handle)
 
             self.allocations.clear()
+            self._import_sources.clear()
 
             if hasattr(self, "base_va") and self.base_va:
                 mem_address_free(self.base_va, self.va_size)

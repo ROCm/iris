@@ -491,6 +491,7 @@ def get_address_range(ptr):
 hipMemAllocationTypePinned = 0x1
 hipMemHandleTypePosixFileDescriptor = 0x1
 hipMemLocationTypeDevice = 0x1
+hipMemAllocationGranularityMinimum = 0x0
 hipMemAllocationGranularityRecommended = 0x1
 hipMemAccessFlagsProtReadWrite = 0x3
 
@@ -536,7 +537,13 @@ class hipMemAccessDesc(ctypes.Structure):
 
 def get_allocation_granularity(device_id):
     """
-    Get the allocation granularity for VMem allocations on a device.
+    Get the minimum allocation granularity for VMem allocations on a device.
+
+    This is the smallest size and alignment hipMemCreate and hipMemMap accept.
+    It is not the recommended granularity: from HIP 7.16 (ROCm 10.x) the
+    recommended value is 2 MiB, while the minimum stays 4 KiB. Rounding to
+    the recommended value would make every allocation, and every small heap,
+    cost at least 2 MiB. Before HIP 7.16 the two were equal.
 
     Args:
         device_id: Device ID
@@ -562,7 +569,7 @@ def get_allocation_granularity(device_id):
         gpu_runtime.hipMemGetAllocationGranularity(
             ctypes.byref(granularity),
             ctypes.byref(prop),
-            hipMemAllocationGranularityRecommended,
+            hipMemAllocationGranularityMinimum,
         )
     )
 

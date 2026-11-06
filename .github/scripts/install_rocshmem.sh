@@ -31,7 +31,7 @@ SRC="$(mktemp -d)"
 
 # TODO: drop this source build once the CI base images reach ROCm 7.14+, whose
 # artifacts ship rocSHMEM's static library and headers -- only the bindings below
-# would still be needed. The bases are ROCm 7.2.1 (apptainer) and 7.1 (docker)
+# would still be needed. The bases are ROCm 10.1 (apptainer) and 7.1 (docker)
 # today. rocshmem4py stays a source build either way until its TheRock packaging
 # lands.
 echo "==> rocSHMEM ${ROCSHMEM_REF} -> ${ROCSHMEM_PREFIX} (GPU_TARGETS=${ROCSHMEM_GPU_TARGETS})"
