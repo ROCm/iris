@@ -14,15 +14,23 @@ from triton.language.core import _aggregate as aggregate
 from iris.experimental.plan.triton import (
     H_GATES,
     H_NUM_CHUNKS,
+    H_NUM_GROUPS,
     H_RANK,
     H_ROUND,
     H_WORLD_SIZE,
     HEADER_WORDS,
+    R_ARRIVAL,
+    R_EXPECTED,
     R_OWNER,
-    R_WRITERS,
     RECORD_WORDS,
 )
 from iris.mem.utils import wait_cnt
+
+
+@gluon.jit
+def _group_word(num_chunks, world_size, group):
+    """Gate word of ``group``'s arrival, as ``triggered.group_gate`` computes it on the host."""
+    return 2 * num_chunks + 2 * world_size + 2 + group
 
 
 @aggregate
@@ -95,14 +103,15 @@ class TriggeredView:
     @gluon.jit
     def arrived(self, chunk):
         """
-        True once chunk ``chunk`` is visible here this round (marked ready, for this rank's own).
+        True once chunk ``chunk`` is visible here this round: for this rank's own chunks, once marked
+        ready; for another rank's chunk in a group, once the whole group has arrived here. Always
+        true of chunks not sent to this rank.
 
         Call uniformly across the CTA: the result reaches the other waves through a CTA barrier, so
-        every wave must make the same number of calls (true of ``wait``, ``sent`` and ``wait_sent`` too).
+        every wave must make the same number of calls (true of the other waits too).
         """
-        own = self.owns(chunk)
-        word = gl.where(own, chunk, self.num_chunks + chunk)
-        target = gl.where(own, self._record(chunk, R_WRITERS) * self.round, self.round)
+        word = self._record(chunk, R_ARRIVAL)
+        target = self._record(chunk, R_EXPECTED) * self.round
         return gl.atomic_add(self.gates + word, 0, sem="acquire", scope="sys") >= target
 
     @gluon.jit
@@ -115,6 +124,29 @@ class TriggeredView:
     def _sends_to(self, peer):
         """True if this rank's chains go to rank ``peer``, so its completion counter counts rounds."""
         return gl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + peer) != 0
+
+    @gluon.jit
+    def group_arrived(self, group):
+        """
+        True once every chunk of ``group`` sent to this rank has arrived this round. Always true of a
+        group with no chunks sent here, including a group no chunk uses (a debug build asserts on
+        that, since it is likely a typo).
+        """
+        world_size = gl.load(self.view + H_WORLD_SIZE)
+        known = (group >= 0) & (group < gl.load(self.view + H_NUM_GROUPS))
+        gl.device_assert(known, "wait_group: no chunk uses this group")
+        expected = gl.load(
+            self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + world_size + group, mask=known, other=0
+        )
+        word = self.gates + _group_word(self.num_chunks, world_size, group)
+        seen = gl.atomic_add(word, 0, mask=known, sem="acquire", scope="sys")
+        return (known == 0) | (seen >= expected * self.round)
+
+    @gluon.jit
+    def wait_group(self, group):
+        """Spin until ``group_arrived(group)``."""
+        while self.group_arrived(group) == 0:
+            pass
 
     @gluon.jit
     def sent(self):
