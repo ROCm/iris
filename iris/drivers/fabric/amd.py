@@ -145,6 +145,7 @@ class hipMemFabricHandle(ctypes.Structure):
 
 class _amdsmi_bdf_bitfields(ctypes.Structure):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("function_number", ctypes.c_uint64, 3),
         ("device_number", ctypes.c_uint64, 5),
@@ -155,6 +156,7 @@ class _amdsmi_bdf_bitfields(ctypes.Structure):
 
 class amdsmi_bdf_t(ctypes.Union):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("bdf", _amdsmi_bdf_bitfields),
         ("as_uint", ctypes.c_uint64),
@@ -163,6 +165,7 @@ class amdsmi_bdf_t(ctypes.Union):
 
 class amdsmi_fabric_info_v1_t(ctypes.Structure):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("accelerator_id", ctypes.c_uint32),
         ("fabric_type", ctypes.c_uint32),
@@ -181,11 +184,13 @@ class amdsmi_fabric_info_v1_t(ctypes.Structure):
 
 class _amdsmi_fabric_info_union(ctypes.Union):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [("v1", amdsmi_fabric_info_v1_t)]
 
 
 class amdsmi_fabric_info_ver_t(ctypes.Structure):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("version", ctypes.c_uint32),
         ("fabric_version", _amdsmi_fabric_info_union),
@@ -194,6 +199,7 @@ class amdsmi_fabric_info_ver_t(ctypes.Structure):
 
 class amdsmi_fabric_info_t(ctypes.Structure):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("bdf", amdsmi_bdf_t),
         ("fabric_info", amdsmi_fabric_info_ver_t),
