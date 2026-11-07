@@ -21,7 +21,7 @@ dependencies = [
     "numpy",
     "requests",
     "ruff<0.16",  # 0.16 formats code blocks in Markdown; see lint.yml
-    "tritonblas @ git+https://github.com/ROCm/tritonBLAS.git@muhaawad/iris",
+    "tritonblas @ git+https://github.com/ROCm/tritonBLAS.git@dev/dasidler/merge-main-into-muhaawad-iris",
 ]
 
 [project.urls]

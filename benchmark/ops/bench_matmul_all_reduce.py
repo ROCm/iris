@@ -15,7 +15,7 @@ from iris.ops import FusedConfig, matmul_all_reduce_preamble
 @bench.axis("N", [3584])
 @bench.axis("K", [8192])
 @bench.axis("dtype", [torch.float16])
-@bench.axis("variant", ["atomic", "two_shot"])
+@bench.axis("variant", ["one_shot", "two_shot"])
 def matmul_all_reduce(state, ctx):
     M, N, K = state["M"], state["N"], state["K"]
     dtype = state["dtype"]
@@ -33,16 +33,10 @@ def matmul_all_reduce(state, ctx):
     state.set_flops(2 * M * N * K)
 
     def _run():
-        workspace.prepared = False
         ctx.ops.matmul_all_reduce(C, A, B, config=config, workspace=workspace)
 
     def _preamble():
         C.zero_()
-        if workspace.locks is not None:
-            workspace.locks.zero_()
-        if workspace.aux_buffer is not None:
-            workspace.aux_buffer.zero_()
-        workspace.prepared = True
 
     state.exec(_run, preamble_fn=_preamble)
 

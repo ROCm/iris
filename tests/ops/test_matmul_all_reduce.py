@@ -8,11 +8,32 @@ Note: This test requires tritonBLAS to be installed.
 Install with: pip install git+https://github.com/ROCm/tritonBLAS.git
 """
 
+import os
 import pytest
 import torch
 import torch.distributed as dist
 import iris
 import iris.ops as ops
+from iris.ops.config import FusedConfig
+
+
+def _param_shapes():
+    if "IRIS_TEST_M" in os.environ:
+        return [
+            (
+                int(os.environ["IRIS_TEST_M"]),
+                int(os.environ["IRIS_TEST_N"]),
+                int(os.environ["IRIS_TEST_K"]),
+            )
+        ]
+    return [
+        (128, 64, 32),
+        (1024, 256, 512),
+    ]
+
+
+def _heap_size() -> int:
+    return int(os.environ.get("IRIS_TEST_HEAP_SIZE", 2**33))
 
 
 @pytest.mark.parametrize(
@@ -25,41 +46,43 @@ import iris.ops as ops
 )
 @pytest.mark.parametrize(
     "M, N, K",
-    [
-        (128, 64, 32),
-        (1024, 256, 512),
-    ],
+    _param_shapes(),
 )
 @pytest.mark.parametrize(
     "variant",
     [
-        "atomic",
-        # TODO enable these tests when support for cache-modifiers is in place.
-        # "spinlock",
         "one_shot",
         "two_shot",
+        "two_shot_row_major",
+        "two_shot_compact",
     ],
 )
 def test_matmul_all_reduce(dtype, atol, rtol, M, N, K, variant):
-    """Test matmul_all_reduce by comparing against torch.matmul + dist.all_reduce."""
+    """Test matmul_all_reduce against torch.matmul plus fp32 all-reduce."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
-    heap_size = 2**33  # 8GB
+    heap_size = _heap_size()
     shmem = iris.iris(heap_size)
     rank = shmem.get_rank()
     world_size = shmem.get_num_ranks()
+    if variant == "two_shot_compact" and world_size != 8:
+        pytest.skip("two_shot_compact requires the 8-XCD selector to match an 8-rank communicator")
 
-    # Create input matrices
+    # Match the benchmark inputs: per-rank A, replicated B.
+    torch.manual_seed(123 + rank)
     A_local = torch.randn(M, K, dtype=dtype, device=f"cuda:{rank}")
+    torch.manual_seed(456)
     B = torch.randn(K, N, dtype=dtype, device=f"cuda:{rank}")
 
-    # Compute reference: torch.matmul + dist.all_reduce
+    # Compute reference: local matmul rounded to output dtype, fp32 all-reduce,
+    # then final cast back to the output dtype.
     C_local_ref = torch.matmul(A_local, B)
-    pytorch_output = C_local_ref.clone()
+    pytorch_output = C_local_ref.to(torch.float32)
     shmem.barrier()
     dist.all_reduce(pytorch_output, op=dist.ReduceOp.SUM)
     torch.cuda.synchronize()
+    pytorch_output = pytorch_output.to(dtype)
 
     # Set up Iris tensors
     iris_A = shmem.zeros((M, K), dtype=dtype)
@@ -70,26 +93,24 @@ def test_matmul_all_reduce(dtype, atol, rtol, M, N, K, variant):
 
     shmem.barrier()
 
-    # Select appropriate config based on problem size
-    from iris.ops.config import FusedConfig
-
-    if M <= 128 or K <= 64 or N <= 128:
-        config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant=variant)
-    elif dtype == torch.float32:
-        config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant=variant)
-    else:
-        config = FusedConfig(all_reduce_variant=variant)
+    config = FusedConfig(all_reduce_variant=variant)
 
     # Use high-level API
-    ops.matmul_all_reduce(shmem, iris_C, iris_A, iris_B, config=config)
+    workspace = ops.matmul_all_reduce(shmem, iris_C, iris_A, iris_B, config=config)
 
     torch.cuda.synchronize()
     shmem.barrier()
 
     max_diff = torch.abs(iris_C - pytorch_output).max().item()
 
+    if variant == "two_shot":
+        rows_per_rank = M // world_size
+        duplicate_factor = (workspace.launch_params["block_size_m"] + rows_per_rank - 1) // rows_per_rank
+        expected_variant = "two_shot_compact" if M <= 512 and duplicate_factor >= 2 else "two_shot_row_major"
+        assert workspace.variant == expected_variant
+
     assert torch.allclose(iris_C, pytorch_output, atol=atol, rtol=rtol), (
-        f"Max difference: {max_diff}, expected < {atol}\n"
+        f"Max difference: {max_diff}, expected within atol={atol}, rtol={rtol}\n"
         f"Rank {rank}: iris.ops.matmul_all_reduce output doesn't match reference"
     )
 
@@ -119,14 +140,15 @@ def test_matmul_all_reduce_via_shmem_ops():
     B = shmem.randn((K, N), dtype=dtype)
     output = shmem.zeros((M, N), dtype=dtype)
 
-    # Reference using PyTorch
+    # Reference using PyTorch with the same fp32 all-reduce contract as the op.
     A_ref = A.clone()
     B_ref = B.clone()
     C_ref = torch.matmul(A_ref, B_ref)
-    pytorch_output = C_ref.clone()
+    pytorch_output = C_ref.to(torch.float32)
     shmem.barrier()
     dist.all_reduce(pytorch_output, op=dist.ReduceOp.SUM)
     torch.cuda.synchronize()
+    pytorch_output = pytorch_output.to(dtype)
 
     # Use shmem.ops interface
     shmem.ops.matmul_all_reduce(output, A, B)
@@ -150,25 +172,18 @@ def test_matmul_all_reduce_via_shmem_ops():
     gc.collect()
 
 
-def test_matmul_all_reduce_lock_too_small():
-    """Test that ValueError is raised when the lock array is too small for current tile count.
-
-    Scenario: workspace is prepared with larger block sizes (fewer tiles), then reused
-    with smaller block sizes (more tiles). The workspace.matches() call skips the preamble,
-    leaving the undersized lock array in place.
-    """
+def test_matmul_all_reduce_unsupported_variant():
+    """matmul_all_reduce only supports the direct one_shot/two_shot paths."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
 
     heap_size = 2**33
     shmem = iris.iris(heap_size)
-    world_size = shmem.get_num_ranks()
 
     from iris.ops.config import FusedConfig
 
-    M, N, K = 512, 512, 64
+    M, N, K = 128, 128, 64
     dtype = torch.float16
-    variant = "one_shot"
 
     iris_A = shmem.zeros((M, K), dtype=dtype)
     iris_B = shmem.zeros((K, N), dtype=dtype)
@@ -176,19 +191,9 @@ def test_matmul_all_reduce_lock_too_small():
 
     shmem.barrier()
 
-    # Step 1: run preamble with larger block sizes → allocates a smaller lock array
-    config_large = FusedConfig(block_size_m=128, block_size_n=128, block_size_k=32, all_reduce_variant=variant)
-    workspace = ops.matmul_all_reduce_preamble(shmem, iris_C, iris_A, iris_B, config=config_large)
-
-    # Step 2: manually mark workspace as prepared so matmul_all_reduce skips the preamble
-    workspace.prepared = True
-
-    # Step 3: call matmul_all_reduce with smaller block sizes that need more tiles —
-    # workspace.matches() returns True (same shape/dtype/variant), preamble is skipped,
-    # and the undersized lock array is detected.
-    config_small = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant=variant)
-    with pytest.raises(ValueError, match="Lock array too small"):
-        ops.matmul_all_reduce(shmem, iris_C, iris_A, iris_B, config=config_small, workspace=workspace)
+    config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, all_reduce_variant="atomic")
+    with pytest.raises(ValueError, match="supports only"):
+        ops.matmul_all_reduce(shmem, iris_C, iris_A, iris_B, config=config)
 
     shmem.barrier()
     del shmem

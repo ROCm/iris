@@ -32,7 +32,9 @@ class FusedConfig:
 
     CCL Parameters (for operations that need collective communication):
         all_reduce_variant: All-reduce algorithm variant. Options: "atomic", "ring",
-                           "one_shot", "two_shot", "spinlock". Default: "two_shot".
+                           "one_shot", "two_shot", "two_shot_row_major", "two_shot_compact",
+                           "spinlock". Default: "two_shot". ``matmul_all_reduce`` supports
+                           "one_shot", "two_shot", "two_shot_row_major" and "two_shot_compact".
         all_reduce_num_rings: Number of concurrent rings (for ring variant). Default: 1.
 
     Example:
@@ -59,7 +61,7 @@ class FusedConfig:
     allow_tf32: bool = True
 
     # CCL-specific parameters
-    all_reduce_variant: str = "two_shot"  # atomic, ring, one_shot, two_shot, spinlock
+    all_reduce_variant: str = "two_shot"  # atomic, ring, one_shot, two_shot[_row_major|_compact], spinlock
     all_reduce_num_rings: int = 1
 
     def validate(self, world_size: Optional[int] = None):
@@ -88,7 +90,15 @@ class FusedConfig:
             raise ValueError(f"chunk_size must be positive, got {self.chunk_size}")
 
         # Validate all_reduce_variant
-        valid_variants = ["atomic", "ring", "one_shot", "two_shot", "spinlock"]
+        valid_variants = [
+            "atomic",
+            "ring",
+            "one_shot",
+            "two_shot",
+            "two_shot_row_major",
+            "two_shot_compact",
+            "spinlock",
+        ]
         if self.all_reduce_variant not in valid_variants:
             raise ValueError(f"all_reduce_variant must be one of {valid_variants}, got {self.all_reduce_variant}")
 
