@@ -8,6 +8,7 @@ Triton device-side context for Iris RMA operations.
 import triton
 import triton.language as tl
 from triton.language.core import _aggregate as aggregate
+from triton.language.target_info import is_hip_cdna3, is_hip_cdna4
 from iris.mem.utils import get_xcc_id, get_cu_id, read_realtime  # noqa: F401 — used by Tracing
 from iris.mem.triton.tracing import Tracing
 from iris.mem.triton.types import Tile, TileView, TensorView
@@ -862,8 +863,28 @@ class Context:
         else:
             dst_ptr, combined_mask = dst_view.offset_tile_ptr(tile, offset_n=self.rank * N_local, src_mask=None)
 
-        for dest_rank in range(self.world_size):
-            self.store(dst_ptr, tile.data, to_rank=dest_rank, mask=combined_mask, hint=(1, tile.block_n))
+        # Load every peer's heap base before the first store: a load issued after a store cannot be
+        # hoisted above it, and waiting for that load also waits for all earlier stores to complete.
+        local_base = tl.load(self.heap_bases + self.rank)
+        ptr_int = tl.cast(dst_ptr, tl.uint64)
+        ptr_deltas = ()
+        for step in tl.static_range(1, self.world_size):
+            if is_hip_cdna3() or is_hip_cdna4():
+                # Programs that start at the same peer queue behind each other on one link, so start each
+                # program at a different peer.
+                peer = (self.rank + 1 + (step - 1 + tl.program_id(0)) % (self.world_size - 1)) % self.world_size
+            else:
+                # Rotate by rank so that each destination sees a different writer at any given moment.
+                peer = (self.rank + step) % self.world_size
+            ptr_deltas += (tl.load(self.heap_bases + peer) - local_base,)
+
+        # Start with the local copy, then write to the peers in the order chosen above.
+        local_ptr = tl.max_contiguous(tl.multiple_of(dst_ptr, (1, tile.block_n)), (1, tile.block_n))
+        tl.store(local_ptr, tile.data, mask=combined_mask)
+        for step in tl.static_range(1, self.world_size):
+            remote_ptr = tl.cast(ptr_int + ptr_deltas[step - 1], dst_ptr.dtype)
+            remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, (1, tile.block_n)), (1, tile.block_n))
+            tl.store(remote_ptr, tile.data, mask=combined_mask)
 
     @triton.jit
     def gather(self, tile: TileView, src_view: TensorView, source_rank: tl.constexpr, hint: tl.constexpr = None):
