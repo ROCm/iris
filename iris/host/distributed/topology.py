@@ -234,6 +234,7 @@ _AMDSMI_FABRIC_PPOD_SENTINEL = bytes([0x99] * _AMDSMI_PPOD_ID_BYTES)
 
 class _AmdSmiBdfBitfields(ctypes.Structure):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("function_number", ctypes.c_uint64, 3),
         ("device_number", ctypes.c_uint64, 5),
@@ -244,6 +245,7 @@ class _AmdSmiBdfBitfields(ctypes.Structure):
 
 class _AmdSmiBdf(ctypes.Union):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("bdf", _AmdSmiBdfBitfields),
         ("as_uint", ctypes.c_uint64),
@@ -252,6 +254,7 @@ class _AmdSmiBdf(ctypes.Union):
 
 class _AmdSmiFabricInfoV1(ctypes.Structure):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("accelerator_id", ctypes.c_uint32),
         ("fabric_type", ctypes.c_uint32),
@@ -270,11 +273,13 @@ class _AmdSmiFabricInfoV1(ctypes.Structure):
 
 class _AmdSmiFabricInfoUnion(ctypes.Union):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [("v1", _AmdSmiFabricInfoV1)]
 
 
 class _AmdSmiFabricInfoVer(ctypes.Structure):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("version", ctypes.c_uint32),
         ("fabric_version", _AmdSmiFabricInfoUnion),
@@ -283,6 +288,7 @@ class _AmdSmiFabricInfoVer(ctypes.Structure):
 
 class _AmdSmiFabricInfo(ctypes.Structure):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("bdf", _AmdSmiBdf),
         ("fabric_info", _AmdSmiFabricInfoVer),
