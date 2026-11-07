@@ -8,6 +8,7 @@ Triton device-side context for Iris RMA operations.
 import triton
 import triton.language as tl
 from triton.language.core import _aggregate as aggregate
+from triton.language.target_info import is_hip_cdna3, is_hip_cdna4
 from iris.mem.utils import get_xcc_id, get_cu_id, read_realtime  # noqa: F401 — used by Tracing
 from iris.mem.triton.tracing import Tracing
 from iris.mem.triton.types import Tile, TileView, TensorView
@@ -868,11 +869,16 @@ class Context:
         ptr_int = tl.cast(dst_ptr, tl.uint64)
         ptr_deltas = ()
         for step in tl.static_range(1, self.world_size):
-            peer = (self.rank + step) % self.world_size
+            if is_hip_cdna3() or is_hip_cdna4():
+                # Programs that start at the same peer queue behind each other on one link, so start each
+                # program at a different peer.
+                peer = (self.rank + 1 + (step - 1 + tl.program_id(0)) % (self.world_size - 1)) % self.world_size
+            else:
+                # Rotate by rank so that each destination sees a different writer at any given moment.
+                peer = (self.rank + step) % self.world_size
             ptr_deltas += (tl.load(self.heap_bases + peer) - local_base,)
 
-        # Start with the local copy, then write to peers in a per-rank rotated order so that each
-        # destination sees a different writer at any given moment.
+        # Start with the local copy, then write to the peers in the order chosen above.
         local_ptr = tl.max_contiguous(tl.multiple_of(dst_ptr, (1, tile.block_n)), (1, tile.block_n))
         tl.store(local_ptr, tile.data, mask=combined_mask)
         for step in tl.static_range(1, self.world_size):
