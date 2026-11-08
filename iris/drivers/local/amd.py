@@ -350,7 +350,7 @@ class LocalHipDriver(BaseDriver):
         )
         return int(granularity.value)
 
-    def _get_granularity(self) -> int:
+    def _get_recommended_granularity(self) -> int:
         """Recommended granularity, used for sizing/aligning this driver's own mappings."""
         if self._granularity is None:
             self._granularity = self._query_granularity(hipMemAllocationGranularityRecommended)
@@ -398,7 +398,7 @@ class LocalHipDriver(BaseDriver):
         """
         self._check_initialized()
         props = self._make_alloc_props()
-        granularity = self._get_granularity()
+        granularity = self._get_recommended_granularity()
         alloc_size = _round_up(size, granularity)
 
         reserved_va = placement is None
@@ -721,7 +721,7 @@ class LocalHipDriver(BaseDriver):
     def get_recommended_granularity(self) -> int:
         """Return the recommended (performant) HIP VMem allocation granularity for this device."""
         self._check_initialized()
-        return self._get_granularity()
+        return self._get_recommended_granularity()
 
     def reserve_va(self, size: int, alignment: int = 0) -> int:
         """Reserve a HIP virtual address range without backing memory.
@@ -735,7 +735,7 @@ class LocalHipDriver(BaseDriver):
         releases the original (base, size).
         """
         self._check_initialized()
-        granularity = self._get_granularity()
+        granularity = self._get_recommended_granularity()
         if alignment == 0:
             alignment = granularity
 

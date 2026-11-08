@@ -513,7 +513,7 @@ class AmdFabricDriver(BaseDriver):
         )
         return int(granularity.value)
 
-    def _get_granularity(self) -> int:
+    def _get_recommended_granularity(self) -> int:
         """Recommended granularity, used for sizing/aligning this driver's own mappings."""
         if self._granularity is None:
             self._granularity = self._query_granularity(hipMemAllocationGranularityRecommended)
@@ -610,7 +610,7 @@ class AmdFabricDriver(BaseDriver):
         """
         self._check_initialized()
         props = self._make_alloc_props()
-        granularity = self._get_granularity()
+        granularity = self._get_recommended_granularity()
         alloc_size = _round_up(size, granularity)
 
         reserved_va = placement is None
@@ -730,7 +730,7 @@ class AmdFabricDriver(BaseDriver):
         self._check_initialized()
         imported_handle = self._import_handle(handle_bytes)
 
-        granularity = self._get_granularity()
+        granularity = self._get_recommended_granularity()
         va_owned = placement is None
         mapped_va = int(placement.va) if placement is not None else 0
         mapped = False
@@ -888,7 +888,7 @@ class AmdFabricDriver(BaseDriver):
     def get_recommended_granularity(self) -> int:
         """Return the recommended (performant) HIP VMM allocation granularity for this device."""
         self._check_initialized()
-        return self._get_granularity()
+        return self._get_recommended_granularity()
 
     def reserve_va(self, size: int, alignment: int = 0) -> int:
         """Reserve a HIP virtual address range without backing memory.
@@ -902,7 +902,7 @@ class AmdFabricDriver(BaseDriver):
         releases the original (base, size).
         """
         self._check_initialized()
-        granularity = self._get_granularity()
+        granularity = self._get_recommended_granularity()
         if alignment == 0:
             alignment = granularity
 

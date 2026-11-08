@@ -233,7 +233,14 @@ class VMemChunkedAllocator(BaseAllocator):
         # and remember the true minimum for reporting. On stacks where the two differ,
         # the recommended value is what the allocator aligns and maps with.
         self.granularity = self.driver.get_recommended_granularity()
-        self.min_granularity = self.driver.get_minimum_granularity()
+        # min_granularity is reporting-only. Its HIP query is less tested for some handle
+        # types (e.g. the fabric handle type), so don't let a failed query break allocator
+        # construction; fall back to the recommended granule with a debug log.
+        try:
+            self.min_granularity = self.driver.get_minimum_granularity()
+        except Exception as exc:
+            logger.debug("get_minimum_granularity() failed (%s); reporting recommended granule instead", exc)
+            self.min_granularity = self.granularity
         if not _is_power_of_two(self.granularity):
             raise RuntimeError(
                 f"VMemChunkedAllocator: driver granularity {self.granularity} "
@@ -259,9 +266,10 @@ class VMemChunkedAllocator(BaseAllocator):
         # VA budgets; if reserve_va fails, the caller should pass an explicit
         # va_size. Not capped here because the right cap depends on workload.
         self.va_size = max(va_size, heap_size * 4)
-        # chunk_size may not be a power of two, so round the VA reservation up to a
-        # whole number of chunks arithmetically rather than with a bitmask.
-        self.va_size = math.ceil(self.va_size / self.chunk_size) * self.chunk_size
+        # chunk_size may not be a power of two, so round the VA reservation up to a whole
+        # number of chunks with integer arithmetic (a VA size shouldn't depend on float
+        # division staying exact), rather than with a bitmask.
+        self.va_size = -(-self.va_size // self.chunk_size) * self.chunk_size
         # Reserve the VA arena aligned to the largest alignment we promise on the absolute
         # address, not merely the granule. Because base_va is then a multiple of every
         # permitted alignment, aligning a block's heap offset also aligns its data_ptr().
@@ -393,6 +401,10 @@ class VMemChunkedAllocator(BaseAllocator):
         without self.lock held. Most call sites take the lock anyway because
         they go on to mutate allocator state; get_allocation_chunks_since()
         does not take the lock (see its docstring) and calls this unlocked.
+
+        reuse(), released_offsets() and collect_due() are intentionally *not*
+        guarded: they are reached only via SymmetricHeap.collect(), never as
+        public post-close entry points, so an explicit guard would be dead code.
         """
         if self._closed:
             raise RuntimeError("VMemChunkedAllocator: operation attempted after close()")
@@ -500,6 +512,12 @@ class VMemChunkedAllocator(BaseAllocator):
             # import, which a later non-growing allocation would read over as unmapped peer VA).
             # torch.as_tensor over a CUDA array interface only wraps the pointer; it does not
             # touch the (possibly still unmapped) memory, so building before the grow is safe.
+            #
+            # try/finally with a `committed` flag makes the rollback cover *every* exception
+            # type (including KeyboardInterrupt), not just Exception. The finalizer is armed
+            # before the bookkeeping commit: once the block is owned by GC it is guaranteed to
+            # be freed, and the finally never also returns it to a free list (no double-manage).
+            committed = False
             try:
                 va = self.base_va + offset
                 interface_size = (aligned_size // elem_size) * elem_size
@@ -507,34 +525,36 @@ class VMemChunkedAllocator(BaseAllocator):
                 tensor_bytes = torch.as_tensor(iface, device=self.device)
                 full = tensor_bytes.view(dtype)
                 tensor = full.narrow(0, 0, num_elements)
-            except Exception:
-                # Return a popped free-list block to the exact bucket it came from; nothing
-                # was grown and the bump pointer was never advanced.
-                if from_free_list:
+
+                # Tensor built successfully -- now it is safe to grow chunks.
+                for _ in range(grow_chunks):
+                    self._grow_chunk()
+
+                # Arm the GC weak ref before committing bookkeeping, so the block can never be
+                # left live-but-unfinalized if a later step raised.
+                weakref.finalize(
+                    tensor.untyped_storage(),
+                    self._free_callback,
+                    offset,
+                    bucket,
+                )
+
+                self.bump = new_bump
+                self.alloc_sizes[offset] = aligned_size
+                self._bytes_since_collect += aligned_size
+                if pad_start is not None and pad_start != offset:
+                    # This block owns alignment padding [pad_start, offset) below it; reuse() rolls
+                    # the bump back to pad_start, not offset, so the padding is not stranded.
+                    self._pad_start[offset] = pad_start
+
+                committed = True
+                return tensor
+            finally:
+                if not committed and from_free_list:
+                    # Build/grow/finalizer-registration failed: return the popped free-list block
+                    # to the exact bucket it came from. Nothing was grown into use, the bump
+                    # pointer was never advanced, and no finalizer owns this offset.
                     self.free_lists[reused_bucket].append(offset)
-                raise
-
-            # Tensor built successfully -- now it is safe to grow chunks and commit.
-            for _ in range(grow_chunks):
-                self._grow_chunk()
-
-            self.bump = new_bump
-            self.alloc_sizes[offset] = aligned_size
-            self._bytes_since_collect += aligned_size
-            if pad_start is not None and pad_start != offset:
-                # This block owns alignment padding [pad_start, offset) below it; reuse() rolls
-                # the bump back to pad_start, not offset, so the padding is not stranded.
-                self._pad_start[offset] = pad_start
-
-            # Attach GC weak ref for automatic free
-            weakref.finalize(
-                tensor.untyped_storage(),
-                self._free_callback,
-                offset,
-                bucket,
-            )
-
-            return tensor
 
     def owns_tensor(self, tensor: torch.Tensor) -> bool:
         if not tensor.is_cuda:
@@ -781,6 +801,7 @@ class VMemChunkedAllocator(BaseAllocator):
                 "free_bytes": free_bytes,
                 "va_size": self.va_size,
                 "chunk_size": self.chunk_size,
+                # "granularity" is kept as a backward-compat alias of "recommended_granularity".
                 "granularity": self.granularity,
                 "recommended_granularity": self.granularity,
                 "min_granularity": self.min_granularity,

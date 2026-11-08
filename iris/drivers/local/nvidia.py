@@ -654,6 +654,9 @@ class LocalCudaDriver(BaseDriver):
     def get_minimum_granularity(self) -> int:
         """Return the CUDA VMM allocation granularity for this device."""
         self._check_initialized()
+        # TODO(#600): this returns the recommended granule, so get_stats() reports
+        # min_granularity == recommended (the mislabeling the AMD drivers now avoid).
+        # Query CU_MEM_ALLOC_GRANULARITY_MINIMUM to report the true minimum here.
         return self._get_granularity()
 
     def reserve_va(self, size: int, alignment: int = 0) -> int:

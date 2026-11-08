@@ -566,6 +566,9 @@ class NvidiaFabricDriver(BaseDriver):
         _run_cleanup_steps(*steps)
 
     def get_minimum_granularity(self) -> int:
+        # TODO(#600): this returns the recommended granule, so get_stats() reports
+        # min_granularity == recommended (the mislabeling the AMD drivers now avoid).
+        # Query CU_MEM_ALLOC_GRANULARITY_MINIMUM to report the true minimum here.
         self._check_initialized()
         return self._get_granularity()
 
