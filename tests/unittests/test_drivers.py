@@ -90,6 +90,32 @@ def test_amd_fabric_library_selection_prefers_loaded_copy(monkeypatch):
     assert set(loaded) == {"/sdk/core/lib/libamdhip64.so.7", "/sdk/core/lib/libamd_smi.so.27"}
 
 
+class _FakeVaHip:
+    """Stand-in for the HIP VA ctypes binding used by reserve_va/free_va tests.
+
+    hipMemAddressReserve writes the chosen raw base into the caller's c_void_p and
+    records the (size, alignment) it was asked for; hipMemAddressFree records the
+    (ptr, size) it was asked to release. This lets the tests assert the over-reserve
+    size, the trimmed base, and that the ORIGINAL reservation is what gets freed,
+    without a GPU.
+    """
+
+    def __init__(self, raw_base, hip_success):
+        self._raw_base = raw_base
+        self._hip_success = hip_success
+        self.reserve_calls = []
+        self.free_calls = []
+
+    def hipMemAddressReserve(self, pptr, size, alignment, addr, flags):
+        self.reserve_calls.append((size, alignment))
+        pptr._obj.value = self._raw_base
+        return self._hip_success
+
+    def hipMemAddressFree(self, ptr, size):
+        self.free_calls.append((ptr.value, size))
+        return self._hip_success
+
+
 class TestExceptions:
     def test_cuda_fabric_error_uses_driver_error_hierarchy(self):
         assert issubclass(CudaFabricError, DriverError)
@@ -322,6 +348,33 @@ class TestAmdFabricDriver:
         ]
 
 
+    def test_reserve_va_over_aligns_beyond_granule_and_frees_raw(self, monkeypatch):
+        """AmdFabricDriver shares the over-align/trim contract with LocalHipDriver.
+
+        The fabric driver keeps its own copy of reserve_va/free_va, so verify the trim
+        and raw-release behavior here too to catch drift between the two copies.
+        """
+        granularity = 2 * 1024 * 1024
+        alignment = 8 * 1024 * 1024
+        size = 4 * 1024 * 1024
+        raw_base = granularity
+
+        driver = AmdFabricDriver()
+        driver._initialized = True
+        driver._granularity = granularity
+        fake = _FakeVaHip(raw_base, amd_driver_module.HIP_SUCCESS)
+        monkeypatch.setattr(amd_driver_module, "_hip", fake)
+
+        va = driver.reserve_va(size, alignment)
+        assert va % alignment == 0
+        assert fake.reserve_calls == [(size + alignment, granularity)]
+        assert driver._aligned_reservations == {va: (raw_base, size + alignment)}
+
+        driver.free_va(va, size)
+        assert fake.free_calls == [(raw_base, size + alignment)]
+        assert va not in driver._aligned_reservations
+
+
 class TestLocalHipDriver:
     def test_granularity_methods_route_distinct_flags(self, monkeypatch):
         """Same contract as AmdFabricDriver: minimum and recommended must use distinct flags."""
@@ -368,6 +421,69 @@ class TestLocalHipDriver:
 
         assert driver._min_granularity is None
         assert driver._granularity is None
+
+    def test_reserve_va_over_aligns_beyond_granule_and_frees_raw(self, monkeypatch):
+        """reserve_va must honor an alignment larger than the granule.
+
+        hipMemAddressReserve only guarantees granularity alignment on this stack, so
+        reserve_va over-reserves by ``alignment`` bytes and trims to the first aligned
+        address. The symmetric heap relies on this to give every rank a base aligned to
+        MAX_ALIGNMENT; without it an allocation's aligned heap offset would not translate
+        to an aligned pointer. free_va must then release the ORIGINAL (raw) reservation,
+        not the trimmed base, or the driver leaks VA and HIP rejects the free.
+        """
+        granularity = 2 * 1024 * 1024  # 2 MiB
+        alignment = 8 * 1024 * 1024  # 8 MiB
+        size = 4 * 1024 * 1024  # 4 MiB
+        raw_base = granularity  # 2 MiB-aligned but NOT 8 MiB-aligned -> must be trimmed
+
+        driver = LocalHipDriver()
+        driver._initialized = True
+        driver._granularity = granularity
+        fake = _FakeVaHip(raw_base, local_amd_driver_module.HIP_SUCCESS)
+        monkeypatch.setattr(local_amd_driver_module, "_hip", fake)
+
+        va = driver.reserve_va(size, alignment)
+
+        # Trimmed to the first alignment-aligned address inside the over-reservation.
+        assert va % alignment == 0
+        assert raw_base <= va < raw_base + alignment
+        # Over-reserved by `alignment` extra bytes, reserved at granule alignment.
+        assert fake.reserve_calls == [(size + alignment, granularity)]
+        assert driver._aligned_reservations == {va: (raw_base, size + alignment)}
+
+        driver.free_va(va, size)
+
+        # The ORIGINAL reservation (raw base, raw size) is released, and the bookkeeping
+        # entry is dropped so a stale lookup cannot mis-free later.
+        assert fake.free_calls == [(raw_base, size + alignment)]
+        assert va not in driver._aligned_reservations
+
+    def test_reserve_va_within_granule_is_not_trimmed(self, monkeypatch):
+        """When alignment <= granularity the driver already satisfies it directly.
+
+        reserve_va must then reserve exactly ``size`` (no over-reservation) and record no
+        trimming bookkeeping, so free_va releases exactly what was reserved.
+        """
+        granularity = 2 * 1024 * 1024
+        size = 4 * 1024 * 1024
+        raw_base = granularity
+
+        driver = LocalHipDriver()
+        driver._initialized = True
+        driver._granularity = granularity
+        fake = _FakeVaHip(raw_base, local_amd_driver_module.HIP_SUCCESS)
+        monkeypatch.setattr(local_amd_driver_module, "_hip", fake)
+
+        va = driver.reserve_va(size, granularity)
+
+        assert va == raw_base
+        assert fake.reserve_calls == [(size, granularity)]
+        assert driver._aligned_reservations == {}
+
+        driver.free_va(va, size)
+        assert fake.free_calls == [(raw_base, size)]
+        assert driver._aligned_reservations == {}
 
 
 class TestNvidiaFabricDriver:

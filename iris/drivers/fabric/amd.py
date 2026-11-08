@@ -476,6 +476,10 @@ class AmdFabricDriver(BaseDriver):
         self._min_granularity: Optional[int] = None
         self._initialized: bool = False
         self._fabric_domain: Optional[tuple[str, int]] = None
+        # Maps an over-aligned VA (returned by reserve_va) to the raw
+        # (base, size) actually reserved from the driver, so free_va can
+        # release the original reservation. See reserve_va for details.
+        self._aligned_reservations: dict[int, tuple[int, int]] = {}
 
     def _check_initialized(self) -> None:
         if not self._initialized:
@@ -887,21 +891,46 @@ class AmdFabricDriver(BaseDriver):
         return self._get_granularity()
 
     def reserve_va(self, size: int, alignment: int = 0) -> int:
-        """Reserve a HIP virtual address range without backing memory."""
-        self._check_initialized()
-        if alignment == 0:
-            alignment = self._get_granularity()
+        """Reserve a HIP virtual address range without backing memory.
 
+        hipMemAddressReserve only guarantees the returned base is aligned to the
+        allocation granularity; the ``alignment`` argument is a hint and larger
+        requests are not honored by the driver on this stack. When a caller needs
+        a base aligned beyond the granule (e.g. aligned symmetric-heap bases) we
+        over-reserve by ``alignment`` extra bytes, trim to the first aligned
+        address inside the range, and record the raw reservation so that free_va
+        releases the original (base, size).
+        """
+        self._check_initialized()
+        granularity = self._get_granularity()
+        if alignment == 0:
+            alignment = granularity
+
+        if alignment <= granularity:
+            reserved = ctypes.c_void_p()
+            _hip_try(
+                _hip.hipMemAddressReserve(ctypes.byref(reserved), size, alignment, None, 0),
+                "hipMemAddressReserve",
+            )
+            if reserved.value is None:
+                raise AmdFabricError("hipMemAddressReserve returned a null VA")
+            return int(reserved.value)
+
+        raw_size = size + alignment
         reserved = ctypes.c_void_p()
         _hip_try(
-            _hip.hipMemAddressReserve(ctypes.byref(reserved), size, alignment, None, 0),
+            _hip.hipMemAddressReserve(ctypes.byref(reserved), raw_size, granularity, None, 0),
             "hipMemAddressReserve",
         )
         if reserved.value is None:
             raise AmdFabricError("hipMemAddressReserve returned a null VA")
-        return int(reserved.value)
+        raw_va = int(reserved.value)
+        aligned_va = raw_va + (-raw_va % alignment)
+        self._aligned_reservations[aligned_va] = (raw_va, raw_size)
+        return aligned_va
 
     def free_va(self, va: int, size: int) -> None:
         """Free a HIP VA range previously returned by reserve_va."""
         self._check_initialized()
-        _hip_try(_hip.hipMemAddressFree(ctypes.c_void_p(va), size), "hipMemAddressFree")
+        raw_va, raw_size = self._aligned_reservations.pop(va, (va, size))
+        _hip_try(_hip.hipMemAddressFree(ctypes.c_void_p(raw_va), raw_size), "hipMemAddressFree")

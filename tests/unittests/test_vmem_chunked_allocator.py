@@ -444,6 +444,52 @@ def test_chunked_stats():
     assert stats["bump"] > 0
 
 
+def test_chunked_single_rank_does_not_refresh_per_allocation(monkeypatch):
+    """Single-rank allocations must not call refresh_peer_access().
+
+    Regression: tying the post-allocation refresh to "chunk count != shared count" without
+    gating on num_ranks made 1-rank jobs refresh on every allocation, because
+    _shared_chunk_counts is never created for a 1-rank job (so my_shared stayed 0 while the
+    real count was >= 1). Single-rank has no peers and a base VA that never moves, so a
+    post-allocation refresh is pure overhead.
+    """
+    ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
+    if ctx.num_ranks != 1:
+        pytest.skip("single-rank behavior only")
+
+    calls = []
+    monkeypatch.setattr(ctx.heap, "refresh_peer_access", lambda *a, **k: calls.append(1))
+    for _ in range(5):
+        ctx.zeros(256, dtype=torch.float32)
+    assert calls == [], "single-rank allocate must not refresh peer access"
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires at least 2 GPUs")
+def test_chunked_peer_bases_aligned_like_owner():
+    """Imported peer arenas must be aligned exactly like the owner's base_va.
+
+    A symmetric object sits at the same offset on every rank, so an importer's translated
+    address (heap_bases[peer] + offset) is only aligned to the requested alignment if the peer
+    arena base is aligned as the owner's base is. Before the peer-arena fix the arenas were only
+    granule-aligned, so an over-aligned allocation looked aligned on the owner but misaligned to
+    every importer.
+    """
+    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
+    if ctx.num_ranks < 2:
+        pytest.skip("Requires at least 2 ranks")
+    alloc = ctx.heap.allocator
+
+    # Touch the heap and exchange, so peer arenas are actually reserved.
+    t = ctx.zeros(1024, dtype=torch.float32)  # noqa: F841
+    ctx.barrier()
+
+    align = alloc.base_alignment
+    assert alloc.get_base_address() % align == 0, "owner base must be aligned to base_alignment"
+    for peer in range(ctx.num_ranks):
+        base = int(ctx.heap_bases[peer].item())
+        assert base % align == 0, f"peer {peer} base 0x{base:x} not aligned to 0x{align:x}"
+
+
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires at least 2 GPUs")
 def test_chunked_multirank_exchange():
     """Test FD exchange and peer access across ranks."""

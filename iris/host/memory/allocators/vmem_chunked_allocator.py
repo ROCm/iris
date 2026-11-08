@@ -359,6 +359,18 @@ class VMemChunkedAllocator(BaseAllocator):
     def get_base_address(self) -> int:
         return self.base_va
 
+    @property
+    def base_alignment(self) -> int:
+        """Alignment the heap base VA is reserved to, and the largest per-allocation alignment
+        honored on the absolute address (see allocate()).
+
+        Peer VA arenas (SymmetricHeap._refresh_peer_access_*) must be reserved to this same
+        alignment: a symmetric object sits at an identical offset on every rank, so an importer's
+        translated address heap_bases[peer] + offset is only aligned to the requested alignment if
+        the peer arena base is aligned exactly as the owner's base_va is.
+        """
+        return self._max_alignment
+
     def get_minimum_allocation_size(self) -> int:
         return self.granularity
 
