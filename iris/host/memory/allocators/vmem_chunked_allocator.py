@@ -27,7 +27,7 @@ import logging
 import weakref
 from collections import defaultdict, deque
 from threading import Lock
-from typing import List, NamedTuple, Optional, Tuple
+from typing import List, Optional, Sequence, Union
 
 import torch
 
@@ -161,7 +161,7 @@ class VMemChunkedAllocator(BaseAllocator):
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         va_size: int = DEFAULT_VA_SIZE,
         *,
-        reserved_bytes: int = 0,
+        reserved_bytes: Union[int, Sequence[int]] = 0,
         topology: Optional[TopologyMap] = None,
     ) -> None:
         super().__init__(heap_size, device_id, cur_rank, num_ranks)
@@ -815,7 +815,7 @@ class VMemChunkedAllocator(BaseAllocator):
     def plan_capacity(
         target_user_bytes: int,
         *,
-        reserved_bytes=0,
+        reserved_bytes: Union[int, Sequence[int]] = 0,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         granularity: int = 4096,
         va_size: int = DEFAULT_VA_SIZE,

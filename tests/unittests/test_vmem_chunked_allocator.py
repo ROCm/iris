@@ -643,10 +643,10 @@ def test_chunked_internal_state_not_counted_against_heap():
         assert stats["mapped_bytes"] > base_mapped
         assert stats["usable_bytes"] >= heap_size
 
-        # Consuming the whole internal budget as internal allocations...
+        # Consuming the whole internal budget as internal allocations still leaves the user able to
+        # allocate out of the reserved headroom.
         internal_t = alloc.allocate(rounded_reserved // 4, torch.float32, internal=True)
         assert alloc.get_stats()["internal_bytes"] >= rounded_reserved
-        # ...still leaves the user able to allocate out of the reserved headroom.
         user_t = alloc.allocate(heap_size // 4, torch.float32)
         assert user_t is not None
         del internal_t, user_t

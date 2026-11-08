@@ -15,7 +15,7 @@ import logging
 import os
 import socket
 import struct
-from typing import List
+from typing import List, Sequence, Union
 
 import numpy as np
 import torch
@@ -182,7 +182,7 @@ class SymmetricHeap:
         cur_rank: int,
         num_ranks: int,
         allocator_type: str = "torch",
-        reserved_bytes=0,
+        reserved_bytes: Union[int, Sequence[int]] = 0,
         rank_gpus=None,
     ):
         """
