@@ -25,9 +25,19 @@ import pytest
 import torch
 
 import iris
+from iris.host.memory.allocators import vmem_chunked_allocator as vmem_chunked_module
 
 
 ALLOC_TYPE = "vmem_chunked"
+
+
+class _ConstructionBoom:
+    """Drop-in for _CUDAArrayInterface whose construction raises, to simulate a tensor-build
+    failure narrowly (only the allocator's construction path, not the whole process's
+    torch.as_tensor). See the rollback tests below."""
+
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("injected tensor construction failure")
 
 
 def test_chunked_creation():
@@ -560,9 +570,10 @@ def test_chunked_mixed_alloc_free_pattern():
 def test_chunked_granularity_reports_min_and_recommended():
     """Driver/allocator must report a true minimum and a recommended granule, not conflate them.
 
-    Repro: before the fix the AMD drivers returned the *recommended* granularity from
-    get_minimum_granularity() and offered no recommended query, so "minimum" == recommended
-    and the allocator exposed neither value in stats.
+    This is an end-to-end sanity check only. The authoritative per-flag routing coverage is the
+    GPU-free driver mock tests in test_drivers.py; on stacks where minimum == recommended this
+    test cannot by itself distinguish a correctly fixed driver from a broken one, so it asserts
+    only the invariants (min <= recommended, recommended a multiple of min, stats expose both).
     """
     ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
     alloc = ctx.heap.allocator
@@ -582,11 +593,10 @@ def test_chunked_granularity_reports_min_and_recommended():
 
 
 def test_chunked_honors_requested_alignment_above_granule():
-    """allocate(alignment=...) above the granule must align the heap offset.
+    """allocate(alignment=...) above the granule must align the absolute address.
 
-    Repro: before the fix the alignment argument was ignored beyond the fixed
-    min_alignment, so an over-aligned request's offset was not a multiple of the
-    requested alignment.
+    Repro: before the fix the alignment argument was ignored beyond the fixed min_alignment,
+    so an over-aligned request's data_ptr() was not a multiple of the requested alignment.
     """
     ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
     alloc = ctx.heap.allocator
@@ -599,18 +609,69 @@ def test_chunked_honors_requested_alignment_above_granule():
 
     t = alloc.allocate(1024, torch.float32, alignment=alignment)
     assert t is not None
+    # The *absolute address*, not merely the heap offset, must be aligned: callers pass
+    # alignment= for TMA descriptors / tl.multiple_of / page-aligned DMA, which look at data_ptr().
+    assert t.data_ptr() % alignment == 0, f"address 0x{t.data_ptr():x} not aligned to 0x{alignment:x}"
     offset = t.data_ptr() - base
-    assert offset % alignment == 0, f"offset 0x{offset:x} not aligned to 0x{alignment:x}"
+    assert offset % alignment == 0
 
-    # An over-aligned block is reclaimable, and the next request of the same size/alignment
-    # reuses that *exact* offset -- proving the free list is keyed by (size, alignment) and
-    # a real reuse happened, not just a fresh bump that happened to also be aligned.
+    # Keep a live allocation ABOVE the over-aligned block so that, when freed, it lands in a
+    # free-list bucket instead of merging straight back into the bump pointer. Without this the
+    # block would be at the top of the heap and the "reuse" below would really be a fresh bump
+    # that only coincidentally re-aligns -- not a test of the (size, alignment) free-list key.
+    above = alloc.allocate(alloc.granularity // 4, torch.float32)
+    assert above is not None
+
     del t
     ctx.reclaim_freed()
+    bucket = next(b for b, offs in alloc.free_lists.items() if offset in offs)
+    assert bucket.alignment == max(alloc.min_alignment, alignment), "block must be filed by its alignment"
+    bump_before_reuse = alloc.bump
+
+    # The next request of the same size/alignment pops that exact block from the free list --
+    # the bump pointer does not move, proving a real free-list reuse keyed by (size, alignment).
     t2 = alloc.allocate(1024, torch.float32, alignment=alignment)
-    offset2 = t2.data_ptr() - base
-    assert offset2 % alignment == 0
-    assert offset2 == offset, "expected the freed over-aligned block to be reused, not re-bumped"
+    assert alloc.bump == bump_before_reuse, "expected a free-list reuse, not a bump allocation"
+    assert t2.data_ptr() % alignment == 0
+    assert (t2.data_ptr() - base) == offset, "expected the freed over-aligned block to be reused"
+
+
+def test_chunked_over_aligned_block_returns_bump_to_start():
+    """Freeing an over-aligned block must reclaim its alignment padding, not strand it.
+
+    Repro (MAJOR): allocate one granule, then a block aligned to 4*granule (which skips padding
+    to reach the aligned offset), free both and reclaim. Before the fix the bump pointer rolled
+    back only to the aligned offset -- the skipped padding, and every block below it, was lost to
+    free lists and the heap could never shrink back below it.
+    """
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    bump_before = alloc.bump
+    alignment = 4 * alloc.granularity
+
+    a = alloc.allocate(alloc.granularity // 4, torch.float32)  # one granule, no padding
+    b = alloc.allocate(1024, torch.float32, alignment=alignment)  # forces padding before b
+    assert a is not None and b is not None
+    assert alloc.bump > bump_before
+
+    del a, b
+    ctx.reclaim_freed()
+
+    assert alloc.bump == bump_before, "bump did not return to its starting value -- padding stranded"
+    assert alloc.get_stats()["num_free_blocks"] == 0, "blocks stranded in free lists instead of rolled back"
+
+
+def test_chunked_alignment_above_max_is_rejected():
+    """An alignment larger than the heap's guaranteed maximum must raise, not silently misalign.
+
+    The heap base is reserved aligned to MAX_ALIGNMENT; beyond that the absolute address can no
+    longer be guaranteed aligned, so the allocator rejects the request instead of returning a
+    pointer that only looks aligned in heap-offset space.
+    """
+    ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    with pytest.raises(ValueError, match="exceeds the heap's maximum alignment"):
+        alloc.allocate(1024, torch.float32, alignment=alloc._max_alignment * 2)
 
 
 def test_chunked_rejects_operations_after_close():
@@ -665,16 +726,34 @@ def test_chunked_get_allocation_chunks_since_rejects_after_close():
 
 
 def test_chunked_non_power_of_two_heap_size():
-    """A non-power-of-two heap size below the default chunk must construct and allocate.
+    """A non-power-of-two heap size below the default chunk must construct, allocate, and grow.
 
     Repro: 6 MiB with a 2 MiB granule produced a non-power-of-two chunk size and raised
     "computed chunk_size ... is not a power of two" during construction.
     """
     ctx = iris.iris(6 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    assert not _is_pow2(alloc.chunk_size), "test wants a non-power-of-two chunk_size to exercise growth"
+
     t = ctx.zeros(1024, dtype=torch.float32)
     t.fill_(3.0)
     torch.cuda.synchronize()
     assert torch.all(t == 3.0)
+
+    # Allocate past the first chunk so chunk growth runs with a non-power-of-two chunk_size,
+    # not just initial construction. The VA rounding there uses math.ceil, not a bitmask.
+    chunks0 = alloc.get_num_chunks()
+    hold = [t]
+    while alloc.get_num_chunks() == chunks0:
+        hold.append(ctx.zeros(alloc.chunk_size // 4, dtype=torch.float32))
+    assert alloc.get_num_chunks() > chunks0
+    hold[-1].fill_(5.0)
+    torch.cuda.synchronize()
+    assert torch.all(hold[-1] == 5.0)
+
+
+def _is_pow2(n):
+    return n > 0 and (n & (n - 1)) == 0
 
 
 def test_chunked_failed_allocation_rolls_back(monkeypatch):
@@ -689,10 +768,9 @@ def test_chunked_failed_allocation_rolls_back(monkeypatch):
     bump_before = alloc.bump
     active_before = alloc.get_stats()["num_active_allocs"]
 
-    def boom(*args, **kwargs):
-        raise RuntimeError("injected tensor construction failure")
-
-    monkeypatch.setattr(torch, "as_tensor", boom)
+    # Narrowly fail only the allocator's own tensor construction (patch the interface class it
+    # uses), not the whole process's torch.as_tensor.
+    monkeypatch.setattr(vmem_chunked_module, "_CUDAArrayInterface", _ConstructionBoom)
     with pytest.raises(RuntimeError):
         alloc.allocate(1024, torch.float32)
     monkeypatch.undo()
@@ -732,10 +810,7 @@ def test_chunked_failed_allocation_rolls_back_free_list_block(monkeypatch):
     free_list_before = list(alloc.free_lists[bucket])
     bump_before = alloc.bump
 
-    def boom(*args, **kwargs):
-        raise RuntimeError("injected tensor construction failure")
-
-    monkeypatch.setattr(torch, "as_tensor", boom)
+    monkeypatch.setattr(vmem_chunked_module, "_CUDAArrayInterface", _ConstructionBoom)
     with pytest.raises(RuntimeError):
         alloc.allocate(1024, torch.float32)
     monkeypatch.undo()
@@ -749,6 +824,64 @@ def test_chunked_failed_allocation_rolls_back_free_list_block(monkeypatch):
     # It's reusable afterward, landing at the same offset.
     t2 = alloc.allocate(1024, torch.float32)
     assert (t2.data_ptr() - base) == freed_offset
+
+
+def test_chunked_failed_allocation_during_growth_grows_nothing(monkeypatch):
+    """A construction failure on an allocation that must grow a chunk must grow nothing.
+
+    This is the third rollback case (beyond the bump and free-list paths): a request larger than
+    the remaining mapped extent. Because the tensor is built BEFORE _grow_chunk() runs, a failure
+    leaves no chunk mapped-but-unexported -- which would otherwise be invisible locally but let a
+    peer RMA into unmapped VA. Verifies no chunk was added and the bump pointer did not move.
+    """
+    ctx = iris.iris(1 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    chunks_before = alloc.get_num_chunks()
+    bump_before = alloc.bump
+
+    # Sized to overflow the currently mapped extent, forcing at least one _grow_chunk().
+    grow_elems = (alloc.mapped_extent - alloc.bump + alloc.chunk_size) // 4
+
+    monkeypatch.setattr(vmem_chunked_module, "_CUDAArrayInterface", _ConstructionBoom)
+    with pytest.raises(RuntimeError):
+        alloc.allocate(grow_elems, torch.float32)
+    monkeypatch.undo()
+
+    assert alloc.get_num_chunks() == chunks_before, "a chunk was grown despite the failed allocation"
+    assert alloc.bump == bump_before
+
+    # The same request succeeds once construction works, and this time it does grow.
+    t = alloc.allocate(grow_elems, torch.float32)
+    assert t is not None
+    assert alloc.get_num_chunks() > chunks_before
+
+
+def test_chunked_reuses_block_with_larger_alignment(monkeypatch):
+    """A freed block may serve a same-size request needing a smaller alignment.
+
+    A block filed under a larger alignment already sits at an offset that satisfies any smaller
+    (power-of-two) alignment, so reuse is safe and avoids fragmenting the heap. The choice is
+    deterministic (smallest sufficient alignment first) and depends only on free-list contents,
+    which are identical across ranks, so offsets stay symmetric.
+    """
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    big_align = 4 * alloc.granularity
+
+    # Free a highly-aligned block into a free list (keep one above it so it is not rolled back).
+    t = alloc.allocate(1024, torch.float32, alignment=big_align)
+    offset = t.data_ptr() - alloc.get_base_address()
+    above = alloc.allocate(alloc.granularity // 4, torch.float32)  # noqa: F841
+    assert above is not None
+    del t
+    ctx.reclaim_freed()
+    assert any(offset in offs for b, offs in alloc.free_lists.items() if b.alignment == big_align)
+
+    # A same-size request with the default (smaller) alignment reuses that exact block.
+    bump_before = alloc.bump
+    t2 = alloc.allocate(1024, torch.float32)  # default alignment < big_align
+    assert alloc.bump == bump_before, "expected cross-alignment free-list reuse, not a bump allocation"
+    assert (t2.data_ptr() - alloc.get_base_address()) == offset
 
 
 if __name__ == "__main__":

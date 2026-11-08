@@ -136,6 +136,9 @@ class BaseDriver(ABC):
         memory in units of this value. Defaults to the minimum for drivers that
         do not distinguish the two.
         """
+        # TODO(nvidia): the NVIDIA local/fabric drivers inherit this default, so they report
+        # recommended == minimum. Query CU_MEM_ALLOC_GRANULARITY_RECOMMENDED and override there
+        # to label the recommended granule distinctly, as the AMD drivers already do.
         return self.get_minimum_granularity()
 
     @abstractmethod

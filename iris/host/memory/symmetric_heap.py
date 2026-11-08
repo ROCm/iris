@@ -223,8 +223,8 @@ class SymmetricHeap:
         if is_simulation_env():
             allocator_type = "torch"
 
-        # Bytes added on top of heap_size for Iris's own allocations. vmem_chunked grows on
-        # demand (and needs a power-of-two chunk size), so it is left alone.
+        # Bytes added on top of heap_size for Iris's own allocations. vmem_chunked is excluded:
+        # it grows on demand and accounts for its own internal budget, so it is left alone here.
         self.reserved_size = 0
         if reserved_bytes > 0 and allocator_type in ("torch", "vmem"):
             if allocator_type == "torch":
@@ -366,7 +366,6 @@ class SymmetricHeap:
         actual_elements = max(num_elements, min_elements)
 
         is_chunked = isinstance(self.allocator, VMemChunkedAllocator)
-        chunks_before = self.allocator.get_num_chunks() if is_chunked else 0
 
         if is_chunked:
             # Every rank reaches the same branches: they depend only on state identical across ranks
@@ -384,8 +383,14 @@ class SymmetricHeap:
         tensor = tensor[:num_elements]
 
         if is_chunked:
-            chunks_after = self.allocator.get_num_chunks()
-            if chunks_after > chunks_before:
+            # Refresh whenever our mapped chunk count differs from what peers have already
+            # imported (_shared_chunk_counts), not just when THIS allocate grew a chunk. A
+            # chunk grown by an allocation that then failed before refresh would otherwise be
+            # exported to no one; a later allocation that fits without growing would see an
+            # unchanged count and skip the refresh, leaving peers to RMA into unmapped VA.
+            shared_counts = getattr(self, "_shared_chunk_counts", None)
+            my_shared = shared_counts[self.cur_rank] if shared_counts else 0
+            if self.allocator.get_num_chunks() != my_shared:
                 self.refresh_peer_access()
         else:
             self.refresh_peer_access()

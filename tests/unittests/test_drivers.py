@@ -345,6 +345,30 @@ class TestLocalHipDriver:
             local_amd_driver_module.hipMemAllocationGranularityRecommended,
         ]
 
+    def test_initialize_resets_cached_granularity(self, monkeypatch):
+        """Re-initialize must drop cached granularity so a device switch re-queries the driver.
+
+        get_minimum_granularity/get_recommended_granularity memoize their first query. If
+        initialize() did not clear those caches, binding the driver to a different device would
+        keep reporting the old device's granularity.
+        """
+        driver = LocalHipDriver()
+        driver._initialized = True
+        driver._min_granularity = 4096
+        driver._granularity = 2 * 1024 * 1024
+
+        class FakeHip:
+            def hipSetDevice(self, ordinal):
+                return local_amd_driver_module.HIP_SUCCESS
+
+        monkeypatch.setattr(local_amd_driver_module, "_hip", FakeHip())
+        monkeypatch.setattr(local_amd_driver_module, "_configure_signatures", lambda: None)
+
+        driver.initialize(1)
+
+        assert driver._min_granularity is None
+        assert driver._granularity is None
+
 
 class TestNvidiaFabricDriver:
     @pytest.mark.parametrize(
