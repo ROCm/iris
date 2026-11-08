@@ -654,6 +654,112 @@ def test_chunked_internal_state_not_counted_against_heap():
         alloc.close()
 
 
+def test_chunked_reserved_rounds_per_allocation():
+    """A list reservation rounds each entry to a granule, so N tiny internal allocations reserve
+    N granules -- not one granule for the summed bytes (which would under-reserve)."""
+    heap_size = 8 << 20
+    # Two separate tiny control allocations (e.g. barrier flags + SDMA counters). Summed they are
+    # far under one granule, but each consumes a whole granule when allocated.
+    alloc = _make_chunked(heap_size, reserved_bytes=[8, 8])
+    try:
+        g = alloc.granularity
+        stats = alloc.get_stats()
+        assert stats["reserved_bytes"] == 2 * g
+
+        # Consuming both as internal allocations stays within the reservation: internal_bytes never
+        # exceeds reserved_bytes, so the user's usable budget is untouched.
+        a = alloc.allocate(1, torch.int32, internal=True)
+        b = alloc.allocate(1, torch.int64, internal=True)
+        internal = alloc.get_stats()
+        assert internal["internal_bytes"] == 2 * g
+        assert internal["internal_bytes"] <= internal["reserved_bytes"]
+        assert internal["usable_bytes"] >= heap_size
+        del a, b
+    finally:
+        alloc.close()
+
+
+def test_chunked_reserved_scalar_rounds_to_granule():
+    """A single scalar reservation keeps the simple lump behavior: rounded up to one granule."""
+    alloc = _make_chunked(8 << 20, reserved_bytes=8)
+    try:
+        assert alloc.get_stats()["reserved_bytes"] == alloc.granularity
+    finally:
+        alloc.close()
+
+
+def test_chunked_reserved_empty_and_zero_are_noops():
+    """An empty list, a list of zeros, or a zero scalar reserve nothing (no accidental granule)."""
+    for reserved in ([], [0, 0], 0):
+        alloc = _make_chunked(8 << 20, reserved_bytes=reserved)
+        try:
+            assert alloc.get_stats()["reserved_bytes"] == 0
+        finally:
+            alloc.close()
+
+
+def test_chunked_internal_bytes_round_trip_on_free():
+    """internal_bytes rises as control state is allocated and falls back as each block is freed --
+    the free path must not strand internal bytes (which would permanently shrink usable space)."""
+    alloc = _make_chunked(8 << 20, reserved_bytes=[8, 8])
+    try:
+        g = alloc.granularity
+        assert alloc.get_stats()["internal_bytes"] == 0
+        a = alloc.allocate(1, torch.int32, internal=True)
+        b = alloc.allocate(1, torch.int64, internal=True)
+        assert alloc.get_stats()["internal_bytes"] == 2 * g
+        # get_stats() processes pending frees, so internal_bytes reflects each GC'd block.
+        del a
+        gc.collect()
+        assert alloc.get_stats()["internal_bytes"] == g
+        del b
+        gc.collect()
+        assert alloc.get_stats()["internal_bytes"] == 0
+    finally:
+        alloc.close()
+
+
+def test_chunked_free_internal_leaves_user_intact():
+    """Freeing internal control state drops internal_bytes to zero but leaves the user block used --
+    the two kinds of accounting must move independently, not clobber each other."""
+    alloc = _make_chunked(16 << 20, reserved_bytes=[8])
+    try:
+        g = alloc.granularity
+        internal_t = alloc.allocate(1, torch.int32, internal=True)
+        user_t = alloc.allocate(4096, torch.float32)
+        used_with_both = alloc.get_stats()["used_bytes"]
+        del internal_t
+        gc.collect()
+        s = alloc.get_stats()
+        assert s["internal_bytes"] == 0
+        # Exactly the internal granule left used_bytes; the user block is untouched.
+        assert s["used_bytes"] == used_with_both - g
+        assert s["num_active_allocs"] == 1
+        assert user_t.numel() == 4096
+        del user_t
+    finally:
+        alloc.close()
+
+
+def test_chunked_internal_over_reservation_is_safe():
+    """If internal allocations exceed the reservation, accounting stays non-negative and consistent:
+    pending_internal clamps at zero, so no capacity figure underflows or goes negative."""
+    alloc = _make_chunked(8 << 20, reserved_bytes=[8])  # reserve one granule
+    try:
+        g = alloc.granularity
+        assert alloc.get_stats()["reserved_bytes"] == g
+        held = [alloc.allocate(1, torch.int32, internal=True) for _ in range(3)]
+        stats = alloc.get_stats()
+        assert stats["internal_bytes"] == 3 * g
+        assert stats["internal_bytes"] > stats["reserved_bytes"]
+        assert stats["usable_bytes"] >= 0
+        assert 0 <= stats["largest_allocatable_bytes"] <= stats["usable_bytes"]
+        assert stats["used_bytes"] >= stats["internal_bytes"]
+        del held
+    finally:
+        alloc.close()
+
+
 def test_chunked_capacity_report_fields():
     """get_stats() exposes usable/used/free/largest/internal/reserved with sane invariants."""
     ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
@@ -669,8 +775,10 @@ def test_chunked_capacity_report_fields():
     ):
         assert key in stats, f"missing capacity field {key!r}"
 
-    # Iris allocates its device-barrier flags as internal control state.
+    # Iris allocates its device-barrier flags (and SDMA counters, if enabled) as internal control
+    # state. The reservation must cover all of it, so heap_size stays fully usable to the caller.
     assert stats["internal_bytes"] > 0
+    assert stats["internal_bytes"] <= stats["reserved_bytes"]
     assert stats["used_bytes"] >= stats["internal_bytes"]
     assert stats["largest_allocatable_bytes"] <= stats["usable_bytes"]
 
@@ -696,6 +804,46 @@ def test_chunked_sizing_helper_roundtrip():
         assert alloc.get_stats()["usable_bytes"] >= target
     finally:
         alloc.close()
+
+
+def test_plan_capacity_list_reservation_rounds_per_allocation():
+    """plan_capacity() rounds a *list* reservation per allocation, matching a real list-built
+    allocator. Summing the bytes and rounding once (the old behavior) would under-reserve: here two
+    tiny control allocations each consume a whole granule, so the reservation must be two granules,
+    not one. A one-line revert to scalar rounding of the summed bytes turns 2*g into g and fails."""
+    from iris.host.memory.allocators import VMemChunkedAllocator
+
+    target = 16 << 20
+    g = 2 << 20  # exaggerated granule so each tiny allocation clearly rounds up to a full granule
+    plan_list = VMemChunkedAllocator.plan_capacity(target, reserved_bytes=[8, 8], granularity=g)
+    assert plan_list["reserved_bytes"] == 2 * g
+
+    # The same summed bytes as a single lump reserve only one granule -- the under-reservation the
+    # list form fixes. This asserts plan_capacity actually distinguishes the two.
+    plan_lump = VMemChunkedAllocator.plan_capacity(target, reserved_bytes=16, granularity=g)
+    assert plan_lump["reserved_bytes"] == g
+
+    # Zero/empty entries are dropped, not rounded up to a spurious granule.
+    assert VMemChunkedAllocator.plan_capacity(target, reserved_bytes=[0, 0], granularity=g)["reserved_bytes"] == 0
+    assert VMemChunkedAllocator.plan_capacity(target, reserved_bytes=[], granularity=g)["reserved_bytes"] == 0
+
+
+def test_internal_reservation_sizes_cover_iris_control_state():
+    """The reservation list Iris hands the heap must include *every* control-state allocation it
+    makes: device-barrier flags always, and the SDMA all-gather counters when SDMA is enabled. The
+    bug this guards: the SDMA counters were omitted from the reservation, so with engines=("sdma",)
+    the last granule of heap_size was silently consumed by Iris. Pure wiring check (no SDMA hardware
+    needed) -- a real engines=("sdma",) run would require rocm-xio, which is unavailable here."""
+    from iris.host.iris import _internal_reservation_sizes
+
+    num_ranks = 8
+    without = _internal_reservation_sizes(num_ranks, sdma_enabled=False)
+    assert without == [num_ranks * num_ranks * torch.int32.itemsize]  # matches _device_barrier_flags int32[R, R]
+
+    with_sdma = _internal_reservation_sizes(num_ranks, sdma_enabled=True)
+    # Enabling SDMA adds exactly one more reserved allocation (int64[R] counters); it never drops the
+    # flags or changes their size. A revert that forgets the SDMA entry makes with_sdma == without.
+    assert with_sdma == without + [num_ranks * torch.int64.itemsize]
 
 
 def test_chunked_oom_message_has_breakdown():

@@ -182,7 +182,7 @@ class SymmetricHeap:
         cur_rank: int,
         num_ranks: int,
         allocator_type: str = "torch",
-        reserved_bytes: int = 0,
+        reserved_bytes=0,
         rank_gpus=None,
     ):
         """
@@ -195,9 +195,11 @@ class SymmetricHeap:
             num_ranks: Total number of ranks
             allocator_type: Type of allocator ("torch", "vmem", or
                 "vmem_chunked"); default "torch"
-            reserved_bytes: Bytes Iris allocates on the heap for itself. The torch and vmem
-                heaps grow by this much, rounded up to the allocator's allocation unit, so
-                that all of ``heap_size`` stays available to the caller.
+            reserved_bytes: Bytes Iris allocates on the heap for itself. Either a single byte
+                count or a list of per-allocation byte counts (one entry per internal allocation).
+                The torch and vmem heaps grow by this much, each entry rounded up to the
+                allocator's allocation unit, so that all of ``heap_size`` stays available to the
+                caller; vmem_chunked reserves it the same way, pre-mapped on top of ``heap_size``.
             rank_gpus: Each rank's GPU as a device ordinal in this process, from
                 ``rank_gpu_ordinals``, if the caller already exchanged it. The vmem
                 allocator exchanges it itself when this is None.
@@ -227,17 +229,28 @@ class SymmetricHeap:
         if is_simulation_env():
             allocator_type = "torch"
 
-        # Bytes added on top of heap_size for Iris's own allocations. vmem_chunked is excluded:
-        # it grows on demand and accounts for its own internal budget, so it is left alone here.
+        # reserved_bytes may be a single byte count or a list of per-allocation byte counts (each a
+        # separate Iris control-state allocation). Normalize to a list so the reservation rounds per
+        # allocation rather than summing first and rounding once (which under-reserves by up to a
+        # unit per allocation, since every allocation consumes a whole number of units).
+        if isinstance(reserved_bytes, (list, tuple)):
+            reserved_sizes = [int(b) for b in reserved_bytes if b and int(b) > 0]
+        else:
+            reserved_sizes = [int(reserved_bytes)] if reserved_bytes and int(reserved_bytes) > 0 else []
+
+        # Bytes added on top of heap_size for Iris's own allocations. vmem_chunked grows on
+        # demand (and needs a power-of-two chunk size), so it is left alone.
         self.reserved_size = 0
-        if reserved_bytes > 0 and allocator_type in ("torch", "vmem"):
+        if reserved_sizes and allocator_type in ("torch", "vmem"):
             if allocator_type == "torch":
                 unit = 1024  # allocate()'s default alignment
             else:
                 from iris.host.platform.hip import get_allocation_granularity
 
                 unit = get_allocation_granularity(device_id)
-            self.reserved_size = -(-reserved_bytes // unit) * unit
+            # Each entry is a separate allocation that consumes a whole number of units; round per
+            # entry, then sum.
+            self.reserved_size = sum(-(-b // unit) * unit for b in reserved_sizes)
             heap_size += self.reserved_size
             self.heap_size = heap_size
 
@@ -275,11 +288,11 @@ class SymmetricHeap:
                 device_id,
                 cur_rank,
                 num_ranks,
-                reserved_bytes=reserved_bytes,
+                reserved_bytes=reserved_sizes,
                 topology=topology,
             )
             # vmem_chunked reserves the internal budget itself (pre-mapped on top of heap_size),
-            # rounded to its own granularity; mirror it here for reporting.
+            # rounded per allocation to its own granularity; mirror it here for reporting.
             self.reserved_size = self.allocator.reserved_bytes
         else:
             raise ValueError(f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem', 'vmem_chunked'")

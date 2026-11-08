@@ -112,6 +112,21 @@ def _require_sdma_visibility(rank_gpus):
         )
 
 
+def _internal_reservation_sizes(num_ranks: int, sdma_enabled: bool) -> list:
+    """Byte sizes of the heap allocations Iris makes for its own control state, one entry per
+    allocation, so the symmetric heap can reserve exactly that much on top of the caller's heap_size
+    and keep heap_size fully usable. Each entry is reserved rounded up to the allocator's allocation
+    unit independently (summing first and rounding once would under-reserve by up to a unit per
+    allocation). Keep in sync with the ``mark_internal()`` allocations in ``Iris.__init__``:
+    ``_device_barrier_flags`` (always) and the ``_sdma_all_gather_counters`` heap tensor (SDMA only).
+    """
+    sizes = [num_ranks * num_ranks * torch.int32.itemsize]  # _device_barrier_flags: int32[R, R]
+    if sdma_enabled:
+        # all_gather(engine="sdma") arrival counters: the heap-resident int64[R] (one per source rank)
+        sizes.append(num_ranks * torch.int64.itemsize)
+    return sizes
+
+
 class Iris:
     """
     Main Iris class for multi-GPU communication and memory management.
@@ -184,16 +199,17 @@ class Iris:
                 f"init: heap_size={heap_size / (1 << 30):.1f}GB rank={cur_rank}/{num_ranks} allocator={allocator_type}",
             )
 
-        # Initialize symmetric heap with specified allocator
-        # Room for the device barrier's flags (allocated below) on top of the caller's heap_size.
-        barrier_flags_bytes = num_ranks * num_ranks * torch.int32.itemsize
+        # Initialize symmetric heap with specified allocator.
+        # Reserve room on top of the caller's heap_size for every Iris control-state allocation made
+        # below (see _internal_reservation_sizes), so heap_size stays fully usable.
+        internal_reservations = _internal_reservation_sizes(num_ranks, self._sdma_ep is not None)
         self.heap = SymmetricHeap(
             heap_size,
             gpu_id,
             cur_rank,
             num_ranks,
             allocator_type,
-            reserved_bytes=barrier_flags_bytes,
+            reserved_bytes=internal_reservations,
             rank_gpus=rank_gpus,
         )
         self.device = f"cuda:{gpu_id}"
