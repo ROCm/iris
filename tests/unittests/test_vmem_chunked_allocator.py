@@ -760,6 +760,23 @@ def test_chunked_internal_over_reservation_is_safe():
         alloc.close()
 
 
+def test_chunked_internal_accounting_not_committed_on_build_failure(monkeypatch):
+    """If tensor construction raises, the internal reservation must NOT have been counted -- otherwise
+    internal_bytes over-counts and a phantom offset lingers in _internal_offsets for an allocation
+    that never produced a tensor (and so has no finalizer to undo it). Reverting the fix (counting
+    internal bytes before the build) leaves internal_bytes advanced here and fails this test."""
+    alloc = _make_chunked(8 << 20, reserved_bytes=[8])
+    try:
+        before = alloc.get_stats()["internal_bytes"]
+        monkeypatch.setattr(torch, "as_tensor", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        with pytest.raises(RuntimeError):
+            alloc.allocate(1, torch.int32, internal=True)
+        # Patch is still active here, but get_stats()/_process_pending_frees() do not build tensors.
+        assert alloc.get_stats()["internal_bytes"] == before
+    finally:
+        alloc.close()
+
+
 def test_chunked_capacity_report_fields():
     """get_stats() exposes usable/used/free/largest/internal/reserved with sane invariants."""
     ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)

@@ -368,7 +368,8 @@ class SymmetricHeap:
         """Return capacity/accounting stats for the active allocator.
 
         For vmem_chunked this includes usable/used/free/largest-allocatable/internal/reserved bytes.
-        Other allocators return a minimal view.
+        Other allocators (torch, vmem) return only ``{"heap_size", "reserved_bytes"}``, so callers
+        that may run on any allocator type should guard accesses to the capacity-specific keys.
         """
         if hasattr(self.allocator, "get_stats"):
             stats = dict(self.allocator.get_stats())

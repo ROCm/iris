@@ -1635,6 +1635,10 @@ class Iris:
         internal (Iris control state), and reserved bytes, alongside chunk/VA sizing. Figures are
         bounded by the VA reservation and growth, not by physical HBM.
 
+        The full field set is only populated for ``vmem_chunked``; the ``torch`` and ``vmem``
+        allocators return just ``{"heap_size", "reserved_bytes"}``, so guard accesses to the
+        capacity fields (e.g. ``stats.get("usable_bytes")``) if the allocator type may vary.
+
         Returns:
             dict: Capacity/accounting fields for the active allocator.
 

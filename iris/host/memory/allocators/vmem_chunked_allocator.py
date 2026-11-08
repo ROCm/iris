@@ -497,25 +497,26 @@ class VMemChunkedAllocator(BaseAllocator):
             # Track for free
             self.alloc_sizes[offset] = aligned_size
             self._bytes_since_collect += aligned_size
-            if internal:
-                self.internal_bytes += aligned_size
-                self._internal_offsets.add(offset)
 
                 # Tensor built successfully -- now it is safe to grow chunks.
                 for _ in range(grow_chunks):
                     self._grow_chunk()
 
-                # Arm the GC weak ref before committing bookkeeping, so the block can never be
-                # left live-but-unfinalized if a later step raised.
-                weakref.finalize(
-                    tensor.untyped_storage(),
-                    self._free_callback,
-                    offset,
-                    bucket,
-                )
-                # GC now owns this offset, so mark committed before the bookkeeping below: the
-                # finally must not also re-file it on a late failure (double-manage).
-                committed = True
+            # Count the internal reservation only after the tensor is built, so a failed build never
+            # leaves internal_bytes over-counted or a phantom offset in _internal_offsets. (Rolling
+            # back the bump pointer / alloc_sizes on a failed build is a separate concern.) The offset
+            # is paired with the decrement in _process_pending_frees via the finalizer registered next.
+            if internal:
+                self.internal_bytes += aligned_size
+                self._internal_offsets.add(offset)
+
+            # Attach GC weak ref for automatic free
+            weakref.finalize(
+                tensor.untyped_storage(),
+                self._free_callback,
+                offset,
+                aligned_size,
+            )
 
                 self.bump = new_bump
                 self.alloc_sizes[offset] = aligned_size
@@ -823,9 +824,12 @@ class VMemChunkedAllocator(BaseAllocator):
         """Predict the backing an allocator needs for ``target_user_bytes`` of usable space.
 
         Pure (no device calls) so callers can size ``heap_size`` deterministically. ``granularity``
-        defaults to a conservative 4 KiB; pass the device's granularity (``allocator.granularity``)
-        for an exact result. Mirrors ``__init__`` sizing: chunk size derives from the user target,
-        the reservation is added as whole chunks on top, and VA gets 4x headroom.
+        defaults to 4 KiB; pass the device's granularity (``allocator.granularity``) for an exact
+        result. Note the default is *not* conservative for ``reserved_bytes``: a smaller granularity
+        rounds each reserved allocation down toward its raw size, so with a real (larger) device
+        granule the reservation is bigger than predicted -- pass the device granularity when the
+        reservation must be sized accurately. Mirrors ``__init__`` sizing: chunk size derives from
+        the user target, the reservation is added as whole chunks on top, and VA gets 4x headroom.
 
         ``reserved_bytes`` matches the constructor: a single byte count is rounded up to one granule,
         while a list of per-allocation byte counts is rounded per entry (each a separate control-state
@@ -845,12 +849,14 @@ class VMemChunkedAllocator(BaseAllocator):
         cs = max(effective_chunk, g)
         cs = -(-cs // g) * g
         total = target_user_bytes + reserved
-        n_chunks = max(1, math.ceil(total / cs))
+        # Exact integer ceil-division (-(-a // b)), not math.ceil(a / b), so large byte counts never
+        # lose precision to float; cs above uses the same idiom.
+        n_chunks = max(1, -(-total // cs))
         mapped = n_chunks * cs
         if va_size == 0:
             va_size = 128 * 1024 * 1024 * 1024
         va = max(va_size, total * 4)
-        va = math.ceil(va / cs) * cs
+        va = -(-va // cs) * cs
         return {
             "chunks": n_chunks,
             "chunk_size": cs,
