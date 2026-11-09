@@ -749,7 +749,7 @@ def test_prepare_ahead_is_opt_in(monkeypatch):
     schedule = chunks(_slice(buffer, rank, slice_elems), 4, base=buffer)
     ledger = queue_ledger.ledger()
     # Room for one and a half rounds: enough for a plan that prepares each round after the last
-    monkeypatch.setattr(ledger, "capacity", armer.round_bytes(schedule) * 3 // 2)
+    monkeypatch.setattr(ledger, "capacity", max(armer.round_bytes(schedule, rank, world).values()) * 3 // 2)
 
     with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         for round in range(1, 4):
@@ -762,6 +762,49 @@ def test_prepare_ahead_is_opt_in(monkeypatch):
         TriggeredPlan(ctx, buffer, schedule, timeout=20, prepare_ahead=True)
     monkeypatch.undo()
     assert not any(ledger.entries.values()) and not any(ledger.holds.values())
+    ctx.barrier()
+    del ctx
+
+
+def test_tile_chunks_into_staging_with_pitch():
+    """Each rank's tiles land in a separate staging buffer with a wider row pitch, not in the buffer."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    m, n, bm, bn, programs = 40, 72, 16, 32, 4
+    buffer = ctx.zeros(world * m, n, dtype=torch.int32)
+    staging = ctx.zeros(world * m, n + 24, dtype=torch.int32)
+    staging.fill_(EMPTY)
+    mine = buffer[rank * m : (rank + 1) * m]
+    dst = staging[rank * m : (rank + 1) * m, :n]
+    schedule = tile_chunks(mine, (bm, bn), programs, base=buffer, dst=dst, dst_base=staging)
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20, destination=staging) as plan:
+        for round in range(1, 4):
+            if round > 1:
+                plan.next_round()
+            handle = plan.start()
+            _tiled_producer[(programs,)](
+                buffer,
+                handle,
+                plan.chunk_id(rank, 0),
+                round,
+                rank * m,
+                m,
+                n,
+                BM=bm,
+                BN=bn,
+                NUM_PROGRAMS=programs,
+                GROUP_M=0,
+            )
+            plan.wait()
+            for p in range(world):
+                got = staging[p * m : (p + 1) * m]
+                if p != rank:
+                    assert torch.equal(got[:, :n], _expected(round, m * n, start=p * m * n).view(m, n)), f"from {p}"
+                else:
+                    assert (got[:, :n] == EMPTY).all()  # nothing is sent to its own rank
+                assert (got[:, n:] == EMPTY).all()
+            ctx.barrier()
     ctx.barrier()
     del ctx
 
@@ -981,6 +1024,87 @@ def test_plans_share_queues_per_round():
     del ctx
 
 
+@triton.jit
+def _mark_all(handle, first, n):
+    cv = TriggeredView.initialize(handle)
+    for c in range(n):
+        cv.mark_ready(first + c)
+
+
+@triton.jit
+def _group_consumer(inbox, out, handle, n, BLOCK: tl.constexpr):
+    """Wait once for every source's block, then copy the inbox."""
+    TriggeredView.initialize(handle).wait_group(0)
+    for off in range(0, n, BLOCK):
+        idx = off + tl.arange(0, BLOCK)
+        tl.store(out + idx, tl.load(inbox + idx, mask=idx < n), mask=idx < n)
+
+
+def test_reduce_scatter_inboxes_and_group():
+    """
+    Rank s sends block p of its buffer to rank p only, into inbox slot s there: the shape of a
+    reduce-scatter. Every chunk joins group 0, so a consumer waits once for all sources.
+    """
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    block = 4096  # int32 elements per block
+    buffer = ctx.zeros(world * block, dtype=torch.int32)
+    inbox = ctx.zeros(world * block, dtype=torch.int32)
+    inbox.fill_(EMPTY)
+    out = torch.empty_like(inbox)
+    nbytes = block * 4
+    schedule = [
+        Chunk((Region(p * nbytes, nbytes, dst_offset_bytes=rank * nbytes),), peers=(p,), group=0)
+        for p in range(world)
+        if p != rank
+    ]
+
+    def contribution(sender, owner, round):
+        return (round << 24) | (sender << 20) | (owner << 16) | torch.arange(block, dtype=torch.int32, device="cuda")
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20, destination=inbox) as plan:
+        for round in range(1, 4):
+            if round > 1:
+                plan.next_round()
+            for p in range(world):
+                buffer[p * block : (p + 1) * block] = contribution(rank, p, round)
+            out.fill_(EMPTY)
+            handle = plan.start()
+            _mark_all[(1,)](handle, plan.chunk_id(rank, 0), len(schedule))
+            _group_consumer[(1,)](inbox, out, handle, inbox.numel(), BLOCK=1024)
+            plan.wait()
+            for s in range(world):
+                got = out[s * block : (s + 1) * block]
+                if s != rank:
+                    assert torch.equal(got, contribution(s, rank, round)), f"slot {s}"
+                else:
+                    assert (got == EMPTY).all()
+            ctx.barrier()
+    ctx.barrier()
+    del ctx
+
+
+def test_chunk_to_some_peers():
+    """Rank 0 sends to rank 1 only; other ranks get nothing and do not wait for it."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    n = 4096
+    buffer = ctx.zeros(world * n, dtype=torch.int32)
+    buffer.fill_(EMPTY)
+    if rank == 0:
+        buffer[:n] = _expected(1, n)
+    schedule = whole(buffer[:n], base=buffer, peers=[1]) if rank == 0 else []
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
+        plan.run()
+        if rank == 1:
+            assert torch.equal(buffer[:n], _expected(1, n))
+        elif rank > 1:
+            assert (buffer[:n] == EMPTY).all()
+    ctx.barrier()
+    del ctx
+
+
 def test_misuse_raises():
     ctx = _ctx()
     rank, world = ctx.get_rank(), ctx.get_num_ranks()
@@ -1052,6 +1176,20 @@ def test_invalid_schedule_fails_every_rank():
         schedule = [Chunk((Region(0, world * slice_elems * 4 + 4),))]  # runs past the buffer
     with pytest.raises(ValueError if rank == 0 else RuntimeError, match="past the buffer" if rank == 0 else "validate"):
         TriggeredPlan(ctx, buffer, schedule, timeout=20)
+    ctx.barrier()
+    del ctx
+
+
+def test_sparse_group_ids_rejected():
+    """Group ids must be small: every id up to the largest gets gate and view words on every rank."""
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    slice_elems = 1024
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    schedule = whole(_slice(buffer, rank, slice_elems), base=buffer, group=10_000 if rank == 0 else 0)
+    with pytest.raises(ValueError, match="group ids go up to 10000"):
+        TriggeredPlan(ctx, buffer, schedule, timeout=20)
+    assert not any(queue_ledger.ledger().entries.values())
     ctx.barrier()
     del ctx
 
