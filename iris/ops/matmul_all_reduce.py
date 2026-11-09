@@ -16,7 +16,7 @@ import triton.language as tl
 
 from tritonblas.kernels.stages import GemmContext, make_tensor_view, Tile
 
-from .config import FusedConfig
+from .config import FusedConfig, require_cu_engine
 from .workspace import FusedWorkspace
 import iris
 from iris.host.tracing.kernel_artifacts import iris_launch
@@ -253,6 +253,7 @@ def matmul_all_reduce(
     """
     if config is None:
         config = FusedConfig()
+    require_cu_engine(config, "matmul_all_reduce")
 
     # Extract dimensions
     if A.ndim != 2 or B.ndim != 2:

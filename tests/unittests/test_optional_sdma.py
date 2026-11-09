@@ -45,3 +45,16 @@ def test_default_context_rejects_sdma_all_gather():
         shmem.ccl.all_gather(out, inp, config=Config(engine="sdma"))
     with pytest.raises(RuntimeError, match=r"engines=\(\"sdma\",\)"):
         shmem.ccl.prepare_all_gather(out)
+
+
+def test_default_context_rejects_sdma_matmul_reduce_scatter():
+    import iris.ops as ops
+
+    shmem = iris.iris(1 << 20)
+    A = shmem.zeros(64, 32, dtype=torch.float16)
+    B = shmem.zeros(32, 64, dtype=torch.float16)
+    C = shmem.zeros(64, 64, dtype=torch.float16)
+    config = ops.FusedConfig(engine="sdma", block_size_m=64, block_size_n=64, block_size_k=32)
+
+    with pytest.raises(RuntimeError, match=r"engines=\(\"sdma\",\)"):
+        ops.matmul_reduce_scatter(shmem, C, A, B, config=config)

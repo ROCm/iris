@@ -16,7 +16,7 @@ import triton.language as tl
 import iris
 
 from iris.host.tracing.events import TraceEvent
-from .config import FusedConfig
+from .config import FusedConfig, require_cu_engine
 from .workspace import FusedWorkspace
 
 
@@ -558,6 +558,8 @@ def all_gather_matmul_hbm_buffer(
             num_fetch_stages = auto_nfs
         if first_stage_fetch_sms is None:
             first_stage_fetch_sms = auto_fsf
+
+    require_cu_engine(config, "all_gather_matmul_hbm_buffer")
 
     # Apply defaults for any remaining None values (when config is explicit
     # but some params are left at None).
