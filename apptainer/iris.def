@@ -74,10 +74,10 @@ From: rocm/pytorch:rocm10.1.0_ubuntu24.04_py3.12_pytorch_release_2.14.0
     # ROCm 10.x images have no /opt/venv, unlike the 7.x ones.
     chmod -R a+rwX \$(python3 -c \"import sysconfig; p = sysconfig.get_paths(); print(p['purelib'], p['scripts'])\")
 
-    # rocSHMEM + rocshmem4py, so the provider tests run instead of skipping.
-    # See install_rocshmem.sh for the rationale, including the two arches.
-    ROCSHMEM_GPU_TARGETS='gfx942;gfx950' ROCSHMEM_PREFIX=/opt/rocshmem \
-        bash /opt/install_rocshmem.sh
+    # rocshmem4py, so the provider tests run instead of skipping. ROCm 10.x
+    # ships rocSHMEM itself, so install_rocshmem.sh builds only the bindings,
+    # against that install; see the script for the source-build fallback.
+    bash /opt/install_rocshmem.sh
     "
 
 %environment
@@ -93,7 +93,6 @@ From: rocm/pytorch:rocm10.1.0_ubuntu24.04_py3.12_pytorch_release_2.14.0
     export OMPI_ALLOW_RUN_AS_ROOT=1
     # Set required RCCL environment variable for ROCm
     export HSA_NO_SCRATCH_RECLAIM=1
-    export ROCSHMEM_PREFIX=/opt/rocshmem
 
 %runscript
     echo "Welcome to the ROCm-aware Apptainer image!"
