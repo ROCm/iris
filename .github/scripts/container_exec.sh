@@ -53,7 +53,9 @@ if [ "$CONTAINER_RUNTIME" = "apptainer" ]; then
         IMAGE="$CUSTOM_IMAGE"
     else
         # Calculate checksum of def file to find the correct subdirectory
-        DEF_FILE=apptainer/iris.def
+        # IRIS_DEF_FILE selects another definition (e.g. apptainer/iris-rocm7.def).
+        # Images are cached by the definition's checksum, so variants never collide.
+        DEF_FILE=${IRIS_DEF_FILE:-apptainer/iris.def}
         if [ ! -f "$DEF_FILE" ]; then
             echo "[ERROR] Definition file $DEF_FILE not found" >&2
             exit 1
