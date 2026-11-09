@@ -506,17 +506,12 @@ class VMemChunkedAllocator(BaseAllocator):
                 offset = aligned_bump
                 new_bump = aligned_bump + aligned_size
 
-            # Build the tensor BEFORE growing chunks or mutating bookkeeping, so a construction
-            # failure leaves the allocator untouched: no bump advance, no orphaned reservation,
-            # and -- critically -- no chunk grown-but-unexported (a grown chunk that peers never
-            # import, which a later non-growing allocation would read over as unmapped peer VA).
-            # torch.as_tensor over a CUDA array interface only wraps the pointer; it does not
-            # touch the (possibly still unmapped) memory, so building before the grow is safe.
-            #
-            # try/finally with a `committed` flag makes the rollback cover *every* exception
-            # type (including KeyboardInterrupt), not just Exception. The finalizer is armed
-            # before the bookkeeping commit: once the block is owned by GC it is guaranteed to
-            # be freed, and the finally never also returns it to a free list (no double-manage).
+            # Build the tensor BEFORE growing chunks or mutating bookkeeping, so a failed
+            # construction rolls back cleanly (nothing grown, bump untouched). Just a local-rollback
+            # nicety -- peer correctness comes from SymmetricHeap refreshing on chunk-count change.
+            # Safe because we pass an explicit device index, so as_tensor only wraps the pointer
+            # (torch <2.9 instead probes the unmapped VA via getDeviceFromPtr -- then grow first).
+            # The try/finally below returns a popped free-list block on any failure (committed flag).
             committed = False
             try:
                 va = self.base_va + offset
@@ -538,6 +533,9 @@ class VMemChunkedAllocator(BaseAllocator):
                     offset,
                     bucket,
                 )
+                # GC now owns this offset, so mark committed before the bookkeeping below: the
+                # finally must not also re-file it on a late failure (double-manage).
+                committed = True
 
                 self.bump = new_bump
                 self.alloc_sizes[offset] = aligned_size
@@ -547,7 +545,6 @@ class VMemChunkedAllocator(BaseAllocator):
                     # the bump back to pad_start, not offset, so the padding is not stranded.
                     self._pad_start[offset] = pad_start
 
-                committed = True
                 return tensor
             finally:
                 if not committed and from_free_list:

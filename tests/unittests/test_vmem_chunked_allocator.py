@@ -930,6 +930,42 @@ def test_chunked_reuses_block_with_larger_alignment(monkeypatch):
     assert (t2.data_ptr() - alloc.get_base_address()) == offset
 
 
+def test_chunked_does_not_reuse_block_with_smaller_alignment():
+    """A block filed under a SMALLER alignment must not serve a larger-alignment request.
+
+    The reverse of test_chunked_reuses_block_with_larger_alignment: it pins the
+    ``b.alignment > bucket.alignment`` direction in _take_reusable_block. A less-aligned
+    block's offset need not satisfy a stricter alignment, so the allocator must bump-allocate
+    a fresh, correctly aligned block and leave the freed small-alignment block untouched.
+    """
+    ctx = iris.iris(64 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    big_align = 4 * alloc.granularity
+
+    # Free a default- (small-) aligned block into a free list (keep one above it so it is not
+    # rolled back into the bump pointer).
+    t = alloc.allocate(1024, torch.float32)  # default alignment
+    small_offset = t.data_ptr() - alloc.get_base_address()
+    above = alloc.allocate(alloc.granularity // 4, torch.float32)  # noqa: F841
+    assert above is not None
+    del t
+    ctx.reclaim_freed()
+    small_bucket = next(b for b, offs in alloc.free_lists.items() if small_offset in offs)
+    assert small_bucket.alignment < big_align, "test needs the freed block filed under a smaller alignment"
+
+    # A same-size request needing a LARGER alignment must not take the small-aligned block.
+    bump_before = alloc.bump
+    t2 = alloc.allocate(1024, torch.float32, alignment=big_align)
+    new_offset = t2.data_ptr() - alloc.get_base_address()
+
+    assert alloc.bump > bump_before, "expected a fresh bump allocation, not small-alignment reuse"
+    assert new_offset != small_offset
+    assert new_offset % big_align == 0, "the larger-alignment request must be correctly aligned"
+    assert t2.data_ptr() % big_align == 0
+    # The freed small-alignment block is left untouched, still available for a matching request.
+    assert small_offset in alloc.free_lists[small_bucket]
+
+
 if __name__ == "__main__":
     test_chunked_creation()
     test_chunked_basic_allocation()
