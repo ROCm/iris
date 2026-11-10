@@ -47,6 +47,12 @@ From: rocm/pytorch:rocm10.1.0_ubuntu24.04_py3.12_pytorch_release_2.14.0
     if [ ! -e /opt/rocm ]; then ln -s \"\$(rocm-sdk path --root)\" /opt/rocm; fi
     [ -x /opt/rocm/bin/hipcc ] || { echo \"no usable ROCm tree at /opt/rocm\" >&2; exit 1; }
 
+    # These images have python3 but no python, which CI scripts
+    # (run_ccl_benchmark.sh) and users call. The 7.x images had one through
+    # /opt/venv. Point it at the interpreter torch is installed in.
+    if ! command -v python >/dev/null; then ln -s \"\$(command -v python3)\" /usr/local/bin/python; fi
+    python -c 'import torch' || { echo \"python does not see torch\" >&2; exit 1; }
+
     # Create groups if they don't exist
     groupadd -r video 2>/dev/null || true
     groupadd -r render 2>/dev/null || true
