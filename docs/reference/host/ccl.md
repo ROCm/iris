@@ -27,6 +27,19 @@ Experimental: returns a [triggered plan](plan.md), which may change between rele
 .. automethod:: iris.host.iris.Iris.CCL.prepare_all_gather
 ```
 
+## prepare_scatter, prepare_gather, prepare_broadcast, prepare_all_to_all
+
+```{note}
+Experimental: return a [triggered plan](plan.md), which may change between releases without deprecation.
+```
+
+```{eval-rst}
+.. automethod:: iris.host.iris.Iris.CCL.prepare_scatter
+.. automethod:: iris.host.iris.Iris.CCL.prepare_gather
+.. automethod:: iris.host.iris.Iris.CCL.prepare_broadcast
+.. automethod:: iris.host.iris.Iris.CCL.prepare_all_to_all
+```
+
 ## all_reduce_preamble
 
 ```{note}

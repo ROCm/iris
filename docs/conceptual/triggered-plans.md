@@ -168,6 +168,23 @@ plan = TriggeredPlan(ctx, a_local, schedule, destination=staging)
 dst.copy_(a_local)                                  # a chunk is never sent to its own rank
 ```
 
+`ctx.ccl` builds the common in-place patterns as plans, each checking that every rank's schedule
+covers exactly what it sends: `prepare_all_gather`, `prepare_scatter` (the root sends part `r` of
+the tensor to rank `r`), `prepare_gather` (every rank sends its part to the root),
+`prepare_broadcast` (the root sends the whole tensor) and `prepare_all_to_all` (rank `r` sends
+block `(r, j)` of `world_size ** 2` blocks to rank `j`). A kernel that drives any of them marks the
+chunks its rank owns and waits for the rest; `wait()` returns at once for chunks not sent to it:
+
+```python
+@triton.jit
+def drive(handle, num_chunks):
+    view = TriggeredView.initialize(handle)
+    c = tl.program_id(0)
+    if view.owns(c):
+        view.mark_ready(c)
+    view.wait(c)
+```
+
 ### Gluon
 
 Gluon kernels use `iris.experimental.plan.gluon.TriggeredView`. It reads the same handle and has

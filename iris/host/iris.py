@@ -1853,6 +1853,126 @@ class Iris:
 
             return prepare(output_tensor, self._iris, schedule=schedule, timeout=timeout, prepare_ahead=prepare_ahead)
 
+        def prepare_scatter(self, tensor, root, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place scatter that a producer kernel on the root triggers on the SDMA copy engines.
+
+            Experimental: returns an ``iris.experimental.plan.TriggeredPlan``, which may change
+            between releases without deprecation. Collective, and needs a context created with
+            ``engines=("sdma",)``.
+
+            ``tensor`` holds one part of ``M`` rows per rank (``M`` is its first dimension divided by
+            the number of ranks). Each round, the root writes the parts and marks each chunk ready; the
+            copy engine sends part ``r`` to rank ``r``, at the same offset. Other parts of a rank's
+            ``tensor`` are not touched.
+
+            Args:
+                tensor: Contiguous tensor on the symmetric heap of shape (world_size * M, ...).
+                root: The rank that sends; the same on every rank.
+                schedule: The root's chunks: those for part ``r`` built from that part with the
+                    ``iris.experimental.plan`` builders, ``base=tensor`` and ``peers=(r,)``. Other
+                    ranks pass ``None`` or ``[]``. Default: ``whole()`` of each part.
+                timeout: Seconds the plan's ``wait()``, ``close()`` and round fence wait before raising.
+                prepare_ahead: Allow the plan's ``prepare_next()``, which prepares the next round
+                    while this one runs. The plan then holds queue space for two rounds.
+
+            Returns:
+                TriggeredPlan, prepared for its first round.
+
+            Example:
+                >>> with ctx.ccl.prepare_scatter(buf, root=0) as plan:
+                ...     handle = plan.start()
+                ...     producer[grid](buf, handle)  # on the root: TriggeredView.mark_ready(chunk)
+                ...     plan.wait()                   # every rank: its part has arrived
+            """
+            from iris.ccl.sdma.plans import prepare_scatter
+
+            return prepare_scatter(tensor, root, self._iris, schedule, timeout, prepare_ahead)
+
+        def prepare_gather(self, tensor, root, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place gather that producer kernels trigger on the SDMA copy engines.
+
+            Experimental: returns an ``iris.experimental.plan.TriggeredPlan``, which may change
+            between releases without deprecation. Collective, and needs a context created with
+            ``engines=("sdma",)``.
+
+            ``tensor`` holds one part of ``M`` rows per rank. Each round, every rank but the root
+            writes its own part and marks each chunk ready; the copy engine sends it to the root, at the
+            same offset. Other ranks' ``tensor`` only ever holds their own part.
+
+            Args:
+                tensor: Contiguous tensor on the symmetric heap of shape (world_size * M, ...).
+                root: The rank that receives; the same on every rank.
+                schedule: This rank's chunks, built from its own part with ``base=tensor`` and
+                    ``peers=(root,)``; the root passes ``None`` or ``[]``. Default: ``whole()`` of the part.
+                timeout: Seconds the plan's ``wait()``, ``close()`` and round fence wait before raising.
+                prepare_ahead: Allow the plan's ``prepare_next()``, which prepares the next round
+                    while this one runs. The plan then holds queue space for two rounds.
+
+            Returns:
+                TriggeredPlan, prepared for its first round.
+            """
+            from iris.ccl.sdma.plans import prepare_gather
+
+            return prepare_gather(tensor, root, self._iris, schedule, timeout, prepare_ahead)
+
+        def prepare_broadcast(self, tensor, root, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place broadcast that a producer kernel on the root triggers on the SDMA copy engines.
+
+            Experimental: returns an ``iris.experimental.plan.TriggeredPlan``, which may change
+            between releases without deprecation. Collective, and needs a context created with
+            ``engines=("sdma",)``.
+
+            Each round, the root writes ``tensor`` and marks each chunk ready; the copy engine sends it
+            to every other rank, at the same offset.
+
+            Args:
+                tensor: Contiguous tensor on the symmetric heap.
+                root: The rank that sends; the same on every rank.
+                schedule: The root's chunks, covering the whole tensor (``base=tensor``, default
+                    ``peers``); other ranks pass ``None`` or ``[]``. Default: ``whole()`` of the tensor.
+                timeout: Seconds the plan's ``wait()``, ``close()`` and round fence wait before raising.
+                prepare_ahead: Allow the plan's ``prepare_next()``, which prepares the next round
+                    while this one runs. The plan then holds queue space for two rounds.
+
+            Returns:
+                TriggeredPlan, prepared for its first round.
+            """
+            from iris.ccl.sdma.plans import prepare_broadcast
+
+            return prepare_broadcast(tensor, root, self._iris, schedule, timeout, prepare_ahead)
+
+        def prepare_all_to_all(self, tensor, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place all-to-all that producer kernels trigger on the SDMA copy engines.
+
+            Experimental: returns an ``iris.experimental.plan.TriggeredPlan``, which may change
+            between releases without deprecation. Collective, and needs a context created with
+            ``engines=("sdma",)``.
+
+            ``tensor`` holds ``world_size ** 2`` blocks of ``M`` rows, laid out ``[source][destination]``.
+            Each round, rank ``r`` writes its blocks ``(r, j)`` and marks each chunk ready; the copy
+            engine sends block ``(r, j)`` to rank ``j``, at the same offset. Afterwards rank ``j``'s
+            blocks ``(r, j)`` hold what every rank sent it. Unlike ``all_to_all``, input and output
+            share one tensor.
+
+            Args:
+                tensor: Contiguous tensor on the symmetric heap of shape (world_size ** 2 * M, ...).
+                schedule: This rank's chunks: those for block ``(r, j)`` built from it with
+                    ``base=tensor`` and ``peers=(j,)``. Default: ``whole()`` of each block.
+                timeout: Seconds the plan's ``wait()``, ``close()`` and round fence wait before raising.
+                prepare_ahead: Allow the plan's ``prepare_next()``, which prepares the next round
+                    while this one runs. The plan then holds queue space for two rounds.
+
+            Returns:
+                TriggeredPlan, prepared for its first round.
+            """
+            from iris.ccl.sdma.plans import prepare_all_to_all
+
+            return prepare_all_to_all(tensor, self._iris, schedule, timeout, prepare_ahead)
+
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
             Prepare reusable workspace for all-reduce.
