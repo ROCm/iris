@@ -258,6 +258,18 @@ class Iris:
         with self.heap.mark_internal():
             self._device_barrier_flags = self.zeros((num_ranks, num_ranks), dtype=torch.int32)
 
+        # Fail loud if Iris's actual internal (mark_internal) allocations drift from the reserved
+        # budget: _internal_reservation_sizes must list every mark_internal() allocation made above,
+        # or a newly added / relocated internal allocation silently eats the caller's usable heap.
+        # Only vmem_chunked tracks this budget; torch/vmem reserve a lump and do not.
+        allocator = self.heap.allocator
+        if hasattr(allocator, "internal_bytes") and hasattr(allocator, "reserved_bytes"):
+            assert allocator.internal_bytes == allocator.reserved_bytes, (
+                f"Iris internal allocations ({allocator.internal_bytes} B) do not match the reserved "
+                f"budget ({allocator.reserved_bytes} B); update _internal_reservation_sizes to cover "
+                f"every mark_internal() allocation in Iris.__init__."
+            )
+
         # Initialize tracing
         self.tracing = Tracing(self)
 
@@ -1631,9 +1643,19 @@ class Iris:
         """
         Return capacity and accounting statistics for the symmetric heap.
 
-        For the ``vmem_chunked`` allocator this reports usable, used, free, largest-allocatable,
-        internal (Iris control state), and reserved bytes, alongside chunk/VA sizing. Figures are
-        bounded by the VA reservation and growth, not by physical HBM.
+        For the ``vmem_chunked`` allocator this reports heap_size, usable, used, free,
+        largest-allocatable, internal (Iris control state), and reserved bytes, alongside chunk/VA
+        sizing. ``usable_bytes`` is the real user budget left (``heap_size`` minus user allocations;
+        internal control state is paid from the reservation). ``va_headroom_bytes`` and
+        ``largest_allocatable_bytes`` are bounded by the VA reservation and growth, not by physical
+        HBM, so they can far exceed ``usable_bytes``.
+
+        ``internal_bytes`` counts only the control state allocated at init (the device-barrier flags,
+        plus the SDMA all-gather counters when ``engines=("sdma",)``) -- the allocations covered by
+        the reserved budget. Library workspaces created lazily on first use (e.g. ``TriggeredPlan``
+        gates, the CCL ring buffer, ops locks) are allocated out of the user's usable heap and count
+        as ``used_bytes``, not ``internal_bytes``; do not read ``internal_bytes`` as "everything Iris
+        owns".
 
         The full field set is only populated for ``vmem_chunked``; the ``torch`` and ``vmem``
         allocators return just ``{"heap_size", "reserved_bytes"}``, so guard accesses to the

@@ -78,6 +78,13 @@ def _next_power_of_two(n):
     return 1 << (n - 1).bit_length()
 
 
+def _prev_power_of_two(n: int) -> int:
+    """Return the largest power of two <= n (0 if n <= 0)."""
+    if n <= 0:
+        return 0
+    return 1 << (n.bit_length() - 1)
+
+
 def _is_power_of_two(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
 
@@ -87,11 +94,24 @@ def _aligned_block_size(size_bytes: int, granularity: int, min_alignment: int) -
     power of two for the free lists, then granule-aligned. Shared by the live allocator (allocate(),
     _reservation_bytes) and the pure plan_capacity() estimator so both agree on per-allocation
     sizing -- otherwise a reservation or capacity plan can disagree with what allocate() really uses.
+
+    This models the default path only: it does not take allocate()'s per-call ``alignment`` argument,
+    so it cannot predict an over-aligned allocation whose bump-pointer padding exceeds the block size.
+    It must also track whatever allocate() does for the agreement to hold -- #633 changes block sizing
+    (block size independent of the requested alignment, plus bump-path alignment padding), so this
+    helper and plan_capacity() have to follow that sizing on the #633 rebase.
     """
     size_bytes = max(size_bytes, granularity)
     size_class = _next_power_of_two(size_bytes)
     aligned_size = max(size_class, min_alignment)
     return (aligned_size + granularity - 1) & ~(granularity - 1)
+
+
+def _block_size(free_list_key) -> int:
+    """Block size (bytes) a free-list key represents. The key is the block size itself today (an
+    int), but #633 keys free lists by a ``Bucket(size, alignment)``; read ``.size`` when present so
+    capacity math works on either and never multiplies/compares an int against a tuple."""
+    return getattr(free_list_key, "size", free_list_key)
 
 
 class VMemChunkedAllocator(BaseAllocator):
@@ -201,9 +221,11 @@ class VMemChunkedAllocator(BaseAllocator):
         # single byte count or a list of per-allocation byte counts (see _reservation_bytes).
         self._requested_reserved_bytes = reserved_bytes
         self.reserved_bytes = 0
-        # Bytes currently allocated for internal (Iris) control state, and the offsets backing them.
+        # Bytes currently allocated for internal (Iris) control state, and each internal offset mapped
+        # to the block size backing it. Storing the size here (rather than reading it back from the
+        # free-list key on free) keeps internal accounting independent of the free-list key type.
         self.internal_bytes = 0
-        self._internal_offsets = set()
+        self._internal_offsets = {}
 
         vendor = _detect_vendor()
         if vendor == "unknown":
@@ -276,7 +298,9 @@ class VMemChunkedAllocator(BaseAllocator):
 
         # Chunk configuration -- cap at heap_size to avoid overshooting VA.
         # NOTE: chunk_size is derived from heap_size (not heap_size + reserved) so it stays a power
-        # of two for power-of-two heaps; the reservation only adds whole chunks below.
+        # of two for power-of-two heaps; the reservation is mapped as its own region below. Once #633
+        # (non-power-of-two chunk sizes) lands, chunk_size could derive from heap_size + reserved
+        # directly, so revisit this split on that rebase.
         effective_chunk = min(chunk_size, max(heap_size, self.granularity))
         self.chunk_size = max(effective_chunk, self.granularity)
         # granularity is a power of two (asserted above), so the bitmask trick
@@ -298,36 +322,51 @@ class VMemChunkedAllocator(BaseAllocator):
         self.va_size = (self.va_size + self.chunk_size - 1) & ~(self.chunk_size - 1)
         self.base_va = self.driver.reserve_va(self.va_size, self.granularity)
 
-        # Pre-allocate initial chunks to cover heap_size plus the internal reservation, so the
-        # caller gets ~heap_size of usable space before any growth is triggered.
-        n_initial_chunks = max(1, math.ceil((heap_size + self.reserved_bytes) / self.chunk_size))
+        # Pre-map chunk_size chunks to cover heap_size, so the caller gets ~heap_size of usable
+        # space before any growth is triggered.
+        n_initial_chunks = max(1, math.ceil(heap_size / self.chunk_size))
         for _ in range(n_initial_chunks):
             self._grow_chunk()
+        # Back the internal reservation with its own region of exactly reserved_bytes (already a
+        # granule multiple) rather than rounding heap_size + reserved up to whole chunks -- a few
+        # MiB of control state would otherwise map a whole extra chunk. The region is granule- (not
+        # chunk-) sized; peers import it like any other region since each carries its own size.
+        if self.reserved_bytes > 0:
+            self._map_physical_region(self.reserved_bytes)
 
-    def _grow_chunk(self):
-        """Map a new physical chunk into the VA range."""
-        if self.mapped_extent + self.chunk_size > self.va_size:
+    def _map_physical_region(self, size: int) -> None:
+        """Map one physical region of ``size`` bytes (a granule multiple) at the top of the VA arena.
+
+        Regions stay contiguous and granule-aligned. Growth uses ``chunk_size`` via :meth:`_grow_chunk`;
+        the one-time internal reservation uses its exact (sub-chunk) size so it never maps a whole
+        extra chunk.
+        """
+        if self.mapped_extent + size > self.va_size:
             raise RuntimeError(
-                "VMemChunkedAllocator: VA space exhausted while mapping a new chunk "
-                f"(chunk_size={self.chunk_size}). {self._capacity_message()}. "
+                "VMemChunkedAllocator: VA space exhausted while mapping a region "
+                f"(size={size}). {self._capacity_message()}. "
                 "Increase va_size."
             )
 
         target_va = self.base_va + self.mapped_extent
         placement = MappingPlacement(target_va, arena_base=self.base_va)
-        allocation = self.driver.allocate_exportable(self.chunk_size, placement)
+        allocation = self.driver.allocate_exportable(size, placement)
         self.chunks.append(allocation)
         self._shared_regions.append(ExportableMemory(va=allocation.va, size=allocation.size, allocation=allocation))
-        self.mapped_extent += self.chunk_size
+        self.mapped_extent += size
+
+    def _grow_chunk(self):
+        """Map a new physical chunk (``chunk_size``) into the VA range."""
+        self._map_physical_region(self.chunk_size)
 
     def _process_pending_frees(self) -> None:
         """Move frees from GC finalizers to the released list. Call with lock held."""
         while self._pending_free:
             offset, bucket = self._pending_free.popleft()
             self.alloc_sizes.pop(offset, None)
-            if offset in self._internal_offsets:
-                self.internal_bytes -= size_class
-                self._internal_offsets.discard(offset)
+            internal_size = self._internal_offsets.pop(offset, None)
+            if internal_size is not None:
+                self.internal_bytes -= internal_size
             self._released[offset] = size_class
 
     def released_offsets(self) -> List[int]:
@@ -424,14 +463,16 @@ class VMemChunkedAllocator(BaseAllocator):
 
     def _reservation_bytes(self, requested) -> int:
         """Size the internal reservation from ``requested`` (a byte count or a list of per-allocation
-        byte counts). A list is rounded per allocation via :meth:`_aligned_alloc_size` so it covers
-        exactly what those separate allocations will consume; a single count is rounded up to a whole
-        granule (a lump budget, not tied to one allocation). :meth:`plan_capacity` uses the identical
-        rule statically."""
+        byte counts). Both forms are rounded per allocation via :meth:`_aligned_alloc_size`: a list
+        rounds each entry, and a scalar is treated as one allocation of that size. A scalar is *not*
+        rounded to a bare granule -- a real internal allocation of ``requested`` bytes consumes the
+        power-of-two-bucketed block size, so bare-granule rounding would under-reserve a scalar like
+        5 MiB (reserve 6 MiB, allocation uses 8 MiB). :meth:`plan_capacity` uses the identical rule
+        statically. (``SymmetricHeap`` always forwards a list; the scalar form is for direct users.)"""
         if isinstance(requested, (list, tuple)):
             return sum(self._aligned_alloc_size(int(b)) for b in requested if b and int(b) > 0)
         req = max(0, int(requested))
-        return -(-req // self.granularity) * self.granularity
+        return self._aligned_alloc_size(req) if req > 0 else 0
 
     def allocate(
         self,
@@ -506,9 +547,12 @@ class VMemChunkedAllocator(BaseAllocator):
             # leaves internal_bytes over-counted or a phantom offset in _internal_offsets. (Rolling
             # back the bump pointer / alloc_sizes on a failed build is a separate concern.) The offset
             # is paired with the decrement in _process_pending_frees via the finalizer registered next.
+            # NOTE (#633 rebase): when allocate() grows a try/finally "committed" block, move this
+            # bookkeeping inside it so a later failure (in _grow_chunk or finalizer registration)
+            # cannot leave the internal counters advanced.
             if internal:
                 self.internal_bytes += aligned_size
-                self._internal_offsets.add(offset)
+                self._internal_offsets[offset] = aligned_size
 
             # Attach GC weak ref for automatic free
             weakref.finalize(
@@ -771,27 +815,45 @@ class VMemChunkedAllocator(BaseAllocator):
     def _capacity_fields(self):
         """Capacity accounting derived from current state. Caller holds the lock (or is in init).
 
-        All figures are in bytes. ``usable_bytes`` and ``largest_allocatable_bytes`` are bounded by
-        the VA reservation and growth (not by physical HBM, which the allocator cannot see), so they
-        can far exceed what is currently mapped: allocating up to them triggers chunk growth and may
-        hit a real HBM limit first. For the physically-backed figure (space already mapped and free),
-        use ``free_in_mapped_bytes``. Both VA-bounded figures exclude the still-unconsumed internal
-        reservation so Iris's budget is never double-counted.
+        All figures are in bytes.
+
+        ``usable_bytes`` is the user budget still available: ``heap_size`` minus the bytes user
+        allocations have taken. Internal (Iris control-state) allocations are backed by the separate
+        reservation, so they are excluded and never reduce it. Clamped at 0; tracks real memory, not
+        the VA reservation.
+
+        ``va_headroom_bytes`` and ``largest_allocatable_bytes`` are bounded by the VA reservation and
+        growth, not by physical HBM (which the allocator cannot observe), so they can exceed both
+        ``usable_bytes`` and the currently mapped size; reaching them triggers chunk growth and may
+        fail on a real HBM limit first. ``largest_allocatable_bytes`` is the largest single request
+        that still succeeds: a request of ``S`` bytes consumes ``_aligned_block_size(S)`` (rounded up
+        to a power of two), so it is the largest power of two that fits in the growable VA, or the
+        largest ready free block, whichever is larger.
+
+        ``free_in_mapped_bytes`` is the already-mapped, currently-free space. It still counts the
+        mapped reservation headroom that internal allocations have not consumed; ``usable_bytes`` and
+        ``va_headroom_bytes`` exclude that unconsumed reservation.
         """
         used_bytes = sum(self.alloc_sizes.values())
-        free_list_bytes = sum(size_class * len(offsets) for size_class, offsets in self.free_lists.items())
-        largest_free = max((size for size, offsets in self.free_lists.items() if offsets), default=0)
+        free_list_bytes = sum(_block_size(k) * len(offsets) for k, offsets in self.free_lists.items())
+        largest_free = max((_block_size(k) for k, offsets in self.free_lists.items() if offsets), default=0)
         free_in_mapped = (self.mapped_extent - self.bump) + free_list_bytes
         pending_internal = max(0, self.reserved_bytes - self.internal_bytes)
         growable = max(0, self.va_size - self.bump - pending_internal)
+        # User budget left: heap_size minus what user allocations have taken. Internal control state
+        # is covered by the reservation, so subtract only the non-internal portion of used_bytes.
+        user_used = max(0, used_bytes - self.internal_bytes)
+        usable_bytes = max(0, self.heap_size - user_used)
         return {
+            "heap_size": self.heap_size,
             "reserved_bytes": self.reserved_bytes,
             "internal_bytes": self.internal_bytes,
             "used_bytes": used_bytes,
             "free_bytes": free_list_bytes,
             "free_in_mapped_bytes": free_in_mapped,
-            "usable_bytes": growable + free_list_bytes,
-            "largest_allocatable_bytes": max(growable, largest_free),
+            "usable_bytes": usable_bytes,
+            "va_headroom_bytes": growable + free_list_bytes,
+            "largest_allocatable_bytes": max(_prev_power_of_two(growable), largest_free),
         }
 
     def _capacity_message(self, requested_bytes=None):
@@ -802,6 +864,7 @@ class VMemChunkedAllocator(BaseAllocator):
             parts.append(f"requested={requested_bytes}")
         parts += [
             f"usable_bytes={c['usable_bytes']}",
+            f"va_headroom_bytes={c['va_headroom_bytes']}",
             f"largest_allocatable_bytes={c['largest_allocatable_bytes']}",
             f"used_bytes={c['used_bytes']}",
             f"internal_bytes={c['internal_bytes']}",
@@ -816,32 +879,37 @@ class VMemChunkedAllocator(BaseAllocator):
     def plan_capacity(
         target_user_bytes: int,
         *,
+        granularity: int,
         reserved_bytes: Union[int, Sequence[int]] = 0,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
-        granularity: int = 4096,
         va_size: int = DEFAULT_VA_SIZE,
     ) -> dict:
         """Predict the backing an allocator needs for ``target_user_bytes`` of usable space.
 
         Pure (no device calls) so callers can size ``heap_size`` deterministically. ``granularity``
-        defaults to 4 KiB; pass the device's granularity (``allocator.granularity``) for an exact
-        result. Note the default is *not* conservative for ``reserved_bytes``: a smaller granularity
-        rounds each reserved allocation down toward its raw size, so with a real (larger) device
-        granule the reservation is bigger than predicted -- pass the device granularity when the
-        reservation must be sized accurately. Mirrors ``__init__`` sizing: chunk size derives from
-        the user target, the reservation is added as whole chunks on top, and VA gets 4x headroom.
+        is a required keyword: pass the device's granularity (``allocator.granularity``, or the
+        driver's recommended granule -- 2 MiB on AMD). It has no default because a wrong granule
+        silently mis-sizes the reservation (a smaller granule rounds each reserved allocation down
+        toward its raw size, so a real, larger device granule reserves more than predicted). Mirrors
+        ``__init__`` sizing: chunk size derives from the user target, the reservation is mapped as its
+        own region on top, and VA gets 4x headroom.
 
-        ``reserved_bytes`` matches the constructor: a single byte count is rounded up to one granule,
-        while a list of per-allocation byte counts is rounded per entry (each a separate control-state
-        allocation that consumes a whole granule), using the same rule as the live allocator so the
-        prediction matches a real allocator built with the same reservation.
+        ``reserved_bytes`` matches the constructor: a scalar is sized as one internal allocation and a
+        list is rounded per entry, both via ``_aligned_block_size`` (power-of-two bucketed, then
+        granule-aligned), using the same rule as the live allocator so the prediction matches a real
+        allocator built with the same reservation.
+
+        ``target_user_bytes`` is assumed power-of-two (as the live allocator asserts for its chunk
+        size); a non-power-of-two target still returns a plan, but the built allocator would reject it
+        until #633 (non-power-of-two chunk sizes) lands.
         """
         g = max(1, granularity)
+        min_align = max(g, 1024)
         if isinstance(reserved_bytes, (list, tuple)):
-            min_align = max(g, 1024)
             reserved = sum(_aligned_block_size(int(b), g, min_align) for b in reserved_bytes if b and int(b) > 0)
         else:
-            reserved = -(-max(0, int(reserved_bytes)) // g) * g
+            b = max(0, int(reserved_bytes))
+            reserved = _aligned_block_size(b, g, min_align) if b > 0 else 0
         # Mirror __init__'s chunk sizing: derive from the user target, cap at chunk_size, round up to
         # a whole granule. The real allocator additionally requires the result to be a power of two
         # (it asserts), which holds for power-of-two targets and chunk sizes.
@@ -851,8 +919,11 @@ class VMemChunkedAllocator(BaseAllocator):
         total = target_user_bytes + reserved
         # Exact integer ceil-division (-(-a // b)), not math.ceil(a / b), so large byte counts never
         # lose precision to float; cs above uses the same idiom.
-        n_chunks = max(1, -(-total // cs))
-        mapped = n_chunks * cs
+        heap_chunks = max(1, -(-target_user_bytes // cs))
+        # The reservation is mapped as its own region of exactly `reserved` (see __init__), not as
+        # whole chunks, so it contributes one region and `reserved` bytes -- not a chunk multiple.
+        n_chunks = heap_chunks + (1 if reserved > 0 else 0)
+        mapped = heap_chunks * cs + reserved
         if va_size == 0:
             va_size = 128 * 1024 * 1024 * 1024
         va = max(va_size, total * 4)
@@ -862,7 +933,13 @@ class VMemChunkedAllocator(BaseAllocator):
             "chunk_size": cs,
             "mapped_bytes": mapped,
             "reserved_bytes": reserved,
-            "usable_bytes": mapped - reserved,
+            "heap_size": target_user_bytes,
+            # Budget the caller asked to be usable (matches get_stats()'s usable_bytes on a fresh,
+            # empty allocator). The allocator maps >= this (mapped_bytes) but the user budget is the
+            # target; internal control state is paid from the reservation, not this budget.
+            "usable_bytes": target_user_bytes,
+            # VA/growth-bounded headroom on a fresh allocator (bump=0, whole reservation pending).
+            "va_headroom_bytes": max(0, va - reserved),
             "va_size": va,
         }
 

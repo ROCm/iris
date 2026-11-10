@@ -15,6 +15,7 @@ import logging
 import os
 import socket
 import struct
+import threading
 from typing import List, Sequence, Union
 
 import numpy as np
@@ -212,9 +213,12 @@ class SymmetricHeap:
         self.cur_rank = cur_rank
         self.num_ranks = num_ranks
         self._peer_va_ranges = {}
-        # Depth counter for mark_internal(): allocations made inside it are tagged as Iris control
-        # state so they count against the reserved budget, not the user's usable space.
-        self._internal_alloc_depth = 0
+        # Per-thread depth counter for mark_internal(): allocations made inside it are tagged as Iris
+        # control state so they count against the reserved budget, not the user's usable space. It is
+        # thread-local so a concurrent allocation on another thread is never mis-tagged internal while
+        # a mark_internal() block is open (allocation is collective/single-threaded in practice, but
+        # the counter must not leak across threads).
+        self._internal_tls = threading.local()
         allocator_type = os.environ.get("IRIS_ALLOCATOR", allocator_type).lower()
         _log_rank(
             logging.INFO,
@@ -238,8 +242,10 @@ class SymmetricHeap:
         else:
             reserved_sizes = [int(reserved_bytes)] if reserved_bytes and int(reserved_bytes) > 0 else []
 
-        # Bytes added on top of heap_size for Iris's own allocations. vmem_chunked grows on
-        # demand (and needs a power-of-two chunk size), so it is left alone.
+        # Bytes set aside for Iris's own allocations. torch and vmem have no reservation concept, so
+        # the reservation is folded into heap_size here and grown in place below. vmem_chunked takes
+        # reserved_bytes as a constructor argument and maps it as a separate region, so this branch
+        # is skipped for it and reserved_size stays 0.
         self.reserved_size = 0
         if reserved_sizes and allocator_type in ("torch", "vmem"):
             if allocator_type == "torch":
@@ -356,24 +362,27 @@ class SymmetricHeap:
 
         Used so Iris's own buffers (e.g. device-barrier flags) count against the allocator's
         reserved budget rather than the caller's usable heap. No-op for allocators that do not
-        track an internal budget.
+        track an internal budget. Thread-local, so it only tags allocations on the calling thread.
         """
-        self._internal_alloc_depth += 1
+        self._internal_tls.depth = getattr(self._internal_tls, "depth", 0) + 1
         try:
             yield
         finally:
-            self._internal_alloc_depth -= 1
+            self._internal_tls.depth -= 1
 
     def get_capacity(self) -> dict:
         """Return capacity/accounting stats for the active allocator.
 
-        For vmem_chunked this includes usable/used/free/largest-allocatable/internal/reserved bytes.
-        Other allocators (torch, vmem) return only ``{"heap_size", "reserved_bytes"}``, so callers
-        that may run on any allocator type should guard accesses to the capacity-specific keys.
+        For vmem_chunked this includes heap_size, usable/used/free/largest-allocatable/internal/
+        reserved bytes. Other allocators (torch, vmem) return only ``{"heap_size", "reserved_bytes"}``.
+        Both key names are always present, so callers can rely on them and guard accesses to the
+        remaining vmem_chunked-only keys. Keyed off the allocator type (not ``hasattr(get_stats)``)
+        so the documented contract holds even if torch/vmem later grow a ``get_stats``.
         """
-        if hasattr(self.allocator, "get_stats"):
+        if isinstance(self.allocator, VMemChunkedAllocator):
             stats = dict(self.allocator.get_stats())
             stats.setdefault("reserved_bytes", self.reserved_size)
+            stats.setdefault("heap_size", self.heap_size)
             return stats
         return {"heap_size": self.heap_size, "reserved_bytes": self.reserved_size}
 
@@ -417,7 +426,7 @@ class SymmetricHeap:
 
         is_chunked = isinstance(self.allocator, VMemChunkedAllocator)
 
-        mark_internal = internal or self._internal_alloc_depth > 0
+        mark_internal = internal or getattr(self._internal_tls, "depth", 0) > 0
         if is_chunked:
             # Every rank reaches the same branches: they depend only on state identical across ranks
             collected = self.allocator.collect_due()
