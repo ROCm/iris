@@ -214,10 +214,8 @@ def get_arch_string(device_id=None):
         return f"sm_{props.major}{props.minor}"
 
 
-def get_num_xcc(device_id=None):
-    if device_id is None:
-        device_id = get_device_id()
-
+@functools.lru_cache(maxsize=None)
+def _get_num_xcc_cached(device_id):
     if not _is_amd_backend:
         # XCC is AMD-specific, return 1 for CUDA
         return 1
@@ -229,6 +227,17 @@ def get_num_xcc(device_id=None):
     xcc_count = ctypes.c_int()
     gpu_try(gpu_runtime.hipDeviceGetAttribute(ctypes.byref(xcc_count), hipDeviceAttributeNumberOfXccs, device_id))
     return xcc_count.value
+
+
+def get_num_xcc(device_id=None):
+    # device_id is resolved to a concrete value before the cache boundary,
+    # so a call with device_id=None is keyed on the actual current device
+    # (which get_device_id() reads live) rather than cached under the
+    # literal None for whichever device happened to be current on the
+    # first call.
+    if device_id is None:
+        device_id = get_device_id()
+    return _get_num_xcc_cached(device_id)
 
 
 def malloc_fine_grained(size):
