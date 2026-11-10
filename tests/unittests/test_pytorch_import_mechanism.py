@@ -288,3 +288,29 @@ def test_as_symmetric_integration():
     assert torch.all(b == 2.0), "Native tensor b should be unchanged"
     assert torch.all(c == 3.0), "Imported tensor c should be unchanged"
     assert torch.all(external == 3.0), "External tensor should be unchanged"
+
+
+@pytest.mark.parametrize("allocator_type", ["vmem", "vmem_chunked"])
+def test_as_symmetric_holds_source_allocation(allocator_type):
+    """An imported tensor keeps its source allocation, even after the caller drops the original.
+
+    Without that, torch's caching allocator hands the block to the next tensor of the same size
+    while the heap still maps it. Peers also need the source allocation: a later import refreshes
+    peer access, which exports the earlier import from it.
+    """
+    ctx = iris.iris(64 << 20, allocator_type=allocator_type)
+    n = 1 << 18  # 1 MiB of fp32
+
+    external = torch.full((n,), 7.0, dtype=torch.float32, device="cuda")
+    imported = ctx.as_symmetric(external)
+    del external
+
+    reused = [torch.full((n,), -1.0, dtype=torch.float32, device="cuda") for _ in range(4)]
+    torch.cuda.synchronize()
+    assert torch.all(imported == 7.0), "the source block was reused while the heap still maps it"
+
+    second = ctx.as_symmetric(torch.full((n,), 5.0, dtype=torch.float32, device="cuda"))
+    torch.cuda.synchronize()
+    assert torch.all(imported == 7.0)
+    assert torch.all(second == 5.0)
+    assert all(torch.all(t == -1.0) for t in reused)

@@ -2,7 +2,7 @@
 # Copyright (c) 2025-2026 Advanced Micro Devices, Inc. All rights reserved.
 
 Bootstrap: docker
-From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
+From: rocm/pytorch:rocm10.1.0_ubuntu24.04_py3.12_pytorch_release_2.14.0
 
 # The rocSHMEM installer is copied in rather than inlined, so it stays one
 # implementation shared with docker/Dockerfile. Caveat: container_build.sh caches
@@ -30,12 +30,22 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
     export PATH=\"\$ROCM_PATH/bin:\$PATH\"
 
     # Install system packages
-    # see docker/Dockerfile -- base image pins a rotated-out internal ROCm apt repo
+    # see docker/Dockerfile -- base image pins a rotated-out internal ROCm apt repo.
+    # libdrm-dev: rocm-xio's SDMA extension (iris[sdma]) links -ldrm, which the
+    # ROCm 10.1 image does not provide.
     rm -f /etc/apt/sources.list.d/rocm.list && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        git wget ninja-build cmake python3-pip python3-dev build-essential jq libdwarf-dev && \
+        git wget ninja-build cmake python3-pip python3-dev build-essential jq libdwarf-dev \
+        libdrm-dev && \
     rm -rf /var/lib/apt/lists/*
+
+    # ROCm 10.x images carry ROCm as Python packages (TheRock layout) and have
+    # no /opt/rocm. rocm-sdk's root is a complete ROCm tree (bin/hipcc,
+    # lib/cmake/hip, .info), so pointing /opt/rocm at it keeps ROCM_PATH below,
+    # install_rocshmem.sh and the tests' /opt/rocm assumptions working.
+    if [ ! -e /opt/rocm ]; then ln -s \"\$(rocm-sdk path --root)\" /opt/rocm; fi
+    [ -x /opt/rocm/bin/hipcc ] || { echo \"no usable ROCm tree at /opt/rocm\" >&2; exit 1; }
 
     # Create groups if they don't exist
     groupadd -r video 2>/dev/null || true
@@ -59,13 +69,15 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
     git checkout f7c1d69401e9f09050451f30776562954b05e850
     pip3 install -e .
 
-    # Make the venv writable by all
-    chmod -R 777 /opt/venv
+    # Make the Python environment writable by all: CI pip-installs Iris inside
+    # the container as a non-root user. Ask the interpreter where that is --
+    # ROCm 10.x images have no /opt/venv, unlike the 7.x ones.
+    chmod -R a+rwX \$(python3 -c \"import sysconfig; p = sysconfig.get_paths(); print(p['purelib'], p['scripts'])\")
 
-    # rocSHMEM + rocshmem4py, so the provider tests run instead of skipping.
-    # See install_rocshmem.sh for the rationale, including the two arches.
-    ROCSHMEM_GPU_TARGETS='gfx942;gfx950' ROCSHMEM_PREFIX=/opt/rocshmem \
-        bash /opt/install_rocshmem.sh
+    # rocshmem4py, so the provider tests run instead of skipping. ROCm 10.x
+    # ships rocSHMEM itself, so install_rocshmem.sh builds only the bindings,
+    # against that install; see the script for the source-build fallback.
+    bash /opt/install_rocshmem.sh
     "
 
 %environment
@@ -81,7 +93,6 @@ From: rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.14_pytorch_2.10.0
     export OMPI_ALLOW_RUN_AS_ROOT=1
     # Set required RCCL environment variable for ROCm
     export HSA_NO_SCRATCH_RECLAIM=1
-    export ROCSHMEM_PREFIX=/opt/rocshmem
 
 %runscript
     echo "Welcome to the ROCm-aware Apptainer image!"
