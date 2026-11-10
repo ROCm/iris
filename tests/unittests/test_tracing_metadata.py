@@ -3,12 +3,14 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from iris.host.platform import hip
 from iris.host.tracing.core import Tracing
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA/ROCm GPUs")
 def test_trace_metadata_describes_the_ranks_gpu_not_the_gpu_numbered_like_the_rank():
     # A rank on a second host has a rank at or above the local GPU count, so the rank is not a valid device index.
     num_gpus = torch.cuda.device_count()
