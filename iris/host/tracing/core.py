@@ -93,13 +93,15 @@ class Tracing:
 
     def _collect_system_metadata(self):
         """Collect system and GPU metadata."""
+        # The rank is not a device index: a rank on a second host, or one given an explicit device, uses another GPU.
+        gpu_id = self.iris.gpu_id
         try:
-            device_name = torch.cuda.get_device_name(self.iris.cur_rank)
+            device_name = torch.cuda.get_device_name(gpu_id)
         except Exception:
             device_name = "Unknown GPU"
 
         try:
-            total_memory = torch.cuda.get_device_properties(self.iris.cur_rank).total_memory
+            total_memory = torch.cuda.get_device_properties(gpu_id).total_memory
             total_memory_gb = total_memory / (1024**3)
         except Exception:
             total_memory_gb = 0
@@ -110,9 +112,9 @@ class Tracing:
             "hostname": socket.gethostname(),
             "gpu_device_name": device_name,
             "gpu_total_memory_gb": f"{total_memory_gb:.2f}",
-            "gpu_arch": hip.get_arch_string(self.iris.cur_rank),
-            "gpu_cu_count": hip.get_cu_count(self.iris.cur_rank),
-            "gpu_num_xcc": hip.get_num_xcc(self.iris.cur_rank),
+            "gpu_arch": hip.get_arch_string(gpu_id),
+            "gpu_cu_count": hip.get_cu_count(gpu_id),
+            "gpu_num_xcc": hip.get_num_xcc(gpu_id),
             "rocm_version": hip.get_rocm_version(),
         }
 
