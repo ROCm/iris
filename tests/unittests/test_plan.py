@@ -608,10 +608,13 @@ def _snapshot(buf, out, n, BLOCK: tl.constexpr):
 @triton.jit
 def _hold(flag, released, ticks):
     """Spin until the host sets ``flag``; ``released`` is 1 if it did, 0 if ``ticks`` ran out first."""
+    # ``.cv`` makes every read bypass the caches and fetch the current value. A plain volatile load can be
+    # served from L2: once the first read has cached the 0, it never sees the host's store, so the hold
+    # would time out with nothing waiting on it
     t0 = read_realtime()
-    while (tl.load(flag, volatile=True) == 0) & (read_realtime() - t0 < ticks):
+    while (tl.load(flag, cache_modifier=".cv", volatile=True) == 0) & (read_realtime() - t0 < ticks):
         pass
-    tl.store(released, (tl.load(flag, volatile=True) != 0).to(tl.int32))
+    tl.store(released, (tl.load(flag, cache_modifier=".cv", volatile=True) != 0).to(tl.int32))
 
 
 def test_stream_ordered_rounds():
