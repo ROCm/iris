@@ -4,7 +4,6 @@
 import ctypes
 import importlib.util
 import os
-import socket
 from datetime import timedelta
 
 import numpy as np
@@ -84,7 +83,7 @@ def _check_copy_engine(shmem, rank, num_ranks):
         torch.testing.assert_close(dst[sender * BLOCK_SIZE : (sender + 1) * BLOCK_SIZE], expected, rtol=0, atol=0)
 
 
-def _placed_rank(rank, bus_ids, gpus, allocator_type, engines, reverse_visibility, port):
+def _placed_rank(rank, bus_ids, gpus, allocator_type, engines, reverse_visibility, store_path):
     # The spawned world must not join the runner's torchrun store or inherit its rank variables.
     for name in ("TORCHELASTIC_USE_AGENT_STORE", "IRIS_ALLOCATOR", "RANK", "LOCAL_RANK", "WORLD_SIZE"):
         os.environ.pop(name, None)
@@ -101,7 +100,7 @@ def _placed_rank(rank, bus_ids, gpus, allocator_type, engines, reverse_visibilit
     assert torch.cuda.get_device_properties(gpu).pci_bus_id == bus_ids[gpus[rank]]
     dist.init_process_group(
         "nccl",
-        init_method=f"tcp://127.0.0.1:{port}",
+        init_method=f"file://{store_path}",
         rank=rank,
         world_size=len(gpus),
         device_id=torch.device("cuda", gpu),
@@ -154,21 +153,21 @@ def _placed_rank(rank, bus_ids, gpus, allocator_type, engines, reverse_visibilit
         pytest.param("vmem", ("sdma",), True, marks=pytest.mark.skipif(not HAS_XIO, reason="needs rocm-xio")),
     ],
 )
-def test_ranks_placed_off_rank_mod_gpus(allocator_type, engines, reverse_visibility):
+def test_ranks_placed_off_rank_mod_gpus(allocator_type, engines, reverse_visibility, tmp_path):
     """Ranks whose process group is bound to a GPU other than ``rank % visible GPUs``."""
     num_gpus = torch.cuda.device_count()
     if num_gpus < 3:
         pytest.skip("needs 3 GPUs so the placement differs from rank % visible GPUs")
     try:
         if dist.get_rank() == 0:
-            with socket.socket() as s:
-                s.bind(("127.0.0.1", 0))
-                port = s.getsockname()[1]
+            # Rendezvous through a file rather than a TCP port: picking a free port and handing it to
+            # the spawned ranks races other processes on the machine for it (EADDRINUSE).
+            store_path = tmp_path / "process_group_store"
             gpus = (num_gpus - 2, num_gpus - 1)
             bus_ids = [torch.cuda.get_device_properties(i).pci_bus_id for i in range(num_gpus)]
             mp.spawn(
                 _placed_rank,
-                args=(bus_ids, gpus, allocator_type, engines, reverse_visibility, port),
+                args=(bus_ids, gpus, allocator_type, engines, reverse_visibility, str(store_path)),
                 nprocs=len(gpus),
                 join=True,
             )
