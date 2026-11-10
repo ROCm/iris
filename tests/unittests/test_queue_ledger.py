@@ -45,7 +45,7 @@ def test_rounds_within_a_hold_need_no_capacity_check():
         ledger.reserve(a, 3, 0, {1: 30})
     ledger.release(a, 1)
     ledger.reserve(a, 3, 0, {1: 30})
-    assert [(e[1], e[2]) for e in ledger.entries[(0, 1)] if e[0] is a] == [(2, 30), (3, 30)]
+    assert [(e[1], e[2]) for e in ledger.entries[(0, 1, 0)] if e[0] is a] == [(2, 30), (3, 30)]
 
 
 def test_release_whole_plan_drops_its_hold():

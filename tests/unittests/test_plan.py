@@ -6,6 +6,7 @@
 #
 # Every test uses its plans as context managers, so no chain is left parked on a queue.
 
+import dataclasses
 import time
 from contextlib import nullcontext
 
@@ -546,6 +547,63 @@ def test_head_of_line_order():
         assert torch.equal(buffer[:slice_elems], _expected(1, slice_elems))
         if rank != 0:
             assert (plan.arrivals == 1).all()
+    ctx.barrier()
+    del ctx
+
+
+def test_lanes_do_not_block_each_other():
+    """test_head_of_line_order's release order with the chunks on two lanes: the one released early is not held back."""
+    try:
+        ctx = iris.iris(1 << 26, allocator_type="vmem_chunked", engines=("sdma",), sdma_lanes=2)
+    except RuntimeError as exc:
+        if "update rocm-xio" in str(exc):
+            pytest.skip("rocm-xio cannot create several host channels per peer")
+        raise
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    if world < 2:
+        pytest.skip("triggered plans need at least two ranks")
+    slice_elems = 4096
+    half = slice_elems // 2
+    buffer = ctx.zeros(world * slice_elems, dtype=torch.int32)
+    buffer.fill_(EMPTY)
+    if rank == 0:
+        buffer[:slice_elems] = _expected(1, slice_elems)
+    schedule = []
+    if rank == 0:
+        early, late = chunks(buffer[:slice_elems], 2)
+        schedule = [early, dataclasses.replace(late, lane=1)]
+
+    with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
+        handle = plan.start()
+        if rank == 0:
+            _mark_ready_kernel[(1,)](handle, 1)  # only the chunk on lane 1; lane 0's was prepared first
+        ctx.barrier()
+        if rank != 0:
+            deadline = time.monotonic() + 10
+            while plan.arrivals[1].item() != 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert plan.arrivals.tolist() == [0, 1]
+            assert torch.equal(buffer[half:slice_elems], _expected(1, slice_elems)[half:])
+            assert (buffer[:half] == EMPTY).all()
+        ctx.barrier()
+        if rank == 0:
+            _mark_ready_kernel[(1,)](handle, 0)
+        plan.wait()
+        assert torch.equal(buffer[:slice_elems], _expected(1, slice_elems))
+        if rank == 0:
+            assert plan.completion[1:].tolist() == [2] * (world - 1)  # one completion signal per lane
+    ctx.barrier()
+    del ctx
+
+
+def test_lane_beyond_the_context_fails_every_rank():
+    ctx = _ctx()
+    rank, world = ctx.get_rank(), ctx.get_num_ranks()
+    buffer = ctx.zeros(world * 1024, dtype=torch.int32)
+    schedule = chunks(_slice(buffer, rank, 1024), 2, base=buffer, lane=int(rank == 0))
+    match = "lane 1 is not one of the 1 lane" if rank == 0 else "could not validate"
+    with pytest.raises((ValueError, RuntimeError), match=match):
+        TriggeredPlan(ctx, buffer, schedule)
     ctx.barrier()
     del ctx
 
@@ -1283,10 +1341,10 @@ def test_completion_signal_failure(monkeypatch, arm_fails):
         armed.append(args)
         return arm_chain(*args, **kwargs)
 
-    def flaky_signal(src_device, dst_device, completion_addr):
+    def flaky_signal(src_device, dst_device, completion_addr, channel=0):
         if rank == 0 and dst_device == broken:
             raise RuntimeError("injected signal failure")
-        return signal_completion(src_device, dst_device, completion_addr)
+        return signal_completion(src_device, dst_device, completion_addr, channel)
 
     monkeypatch.setattr(armer, "arm_chain", flaky_arm)
     monkeypatch.setattr(armer, "signal_completion", flaky_signal)

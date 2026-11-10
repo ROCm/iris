@@ -15,9 +15,11 @@ Lifecycle:
             ...                                           # read this round's data
             plan.next_round()                             # collective, stream-ordered: device barrier
 
-All of a rank's chains to one peer share that peer's host-initiated copy-engine queue, and run in
-the order they were prepared. Plans sharing queues must therefore start and close in the order they
-were prepared, and nothing else may use those queues while copies are prepared on them.
+All of a rank's chains to one peer on one lane share that lane's host-initiated copy-engine queue,
+and run in the order they were prepared. Plans sharing queues must therefore start and close in the
+order they were prepared, and nothing else may use those queues while copies are prepared on them.
+Chunks default to lane 0; ``Chunk.lane`` puts a chunk on another of the context's ``sdma_lanes``
+lanes, each on its own host queue, and lanes do not wait for each other.
 """
 
 import enum
@@ -32,6 +34,7 @@ from iris.host import queue_ledger
 from iris.host.distributed.helpers import distributed_allgather
 from iris.experimental.plan import triton as dv
 from iris.experimental.plan import armer, kernels
+from iris.experimental.plan.queues import queue_index
 from iris.experimental.plan.schedule import check_disjoint, validate
 from iris.mem.utils import REALTIME_HZ
 
@@ -108,10 +111,11 @@ def view_words(rank, world_size, gates_ptr, schedules):
             words[rec + dv.R_EXPECTED.value] = per_round
             rec += dv.RECORD_WORDS.value
             chunk_id += 1
-    # The peers this rank's chains go to, then how much each group's arrival grows here per round
-    sends_to = {p for chunk in schedules[rank] for p in chunk.recipients(rank, world_size)}
-    for peer in range(world_size):
-        words[rec + peer] = int(peer in sends_to)
+    # How many queues this rank's chains use to each peer (its completion grows that much per round),
+    # then how much each group's arrival grows here per round
+    queues = {(p, queue_index(chunk.lane)) for chunk in schedules[rank] for p in chunk.recipients(rank, world_size)}
+    for peer, _ in queues:
+        words[rec + peer] += 1
     words[rec + world_size :] = expected
     return words
 
@@ -183,7 +187,9 @@ class TriggeredPlan:
             raise ValueError("destination overlaps buffer; pass the same tensor, or memory apart from it")
         error = None
         try:
-            schedule = list(validate(schedule, buffer_bytes, destination_bytes, self.rank, self.world_size))
+            schedule = list(
+                validate(schedule, buffer_bytes, destination_bytes, self.rank, self.world_size, lanes=ctx.sdma_lanes)
+            )
         except Exception as e:
             error = e
         self._agree(error, "validate its schedule")
@@ -221,11 +227,25 @@ class TriggeredPlan:
             self._first[self.rank], self._first[self.rank + 1], dtype=torch.int64, device=buffer.device
         )
         self._writers = [c.writers for c in self.schedules[self.rank]]
-        # The most any gate grows per round, on any rank
-        self._max_per_round = max(max(c.writers for s in self.schedules for c in s), int(counts.max(initial=0)))
+        # The most any gate grows per round, on any rank: a counter, a group's arrival, or a completion
+        # (one per queue, so per lane, to the peer)
+        lanes_to_a_peer = max(
+            len({queue_index(c.lane) for c in s if p in c.recipients(r, self.world_size)})
+            for r, s in enumerate(self.schedules)
+            for p in range(self.world_size)
+        )
+        self._max_per_round = max(
+            max(c.writers for s in self.schedules for c in s), int(counts.max(initial=0)), lanes_to_a_peer
+        )
         self._status = torch.zeros(self.num_chunks + self.world_size, dtype=torch.int32, device=buffer.device)
-        # Every round ends with a completion signal to each of these, even after a failed arm
-        self._peers = sorted({p for c in self.schedules[self.rank] for p in c.recipients(self.rank, self.world_size)})
+        # Every round ends with a completion signal on each of these (peer, queue), even after a failed arm
+        self._queues = sorted(
+            {
+                (p, queue_index(c.lane))
+                for c in self.schedules[self.rank]
+                for p in c.recipients(self.rank, self.world_size)
+            }
+        )
         self._leaked = False
         self._prepare_error = None
         self._chains = None
@@ -315,8 +335,8 @@ class TriggeredPlan:
         # Counters are never reset and the copy engine compares 32 bits; the same on every rank
         if self._max_per_round * round > INT32_MAX:
             raise RuntimeError(
-                f"a gate's growth per round (a chunk's writers, or a group's chunks) x round exceeds {INT32_MAX} "
-                f"at round {round}; close the plan and create a new one"
+                f"a gate's growth per round (a chunk's writers, a group's chunks, or the lanes to a peer) x round "
+                f"exceeds {INT32_MAX} at round {round}; close the plan and create a new one"
             )
 
     def _prepare_next(self):
@@ -357,7 +377,8 @@ class TriggeredPlan:
                 counter = self.counters.data_ptr() + word * chunk_id
                 arrival_addr = heap.translate(self.gates.data_ptr() + word * arrival, self.rank, peer)
                 devices = self.ctx._copy_engine_devices(peer)
-                chains.append((armer.Chain(*devices, counter, copies, arrival_addr, chunk.is_2d), chunk.writers))
+                chain = armer.Chain(*devices, counter, copies, arrival_addr, chunk.is_2d, queue_index(chunk.lane))
+                chains.append((chain, chunk.writers))
         self._chains = chains
 
     def _submit(self, round):
@@ -378,19 +399,21 @@ class TriggeredPlan:
 
     def _signal_completion(self):
         """
-        Queue each peer's completion signal for this round, separately. Returns the peers whose signal
-        could not be queued: nothing will tell when their queues drain, so they are no longer waited
-        for, and the plan's memory is kept for the life of the process instead of freed.
+        Queue the completion signal for this round on each queue to each peer, separately. Returns the
+        peers with a signal that could not be queued: nothing will tell when their queues drain, so
+        they are no longer waited for, and the plan's memory is kept for the life of the process
+        instead of freed.
         """
         completion, word = self.completion.data_ptr(), self.gates.element_size()
         failed = []
-        for peer in self._peers:
+        for peer, queue in self._queues:
             try:
-                armer.signal_completion(*self.ctx._copy_engine_devices(peer), completion + word * peer)
+                armer.signal_completion(*self.ctx._copy_engine_devices(peer), completion + word * peer, queue)
             except Exception:
-                failed.append(peer)
+                if peer not in failed:
+                    failed.append(peer)
         for peer in failed:
-            self._peers.remove(peer)
+            self._queues = [(p, q) for p, q in self._queues if p != peer]
             self.view.narrow(0, dv.HEADER_WORDS.value + self.num_chunks * dv.RECORD_WORDS.value + peer, 1).fill_(0)
             self._leaked = True
         return failed

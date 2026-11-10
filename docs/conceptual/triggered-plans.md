@@ -300,22 +300,49 @@ per round, by the whole CTA after every wave's stores are done, with release sem
   has to tell which mark is the last one. A group's counter grows by the number of its chunks sent
   to the rank, per round. Since several senders add to it, it counts rounds correctly only because
   the round fence keeps every rank's round `r` copies ahead of any round `r + 1` copy.
-- Every round, a rank's copies to a peer end with one signal on the sending rank's completion
-  counter for that peer. `wait()` and `sent()` / `wait_sent()` read it: once it reaches the round,
-  every copy to that peer has landed, and the source may be overwritten.
+- Every round, a rank's copies on each queue to a peer end with one signal on the sending rank's
+  completion counter for that peer. `wait()` and `sent()` / `wait_sent()` read it: once it reaches
+  the round times the number of queues (lanes) the rank's chunks use to that peer, every copy to
+  that peer has landed, and the source may be overwritten.
 - Rounds start at 1 and add 1 per `next_round()`. Counters are never reset, so a plan is limited
   to rounds where `writers × round` (and a group's count × round) stays at most 2³¹ − 1: over
   7 million rounds at 304 writers.
 - `wait()` reads only this rank's gates: the completion counter of every peer it sends to, and the
   arrival counter of every chunk sent to it.
 
+## Lanes
+
+A rank's copies to one peer run in the order they were prepared, so a chunk whose producer finishes
+early waits behind every earlier chunk whose producer has not. A **lane** is an independent ordered
+queue to a peer: chunks on different lanes do not wait for each other, chunks on one lane keep
+schedule order. Create the context with `sdma_lanes=N` and set `lane` (0 to N − 1, default 0) on
+each chunk, or pass `lane=` to the schedule builders:
+
+```python
+ctx = iris.iris(heap_size, engines=("sdma",), sdma_lanes=2)
+first, second = mine.chunk(2)                         # mine: this rank's rows of out
+schedule = chunks(first, 4, base=out, lane=0) + chunks(second, 4, base=out, lane=1)
+```
+
+Each lane runs on its own host queue to each peer. A host `put(..., channel=q)` names a queue by
+index (`channel` is rocm-xio's word for it); lane `i` uses queue `i`, so the put is refused while a
+plan has copies prepared on that queue, and unaffected by plans on the others. All lanes to one peer
+share a copy engine, so lanes remove blocking but add no bandwidth. More than one lane needs a
+rocm-xio that can create several host queues per GPU pair. With the default single lane, nothing
+changes.
+
+A lane is only an ordered queue. It is not a route or a share of a collective's tiles, and it does
+not say which work must never share a queue.
+
 ## Requirements and limits
 
 - **SDMA engine.** Create the context with `engines=("sdma",)` (needs `pip install iris[sdma]`).
-- **One queue per peer.** Plans use the host-initiated copy-engine queue to each peer, shared with
-  host `Iris.put()` and with the plans of every Iris context in the process. Kernel-initiated
-  copies (`put(..., use_copy_engine=True)`) use a separate queue and are unaffected.
-- **Ring capacity.** Prepared copies may use at most half of each queue's 8 MiB ring, and each plan
+- **One queue per peer and lane.** Plans use the host-initiated copy-engine queue to each peer (one
+  per lane, see [Lanes](#lanes)), shared with host `Iris.put()` on the same queue and with the plans
+  of every Iris context in the process. Kernel-initiated copies (`put(..., use_copy_engine=True)`)
+  use a separate queue and are unaffected.
+- **Ring capacity.** Prepared copies may use at most half of each queue's 8 MiB ring (each lane has
+  its own ring and its own budget), and each plan
   holds room for one round of its copies (two with `prepare_ahead`). Copies hold their ring space
   until their gates open, and a submit that does not fit waits for space, so a full ring could hang
   the host before any kernel opens a gate. The other half covers wrap padding, work queued before

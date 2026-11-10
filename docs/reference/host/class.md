@@ -52,6 +52,25 @@ and for device operations using `use_copy_engine=True`. Host SDMA methods raise
 `RuntimeError` if the copy engine is disabled. Pass the returned context to
 device operations through their `copy_engine_ctx` argument.
 
+### SDMA lanes
+
+Host-initiated SDMA work to one peer runs on an ordered queue: a copy that waits on a flag holds
+back everything queued behind it. `sdma_lanes` creates several independent lanes to each peer, so
+unrelated work does not wait on it. Each lane runs on its own host queue; `put` and `quiet` name a
+queue with `channel=`, which is rocm-xio's word for the index of a queue within a GPU pair (it is
+not a routing channel as in collective libraries). Lane `i` uses queue `i`. The default is one lane.
+
+```python
+ctx = iris.iris(heap_size=1 << 30, engines=("sdma",), sdma_lanes=2)
+```
+
+`sdma_lanes` needs `engines=("sdma",)`. Values above 1 need a rocm-xio whose `sdma_ep` can create
+several host queues per peer (`create_host_queue(..., num_channels=N)`); Iris raises `RuntimeError`
+at creation if the installed one cannot. All lanes to one peer share the same copy engine, so lanes
+remove blocking but add no bandwidth. Each lane holds its own queue, and the driver limits how many
+a process can create. [Triggered plans](../../conceptual/triggered-plans.md#lanes) put chunks on
+lanes with `Chunk.lane`.
+
 ```{eval-rst}
 .. automethod:: iris.host.iris.Iris.get_copy_engine_ctx
 ```
