@@ -33,5 +33,12 @@ torchrun --standalone --nproc_per_node=4 examples/35_sdma_collectives/example.py
 torchrun --standalone --nproc_per_node=4 examples/35_sdma_collectives/example.py --collective all_to_all
 ```
 
+Across hosts, one rank per host with `mlx5` NICs, the copy engine still triggers and RDMA carries
+the data ([triggered plans over RDMA](../../docs/conceptual/rdma-gda.md#triggered-plans-over-rdma)):
+
+```terminal
+torchrun --nnodes=2 --nproc_per_node=1 ... examples/35_sdma_collectives/example.py --collective scatter --rdma_device mlx5_0
+```
+
 Options: `--m` rows per part (default 64), `--n` columns (128), `--tile_rows` rows per chunk (8),
 `--rounds` (3), `--heap_size` (256 MiB). The script raises on a mismatch.

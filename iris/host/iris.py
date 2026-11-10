@@ -223,7 +223,9 @@ class Iris:
         if self._sdma_ep is not None:
             # rocm-xio keys queues by device ordinal and only opens queues between GPUs this process can see
             rank_gpus = rank_gpu_ordinals(gpu_id, num_ranks)
-            _require_sdma_visibility(rank_gpus)
+            if "rdma" not in engines:
+                _require_sdma_visibility(rank_gpus)
+            # With RDMA, ranks on other hosts are None: the copy engines reach this host's GPUs only
             self._copy_engine_gpus = rank_gpus
 
         if logger.isEnabledFor(logging.INFO):
@@ -346,13 +348,15 @@ class Iris:
         context_size = sdma_ep.QUEUE_DEVICE_CTX_SIZE
         self.copy_engines_device_ctx = torch.zeros((num_ranks, context_size), dtype=torch.uint64, device=self.device)
 
-        for peer_gpu in sorted(set(self._copy_engine_gpus)):
+        for peer_gpu in sorted({g for g in self._copy_engine_gpus if g is not None}):
             # Device-initiated queues
             sdma_ep.create_queue(self.gpu_id, peer_gpu)
             # Host-initiated queues: one channel per lane
             self._create_host_queues(self.gpu_id, peer_gpu)
 
         for peer_rank, peer_gpu in enumerate(self._copy_engine_gpus):
+            if peer_gpu is None:
+                continue  # on another host: reached by RDMA
             handle = sdma_ep.get_queue_device_ctx(self.gpu_id, peer_gpu)
             self.debug(f"---- Queue {peer_rank} (GPU {self.gpu_id} -> GPU {peer_gpu}) ------------")
             self.debug(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
@@ -395,7 +399,13 @@ class Iris:
 
     def _copy_engine_devices(self, to_rank):
         """The (source, destination) device ordinals of this rank's copy-engine queue to ``to_rank``."""
-        return self.gpu_id, self._copy_engine_gpus[to_rank]
+        peer_gpu = self._copy_engine_gpus[to_rank]
+        if peer_gpu is None:
+            raise RuntimeError(
+                f"rank {to_rank}'s GPU is not visible to this process (it is on another host); "
+                "the copy engines reach only the GPUs this process sees"
+            )
+        return self.gpu_id, peer_gpu
 
     def __del__(self):
         """Cleanup resources on deletion."""
@@ -1528,6 +1538,8 @@ class Iris:
         else:
             # Quiet to all ranks
             for rank, peer_gpu in enumerate(self._copy_engine_gpus):
+                if peer_gpu is None:
+                    continue  # on another host
                 self._check_host_queue_idle(rank, channel)
                 sdma_ep.quiet(self.gpu_id, peer_gpu, channel)
 

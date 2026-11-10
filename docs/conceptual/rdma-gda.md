@@ -47,6 +47,39 @@ fetch-add; `rdma_put_signal` is a write followed, on the same queue pair, by an 
 sees the flag sees the data (a Triton kernel on the peer polls the flag with an acquire atomic). The lower level is
 `iris.device.rdma_utils` (`put`, `atomic_add`, `quiet`, `poll_cq`).
 
+## Triggered plans over RDMA
+
+A [triggered plan](triggered-plans.md) can send to peers on other hosts: create the context with
+`engines=("sdma", "rdma")` and use the plan, or the `ctx.ccl.prepare_*` collectives, as usual. For
+each chunk and each remote peer the host posts the chunk's RDMA writes **dormant** into a dedicated
+queue pair (one per peer and lane, queues in GPU memory), then a write of the round into the chunk's
+arrival word on the peer, and arms a chain on the local GPU's copy-engine queue: wait until the
+chunk's counter reaches `writers × round`, then write the send queue's doorbell record and the NIC's
+doorbell. `mark_ready` in the producer kernel opens the gate and the copy engine rings the NIC; no CPU
+is involved while the round runs. The receiving side is unchanged: it waits on its own arrival word.
+
+- A chunk's arrival word has exactly one writer, so the round is **written**, not added. Chunks in a
+  group share an arrival word between senders, so a plan with groups cannot go over RDMA.
+- A rank learns that its chunks reached an RDMA peer from the completion the NIC posts once the peer
+  acknowledged the data and the arrival write. The host polls those in `wait()` and then sets the
+  peer's completion counter (from a stream of its own), so `sent()` / `wait_sent()` in a kernel on
+  the sending rank become true only while the host is in `wait()`: call `wait()` after launching such
+  a kernel. `wait(blocking=False)` and `prepare_ahead` are refused. A send that fails (an error
+  completion) is raised by `wait()` or `close()`; the plan's memory is then kept, not freed.
+- Peers on other hosts are not mapped, so `next_round()` fences on the host: it waits for the current
+  stream, then the ranks agree before any starts the next round.
+- Every kick of a lane runs on one copy-engine queue, this GPU's queue to itself, whatever the peer:
+  a chunk released early waits for every chunk prepared before it on that lane, to any peer (with
+  copy engines alone, only to the same peer). Spread independent chunks over lanes.
+- A triggered queue pair holds 1,024 work requests and 512 completions per round: a chunk of R
+  packed regions takes R + 1 slots and one completion (a strided region takes one slot per row).
+  Plans that need more are refused when they are created, as is a single write over 2 GiB.
+- The work requests are written by the CPU into GPU memory; Iris drains those writes to the device
+  before arming any chain that can ring the doorbell.
+- In this mode the copy engines reach this host's GPUs only: host `put` to a rank on another host
+  raises.
+- Limits: `mlx5` and InfiniBand, and one rank per host, so every peer is reached over RDMA.
+
 ## Things to know
 
 - Use `dist.barrier()`, not `ctx.barrier()`, while a kernel is spinning for a signal: `ctx.barrier()` first waits for

@@ -94,12 +94,17 @@ def main():
     p.add_argument("--tile_rows", type=int, default=8, help="rows per chunk")
     p.add_argument("--rounds", type=int, default=3)
     p.add_argument("--heap_size", type=int, default=1 << 28)
+    p.add_argument("--rdma_device", default=None, help="reach peers on other hosts over RDMA through this NIC")
     a = p.parse_args()
 
     torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
     dist.init_process_group(backend="nccl")
     try:
-        ctx = iris.iris(a.heap_size, engines=("sdma",))
+        if a.rdma_device is not None:
+            # One rank per host: the copy engine still triggers, RDMA carries the data
+            ctx = iris.iris(a.heap_size, engines=("sdma", "rdma"), rdma_device=a.rdma_device)
+        else:
+            ctx = iris.iris(a.heap_size, engines=("sdma",))
         rank, world = ctx.get_rank(), ctx.get_num_ranks()
         n, writes, lands = layout(a.collective, a.root, rank, world)
         buf = ctx.zeros((n * a.m, a.n), dtype=torch.int32)

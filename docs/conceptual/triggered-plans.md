@@ -371,7 +371,9 @@ not say which work must never share a queue.
   also miss the bytes that rank sends. The plan checks this when it is created, which catches a
   schedule built from the whole buffer instead of the rank's own part. `destination` must be the
   buffer itself or memory apart from it.
-- **Single node only.**
+- **Single node, or one rank per host over RDMA.** With `engines=("sdma", "rdma")` a plan sends to
+  peers on other hosts through the NIC, released by the same copy-engine gates; see
+  [triggered plans over RDMA](rdma-gda.md#triggered-plans-over-rdma) for what changes.
 - **Linear regions are at most 1 GiB** (`COPY_LINEAR`'s byte count is 30 bits on SDMA 4.4). The
   schedule builders split larger ranges.
 
