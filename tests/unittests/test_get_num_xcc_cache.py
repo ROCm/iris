@@ -12,7 +12,7 @@ def _mocked_runtime():
     return runtime
 
 
-def test_get_num_xcc_runs_hip_device_get_attribute_once_per_device(tmp_path):
+def test_get_num_xcc_runs_hip_device_get_attribute_once_per_device():
     hip._get_num_xcc_cached.cache_clear()
     runtime = _mocked_runtime()
     try:
@@ -26,7 +26,7 @@ def test_get_num_xcc_runs_hip_device_get_attribute_once_per_device(tmp_path):
         hip._get_num_xcc_cached.cache_clear()
 
 
-def test_get_num_xcc_caches_the_default_device_resolution(tmp_path):
+def test_get_num_xcc_caches_the_default_device_resolution():
     hip._get_num_xcc_cached.cache_clear()
     runtime = _mocked_runtime()
     try:
@@ -42,7 +42,7 @@ def test_get_num_xcc_caches_the_default_device_resolution(tmp_path):
         hip._get_num_xcc_cached.cache_clear()
 
 
-def test_get_num_xcc_keys_the_cache_on_device_id(tmp_path):
+def test_get_num_xcc_keys_the_cache_on_device_id():
     hip._get_num_xcc_cached.cache_clear()
     runtime = _mocked_runtime()
     try:
