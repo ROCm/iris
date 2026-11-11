@@ -120,15 +120,13 @@ The fundamental insight is that **achieving peak performance requires computatio
 # Producer side
 compute_tile(...)
 # Release pattern - notify tile is ready
-iris.atomic_cas(flag + tile_id, 0, 1, consumer_rank, 
-                sem="release", scope="sys")
+iris.atomic_cas(flag + tile_id, 0, 1, consumer_rank, sem="release", scope="sys")
 
 # Consumer side
 # Acquire pattern - wait for tile
 done = 0
 while done == 0:
-    done = iris.atomic_cas(flag + tile_id, 1, 0, consumer_rank,
-                          sem="acquire", scope="sys")
+    done = iris.atomic_cas(flag + tile_id, 1, 0, consumer_rank, sem="acquire", scope="sys")
 # Consume data
 data = iris.load(buffer + offsets, consumer_rank, mask=mask)
 ```
