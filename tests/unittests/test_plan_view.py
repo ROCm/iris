@@ -122,6 +122,18 @@ def test_sent_waits_for_every_peer():
     assert out.item() == 1
 
 
+def test_sent_counts_every_lane():
+    two = [Chunk((Region(0, 64),)), Chunk((Region(64, 64),), lane=1)]
+    out = torch.zeros(1, dtype=torch.int32, device="cuda")
+    view, (_, _, completion, _) = _view(0, [two, []], round=2)
+    completion[1] = 3  # round 1's two signals and one of round 2's
+    _sent_kernel[(1,)](view, out)
+    assert out.item() == 0
+    completion[1] = 4
+    _sent_kernel[(1,)](view, out)
+    assert out.item() == 1
+
+
 def test_sent_beyond_64_ranks():
     """Each peer has its own flag in the view, so sent() is not limited to a 64-bit mask."""
     world = 70

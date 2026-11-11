@@ -137,8 +137,9 @@ def wait_kernel(view, status, error, ticks, OWN_ONLY: tl.constexpr, STREAM: tl.c
             done = _reached(cv.gates + tl.load(record + R_ARRIVAL), target, t0, ticks, abort, abort_round)
     else:
         peer = pid - cv.num_chunks
-        if cv._sends_to(peer):
-            done = _reached(cv.gates + 2 * cv.num_chunks + peer, cv.round, t0, ticks, abort, abort_round)
+        queues = cv._queues_to(peer)
+        if queues != 0:
+            done = _reached(cv.gates + 2 * cv.num_chunks + peer, queues * cv.round, t0, ticks, abort, abort_round)
     # Even if done: a peer that failed the round may still send it, such as its old data from a flush
     failed, failed_rank = _failed(abort)
     aborted = (failed != 0) & (failed <= abort_round)

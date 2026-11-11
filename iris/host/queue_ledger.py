@@ -4,7 +4,7 @@
 """
 What triggered plans (iris.experimental.plan) have armed on this process's host copy-engine queues.
 
-The queues belong to the process, not to an Iris instance, so the ledger does too.
+The queues belong to the process, not to an Iris instance, so the ledger does too. Keys are ``(src, peer, lane)``.
 """
 
 from collections import defaultdict
@@ -17,37 +17,37 @@ class QueueLedger:
 
     def __init__(self, capacity):
         self.capacity = capacity
-        self.entries = defaultdict(list)  # (src, dst) -> [(plan, round, nbytes)]
-        self.holds = defaultdict(dict)  # (src, dst) -> {plan: nbytes}, space kept for a plan's rounds
+        self.entries = defaultdict(list)  # (src, dst, lane) -> [(plan, round, nbytes)]
+        self.holds = defaultdict(dict)  # (src, dst, lane) -> {plan: nbytes}, space kept for a plan's rounds
 
     def _used(self, key):
         held = self.holds[key]
         return sum(held.values()) + sum(n for plan, _, n in self.entries[key] if plan not in held)
 
     def _check(self, src, nbytes):
-        for peer, n in nbytes.items():
-            used = self._used((src, peer))
+        for (peer, lane), n in nbytes.items():
+            used = self._used((src, peer, lane))
             if used + n > self.capacity:
                 raise RuntimeError(
-                    f"preparing {n} bytes of copies on the queue to rank {peer} would exceed {self.capacity} bytes "
+                    f"preparing {n} bytes of copies on the queue {lane} to rank {peer} would exceed {self.capacity} bytes "
                     f"({used} already prepared); wait for or close other plans first"
                 )
 
     def hold(self, plan, src, nbytes):
         """Keep ``nbytes[peer]`` of each queue for ``plan``, so its rounds can be prepared without checking again."""
         self._check(src, nbytes)
-        for peer, n in nbytes.items():
-            self.holds[(src, peer)][plan] = n
+        for queue, n in nbytes.items():
+            self.holds[(src, *queue)][plan] = n
 
     def reserve(self, plan, round, src, nbytes):
-        for peer, n in nbytes.items():
-            key = (src, peer)
+        for queue, n in nbytes.items():
+            key = (src, *queue)
             held = self.holds[key].get(plan)
             if held is not None and sum(e[2] for e in self.entries[key] if e[0] is plan) + n > held:
                 raise RuntimeError(f"preparing round {round} would exceed the queue space held for the plan")
-        self._check(src, {p: n for p, n in nbytes.items() if plan not in self.holds[(src, p)]})
-        for peer, n in nbytes.items():
-            self.entries[(src, peer)].append((plan, round, n))
+        self._check(src, {q: n for q, n in nbytes.items() if plan not in self.holds[(src, *q)]})
+        for queue, n in nbytes.items():
+            self.entries[(src, *queue)].append((plan, round, n))
 
     def release(self, plan, round=None):
         """Forget ``plan``'s prepared ``round``, or all of its rounds and held space."""
@@ -74,20 +74,22 @@ class QueueLedger:
 
     def check_order(self, plan, round, started, action):
         """Raise unless every round prepared before ``plan``'s ``round`` has ``started(other, round)``."""
-        for (_, peer), entries in self.entries.items():
+        for (_, peer, lane), entries in self.entries.items():
+            if not any(e[0] is plan and e[1] == round for e in entries):
+                continue  # nothing of this round on this queue
             for other, other_round, _ in entries:
                 if other is plan and other_round == round:
                     break
                 if other is not plan and not started(other, other_round):
                     raise RuntimeError(
-                        f"plan prepared earlier on the queue to rank {peer} (round {other_round}) has not started it; "
+                        f"plan prepared earlier on the queue {lane} to rank {peer} (round {other_round}) has not started it; "
                         f"plans sharing queues must {action} in the order they were prepared"
                     )
 
-    def check_idle(self, src, dst):
-        if self.entries.get((src, dst)):
+    def check_idle(self, src, dst, lane):
+        if self.entries.get((src, dst, lane)):
             raise RuntimeError(
-                f"triggered plans have copies prepared on the copy-engine queue to rank {dst}; "
+                f"triggered plans have copies prepared on the copy-engine queue {lane} to rank {dst}; "
                 "wait for or close those plans before using it"
             )
 

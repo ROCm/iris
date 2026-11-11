@@ -204,6 +204,21 @@ def test_whole_and_chunks_take_group():
     assert [c.group for c in chunks(buf, 4, group=2)] == [2] * 4
 
 
+def test_builders_take_lane():
+    buf = torch.zeros(64, 64, dtype=torch.int32)
+    assert Chunk((Region(0, 64),)).lane == 0
+    assert [c.lane for c in whole(buf[0], base=buf, lane=1)] == [1]
+    assert [c.lane for c in chunks(buf, 4, lane=2)] == [2] * 4
+    assert {c.lane for c in tile_chunks(buf, (16, 16), 4, lane=3)} == {3}
+
+
+def test_validate_checks_lanes():
+    two = [Chunk((Region(0, 64),), lane=0), Chunk((Region(0, 64),), lane=1)]
+    assert validate(two, 64, lanes=2) == two
+    with pytest.raises(ValueError, match="lane 1 needs sdma_lanes > 1, not 1"):
+        validate(two, 64)
+
+
 def test_group_and_peers_take_integers():
     """numpy integers work; floats and bools do not."""
     chunk = Chunk((Region(0, 64),), peers=np.arange(1, 3), group=np.int64(1))

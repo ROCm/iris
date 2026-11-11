@@ -6,13 +6,13 @@ Device side of triggered plans (see ``iris.experimental.plan``).
 
 For each (chunk, peer), the host arms a chain on the copy engine: wait until the chunk's counter
 reaches ``writers * round``, copy the chunk's regions to the peer, then add 1 to the chunk's arrival
-counter on the peer (its group's, if it has one). After a round's last chain to a peer, the copy
+counter on the peer (its group's, if it has one). After a round's last chain on each lane to a peer, the copy
 engine adds 1 to this rank's completion counter for that peer. Kernels add to the counter with
 ``mark_ready``, observe arrivals with ``arrived`` / ``wait`` (``group_arrived`` / ``wait_group``)
 and completion with ``sent`` / ``wait_sent``.
 
-View layout (int64 words): an 8-word header, one 4-word record per chunk, one word per rank (1 if
-this rank's chains go to that rank), then one word per group. Gates (int32, one symmetric tensor):
+View layout (int64 words): an 8-word header, one 4-word record per chunk, one word per rank (the lanes
+this rank uses to that rank), then one word per group. Gates (int32, one symmetric tensor):
 ``num_chunks`` counters, ``num_chunks`` arrivals, one completion per rank, one round-fence count per
 rank, the earliest round a peer failed and that peer (see ``iris.experimental.plan.kernels``), then
 one arrival per group.
@@ -24,7 +24,7 @@ from triton.language.core import _aggregate as aggregate
 
 from iris.mem.utils import wait_cnt
 
-ABI_VERSION = 3
+ABI_VERSION = 4
 
 # Header words
 HEADER_WORDS = tl.constexpr(8)
@@ -137,9 +137,9 @@ class TriggeredView:
             pass
 
     @triton.jit
-    def _sends_to(self, peer):
-        """True if this rank's chains go to rank ``peer``, so its completion counter counts rounds."""
-        return tl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + peer) != 0
+    def _queues_to(self, peer):
+        """How many queues this rank's chains use to rank ``peer``: its completion counter grows that much per round."""
+        return tl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + peer)
 
     @triton.jit
     def group_arrived(self, group):
@@ -169,9 +169,10 @@ class TriggeredView:
         """True once every peer has received this rank's chunks this round, so they may be overwritten."""
         pending = 0
         for peer in range(tl.load(self.view + H_WORLD_SIZE)):
-            if self._sends_to(peer):
+            queues = self._queues_to(peer)
+            if queues != 0:
                 completion = self.gates + 2 * self.num_chunks + peer
-                pending += (tl.atomic_add(completion, 0, sem="acquire", scope="sys") < self.round).to(tl.int32)
+                pending += (tl.atomic_add(completion, 0, sem="acquire", scope="sys") < queues * self.round).to(tl.int32)
         return pending == 0
 
     @triton.jit
