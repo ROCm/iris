@@ -170,3 +170,84 @@ def test_all_gather_partitioned(dtype, M, N, block_size_m, block_size_n):
         import gc
 
         gc.collect()
+
+
+def test_all_gather_rejects_non_symmetric_output():
+    """Test that non-symmetric output tensor raises ValueError.
+
+    In all_gather, other ranks write to the output tensor via RMA (iris.store).
+    If the output is not on the symmetric heap, those remote writes would
+    silently go to the wrong address. We reject early with a clear error.
+    """
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**30
+    shmem = iris.iris(heap_size)
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+    M, N = 128, 64
+
+    # Input on symmetric heap (fine)
+    iris_input = shmem.zeros((M, N), dtype=torch.float32)
+    # Output on regular CUDA memory (NOT on symmetric heap)
+    bad_output = torch.zeros(world_size * M, N, dtype=torch.float32, device=f"cuda:{rank}")
+    assert not shmem.is_symmetric(bad_output)
+
+    try:
+        with pytest.raises(ValueError, match="output_tensor must be on the symmetric heap"):
+            config = Config(block_size_m=32, block_size_n=64)
+            shmem.ccl.all_gather(bad_output, iris_input, config=config)
+    finally:
+        shmem.barrier()
+        del shmem
+        import gc
+
+        gc.collect()
+
+
+def test_all_gather_non_symmetric_input_ok():
+    """Test that non-symmetric input tensor works fine (input is local-only).
+
+    In all_gather, each rank only reads its own input locally — it's never
+    accessed remotely. So non-symmetric input tensors should work as-is.
+    """
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    heap_size = 2**30
+    shmem = iris.iris(heap_size)
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+    M, N = 128, 64
+
+    # Input on regular CUDA memory (NOT on symmetric heap — that's fine for all_gather)
+    external_input = torch.randn(M, N, dtype=torch.float32, device=f"cuda:{rank}")
+    external_input.fill_(float(rank + 1))
+    assert not shmem.is_symmetric(external_input)
+
+    # Output on symmetric heap (required — remote writes)
+    iris_output = shmem.zeros((world_size * M, N), dtype=torch.float32)
+
+    # Reference via PyTorch
+    pytorch_output = torch.zeros(world_size * M, N, dtype=torch.float32, device=f"cuda:{rank}")
+    shmem.barrier()
+    dist.all_gather_into_tensor(pytorch_output, external_input)
+    torch.cuda.synchronize()
+
+    # Should work — input doesn't need symmetric heap
+    shmem.barrier()
+    config = Config(block_size_m=32, block_size_n=64)
+    shmem.ccl.all_gather(iris_output, external_input, config=config)
+    torch.cuda.synchronize()
+
+    try:
+        assert torch.allclose(iris_output, pytorch_output, atol=1e-5), (
+            f"Non-symmetric input: max diff {torch.abs(iris_output - pytorch_output).max().item()}"
+        )
+    finally:
+        shmem.barrier()
+        del shmem
+        import gc
+
+        gc.collect()
