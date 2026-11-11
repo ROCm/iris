@@ -264,11 +264,13 @@ class Iris:
         # Only vmem_chunked tracks this budget; torch/vmem reserve a lump and do not.
         allocator = self.heap.allocator
         if hasattr(allocator, "internal_bytes") and hasattr(allocator, "reserved_bytes"):
-            assert allocator.internal_bytes == allocator.reserved_bytes, (
-                f"Iris internal allocations ({allocator.internal_bytes} B) do not match the reserved "
-                f"budget ({allocator.reserved_bytes} B); update _internal_reservation_sizes to cover "
-                f"every mark_internal() allocation in Iris.__init__."
-            )
+            if allocator.internal_bytes != allocator.reserved_bytes:
+                # RuntimeError rather than assert so the invariant stays enforced under python -O.
+                raise RuntimeError(
+                    f"Iris internal allocations ({allocator.internal_bytes} B) do not match the reserved "
+                    f"budget ({allocator.reserved_bytes} B); update _internal_reservation_sizes to cover "
+                    f"every mark_internal() allocation in Iris.__init__."
+                )
 
         # Initialize tracing
         self.tracing = Tracing(self)

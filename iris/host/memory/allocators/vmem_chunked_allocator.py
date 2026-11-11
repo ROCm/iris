@@ -118,12 +118,6 @@ def _aligned_block_size(size_bytes: int, granularity: int) -> int:
     return (size_class + granularity - 1) & ~(granularity - 1)
 
 
-def _block_size(bucket: Bucket) -> int:
-    """Block size (bytes) a free-list key represents. Keys are ``Bucket(size, alignment)``; the
-    block size is the bucket's ``size`` field."""
-    return bucket.size
-
-
 class VMemChunkedAllocator(BaseAllocator):
     """
     Chunked VMem allocator with power-of-two free lists.
@@ -163,9 +157,9 @@ class VMemChunkedAllocator(BaseAllocator):
         chunk_size: Size of each physical chunk in bytes (default 256 MiB)
         va_size: Total VA reservation size (default 64 GiB)
         reserved_bytes: Bytes pre-mapped on top of heap_size for Iris's own control state, so
-            heap_size stays usable to the caller. Either a single byte count (rounded up to a
-            granule) or a list of per-allocation byte counts (each rounded independently; see
-            _reservation_bytes). Keyword-only.
+            heap_size stays usable to the caller. Either a single byte count (sized as one
+            allocation: power-of-two bucketed, then granule-aligned) or a list of per-allocation
+            byte counts (each sized the same way). Keyword-only.
         topology: Optional cluster topology used to select local vs fabric driver
     """
 
@@ -927,8 +921,8 @@ class VMemChunkedAllocator(BaseAllocator):
         ``va_headroom_bytes`` exclude that unconsumed reservation.
         """
         used_bytes = sum(self.alloc_sizes.values())
-        free_list_bytes = sum(_block_size(k) * len(offsets) for k, offsets in self.free_lists.items())
-        largest_free = max((_block_size(k) for k, offsets in self.free_lists.items() if offsets), default=0)
+        free_list_bytes = sum(k.size * len(offsets) for k, offsets in self.free_lists.items())
+        largest_free = max((k.size for k, offsets in self.free_lists.items() if offsets), default=0)
         free_in_mapped = (self.mapped_extent - self.bump) + free_list_bytes
         pending_internal = max(0, self.reserved_bytes - self.internal_bytes)
         growable = max(0, self.va_size - self.bump - pending_internal)
