@@ -27,7 +27,7 @@ import logging
 import weakref
 from collections import defaultdict, deque
 from threading import Lock
-from typing import List, Optional, Sequence, Union
+from typing import List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -89,29 +89,39 @@ def _is_power_of_two(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
 
 
-def _aligned_block_size(size_bytes: int, granularity: int, min_alignment: int) -> int:
+class Bucket(NamedTuple):
+    """A free-list key: a block's size and alignment, both in bytes.
+
+    A freed block is reused for a request with the same ``size`` and a compatible
+    alignment (see allocate() / _take_reusable_block for the matching rule, and
+    _free_callback / reuse() for how freed blocks are filed back under their bucket).
+    """
+
+    size: int
+    alignment: int
+
+
+def _aligned_block_size(size_bytes: int, granularity: int) -> int:
     """Bytes an allocation of ``size_bytes`` actually consumes: at least one granule, bucketed to a
     power of two for the free lists, then granule-aligned. Shared by the live allocator (allocate(),
     _reservation_bytes) and the pure plan_capacity() estimator so both agree on per-allocation
     sizing -- otherwise a reservation or capacity plan can disagree with what allocate() really uses.
 
-    This models the default path only: it does not take allocate()'s per-call ``alignment`` argument,
-    so it cannot predict an over-aligned allocation whose bump-pointer padding exceeds the block size.
-    It must also track whatever allocate() does for the agreement to hold -- #633 changes block sizing
-    (block size independent of the requested alignment, plus bump-path alignment padding), so this
-    helper and plan_capacity() have to follow that sizing on the #633 rebase.
+    The block size is independent of a request's ``alignment``: the bucket key records the alignment
+    and the bump pointer absorbs any alignment padding, so this models every allocation's block size
+    regardless of alignment. What it cannot model is the bump-pointer padding an over-aligned request
+    adds on top (that depends on the live bump position), so a capacity estimate built from this is
+    exact for default-aligned allocations and a lower bound once over-alignment is in play.
     """
     size_bytes = max(size_bytes, granularity)
     size_class = _next_power_of_two(size_bytes)
-    aligned_size = max(size_class, min_alignment)
-    return (aligned_size + granularity - 1) & ~(granularity - 1)
+    return (size_class + granularity - 1) & ~(granularity - 1)
 
 
-def _block_size(free_list_key) -> int:
-    """Block size (bytes) a free-list key represents. The key is the block size itself today (an
-    int), but #633 keys free lists by a ``Bucket(size, alignment)``; read ``.size`` when present so
-    capacity math works on either and never multiplies/compares an int against a tuple."""
-    return getattr(free_list_key, "size", free_list_key)
+def _block_size(bucket: Bucket) -> int:
+    """Block size (bytes) a free-list key represents. Keys are ``Bucket(size, alignment)``; the
+    block size is the bucket's ``size`` field."""
+    return bucket.size
 
 
 class VMemChunkedAllocator(BaseAllocator):
@@ -216,6 +226,7 @@ class VMemChunkedAllocator(BaseAllocator):
         self.mapped_extent = 0
         self.base_va = 0
         self.granularity = 0
+        self.min_granularity = 0
         # Bytes set aside for Iris's own control state so heap_size stays usable to the caller.
         # Sized once the granularity is known (below), then pre-mapped on top of heap_size. May be a
         # single byte count or a list of per-allocation byte counts (see _reservation_bytes).
@@ -296,11 +307,12 @@ class VMemChunkedAllocator(BaseAllocator):
         # under-reserve by up to a granule per allocation.
         self.reserved_bytes = self._reservation_bytes(self._requested_reserved_bytes)
 
-        # Chunk configuration -- cap at heap_size to avoid overshooting VA.
-        # NOTE: chunk_size is derived from heap_size (not heap_size + reserved) so it stays a power
-        # of two for power-of-two heaps; the reservation is mapped as its own region below. Once #633
-        # (non-power-of-two chunk sizes) lands, chunk_size could derive from heap_size + reserved
-        # directly, so revisit this split on that rebase.
+        # Chunk configuration -- cap at heap_size to avoid overshooting VA. chunk_size derives from
+        # heap_size alone, not heap_size + reserved_bytes: the internal reservation is mapped as its
+        # own exact-sized region at the end of __init__, so folding it into chunk_size would only
+        # round a few MiB of control state up to a whole extra chunk. Chunk sizes need not be a power
+        # of two (VA rounding below is arithmetic), so this split is a sizing choice, not a
+        # correctness one.
         effective_chunk = min(chunk_size, max(heap_size, self.granularity))
         self.chunk_size = max(effective_chunk, self.granularity)
         # granularity is a power of two (asserted above), so the bitmask trick
@@ -317,10 +329,19 @@ class VMemChunkedAllocator(BaseAllocator):
         # and imports. For very large heaps (>100 GiB) this can exceed sensible
         # VA budgets; if reserve_va fails, the caller should pass an explicit
         # va_size. Not capped here because the right cap depends on workload.
+        # Include the internal reservation in the VA budget so growth + imports still get headroom
+        # on top of heap_size + the reservation.
         self.va_size = max(va_size, (heap_size + self.reserved_bytes) * 4)
-        # chunk_size is a power of two (asserted above), so bitmask alignment is safe.
-        self.va_size = (self.va_size + self.chunk_size - 1) & ~(self.chunk_size - 1)
-        self.base_va = self.driver.reserve_va(self.va_size, self.granularity)
+        # chunk_size may not be a power of two, so round the VA reservation up to a whole
+        # number of chunks with integer arithmetic (a VA size shouldn't depend on float
+        # division staying exact), rather than with a bitmask.
+        self.va_size = -(-self.va_size // self.chunk_size) * self.chunk_size
+        # Reserve the VA arena aligned to the largest alignment we promise on the absolute
+        # address, not merely the granule. Because base_va is then a multiple of every
+        # permitted alignment, aligning a block's heap offset also aligns its data_ptr().
+        # Both granularity and MAX_ALIGNMENT are powers of two, so the max is too.
+        self._max_alignment = max(self.granularity, self.MAX_ALIGNMENT)
+        self.base_va = self.driver.reserve_va(self.va_size, self._max_alignment)
 
         # Pre-map chunk_size chunks to cover heap_size, so the caller gets ~heap_size of usable
         # space before any growth is triggered.
@@ -367,7 +388,7 @@ class VMemChunkedAllocator(BaseAllocator):
             internal_size = self._internal_offsets.pop(offset, None)
             if internal_size is not None:
                 self.internal_bytes -= internal_size
-            self._released[offset] = size_class
+            self._released[offset] = bucket
 
     def released_offsets(self) -> List[int]:
         """Offsets freed on this rank that are not yet reusable, sorted."""
@@ -456,10 +477,48 @@ class VMemChunkedAllocator(BaseAllocator):
         """
         return self._interconnect
 
+    def _check_open(self) -> None:
+        """Reject operations once the allocator has been closed.
+
+        This is a single read of a plain bool, so it is safe to call with or
+        without self.lock held. Most call sites take the lock anyway because
+        they go on to mutate allocator state; get_allocation_chunks_since()
+        does not take the lock (see its docstring) and calls this unlocked.
+
+        reuse(), released_offsets() and collect_due() are intentionally *not*
+        guarded: they are reached only via SymmetricHeap.collect(), never as
+        public post-close entry points, so an explicit guard would be dead code.
+        """
+        if self._closed:
+            raise RuntimeError("VMemChunkedAllocator: operation attempted after close()")
+
+    def _take_reusable_block(self, bucket: Bucket) -> Optional[Tuple[int, Bucket]]:
+        """Pop a free (offset, source_bucket) that satisfies ``bucket``, or return None.
+
+        Prefers an exact (size, alignment) match. Failing that, accepts a same-size block
+        filed under a *larger* alignment: its offset is already a multiple of the smaller
+        requested alignment, so it satisfies the request. The smallest sufficient alignment
+        is chosen first to avoid wasting the most-aligned blocks. The choice depends only on
+        free_lists and the request, both identical on every rank, so offsets stay symmetric.
+
+        The source bucket is returned so a caller that must roll back (a failed allocation)
+        can file the block back under the exact key it came from, not the request's key.
+        """
+        exact = self.free_lists.get(bucket)
+        if exact:
+            return exact.pop(), bucket
+        for candidate in sorted(
+            b
+            for b, offs in self.free_lists.items()
+            if b.size == bucket.size and b.alignment > bucket.alignment and offs
+        ):
+            return self.free_lists[candidate].pop(), candidate
+        return None
+
     def _aligned_alloc_size(self, size_bytes: int) -> int:
         """Bytes an allocation of ``size_bytes`` actually consumes (see module-level
         :func:`_aligned_block_size`)."""
-        return _aligned_block_size(size_bytes, self.granularity, self.min_alignment)
+        return _aligned_block_size(size_bytes, self.granularity)
 
     def _reservation_bytes(self, requested) -> int:
         """Size the internal reservation from ``requested`` (a byte count or a list of per-allocation
@@ -486,6 +545,12 @@ class VMemChunkedAllocator(BaseAllocator):
         Allocate from a free list or the bump pointer. With ``grow=False``, return None instead of
         mapping new chunks.
 
+        A requested ``alignment`` up to ``MAX_ALIGNMENT`` is honored on the absolute address: the
+        returned tensor's ``data_ptr()`` (and its offset from the heap base) is a multiple of
+        ``alignment``. This holds because the heap base is reserved aligned to ``MAX_ALIGNMENT``,
+        so aligning the heap offset aligns the address identically on every rank. An ``alignment``
+        above ``MAX_ALIGNMENT`` is rejected rather than silently returning a misaligned pointer.
+
         ``internal=True`` marks the allocation as Iris control state (e.g. device-barrier flags),
         so it is counted against ``reserved_bytes`` rather than the user's usable budget in
         ``get_stats()``.
@@ -500,7 +565,22 @@ class VMemChunkedAllocator(BaseAllocator):
             elem_size = _element_size(dtype)
             size_bytes = num_elements * elem_size
             # Size the allocation: min one granule, bucketed to a power of two, granule-aligned.
+            # Block size is independent of alignment (the bucket key records the alignment and the
+            # bump pointer absorbs any padding), so an over-aligned request does not inflate the
+            # block -- a 4 KiB request with 64 MiB alignment stays a granule, not 64 MiB. Shared with
+            # the internal reservation and plan_capacity() via _aligned_block_size so they agree.
             aligned_size = self._aligned_alloc_size(size_bytes)
+            # Effective alignment: at least min_alignment, raised to honor an over-aligned request.
+            # Rounded to a power of two so the bitmask alignment math holds.
+            effective_align = max(self.min_alignment, _next_power_of_two(max(1, alignment)))
+            if effective_align > self._max_alignment:
+                raise ValueError(
+                    f"VMemChunkedAllocator: requested alignment {alignment} (effective "
+                    f"{effective_align}) exceeds the heap's maximum alignment {self._max_alignment}. "
+                    f"The heap base is reserved aligned to {self._max_alignment}; a larger alignment "
+                    f"cannot be guaranteed on the absolute address. Raise MAX_ALIGNMENT or request less."
+                )
+            bucket = Bucket(aligned_size, effective_align)
 
             pad_start: Optional[int] = None
             reused = self._take_reusable_block(bucket)
@@ -527,7 +607,7 @@ class VMemChunkedAllocator(BaseAllocator):
                     if self.mapped_extent + grow_chunks * self.chunk_size > self.va_size:
                         raise RuntimeError(
                             "VMemChunkedAllocator: out of capacity -- cannot satisfy allocation "
-                            f"(needs {n_new_chunks} new chunk(s), {n_new_chunks * self.chunk_size} bytes). "
+                            f"(needs {grow_chunks} new chunk(s), {grow_chunks * self.chunk_size} bytes). "
                             f"{self._capacity_message(requested_bytes=aligned_size)}. "
                             "Increase heap_size or va_size."
                         )
@@ -535,32 +615,36 @@ class VMemChunkedAllocator(BaseAllocator):
                 offset = aligned_bump
                 new_bump = aligned_bump + aligned_size
 
-            # Track for free
-            self.alloc_sizes[offset] = aligned_size
-            self._bytes_since_collect += aligned_size
+            # Build the tensor BEFORE growing chunks or mutating bookkeeping, so a failed
+            # construction rolls back cleanly (nothing grown, bump untouched). Just a local-rollback
+            # nicety -- peer correctness comes from SymmetricHeap refreshing on chunk-count change.
+            # Safe because we pass an explicit device index, so as_tensor only wraps the pointer
+            # (torch <2.9 instead probes the unmapped VA via getDeviceFromPtr -- then grow first).
+            # The try/finally below returns a popped free-list block on any failure (committed flag).
+            committed = False
+            try:
+                va = self.base_va + offset
+                interface_size = (aligned_size // elem_size) * elem_size
+                iface = _CUDAArrayInterface(va, interface_size)
+                tensor_bytes = torch.as_tensor(iface, device=self.device)
+                full = tensor_bytes.view(dtype)
+                tensor = full.narrow(0, 0, num_elements)
 
                 # Tensor built successfully -- now it is safe to grow chunks.
                 for _ in range(grow_chunks):
                     self._grow_chunk()
 
-            # Count the internal reservation only after the tensor is built, so a failed build never
-            # leaves internal_bytes over-counted or a phantom offset in _internal_offsets. (Rolling
-            # back the bump pointer / alloc_sizes on a failed build is a separate concern.) The offset
-            # is paired with the decrement in _process_pending_frees via the finalizer registered next.
-            # NOTE (#633 rebase): when allocate() grows a try/finally "committed" block, move this
-            # bookkeeping inside it so a later failure (in _grow_chunk or finalizer registration)
-            # cannot leave the internal counters advanced.
-            if internal:
-                self.internal_bytes += aligned_size
-                self._internal_offsets[offset] = aligned_size
-
-            # Attach GC weak ref for automatic free
-            weakref.finalize(
-                tensor.untyped_storage(),
-                self._free_callback,
-                offset,
-                aligned_size,
-            )
+                # Arm the GC weak ref before committing bookkeeping, so the block can never be
+                # left live-but-unfinalized if a later step raised.
+                weakref.finalize(
+                    tensor.untyped_storage(),
+                    self._free_callback,
+                    offset,
+                    bucket,
+                )
+                # GC now owns this offset, so mark committed before the bookkeeping below: the
+                # finally must not also re-file it on a late failure (double-manage).
+                committed = True
 
                 self.bump = new_bump
                 self.alloc_sizes[offset] = aligned_size
@@ -569,6 +653,14 @@ class VMemChunkedAllocator(BaseAllocator):
                     # This block owns alignment padding [pad_start, offset) below it; reuse() rolls
                     # the bump back to pad_start, not offset, so the padding is not stranded.
                     self._pad_start[offset] = pad_start
+                # Count the internal reservation inside the committed block, after the finalizer is
+                # armed. The finalizer's offset -> _internal_offsets decrement in
+                # _process_pending_frees is then guaranteed a matching entry, and a failed build or
+                # grow (which never reaches here) can never leave internal_bytes over-counted or a
+                # phantom offset in _internal_offsets.
+                if internal:
+                    self.internal_bytes += aligned_size
+                    self._internal_offsets[offset] = aligned_size
 
                 return tensor
             finally:
@@ -899,20 +991,18 @@ class VMemChunkedAllocator(BaseAllocator):
         granule-aligned), using the same rule as the live allocator so the prediction matches a real
         allocator built with the same reservation.
 
-        ``target_user_bytes`` is assumed power-of-two (as the live allocator asserts for its chunk
-        size); a non-power-of-two target still returns a plan, but the built allocator would reject it
-        until #633 (non-power-of-two chunk sizes) lands.
+        A non-power-of-two ``target_user_bytes`` is fully supported: chunk sizes need not be powers
+        of two, so the built allocator accepts it and this plan matches what it would map (the
+        estimate is granule-accurate for any target, not only power-of-two ones).
         """
         g = max(1, granularity)
-        min_align = max(g, 1024)
         if isinstance(reserved_bytes, (list, tuple)):
-            reserved = sum(_aligned_block_size(int(b), g, min_align) for b in reserved_bytes if b and int(b) > 0)
+            reserved = sum(_aligned_block_size(int(b), g) for b in reserved_bytes if b and int(b) > 0)
         else:
             b = max(0, int(reserved_bytes))
-            reserved = _aligned_block_size(b, g, min_align) if b > 0 else 0
+            reserved = _aligned_block_size(b, g) if b > 0 else 0
         # Mirror __init__'s chunk sizing: derive from the user target, cap at chunk_size, round up to
-        # a whole granule. The real allocator additionally requires the result to be a power of two
-        # (it asserts), which holds for power-of-two targets and chunk sizes.
+        # a whole granule. Chunk sizes need not be a power of two, so this holds for any target.
         effective_chunk = min(chunk_size, max(target_user_bytes, g))
         cs = max(effective_chunk, g)
         cs = -(-cs // g) * g
@@ -960,6 +1050,8 @@ class VMemChunkedAllocator(BaseAllocator):
                 "chunk_size": self.chunk_size,
                 # "granularity" is kept as a backward-compat alias of "recommended_granularity".
                 "granularity": self.granularity,
+                "recommended_granularity": self.granularity,
+                "min_granularity": self.min_granularity,
                 **capacity,
             }
 
