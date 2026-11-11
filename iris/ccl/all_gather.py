@@ -61,7 +61,7 @@ def all_gather(output_tensor, input_tensor, ctx, group=None, async_op=False, con
 
         launch(input_tensor, output_tensor, ctx, rank_in_group, rank_global, world_size, rank_start, rank_stride)
         if not async_op:
-            ctx.barrier()
+            ctx.device_barrier(group=group)
         return
 
     if config.use_gluon and config.all_gather_variant == "tdm":

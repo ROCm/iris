@@ -58,8 +58,9 @@ def _all_reduce(shmem, dst, src):
 
 
 def _reduce_scatter(shmem, dst, src):
-    # Only the owned tiles are written, so mark the rest. The output is local, so
-    # no peer can race with this fill
+    # Only the owned tiles are written, so mark the rest. Reduce-scatter pulls:
+    # peers read this rank's input but never write its output, so only this
+    # rank's own kernel can race with this fill, and the stream orders that
     dst.fill_(float("nan"))
     shmem.ccl.reduce_scatter(dst, src)
 
