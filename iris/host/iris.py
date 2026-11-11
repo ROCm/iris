@@ -1811,6 +1811,49 @@ class Iris:
 
             return prepare(output_tensor, self._iris, schedule=schedule, timeout=timeout, prepare_ahead=prepare_ahead)
 
+        def prepare_scatter(self, tensor, root, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place scatter that the root triggers on the SDMA copy engines: part ``r`` of
+            ``tensor`` (``world_size`` parts of ``M`` rows) lands at the same offset on rank ``r``.
+            ``schedule`` is the root's chunks (``peers=(r,)`` for part ``r``; others pass ``None``);
+            ``timeout`` and ``prepare_ahead`` are as for :meth:`prepare_all_gather`.
+            """
+            from iris.ccl.sdma.plans import prepare_scatter
+
+            return prepare_scatter(tensor, root, self._iris, schedule, timeout, prepare_ahead)
+
+        def prepare_gather(self, tensor, root, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place gather to ``root`` on the SDMA copy engines: part ``r`` of rank ``r``'s
+            ``tensor`` (``world_size`` parts of ``M`` rows) lands at the same offset on the root.
+            ``schedule`` is this rank's chunks of its part (``peers=(root,)``; the root passes ``None``);
+            ``timeout`` and ``prepare_ahead`` are as for :meth:`prepare_all_gather`.
+            """
+            from iris.ccl.sdma.plans import prepare_gather
+
+            return prepare_gather(tensor, root, self._iris, schedule, timeout, prepare_ahead)
+
+        def prepare_broadcast(self, tensor, root, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place broadcast from ``root`` on the SDMA copy engines: the root's ``tensor``
+            lands at the same offset on every rank. ``schedule`` is the root's chunks (others pass
+            ``None``); ``timeout`` and ``prepare_ahead`` are as for :meth:`prepare_all_gather`.
+            """
+            from iris.ccl.sdma.plans import prepare_broadcast
+
+            return prepare_broadcast(tensor, root, self._iris, schedule, timeout, prepare_ahead)
+
+        def prepare_all_to_all(self, tensor, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place all-to-all on the SDMA copy engines: ``tensor`` holds ``world_size ** 2``
+            blocks of ``M`` rows, ``[source][destination]``, and block ``(r, j)`` of rank ``r`` lands at the
+            same offset on rank ``j``. ``schedule`` is this rank's chunks (``peers=(j,)`` for block
+            ``(r, j)``); ``timeout`` and ``prepare_ahead`` are as for :meth:`prepare_all_gather`.
+            """
+            from iris.ccl.sdma.plans import prepare_all_to_all
+
+            return prepare_all_to_all(tensor, self._iris, schedule, timeout, prepare_ahead)
+
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
             Prepare reusable workspace for all-reduce.
