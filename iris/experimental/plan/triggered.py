@@ -31,7 +31,7 @@ import torch.distributed as dist
 from iris.host import queue_ledger
 from iris.host.distributed.helpers import distributed_allgather
 from iris.experimental.plan import triton as dv
-from iris.experimental.plan import armer, kernels
+from iris.experimental.plan import armer, kernels, rdma
 from iris.experimental.plan.schedule import check_disjoint, validate
 from iris.mem.utils import REALTIME_HZ
 
@@ -125,9 +125,9 @@ def _mark_closed(plans):
         plan.state = State.CLOSED
         if plan._leaked:
             warnings.warn("a triggered plan could not fence every copy-engine queue; its memory is kept, not freed")
-            _leaked.append((plan.gates, plan.view, plan.buffer, plan.destination))
+            _leaked.append((plan.gates, plan.view, plan.buffer, plan.destination, plan._rdma))
         plan.gates = plan.counters = plan.arrivals = plan.completion = plan.group_arrivals = None
-        plan.view = plan.buffer = plan.destination = None
+        plan.view = plan.buffer = plan.destination = plan._rdma = None
 
 
 class TriggeredPlan:
@@ -206,6 +206,22 @@ class TriggeredPlan:
         if self.num_chunks == 0:
             raise ValueError("no rank's schedule has any chunks")
 
+        # Peers on other hosts, reached over RDMA
+        self._rdma_peers = frozenset(ctx._rdma_endpoints)
+        self._rdma = None
+        self._rdma_sends, rdma_keys = rdma.kicks(
+            self.schedules, self.rank, self.world_size, self._rdma_peers, self._first
+        )
+        if self._rdma_peers:
+            error = None
+            try:
+                rdma.check(self.schedules, self._rdma_sends)
+                if prepare_ahead:
+                    raise ValueError("prepare_ahead is not supported for a plan that sends over RDMA")
+            except Exception as e:
+                error = e
+            self._agree(error, "send over RDMA")
+
         self.buffer, self.destination = buffer, destination
         counts = group_counts(self.schedules, self.world_size)
         # Each chunk's counter (marks) and arrival, each peer queue's completion, each peer's round
@@ -235,7 +251,12 @@ class TriggeredPlan:
         self._status = torch.zeros(self.num_chunks + self.world_size, dtype=torch.int32, device=buffer.device)
         # Every round ends with a completion signal on each of these (peer, queue), even after a failed arm
         self._queues = sorted(
-            {(p, c.lane) for c in self.schedules[self.rank] for p in c.recipients(self.rank, self.world_size)}
+            {
+                (p, c.lane)
+                for c in self.schedules[self.rank]
+                for p in c.recipients(self.rank, self.world_size)
+                if p not in self._rdma_peers
+            }
         )
         self._leaked = False
         self._prepare_error = None
@@ -246,6 +267,9 @@ class TriggeredPlan:
         self._prepare_ahead = prepare_ahead
         self._ledger = queue_ledger.ledger()
         self.round = 0
+        if self._rdma_peers:
+            # Collective: connects this plan's queue pairs
+            self._rdma = rdma.RdmaKicks(self, self._rdma_peers, self._rdma_sends, rdma_keys)
         try:
             self._arm_first()
         except Exception as error:
@@ -291,7 +315,7 @@ class TriggeredPlan:
 
     def _arm_first(self):
         """Collective: hold queue space (two rounds with prepare_ahead) and prepare round 1 on every rank, or raise on every rank."""
-        self._round_bytes = nbytes = armer.round_bytes(self.schedules[self.rank], self.rank, self.world_size)
+        self._round_bytes = nbytes = self._bytes_per_round()
         error, held = None, False
         try:
             # With prepare_next(), a round may be prepared while the one before it still is
@@ -321,6 +345,15 @@ class TriggeredPlan:
             # Chains armed so far stay parked: close() flushes them
             self.state = State.FAILED
             raise
+
+    def _bytes_per_round(self):
+        """Queue bytes one round of this rank's chains takes, keyed ``(peer, queue)``: copies to peers, kicks to itself."""
+        nbytes = armer.round_bytes(self.schedules[self.rank], self.rank, self.world_size)
+        nbytes = {key: n for key, n in nbytes.items() if key[0] not in self._rdma_peers}
+        if self._rdma_sends:
+            for key, n in rdma.kick_bytes(self._rdma_sends, self.rank).items():
+                nbytes[key] = nbytes.get(key, 0) + n
+        return nbytes
 
     def _check_round(self, round):
         # Counters are never reset and the copy engine compares 32 bits; the same on every rank
@@ -354,6 +387,8 @@ class TriggeredPlan:
             chunk_id = self.chunk_id(self.rank, i)
             arrival = n + chunk_id if chunk.group is None else group_gate(n, w, chunk.group)
             for peer in chunk.recipients(self.rank, w):
+                if peer in self._rdma_peers:
+                    continue
                 copies = [
                     armer.Copy(
                         src + r.offset_bytes,
@@ -379,8 +414,13 @@ class TriggeredPlan:
                 self._build_chains()
             for chain, writers in self._chains:
                 armer.arm_chain(chain, writers * round)
+            if self._rdma is not None:
+                self._rdma.arm(round)
         except Exception as e:
             error = e
+        if self._rdma is not None and self._rdma.armed != round:
+            # A copy-engine chain failed before the round's RDMA work was posted: nothing will send it
+            self._rdma.abandon(round)
         # Even after a failed arm, so a flush can tell when each queue has drained
         failed = self._signal_completion()
         if error is not None:
@@ -444,6 +484,13 @@ class TriggeredPlan:
     def _wait(self, own_only, timeout):
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         while True:
+            if self._rdma is not None:
+                # The NIC's completions, not a copy engine, tell when RDMA peers have this rank's chunks
+                self._rdma.progress()
+                error = None if own_only else self._rdma_error()
+                if error:
+                    self.state = State.FAILED
+                    raise error
             self._launch_wait(own_only, False, _WAIT_SLICE)
             status = self._status.cpu()
             pending = status == 0
@@ -495,6 +542,15 @@ class TriggeredPlan:
         detail = f"; own chunks short of writers' marks: {index}: {value} of {writers}" if own else ""
         return TimeoutError(f"round {round}: chunks [{index}] not complete{detail}")
 
+    def _rdma_error(self):
+        """The exception for an RDMA send that failed and was not reported yet, or None."""
+        if self._rdma is None or self._rdma.error is None or self._rdma.reported:
+            return None
+        self._rdma.reported = True
+        error = RuntimeError(f"round {self.round}: an RDMA send failed: {self._rdma.error}")
+        error.__cause__ = self._rdma.error
+        return error
+
     def _raise_recorded(self):
         """Raise (once) an error the GPU recorded; the plan is FAILED."""
         error = self._deferred_error(self._error.tolist())
@@ -513,11 +569,19 @@ class TriggeredPlan:
         raised by the next blocking ``wait()``, or by ``close()``.
         """
         self._require(State.RUNNING)
+        if not blocking and self._rdma is not None:
+            raise RuntimeError("a plan that sends over RDMA needs wait(): the host polls the NIC for its completions")
         if not blocking:
             ticks = int((self.timeout if timeout is None else timeout) * REALTIME_HZ)
             self._launch_wait(False, True, ticks)
             self.state = State.DONE
             return
+        if self._rdma is not None:
+            # Before anything waits for the stream: a kernel on it may be waiting in sent() for what
+            # only these completions set
+            deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
+            self._rdma.drain(deadline)
+            timeout = max(0.0, deadline - time.monotonic())
         self._raise_recorded()
         try:
             self._wait(own_only=False, timeout=timeout)
@@ -565,6 +629,8 @@ class TriggeredPlan:
         If this rank cannot prepare the next round, it still takes part in the fence, telling its
         peers, whose ``wait()`` for that round then raises; then this call raises. A rank whose plan
         has recorded an error (from a stream-ordered ``wait()``) does the same, without raising here.
+
+        A plan with RDMA peers fences on the host.
         """
         self._require(State.DONE)
         self._check_round(self.round + 1)
@@ -573,14 +639,25 @@ class TriggeredPlan:
         self._ledger.release(self, self.round)
         self._prepare_next()
         error, self._prepare_error = self._prepare_error, None
-        kernels.fence_kernel[(1,)](
-            self.view,
-            self.ctx.get_heap_bases(),
-            self._error,
-            int(self.timeout * REALTIME_HZ),
-            ABORT=error is not None,
-            num_warps=1,
-        )
+        if self._rdma is not None:
+            # Peers on other hosts are not mapped, so the fence is on the host: the stream's reads of
+            # this round are done, then every rank agrees (or raises) before any starts the next one
+            torch.cuda.current_stream().synchronize()
+            try:
+                self._agree(error, "prepare the next round")
+            except Exception:
+                # Chains may be left armed: close() flushes them
+                self.state = State.FAILED
+                raise
+        else:
+            kernels.fence_kernel[(1,)](
+                self.view,
+                self.ctx.get_heap_bases(),
+                self._error,
+                int(self.timeout * REALTIME_HZ),
+                ABORT=error is not None,
+                num_warps=1,
+            )
         if error is not None:
             # Chains may be left armed: close() flushes them
             self.state = State.FAILED
@@ -646,7 +723,7 @@ class TriggeredPlan:
             closed.append(self)
         self._ledger.release(self)
         self.ctx.barrier()
-        error = self._deferred_error(self._error.tolist())
+        error = self._deferred_error(self._error.tolist()) or self._rdma_error()
         for plan in closed:
             # Plans whose own close() returned while they were queued behind this one
             other = plan._deferred_error(plan._error.tolist()) if plan is not self else None

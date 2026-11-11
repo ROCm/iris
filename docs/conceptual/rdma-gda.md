@@ -18,3 +18,15 @@ def send(data, flag, rank, peer, heap_bases, nbytes, rdma_ctx, status):
   `heap_size`, which also holds Iris's own allocations.
 - A queue pair is driven by the host or by kernels, not both.
 - Call `rdma_quiet` at least every few hundred requests: 350 or more outstanding did not complete in testing.
+
+## Triggered plans over RDMA
+
+With `engines=("sdma", "rdma")`, a triggered plan (or `ctx.ccl.prepare_*`) also sends to peers on other
+hosts: the host posts each chunk's RDMA writes dormant, and the chunk's copy-engine gate rings the NIC
+doorbell once the producer marks it ready. Differences from copy-engine peers:
+
+- Groups, `prepare_ahead` and `wait(blocking=False)` are refused; `sent()` / `wait_sent()` become true
+  only while the host is in `wait()`.
+- Per round, a (peer, lane) holds at most 1,024 writes and 512 chunks, and no write exceeds 2 GiB.
+- A lane's kicks share one copy-engine queue, so a chunk released early waits for earlier chunks on
+  that lane to every RDMA peer.

@@ -345,7 +345,7 @@ schedule = chunks(first, 4, base=out, lane=0) + chunks(second, 4, base=out, lane
   also miss the bytes that rank sends. The plan checks this when it is created, which catches a
   schedule built from the whole buffer instead of the rank's own part. `destination` must be the
   buffer itself or memory apart from it.
-- **Single node only.**
+- **Single node, or one rank per host over RDMA** (see [RDMA](rdma-gda.md#triggered-plans-over-rdma)).
 - **Linear regions are at most 1 GiB** (`COPY_LINEAR`'s byte count is 30 bits on SDMA 4.4). The
   schedule builders split larger ranges.
 

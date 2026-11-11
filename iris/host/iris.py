@@ -174,6 +174,9 @@ class Iris:
             from iris.device.sdma_utils import bind_sdma_ep
 
             self._sdma_ep = bind_sdma_ep()
+            # Until both xio trains merge
+            if sdma_lanes > 1 and not hasattr(self._sdma_ep, "get_host_channel_count"):
+                raise RuntimeError("sdma_lanes > 1 needs rocm-xio's multi-channel host queues")
 
         # Initialize distributed environment
         comm, cur_rank, num_ranks = init_distributed()
@@ -193,7 +196,9 @@ class Iris:
         if self._sdma_ep is not None:
             # rocm-xio keys queues by device ordinal and only opens queues between GPUs this process can see
             rank_gpus = rank_gpu_ordinals(gpu_id, num_ranks)
-            _require_sdma_visibility(rank_gpus)
+            if "rdma" not in engines:
+                _require_sdma_visibility(rank_gpus)
+            # With RDMA, ranks on other hosts are None: the copy engines reach this host's GPUs only
             self._copy_engine_gpus = rank_gpus
 
         if logger.isEnabledFor(logging.INFO):
@@ -309,13 +314,18 @@ class Iris:
         context_size = sdma_ep.QUEUE_DEVICE_CTX_SIZE
         self.copy_engines_device_ctx = torch.zeros((num_ranks, context_size), dtype=torch.uint64, device=self.device)
 
-        for peer_gpu in sorted(set(self._copy_engine_gpus)):
+        for peer_gpu in sorted({g for g in self._copy_engine_gpus if g is not None}):
             # Device-initiated queues
             sdma_ep.create_queue(self.gpu_id, peer_gpu)
-            # Host-initiated queues, one per lane
-            sdma_ep.create_host_queue(self.gpu_id, peer_gpu, num_channels=self.sdma_lanes)
+            # Host-initiated queues, one per lane (one-lane call: until both xio trains merge)
+            if self.sdma_lanes == 1:
+                sdma_ep.create_host_queue(self.gpu_id, peer_gpu)
+            else:
+                sdma_ep.create_host_queue(self.gpu_id, peer_gpu, num_channels=self.sdma_lanes)
 
         for peer_rank, peer_gpu in enumerate(self._copy_engine_gpus):
+            if peer_gpu is None:
+                continue  # on another host: reached by RDMA
             handle = sdma_ep.get_queue_device_ctx(self.gpu_id, peer_gpu)
             self.debug(f"---- Queue {peer_rank} (GPU {self.gpu_id} -> GPU {peer_gpu}) ------------")
             self.debug(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
@@ -341,7 +351,10 @@ class Iris:
 
     def _copy_engine_devices(self, to_rank):
         """The (source, destination) device ordinals of this rank's copy-engine queue to ``to_rank``."""
-        return self.gpu_id, self._copy_engine_gpus[to_rank]
+        peer_gpu = self._copy_engine_gpus[to_rank]
+        if peer_gpu is None:
+            raise RuntimeError(f"rank {to_rank} is on another host; the copy engines reach only this host's GPUs")
+        return self.gpu_id, peer_gpu
 
     def __del__(self):
         """Cleanup resources on deletion."""
@@ -1474,6 +1487,8 @@ class Iris:
         else:
             # Quiet to all ranks
             for rank, peer_gpu in enumerate(self._copy_engine_gpus):
+                if peer_gpu is None:
+                    continue  # on another host
                 self._check_host_queue_idle(rank, channel)
                 sdma_ep.quiet(self.gpu_id, peer_gpu, channel)
 
