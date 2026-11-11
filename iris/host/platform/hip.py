@@ -230,11 +230,7 @@ def _get_num_xcc_cached(device_id):
 
 
 def get_num_xcc(device_id=None):
-    # device_id is resolved to a concrete value before the cache boundary,
-    # so a call with device_id=None is keyed on the actual current device
-    # (which get_device_id() reads live) rather than cached under the
-    # literal None for whichever device happened to be current on the
-    # first call.
+    # Resolve before caching so the key is the current device, not None.
     if device_id is None:
         device_id = get_device_id()
     return _get_num_xcc_cached(device_id)

@@ -54,3 +54,25 @@ def test_get_num_xcc_keys_the_cache_on_device_id():
             assert runtime.hipDeviceGetAttribute.call_count == 2
     finally:
         hip._get_num_xcc_cached.cache_clear()
+
+
+def test_get_num_xcc_default_follows_current_device():
+    hip._get_num_xcc_cached.cache_clear()
+    xcc_by_device = {0: 8, 1: 4}
+
+    def fake_attr(out, attr, device_id):
+        out._obj.value = xcc_by_device[device_id]
+        return 0
+
+    runtime = mock.MagicMock()
+    runtime.hipDeviceGetAttribute.side_effect = fake_attr
+    try:
+        with mock.patch.object(hip, "_is_amd_backend", True), mock.patch.object(
+            hip, "get_rocm_version", return_value=(7, 1)
+        ), mock.patch.object(hip, "get_device_id", side_effect=[0, 1, 0]), mock.patch.object(
+            hip, "gpu_runtime", runtime
+        ), mock.patch.object(hip, "gpu_try"):
+            assert [hip.get_num_xcc() for _ in range(3)] == [8, 4, 8]
+            assert runtime.hipDeviceGetAttribute.call_count == 2
+    finally:
+        hip._get_num_xcc_cached.cache_clear()
