@@ -223,8 +223,8 @@ class SymmetricHeap:
         if is_simulation_env():
             allocator_type = "torch"
 
-        # Bytes added on top of heap_size for Iris's own allocations. vmem_chunked grows on
-        # demand (and needs a power-of-two chunk size), so it is left alone.
+        # Bytes added on top of heap_size for Iris's own allocations. vmem_chunked is excluded:
+        # it grows on demand and accounts for its own internal budget, so it is left alone here.
         self.reserved_size = 0
         if reserved_bytes > 0 and allocator_type in ("torch", "vmem"):
             if allocator_type == "torch":
@@ -366,7 +366,6 @@ class SymmetricHeap:
         actual_elements = max(num_elements, min_elements)
 
         is_chunked = isinstance(self.allocator, VMemChunkedAllocator)
-        chunks_before = self.allocator.get_num_chunks() if is_chunked else 0
 
         if is_chunked:
             # Every rank reaches the same branches: they depend only on state identical across ranks
@@ -384,9 +383,20 @@ class SymmetricHeap:
         tensor = tensor[:num_elements]
 
         if is_chunked:
-            chunks_after = self.allocator.get_num_chunks()
-            if chunks_after > chunks_before:
-                self.refresh_peer_access()
+            # Refresh whenever our mapped chunk count differs from what peers have already
+            # imported (_shared_chunk_counts), not just when THIS allocate grew a chunk. A
+            # chunk grown by an allocation that then failed before refresh would otherwise be
+            # exported to no one; a later allocation that fits without growing would see an
+            # unchanged count and skip the refresh, leaving peers to RMA into unmapped VA.
+            #
+            # Single-rank jobs have no peers to export to and a base VA that never moves, so
+            # they never need a post-allocation refresh (and _shared_chunk_counts is never even
+            # created for them). Gating on num_ranks avoids refreshing on every allocation.
+            if self.num_ranks > 1:
+                shared_counts = getattr(self, "_shared_chunk_counts", None)
+                my_shared = shared_counts[self.cur_rank] if shared_counts else 0
+                if self.allocator.get_num_chunks() != my_shared:
+                    self.refresh_peer_access()
         else:
             self.refresh_peer_access()
 
@@ -655,9 +665,13 @@ class SymmetricHeap:
                     continue
 
                 if peer not in self._peer_va_ranges:
+                    # Reserve the peer arena aligned exactly as the owner's base_va, so a
+                    # symmetric object's translated address (peer_va_base + offset) is aligned
+                    # to the same degree the owner's data_ptr() is -- otherwise an over-aligned
+                    # allocation looks aligned on the owner but misaligned to every importer.
                     peer_va_base = self.allocator.driver.reserve_va(
                         self.allocator.va_size,
-                        self.allocator.granularity,
+                        self.allocator.base_alignment,
                     )
                     self._peer_va_ranges[peer] = peer_va_base
                 else:
@@ -785,9 +799,11 @@ class SymmetricHeap:
                 )
 
             if peer not in self._peer_va_ranges:
+                # Align the peer arena as the owner's base_va (see the chunked path above) so
+                # translated addresses are aligned identically on importers and the owner.
                 peer_va_base = self.allocator.driver.reserve_va(
                     self.allocator.va_size,
-                    self.allocator.granularity,
+                    self.allocator.base_alignment,
                 )
                 self._peer_va_ranges[peer] = peer_va_base
             else:

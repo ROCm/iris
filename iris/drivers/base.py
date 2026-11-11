@@ -123,7 +123,23 @@ class BaseDriver(ABC):
 
     @abstractmethod
     def get_minimum_granularity(self) -> int:
-        """Minimum allocation granularity in bytes for this driver+device."""
+        """Smallest legal allocation granularity in bytes for this driver+device.
+
+        This is the finest unit the driver will accept for a mapping; it is not
+        necessarily the most efficient one (see ``get_recommended_granularity``).
+        """
+
+    def get_recommended_granularity(self) -> int:
+        """Recommended (performant) allocation granularity in bytes.
+
+        Always a multiple of ``get_minimum_granularity``. Allocators should back
+        memory in units of this value. Defaults to the minimum for drivers that
+        do not distinguish the two.
+        """
+        # TODO(#600): the NVIDIA local/fabric drivers inherit this default, so they report
+        # recommended == minimum. Query CU_MEM_ALLOC_GRANULARITY_RECOMMENDED and override there
+        # to label the recommended granule distinctly, as the AMD drivers already do.
+        return self.get_minimum_granularity()
 
     @abstractmethod
     def reserve_va(self, size: int, alignment: int = 0) -> int:
