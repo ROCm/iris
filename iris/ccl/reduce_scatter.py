@@ -21,12 +21,15 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
         ctx: Iris instance
         op: ReduceOp (only SUM supported)
         group: ProcessGroup or None
-        async_op: If False (default), end with a device-side barrier on the current
-            stream: work queued after this call runs only once every rank's part of
-            the collective is done. The host does not wait. If True, skip the
-            barrier; the caller must synchronize the ranks, e.g. with
-            ``ctx.device_barrier(group=group)``, before reading the output or
-            reusing the buffers
+        async_op: If False (default), surround the collective with device-side
+            barriers on the current stream. It starts only once every rank's
+            earlier work is done, so peers read this rank's finished input and do
+            not overwrite an output it is still reading. Work queued after this
+            call runs only once every rank's part of the collective is done. The
+            host does not wait. If True, skip both barriers; the caller must
+            synchronize the ranks, e.g. with ``ctx.device_barrier(group=group)``,
+            before the call and again before reading the output or reusing the
+            buffers
         config: Config with kernel parameters
     """
     from iris.ccl.config import Config
@@ -60,6 +63,11 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
             f"Output tensor shape {output_tensor.shape[:2]} does not match input shape {(M, N)}. "
             f"For reduce-scatter, output should have the same shape as input."
         )
+
+    if not async_op:
+        # Peers may read this rank's input or write its output, so wait for every
+        # rank's earlier work before starting
+        ctx.device_barrier(group=group)
 
     if variant == "tdm":
         # gfx1250 tensor data movement engine; see gluon/reduce_scatter_tdm.py
