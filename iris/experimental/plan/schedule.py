@@ -8,8 +8,8 @@ A schedule is the list of chunks one rank sends, in the order its producer compl
 chunk has been marked ready by all of its ``writers``, the copy engine copies every region of the
 chunk to each of its peers and signals the chunk's arrival there.
 
-All of a rank's copies to one peer run in schedule order, so a chunk completed early waits for
-every chunk before it. Order the schedule the way the producer finishes its work.
+All of a rank's copies to one peer on one lane run in schedule order, so a chunk completed early
+waits for every chunk before it on that lane. Order the schedule the way the producer finishes its work.
 """
 
 import operator
@@ -71,18 +71,21 @@ class Chunk:
     ``peers`` are the ranks it goes to (every other rank if ``None``). Chunks with the same
     ``group`` (a small integer, shared across ranks) signal one arrival counter at each receiver,
     so a consumer can wait for all of them at once with ``wait_group``.
+    ``lane`` picks which of the context's ``sdma_lanes`` host queues carries its chains.
     """
 
     regions: tuple
     writers: int = 1
     peers: tuple | None = None
     group: int | None = None
+    lane: int = 0
 
     def __post_init__(self):
         if self.peers is not None:
             object.__setattr__(self, "peers", tuple(sorted({_index(p, "peers") for p in self.peers})))
         if self.group is not None:
             object.__setattr__(self, "group", _index(self.group, "group"))
+        object.__setattr__(self, "lane", _index(self.lane, "lane"))
 
     def recipients(self, sender, world_size):
         """The ranks this chunk goes to, when ``sender`` sends it."""
@@ -134,26 +137,26 @@ def _dst_offset(view, dst, dst_base, what):
     return _byte_offset(dst, dst_base)
 
 
-def whole(view, base=None, writers=1, dst=None, dst_base=None, peers=None, group=None):
+def whole(view, base=None, writers=1, dst=None, dst_base=None, peers=None, group=None, lane=0):
     """
     One chunk covering a contiguous ``view``, marked ready by ``writers`` programs per round.
 
     By default it lands where it is, in each peer's buffer. With ``dst`` (a contiguous view of the
     same shape inside ``dst_base``, the plan's destination), it lands there instead. ``peers``
-    limits the ranks it goes to, and ``group`` is its arrival group.
+    limits the ranks it goes to, ``group`` is its arrival group and ``lane`` its lane.
     """
     if not view.is_contiguous() or (dst is not None and not dst.is_contiguous()):
         raise ValueError("whole() needs contiguous views")
     dst_offset = _dst_offset(view, dst, dst_base, "whole()")
     nbytes = view.numel() * view.element_size()
-    return [Chunk(_linear(_byte_offset(view, base), nbytes, dst_offset), writers, peers, group)]
+    return [Chunk(_linear(_byte_offset(view, base), nbytes, dst_offset), writers, peers, group, lane)]
 
 
-def chunks(view, n, base=None, writers=1, dst=None, dst_base=None, peers=None, group=None):
+def chunks(view, n, base=None, writers=1, dst=None, dst_base=None, peers=None, group=None, lane=0):
     """
     Split a contiguous ``view`` along dim 0 into ``n`` chunks, in order. Suits producers that
     finish row blocks in order: row-block, streaming and elementwise kernels. ``dst``, ``dst_base``,
-    ``peers`` and ``group`` are as for ``whole()``; every chunk joins ``group``.
+    ``peers``, ``group`` and ``lane`` are as for ``whole()``; every chunk joins ``group``.
     """
     if not view.is_contiguous() or (dst is not None and not dst.is_contiguous()):
         raise ValueError("chunks() needs contiguous views")
@@ -172,13 +175,14 @@ def chunks(view, n, base=None, writers=1, dst=None, dst_base=None, peers=None, g
             writers,
             peers,
             group,
+            lane,
         )
         for r in range(0, rows, per_chunk)
     ]
 
 
 def tile_chunks(
-    view, block_shape, tiles_per_chunk, order=None, base=None, dst=None, dst_base=None, peers=None, group=None
+    view, block_shape, tiles_per_chunk, order=None, base=None, dst=None, dst_base=None, peers=None, group=None, lane=0
 ):
     """
     Group the tiles of a tiled producer into chunks of ``tiles_per_chunk``, in completion order.
@@ -197,7 +201,7 @@ def tile_chunks(
 
     With ``dst`` (a 2D view of the same shape and unit column stride inside ``dst_base``, the plan's
     destination), each tile lands at its place in ``dst`` instead, with ``dst``'s row pitch.
-    ``peers`` limits the ranks every chunk goes to, and every chunk joins ``group``.
+    ``peers`` limits the ranks every chunk goes to, every chunk joins ``group`` and runs on ``lane``.
     """
     if view.dim() != 2 or view.stride(1) != 1 or (dst is not None and (dst.dim() != 2 or dst.stride(1) != 1)):
         raise ValueError("tile_chunks() needs 2D views with unit column stride")
@@ -231,15 +235,15 @@ def tile_chunks(
                     region, dst_offset_bytes=dst_offset + m0 * dst_stride + n0 * elem, dst_stride_bytes=dst_stride
                 )
             regions.append(region)
-        result.append(Chunk(tuple(regions), len(regions), peers, group))
+        result.append(Chunk(tuple(regions), len(regions), peers, group, lane))
     return result
 
 
-def validate(schedule, buffer_bytes, destination_bytes=None, rank=None, world_size=None):
+def validate(schedule, buffer_bytes, destination_bytes=None, rank=None, world_size=None, lanes=1):
     """
     Check every chunk of ``schedule`` fits a buffer of ``buffer_bytes`` (and a destination of
-    ``destination_bytes``, by default the buffer) and can be encoded. With ``rank`` and
-    ``world_size``, also check each chunk's ``peers``.
+    ``destination_bytes``, by default the buffer), can be encoded and sits on one of the ``lanes``
+    lanes. With ``rank`` and ``world_size``, also check each chunk's ``peers``.
     """
     destination_bytes = buffer_bytes if destination_bytes is None else destination_bytes
     for i, chunk in enumerate(schedule):
@@ -249,6 +253,8 @@ def validate(schedule, buffer_bytes, destination_bytes=None, rank=None, world_si
             raise ValueError(f"chunk {i} needs at least one writer")
         if chunk.group is not None and chunk.group < 0:
             raise ValueError(f"chunk {i}: group must be a non-negative integer, not {chunk.group!r}")
+        if not 0 <= chunk.lane < lanes:
+            raise ValueError(f"chunk {i}: lane {chunk.lane} needs sdma_lanes > {chunk.lane}, not {lanes}")
         if chunk.peers is not None:
             if not chunk.peers:
                 raise ValueError(f"chunk {i} has no peers")

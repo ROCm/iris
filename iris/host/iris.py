@@ -75,7 +75,7 @@ from iris.mem.triton.tracing import Tracing as DeviceTracing  # noqa: F401
 from iris.host.memory import tensors as tensor_creation
 from iris.host.platform.utils import is_simulation_env
 
-_SUPPORTED_ENGINES = frozenset({"sdma"})
+_SUPPORTED_ENGINES = frozenset({"sdma", "rdma"})
 
 
 def _resolve_gpu_id(device, cur_rank, num_gpus):
@@ -94,6 +94,15 @@ def _resolve_gpu_id(device, cur_rank, num_gpus):
     if not 0 <= device < num_gpus:
         raise ValueError(f"GPU {device} is not one of the {num_gpus} visible GPUs")
     return device
+
+
+def _raise_if_any_failed(error, failed, what):
+    """Raise ``error`` on the rank that has it, and say which ranks failed on the others."""
+    if error is not None:
+        raise error
+    ranks = [r for r, f in enumerate(failed) if f]
+    if ranks:
+        raise RuntimeError(f"rank(s) {ranks} could not {what}")
 
 
 def _require_sdma_visibility(rank_gpus):
@@ -124,12 +133,17 @@ class Iris:
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem"
         engines (str or tuple of str, optional): Engine name or names to set up. Use
             ``("sdma",)`` for host- and device-initiated SDMA operations (needs
-            ``pip install iris[sdma]``). Defaults to ``()`` (none).
+            ``pip install iris[sdma]``), and ``("rdma",)`` for GPU-initiated RDMA to peers on other
+            hosts (mlx5; see ``docs/conceptual/rdma-gda.md``). Defaults to ``()`` (none).
         device (int, str or torch.device, optional): GPU this rank runs on, as an index
             into the visible GPUs, ``"cuda:N"``, or a ``torch.device``; ``"cuda"`` uses the
             current device, so call ``torch.cuda.set_device`` first. ``None`` (default) uses
             ``rank % visible GPUs``. It must be the GPU the process group is bound to; if the
             group was initialized with ``device_id``, a different GPU raises ``ValueError``.
+        sdma_lanes (int, optional): Independent host copy-engine queues (lanes) to each peer; lane ``i``
+            is ``channel=i`` of ``put``/``quiet``. Needs ``engines=("sdma",)``. Defaults to 1.
+        rdma_device (str, optional): The RDMA NIC to use for ``engines=("rdma",)`` (for example
+            ``"mlx5_0"``). Defaults to ``""`` (let rocm-xio choose).
 
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap with torch allocator
@@ -141,7 +155,9 @@ class Iris:
 
     """
 
-    def __init__(self, heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
+    def __init__(
+        self, heap_size=1 << 30, allocator_type="torch", engines=(), device=None, sdma_lanes=1, rdma_device=""
+    ):
         if engines is None:
             engines = ()
         elif isinstance(engines, str):
@@ -151,11 +167,16 @@ class Iris:
         unsupported = set(engines) - _SUPPORTED_ENGINES
         if unsupported:
             raise ValueError(f"Unsupported engines: {sorted(unsupported)}. Supported: {sorted(_SUPPORTED_ENGINES)}.")
+        self.sdma_lanes = sdma_lanes
+        self.rdma_device = rdma_device
         self._sdma_ep = None
         if "sdma" in engines:
             from iris.device.sdma_utils import bind_sdma_ep
 
             self._sdma_ep = bind_sdma_ep()
+            # Until both xio trains merge
+            if sdma_lanes > 1 and not hasattr(self._sdma_ep, "get_host_channel_count"):
+                raise RuntimeError("sdma_lanes > 1 needs rocm-xio's multi-channel host queues")
 
         # Initialize distributed environment
         comm, cur_rank, num_ranks = init_distributed()
@@ -175,7 +196,9 @@ class Iris:
         if self._sdma_ep is not None:
             # rocm-xio keys queues by device ordinal and only opens queues between GPUs this process can see
             rank_gpus = rank_gpu_ordinals(gpu_id, num_ranks)
-            _require_sdma_visibility(rank_gpus)
+            if "rdma" not in engines:
+                _require_sdma_visibility(rank_gpus)
+            # With RDMA, ranks on other hosts are None: the copy engines reach this host's GPUs only
             self._copy_engine_gpus = rank_gpus
 
         if logger.isEnabledFor(logging.INFO):
@@ -195,6 +218,7 @@ class Iris:
             allocator_type,
             reserved_bytes=barrier_flags_bytes,
             rank_gpus=rank_gpus,
+            rdma="rdma" in engines,
         )
         self.device = f"cuda:{gpu_id}"
         self.heap_bases = self.heap.get_heap_bases()
@@ -229,6 +253,11 @@ class Iris:
                 torch.zeros(num_ranks, dtype=torch.int64, device=self.device),
             )
 
+        self.rdma_device_ctx = None
+        self._rdma_endpoints = {}
+        if "rdma" in engines:
+            self._init_rdma()
+
         # Initialize CCL interface
         self.ccl = self.CCL(self)
 
@@ -245,6 +274,39 @@ class Iris:
         # Pre-build the device context tensor (rebuilt when tracing is enabled)
         self._build_device_context()
 
+    def _init_rdma(self):
+        """Collective: one connected endpoint per peer, the whole heap registered as one region."""
+        import torch.distributed as dist
+
+        from iris.device import rdma_utils
+
+        endpoints, mine, error = {}, {}, None
+        try:
+            rdma = rdma_utils.bind_rdma_ep()
+            base, size = self.heap.rdma_region()
+            for peer in range(self.num_ranks):
+                if peer == self.cur_rank:
+                    continue
+                ep = rdma.Endpoint("mlx5", self.rdma_device, self.gpu_id, device_queues=True)
+                ep.register_buffer(base, size, True)
+                endpoints[peer] = ep
+                mine[peer] = ep.local_info()
+        except Exception as e:
+            error = e
+        # A rank that could not set up its endpoints says so here, so none is left waiting to connect
+        everyone = [None] * self.num_ranks
+        dist.all_gather_object(everyone, (error is not None, mine))
+        _raise_if_any_failed(error, [failed for failed, _ in everyone], "create its RDMA endpoints")
+        try:
+            for peer, ep in endpoints.items():
+                ep.connect(everyone[peer][1][self.cur_rank])
+        except Exception as e:
+            error = e
+        failed = distributed_allgather(np.array([error is not None], dtype=np.int64)).reshape(-1).tolist()
+        _raise_if_any_failed(error, failed, "connect its RDMA endpoints")
+        self._rdma_endpoints = endpoints
+        self.rdma_device_ctx = rdma_utils.build_context(endpoints, self.num_ranks, self.device)
+
     def _init_copy_engines(self, num_ranks):
         sdma_ep = self._sdma_ep
         sdma_ep.init()
@@ -252,13 +314,18 @@ class Iris:
         context_size = sdma_ep.QUEUE_DEVICE_CTX_SIZE
         self.copy_engines_device_ctx = torch.zeros((num_ranks, context_size), dtype=torch.uint64, device=self.device)
 
-        for peer_gpu in sorted(set(self._copy_engine_gpus)):
+        for peer_gpu in sorted({g for g in self._copy_engine_gpus if g is not None}):
             # Device-initiated queues
             sdma_ep.create_queue(self.gpu_id, peer_gpu)
-            # Host-initiated queues
-            sdma_ep.create_host_queue(self.gpu_id, peer_gpu)
+            # Host-initiated queues, one per lane (one-lane call: until both xio trains merge)
+            if self.sdma_lanes == 1:
+                sdma_ep.create_host_queue(self.gpu_id, peer_gpu)
+            else:
+                sdma_ep.create_host_queue(self.gpu_id, peer_gpu, num_channels=self.sdma_lanes)
 
         for peer_rank, peer_gpu in enumerate(self._copy_engine_gpus):
+            if peer_gpu is None:
+                continue  # on another host: reached by RDMA
             handle = sdma_ep.get_queue_device_ctx(self.gpu_id, peer_gpu)
             self.debug(f"---- Queue {peer_rank} (GPU {self.gpu_id} -> GPU {peer_gpu}) ------------")
             self.debug(f"queue_buf {handle.queue_buf:#x} at {id(handle.queue_buf):#x}")
@@ -284,7 +351,10 @@ class Iris:
 
     def _copy_engine_devices(self, to_rank):
         """The (source, destination) device ordinals of this rank's copy-engine queue to ``to_rank``."""
-        return self.gpu_id, self._copy_engine_gpus[to_rank]
+        peer_gpu = self._copy_engine_gpus[to_rank]
+        if peer_gpu is None:
+            raise RuntimeError(f"rank {to_rank} is on another host; the copy engines reach only this host's GPUs")
+        return self.gpu_id, peer_gpu
 
     def __del__(self):
         """Cleanup resources on deletion."""
@@ -1184,7 +1254,7 @@ class Iris:
         if to_tensor is None:
             to_tensor = from_tensor
 
-        self._check_host_queue_idle(to_rank)
+        self._check_host_queue_idle(to_rank, channel)
         from_rank = self.get_rank()
         src_gpu, dst_gpu = self._copy_engine_devices(to_rank)
         from_ptr = from_tensor.data_ptr()
@@ -1271,7 +1341,7 @@ class Iris:
             ...                wait_flag=flag.data_ptr(), wait_value=256, signal_flag=signal_ptr)
         """
         sdma_ep = self._require_copy_engine()
-        self._check_host_queue_idle(to_rank)
+        self._check_host_queue_idle(to_rank, channel)
         src_gpu, dst_gpu = self._copy_engine_devices(to_rank)
 
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
@@ -1349,7 +1419,7 @@ class Iris:
             channel: SDMA channel to use
         """
         sdma_ep = self._require_copy_engine()
-        self._check_host_queue_idle(to_rank)
+        self._check_host_queue_idle(to_rank, channel)
         src_gpu, dst_gpu = self._copy_engine_devices(to_rank)
 
         per_tile = (global_addrs, dst_addrs, tile_heights, tile_widths, src_strides, dst_strides)
@@ -1412,17 +1482,19 @@ class Iris:
         """
         sdma_ep = self._require_copy_engine()
         if to_rank is not None:
-            self._check_host_queue_idle(to_rank)
+            self._check_host_queue_idle(to_rank, channel)
             sdma_ep.quiet(*self._copy_engine_devices(to_rank), channel)
         else:
             # Quiet to all ranks
             for rank, peer_gpu in enumerate(self._copy_engine_gpus):
-                self._check_host_queue_idle(rank)
+                if peer_gpu is None:
+                    continue  # on another host
+                self._check_host_queue_idle(rank, channel)
                 sdma_ep.quiet(self.gpu_id, peer_gpu, channel)
 
-    def _check_host_queue_idle(self, to_rank):
+    def _check_host_queue_idle(self, to_rank, channel):
         # Chains parked on a host queue block everything queued behind them, quiet() included
-        queue_ledger.ledger().check_idle(self.get_rank(), to_rank)
+        queue_ledger.ledger().check_idle(self.get_rank(), to_rank, channel)
 
     def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -1808,6 +1880,49 @@ class Iris:
 
             return prepare(output_tensor, self._iris, schedule=schedule, timeout=timeout, prepare_ahead=prepare_ahead)
 
+        def prepare_scatter(self, tensor, root, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place scatter that the root triggers on the SDMA copy engines: part ``r`` of
+            ``tensor`` (``world_size`` parts of ``M`` rows) lands at the same offset on rank ``r``.
+            ``schedule`` is the root's chunks (``peers=(r,)`` for part ``r``; others pass ``None``);
+            ``timeout`` and ``prepare_ahead`` are as for :meth:`prepare_all_gather`.
+            """
+            from iris.ccl.sdma.plans import prepare_scatter
+
+            return prepare_scatter(tensor, root, self._iris, schedule, timeout, prepare_ahead)
+
+        def prepare_gather(self, tensor, root, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place gather to ``root`` on the SDMA copy engines: part ``r`` of rank ``r``'s
+            ``tensor`` (``world_size`` parts of ``M`` rows) lands at the same offset on the root.
+            ``schedule`` is this rank's chunks of its part (``peers=(root,)``; the root passes ``None``);
+            ``timeout`` and ``prepare_ahead`` are as for :meth:`prepare_all_gather`.
+            """
+            from iris.ccl.sdma.plans import prepare_gather
+
+            return prepare_gather(tensor, root, self._iris, schedule, timeout, prepare_ahead)
+
+        def prepare_broadcast(self, tensor, root, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place broadcast from ``root`` on the SDMA copy engines: the root's ``tensor``
+            lands at the same offset on every rank. ``schedule`` is the root's chunks (others pass
+            ``None``); ``timeout`` and ``prepare_ahead`` are as for :meth:`prepare_all_gather`.
+            """
+            from iris.ccl.sdma.plans import prepare_broadcast
+
+            return prepare_broadcast(tensor, root, self._iris, schedule, timeout, prepare_ahead)
+
+        def prepare_all_to_all(self, tensor, schedule=None, timeout=30.0, prepare_ahead=False):
+            """
+            Prepare an in-place all-to-all on the SDMA copy engines: ``tensor`` holds ``world_size ** 2``
+            blocks of ``M`` rows, ``[source][destination]``, and block ``(r, j)`` of rank ``r`` lands at the
+            same offset on rank ``j``. ``schedule`` is this rank's chunks (``peers=(j,)`` for block
+            ``(r, j)``); ``timeout`` and ``prepare_ahead`` are as for :meth:`prepare_all_gather`.
+            """
+            from iris.ccl.sdma.plans import prepare_all_to_all
+
+            return prepare_all_to_all(tensor, self._iris, schedule, timeout, prepare_ahead)
+
         def all_reduce_preamble(self, output_tensor, input_tensor, config=None, workspace=None):
             """
             Prepare reusable workspace for all-reduce.
@@ -1921,7 +2036,7 @@ class Iris:
             )
 
 
-def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
+def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None, sdma_lanes=1, rdma_device=""):
     """
     Create and return an Iris instance with the specified heap size.
 
@@ -1931,6 +2046,8 @@ def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
                               Can be overridden with IRIS_ALLOCATOR environment variable.
         engines (str or tuple of str, optional): See :class:`Iris`.
         device (int, str or torch.device, optional): See :class:`Iris`.
+        sdma_lanes (int, optional): See :class:`Iris`. Defaults to 1.
+        rdma_device (str, optional): See :class:`Iris`. Defaults to ``""`` (let rocm-xio choose).
 
     Returns:
         Iris: An initialized Iris instance.
@@ -1944,4 +2061,6 @@ def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
         >>> iris_ctx = iris.iris(2**30, allocator_type="vmem")
         >>> tensor = iris_ctx.zeros(1024, 1024)
     """
-    return Iris(heap_size, allocator_type, engines=engines, device=device)
+    return Iris(
+        heap_size, allocator_type, engines=engines, device=device, sdma_lanes=sdma_lanes, rdma_device=rdma_device
+    )
