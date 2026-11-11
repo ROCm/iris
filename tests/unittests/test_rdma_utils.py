@@ -3,11 +3,13 @@
 
 import struct
 
+import pytest
 import torch
 import triton
 import triton.language as tl
 
 from iris.device import rdma_utils
+from iris.host.memory.symmetric_heap import SymmetricHeap
 
 
 @triton.jit
@@ -125,3 +127,8 @@ def test_a_claim_with_too_many_outstanding_wqes_drains_the_completion_queue():
     assert state[rdma_utils.S_COMPLETED.value] == 4
     assert state[rdma_utils.S_CQ_CI.value] == 1
     assert state[rdma_utils.S_NEXT.value] == 5
+
+
+def test_rdma_heap_mode_refuses_what_it_cannot_do():
+    with pytest.raises(ValueError, match="'torch' and 'vmem_chunked'"):
+        SymmetricHeap(1 << 20, 0, 0, 1, "vmem", rdma=True)

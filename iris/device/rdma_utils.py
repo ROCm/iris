@@ -44,6 +44,20 @@ CQE_REQ_ERR = tl.constexpr(13)
 CQE_INVALID = tl.constexpr(15)
 WQE_CQ_UPDATE = tl.constexpr(0x08)
 
+rdma_ep = None
+
+
+def bind_rdma_ep():
+    """Import rocm-xio's ``rdma_ep`` (a build with an RDMA provider, e.g. -DGDA_MLX5=ON)."""
+    global rdma_ep
+    if rdma_ep is None:
+        from xio import rdma_ep as imported
+
+        if imported is None:
+            raise ModuleNotFoundError("rocm-xio was built without an RDMA provider (-DGDA_MLX5=ON)", name="xio")
+        rdma_ep = imported
+    return rdma_ep
+
 
 @triton.jit
 def bswap32(x):
@@ -213,3 +227,15 @@ def put_signal(ctx, laddr, raddr, nbytes, signal_raddr, signal_value):
     """
     put(ctx, laddr, raddr, nbytes)
     return atomic_add(ctx, signal_raddr, signal_value)
+
+
+def build_context(endpoints, world_size, device):
+    """``world_size`` rows of ``DEVICE_CTX_WORDS``: row ``p`` from the endpoint connected to peer ``p``, others zero."""
+    import torch
+
+    words = bind_rdma_ep().DEVICE_CTX_WORDS
+    assert words == DEVICE_CTX_WORDS.value, "rocm-xio and iris.device.rdma_utils disagree on the context width"
+    ctx = torch.zeros((world_size, words), dtype=torch.uint64, device=device)
+    for peer, endpoint in endpoints.items():
+        ctx[peer] = torch.tensor(endpoint.device_context(), dtype=torch.uint64)
+    return ctx
