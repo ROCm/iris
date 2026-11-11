@@ -347,7 +347,6 @@ class TestAmdFabricDriver:
             amd_driver_module.hipMemAllocationGranularityRecommended,
         ]
 
-
     def test_reserve_va_over_aligns_beyond_granule_and_frees_raw(self, monkeypatch):
         """AmdFabricDriver shares the over-align/trim contract with LocalHipDriver.
 
