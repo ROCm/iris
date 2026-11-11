@@ -391,6 +391,10 @@ def put(
 
         # Element size in bytes from the pointee dtype (handles fp8, fp16, fp32, int*, ...)
         element_size_bytes = from_ptr.dtype.element_ty.primitive_bitwidth // 8
+        tl.static_assert(
+            from_ptr.dtype.element_ty.primitive_bitwidth >= 8,
+            "iris.put with the copy engine does not support sub-byte element types (e.g. bool / int1)",
+        )
 
         is_2d_copy: tl.constexpr = len(from_ptr.shape) == 2
 

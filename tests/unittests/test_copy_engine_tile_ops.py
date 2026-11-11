@@ -230,6 +230,29 @@ def test_put_element_size_from_dtype(dtype):
     del shmem
 
 
+def test_put_rejects_sub_byte_dtype():
+    """bool/int1 is 1 bit wide in Triton: the copy size would be 0, so it must fail at compile time."""
+    from triton.compiler.errors import CompilationError
+
+    shmem = iris.iris(1 << 20, engines=("sdma",))
+    if shmem.get_num_ranks() != 2:
+        pytest.skip("Copy engine tests require exactly two ranks.")
+    rank = shmem.get_rank()
+    src = shmem.zeros(128, device="cuda", dtype=torch.bool)
+    dst = shmem.zeros(128, device="cuda", dtype=torch.bool)
+    with pytest.raises(CompilationError) as exc_info:
+        _put_dtype_kernel[(1,)](src, dst, 100, rank, 1 - rank, shmem.get_heap_bases(), shmem.get_copy_engine_ctx())
+    # The static_assert message is on the chained exception, not on the outer CompilationError.
+    messages = []
+    err = exc_info.value
+    while err is not None:
+        messages.append(str(err))
+        err = err.__cause__ or err.__context__
+    shmem.barrier()  # before asserting, so a failure cannot leave the other rank hanging
+    assert any("sub-byte" in m for m in messages), messages
+    del shmem
+
+
 @triton.jit
 def _partial_tile_batch_kernel(
     src,
