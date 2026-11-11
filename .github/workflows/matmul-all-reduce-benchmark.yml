@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+name: Matmul All-Reduce Workspace Benchmark
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "iris/ops/matmul_all_reduce.py"
+      - "iris/ops/workspace.py"
+      - "iris/mem/triton/context.py"
+      - "tests/ops/test_matmul_all_reduce.py"
+      - "benchmark/ops/*workspace*"
+      - ".github/scripts/run_workspace_benchmark.sh"
+      - ".github/workflows/matmul-all-reduce-benchmark.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  DOCKER_IMAGE_NAME: ${{ vars.DOCKER_IMAGE_NAME || 'iris-dev-triton-aafec41' }}
+
+jobs:
+  benchmark:
+    # The upstream self-hosted GPU pool is not available on contributor forks.
+    if: github.repository == 'ROCm/iris'
+    runs-on: [linux-mi350-8gpu-iris]
+    timeout-minutes: 180
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare base source snapshot
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          mkdir -p .workspace_benchmark/base .workspace_benchmark/results
+          git archive "$BASE_SHA" | tar -x -C .workspace_benchmark/base
+          git rev-parse HEAD > .workspace_benchmark/head_sha
+          printf '%s\n' "$BASE_SHA" > .workspace_benchmark/base_sha
+
+      - name: Build Iris container
+        run: bash .github/scripts/container_build.sh
+
+      - name: Record environment
+        run: |
+          bash .github/scripts/report_versions.sh
+          rocm-smi > .workspace_benchmark/results/rocm-smi.txt 2>&1 || true
+
+      - name: Benchmark base and PR on 2, 4 and 8 ranks
+        run: |
+          # The queue runs in a temporary checkout; preserve artifacts before
+          # it removes that checkout, including results from a failed sweep.
+          python3 .github/scripts/gpu_task_queue.py --task 8 "Workspace reuse benchmark" \
+            'bash .github/scripts/container_exec.sh --gpus "$GPU_DEVICES" "bash .github/scripts/run_workspace_benchmark.sh"; rc=$?
+             mkdir -p "$GITHUB_WORKSPACE/.workspace_benchmark/results"
+             cp -r .workspace_benchmark/results/. "$GITHUB_WORKSPACE/.workspace_benchmark/results/" || rc=$?
+             exit "$rc"'
+
+      - name: Publish comparison
+        if: always()
+        run: |
+          if [ -f .workspace_benchmark/results/summary.md ]; then
+            cat .workspace_benchmark/results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: matmul-workspace-${{ github.run_id }}
+          path: .workspace_benchmark/results/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Release GPUs
+        if: always()
+        run: bash .github/scripts/release_gpus.sh

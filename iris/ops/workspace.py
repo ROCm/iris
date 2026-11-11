@@ -5,7 +5,7 @@
 Workspace management for fused GEMM+CCL operations.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 import torch
 
@@ -56,6 +56,27 @@ class FusedWorkspace:
     rs_key: Optional[tuple] = None
 
     prepared: bool = False
+    tile_shape: Tuple[int, int] = ()
+    owner: Optional[object] = field(default=None, repr=False, compare=False)
+    generation: int = 0
+    completion_locks: Optional[torch.Tensor] = None
+
+    def allocation_matches(
+        self,
+        operation: str,
+        shape: Tuple[int, int, int],
+        dtype: torch.dtype,
+        world_size: int,
+        variant: str = "",
+    ) -> bool:
+        """Check allocation metadata independently of per-call preparation."""
+        return (
+            self.operation == operation
+            and self.shape == shape
+            and self.dtype == dtype
+            and self.world_size == world_size
+            and self.variant == variant
+        )
 
     def matches(
         self,
@@ -78,14 +99,7 @@ class FusedWorkspace:
         Returns:
             True if workspace matches and can be reused
         """
-        return (
-            self.operation == operation
-            and self.shape == shape
-            and self.dtype == dtype
-            and self.world_size == world_size
-            and self.variant == variant
-            and self.prepared
-        )
+        return self.allocation_matches(operation, shape, dtype, world_size, variant) and self.prepared
 
     def reset(self):
         """Mark workspace as unprepared (buffers will be re-initialized next time)."""
@@ -99,3 +113,7 @@ class FusedWorkspace:
         self.strip_counters = self.partition_counters = None
         self.rs_key = None
         self.prepared = False
+        self.tile_shape = ()
+        self.owner = None
+        self.generation = 0
+        self.completion_locks = None
