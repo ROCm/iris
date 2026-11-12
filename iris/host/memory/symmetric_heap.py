@@ -8,13 +8,15 @@ Provides a high-level interface for distributed symmetric memory management,
 hiding the details of allocators and inter-process memory sharing.
 """
 
+import contextlib
 import gc
 import itertools
 import logging
 import os
 import socket
 import struct
-from typing import List
+import threading
+from typing import List, Sequence, Union
 
 import numpy as np
 import torch
@@ -181,7 +183,7 @@ class SymmetricHeap:
         cur_rank: int,
         num_ranks: int,
         allocator_type: str = "torch",
-        reserved_bytes: int = 0,
+        reserved_bytes: Union[int, Sequence[int]] = 0,
         rank_gpus=None,
     ):
         """
@@ -194,9 +196,11 @@ class SymmetricHeap:
             num_ranks: Total number of ranks
             allocator_type: Type of allocator ("torch", "vmem", or
                 "vmem_chunked"); default "torch"
-            reserved_bytes: Bytes Iris allocates on the heap for itself. The torch and vmem
-                heaps grow by this much, rounded up to the allocator's allocation unit, so
-                that all of ``heap_size`` stays available to the caller.
+            reserved_bytes: Bytes Iris allocates on the heap for itself. Either a single byte
+                count or a list of per-allocation byte counts (one entry per internal allocation).
+                The torch and vmem heaps grow by this much, each entry rounded up to the
+                allocator's allocation unit, so that all of ``heap_size`` stays available to the
+                caller; vmem_chunked reserves it the same way, pre-mapped on top of ``heap_size``.
             rank_gpus: Each rank's GPU as a device ordinal in this process, from
                 ``rank_gpu_ordinals``, if the caller already exchanged it. The vmem
                 allocator exchanges it itself when this is None.
@@ -209,6 +213,12 @@ class SymmetricHeap:
         self.cur_rank = cur_rank
         self.num_ranks = num_ranks
         self._peer_va_ranges = {}
+        # Per-thread depth counter for mark_internal(): allocations made inside it are tagged as Iris
+        # control state so they count against the reserved budget, not the user's usable space. It is
+        # thread-local so a concurrent allocation on another thread is never mis-tagged internal while
+        # a mark_internal() block is open (allocation is collective/single-threaded in practice, but
+        # the counter must not leak across threads).
+        self._internal_tls = threading.local()
         allocator_type = os.environ.get("IRIS_ALLOCATOR", allocator_type).lower()
         _log_rank(
             logging.INFO,
@@ -223,17 +233,30 @@ class SymmetricHeap:
         if is_simulation_env():
             allocator_type = "torch"
 
-        # Bytes added on top of heap_size for Iris's own allocations. vmem_chunked is excluded:
-        # it grows on demand and accounts for its own internal budget, so it is left alone here.
+        # reserved_bytes may be a single byte count or a list of per-allocation byte counts (each a
+        # separate Iris control-state allocation). Normalize to a list so the reservation rounds per
+        # allocation rather than summing first and rounding once (which under-reserves by up to a
+        # unit per allocation, since every allocation consumes a whole number of units).
+        if isinstance(reserved_bytes, (list, tuple)):
+            reserved_sizes = [int(b) for b in reserved_bytes if b and int(b) > 0]
+        else:
+            reserved_sizes = [int(reserved_bytes)] if reserved_bytes and int(reserved_bytes) > 0 else []
+
+        # Bytes set aside for Iris's own allocations. torch and vmem have no reservation concept, so
+        # the reservation is folded into heap_size here and grown in place below. vmem_chunked takes
+        # reserved_bytes as a constructor argument and maps it as a separate region, so this branch
+        # is skipped for it and reserved_size stays 0.
         self.reserved_size = 0
-        if reserved_bytes > 0 and allocator_type in ("torch", "vmem"):
+        if reserved_sizes and allocator_type in ("torch", "vmem"):
             if allocator_type == "torch":
                 unit = 1024  # allocate()'s default alignment
             else:
                 from iris.host.platform.hip import get_allocation_granularity
 
                 unit = get_allocation_granularity(device_id)
-            self.reserved_size = -(-reserved_bytes // unit) * unit
+            # Each entry is a separate allocation that consumes a whole number of units; round per
+            # entry, then sum.
+            self.reserved_size = sum(-(-b // unit) * unit for b in reserved_sizes)
             heap_size += self.reserved_size
             self.heap_size = heap_size
 
@@ -271,8 +294,12 @@ class SymmetricHeap:
                 device_id,
                 cur_rank,
                 num_ranks,
+                reserved_bytes=reserved_sizes,
                 topology=topology,
             )
+            # vmem_chunked reserves the internal budget itself (pre-mapped on top of heap_size),
+            # rounded per allocation to its own granularity; mirror it here for reporting.
+            self.reserved_size = self.allocator.reserved_bytes
         else:
             raise ValueError(f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem', 'vmem_chunked'")
 
@@ -329,7 +356,39 @@ class SymmetricHeap:
             return self.allocator.va_size
         return self.heap_size
 
-    def allocate(self, num_elements: int, dtype: torch.dtype, alignment: int = 1024) -> torch.Tensor:
+    @contextlib.contextmanager
+    def mark_internal(self):
+        """Tag heap allocations made in this block as Iris internal control state.
+
+        Used so Iris's own buffers (e.g. device-barrier flags) count against the allocator's
+        reserved budget rather than the caller's usable heap. No-op for allocators that do not
+        track an internal budget. Thread-local, so it only tags allocations on the calling thread.
+        """
+        self._internal_tls.depth = getattr(self._internal_tls, "depth", 0) + 1
+        try:
+            yield
+        finally:
+            self._internal_tls.depth -= 1
+
+    def get_capacity(self) -> dict:
+        """Return capacity/accounting stats for the active allocator.
+
+        For vmem_chunked this includes heap_size, usable/used/free/largest-allocatable/internal/
+        reserved bytes. Other allocators (torch, vmem) return only ``{"heap_size", "reserved_bytes"}``.
+        Both key names are always present, so callers can rely on them and guard accesses to the
+        remaining vmem_chunked-only keys. Keyed off the allocator type (not ``hasattr(get_stats)``)
+        so the documented contract holds even if torch/vmem later grow a ``get_stats``.
+        """
+        if isinstance(self.allocator, VMemChunkedAllocator):
+            stats = dict(self.allocator.get_stats())
+            stats.setdefault("reserved_bytes", self.reserved_size)
+            stats.setdefault("heap_size", self.heap_size)
+            return stats
+        return {"heap_size": self.heap_size, "reserved_bytes": self.reserved_size}
+
+    def allocate(
+        self, num_elements: int, dtype: torch.dtype, alignment: int = 1024, internal: bool = False
+    ) -> torch.Tensor:
         """
         Allocate a tensor on the symmetric heap.
 
@@ -367,17 +426,18 @@ class SymmetricHeap:
 
         is_chunked = isinstance(self.allocator, VMemChunkedAllocator)
 
+        mark_internal = internal or getattr(self._internal_tls, "depth", 0) > 0
         if is_chunked:
             # Every rank reaches the same branches: they depend only on state identical across ranks
             collected = self.allocator.collect_due()
             if collected:
                 self.collect()
-            tensor = self.allocator.allocate(actual_elements, dtype, alignment, grow=False)
+            tensor = self.allocator.allocate(actual_elements, dtype, alignment, grow=False, internal=mark_internal)
             if tensor is None:
                 # A collect() just above found everything there is to reuse; nothing was freed since
                 if not collected:
                     self.collect()
-                tensor = self.allocator.allocate(actual_elements, dtype, alignment)
+                tensor = self.allocator.allocate(actual_elements, dtype, alignment, internal=mark_internal)
         else:
             tensor = self.allocator.allocate(actual_elements, dtype, alignment)
         tensor = tensor[:num_elements]

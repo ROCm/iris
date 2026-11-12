@@ -966,6 +966,348 @@ def test_chunked_does_not_reuse_block_with_smaller_alignment():
     assert small_offset in alloc.free_lists[small_bucket]
 
 
+def _make_chunked(heap_size, **kwargs):
+    """Construct a VMemChunkedAllocator directly for single-rank unit tests."""
+    from iris.host.memory.allocators import VMemChunkedAllocator
+
+    dev = torch.cuda.current_device()
+    return VMemChunkedAllocator(heap_size, dev, 0, 1, **kwargs)
+
+
+def test_chunked_internal_state_not_counted_against_heap():
+    """reserved_bytes is mapped as its own region on top of heap_size, so the user budget stays
+    usable and the extra physical cost is only the rounded reservation -- not a whole extra chunk."""
+    heap_size = 8 << 20
+    reserved = 2 << 20
+
+    baseline = _make_chunked(heap_size)
+    try:
+        base_mapped = baseline.get_stats()["mapped_bytes"]
+    finally:
+        baseline.close()
+
+    alloc = _make_chunked(heap_size, reserved_bytes=reserved)
+    try:
+        gran = alloc.granularity
+        rounded_reserved = -(-reserved // gran) * gran
+        stats = alloc.get_stats()
+        assert stats["reserved_bytes"] == rounded_reserved
+        # The reservation is mapped on top of the user heap, and costs exactly the rounded
+        # reservation -- not a whole extra chunk.
+        assert stats["mapped_bytes"] >= heap_size + rounded_reserved
+        assert stats["mapped_bytes"] <= base_mapped + rounded_reserved
+    finally:
+        alloc.close()
+
+
+def test_chunked_reservation_keeps_full_heap_usable_without_growth():
+    """The real physical-budget check: after the whole reserved budget is spent on internal control
+    state, the caller can still allocate heap_size of user data in granule-sized pieces without
+    mapping a new chunk (proving the reservation really is extra, pre-mapped memory -- a stronger
+    guarantee than the usable_bytes field, which only accounts the budget)."""
+    heap_size = 8 << 20
+    reserved = 2 << 20
+    alloc = _make_chunked(heap_size, reserved_bytes=reserved)
+    try:
+        g = alloc.granularity
+        rounded_reserved = -(-reserved // g) * g
+        # Spend the entire reserved budget as internal allocations (one granule each).
+        internal = [alloc.allocate(g, torch.int8, internal=True) for _ in range(rounded_reserved // g)]
+        assert alloc.get_stats()["internal_bytes"] >= rounded_reserved
+        chunks_before = alloc.get_num_chunks()
+        # The full user heap_size must fit in the pre-mapped space, so no new chunk is mapped.
+        user = [alloc.allocate(g, torch.int8) for _ in range(heap_size // g)]
+        assert all(t is not None for t in user)
+        assert alloc.get_num_chunks() == chunks_before
+        del internal, user
+    finally:
+        alloc.close()
+
+
+def test_chunked_reserved_rounds_per_allocation():
+    """A list reservation rounds each entry to a granule, so N tiny internal allocations reserve
+    N granules -- not one granule for the summed bytes (which would under-reserve)."""
+    heap_size = 8 << 20
+    # Two separate tiny control allocations (e.g. barrier flags + SDMA counters). Summed they are
+    # far under one granule, but each consumes a whole granule when allocated.
+    alloc = _make_chunked(heap_size, reserved_bytes=[8, 8])
+    try:
+        g = alloc.granularity
+        stats = alloc.get_stats()
+        assert stats["reserved_bytes"] == 2 * g
+
+        # Consuming both as internal allocations stays within the reservation: internal_bytes never
+        # exceeds reserved_bytes, so the user's usable budget is untouched.
+        a = alloc.allocate(1, torch.int32, internal=True)
+        b = alloc.allocate(1, torch.int64, internal=True)
+        internal = alloc.get_stats()
+        assert internal["internal_bytes"] == 2 * g
+        assert internal["internal_bytes"] <= internal["reserved_bytes"]
+        assert internal["usable_bytes"] >= heap_size
+        del a, b
+    finally:
+        alloc.close()
+
+
+def test_chunked_reserved_scalar_sized_as_one_allocation():
+    """A scalar reservation is sized like a single internal allocation (power-of-two bucketed, then
+    granule-aligned), not a bare-granule lump. A tiny scalar still lands on one granule."""
+    alloc = _make_chunked(8 << 20, reserved_bytes=8)
+    try:
+        assert alloc.get_stats()["reserved_bytes"] == alloc.granularity
+    finally:
+        alloc.close()
+
+
+def test_chunked_reserved_empty_and_zero_are_noops():
+    """An empty list, a list of zeros, or a zero scalar reserve nothing (no accidental granule)."""
+    for reserved in ([], [0, 0], 0):
+        alloc = _make_chunked(8 << 20, reserved_bytes=reserved)
+        try:
+            assert alloc.get_stats()["reserved_bytes"] == 0
+        finally:
+            alloc.close()
+
+
+def test_chunked_internal_bytes_round_trip_on_free():
+    """internal_bytes rises as control state is allocated and falls back as each block is freed --
+    the free path must not strand internal bytes (which would permanently shrink usable space)."""
+    alloc = _make_chunked(8 << 20, reserved_bytes=[8, 8])
+    try:
+        g = alloc.granularity
+        assert alloc.get_stats()["internal_bytes"] == 0
+        a = alloc.allocate(1, torch.int32, internal=True)
+        b = alloc.allocate(1, torch.int64, internal=True)
+        assert alloc.get_stats()["internal_bytes"] == 2 * g
+        # get_stats() processes pending frees, so internal_bytes reflects each GC'd block.
+        del a
+        gc.collect()
+        assert alloc.get_stats()["internal_bytes"] == g
+        del b
+        gc.collect()
+        assert alloc.get_stats()["internal_bytes"] == 0
+    finally:
+        alloc.close()
+
+
+def test_chunked_free_internal_leaves_user_intact():
+    """Freeing internal control state drops internal_bytes to zero but leaves the user block used --
+    the two kinds of accounting must move independently, not clobber each other."""
+    alloc = _make_chunked(16 << 20, reserved_bytes=[8])
+    try:
+        g = alloc.granularity
+        internal_t = alloc.allocate(1, torch.int32, internal=True)
+        user_t = alloc.allocate(4096, torch.float32)
+        used_with_both = alloc.get_stats()["used_bytes"]
+        del internal_t
+        gc.collect()
+        s = alloc.get_stats()
+        assert s["internal_bytes"] == 0
+        # Exactly the internal granule left used_bytes; the user block is untouched.
+        assert s["used_bytes"] == used_with_both - g
+        assert s["num_active_allocs"] == 1
+        assert user_t.numel() == 4096
+        del user_t
+    finally:
+        alloc.close()
+
+
+def test_chunked_internal_over_reservation_is_safe():
+    """If internal allocations exceed the reservation, accounting stays non-negative and consistent:
+    pending_internal clamps at zero, so no capacity figure underflows or goes negative."""
+    alloc = _make_chunked(8 << 20, reserved_bytes=[8])  # reserve one granule
+    try:
+        g = alloc.granularity
+        assert alloc.get_stats()["reserved_bytes"] == g
+        held = [alloc.allocate(1, torch.int32, internal=True) for _ in range(3)]
+        stats = alloc.get_stats()
+        assert stats["internal_bytes"] == 3 * g
+        assert stats["internal_bytes"] > stats["reserved_bytes"]
+        # No user allocations, so the whole heap_size budget is still usable.
+        assert stats["usable_bytes"] == stats["heap_size"]
+        # largest_allocatable is VA/growth-bounded, so it is capped by va_headroom (not the budget).
+        assert 0 <= stats["largest_allocatable_bytes"] <= stats["va_headroom_bytes"]
+        assert stats["used_bytes"] >= stats["internal_bytes"]
+        del held
+    finally:
+        alloc.close()
+
+
+def test_chunked_internal_accounting_not_committed_on_build_failure(monkeypatch):
+    """If tensor construction raises, the internal reservation must NOT have been counted -- otherwise
+    internal_bytes over-counts and a phantom offset lingers in _internal_offsets for an allocation
+    that never produced a tensor (and so has no finalizer to undo it). Reverting the fix (counting
+    internal bytes before the build) leaves internal_bytes advanced here and fails this test."""
+    import iris.host.memory.allocators.vmem_chunked_allocator as vmem_chunked
+
+    alloc = _make_chunked(8 << 20, reserved_bytes=[8])
+    try:
+        before = alloc.get_stats()["internal_bytes"]
+
+        def _boom(*a, **k):
+            raise RuntimeError("boom")
+
+        # Fail the tensor build at _CUDAArrayInterface construction (the same seam the allocator's
+        # other rollback tests use) rather than patching the global torch.as_tensor.
+        monkeypatch.setattr(vmem_chunked, "_CUDAArrayInterface", _boom)
+        with pytest.raises(RuntimeError):
+            alloc.allocate(1, torch.int32, internal=True)
+        # Patch is still active here, but get_stats()/_process_pending_frees() do not build tensors.
+        assert alloc.get_stats()["internal_bytes"] == before
+    finally:
+        alloc.close()
+
+
+def test_chunked_internal_accounting_not_committed_on_grow_failure(monkeypatch):
+    """Companion to the build-failure test for the OTHER failure seam inside allocate()'s committed
+    block: if chunk growth raises AFTER the tensor builds but BEFORE the block commits, the internal
+    reservation must not have been counted. The build-failure test never grows a chunk, so it would
+    stay green even if the internal accounting were moved above the _grow_chunk loop; this test pins
+    the accounting below growth. A revert of that placement (count internal before growing) advances
+    internal_bytes here and fails."""
+    one_mib = 1 << 20
+    alloc = _make_chunked(2 << 20, chunk_size=2 << 20, reserved_bytes=[one_mib])
+    try:
+        # Fill the mapped space (heap chunk + reservation region) so the next allocation must grow.
+        filler = []
+        while alloc.get_stats()["free_in_mapped_bytes"] >= one_mib:
+            filler.append(alloc.allocate(one_mib, torch.int8))
+        before_internal = alloc.get_stats()["internal_bytes"]
+        before_chunks = alloc.get_num_chunks()
+
+        def _boom(*a, **k):
+            raise RuntimeError("injected grow failure")
+
+        monkeypatch.setattr(alloc, "_grow_chunk", _boom)
+        with pytest.raises(RuntimeError):
+            alloc.allocate(one_mib, torch.int8, internal=True)
+        # Growth failed before the commit flag was set: no new chunk mapped, and the internal
+        # reservation was never counted (no over-count, no phantom offset in _internal_offsets).
+        assert alloc.get_stats()["internal_bytes"] == before_internal
+        assert alloc.get_num_chunks() == before_chunks
+        del filler
+    finally:
+        alloc.close()
+
+
+def test_chunked_capacity_report_fields():
+    """get_stats() exposes usable/used/free/largest/internal/reserved with sane invariants."""
+    ctx = iris.iris(4 << 20, allocator_type=ALLOC_TYPE)
+    alloc = ctx.heap.allocator
+    stats = alloc.get_stats()
+    for key in (
+        "heap_size",
+        "reserved_bytes",
+        "internal_bytes",
+        "used_bytes",
+        "free_in_mapped_bytes",
+        "usable_bytes",
+        "va_headroom_bytes",
+        "largest_allocatable_bytes",
+    ):
+        assert key in stats, f"missing capacity field {key!r}"
+
+    # Iris allocates its device-barrier flags (and SDMA counters, if enabled) as internal control
+    # state. The reservation must cover all of it, so heap_size stays fully usable to the caller.
+    assert stats["internal_bytes"] > 0
+    assert stats["internal_bytes"] <= stats["reserved_bytes"]
+    assert stats["used_bytes"] >= stats["internal_bytes"]
+    # usable_bytes is the real user budget (bounded by heap_size); largest_allocatable is
+    # VA/growth-bounded and capped by va_headroom, which can far exceed the budget.
+    assert stats["usable_bytes"] <= stats["heap_size"]
+    assert stats["largest_allocatable_bytes"] <= stats["va_headroom_bytes"]
+
+    before = alloc.get_stats()
+    t = ctx.zeros(4096, dtype=torch.float32)
+    after = alloc.get_stats()
+    assert after["used_bytes"] > before["used_bytes"]
+    # A user allocation draws down the usable budget; heap_size is fixed and internal_bytes unchanged.
+    assert after["usable_bytes"] < before["usable_bytes"]
+    assert after["heap_size"] == before["heap_size"]
+    assert after["internal_bytes"] == before["internal_bytes"]
+    del t
+
+
+def test_chunked_sizing_helper_roundtrip():
+    """plan_capacity() predicts the same reservation, mapped bytes, region count, chunk size, and
+    usable budget that a real allocator built with the same target reports -- the point of sharing
+    _aligned_block_size."""
+    from iris.host.memory.allocators import VMemChunkedAllocator
+
+    target = 16 << 20
+    reserved = 1 << 20
+    alloc = _make_chunked(target, reserved_bytes=reserved)
+    try:
+        stats = alloc.get_stats()
+        # Plan with the device granularity so the prediction matches the live allocator exactly.
+        plan = VMemChunkedAllocator.plan_capacity(target, reserved_bytes=reserved, granularity=alloc.granularity)
+        assert plan["reserved_bytes"] == stats["reserved_bytes"]
+        assert plan["chunk_size"] == stats["chunk_size"]
+        assert plan["mapped_bytes"] == stats["mapped_bytes"]
+        assert plan["chunks"] == alloc.get_num_chunks()
+        # usable_bytes is now the real user budget (not VA-bounded): a fresh allocator has the whole
+        # target available, which is exactly what the plan predicts.
+        assert plan["usable_bytes"] == stats["usable_bytes"] == target
+    finally:
+        alloc.close()
+
+
+def test_plan_capacity_list_reservation_rounds_per_allocation():
+    """plan_capacity() rounds a *list* reservation per allocation, matching a real list-built
+    allocator. Summing the bytes and rounding once (the old behavior) would under-reserve: here two
+    tiny control allocations each consume a whole granule, so the reservation must be two granules,
+    not one. A one-line revert to scalar rounding of the summed bytes turns 2*g into g and fails."""
+    from iris.host.memory.allocators import VMemChunkedAllocator
+
+    target = 16 << 20
+    g = 2 << 20  # exaggerated granule so each tiny allocation clearly rounds up to a full granule
+    plan_list = VMemChunkedAllocator.plan_capacity(target, reserved_bytes=[8, 8], granularity=g)
+    assert plan_list["reserved_bytes"] == 2 * g
+
+    # The same summed bytes as a single lump reserve only one granule -- the under-reservation the
+    # list form fixes. This asserts plan_capacity actually distinguishes the two.
+    plan_lump = VMemChunkedAllocator.plan_capacity(target, reserved_bytes=16, granularity=g)
+    assert plan_lump["reserved_bytes"] == g
+
+    # Zero/empty entries are dropped, not rounded up to a spurious granule.
+    assert VMemChunkedAllocator.plan_capacity(target, reserved_bytes=[0, 0], granularity=g)["reserved_bytes"] == 0
+    assert VMemChunkedAllocator.plan_capacity(target, reserved_bytes=[], granularity=g)["reserved_bytes"] == 0
+
+
+def test_internal_reservation_sizes_cover_iris_control_state():
+    """The reservation list Iris hands the heap must include *every* control-state allocation it
+    makes: device-barrier flags always, and the SDMA all-gather counters when SDMA is enabled. The
+    bug this guards: the SDMA counters were omitted from the reservation, so with engines=("sdma",)
+    the last granule of heap_size was silently consumed by Iris. Pure wiring check (no SDMA hardware
+    needed) -- a real engines=("sdma",) run would require rocm-xio, which is unavailable here."""
+    from iris.host.iris import _internal_reservation_sizes
+
+    num_ranks = 8
+    without = _internal_reservation_sizes(num_ranks, sdma_enabled=False)
+    assert without == [num_ranks * num_ranks * torch.int32.itemsize]  # matches _device_barrier_flags int32[R, R]
+
+    with_sdma = _internal_reservation_sizes(num_ranks, sdma_enabled=True)
+    # Enabling SDMA adds exactly one more reserved allocation (int64[R] counters); it never drops the
+    # flags or changes their size. A revert that forgets the SDMA entry makes with_sdma == without.
+    assert with_sdma == without + [num_ranks * torch.int64.itemsize]
+
+
+def test_chunked_oom_message_has_breakdown():
+    """An out-of-capacity error prints the capacity breakdown, not an opaque message."""
+    alloc = _make_chunked(1 << 20, chunk_size=1 << 20, va_size=4 << 20)
+    try:
+        tensors = []
+        with pytest.raises(RuntimeError) as excinfo:
+            for _ in range(64):
+                tensors.append(alloc.allocate(256 * 1024, torch.float32))  # 1 MiB each
+        msg = str(excinfo.value).lower()
+        for token in ("usable", "largest", "va_size"):
+            assert token in msg, f"OOM message missing {token!r}: {excinfo.value}"
+        del tensors
+    finally:
+        alloc.close()
+
+
 if __name__ == "__main__":
     test_chunked_creation()
     test_chunked_basic_allocation()

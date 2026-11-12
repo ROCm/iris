@@ -158,7 +158,9 @@ def test_heap_growth_while_prepared():
 
     with TriggeredPlan(ctx, buffer, schedule, timeout=20) as plan:
         num_chunks = alloc.get_num_chunks()
-        ctx.zeros(alloc.chunk_size, dtype=torch.int8)  # mapped on every rank while copies are prepared
+        # Allocate past every currently-mapped chunk so growth fires regardless of how many chunks
+        # were pre-mapped (the heap may reserve headroom on top of heap_size for internal state).
+        ctx.zeros(num_chunks * alloc.chunk_size, dtype=torch.int8)  # mapped on every rank while copies are prepared
         assert alloc.get_num_chunks() > num_chunks
         handle = plan.start()
         _regions_producer[(2,)](buffer, regs, max_regs, handle, plan.chunk_id(rank, 0), 1, BLOCK=1024)

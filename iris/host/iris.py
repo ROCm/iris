@@ -112,6 +112,21 @@ def _require_sdma_visibility(rank_gpus):
         )
 
 
+def _internal_reservation_sizes(num_ranks: int, sdma_enabled: bool) -> list:
+    """Byte sizes of the heap allocations Iris makes for its own control state, one entry per
+    allocation, so the symmetric heap can reserve exactly that much on top of the caller's heap_size
+    and keep heap_size fully usable. Each entry is reserved rounded up to the allocator's allocation
+    unit independently (summing first and rounding once would under-reserve by up to a unit per
+    allocation). Keep in sync with the ``mark_internal()`` allocations in ``Iris.__init__``:
+    ``_device_barrier_flags`` (always) and the ``_sdma_all_gather_counters`` heap tensor (SDMA only).
+    """
+    sizes = [num_ranks * num_ranks * torch.int32.itemsize]  # _device_barrier_flags: int32[R, R]
+    if sdma_enabled:
+        # all_gather(engine="sdma") arrival counters: the heap-resident int64[R] (one per source rank)
+        sizes.append(num_ranks * torch.int64.itemsize)
+    return sizes
+
+
 class Iris:
     """
     Main Iris class for multi-GPU communication and memory management.
@@ -184,16 +199,17 @@ class Iris:
                 f"init: heap_size={heap_size / (1 << 30):.1f}GB rank={cur_rank}/{num_ranks} allocator={allocator_type}",
             )
 
-        # Initialize symmetric heap with specified allocator
-        # Room for the device barrier's flags (allocated below) on top of the caller's heap_size.
-        barrier_flags_bytes = num_ranks * num_ranks * torch.int32.itemsize
+        # Initialize symmetric heap with specified allocator.
+        # Reserve room on top of the caller's heap_size for every Iris control-state allocation made
+        # below (see _internal_reservation_sizes), so heap_size stays fully usable.
+        internal_reservations = _internal_reservation_sizes(num_ranks, self._sdma_ep is not None)
         self.heap = SymmetricHeap(
             heap_size,
             gpu_id,
             cur_rank,
             num_ranks,
             allocator_type,
-            reserved_bytes=barrier_flags_bytes,
+            reserved_bytes=internal_reservations,
             rank_gpus=rank_gpus,
         )
         self.device = f"cuda:{gpu_id}"
@@ -224,10 +240,11 @@ class Iris:
             self._init_copy_engines(num_ranks)
             # all_gather(engine="sdma") arrival counters, one per source rank; allocated here since
             # allocation is collective over all ranks, and a call may come from a subgroup
-            self._sdma_all_gather_counters = (
-                self.zeros((num_ranks,), dtype=torch.int64),
-                torch.zeros(num_ranks, dtype=torch.int64, device=self.device),
-            )
+            with self.heap.mark_internal():
+                self._sdma_all_gather_counters = (
+                    self.zeros((num_ranks,), dtype=torch.int64),
+                    torch.zeros(num_ranks, dtype=torch.int64, device=self.device),
+                )
 
         # Initialize CCL interface
         self.ccl = self.CCL(self)
@@ -237,7 +254,23 @@ class Iris:
 
         # Pairwise counters for device_barrier(), shared by every process group. Allocated
         # here because heap allocation is collective over all ranks; the heap was sized for it.
-        self._device_barrier_flags = self.zeros((num_ranks, num_ranks), dtype=torch.int32)
+        # Tagged internal so it counts against the reserved budget, not the user's usable heap.
+        with self.heap.mark_internal():
+            self._device_barrier_flags = self.zeros((num_ranks, num_ranks), dtype=torch.int32)
+
+        # Fail loud if Iris's actual internal (mark_internal) allocations drift from the reserved
+        # budget: _internal_reservation_sizes must list every mark_internal() allocation made above,
+        # or a newly added / relocated internal allocation silently eats the caller's usable heap.
+        # Only vmem_chunked tracks this budget; torch/vmem reserve a lump and do not.
+        allocator = self.heap.allocator
+        if hasattr(allocator, "internal_bytes") and hasattr(allocator, "reserved_bytes"):
+            if allocator.internal_bytes != allocator.reserved_bytes:
+                # RuntimeError rather than assert so the invariant stays enforced under python -O.
+                raise RuntimeError(
+                    f"Iris internal allocations ({allocator.internal_bytes} B) do not match the reserved "
+                    f"budget ({allocator.reserved_bytes} B); update _internal_reservation_sizes to cover "
+                    f"every mark_internal() allocation in Iris.__init__."
+                )
 
         # Initialize tracing
         self.tracing = Tracing(self)
@@ -1607,6 +1640,38 @@ class Iris:
             >>> print(device)  # cuda:0
         """
         return self.heap.get_device()
+
+    def memory_stats(self):
+        """
+        Return capacity and accounting statistics for the symmetric heap.
+
+        For the ``vmem_chunked`` allocator this reports heap_size, usable, used, free,
+        largest-allocatable, internal (Iris control state), and reserved bytes, alongside chunk/VA
+        sizing. ``usable_bytes`` is the real user budget left (``heap_size`` minus user allocations;
+        internal control state is paid from the reservation). ``va_headroom_bytes`` and
+        ``largest_allocatable_bytes`` are bounded by the VA reservation and growth, not by physical
+        HBM, so they can far exceed ``usable_bytes``.
+
+        ``internal_bytes`` counts only the control state allocated at init (the device-barrier flags,
+        plus the SDMA all-gather counters when ``engines=("sdma",)``) -- the allocations covered by
+        the reserved budget. Library workspaces created lazily on first use (e.g. ``TriggeredPlan``
+        gates, the CCL ring buffer, ops locks) are allocated out of the user's usable heap and count
+        as ``used_bytes``, not ``internal_bytes``; do not read ``internal_bytes`` as "everything Iris
+        owns".
+
+        The full field set is only populated for ``vmem_chunked``; the ``torch`` and ``vmem``
+        allocators return just ``{"heap_size", "reserved_bytes"}``, so guard accesses to the
+        capacity fields (e.g. ``stats.get("usable_bytes")``) if the allocator type may vary.
+
+        Returns:
+            dict: Capacity/accounting fields for the active allocator.
+
+        Example:
+            >>> ctx = iris.iris(1 << 30, allocator_type="vmem_chunked")
+            >>> stats = ctx.memory_stats()
+            >>> print(stats["usable_bytes"], stats["internal_bytes"])
+        """
+        return self.heap.get_capacity()
 
     def get_cu_count(self):
         """
