@@ -19,8 +19,7 @@ import iris
 
 from .workspace import FusedWorkspace
 from tritonblas.matmul import persistent_matmul_lt
-from tritonblas.config import EpilogueConfig
-from .tritonblas_launch_wave_schedule import build_launch_wave_plan
+from .tritonblas_tile_schedule import build_launch_wave_signal_plan
 
 
 @triton.jit()
@@ -29,14 +28,15 @@ def wait_cnt():
 
 
 @triton.jit()
-def _launch_wave_wait_submit_kernel(
+def _signal_batch_wait_submit_kernel(
     C_local_base,
     flags,
     completion_signals,
     flag_iteration,
-    wave_tile_counts,
-    wave_transfer_offsets,
-    wave_transfer_counts,
+    batch_signal_ids,
+    batch_producers,
+    batch_transfer_offsets,
+    batch_transfer_counts,
     transfer_row_offsets,
     transfer_col_offsets,
     transfer_width_bytes,
@@ -45,16 +45,17 @@ def _launch_wave_wait_submit_kernel(
     copy_engine_ctx: tl.tensor,
     cur_rank: tl.constexpr,
     world_size: tl.constexpr,
-    NUM_WAVES: tl.constexpr,
-    MAX_TILES_PER_WAVE: tl.constexpr,
+    NUM_BATCHES: tl.constexpr,
+    MAX_TRANSFERS_PER_BATCH: tl.constexpr,
     SRC_PITCH: tl.constexpr,
     DST_PITCH: tl.constexpr,
     STRIDE_N: tl.constexpr,
 ):
-    """Submit one SDMA wait-then-copy(+signal) queue entry per launch wave to each peer.
+    """Submit one SDMA wait-then-copy(+signal) queue entry per signal batch to each peer.
 
     "Submit" means writing the packets into the SDMA queue and ringing the doorbell; the copy engine
-    then waits on the wave's flag and copies autonomously, without a workgroup.
+    then waits on the batch's gate and copies autonomously, without a workgroup. Batches are queued in
+    the readiness order tritonBLAS publishes, so no gate blocks the queue behind a later one.
     """
     dst_rank = tl.program_id(0)
     if dst_rank >= world_size or dst_rank == cur_rank:
@@ -64,14 +65,15 @@ def _launch_wave_wait_submit_kernel(
     elem_size = ptr_dtype.itemsize
     tl.static_assert(ptr_dtype.itemsize > 0, "the copy-engine ops do not support sub-byte element types")
 
-    for wave_id in range(NUM_WAVES):
-        transfer_start = tl.load(wave_transfer_offsets + wave_id)
-        transfer_count = tl.load(wave_transfer_counts + wave_id)
+    for batch_id in range(NUM_BATCHES):
+        transfer_start = tl.load(batch_transfer_offsets + batch_id)
+        transfer_count = tl.load(batch_transfer_counts + batch_id)
         if transfer_count != 0:
-            wait_value = (flag_iteration + 1) * tl.load(wave_tile_counts + wave_id)
-            is_last_wave = wave_id == (NUM_WAVES - 1)
+            signal_id = tl.load(batch_signal_ids + batch_id)
+            wait_value = (flag_iteration + 1) * tl.load(batch_producers + batch_id)
+            is_last_batch = batch_id == (NUM_BATCHES - 1)
 
-            if is_last_wave:
+            if is_last_batch:
                 iris.wait_then_put_tile_batch_signal(
                     C_local_base,
                     C_local_base,
@@ -79,7 +81,7 @@ def _launch_wave_wait_submit_kernel(
                     dst_rank,
                     heap_bases,
                     copy_engine_ctx,
-                    flags + wave_id,
+                    flags + signal_id,
                     wait_value,
                     completion_signals + cur_rank,
                     1,
@@ -92,7 +94,7 @@ def _launch_wave_wait_submit_kernel(
                     STRIDE_N * elem_size,
                     SRC_PITCH * elem_size,
                     DST_PITCH * elem_size,
-                    MAX_TILES_PER_WAVE,
+                    MAX_TRANSFERS_PER_BATCH,
                 )
             else:
                 iris.wait_then_put_tile_batch(
@@ -102,7 +104,7 @@ def _launch_wave_wait_submit_kernel(
                     dst_rank,
                     heap_bases,
                     copy_engine_ctx,
-                    flags + wave_id,
+                    flags + signal_id,
                     wait_value,
                     transfer_row_offsets,
                     transfer_col_offsets,
@@ -113,7 +115,7 @@ def _launch_wave_wait_submit_kernel(
                     STRIDE_N * elem_size,
                     SRC_PITCH * elem_size,
                     DST_PITCH * elem_size,
-                    MAX_TILES_PER_WAVE,
+                    MAX_TRANSFERS_PER_BATCH,
                 )
 
 
@@ -138,79 +140,50 @@ def _selector_wave_size(selector, device: torch.device) -> int:
     return int(wave_size)
 
 
-def _ensure_tritonblas_launch_wave_workspace(
-    shmem,
+def _build_signal_batch_workspace(
     workspace: FusedWorkspace,
     selector,
     device: torch.device,
     m_local: int,
     n: int,
-    world_size: int,
     elem_size: int,
 ):
-    num_tiles_m = triton.cdiv(m_local, selector.block_m)
-    num_tiles_n = triton.cdiv(n, selector.block_n)
-    total_tiles = num_tiles_m * num_tiles_n
-    wave_size = _selector_wave_size(selector, device)
-    num_xcds = max(1, int(getattr(selector, "num_sms", 1)))
-    plan_key = (num_tiles_m, num_tiles_n, selector.group_m, total_tiles, wave_size, num_xcds)
+    """Plan the GEMM's tile signalling and flatten each batch's copies into device metadata arrays."""
+    plan = build_launch_wave_signal_plan(m_local, n, selector, _selector_wave_size(selector, device))
 
-    if getattr(workspace, "launch_wave_plan_key", None) != plan_key:
-        plan = build_launch_wave_plan(
-            num_tiles_m=num_tiles_m,
-            num_tiles_n=num_tiles_n,
-            group_size_m=selector.group_m,
-            launch_grid=total_tiles,
-            wave_size=wave_size,
-            num_xcds=num_xcds,
-        )
-        workspace.launch_wave_plan = plan
-        workspace.launch_wave_plan_key = plan_key
-        workspace.locks = shmem.zeros((plan.num_waves,), dtype=torch.int32)
-        transfers_by_wave = [[] for _ in range(plan.num_waves)]
-        for transfer in plan.transfers:
-            transfers_by_wave[transfer.wave_id].append(transfer)
+    batch_transfer_offsets = []
+    batch_transfer_counts = []
+    transfer_row_offsets = []
+    transfer_col_offsets = []
+    transfer_width_bytes = []
+    transfer_heights = []
+    for batch in plan.batches:
+        batch_transfer_offsets.append(len(transfer_row_offsets))
+        batch_transfer_counts.append(len(batch.rects))
+        for rect in batch.rects:
+            row_offset = rect.m_tile_start * selector.block_m
+            col_offset = rect.n_tile_start * selector.block_n
+            transfer_row_offsets.append(row_offset)
+            transfer_col_offsets.append(col_offset)
+            transfer_width_bytes.append(min(rect.n_tile_count * selector.block_n, n - col_offset) * elem_size)
+            transfer_heights.append(min(rect.m_tile_count * selector.block_m, m_local - row_offset))
 
-        wave_transfer_offsets = []
-        wave_transfer_counts = []
-        transfer_row_offsets = []
-        transfer_col_offsets = []
-        transfer_width_bytes = []
-        transfer_heights = []
-        max_tiles_per_wave = 0
-        running_offset = 0
+    def _int32(values):
+        return torch.tensor(values, device=device, dtype=torch.int32)
 
-        for wave_transfers in transfers_by_wave:
-            wave_transfer_offsets.append(running_offset)
-            wave_transfer_counts.append(len(wave_transfers))
-            max_tiles_per_wave = max(max_tiles_per_wave, len(wave_transfers))
-            for transfer in wave_transfers:
-                row_offset = transfer.m_tile_start * selector.block_m
-                col_offset = transfer.n_tile_start * selector.block_n
-                batch_height = min(transfer.m_tile_count * selector.block_m, m_local - row_offset)
-                batch_width = min(transfer.n_tile_count * selector.block_n, n - col_offset)
-                transfer_row_offsets.append(row_offset)
-                transfer_col_offsets.append(col_offset)
-                transfer_width_bytes.append(batch_width * elem_size)
-                transfer_heights.append(batch_height)
-            running_offset += len(wave_transfers)
-
-        workspace.wave_transfer_offsets = torch.tensor(wave_transfer_offsets, device=device, dtype=torch.int32)
-        workspace.wave_transfer_counts = torch.tensor(wave_transfer_counts, device=device, dtype=torch.int32)
-        workspace.transfer_row_offsets = torch.tensor(transfer_row_offsets, device=device, dtype=torch.int32)
-        workspace.transfer_col_offsets = torch.tensor(transfer_col_offsets, device=device, dtype=torch.int32)
-        workspace.transfer_width_bytes = torch.tensor(transfer_width_bytes, device=device, dtype=torch.int32)
-        workspace.transfer_heights = torch.tensor(transfer_heights, device=device, dtype=torch.int32)
-        workspace.wave_tile_counts = torch.tensor(plan.wave_tile_counts, device=device, dtype=torch.int32)
-        workspace.num_tiles_m = num_tiles_m
-        workspace.num_tiles_n = num_tiles_n
-        workspace.num_waves = plan.num_waves
-        workspace.num_batches = plan.num_waves
-        workspace.num_transfers = len(plan.transfers)
-        workspace.max_tiles_per_wave = max_tiles_per_wave
-    if getattr(workspace, "completion_signals", None) is None or workspace.completion_signals.numel() != world_size:
-        workspace.completion_signals = shmem.zeros((world_size,), dtype=torch.int32)
-    return workspace.launch_wave_plan
+    workspace.signal_plan = plan
+    workspace.signal_of_tile = _int32(plan.signal_of_tile)
+    workspace.batch_signal_ids = _int32([batch.signal_id for batch in plan.batches])
+    workspace.batch_producers = _int32([batch.producers for batch in plan.batches])
+    workspace.batch_transfer_offsets = _int32(batch_transfer_offsets)
+    workspace.batch_transfer_counts = _int32(batch_transfer_counts)
+    workspace.transfer_row_offsets = _int32(transfer_row_offsets)
+    workspace.transfer_col_offsets = _int32(transfer_col_offsets)
+    workspace.transfer_width_bytes = _int32(transfer_width_bytes)
+    workspace.transfer_heights = _int32(transfer_heights)
+    workspace.num_batches = len(plan.batches)
+    workspace.num_transfers = len(transfer_row_offsets)
+    workspace.max_transfers_per_batch = max(batch_transfer_counts)
 
 
 def _auto_m_tiles_per_batch(selector, M_local: int, N: int) -> int:
@@ -262,15 +235,6 @@ def matmul_all_gather_copy_engine_preamble(
     if m_tiles_per_batch is None:
         m_tiles_per_batch = _auto_m_tiles_per_batch(selector, M_local, N)
 
-    # Calculate number of tiles based on selector
-    num_tiles_m = (M_local + selector.block_m - 1) // selector.block_m
-    num_tiles_n = (N + selector.block_n - 1) // selector.block_n
-
-    num_tiles = num_tiles_m * num_tiles_n
-
-    # Calculate number of batches
-    num_batches = (num_tiles_m + m_tiles_per_batch - 1) // m_tiles_per_batch
-
     ws = FusedWorkspace(
         operation="matmul_all_gather_copy_engine",
         shape=(M, N, K),
@@ -279,16 +243,15 @@ def matmul_all_gather_copy_engine_preamble(
         prepared=True,
     )
 
-    # Allocate one readiness counter per M-batch.
-    ws.locks = shmem.zeros((num_batches,), dtype=torch.int32)
-    ws.completion_signals = shmem.zeros((world_size,), dtype=torch.int32)
-
-    # Store metadata for later use
     ws.selector = selector
-    ws.num_tiles_m = num_tiles_m
-    ws.num_tiles_n = num_tiles_n
-    ws.num_batches = num_batches
     ws.m_tiles_per_batch = m_tiles_per_batch
+    _build_signal_batch_workspace(ws, selector, A.device, M_local, N, A.element_size())
+    ws.num_tiles_m = ws.signal_plan.schedule.grid_m
+    ws.num_tiles_n = ws.signal_plan.schedule.grid_n
+
+    # One gate per signal, incremented by the GEMM epilogue as each of its tiles is stored.
+    ws.locks = shmem.zeros((ws.signal_plan.num_signals,), dtype=torch.int32)
+    ws.completion_signals = shmem.zeros((world_size,), dtype=torch.int32)
 
     return ws
 
@@ -321,9 +284,9 @@ def matmul_all_gather_copy_engine(
         bias: Optional bias vector (M_local,)
         async_op: If False, performs barrier at end
         workspace: Optional pre-allocated workspace
-        flag_iteration: Launch generation for cumulative batch counters.
-                        Batch readiness counters are not reset each iteration;
-                        the submit kernel waits for the generation-adjusted target.
+        flag_iteration: Launch generation for cumulative gate counters.
+                        Gates are not reset each iteration; the submit kernel
+                        waits for the generation-adjusted target.
         verbose: If True, print submit/main/quiet timing breakdown in sync mode
 
     Returns:
@@ -370,19 +333,6 @@ def matmul_all_gather_copy_engine(
     stride_cm, stride_cn = output_tensor.stride()
 
     selector = workspace.selector
-
-    launch_wave_plan = _ensure_tritonblas_launch_wave_workspace(
-        shmem,
-        workspace,
-        selector,
-        A.device,
-        M_local,
-        N,
-        world_size,
-        output_tensor.element_size(),
-    )
-
-    # Get metadata from workspace after any schedule planning.
     num_batches = workspace.num_batches
 
     if timing_events is not None:
@@ -390,14 +340,15 @@ def matmul_all_gather_copy_engine(
     submit_launch_start = time.perf_counter() if cpu_timing is not None else None
     submit_grid = (world_size,)
     c_local_base = output_tensor[rank * M_local :, :]
-    _launch_wave_wait_submit_kernel[submit_grid](
+    _signal_batch_wait_submit_kernel[submit_grid](
         c_local_base,
         workspace.locks,
         workspace.completion_signals,
         flag_iteration,
-        workspace.wave_tile_counts,
-        workspace.wave_transfer_offsets,
-        workspace.wave_transfer_counts,
+        workspace.batch_signal_ids,
+        workspace.batch_producers,
+        workspace.batch_transfer_offsets,
+        workspace.batch_transfer_counts,
         workspace.transfer_row_offsets,
         workspace.transfer_col_offsets,
         workspace.transfer_width_bytes,
@@ -406,8 +357,8 @@ def matmul_all_gather_copy_engine(
         shmem.get_copy_engine_ctx(),
         rank,
         world_size,
-        workspace.num_waves,
-        workspace.max_tiles_per_wave,
+        num_batches,
+        workspace.max_transfers_per_batch,
         stride_cm,
         stride_cm,
         stride_cn,
@@ -425,15 +376,10 @@ def matmul_all_gather_copy_engine(
         import warnings
 
         warnings.warn(
-            "Bias is not yet supported in the tritonBLAS SignalView path for "
+            "Bias is not yet supported in the tritonBLAS tile-signalling path for "
             "matmul_all_gather_copy_engine. Ignoring bias for this launch."
         )
 
-    epilogue_config = EpilogueConfig(
-        workspace.locks,
-        map_type="launch_wave",
-        block_group_m=launch_wave_plan.wave_size,
-    )
     c_local_view = output_tensor[rank * M_local : (rank + 1) * M_local, :]
     persistent_matmul_lt(
         A,
@@ -442,7 +388,8 @@ def matmul_all_gather_copy_engine(
         selector,
         bias=None,
         work_stealing=False,
-        epilogue_config=epilogue_config,
+        gates=workspace.locks,
+        signal_of_tile=workspace.signal_of_tile,
     )
     if cpu_timing is not None:
         cpu_timing["main_launch_ms"] = (time.perf_counter() - main_launch_start) * 1000.0
@@ -474,7 +421,7 @@ def matmul_all_gather_copy_engine(
             gpu_total_ms = submit_ms + main_ms + quiet_ms
             cpu_launch_total_ms = cpu_timing["submit_launch_ms"] + cpu_timing["main_launch_ms"]
             cpu_total_ms = (time.perf_counter() - cpu_timing["total_start"]) * 1000.0
-            tile_transfer_count = (world_size - 1) * getattr(workspace, "num_transfers", num_batches)
+            tile_transfer_count = (world_size - 1) * workspace.num_transfers
             shmem.info(
                 f"[Rank {rank}] Device copy-engine GPU timing. "
                 f"Submit: {submit_ms:.2f}ms, Main: {main_ms:.2f}ms, Wait: {quiet_ms:.2f}ms, "

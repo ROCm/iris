@@ -13,9 +13,8 @@ This is more efficient than device-initiated SDMA because:
 - Device kernel is lightweight (store + set flag)
 - SDMA hardware automatically performs scatter when flags are set
 
-This implementation supports two backends:
-- Custom Triton kernel (legacy, controlled by use_tritonblas=False)
-- tritonBLAS with SignalView (default, use_tritonblas=True)
+The GEMM is tritonBLAS's persistent kernel with per-tile signalling; which gate each tile
+increments, and the order the gates open in, come from the tile schedule tritonBLAS publishes.
 """
 
 from typing import Optional
@@ -28,9 +27,8 @@ from .workspace import FusedWorkspace
 
 # Import tritonBLAS
 from tritonblas.matmul import persistent_matmul_lt
-from tritonblas.config import EpilogueConfig
 from tritonblas.matmul import _make_matmul_selector
-from .tritonblas_launch_wave_schedule import build_launch_wave_plan
+from .tritonblas_tile_schedule import build_launch_wave_signal_plan
 
 
 @triton.jit()
@@ -112,23 +110,15 @@ def matmul_all_gather_host_copy_engine_preamble(
     # Auto-calculate optimal m_tiles_per_batch if not provided
     if m_tiles_per_batch is None:
         m_tiles_per_batch = _auto_m_tiles_per_batch(selector, M_local, N)
-    num_tiles_m = triton.cdiv(M_local, selector.block_m)
-    num_tiles_n = triton.cdiv(N, selector.block_n)
-    launch_wave_plan = build_launch_wave_plan(
-        num_tiles_m=num_tiles_m,
-        num_tiles_n=num_tiles_n,
-        group_size_m=selector.group_m,
-        launch_grid=num_tiles_m * num_tiles_n,
-        wave_size=selector._ACTIVE_CU,
-        num_xcds=selector.num_sms,
-    )
+    signal_plan = build_launch_wave_signal_plan(M_local, N, selector, selector._ACTIVE_CU)
     ws.selector = selector
-    ws.launch_wave_plan = launch_wave_plan
-    ws.locks = shmem.zeros((launch_wave_plan.num_waves,), dtype=torch.int32)
-    ws.num_tiles_m = num_tiles_m
-    ws.num_tiles_n = num_tiles_n
-    ws.num_batches = launch_wave_plan.num_waves
-    ws.num_waves = launch_wave_plan.num_waves
+    ws.signal_plan = signal_plan
+    ws.signal_of_tile = torch.tensor(signal_plan.signal_of_tile, device=A.device, dtype=torch.int32)
+    # One gate per signal, incremented by the GEMM epilogue as each of its tiles is stored.
+    ws.locks = shmem.zeros((signal_plan.num_signals,), dtype=torch.int32)
+    ws.num_tiles_m = signal_plan.schedule.grid_m
+    ws.num_tiles_n = signal_plan.schedule.grid_n
+    ws.num_batches = len(signal_plan.batches)
     ws.m_tiles_per_batch = m_tiles_per_batch
 
     ws.completion_signals = shmem.zeros((world_size,), dtype=torch.int32)
@@ -194,27 +184,18 @@ def matmul_all_gather_host_copy_engine(
     device = A.device
 
     selector = workspace.selector
-    launch_wave_plan = getattr(workspace, "launch_wave_plan", None)
+    signal_plan = getattr(workspace, "signal_plan", None)
     num_tiles_m = workspace.num_tiles_m
     num_tiles_n = workspace.num_tiles_n
-    num_batches = workspace.num_batches
-    if launch_wave_plan is None:
-        raise ValueError("workspace.launch_wave_plan must be initialized in preamble")
+    if signal_plan is None:
+        raise ValueError("workspace.signal_plan must be initialized in preamble")
 
     # ═══════════════════════════════════════════════════════════════════════
-    # Device Phase: Compute GEMM + store + set flags
+    # Device Phase: Compute GEMM + store + increment each tile's gate
     # ═══════════════════════════════════════════════════════════════════════
-    # tritonBLAS path with SignalView
-    selector = workspace.selector
 
     # Create a view of output_tensor at this rank's position
     C_local_view = output_tensor[rank * M_local : (rank + 1) * M_local, :]
-
-    epilogue_config = EpilogueConfig(
-        workspace.locks,
-        map_type="launch_wave",
-        block_group_m=launch_wave_plan.wave_size,
-    )
 
     # Use work-stealing if enabled
     tritonblas_config = None
@@ -225,7 +206,7 @@ def matmul_all_gather_host_copy_engine(
 
         warnings.warn("Bias is not yet supported in tritonBLAS integration. Consider adding bias manually after GEMM.")
 
-    # Launch tritonBLAS GEMM with SignalView
+    # Launch tritonBLAS GEMM with per-tile signalling
     persistent_matmul_lt(
         A,
         B,
@@ -234,24 +215,25 @@ def matmul_all_gather_host_copy_engine(
         config=tritonblas_config,
         bias=None,
         work_stealing=False,
-        epilogue_config=epilogue_config,
+        gates=workspace.locks,
+        signal_of_tile=workspace.signal_of_tile,
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # Host Phase: Enqueue SDMA POLL+COPY packets for all tiles
+    # Host Phase: Enqueue SDMA POLL+COPY packets for every signal batch
     # (While kernel is running in parallel on device)
     # ═══════════════════════════════════════════════════════════════════════
     element_size = output_tensor.element_size()
 
     if verbose and rank == 0:
         shmem.info(
-            f"[Rank {rank}] Starting SDMA loop (launch-wave transfers)... "
+            f"[Rank {rank}] Starting SDMA loop (launch-wave signal batches)... "
             f"num_m_tiles={num_tiles_m}, num_tiles_n={num_tiles_n}, "
-            f"wave_size={launch_wave_plan.wave_size}"
+            f"wave_size={signal_plan.num_cus}"
         )
         shmem.info(
-            f"[Rank {rank}] Will transfer in {launch_wave_plan.num_waves} waves "
-            f"across {len(launch_wave_plan.transfers)} tiles"
+            f"[Rank {rank}] Will transfer in {len(signal_plan.batches)} batches "
+            f"across {sum(len(batch.rects) for batch in signal_plan.batches)} transfers"
         )
 
     sdma_start_time = time.perf_counter()
@@ -262,17 +244,12 @@ def matmul_all_gather_host_copy_engine(
     block_size_n = workspace.selector.block_n
 
     signal_ptr_local = workspace.completion_signals.data_ptr() + rank * workspace.completion_signals.element_size()
-    transfers_by_wave = [[] for _ in range(launch_wave_plan.num_waves)]
-    for transfer in launch_wave_plan.transfers:
-        transfers_by_wave[transfer.wave_id].append(transfer)
-
-    for wave_id, wave_transfers in enumerate(transfers_by_wave):
-        if not wave_transfers:
-            continue
-
-        expected_flag_value = (flag_iteration + 1) * launch_wave_plan.wave_tile_counts[wave_id]
-        wait_flag_ptr = workspace.locks.data_ptr() + wave_id * workspace.locks.element_size()
-        is_last_wave = wave_id == (launch_wave_plan.num_waves - 1)
+    # Queue the batches in the readiness order tritonBLAS publishes, so no gate blocks the SDMA queue
+    # behind a later one.
+    for batch_id, batch in enumerate(signal_plan.batches):
+        expected_flag_value = (flag_iteration + 1) * batch.producers
+        wait_flag_ptr = workspace.locks.data_ptr() + batch.signal_id * workspace.locks.element_size()
+        is_last_batch = batch_id == (len(signal_plan.batches) - 1)
 
         src_ptrs = []
         dst_ptrs_local = []
@@ -281,11 +258,11 @@ def matmul_all_gather_host_copy_engine(
         src_strides = []
         dst_strides = []
 
-        for transfer in wave_transfers:
-            m_start = transfer.m_tile_start * block_size_m
-            n_start = transfer.n_tile_start * block_size_n
-            batch_height = min(transfer.m_tile_count * block_size_m, M_local - m_start)
-            batch_width = min(transfer.n_tile_count * block_size_n, N - n_start)
+        for rect in batch.rects:
+            m_start = rect.m_tile_start * block_size_m
+            n_start = rect.n_tile_start * block_size_n
+            batch_height = min(rect.m_tile_count * block_size_m, M_local - m_start)
+            batch_width = min(rect.n_tile_count * block_size_n, N - n_start)
 
             src_offset = (m_start + rank * M_local) * stride_cm + n_start * stride_cn
             src_ptrs.append(output_tensor.data_ptr() + src_offset * element_size)
@@ -305,7 +282,7 @@ def matmul_all_gather_host_copy_engine(
                 shmem.heap.translate(dst_ptr_local, rank, remote_rank) for dst_ptr_local in dst_ptrs_local
             ]
             signal_ptr_remote = None
-            if is_last_wave:
+            if is_last_batch:
                 signal_ptr_remote = shmem.heap.translate(signal_ptr_local, rank, remote_rank)
 
             shmem.put_tiles(
@@ -324,12 +301,12 @@ def matmul_all_gather_host_copy_engine(
                 async_op=True,
                 channel=0,
             )
-            tile_transfer_count += len(wave_transfers)
+            tile_transfer_count += len(batch.rects)
 
-            if verbose and wave_id < 2 and remote_rank == (rank + 1) % world_size:
+            if verbose and batch_id < 2 and remote_rank == (rank + 1) % world_size:
                 shmem.info(
-                    f"[Rank {rank}→{remote_rank}] Queued wave={wave_id} "
-                    f"transfers={len(wave_transfers)} tiles={launch_wave_plan.wave_tile_counts[wave_id]}"
+                    f"[Rank {rank}→{remote_rank}] Queued batch={batch_id} signal={batch.signal_id} "
+                    f"transfers={len(batch.rects)} tiles={batch.producers}"
                 )
 
     sdma_end_post_time = time.perf_counter()
