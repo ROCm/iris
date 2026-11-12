@@ -26,6 +26,7 @@ import time
 from .workspace import FusedWorkspace
 
 # Import tritonBLAS
+from tritonblas.config import EpilogueConfig
 from tritonblas.matmul import persistent_matmul_lt
 from tritonblas.matmul import _make_matmul_selector
 from .tritonblas_tile_schedule import build_launch_wave_signal_plan
@@ -113,9 +114,9 @@ def matmul_all_gather_host_copy_engine_preamble(
     signal_plan = build_launch_wave_signal_plan(M_local, N, selector, selector._ACTIVE_CU)
     ws.selector = selector
     ws.signal_plan = signal_plan
-    ws.signal_of_tile = torch.tensor(signal_plan.signal_of_tile, device=A.device, dtype=torch.int32)
     # One gate per signal, incremented by the GEMM epilogue as each of its tiles is stored.
     ws.locks = shmem.zeros((signal_plan.num_signals,), dtype=torch.int32)
+    ws.epilogue_config = EpilogueConfig(ws.locks, map_type="table", tile_to_slot=signal_plan.signal_of_tile)
     ws.num_tiles_m = signal_plan.schedule.grid_m
     ws.num_tiles_n = signal_plan.schedule.grid_n
     ws.num_batches = len(signal_plan.batches)
@@ -206,7 +207,7 @@ def matmul_all_gather_host_copy_engine(
 
         warnings.warn("Bias is not yet supported in tritonBLAS integration. Consider adding bias manually after GEMM.")
 
-    # Launch tritonBLAS GEMM with per-tile signalling
+    # Launch tritonBLAS GEMM, signalling each tile's gate from the epilogue
     persistent_matmul_lt(
         A,
         B,
@@ -215,8 +216,7 @@ def matmul_all_gather_host_copy_engine(
         config=tritonblas_config,
         bias=None,
         work_stealing=False,
-        gates=workspace.locks,
-        signal_of_tile=workspace.signal_of_tile,
+        epilogue_config=workspace.epilogue_config,
     )
 
     # ═══════════════════════════════════════════════════════════════════════

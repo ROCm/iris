@@ -18,6 +18,7 @@ import triton.language as tl
 import iris
 
 from .workspace import FusedWorkspace
+from tritonblas.config import EpilogueConfig
 from tritonblas.matmul import persistent_matmul_lt
 from .tritonblas_tile_schedule import build_launch_wave_signal_plan
 
@@ -172,7 +173,6 @@ def _build_signal_batch_workspace(
         return torch.tensor(values, device=device, dtype=torch.int32)
 
     workspace.signal_plan = plan
-    workspace.signal_of_tile = _int32(plan.signal_of_tile)
     workspace.batch_signal_ids = _int32([batch.signal_id for batch in plan.batches])
     workspace.batch_producers = _int32([batch.producers for batch in plan.batches])
     workspace.batch_transfer_offsets = _int32(batch_transfer_offsets)
@@ -251,6 +251,7 @@ def matmul_all_gather_copy_engine_preamble(
 
     # One gate per signal, incremented by the GEMM epilogue as each of its tiles is stored.
     ws.locks = shmem.zeros((ws.signal_plan.num_signals,), dtype=torch.int32)
+    ws.epilogue_config = EpilogueConfig(ws.locks, map_type="table", tile_to_slot=ws.signal_plan.signal_of_tile)
     ws.completion_signals = shmem.zeros((world_size,), dtype=torch.int32)
 
     return ws
@@ -388,8 +389,7 @@ def matmul_all_gather_copy_engine(
         selector,
         bias=None,
         work_stealing=False,
-        gates=workspace.locks,
-        signal_of_tile=workspace.signal_of_tile,
+        epilogue_config=workspace.epilogue_config,
     )
     if cpu_timing is not None:
         cpu_timing["main_launch_ms"] = (time.perf_counter() - main_launch_start) * 1000.0
