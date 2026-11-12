@@ -21,7 +21,7 @@ dependencies = [
     "numpy",
     "requests",
     "ruff<0.16",  # 0.16 formats code blocks in Markdown; see lint.yml
-    "tritonblas @ git+https://github.com/ROCm/tritonBLAS.git@b9baf7d37817e46187498a8cbb2b44db967e4481",
+    "tritonblas @ git+https://github.com/ROCm/tritonBLAS.git@426fad2296bfb79222efbfe80784182e688393be",
 ]
 
 [project.urls]
