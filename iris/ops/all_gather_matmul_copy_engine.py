@@ -54,7 +54,8 @@ def _batch_submit_kernel(
     dst_rank = pid
 
     ptr_dtype = A_sharded.dtype.element_ty
-    elem_size = ptr_dtype.primitive_bitwidth // 8
+    elem_size = ptr_dtype.itemsize
+    tl.static_assert(ptr_dtype.itemsize > 0, "the copy-engine ops do not support sub-byte element types")
 
     num_batches = (NUM_M_TILES + M_TILES_PER_BATCH - 1) // M_TILES_PER_BATCH
     rows_per_batch = M_TILES_PER_BATCH * BLOCK_SIZE_M

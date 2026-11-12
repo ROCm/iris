@@ -61,7 +61,8 @@ def _launch_wave_wait_submit_kernel(
         return
 
     ptr_dtype = C_local_base.dtype.element_ty
-    elem_size = ptr_dtype.primitive_bitwidth // 8
+    elem_size = ptr_dtype.itemsize
+    tl.static_assert(ptr_dtype.itemsize > 0, "the copy-engine ops do not support sub-byte element types")
 
     for wave_id in range(NUM_WAVES):
         transfer_start = tl.load(wave_transfer_offsets + wave_id)
