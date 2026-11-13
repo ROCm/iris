@@ -121,9 +121,9 @@ class TriggeredView:
             pass
 
     @gluon.jit
-    def _sends_to(self, peer):
-        """True if this rank's chains go to rank ``peer``, so its completion counter counts rounds."""
-        return gl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + peer) != 0
+    def _queues_to(self, peer):
+        """How many queues this rank's chains use to rank ``peer``: its completion counter grows that much per round."""
+        return gl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + peer)
 
     @gluon.jit
     def group_arrived(self, group):
@@ -153,9 +153,10 @@ class TriggeredView:
         """True once every peer has received this rank's chunks this round, so they may be overwritten."""
         pending = 0
         for peer in range(gl.load(self.view + H_WORLD_SIZE)):
-            if self._sends_to(peer):
+            queues = self._queues_to(peer)
+            if queues != 0:
                 completion = self.gates + 2 * self.num_chunks + peer
-                pending += (gl.atomic_add(completion, 0, sem="acquire", scope="sys") < self.round).to(gl.int32)
+                pending += (gl.atomic_add(completion, 0, sem="acquire", scope="sys") < queues * self.round).to(gl.int32)
         return pending == 0
 
     @gluon.jit

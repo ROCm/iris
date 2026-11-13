@@ -300,19 +300,32 @@ per round, by the whole CTA after every wave's stores are done, with release sem
   has to tell which mark is the last one. A group's counter grows by the number of its chunks sent
   to the rank, per round. Since several senders add to it, it counts rounds correctly only because
   the round fence keeps every rank's round `r` copies ahead of any round `r + 1` copy.
-- Every round, a rank's copies to a peer end with one signal on the sending rank's completion
-  counter for that peer. `wait()` and `sent()` / `wait_sent()` read it: once it reaches the round,
-  every copy to that peer has landed, and the source may be overwritten.
+- Every round, a rank's copies on each queue to a peer end with one signal on the sending rank's
+  completion counter for that peer. `wait()` and `sent()` / `wait_sent()` read it: once it reaches
+  the round times the number of queues (lanes) the rank's chunks use to that peer, every copy to
+  that peer has landed, and the source may be overwritten.
 - Rounds start at 1 and add 1 per `next_round()`. Counters are never reset, so a plan is limited
   to rounds where `writers × round` (and a group's count × round) stays at most 2³¹ − 1: over
   7 million rounds at 304 writers.
 - `wait()` reads only this rank's gates: the completion counter of every peer it sends to, and the
   arrival counter of every chunk sent to it.
 
+## Lanes
+
+A rank's copies to one peer run in prepare order, so a chunk ready early waits behind earlier ones.
+`sdma_lanes=N` gives each peer N independent host queues, and `Chunk.lane` (or `lane=` on the
+builders) picks one; lane `i` is host queue (`channel`) `i`. Lanes share a copy engine, so they
+remove blocking but add no bandwidth.
+
+```python
+ctx = iris.iris(heap_size, engines=("sdma",), sdma_lanes=2)
+schedule = chunks(first, 4, base=out, lane=0) + chunks(second, 4, base=out, lane=1)
+```
+
 ## Requirements and limits
 
 - **SDMA engine.** Create the context with `engines=("sdma",)` (needs `pip install iris[sdma]`).
-- **One queue per peer.** Plans use the host-initiated copy-engine queue to each peer, shared with
+- **One queue per peer and lane.** Plans use the host-initiated copy-engine queue to each peer, shared with
   host `Iris.put()` and with the plans of every Iris context in the process. Kernel-initiated
   copies (`put(..., use_copy_engine=True)`) use a separate queue and are unaffected.
 - **Ring capacity.** Prepared copies may use at most half of each queue's 8 MiB ring, and each plan

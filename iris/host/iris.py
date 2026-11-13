@@ -145,6 +145,8 @@ class Iris:
             current device, so call ``torch.cuda.set_device`` first. ``None`` (default) uses
             ``rank % visible GPUs``. It must be the GPU the process group is bound to; if the
             group was initialized with ``device_id``, a different GPU raises ``ValueError``.
+        sdma_lanes (int, optional): Independent host copy-engine queues (lanes) to each peer; lane ``i``
+            is ``channel=i`` of ``put``/``quiet``. Needs ``engines=("sdma",)``. Defaults to 1.
 
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap with torch allocator
@@ -156,7 +158,7 @@ class Iris:
 
     """
 
-    def __init__(self, heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
+    def __init__(self, heap_size=1 << 30, allocator_type="torch", engines=(), device=None, sdma_lanes=1):
         if engines is None:
             engines = ()
         elif isinstance(engines, str):
@@ -166,6 +168,7 @@ class Iris:
         unsupported = set(engines) - _SUPPORTED_ENGINES
         if unsupported:
             raise ValueError(f"Unsupported engines: {sorted(unsupported)}. Supported: {sorted(_SUPPORTED_ENGINES)}.")
+        self.sdma_lanes = sdma_lanes
         self._sdma_ep = None
         if "sdma" in engines:
             from iris.device.sdma_utils import bind_sdma_ep
@@ -288,8 +291,8 @@ class Iris:
         for peer_gpu in sorted(set(self._copy_engine_gpus)):
             # Device-initiated queues
             sdma_ep.create_queue(self.gpu_id, peer_gpu)
-            # Host-initiated queues
-            sdma_ep.create_host_queue(self.gpu_id, peer_gpu)
+            # Host-initiated queues, one per lane
+            sdma_ep.create_host_queue(self.gpu_id, peer_gpu, num_channels=self.sdma_lanes)
 
         for peer_rank, peer_gpu in enumerate(self._copy_engine_gpus):
             handle = sdma_ep.get_queue_device_ctx(self.gpu_id, peer_gpu)
@@ -1217,7 +1220,7 @@ class Iris:
         if to_tensor is None:
             to_tensor = from_tensor
 
-        self._check_host_queue_idle(to_rank)
+        self._check_host_queue_idle(to_rank, channel)
         from_rank = self.get_rank()
         src_gpu, dst_gpu = self._copy_engine_devices(to_rank)
         from_ptr = from_tensor.data_ptr()
@@ -1304,7 +1307,7 @@ class Iris:
             ...                wait_flag=flag.data_ptr(), wait_value=256, signal_flag=signal_ptr)
         """
         sdma_ep = self._require_copy_engine()
-        self._check_host_queue_idle(to_rank)
+        self._check_host_queue_idle(to_rank, channel)
         src_gpu, dst_gpu = self._copy_engine_devices(to_rank)
 
         wait_ptr, wait_bits = self._flag_pointer_and_bits(wait_flag, default_bits=32)
@@ -1382,7 +1385,7 @@ class Iris:
             channel: SDMA channel to use
         """
         sdma_ep = self._require_copy_engine()
-        self._check_host_queue_idle(to_rank)
+        self._check_host_queue_idle(to_rank, channel)
         src_gpu, dst_gpu = self._copy_engine_devices(to_rank)
 
         per_tile = (global_addrs, dst_addrs, tile_heights, tile_widths, src_strides, dst_strides)
@@ -1445,17 +1448,17 @@ class Iris:
         """
         sdma_ep = self._require_copy_engine()
         if to_rank is not None:
-            self._check_host_queue_idle(to_rank)
+            self._check_host_queue_idle(to_rank, channel)
             sdma_ep.quiet(*self._copy_engine_devices(to_rank), channel)
         else:
             # Quiet to all ranks
             for rank, peer_gpu in enumerate(self._copy_engine_gpus):
-                self._check_host_queue_idle(rank)
+                self._check_host_queue_idle(rank, channel)
                 sdma_ep.quiet(self.gpu_id, peer_gpu, channel)
 
-    def _check_host_queue_idle(self, to_rank):
+    def _check_host_queue_idle(self, to_rank, channel):
         # Chains parked on a host queue block everything queued behind them, quiet() included
-        queue_ledger.ledger().check_idle(self.get_rank(), to_rank)
+        queue_ledger.ledger().check_idle(self.get_rank(), to_rank, channel)
 
     def allocate_symmetric(self, *size, dtype=None) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -1986,7 +1989,7 @@ class Iris:
             )
 
 
-def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
+def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None, sdma_lanes=1):
     """
     Create and return an Iris instance with the specified heap size.
 
@@ -1996,6 +1999,7 @@ def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
                               Can be overridden with IRIS_ALLOCATOR environment variable.
         engines (str or tuple of str, optional): See :class:`Iris`.
         device (int, str or torch.device, optional): See :class:`Iris`.
+        sdma_lanes (int, optional): See :class:`Iris`. Defaults to 1.
 
     Returns:
         Iris: An initialized Iris instance.
@@ -2009,4 +2013,4 @@ def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
         >>> iris_ctx = iris.iris(2**30, allocator_type="vmem")
         >>> tensor = iris_ctx.zeros(1024, 1024)
     """
-    return Iris(heap_size, allocator_type, engines=engines, device=device)
+    return Iris(heap_size, allocator_type, engines=engines, device=device, sdma_lanes=sdma_lanes)
