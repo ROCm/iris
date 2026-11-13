@@ -168,6 +168,11 @@ plan = TriggeredPlan(ctx, a_local, schedule, destination=staging)
 dst.copy_(a_local)                                  # a chunk is never sent to its own rank
 ```
 
+`ctx.ccl` also prepares in-place scatter, gather, broadcast and all-to-all plans (`prepare_scatter`,
+`prepare_gather`, `prepare_broadcast`, `prepare_all_to_all`). A kernel driving any of them needs no
+roles: it marks the chunks its rank `owns()` and waits for every chunk, since `wait()` returns at
+once for a chunk not sent to it.
+
 ### Gluon
 
 Gluon kernels use `iris.experimental.plan.gluon.TriggeredView`. It reads the same handle and has
