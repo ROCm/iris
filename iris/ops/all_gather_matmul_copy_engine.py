@@ -9,6 +9,8 @@ Key differences from HBM buffer variant:
 - Host orchestrates SDMA transfers of remote tiles to staged_a buffer
 - GEMM processes local K-blocks first (from A_sharded), then remote K-blocks (from staged_a)
 - Flags only track remote tiles, updated by copy engine via host_atomic_add_32
+- Batches of M-tile rows, and the order they are posted in, come from the tile schedule tritonBLAS
+  publishes for the GEMM, so the copy engine delivers rows in the order the GEMM first needs them
 """
 
 from typing import Optional
@@ -20,6 +22,7 @@ import iris
 from tritonblas.matmul import persistent_matmul_lt
 from tritonblas.config import PrologueConfig
 
+from .tritonblas_tile_schedule import plan_row_batches, selector_schedule, selector_wave_size
 from .workspace import FusedWorkspace
 
 
@@ -28,6 +31,7 @@ def _batch_submit_kernel(
     A_sharded,
     staged_a,
     flags_ptr,
+    batch_order_ptr,
     flag_iteration,
     M,
     K_local,
@@ -60,7 +64,9 @@ def _batch_submit_kernel(
     num_batches = (NUM_M_TILES + M_TILES_PER_BATCH - 1) // M_TILES_PER_BATCH
     rows_per_batch = M_TILES_PER_BATCH * BLOCK_SIZE_M
 
-    for batch_id in range(num_batches):
+    for position in range(num_batches):
+        # Batches are posted in the order the GEMM first needs them, which need not be ascending in M.
+        batch_id = tl.load(batch_order_ptr + position)
         src_m_offset = batch_id * rows_per_batch
         remaining_rows = M - src_m_offset
         tile_height = tl.minimum(remaining_rows, rows_per_batch)
@@ -135,16 +141,13 @@ def all_gather_matmul_copy_engine_preamble(
     num_tiles_n = (N + selector.block_n - 1) // selector.block_n
     total_tiles = num_m_tiles * num_tiles_n
 
-    if m_tiles_per_batch is None:
-        # Auto-calculate optimal m_tiles_per_batch
-        active_cus = getattr(selector, "_ACTIVE_CU", None)
-        if active_cus is None or active_cus <= 0:
-            active_cus = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
-        tiles_per_group = max(1, selector.group_m * num_tiles_n)
-        groups_per_wave = max(1, int(active_cus) // tiles_per_group)
-        m_tiles_per_batch = max(1, min(num_m_tiles, groups_per_wave * selector.group_m))
+    # Batches of whole M-tile rows, sized and ordered from the GEMM's published dispatch order.
+    row_plan = plan_row_batches(
+        selector_schedule(M, N, selector), selector_wave_size(selector, A_sharded.device), m_tiles_per_batch
+    )
+    m_tiles_per_batch = row_plan.m_tiles_per_batch
 
-    num_batches = (num_m_tiles + m_tiles_per_batch - 1) // m_tiles_per_batch
+    num_batches = row_plan.num_batches
     num_flags = num_batches
     ws = FusedWorkspace(
         operation="all_gather_matmul_copy_engine",
@@ -170,6 +173,8 @@ def all_gather_matmul_copy_engine_preamble(
     # Store metadata
     ws.selector = selector
     ws.m_tiles_per_batch = m_tiles_per_batch
+    ws.row_plan = row_plan
+    ws.batch_order = torch.tensor(row_plan.order, dtype=torch.int32, device=A_sharded.device)
     ws.num_m_tiles = num_m_tiles
     ws.num_batches = num_batches
 
@@ -368,6 +373,7 @@ def all_gather_matmul_copy_engine(
             A_sharded,
             workspace.aux_buffer,
             workspace.locks,
+            workspace.batch_order,
             flag_iteration,
             M,
             K_local,
@@ -463,12 +469,11 @@ def all_gather_matmul_copy_engine(
         )
 
         # Post all batches while the GEMM is already running; the GEMM waits per batch on its flags.
-        batch_id = 0
-        for m_tile_start in range(0, num_m_tiles, m_tiles_per_batch):
+        # Batches go out in the order the GEMM first needs them.
+        for batch_id in workspace.row_plan.order:
+            m_tile_start = batch_id * m_tiles_per_batch
             m_tile_end = min(m_tile_start + m_tiles_per_batch, num_m_tiles)
-            num_m_tiles_in_batch = m_tile_end - m_tile_start
-            post_host_batch(batch_id, m_tile_start, num_m_tiles_in_batch)
-            batch_id += 1
+            post_host_batch(batch_id, m_tile_start, m_tile_end - m_tile_start)
 
         sdma_end_post_time = time.perf_counter()
 

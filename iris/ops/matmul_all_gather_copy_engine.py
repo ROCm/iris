@@ -20,7 +20,7 @@ import iris
 from .workspace import FusedWorkspace
 from tritonblas.config import EpilogueConfig
 from tritonblas.matmul import persistent_matmul_lt
-from .tritonblas_tile_schedule import build_launch_wave_signal_plan
+from .tritonblas_tile_schedule import build_launch_wave_signal_plan, selector_wave_size
 
 
 @triton.jit()
@@ -134,13 +134,6 @@ def _wait_completion_signals_kernel(
         pass
 
 
-def _selector_wave_size(selector, device: torch.device) -> int:
-    wave_size = getattr(selector, "_ACTIVE_CU", None)
-    if wave_size is None or wave_size <= 0:
-        wave_size = torch.cuda.get_device_properties(device).multi_processor_count
-    return int(wave_size)
-
-
 def _build_signal_batch_workspace(
     workspace: FusedWorkspace,
     selector,
@@ -150,7 +143,7 @@ def _build_signal_batch_workspace(
     elem_size: int,
 ):
     """Plan the GEMM's tile signalling and flatten each batch's copies into device metadata arrays."""
-    plan = build_launch_wave_signal_plan(m_local, n, selector, _selector_wave_size(selector, device))
+    plan = build_launch_wave_signal_plan(m_local, n, selector, selector_wave_size(selector, device))
 
     batch_transfer_offsets = []
     batch_transfer_counts = []
