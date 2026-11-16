@@ -34,7 +34,8 @@ def _param_shapes():
                 int(os.environ["IRIS_TEST_K"]),
             )
         ]
-    return [(1024, 256, 256)]
+    # The second shape spans several launch waves, so the GEMM signals more than one gate.
+    return [(1024, 256, 256), (16384, 8192, 256)]
 
 
 def _copy_engine_modes():
@@ -224,30 +225,37 @@ def test_matmul_all_gather_copy_engine(dtype, atol, rtol, copy_engine_mode, M, N
             selector=selector,
         )
 
-    shmem.barrier()
+    # Gates are cumulative across launches, so run twice and clear the output in between to check
+    # that the second launch waits for its own generation of tile signals.
+    for flag_iteration in range(2):
+        output.zero_()
+        torch.cuda.synchronize()
+        shmem.barrier()
 
-    if copy_engine_mode == "device":
-        matmul_all_gather_copy_engine(
-            shmem,
-            output,
-            A_local,
-            B,
-            workspace=workspace,
-        )
-    else:
-        matmul_all_gather_host_copy_engine(
-            shmem,
-            output,
-            A_local,
-            B,
-            workspace=workspace,
-            trace=False,
-        )
+        if copy_engine_mode == "device":
+            matmul_all_gather_copy_engine(
+                shmem,
+                output,
+                A_local,
+                B,
+                workspace=workspace,
+                flag_iteration=flag_iteration,
+            )
+        else:
+            matmul_all_gather_host_copy_engine(
+                shmem,
+                output,
+                A_local,
+                B,
+                workspace=workspace,
+                flag_iteration=flag_iteration,
+                trace=False,
+            )
 
-    torch.cuda.synchronize()
-    shmem.barrier()
+        torch.cuda.synchronize()
+        shmem.barrier()
 
-    _assert_gathered_rows_match(output, A_local, B, rank, world_size, atol, rtol, copy_engine_mode)
+        _assert_gathered_rows_match(output, A_local, B, rank, world_size, atol, rtol, copy_engine_mode)
 
     shmem.barrier()
     del output
