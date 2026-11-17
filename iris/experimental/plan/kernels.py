@@ -46,10 +46,15 @@ def _peek(ptr):
 
 
 @triton.jit
+def _unpack_failed(pair):
+    """An abort pair's halves: the round a peer marked failed (0 if none), and that peer."""
+    return pair.to(tl.int32), (pair >> 32).to(tl.int32) - 1
+
+
+@triton.jit
 def _failed(abort):
     """The abort pair in one load: the round a peer marked failed (0 if none), and that peer."""
-    pair = _load(abort.to(tl.pointer_type(tl.int64)))
-    return pair.to(tl.int32), (pair >> 32).to(tl.int32) - 1
+    return _unpack_failed(_load(abort.to(tl.pointer_type(tl.int64))))
 
 
 @triton.jit
@@ -62,7 +67,7 @@ def _aborted(abort, round):
 @triton.jit
 def _aborted_peek(abort, round):
     """_aborted for a poll loop: the pair through _peek."""
-    failed = _peek(abort.to(tl.pointer_type(tl.int64))).to(tl.int32)
+    failed, _ = _unpack_failed(_peek(abort.to(tl.pointer_type(tl.int64))))
     return (failed != 0) & (failed <= round)
 
 
