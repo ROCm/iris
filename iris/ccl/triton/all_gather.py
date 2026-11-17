@@ -83,13 +83,11 @@ def persistent_all_gather(
         # Compute local row and column indices for input tensor
         rm_base = pid_m * BLOCK_SIZE_M
         rn_base = pid_n * BLOCK_SIZE_N
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
         rm_input = rm_base + tl.arange(0, BLOCK_SIZE_M)
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
         rm_input = tl.max_contiguous(tl.multiple_of(rm_input, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-        # Mask for local input bounds
-        input_mask = (rm_input[:, None] < M) & (rn[None, :] < N)
 
         # Compute input offset and load local shard data once
         input_base_m = rm_input[:, None] * stride_in_m
@@ -98,16 +96,46 @@ def persistent_all_gather(
         input_ptr_source = input_ptr + input_offset
         input_ptr_source = tl.multiple_of(input_ptr_source, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-        # Load local input data once for this tile
-        data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
+        # Compute global output row indices: offset by group_rank * M
+        rm_output = rm_input + group_rank * M
 
-        # Send local shard data to all destination ranks
-        # Each rank's input goes to output[group_rank * M : (group_rank + 1) * M, :] on all ranks
-        for i in tl.static_range(world_size):
-            target_rank = rank_start + i * rank_stride
+        # Compute output offset (loop invariant across destination ranks)
+        output_base_m = rm_output[:, None] * stride_out_m
+        output_base_n = rn[None, :] * stride_out_n
+        output_offset = output_base_m + output_base_n
+        output_ptr_target = output_ptr + output_offset
+        output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-            # Compute global output row indices: offset by group_rank * M
-            rm_output = rm_input + group_rank * M
+        # Fast path: NO MASKS (full tiles)
+        # For a full tile the mask is all-true, but Triton does not specialize that case on its own.
+        # Separate masked and unmasked paths avoid emitting address and predicate computation for
+        # masks that can never fire; memory access width is unchanged.
+        if is_full:
+            data = tl.load(input_ptr_source)
+
+            # Send local shard data to all destination ranks
+            # Each rank's input goes to output[group_rank * M : (group_rank + 1) * M, :] on all ranks
+            for i in tl.static_range(world_size):
+                target_rank = rank_start + i * rank_stride
+                if i == group_rank:
+                    # Local destination (i == group_rank): use direct store
+                    tl.store(output_ptr_target, data, cache_modifier=".wt")
+                else:
+                    # Remote destination: use iris.store to send data to remote destination
+                    # Use iris_rank for iris RMA operations (heap_bases indexing)
+                    iris.store(
+                        output_ptr_target,
+                        data,
+                        iris_rank,
+                        target_rank,
+                        heap_bases,
+                        hint=(1, BLOCK_SIZE_N),
+                    )
+
+        # Slow path: MASKED (only boundary tiles land here)
+        else:
+            input_mask = (rm_input[:, None] < M) & (rn[None, :] < N)
+            data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
 
             # Output mask: only write where input was valid
             output_mask = (rm_output[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
@@ -115,28 +143,23 @@ def persistent_all_gather(
             # Combine masks: must be valid in both input and output
             combined_mask = input_mask & output_mask
 
-            # Compute output offset
-            output_base_m = rm_output[:, None] * stride_out_m
-            output_base_n = rn[None, :] * stride_out_n
-            output_offset = output_base_m + output_base_n
-            output_ptr_target = output_ptr + output_offset
-            output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
-
-            if i == group_rank:
-                # Local destination (i == group_rank): use direct store
-                tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
-            else:
-                # Remote destination: use iris.store to send data to remote destination
-                # Use iris_rank for iris RMA operations (heap_bases indexing)
-                iris.store(
-                    output_ptr_target,
-                    data,
-                    iris_rank,
-                    target_rank,
-                    heap_bases,
-                    mask=combined_mask,
-                    hint=(1, BLOCK_SIZE_N),
-                )
+            for i in tl.static_range(world_size):
+                target_rank = rank_start + i * rank_stride
+                if i == group_rank:
+                    # Local destination (i == group_rank): use direct store
+                    tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
+                else:
+                    # Remote destination: use iris.store to send data to remote destination
+                    # Use iris_rank for iris RMA operations (heap_bases indexing)
+                    iris.store(
+                        output_ptr_target,
+                        data,
+                        iris_rank,
+                        target_rank,
+                        heap_bases,
+                        mask=combined_mask,
+                        hint=(1, BLOCK_SIZE_N),
+                    )
 
 
 @triton.jit()
@@ -226,13 +249,11 @@ def persistent_all_gather_partitioned(
         # Compute local row and column indices for input tensor
         rm_base = pid_m * BLOCK_SIZE_M
         rn_base = pid_n * BLOCK_SIZE_N
+        is_full = (rm_base + BLOCK_SIZE_M <= M) & (rn_base + BLOCK_SIZE_N <= N)
         rm_input = rm_base + tl.arange(0, BLOCK_SIZE_M)
         rn = rn_base + tl.arange(0, BLOCK_SIZE_N)
         rm_input = tl.max_contiguous(tl.multiple_of(rm_input, BLOCK_SIZE_M), BLOCK_SIZE_M)
         rn = tl.max_contiguous(tl.multiple_of(rn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-        # Mask for local input bounds
-        input_mask = (rm_input[:, None] < M) & (rn[None, :] < N)
 
         # Compute input offset and load local shard data once
         input_base_m = rm_input[:, None] * stride_in_m
@@ -241,17 +262,8 @@ def persistent_all_gather_partitioned(
         input_ptr_source = input_ptr + input_offset
         input_ptr_source = tl.multiple_of(input_ptr_source, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-        # Load local input data once for this tile
-        data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
-
         # Compute global output row indices: offset by group_rank * M
         rm_output = rm_input + group_rank * M
-
-        # Output mask: only write where input was valid
-        output_mask = (rm_output[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
-
-        # Combine masks: must be valid in both input and output
-        combined_mask = input_mask & output_mask
 
         # Compute output offset
         output_base_m = rm_output[:, None] * stride_out_m
@@ -260,21 +272,50 @@ def persistent_all_gather_partitioned(
         output_ptr_target = output_ptr + output_offset
         output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-        # Send to the assigned destination rank
-        if dest_rank_idx == group_rank:
-            # Local destination: use direct store
-            tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
+        # Fast path: NO MASKS (full tiles)
+        # For a full tile the mask is all-true, but Triton does not specialize that case on its own.
+        # Separate masked and unmasked paths avoid emitting address and predicate computation for
+        # masks that can never fire; memory access width is unchanged.
+        if is_full:
+            data = tl.load(input_ptr_source)
+            if dest_rank_idx == group_rank:
+                tl.store(output_ptr_target, data, cache_modifier=".wt")
+            else:
+                iris.store(
+                    output_ptr_target,
+                    data,
+                    iris_rank,
+                    target_rank,
+                    heap_bases,
+                    hint=(1, BLOCK_SIZE_N),
+                )
+
+        # Slow path: MASKED (only boundary tiles land here)
         else:
-            # Remote destination: use iris.store to send data to remote destination
-            iris.store(
-                output_ptr_target,
-                data,
-                iris_rank,
-                target_rank,
-                heap_bases,
-                mask=combined_mask,
-                hint=(1, BLOCK_SIZE_N),
-            )
+            input_mask = (rm_input[:, None] < M) & (rn[None, :] < N)
+            data = tl.load(input_ptr_source, mask=input_mask, other=0.0)
+
+            # Output mask: only write where input was valid
+            output_mask = (rm_output[:, None] < (group_rank + 1) * M) & (rn[None, :] < N)
+
+            # Combine masks: must be valid in both input and output
+            combined_mask = input_mask & output_mask
+
+            # Send to the assigned destination rank
+            if dest_rank_idx == group_rank:
+                # Local destination: use direct store
+                tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
+            else:
+                # Remote destination: use iris.store to send data to remote destination
+                iris.store(
+                    output_ptr_target,
+                    data,
+                    iris_rank,
+                    target_rank,
+                    heap_bases,
+                    mask=combined_mask,
+                    hint=(1, BLOCK_SIZE_N),
+                )
 
 
 def launch(

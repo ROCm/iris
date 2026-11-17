@@ -105,17 +105,20 @@ def persistent_all_to_all_gluon(
         col_offsets_n = rn * stride_in_n
         col_offsets_out_n = rn * stride_out_n
 
-        # Process local rank - optimized access pattern for dwordx4
-        # Process rows to maximize VGPR usage (BLOCK_SIZE_N elements per row)
-        for i in range(BLOCK_SIZE_M):
-            row_idx = (pid_m * BLOCK_SIZE_M + i) % M
+        is_full = (pid_m * BLOCK_SIZE_M + BLOCK_SIZE_M <= M) & (pid_n * BLOCK_SIZE_N + BLOCK_SIZE_N <= N)
 
-            if row_idx < M:
+        # Fast path: NO MASKS (full tiles)
+        # For a full tile the mask is all-true, but Triton does not specialize that case on its own.
+        # Separate masked and unmasked paths avoid emitting address and predicate computation for
+        # masks that can never fire; memory access width is unchanged.
+        if is_full:
+            # Process local rank - optimized access pattern for dwordx4
+            # Process rows to maximize VGPR usage (BLOCK_SIZE_N elements per row)
+            for i in range(BLOCK_SIZE_M):
+                row_idx = (pid_m * BLOCK_SIZE_M + i) % M
                 row_offset_m = row_idx * stride_in_m
                 row_offset_out_m = row_idx * stride_out_m
-                col_mask = rn < N
 
-                # Compute offsets - compiler should see contiguous access pattern
                 input_offset_local = row_offset_m + (col_offsets_n + group_rank * N * stride_in_n)
                 output_offset_local = row_offset_out_m + (col_offsets_out_n + group_rank * N * stride_out_n)
                 input_ptr_local = input_ptr + input_offset_local
@@ -125,21 +128,17 @@ def persistent_all_to_all_gluon(
                 input_ptr_local = gl.multiple_of(input_ptr_local, 4)
                 output_ptr_local = gl.multiple_of(output_ptr_local, 4)
 
-                # Load/store - should generate dwordx4 for 4 consecutive fp16 elements
-                data = gl.load(input_ptr_local, mask=col_mask)
-                gl.store(output_ptr_local, data, mask=col_mask, cache_modifier=".wt")
+                data = gl.load(input_ptr_local)
+                gl.store(output_ptr_local, data, cache_modifier=".wt")
 
-        # Process remote ranks - same optimized pattern
-        for rank_idx in range(world_size):
-            target_rank = rank_start + rank_idx * rank_stride
-            if rank_idx != group_rank:
-                for i in range(BLOCK_SIZE_M):
-                    row_idx = (pid_m * BLOCK_SIZE_M + i) % M
-
-                    if row_idx < M:
+            # Process remote ranks - same optimized pattern
+            for rank_idx in range(world_size):
+                target_rank = rank_start + rank_idx * rank_stride
+                if rank_idx != group_rank:
+                    for i in range(BLOCK_SIZE_M):
+                        row_idx = (pid_m * BLOCK_SIZE_M + i) % M
                         row_offset_m = row_idx * stride_in_m
                         row_offset_out_m = row_idx * stride_out_m
-                        col_mask = rn < N
 
                         # Use rank_idx for input chunk offset (based on position in group)
                         input_offset_remote = row_offset_m + (col_offsets_n + rank_idx * N * stride_in_n)
@@ -150,8 +149,60 @@ def persistent_all_to_all_gluon(
                         input_ptr_remote = gl.multiple_of(input_ptr_remote, 4)
                         output_ptr_remote = gl.multiple_of(output_ptr_remote, 4)
 
-                        remote_data = gl.load(input_ptr_remote, mask=col_mask)
-                        ctx.store(output_ptr_remote, remote_data, target_rank, mask=col_mask)
+                        remote_data = gl.load(input_ptr_remote)
+                        ctx.store(output_ptr_remote, remote_data, target_rank)
+
+        # Slow path: MASKED (only boundary tiles land here)
+        else:
+            # Process local rank - optimized access pattern for dwordx4
+            # Process rows to maximize VGPR usage (BLOCK_SIZE_N elements per row)
+            for i in range(BLOCK_SIZE_M):
+                row_idx = (pid_m * BLOCK_SIZE_M + i) % M
+
+                if row_idx < M:
+                    row_offset_m = row_idx * stride_in_m
+                    row_offset_out_m = row_idx * stride_out_m
+                    col_mask = rn < N
+
+                    # Compute offsets - compiler should see contiguous access pattern
+                    input_offset_local = row_offset_m + (col_offsets_n + group_rank * N * stride_in_n)
+                    output_offset_local = row_offset_out_m + (col_offsets_out_n + group_rank * N * stride_out_n)
+                    input_ptr_local = input_ptr + input_offset_local
+                    output_ptr_local = output_ptr + output_offset_local
+                    # Critical: multiple_of(4) enables dwordx4 for aligned fp16 access
+                    # This tells compiler that addresses are aligned to 4-element boundaries
+                    input_ptr_local = gl.multiple_of(input_ptr_local, 4)
+                    output_ptr_local = gl.multiple_of(output_ptr_local, 4)
+
+                    # Load/store - should generate dwordx4 for 4 consecutive fp16 elements
+                    data = gl.load(input_ptr_local, mask=col_mask)
+                    gl.store(output_ptr_local, data, mask=col_mask, cache_modifier=".wt")
+
+            # Process remote ranks - same optimized pattern
+            for rank_idx in range(world_size):
+                target_rank = rank_start + rank_idx * rank_stride
+                if rank_idx != group_rank:
+                    for i in range(BLOCK_SIZE_M):
+                        row_idx = (pid_m * BLOCK_SIZE_M + i) % M
+
+                        if row_idx < M:
+                            row_offset_m = row_idx * stride_in_m
+                            row_offset_out_m = row_idx * stride_out_m
+                            col_mask = rn < N
+
+                            # Use rank_idx for input chunk offset (based on position in group)
+                            input_offset_remote = row_offset_m + (col_offsets_n + rank_idx * N * stride_in_n)
+                            output_offset_remote = row_offset_out_m + (
+                                col_offsets_out_n + group_rank * N * stride_out_n
+                            )
+                            input_ptr_remote = input_ptr + input_offset_remote
+                            output_ptr_remote = output_ptr + output_offset_remote
+                            # Strong hints for dwordx4
+                            input_ptr_remote = gl.multiple_of(input_ptr_remote, 4)
+                            output_ptr_remote = gl.multiple_of(output_ptr_remote, 4)
+
+                            remote_data = gl.load(input_ptr_remote, mask=col_mask)
+                            ctx.store(output_ptr_remote, remote_data, target_rank, mask=col_mask)
 
 
 def launch(

@@ -132,36 +132,59 @@ def persistent_all_gather_gluon(
         pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m)
         pid_n = (tile_id % num_pid_in_group) // group_size_m
 
+        row_base = pid_m * BLOCK_SIZE_M
+        col_base = pid_n * BLOCK_SIZE_N
+        is_full = (row_base + BLOCK_SIZE_M <= M) & (col_base + BLOCK_SIZE_N <= N)
+
         # Flat index -> 2D row/col within tile
         flat_idx = gl.arange(0, TOTAL_ELEMS, layout=flat_layout)
         row_local = flat_idx // BLOCK_SIZE_N
         col_local = flat_idx % BLOCK_SIZE_N
 
         # Global row/col
-        row = pid_m * BLOCK_SIZE_M + row_local
-        col = pid_n * BLOCK_SIZE_N + col_local
-
-        mask = (row < M) & (col < N)
+        row = row_base + row_local
+        col = col_base + col_local
 
         # Single flat load of the entire tile
         input_offsets = row * stride_in_m + col * stride_in_n
         input_addr = input_ptr + input_offsets
-        data = gl.load(input_addr, mask=mask, other=0.0)
 
         # Output: this rank's data goes to output[group_rank * M + row, col]
         output_row = group_rank * M + row
         output_offsets = output_row * stride_out_m + col * stride_out_n
         output_ptrs = output_ptr + output_offsets
 
-        # Traffic-shaped stores to all ranks: stagger write order per rank
-        # so each rank writes to a different target at any given moment,
-        # avoiding memory controller contention on the receiver side.
-        for rank_idx in gl.static_range(world_size):
-            if rank_idx == 0:
-                gl.store(output_ptrs, data, mask=mask, cache_modifier=".wt")
-            else:
-                remote_ptrs = output_bases[rank_idx] + output_offsets
-                gl.store(remote_ptrs, data, mask=mask)
+        # Fast path: NO MASKS (full tiles)
+        # For a full tile the mask is all-true, but Triton does not specialize that case on its own.
+        # Separate masked and unmasked paths avoid emitting address and predicate computation for
+        # masks that can never fire; memory access width is unchanged.
+        if is_full:
+            data = gl.load(input_addr)
+
+            # Traffic-shaped stores to all ranks: stagger write order per rank
+            # so each rank writes to a different target at any given moment,
+            # avoiding memory controller contention on the receiver side.
+            for rank_idx in gl.static_range(world_size):
+                if rank_idx == 0:
+                    gl.store(output_ptrs, data, cache_modifier=".wt")
+                else:
+                    remote_ptrs = output_bases[rank_idx] + output_offsets
+                    gl.store(remote_ptrs, data)
+
+        # Slow path: MASKED (only boundary tiles land here)
+        else:
+            mask = (row < M) & (col < N)
+            data = gl.load(input_addr, mask=mask, other=0.0)
+
+            # Traffic-shaped stores to all ranks: stagger write order per rank
+            # so each rank writes to a different target at any given moment,
+            # avoiding memory controller contention on the receiver side.
+            for rank_idx in gl.static_range(world_size):
+                if rank_idx == 0:
+                    gl.store(output_ptrs, data, mask=mask, cache_modifier=".wt")
+                else:
+                    remote_ptrs = output_bases[rank_idx] + output_offsets
+                    gl.store(remote_ptrs, data, mask=mask)
 
 
 def launch(

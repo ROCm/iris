@@ -100,9 +100,9 @@ def persistent_reduce_scatter_two_shot(
         out_ptr = output_ptr + output_offset
 
         # Fast path: NO MASKS (full tiles)
-        # The masking is problem size dependent, and the compiler does not recognize it can have two paths
-        # (one with masks and one without). Separate unmasked paths allow the compiler to generate
-        # more efficient vectorized instructions.
+        # For a full tile the mask is all-true, but Triton does not specialize that case on its own.
+        # Separate masked and unmasked paths avoid emitting address and predicate computation for
+        # masks that can never fire; memory access width is unchanged.
         if is_full:
             start_rank_idx = pid % world_size
             start_rank_global = rank_start + start_rank_idx * rank_stride

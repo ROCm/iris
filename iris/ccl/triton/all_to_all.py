@@ -98,9 +98,9 @@ def persistent_all_to_all(
         output_base_n = rn[None, :] * stride_out_n
 
         # Fast path: NO MASKS (full tiles)
-        # The masking is problem size dependent, and the compiler does not recognize it can have two paths
-        # (one with masks and one without). Separate unmasked paths allow the compiler to generate
-        # more efficient vectorized instructions.
+        # For a full tile the mask is all-true, but Triton does not specialize that case on its own.
+        # Separate masked and unmasked paths avoid emitting address and predicate computation for
+        # masks that can never fire; memory access width is unchanged.
         if is_full:
             # Process local rank first for better cache locality
             input_offset_local = input_base_m + (input_base_n + group_rank * N * stride_in_n)
