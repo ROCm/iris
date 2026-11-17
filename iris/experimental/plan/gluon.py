@@ -33,6 +33,28 @@ def _group_word(num_chunks, world_size, group):
     return 2 * num_chunks + 2 * world_size + 2 + group
 
 
+@gluon.jit
+def _reached_acquire(word, target):
+    """
+    ``word >= target``, with acquire ordering when true. Polls call this in a loop, so a check that fails is a
+    system-scope load, which does not serialize with the copy engines' atomics on the word; only a check that
+    passes takes the acquire atomic that orders the caller's later reads.
+    """
+    ok = gl.load(word, volatile=True, cache_modifier=".cv") >= target
+    if ok:
+        ok = gl.atomic_add(word, 0, sem="acquire", scope="sys") >= target
+    return ok
+
+
+@gluon.jit
+def _reached_acquire_masked(word, target, mask):
+    """_reached_acquire where ``mask`` holds; False where it does not."""
+    ok = mask & (gl.load(word, mask=mask, other=0, volatile=True, cache_modifier=".cv") >= target)
+    if ok:
+        ok = gl.atomic_add(word, 0, mask=mask, sem="acquire", scope="sys") >= target
+    return ok
+
+
 @aggregate
 class TriggeredView:
     """
@@ -112,7 +134,7 @@ class TriggeredView:
         """
         word = self._record(chunk, R_ARRIVAL)
         target = self._record(chunk, R_EXPECTED) * self.round
-        return gl.atomic_add(self.gates + word, 0, sem="acquire", scope="sys") >= target
+        return _reached_acquire(self.gates + word, target)
 
     @gluon.jit
     def wait(self, chunk):
@@ -139,8 +161,7 @@ class TriggeredView:
             self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + world_size + group, mask=known, other=0
         )
         word = self.gates + _group_word(self.num_chunks, world_size, group)
-        seen = gl.atomic_add(word, 0, mask=known, sem="acquire", scope="sys")
-        return (known == 0) | (seen >= expected * self.round)
+        return (known == 0) | _reached_acquire_masked(word, expected * self.round, known)
 
     @gluon.jit
     def wait_group(self, group):
@@ -155,7 +176,7 @@ class TriggeredView:
         for peer in range(gl.load(self.view + H_WORLD_SIZE)):
             if self._sends_to(peer):
                 completion = self.gates + 2 * self.num_chunks + peer
-                pending += (gl.atomic_add(completion, 0, sem="acquire", scope="sys") < self.round).to(gl.int32)
+                pending += (_reached_acquire(completion, self.round) == 0).to(gl.int32)
         return pending == 0
 
     @gluon.jit
