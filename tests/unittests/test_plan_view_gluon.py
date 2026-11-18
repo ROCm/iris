@@ -155,3 +155,48 @@ def test_unknown_group_has_arrived():
     for group in (0, 1, 1000, -1):
         _group_arrived_kernel[(1,)](view, out, group)
         assert out.item() == (group != 0), group
+
+
+@gluon.jit
+def _arrived_race_kernel(handle, counters, progress, out, chunks, CALLS: gl.constexpr, NUM_WARPS: gl.constexpr):
+    """
+    Program 0 calls ``arrived(c)`` ``CALLS`` times around the moment program 1 marks chunk ``c``, and every warp
+    records its own result for every call in ``out[c, call, warp]``.
+    """
+    layout: gl.constexpr = gl.BlockedLayout([1], [64], [NUM_WARPS], [0])
+    warp = gl.arange(0, 64 * NUM_WARPS, layout=layout) // 64
+    if gl.program_id(0) == 0:
+        cv = TriggeredView.initialize(handle)
+        for c in range(chunks):
+            # Let program 1 mark chunk c while the calls below run
+            gl.atomic_xchg(progress, c + 1, sem="release", scope="gpu")
+            for call in gl.static_range(CALLS):
+                ok = cv.arrived(c).to(gl.int32)
+                gl.store(out + (c * CALLS + call) * NUM_WARPS + warp, ok + gl.zeros_like(warp))
+    else:
+        for c in range(chunks):
+            while gl.load(progress, volatile=True, cache_modifier=".cv") < c + 1:
+                pass
+            # A few polls of delay, varied per chunk, so the mark lands at different calls
+            for _ in range(c % 8):
+                gl.load(progress, volatile=True, cache_modifier=".cv")
+            gl.atomic_add(counters + c, 1, sem="release", scope="sys")
+
+
+def test_arrived_agrees_across_warps_while_the_gate_moves():
+    # arrived() is CTA-uniform: every warp of a program gets the same answer from one call, even when the gate
+    # moves past the target during the call.
+    chunks, calls, warps = 2048, 4, 8
+    mine = [Chunk((Region(64 * i, 64),)) for i in range(chunks)]
+    view, (counters, _, _, _) = _view(0, [mine, mine], round=1)
+    progress = torch.zeros(1, dtype=torch.int32, device="cuda")
+    out = torch.full((chunks, calls, warps), -1, dtype=torch.int32, device="cuda")
+    _arrived_race_kernel[(2,)](view, counters, progress, out, chunks, CALLS=calls, NUM_WARPS=warps, num_warps=warps)
+    torch.cuda.synchronize()
+    assert (out >= 0).all()
+    assert (out == out[:, :, :1]).all(), "warps of one program disagreed on a single arrived() call"
+    # The race was exercised: some chunks went from not arrived to arrived within their calls
+    seen = out[:, :, 0]
+    assert ((seen[:, 0] == 0) & (seen[:, -1] == 1)).any()
+    # Rank 0's chunks come first among the counters of both ranks
+    assert counters[:chunks].tolist() == [1] * chunks

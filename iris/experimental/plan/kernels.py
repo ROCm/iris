@@ -7,13 +7,14 @@ import triton
 import triton.language as tl
 
 from iris.experimental.plan.triton import (
-    H_WORLD_SIZE,
     HEADER_WORDS,
+    H_WORLD_SIZE,
+    RECORD_WORDS,
     R_ARRIVAL,
     R_EXPECTED,
     R_WRITERS,
-    RECORD_WORDS,
     TriggeredView,
+    _peek,
 )
 from iris.mem.triton.context import __translate
 from iris.mem.utils import read_realtime
@@ -34,15 +35,6 @@ def _fence_words(cv):
 @triton.jit
 def _load(ptr):
     return tl.atomic_add(ptr, 0, sem="acquire", scope="sys")
-
-
-@triton.jit
-def _peek(ptr):
-    """
-    A system-scope load for polling: unlike _load's atomic, it does not serialize with the copy engines' and other
-    programs' atomics on the same word. Use _load for the check whose result orders later reads.
-    """
-    return tl.load(ptr, volatile=True, cache_modifier=".cv")
 
 
 @triton.jit

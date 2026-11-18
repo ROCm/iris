@@ -28,31 +28,19 @@ from iris.mem.utils import wait_cnt
 
 
 @gluon.jit
+def _peek(ptr):
+    """
+    A system-scope load for polling. Unlike an acquire atomic it does not serialize with the copy engines' or
+    other programs' atomics on the same word, but each wave issues its own, so waves can see different values:
+    poll with it, then confirm with the CTA-uniform acquire check.
+    """
+    return gl.load(ptr, volatile=True, cache_modifier=".cv")
+
+
+@gluon.jit
 def _group_word(num_chunks, world_size, group):
     """Gate word of ``group``'s arrival, as ``triggered.group_gate`` computes it on the host."""
     return 2 * num_chunks + 2 * world_size + 2 + group
-
-
-@gluon.jit
-def _reached_acquire(word, target):
-    """
-    ``word >= target``, with acquire ordering when true. Polls call this in a loop, so a check that fails is a
-    system-scope load, which does not serialize with the copy engines' atomics on the word; only a check that
-    passes takes the acquire atomic that orders the caller's later reads.
-    """
-    ok = gl.load(word, volatile=True, cache_modifier=".cv") >= target
-    if ok:
-        ok = gl.atomic_add(word, 0, sem="acquire", scope="sys") >= target
-    return ok
-
-
-@gluon.jit
-def _reached_acquire_masked(word, target, mask):
-    """_reached_acquire where ``mask`` holds; False where it does not."""
-    ok = mask & (gl.load(word, mask=mask, other=0, volatile=True, cache_modifier=".cv") >= target)
-    if ok:
-        ok = gl.atomic_add(word, 0, mask=mask, sem="acquire", scope="sys") >= target
-    return ok
 
 
 @aggregate
@@ -134,11 +122,18 @@ class TriggeredView:
         """
         word = self._record(chunk, R_ARRIVAL)
         target = self._record(chunk, R_EXPECTED) * self.round
-        return _reached_acquire(self.gates + word, target)
+        return gl.atomic_add(self.gates + word, 0, sem="acquire", scope="sys") >= target
 
     @gluon.jit
     def wait(self, chunk):
-        """Spin until ``arrived(chunk)``."""
+        """
+        Spin until ``arrived(chunk)``. Each wave first polls with its own loads, which do not serialize with
+        the copy engines' atomics on the word; the acquire check that follows is CTA-uniform.
+        """
+        word = self.gates + self._record(chunk, R_ARRIVAL)
+        target = self._record(chunk, R_EXPECTED) * self.round
+        while _peek(word) < target:
+            pass
         while self.arrived(chunk) == 0:
             pass
 
@@ -161,11 +156,19 @@ class TriggeredView:
             self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + world_size + group, mask=known, other=0
         )
         word = self.gates + _group_word(self.num_chunks, world_size, group)
-        return (known == 0) | _reached_acquire_masked(word, expected * self.round, known)
+        seen = gl.atomic_add(word, 0, mask=known, sem="acquire", scope="sys")
+        return (known == 0) | (seen >= expected * self.round)
 
     @gluon.jit
     def wait_group(self, group):
-        """Spin until ``group_arrived(group)``."""
+        """Spin until ``group_arrived(group)``, polling each wave's own loads first (see ``wait``)."""
+        world_size = gl.load(self.view + H_WORLD_SIZE)
+        known = (group >= 0) & (group < gl.load(self.view + H_NUM_GROUPS))
+        if known:
+            expected = gl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + world_size + group)
+            word = self.gates + _group_word(self.num_chunks, world_size, group)
+            while _peek(word) < expected * self.round:
+                pass
         while self.group_arrived(group) == 0:
             pass
 
@@ -176,11 +179,15 @@ class TriggeredView:
         for peer in range(gl.load(self.view + H_WORLD_SIZE)):
             if self._sends_to(peer):
                 completion = self.gates + 2 * self.num_chunks + peer
-                pending += (_reached_acquire(completion, self.round) == 0).to(gl.int32)
+                pending += (gl.atomic_add(completion, 0, sem="acquire", scope="sys") < self.round).to(gl.int32)
         return pending == 0
 
     @gluon.jit
     def wait_sent(self):
-        """Spin until ``sent()``."""
+        """Spin until ``sent()``, polling each wave's own loads first (see ``wait``)."""
+        for peer in range(gl.load(self.view + H_WORLD_SIZE)):
+            if self._sends_to(peer):
+                while _peek(self.gates + 2 * self.num_chunks + peer) < self.round:
+                    pass
         while self.sent() == 0:
             pass
