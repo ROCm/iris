@@ -18,6 +18,17 @@ iris` never requires either dependency.
 | --- | --- | --- |
 | `rocshmem_provider.py` | `rocshmem4py` | intra-node (IPC) |
 | `torch_symm_mem_provider.py` | torch only | intra-node (HIP IPC) on the default backend |
+| `rccl_gin.py` | a RCCL with the GIN device API (the shim in `iris/csrc/rccl_gin` builds on first use) | RCCL's load/store (LSA) team; peers in other fabric domains via GIN device calls |
+
+`rccl_gin.py` is the one provider whose map has `direct=False` peers on
+purpose. Those peers are outside RCCL's load/store team (on other nodes, or
+in other fabric domains on rack-scale systems), and its Triton device functions
+(`put_signal`, `wait_signal`, ...) reach them over RCCL's GPU-Initiated
+Networking. It is also the `rccl_gin` backend of
+`iris.iris(..., engines=("rdma",))` (`RcclGinBackend`, see `iris/rdma/`), which
+makes the whole Iris heap one RCCL window; `wide_ep.py` builds MoE
+dispatch/combine on such a context. Setup, results and limitations are in
+`examples/35_wide_ep_rccl_gin/README.md`.
 
 ## rocSHMEM provider
 

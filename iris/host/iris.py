@@ -75,7 +75,7 @@ from iris.mem.triton.tracing import Tracing as DeviceTracing  # noqa: F401
 from iris.host.memory import tensors as tensor_creation
 from iris.host.platform.utils import is_simulation_env
 
-_SUPPORTED_ENGINES = frozenset({"sdma"})
+_SUPPORTED_ENGINES = frozenset({"sdma", "rdma"})
 
 
 def _resolve_gpu_id(device, cur_rank, num_gpus):
@@ -139,12 +139,21 @@ class Iris:
         allocator_type (str): Type of allocator to use. Options: "torch" (default), "vmem"
         engines (str or tuple of str, optional): Engine name or names to set up. Use
             ``("sdma",)`` for host- and device-initiated SDMA operations (needs
-            ``pip install iris[sdma]``). Defaults to ``()`` (none).
+            ``pip install iris[sdma]``), and ``("rdma",)`` for GPU-initiated RDMA to peers Iris
+            cannot map, such as other nodes (see ``rdma_backend`` and :mod:`iris.rdma`).
+            Defaults to ``()`` (none).
         device (int, str or torch.device, optional): GPU this rank runs on, as an index
             into the visible GPUs, ``"cuda:N"``, or a ``torch.device``; ``"cuda"`` uses the
             current device, so call ``torch.cuda.set_device`` first. ``None`` (default) uses
             ``rank % visible GPUs``. It must be the GPU the process group is bound to; if the
             group was initialized with ``device_id``, a different GPU raises ``ValueError``.
+        rdma_backend (str, optional): The RDMA backend for ``engines=("rdma",)``, one of
+            ``iris.rdma.BACKENDS``. ``"rccl_gin"`` (default): RCCL's GPU-Initiated Networking.
+            RCCL then provides the heap: one RCCL symmetric window of ``heap_size`` that cannot
+            grow, mapped by RCCL on every peer in its load/store team. Those peers are
+            ``ctx.rdma.direct`` and take ``iris.store``/``load``/atomics as usual; every other
+            peer has heap base 0 and is reached with :mod:`iris.rdma.device`. The backend is
+            ``ctx.rdma``; call ``ctx.rdma.close()`` (collective) when done with the context.
 
     Example:
         >>> ctx = iris.iris(heap_size=2**31)  # 2GB heap with torch allocator
@@ -156,7 +165,7 @@ class Iris:
 
     """
 
-    def __init__(self, heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
+    def __init__(self, heap_size=1 << 30, allocator_type="torch", engines=(), device=None, rdma_backend="rccl_gin"):
         if engines is None:
             engines = ()
         elif isinstance(engines, str):
@@ -166,6 +175,8 @@ class Iris:
         unsupported = set(engines) - _SUPPORTED_ENGINES
         if unsupported:
             raise ValueError(f"Unsupported engines: {sorted(unsupported)}. Supported: {sorted(_SUPPORTED_ENGINES)}.")
+        if "sdma" in engines and "rdma" in engines:
+            raise ValueError('engines "sdma" and "rdma" cannot be combined yet')
         self._sdma_ep = None
         if "sdma" in engines:
             from iris.device.sdma_utils import bind_sdma_ep
@@ -203,6 +214,15 @@ class Iris:
         # Reserve room on top of the caller's heap_size for every Iris control-state allocation made
         # below (see _internal_reservation_sizes), so heap_size stays fully usable.
         internal_reservations = _internal_reservation_sizes(num_ranks, self._sdma_ep is not None)
+        self.rdma = None
+        region_provider = None
+        if "rdma" in engines:
+            from iris.rdma import create_backend
+
+            self.rdma = create_backend(rdma_backend)
+            if not self.rdma.provides_heap:
+                raise NotImplementedError(f"RDMA backend {rdma_backend!r} registers the heap; not wired up yet")
+            region_provider = self.rdma.allocate_heap
         self.heap = SymmetricHeap(
             heap_size,
             gpu_id,
@@ -211,6 +231,7 @@ class Iris:
             allocator_type,
             reserved_bytes=internal_reservations,
             rank_gpus=rank_gpus,
+            region_provider=region_provider,
         )
         self.device = f"cuda:{gpu_id}"
         self.heap_bases = self.heap.get_heap_bases()
@@ -1619,6 +1640,12 @@ class Iris:
             >>> ctx = iris.iris(1 << 20)
             >>> ctx.device_barrier()  # Synchronize all ranks on device
         """
+        if self.rdma is not None and not all(self.rdma.direct):
+            # Its flags are written with iris.atomic_* stores, which only reach direct peers
+            raise RuntimeError(
+                "device_barrier needs every peer load/store reachable; with engines=('rdma',) some are not. "
+                "Use barrier(), or signals from iris.rdma.device."
+            )
         distributed_device_barrier(
             self._device_barrier_flags,
             group,
@@ -1986,7 +2013,7 @@ class Iris:
             )
 
 
-def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
+def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None, rdma_backend="rccl_gin"):
     """
     Create and return an Iris instance with the specified heap size.
 
@@ -1996,6 +2023,7 @@ def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
                               Can be overridden with IRIS_ALLOCATOR environment variable.
         engines (str or tuple of str, optional): See :class:`Iris`.
         device (int, str or torch.device, optional): See :class:`Iris`.
+        rdma_backend (str, optional): See :class:`Iris`.
 
     Returns:
         Iris: An initialized Iris instance.
@@ -2009,4 +2037,4 @@ def iris(heap_size=1 << 30, allocator_type="torch", engines=(), device=None):
         >>> iris_ctx = iris.iris(2**30, allocator_type="vmem")
         >>> tensor = iris_ctx.zeros(1024, 1024)
     """
-    return Iris(heap_size, allocator_type, engines=engines, device=device)
+    return Iris(heap_size, allocator_type, engines=engines, device=device, rdma_backend=rdma_backend)

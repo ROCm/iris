@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 from iris.host.logging.logging import _log_rank
-from iris.host.memory.allocators import TorchAllocator, VMemAllocator, VMemChunkedAllocator
+from iris.host.memory.allocators import RegionAllocator, TorchAllocator, VMemAllocator, VMemChunkedAllocator
 from iris.drivers.base import MappingPlacement, PeerMapping
 from iris.host.distributed.fd_passing import setup_fd_infrastructure
 from iris.host.distributed.helpers import distributed_allgather
@@ -185,6 +185,7 @@ class SymmetricHeap:
         allocator_type: str = "torch",
         reserved_bytes: Union[int, Sequence[int]] = 0,
         rank_gpus=None,
+        region_provider=None,
     ):
         """
         Initialize symmetric heap.
@@ -204,6 +205,11 @@ class SymmetricHeap:
             rank_gpus: Each rank's GPU as a device ordinal in this process, from
                 ``rank_gpu_ordinals``, if the caller already exchanged it. The vmem
                 allocator exchanges it itself when this is None.
+            region_provider: For ``engines=("rdma",)`` with a backend that provides the heap: a
+                collective callable taking the heap's byte size and returning an
+                :class:`iris.rdma.HeapRegion`. The heap is then that region, fixed in size, with
+                the peer bases the provider mapped; ``allocator_type`` and ``IRIS_ALLOCATOR``
+                are ignored.
 
         Raises:
             ValueError: If allocator_type is not supported
@@ -220,6 +226,8 @@ class SymmetricHeap:
         # the counter must not leak across threads).
         self._internal_tls = threading.local()
         allocator_type = os.environ.get("IRIS_ALLOCATOR", allocator_type).lower()
+        if region_provider is not None:
+            allocator_type = "region"
         _log_rank(
             logging.INFO,
             "SymmetricHeap: init heap_size=%.1fGB device=%d allocator=%s",
@@ -247,8 +255,8 @@ class SymmetricHeap:
         # reserved_bytes as a constructor argument and maps it as a separate region, so this branch
         # is skipped for it and reserved_size stays 0.
         self.reserved_size = 0
-        if reserved_sizes and allocator_type in ("torch", "vmem"):
-            if allocator_type == "torch":
+        if reserved_sizes and allocator_type in ("torch", "vmem", "region"):
+            if allocator_type in ("torch", "region"):
                 unit = 1024  # allocate()'s default alignment
             else:
                 from iris.host.platform.hip import get_allocation_granularity
@@ -267,7 +275,10 @@ class SymmetricHeap:
             if allocator_type in ("torch", "vmem"):
                 _require_single_host(allocator_type, hostnames)
 
-        if allocator_type == "torch":
+        if allocator_type == "region":
+            # The provider maps peers itself, across hosts where it can, so no single-host check
+            self.allocator = RegionAllocator(region_provider(heap_size), device_id, cur_rank, num_ranks)
+        elif allocator_type == "torch":
             self.allocator = TorchAllocator(heap_size, device_id, cur_rank, num_ranks)
         elif allocator_type == "vmem":
             self.allocator = VMemAllocator(heap_size, device_id, cur_rank, num_ranks, rank_gpus=rank_gpus)
@@ -303,7 +314,7 @@ class SymmetricHeap:
         else:
             raise ValueError(f"Unknown allocator type: {allocator_type}. Supported: 'torch', 'vmem', 'vmem_chunked'")
 
-        needs_fd_infra = True
+        needs_fd_infra = not isinstance(self.allocator, RegionAllocator)
         if isinstance(self.allocator, VMemChunkedAllocator):
             from iris.host.distributed.topology import InterconnectLevel
 
@@ -630,7 +641,11 @@ class SymmetricHeap:
             return
 
         # Dispatch to allocator-specific peer access path
-        if isinstance(self.allocator, VMemChunkedAllocator):
+        if isinstance(self.allocator, RegionAllocator):
+            # Mapped once by the region's provider; peers it cannot map stay 0
+            for r in range(self.num_ranks):
+                self.heap_bases[r] = int(self.allocator.heap_bases_array[r])
+        elif isinstance(self.allocator, VMemChunkedAllocator):
             from iris.host.distributed.topology import InterconnectLevel
 
             if self.allocator.transport_tier == InterconnectLevel.INTRA_RACK_FABRIC:

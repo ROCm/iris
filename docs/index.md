@@ -210,6 +210,7 @@ For other setup methods, see the [Installation Guide](getting-started/installati
 - **[Fine-grained Overlap](conceptual/finegrained-overlap.md)**: GEMM & communication overlap
 - **[Taxonomy](conceptual/taxonomy.md)**: Multi-GPU programming patterns
 - **[Triggered Plans](conceptual/triggered-plans.md)**: Copy-engine transfers released by kernels
+- **[RCCL GIN and Wide EP](conceptual/rccl-gin.md)**: Transfers from kernels to GPUs outside the load/store fabric, and MoE dispatch/combine across fabric domains (experimental)
 
 ### 📖 **Reference**
 - **[Talks and Papers](reference/talks-and-papers.md)**: Publications, conference talks, and videos
