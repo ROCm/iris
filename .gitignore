@@ -69,6 +69,8 @@ docker/rocm-systems/
 .intellikit
 .github/agents/skills/
 docs/benchmark-results/*.png
+# Local source snapshots and measurements produced by the workspace benchmark.
+.workspace_benchmark/
 
 # Local Sphinx build
 docs/.venv/

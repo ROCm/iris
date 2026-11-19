@@ -89,18 +89,10 @@ def fused_gemm_allreduce(state, ctx):
     state.set_flops(2 * M * N * K_local)
 
     def _run():
-        workspace.prepared = False
-        ctx.ops.matmul_all_reduce(C, A, B, config=config, workspace=workspace)
+        nonlocal workspace
+        workspace = ctx.ops.matmul_all_reduce(C, A, B, config=config, workspace=workspace)
 
-    def _preamble():
-        C.zero_()
-        if workspace.locks is not None:
-            workspace.locks.zero_()
-        if workspace.aux_buffer is not None:
-            workspace.aux_buffer.zero_()
-        workspace.prepared = True
-
-    state.exec(_run, preamble_fn=_preamble)
+    state.exec(_run)
 
 
 if __name__ == "__main__":
