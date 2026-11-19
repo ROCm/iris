@@ -45,6 +45,16 @@ R_EXPECTED = tl.constexpr(3)  # how much that word grows per round, seen from th
 
 
 @triton.jit
+def _peek(ptr):
+    """
+    A system-scope load for polling. Unlike an acquire atomic it does not serialize with the copy engines' or
+    other programs' atomics on the same word, but each wave issues its own, so waves can see different values:
+    poll with it, then confirm with the CTA-uniform acquire check.
+    """
+    return tl.load(ptr, volatile=True, cache_modifier=".cv")
+
+
+@triton.jit
 def _group_word(num_chunks, world_size, group):
     """Gate word of ``group``'s arrival, as ``triggered.group_gate`` computes it on the host."""
     return 2 * num_chunks + 2 * world_size + 2 + group
@@ -132,7 +142,14 @@ class TriggeredView:
 
     @triton.jit
     def wait(self, chunk):
-        """Spin until ``arrived(chunk)``."""
+        """
+        Spin until ``arrived(chunk)``. Each wave first polls with its own loads, which do not serialize with
+        the copy engines' atomics on the word; the acquire check that follows is CTA-uniform.
+        """
+        word = self.gates + self._record(chunk, R_ARRIVAL)
+        target = self._record(chunk, R_EXPECTED) * self.round
+        while _peek(word) < target:
+            pass
         while self.arrived(chunk) == 0:
             pass
 
@@ -160,7 +177,14 @@ class TriggeredView:
 
     @triton.jit
     def wait_group(self, group):
-        """Spin until ``group_arrived(group)``."""
+        """Spin until ``group_arrived(group)``, polling each wave's own loads first (see ``wait``)."""
+        world_size = tl.load(self.view + H_WORLD_SIZE)
+        known = (group >= 0) & (group < tl.load(self.view + H_NUM_GROUPS))
+        if known:
+            expected = tl.load(self.view + HEADER_WORDS + self.num_chunks * RECORD_WORDS + world_size + group)
+            word = self.gates + _group_word(self.num_chunks, world_size, group)
+            while _peek(word) < expected * self.round:
+                pass
         while self.group_arrived(group) == 0:
             pass
 
@@ -176,6 +200,10 @@ class TriggeredView:
 
     @triton.jit
     def wait_sent(self):
-        """Spin until ``sent()``."""
+        """Spin until ``sent()``, polling each wave's own loads first (see ``wait``)."""
+        for peer in range(tl.load(self.view + H_WORLD_SIZE)):
+            if self._sends_to(peer):
+                while _peek(self.gates + 2 * self.num_chunks + peer) < self.round:
+                    pass
         while self.sent() == 0:
             pass

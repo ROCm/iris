@@ -7,13 +7,14 @@ import triton
 import triton.language as tl
 
 from iris.experimental.plan.triton import (
-    H_WORLD_SIZE,
     HEADER_WORDS,
+    H_WORLD_SIZE,
+    RECORD_WORDS,
     R_ARRIVAL,
     R_EXPECTED,
     R_WRITERS,
-    RECORD_WORDS,
     TriggeredView,
+    _peek,
 )
 from iris.mem.triton.context import __translate
 from iris.mem.utils import read_realtime
@@ -37,16 +38,28 @@ def _load(ptr):
 
 
 @triton.jit
+def _unpack_failed(pair):
+    """An abort pair's halves: the round a peer marked failed (0 if none), and that peer."""
+    return pair.to(tl.int32), (pair >> 32).to(tl.int32) - 1
+
+
+@triton.jit
 def _failed(abort):
     """The abort pair in one load: the round a peer marked failed (0 if none), and that peer."""
-    pair = _load(abort.to(tl.pointer_type(tl.int64)))
-    return pair.to(tl.int32), (pair >> 32).to(tl.int32) - 1
+    return _unpack_failed(_load(abort.to(tl.pointer_type(tl.int64))))
 
 
 @triton.jit
 def _aborted(abort, round):
     """True once a peer has said it failed ``round`` (or an earlier one)."""
     failed, _ = _failed(abort)
+    return (failed != 0) & (failed <= round)
+
+
+@triton.jit
+def _aborted_peek(abort, round):
+    """_aborted for a poll loop: the pair through _peek."""
+    failed, _ = _unpack_failed(_peek(abort.to(tl.pointer_type(tl.int64))))
     return (failed != 0) & (failed <= round)
 
 
@@ -77,7 +90,7 @@ def release_kernel(view, chunks):
 
 @triton.jit
 def _reached(ptr, target, t0, ticks, abort, round):
-    while (_load(ptr) < target) & (read_realtime() - t0 < ticks) & (_aborted(abort, round) == 0):
+    while (_peek(ptr) < target) & (read_realtime() - t0 < ticks) & (_aborted_peek(abort, round) == 0):
         pass
     return _load(ptr) >= target
 
@@ -184,7 +197,7 @@ def fence_kernel(view, heap_bases, error, ticks, ABORT: tl.constexpr):
     for peer in range(world_size):
         # Behind by a round: this rank timed out on it at an earlier fence
         if (peer != cv.rank) & (_load(fence + peer) >= cv.round - 1):
-            while (_load(fence + peer) < cv.round) & (read_realtime() - t0 < ticks):
+            while (_peek(fence + peer) < cv.round) & (read_realtime() - t0 < ticks):
                 pass
             if _load(fence + peer) < cv.round:
                 _record_error(error, FENCE_TIMED_OUT, cv.round, peer, 0)
