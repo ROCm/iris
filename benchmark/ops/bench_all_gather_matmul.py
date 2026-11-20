@@ -14,6 +14,7 @@ import os
 
 import torch
 import torch.distributed as dist
+import tritonblas
 import iris.bench as bench
 from iris.ops.all_gather_matmul_hbm_buffer import (
     all_gather_matmul_hbm_buffer as _hbm_buffer,
@@ -53,6 +54,40 @@ def rccl_all_gather_matmul(state, ctx):
         dist.all_gather(A_gathered_list, A_sharded)
         A_gathered = torch.cat(A_gathered_list, dim=1)
         torch.mm(A_gathered, B, out=C)
+
+    state.exec(_run)
+
+
+@bench.register
+@bench.axis("num_ranks", [2, 4, 8])
+@bench.axis("M", [1024, 4096, 16384])
+@bench.axis("N", [3584])
+@bench.axis("K", [8192])
+@bench.axis("dtype", [torch.float16])
+def tritonblas_rccl_all_gather_matmul(state, ctx):
+    """RCCL all_gather + tritonBLAS matmul baseline (same GEMM as the iris ops)."""
+    M, N, K = state["M"], state["N"], state["K"]
+    dtype = state["dtype"]
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    K_local = K // world_size
+
+    # Per-rank seed for A (each rank holds different shards); shared seed for B
+    A_sharded = ctx.randn((M, K_local), dtype=dtype, generator=torch.Generator("cuda").manual_seed(42 + rank))
+    B = ctx.randn((K, N), dtype=dtype, generator=torch.Generator("cuda").manual_seed(123))
+    A_gathered_list = [ctx.zeros((M, K_local), dtype=dtype) for _ in range(world_size)]
+    C = ctx.zeros((M, N), dtype=dtype)
+
+    selector = tritonblas.OrigamiMatmulSelector(M, N, K, dtype, dtype, dtype, A_sharded.device)
+    config = tritonblas.matmul_preamble(selector)
+
+    state.set_flops(2 * M * N * K)
+    state.set_bytes((world_size - 1) * M * K_local * A_sharded.element_size())
+
+    def _run():
+        dist.all_gather(A_gathered_list, A_sharded)
+        A_gathered = torch.cat(A_gathered_list, dim=1)
+        tritonblas.matmul_lt(A_gathered, B, C, selector, config)
 
     state.exec(_run)
 

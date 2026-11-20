@@ -55,6 +55,18 @@ class FusedWorkspace:
     partition_counters: Optional[torch.Tensor] = None
     rs_key: Optional[tuple] = None
 
+    # Copy-engine workspace
+    completion_signals: Optional[torch.Tensor] = None  # (world_size,) sender-completion slots
+
+    # Launch-wave copy-engine metadata
+    wave_tile_counts: Optional[torch.Tensor] = None
+    wave_transfer_offsets: Optional[torch.Tensor] = None
+    wave_transfer_counts: Optional[torch.Tensor] = None
+    transfer_row_offsets: Optional[torch.Tensor] = None
+    transfer_col_offsets: Optional[torch.Tensor] = None
+    transfer_width_bytes: Optional[torch.Tensor] = None
+    transfer_heights: Optional[torch.Tensor] = None
+
     prepared: bool = False
 
     def matches(
@@ -98,4 +110,12 @@ class FusedWorkspace:
         self.inbox = self.staging = self.arrivals = self.calls = self.publish_tickets = None
         self.strip_counters = self.partition_counters = None
         self.rs_key = None
+        self.completion_signals = None
+        self.wave_tile_counts = None
+        self.wave_transfer_offsets = None
+        self.wave_transfer_counts = None
+        self.transfer_row_offsets = None
+        self.transfer_col_offsets = None
+        self.transfer_width_bytes = None
+        self.transfer_heights = None
         self.prepared = False
