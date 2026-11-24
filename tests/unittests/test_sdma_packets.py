@@ -170,6 +170,23 @@ def _emit_nop(buf, padding_bytes):
     sdma_utils.place_nop_packet(buf, tl.full((), 0, tl.uint64), padding_bytes)
 
 
+@triton.jit
+def _emit_sub_window(buf, src, dst, width, height, src_pitch, dst_pitch):
+    sdma_utils.place_sub_window_copy_packet(
+        buf, tl.full((), 0, tl.uint64), src, dst, width, height, src_pitch, dst_pitch, 3, 4, 5, 6
+    )
+
+
+def test_sub_window_copy_packet():
+    buf = _buffer()
+    dst = ADDR + 0x1000
+    _emit_sub_window[(1,)](buf, ADDR, dst, 256, 64, 1024, 2048)
+    # op 1, sub-op 0x24; src base, x, y, z, pitch - 1, slice pitch; dst likewise; rect width - 1, height - 1, depth
+    src_part = [ADDR & 0xFFFFFFFF, ADDR >> 32, 3, 4, 0, 1023, 0, 0]
+    dst_part = [dst & 0xFFFFFFFF, dst >> 32, 5, 6, 0, 2047, 0, 0]
+    assert _dwords(buf, 21) == [0x24 << 8 | 1] + src_part + dst_part + [255, 63, 0, SENTINEL]
+
+
 def test_copy_linear_packet():
     buf = _buffer()
     dst = ADDR + 0x1000

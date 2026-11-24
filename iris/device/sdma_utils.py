@@ -219,24 +219,43 @@ def place_nop_packet(queue_ptr_u32, offset_bytes: tl.uint64, padding_bytes):
             tl.store(queue_ptr_u32 + offset_in_dwords + i, 0, cache_modifier=".wt")
 
 
+# Packets are assembled in a register tensor (one dword per element) and written with a single vector store.
+# A `.wt` store is lowered to a volatile store, and the AMDGPU backend waits for every volatile access to complete
+# (s_waitcnt vmcnt(0)) before issuing the next one, so per-dword scalar stores serialize into one round trip to the
+# uncached ring each (~6.7 us for a 112-byte copy + atomic). submit() still waits for the packet to land before it
+# bumps the write pointer.
+@triton.jit
+def _packet_dword(pkt, idx, i: tl.constexpr, value):
+    """Set dword ``i`` of the packet tensor ``pkt`` to ``value``."""
+    return tl.where(idx == i, value, pkt).to(tl.uint32)
+
+
+@triton.jit
+def _store_packet(queue_ptr_u32, offset_bytes: tl.uint64, pkt, idx, num_dwords: tl.constexpr):
+    """Write the first ``num_dwords`` dwords of ``pkt`` to the ring slot at ``offset_bytes``."""
+    slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
+    tl.store(slot_ptr_u32 + idx, pkt, mask=idx < num_dwords, cache_modifier=".wt")
+
+
 @triton.jit
 def place_copy_packet(queue_ptr_u32, offset_bytes: tl.uint64, size_bytes: tl.uint32, src_ptr_val, dst_ptr_val):
     """Place a SDMA_PKT_COPY_LINEAR packet for 1D linear memory copy."""
-    slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
+    idx = tl.arange(0, 8)
+    pkt = tl.zeros([8], dtype=tl.uint32)
     # offset 0: op + sub_op
-    tl.store(slot_ptr_u32 + 0, 1, cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 0, 1)
     # offset 1: count
-    tl.store(slot_ptr_u32 + 1, size_bytes - 1, cache_modifier=".wt")
-    # offset 2: parameters
-    tl.store(slot_ptr_u32 + 2, 0, cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 1, size_bytes - 1)
+    # offset 2: parameters (0)
     # offset 3: src address 31:0
-    tl.store(slot_ptr_u32 + 3, src_ptr_val.to(tl.uint32), cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 3, src_ptr_val.to(tl.uint32))
     # offset 4: src address 63:32
-    tl.store(slot_ptr_u32 + 4, (src_ptr_val >> 32).to(tl.uint32), cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 4, (src_ptr_val >> 32).to(tl.uint32))
     # offset 5: dst address 31:0
-    tl.store(slot_ptr_u32 + 5, dst_ptr_val.to(tl.uint32), cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 5, dst_ptr_val.to(tl.uint32))
     # offset 6: dst address 63:32
-    tl.store(slot_ptr_u32 + 6, (dst_ptr_val >> 32).to(tl.uint32), cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 6, (dst_ptr_val >> 32).to(tl.uint32))
+    _store_packet(queue_ptr_u32, offset_bytes, pkt, idx, 7)
 
 
 @triton.jit
@@ -296,32 +315,29 @@ def place_atomic_packet(
         8: atomic compare-and-swap (32/64-bit with/without return)
     Flags are encoded via IS_64_BIT (bit 5) and RETURN (bit 6).
     """
-    slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
     if IS_64_BIT:
         OP = OP | (0x1 << 5)
     if not RETURN:
         OP = OP | (0x1 << 6)
-    tl.store(slot_ptr_u32 + 0, ((OP & 0x7F) << 25) | (0xA & 0xFF), cache_modifier=".wt")
+    idx = tl.arange(0, 8)
+    pkt = tl.zeros([8], dtype=tl.uint32)
+    pkt = _packet_dword(pkt, idx, 0, ((OP & 0x7F) << 25) | (0xA & 0xFF))
     # offset 1: dst address 31:0
-    tl.store(slot_ptr_u32 + 1, dst_ptr_val.to(tl.uint32), cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 1, dst_ptr_val.to(tl.uint32))
     # offset 2: dst address 63:32
-    tl.store(slot_ptr_u32 + 2, (dst_ptr_val >> 32).to(tl.uint32), cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 2, (dst_ptr_val >> 32).to(tl.uint32))
     # offset 3: src data 31:0
-    tl.store(slot_ptr_u32 + 3, src_data, cache_modifier=".wt")
-    # offset 4: src data 63:32
+    pkt = _packet_dword(pkt, idx, 3, src_data)
+    # offset 4: src data 63:32 (0 for 32-bit)
     if IS_64_BIT:
-        tl.store(slot_ptr_u32 + 4, (tl.cast(src_data, tl.uint64) >> 32).to(tl.uint32), cache_modifier=".wt")
-    else:
-        tl.store(slot_ptr_u32 + 4, 0, cache_modifier=".wt")
+        pkt = _packet_dword(pkt, idx, 4, (tl.cast(src_data, tl.uint64) >> 32).to(tl.uint32))
     # offset 5: compare data 31:0
-    tl.store(slot_ptr_u32 + 5, comp_data, cache_modifier=".wt")
-    # offset 6: compare data 63:32
+    pkt = _packet_dword(pkt, idx, 5, comp_data)
+    # offset 6: compare data 63:32 (0 for 32-bit)
     if IS_64_BIT:
-        tl.store(slot_ptr_u32 + 6, (comp_data >> 32), cache_modifier=".wt")
-    else:
-        tl.store(slot_ptr_u32 + 6, 0, cache_modifier=".wt")
-    # offset 7: loop timer + loop interval
-    tl.store(slot_ptr_u32 + 7, 0, cache_modifier=".wt")
+        pkt = _packet_dword(pkt, idx, 6, comp_data >> 32)
+    # offset 7: loop timer + loop interval (0)
+    _store_packet(queue_ptr_u32, offset_bytes, pkt, idx, 8)
 
 
 @triton.jit
@@ -360,16 +376,18 @@ def place_poll_regmem_packet(
 
     Polls memory location until (value >= expected_value).
     """
-    slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
     header = ((1 & 0x1) << 31) | ((5 & 0x7) << 28) | (8 & 0xFF)
     dw5 = ((retry_count & 0xFFF) << 16) | (interval & 0xFFFF)
 
-    tl.store(slot_ptr_u32 + 0, header, cache_modifier=".wt")
-    tl.store(slot_ptr_u32 + 1, flag_ptr_val.to(tl.uint32), cache_modifier=".wt")
-    tl.store(slot_ptr_u32 + 2, (flag_ptr_val.to(tl.uint64) >> 32).to(tl.uint32), cache_modifier=".wt")
-    tl.store(slot_ptr_u32 + 3, tl.cast(expected_value, tl.uint32), cache_modifier=".wt")
-    tl.store(slot_ptr_u32 + 4, 0xFFFFFFFF, cache_modifier=".wt")
-    tl.store(slot_ptr_u32 + 5, dw5, cache_modifier=".wt")
+    idx = tl.arange(0, 8)
+    pkt = tl.zeros([8], dtype=tl.uint32)
+    pkt = _packet_dword(pkt, idx, 0, header)
+    pkt = _packet_dword(pkt, idx, 1, flag_ptr_val.to(tl.uint32))
+    pkt = _packet_dword(pkt, idx, 2, (flag_ptr_val.to(tl.uint64) >> 32).to(tl.uint32))
+    pkt = _packet_dword(pkt, idx, 3, tl.cast(expected_value, tl.uint32))
+    pkt = _packet_dword(pkt, idx, 4, 0xFFFFFFFF)
+    pkt = _packet_dword(pkt, idx, 5, dw5)
+    _store_packet(queue_ptr_u32, offset_bytes, pkt, idx, 6)
 
 
 @triton.jit
@@ -406,57 +424,52 @@ def place_sub_window_copy_packet(
         dst_x: Destination X offset in bytes
         dst_y: Destination Y offset in rows
     """
-    slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
+    idx = tl.arange(0, 32)
+    pkt = tl.zeros([32], dtype=tl.uint32)
 
     # DW 0: Header (op=1, sub_op=0x24)
     # op[7:0] = 1 (SDMA_OP_COPY), sub_op[15:8] = 0x24 (SDMA_SUBOP_COPY_LINEAR_SUB_WINDOW)
-    tl.store(slot_ptr_u32 + 0, ((0x24 & 0xFF) << 8) | (0x1 & 0xFF), cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 0, ((0x24 & 0xFF) << 8) | (0x1 & 0xFF))
 
     # DW 1-2: Source base address
-    tl.store(slot_ptr_u32 + 1, src_ptr_val.to(tl.uint32), cache_modifier=".wt")
-    tl.store(slot_ptr_u32 + 2, (src_ptr_val >> 32).to(tl.uint32), cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 1, src_ptr_val.to(tl.uint32))
+    pkt = _packet_dword(pkt, idx, 2, (src_ptr_val >> 32).to(tl.uint32))
 
     # DW 3: Source X offset (bytes)
-    tl.store(slot_ptr_u32 + 3, src_x, cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 3, src_x)
 
     # DW 4: Source Y offset (rows)
-    tl.store(slot_ptr_u32 + 4, src_y, cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 4, src_y)
 
     # DW 5: Source Z offset (0 for 2D)
-    tl.store(slot_ptr_u32 + 5, 0, cache_modifier=".wt")
 
     # DW 6: Source pitch (1-based, so subtract 1)
-    tl.store(slot_ptr_u32 + 6, src_buffer_pitch - 1, cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 6, src_buffer_pitch - 1)
 
     # DW 7-8: Source slice pitch (1-based, 0 means slice_pitch of 1, for 2D)
-    tl.store(slot_ptr_u32 + 7, 0, cache_modifier=".wt")
-    tl.store(slot_ptr_u32 + 8, 0, cache_modifier=".wt")
 
     # DW 9-10: Destination base address
-    tl.store(slot_ptr_u32 + 9, dst_ptr_val.to(tl.uint32), cache_modifier=".wt")
-    tl.store(slot_ptr_u32 + 10, (dst_ptr_val >> 32).to(tl.uint32), cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 9, dst_ptr_val.to(tl.uint32))
+    pkt = _packet_dword(pkt, idx, 10, (dst_ptr_val >> 32).to(tl.uint32))
 
     # DW 11: Destination X offset (bytes)
-    tl.store(slot_ptr_u32 + 11, dst_x, cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 11, dst_x)
 
     # DW 12: Destination Y offset (rows)
-    tl.store(slot_ptr_u32 + 12, dst_y, cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 12, dst_y)
 
     # DW 13: Destination Z offset (0 for 2D)
-    tl.store(slot_ptr_u32 + 13, 0, cache_modifier=".wt")
 
     # DW 14: Destination pitch (1-based, so subtract 1)
-    tl.store(slot_ptr_u32 + 14, dst_buffer_pitch - 1, cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 14, dst_buffer_pitch - 1)
 
     # DW 15-16: Destination slice pitch (1-based, 0 means slice_pitch of 1, for 2D)
-    tl.store(slot_ptr_u32 + 15, 0, cache_modifier=".wt")
-    tl.store(slot_ptr_u32 + 16, 0, cache_modifier=".wt")
 
     # DW 17: Rectangle X (width in bytes, 1-based)
-    tl.store(slot_ptr_u32 + 17, tile_width - 1, cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 17, tile_width - 1)
 
     # DW 18: Rectangle Y (height in rows, 1-based)
-    tl.store(slot_ptr_u32 + 18, tile_height - 1, cache_modifier=".wt")
+    pkt = _packet_dword(pkt, idx, 18, tile_height - 1)
 
     # DW 19: Rectangle Z (depth, 1-based, 0 for 2D means depth of 1)
-    tl.store(slot_ptr_u32 + 19, 0, cache_modifier=".wt")
+    _store_packet(queue_ptr_u32, offset_bytes, pkt, idx, 20)
