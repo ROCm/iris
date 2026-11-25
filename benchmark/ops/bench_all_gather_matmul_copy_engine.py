@@ -10,6 +10,7 @@ import iris.bench as bench
 from iris.ops.all_gather_matmul_copy_engine import (
     all_gather_matmul_copy_engine as _copy_engine,
     all_gather_matmul_copy_engine_preamble,
+    all_gather_matmul_copy_engine_prepost_transfers,
 )
 from tritonblas.matmul import _make_matmul_selector
 
@@ -27,7 +28,7 @@ def _make_selector(M: int, N: int, K: int, dtype: torch.dtype, device: torch.dev
     )
 
 
-def _register_copy_engine(state, ctx, *, device_initiated: bool) -> None:
+def _register_copy_engine(state, ctx, *, device_initiated: bool, prepost: bool = False) -> None:
     if ctx.get_copy_engine_ctx() is None:
         state.skip("SDMA engine is not enabled; run with --engines sdma")
     M, N, K = state["M"], state["N"], state["K"]
@@ -76,16 +77,23 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool) -> None:
             workspace=workspace,
             flag_iteration=flag_iteration[0],
             device_initiated=device_initiated,
+            copy_engine_transfers_preposted=prepost,
         )
         flag_iteration[0] += 1
+
+    def _preamble():
+        # Queued outside the timed region; the timed call only triggers them.
+        if prepost:
+            all_gather_matmul_copy_engine_prepost_transfers(ctx, A_sharded, workspace)
 
     state.set_flops(2 * M * N * K)
     state.set_bytes((world_size - 1) * M * K_local * A_sharded.element_size())
     state.add_counter("group_size_m", float(selector.group_m))
     state.add_counter("m_tiles_per_batch", float(m_tiles_per_batch))
     state.add_counter("device_initiated", 1.0 if device_initiated else 0.0)
+    state.add_counter("prepost", 1.0 if prepost else 0.0)
 
-    state.exec(_run)
+    state.exec(_run, preamble_fn=_preamble)
 
 
 @bench.register
@@ -96,6 +104,16 @@ def _register_copy_engine(state, ctx, *, device_initiated: bool) -> None:
 @bench.axis("dtype", [torch.float16])
 def all_gather_matmul_copy_engine_host(state, ctx):
     _register_copy_engine(state, ctx, device_initiated=False)
+
+
+@bench.register
+@bench.axis("num_ranks", [8])
+@bench.axis("M", [1024, 4096, 16384])
+@bench.axis("N", [3584])
+@bench.axis("K", [8192])
+@bench.axis("dtype", [torch.float16])
+def all_gather_matmul_copy_engine_host_prepost(state, ctx):
+    _register_copy_engine(state, ctx, device_initiated=False, prepost=True)
 
 
 @bench.register
