@@ -28,7 +28,6 @@ def _batch_submit_kernel(
     A_sharded,
     staged_a,
     flags_ptr,
-    flag_iteration,
     M,
     K_local,
     stride_am,
@@ -101,6 +100,25 @@ def _batch_submit_kernel(
 def _trigger_kernel(trigger_ptr):
     """Release the host-preposted SDMA transfers waiting on ``trigger_ptr``."""
     tl.atomic_add(trigger_ptr, 1, sem="relaxed", scope="sys")
+
+
+def _launch_prebound(workspace: FusedWorkspace, kernel, grid: tuple, key: tuple, *args) -> None:
+    """Launch ``kernel[grid](*args)``, reusing the compiled kernel for later launches with the same ``key``.
+
+    ``JITFunction.run`` binds and re-specializes every argument on each call: ~23 us of host time for the
+    submit kernel vs ~11 us when calling the compiled kernel directly (~11 vs ~7 us for the trigger). That is
+    on the critical path, because the GEMM launch queues behind it on the host while the GPU idles. ``key`` must
+    cover every argument property the specialization depends on that can change between calls (dtype and 16-byte
+    alignment of caller tensors, integer values); all other arguments must be fixed for the workspace.
+    """
+    cache_key = (kernel, grid, key)
+    runner = workspace.launch_cache.get(cache_key)
+    if runner is None:
+        compiled = kernel[grid](*args)
+        # CompiledKernel's runner indexes grid[0..2] directly; JITFunction.run pads shorter grids itself.
+        workspace.launch_cache[cache_key] = compiled[grid + (1,) * (3 - len(grid))]
+    else:
+        runner(*args)
 
 
 def all_gather_matmul_copy_engine_preamble(
@@ -438,11 +456,15 @@ def all_gather_matmul_copy_engine(
         # The combined COMM_WGS+GEMM kernel remains in this file as an
         # experimental option, but we do not use it by default.
         submit_grid = world_size
-        _batch_submit_kernel[(submit_grid,)](
+        _launch_prebound(
+            workspace,
+            _batch_submit_kernel,
+            (submit_grid,),
+            # Everything else is fixed for the workspace.
+            (A_sharded.dtype, A_sharded.data_ptr() % 16, M, K_local, stride_am, stride_sa_m, stride_sa_k),
             A_sharded,
             workspace.aux_buffer,
             workspace.locks,
-            flag_iteration,
             M,
             K_local,
             stride_am,
@@ -478,7 +500,7 @@ def all_gather_matmul_copy_engine(
                 f"preposted={copy_engine_transfers_preposted}"
             )
 
-        _trigger_kernel[(1,)](workspace.trigger_flag)
+        _launch_prebound(workspace, _trigger_kernel, (1,), (), workspace.trigger_flag)
         persistent_matmul_lt(
             workspace.aux_buffer,
             B,

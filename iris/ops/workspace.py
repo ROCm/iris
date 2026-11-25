@@ -5,7 +5,7 @@
 Workspace management for fused GEMM+CCL operations.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 import torch
 
@@ -67,6 +67,10 @@ class FusedWorkspace:
     transfer_width_bytes: Optional[torch.Tensor] = None
     transfer_heights: Optional[torch.Tensor] = None
 
+    # Pre-bound kernel launchers, keyed by (kernel, grid, specialization key); see
+    # all_gather_matmul_copy_engine._launch_prebound. Only valid for this workspace's buffers.
+    launch_cache: dict = field(default_factory=dict)
+
     prepared: bool = False
 
     def matches(
@@ -118,4 +122,5 @@ class FusedWorkspace:
         self.transfer_col_offsets = None
         self.transfer_width_bytes = None
         self.transfer_heights = None
+        self.launch_cache = {}
         self.prepared = False

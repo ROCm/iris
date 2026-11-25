@@ -286,6 +286,9 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, prep
             f"M={M}, K_local={K_local}, N={N}",
         )
 
+    # The second call reused the first call's pre-bound launcher (submit kernel or trigger kernel).
+    assert len(workspace.launch_cache) == 1
+
     # Clean up to prevent OOM in subsequent tests
     del A_sharded, B, A_sharded_shmem, B_shmem, output, workspace
     torch.cuda.synchronize()
