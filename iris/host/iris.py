@@ -282,7 +282,11 @@ class Iris:
         sdma_ep = self._sdma_ep
         sdma_ep.init()
 
-        context_size = sdma_ep.QUEUE_DEVICE_CTX_SIZE
+        from iris.device.sdma_utils import queue_ctx_size
+
+        # One row per peer: rocm-xio's queue context plus the cached HW read index, which starts at 0 (a valid
+        # lower bound) and is kept up to date by the device-side reservations (see sdma_utils.can_write_up_to).
+        context_size = queue_ctx_size()
         self.copy_engines_device_ctx = torch.zeros((num_ranks, context_size), dtype=torch.uint64, device=self.device)
 
         for peer_gpu in sorted(set(self._copy_engine_gpus)):

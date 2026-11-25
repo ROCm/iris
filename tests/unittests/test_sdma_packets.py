@@ -59,10 +59,11 @@ def test_atomic_opcode(op, ret, is_64_bit, expected):
 
 
 # put() through a copy-engine context whose queue, pointers and doorbell are ordinary buffers.
+# The last context slot holds the cached HW read index (0, like a fresh Iris context).
 def _fake_copy_engine_ctx():
     queue = torch.full((sdma_ep.SDMA_QUEUE_SIZE // 4,), SENTINEL, dtype=torch.int32, device="cuda")
     ptrs = torch.zeros(5, dtype=torch.int64, device="cuda")  # rptr, wptr, doorbell, cached wptr, committed wptr
-    ctx = torch.zeros(sdma_ep.QUEUE_DEVICE_CTX_SIZE, dtype=torch.int64, device="cuda")
+    ctx = torch.zeros(sdma_utils.queue_ctx_size(), dtype=torch.int64, device="cuda")
     ctx[0] = queue.data_ptr()
     for i in range(5):
         ctx[1 + i] = ptrs.data_ptr() + 8 * i
@@ -153,6 +154,70 @@ def test_atomic_add_opcode(dtype, opcode):
     _atomic_add_kernel[(1,)](flag, heap_bases, ctx)
     addr = flag.data_ptr()
     assert _dwords(queue, 9) == [(opcode << 25) | 0xA, addr & 0xFFFFFFFF, addr >> 32, 5, 0, 0, 0, 0, SENTINEL]
+
+
+def _start_queue_at(ptrs, index):
+    """Pretend ``index`` bytes were already submitted and consumed: every queue pointer sits at ``index``."""
+    ptrs.fill_(index)
+
+
+def _put_2d(ctx, src, dst, heap_bases):
+    _put_2d_kernel[(1,)](src, dst, 5, heap_bases, ctx, STRIDE=64, BLOCK=16)
+
+
+def _atomic_add(ctx, flag, heap_bases):
+    _atomic_add_kernel[(1,)](flag, heap_bases, ctx)
+
+
+@pytest.mark.parametrize("op", ["atomic_add", "put_2d"])
+@pytest.mark.parametrize("dwords_before_end", [1, 2, 7])
+def test_command_straddles_ring_end(op, dwords_before_end):
+    """A command that crosses the end of the ring continues at its start, without NOP padding."""
+    heap_bases = torch.zeros(1, dtype=torch.int64, device="cuda")
+    src = torch.zeros(64 * 64, dtype=torch.float32, device="cuda")
+    dst = torch.zeros(64 * 64, dtype=torch.float32, device="cuda")
+    flag = torch.zeros(1, dtype=torch.int32, device="cuda")
+    emit, n_bytes = {
+        "atomic_add": (lambda c: _atomic_add(c, flag, heap_bases), sdma_ep.ATOMIC_COMMAND_BYTES),
+        "put_2d": (lambda c: _put_2d(c, src, dst, heap_bases), sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES),
+    }[op]
+    n_dw = n_bytes // 4
+
+    ctx, queue, ptrs = _fake_copy_engine_ctx()
+    emit(ctx)
+    expected = _dwords(queue, n_dw)
+
+    # Third lap around the ring, ``dwords_before_end`` dwords before its end
+    start = 3 * sdma_ep.SDMA_QUEUE_SIZE - 4 * dwords_before_end
+    ctx, queue, ptrs = _fake_copy_engine_ctx()
+    _start_queue_at(ptrs, start)
+    emit(ctx)
+    tail = [v & 0xFFFFFFFF for v in queue[-dwords_before_end - 1 :].cpu().tolist()]
+    assert tail == [SENTINEL] + expected[:dwords_before_end]
+    assert _dwords(queue, n_dw - dwords_before_end + 1) == expected[dwords_before_end:] + [SENTINEL]
+    # wptr, doorbell, cached wptr and committed wptr all advance by exactly the command
+    assert ptrs[1:].tolist() == [start + n_bytes] * 4
+
+
+def test_reservation_refreshes_cached_read_index():
+    """The HW read pointer is read only when the cached read index says the ring is full."""
+    heap_bases = torch.zeros(1, dtype=torch.int64, device="cuda")
+    flag = torch.zeros(1, dtype=torch.int32, device="cuda")
+    start = 2 * sdma_ep.SDMA_QUEUE_SIZE
+    cached = sdma_utils.queue_ctx_size() - 1
+
+    # Cached index 0 is more than a ring behind: refreshed from the HW read pointer
+    ctx, queue, ptrs = _fake_copy_engine_ctx()
+    _start_queue_at(ptrs, start)
+    _atomic_add(ctx, flag, heap_bases)
+    assert ctx[cached].item() == start
+
+    # Cached index within a ring of the reservation: kept, the HW read pointer is not consulted
+    ctx, queue, ptrs = _fake_copy_engine_ctx()
+    _start_queue_at(ptrs, start)
+    ctx[cached] = start - 64
+    _atomic_add(ctx, flag, heap_bases)
+    assert ctx[cached].item() == start - 64
 
 
 @triton.jit
