@@ -19,6 +19,7 @@ import os
 from iris.ops.all_gather_matmul_copy_engine import (
     all_gather_matmul_copy_engine,
     all_gather_matmul_copy_engine_preamble,
+    all_gather_matmul_copy_engine_prepost_transfers,
 )
 from tritonblas.matmul import _make_matmul_selector
 
@@ -212,11 +213,14 @@ def _make_selector(M, N, K, dtype, device):
 
 @pytest.mark.parametrize("dtype, atol, rtol", [(torch.float16, 5e-2, 5e-2)])
 @pytest.mark.parametrize("device_initiated", _device_initiated_modes())
+@pytest.mark.parametrize("prepost", [False, True])
 @pytest.mark.parametrize("M,K_local,N", _param_shapes())
-def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, M, K_local, N):
+def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, prepost, M, K_local, N):
     """Test all_gather_matmul_copy_engine against torch all_gather + matmul."""
     if not dist.is_initialized():
         pytest.skip("torch.distributed not initialized")
+    if prepost and device_initiated:
+        pytest.skip("prepost only applies to host-initiated transfers")
 
     heap_size = _heap_size()
     ctx = iris.iris(heap_size, engines=("sdma",))
@@ -247,31 +251,40 @@ def test_all_gather_matmul_copy_engine(dtype, atol, rtol, device_initiated, M, K
         selector=selector,
     )
 
-    ctx.barrier()
+    # Two calls on one workspace exercise the trigger / prepost generation pairing and the GEMM's wait counters.
+    for iteration in range(2):
+        output.zero_()
+        torch.cuda.synchronize()
+        ctx.barrier()
 
-    all_gather_matmul_copy_engine(
-        ctx,
-        output,
-        A_sharded_shmem,
-        B_shmem,
-        workspace=workspace,
-        device_initiated=device_initiated,
-        trace=False,
-    )
+        if prepost:
+            all_gather_matmul_copy_engine_prepost_transfers(ctx, A_sharded_shmem, workspace)
 
-    torch.cuda.synchronize()
-    ctx.barrier()
+        all_gather_matmul_copy_engine(
+            ctx,
+            output,
+            A_sharded_shmem,
+            B_shmem,
+            workspace=workspace,
+            device_initiated=device_initiated,
+            copy_engine_transfers_preposted=prepost,
+            trace=False,
+        )
 
-    _assert_output_matches_reference(
-        output,
-        A_sharded,
-        B,
-        rank,
-        world_size,
-        atol,
-        rtol,
-        f"device_initiated={device_initiated}, M={M}, K_local={K_local}, N={N}",
-    )
+        torch.cuda.synchronize()
+        ctx.barrier()
+
+        _assert_output_matches_reference(
+            output,
+            A_sharded,
+            B,
+            rank,
+            world_size,
+            atol,
+            rtol,
+            f"device_initiated={device_initiated}, prepost={prepost}, iteration={iteration}, "
+            f"M={M}, K_local={K_local}, N={N}",
+        )
 
     # Clean up to prevent OOM in subsequent tests
     del A_sharded, B, A_sharded_shmem, B_shmem, output, workspace

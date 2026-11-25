@@ -97,6 +97,12 @@ def _batch_submit_kernel(
         )
 
 
+@triton.jit
+def _trigger_kernel(trigger_ptr):
+    """Release the host-preposted SDMA transfers waiting on ``trigger_ptr``."""
+    tl.atomic_add(trigger_ptr, 1, sem="relaxed", scope="sys")
+
+
 def all_gather_matmul_copy_engine_preamble(
     shmem,
     A_sharded: torch.Tensor,
@@ -166,6 +172,9 @@ def all_gather_matmul_copy_engine_preamble(
     # Allocate per-batch flags
     ws.locks = shmem.zeros((num_flags,), dtype=torch.int32)
     ws.wait_expected = shmem.zeros((total_tiles,), dtype=torch.int32)
+    # Local counter the preposted host SDMA transfers poll on; bumped once per call by _trigger_kernel.
+    ws.trigger_flag = shmem.zeros((1,), dtype=torch.int32)
+    ws.prepost_generation = 0
 
     # Store metadata
     ws.selector = selector
@@ -215,6 +224,65 @@ def all_gather_matmul_copy_engine_preamble(
     return ws
 
 
+def all_gather_matmul_copy_engine_prepost_transfers(
+    shmem,
+    A_sharded: torch.Tensor,
+    workspace: FusedWorkspace,
+) -> None:
+    """Queue the host-initiated SDMA transfers (copy + flag signal per batch and rank) for one launch.
+
+    The first transfer on each destination queue polls ``workspace.trigger_flag`` until it reaches the new
+    ``workspace.prepost_generation``; later batches follow in queue order. Each call must be paired with
+    exactly one ``all_gather_matmul_copy_engine(..., copy_engine_transfers_preposted=True)`` call, whose
+    trigger kernel releases the queued transfers right before the GEMM. Posting ahead of the call takes the
+    host-side submission cost off the critical path.
+    """
+    if workspace is None:
+        raise ValueError("workspace is required when preposting copy-engine transfers")
+
+    generation = workspace.prepost_generation + 1
+    workspace.prepost_generation = generation
+
+    M, K_local = A_sharded.shape
+    rank = shmem.get_rank()
+    world_size = shmem.get_num_ranks()
+    block_m = workspace.selector.block_m
+    num_m_tiles = workspace.num_m_tiles
+    m_tiles_per_batch = workspace.m_tiles_per_batch
+
+    elem_size = A_sharded.element_size()
+    stride_am = A_sharded.stride(0)
+    stride_sa_m, stride_sa_k = workspace.aux_buffer.stride()
+    staged_a_base_addr = workspace.aux_buffer.data_ptr()
+    flags_base_addr = workspace.locks.data_ptr()
+
+    for batch_id, m_tile_start in enumerate(range(0, num_m_tiles, m_tiles_per_batch)):
+        num_m_tiles_in_batch = min(m_tiles_per_batch, num_m_tiles - m_tile_start)
+        flag_addr_local = flags_base_addr + batch_id * 4
+        # Source is the local shard, so batches only advance in M.
+        src_ptr = A_sharded.data_ptr() + m_tile_start * block_m * stride_am * elem_size
+        # Destination is this rank's global-K slot inside staged_a.
+        dst_offset_bytes = (m_tile_start * block_m * stride_sa_m + rank * K_local * stride_sa_k) * elem_size
+
+        for dst_rank in range(world_size):
+            shmem.put_tile(
+                global_addr=src_ptr,
+                to_rank=dst_rank,
+                dst_addr=shmem.heap.translate(staged_a_base_addr + dst_offset_bytes, rank, dst_rank),
+                data_size=elem_size,
+                tile_height=num_m_tiles_in_batch * block_m,
+                tile_width=K_local,
+                src_stride=stride_am,
+                dst_stride=stride_sa_m,
+                wait_flag=workspace.trigger_flag.data_ptr() if batch_id == 0 else None,
+                wait_value=generation,
+                signal_flag=shmem.heap.translate(flag_addr_local, rank, dst_rank),
+                signal_value=1,
+                async_op=True,
+                channel=0,
+            )
+
+
 def all_gather_matmul_copy_engine(
     shmem,
     output_tensor: torch.Tensor,
@@ -230,6 +298,7 @@ def all_gather_matmul_copy_engine(
     trace: bool = False,
     verbose: bool = False,
     device_initiated: bool = False,
+    copy_engine_transfers_preposted: bool = False,
 ) -> FusedWorkspace:
     """
     All-gather + matmul with copy engine orchestrating remote tile transfers.
@@ -244,6 +313,9 @@ def all_gather_matmul_copy_engine(
             "k_contiguous" — (M,K) row-major, K is fast dim.
             "m_contiguous" — (M,K) with M as fast dim.
         device_initiated: If True, use device-side WGs to initiate SDMA transfers instead of host.
+        copy_engine_transfers_preposted: Host-initiated only. If True, this launch's transfers were already
+            queued by all_gather_matmul_copy_engine_prepost_transfers (exactly one prepost per call).
+            If False, they are queued here, right after the trigger and GEMM launches.
         trace: Not supported yet; must be False.
         k_per_flag: Retained for call compatibility; ignored by the current per-batch design.
     """
@@ -251,6 +323,8 @@ def all_gather_matmul_copy_engine(
     shmem._require_copy_engine()
     if trace:
         raise NotImplementedError("trace=True is not supported for all_gather_matmul_copy_engine yet")
+    if copy_engine_transfers_preposted and device_initiated:
+        raise ValueError("copy_engine_transfers_preposted requires device_initiated=False")
 
     M, K_local = A_sharded.shape
     K, N = B.shape
@@ -392,67 +466,19 @@ def all_gather_matmul_copy_engine(
             prologue_config=prologue_config,
         )
     else:
-        # Host-initiated:
-        # Launch GEMM first, then post batches to overlap SDMA.
-        elem_size = A_sharded.element_size()
-        staged_a_base_addr = workspace.aux_buffer.data_ptr()
-        flags_base_addr = workspace.locks.data_ptr()
-        tile_transfer_count = 0
-
-        def post_host_batch(batch_id: int, m_tile_start: int, num_m_tiles_in_batch: int) -> None:
-            nonlocal tile_transfer_count
-
-            for dst_rank in range(world_size):
-                flag_idx = batch_id
-                flag_addr_local = flags_base_addr + flag_idx * 4
-                flag_addr_remote = shmem.heap.translate(flag_addr_local, rank, dst_rank)
-
-                # Source is the local shard, so batches only advance in M.
-                src_offset_bytes = (m_tile_start * selector.block_m * stride_am) * elem_size
-                src_ptr = A_sharded.data_ptr() + src_offset_bytes
-
-                # Destination is this rank's global-K slot inside staged_a.
-                dst_offset_bytes = (
-                    m_tile_start * selector.block_m * stride_sa_m + rank * K_local * stride_sa_k
-                ) * elem_size
-                dst_ptr_local = staged_a_base_addr + dst_offset_bytes
-                dst_ptr_remote = shmem.heap.translate(dst_ptr_local, rank, dst_rank)
-
-                # Use shmem.put_tile method with signal
-                shmem.put_tile(
-                    global_addr=src_ptr,
-                    to_rank=dst_rank,
-                    dst_addr=dst_ptr_remote,
-                    data_size=elem_size,
-                    tile_height=num_m_tiles_in_batch * selector.block_m,
-                    tile_width=K_local,
-                    src_stride=stride_am,
-                    dst_stride=stride_sa_m,
-                    signal_flag=flag_addr_remote,
-                    signal_value=1,
-                    async_op=True,
-                    channel=0,
-                )
-                tile_transfer_count += 1
-
-                if verbose and batch_id == 0 and dst_rank == (rank + 1) % world_size:
-                    shmem.info(
-                        f"[Rank {rank}→{dst_rank}] Signaled batch={batch_id} flag_idx={flag_idx} "
-                        f"({num_m_tiles_in_batch} rows × full local K shard)"
-                    )
+        # Host-initiated: the SDMA transfers are queued on the host queues (here after the GEMM launch, or
+        # earlier by the caller) and the first one per destination polls trigger_flag, which the trigger
+        # kernel bumps right before the GEMM.
+        tile_transfer_count = num_batches * world_size
 
         if verbose and rank == 0:
-            num_batches_calc = workspace.locks.numel()
             shmem.info(
-                f"[Rank {rank}] Starting SDMA loop (batched M-tile transfers)... "
-                f"num_tiles_m={num_m_tiles}, num_k_blocks_local={num_k_blocks_local}, "
-                f"m_tiles_per_batch={m_tiles_per_batch}, tb_block_m={tb_block_m}"
+                f"[Rank {rank}] {num_batches} batches of {m_tiles_per_batch} M-tiles "
+                f"(num_tiles_m={num_m_tiles}, num_k_blocks_local={num_k_blocks_local}, tb_block_m={tb_block_m}), "
+                f"preposted={copy_engine_transfers_preposted}"
             )
-            shmem.info(f"[Rank {rank}] Will transfer in {num_batches_calc} batches of {m_tiles_per_batch} M-tiles each")
 
-        if verbose and rank == 0:
-            shmem.info(f"[Rank {rank}] Launching GEMM kernel...")
-
+        _trigger_kernel[(1,)](workspace.trigger_flag)
         persistent_matmul_lt(
             workspace.aux_buffer,
             B,
@@ -461,14 +487,9 @@ def all_gather_matmul_copy_engine(
             bias=None,
             prologue_config=prologue_config,
         )
-
-        # Post all batches while the GEMM is already running; the GEMM waits per batch on its flags.
-        batch_id = 0
-        for m_tile_start in range(0, num_m_tiles, m_tiles_per_batch):
-            m_tile_end = min(m_tile_start + m_tiles_per_batch, num_m_tiles)
-            num_m_tiles_in_batch = m_tile_end - m_tile_start
-            post_host_batch(batch_id, m_tile_start, num_m_tiles_in_batch)
-            batch_id += 1
+        if not copy_engine_transfers_preposted:
+            # The trigger is already (or about to be) satisfied, so these start as soon as they are queued.
+            all_gather_matmul_copy_engine_prepost_transfers(shmem, A_sharded, workspace)
 
         sdma_end_post_time = time.perf_counter()
 
