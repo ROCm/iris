@@ -35,6 +35,27 @@ def bind_sdma_ep():
     return sdma_ep
 
 
+def queue_ctx_size():
+    """Columns per destination rank in the copy-engine context tensor (``Iris.get_copy_engine_ctx()``).
+
+    rocm-xio's device context (queue_buf, rptr, wptr, doorbell, cached_wptr, committed_wptr) followed by one
+    Iris-owned slot caching the last observed HW read index (see ``can_write_up_to``).
+    """
+    return bind_sdma_ep().QUEUE_DEVICE_CTX_SIZE + 1
+
+
+@triton.jit
+def queue_ctx(copy_engine_ctx, to_rank):
+    """Row of the copy-engine context tensor that describes this rank's queue to ``to_rank``."""
+    return copy_engine_ctx + (sdma_ep.QUEUE_DEVICE_CTX_SIZE + 1) * to_rank
+
+
+@triton.jit
+def cached_read_index_slot(queue_ctx_row):
+    """Pointer to the cached HW read index of the queue described by ``queue_ctx_row``."""
+    return (queue_ctx_row + sdma_ep.QUEUE_DEVICE_CTX_SIZE).to(tl.pointer_type(tl.uint64))
+
+
 @triton.jit
 def wrap_into_ring(index: tl.uint64):
     queue_size_u32 = sdma_ep.SDMA_QUEUE_SIZE
@@ -43,124 +64,67 @@ def wrap_into_ring(index: tl.uint64):
 
 
 @triton.jit
-def can_write_up_to(rptr, up_to_index: tl.uint64):
-    """Check if there's space to write up to the given index in the ring buffer."""
-    hw_read_ptr = tl.load(rptr, cache_modifier=".cv", volatile=True)
-    return (up_to_index - hw_read_ptr) < sdma_ep.SDMA_QUEUE_SIZE
+def can_write_up_to(rptr, up_to_index: tl.uint64, cached_rptr: tl.pointer_type(tl.uint64)):
+    """Check if there's space to write up to the given index in the ring buffer.
+
+    Like SdmaQueueHandle::CanWriteUpto in rocm-xio: checks against the cached read index first and reads the HW
+    read pointer, an uncached round trip of ~1.8 us, only when the cached value says the ring is full; the fresh
+    value is then written back. The HW read index only grows, so any cached value (stale, or written by another
+    workgroup) is a lower bound and the fast path never reports space that does not exist.
+    """
+    read_index = tl.load(cached_rptr)
+    if (up_to_index - read_index) >= sdma_ep.SDMA_QUEUE_SIZE:
+        read_index = tl.load(rptr, cache_modifier=".cv", volatile=True)
+        tl.store(cached_rptr, read_index)
+    return (up_to_index - read_index) < sdma_ep.SDMA_QUEUE_SIZE
 
 
 @triton.jit
 def acquire(
-    queue_ptr_u32,
     read_ptr,
-    write_ptr,
-    doorbell_ptr,
     cached_write_ptr: tl.pointer_type(tl.uint64),
-    committed_write_ptr,
     command_in_bytes: tl.uint64,
+    cached_rptr: tl.pointer_type(tl.uint64),
 ):
     """
-    Reserve space in the SDMA queue.
-    Returns (base_index, offset) where:
-      - base_index: the index where the packet should be written (cur_index initially)
-      - offset: padding bytes added for wraparound (0 if no wraparound)
+    Reserve ``command_in_bytes`` in the SDMA queue with a compare-and-swap on ``cached_write_ptr``.
+
+    Returns the ring index (in bytes) where the command starts. The command may straddle the end of the
+    ring; the packet writers wrap every dword (see ``_store_packet``), so no NOP padding is needed.
+    ``cached_rptr`` is the queue's cached read index (``cached_read_index_slot``).
 
     Based on ReserveQueueSpace from anvil_device.hpp.
     """
-    queue_size_u32 = sdma_ep.SDMA_QUEUE_SIZE
-    queue_size_in_bytes = queue_size_u32.to(tl.uint64)
-
-    base_u32 = 0
-    base = (base_u32).to(tl.uint64)
-    offset_u32 = 0
-    offset = (offset_u32).to(tl.uint64)
-
+    base = tl.zeros([], dtype=tl.uint64)
     stop_loop = False
     while not stop_loop:
-        cur_index = tl.load(cached_write_ptr, volatile=True)
-        offset = (offset_u32).to(tl.uint64)
-
-        # Calculate current position in ring buffer
-        cur_ring_pos = wrap_into_ring(cur_index)
-
-        # Check if we need to wrap around
-        if (cur_ring_pos + command_in_bytes) > queue_size_in_bytes:
-            # Need to pad to end of ring before wrap around
-            offset = queue_size_in_bytes - cur_ring_pos
-
-        # Calculate new index including any wraparound padding
-        new_index = cur_index + command_in_bytes + offset
-        base = cur_index
-
-        # Check if queue has space
-        if can_write_up_to(read_ptr, new_index):
-            # Try to atomically claim this space
-            if tl.atomic_cas(cached_write_ptr, cur_index, new_index, sem="relaxed", scope="gpu") == cur_index:
+        base = tl.load(cached_write_ptr, volatile=True)
+        new_index = base + command_in_bytes
+        if can_write_up_to(read_ptr, new_index, cached_rptr):
+            if tl.atomic_cas(cached_write_ptr, base, new_index, sem="relaxed", scope="gpu") == base:
                 stop_loop = True
-    return base, offset
+    return base
 
 
-# acquire function using atomic_add instead of atomic_cas
 @triton.jit
 def acquire_fadd(
-    queue_ptr_u32,
     read_ptr,
-    write_ptr,
-    doorbell_ptr,
     cached_write_ptr: tl.pointer_type(tl.uint64),
-    committed_write_ptr,
     command_in_bytes: tl.uint64,
+    cached_rptr: tl.pointer_type(tl.uint64),
 ):
     """
-    Reserve space in the SDMA queue using atomic_add.
-    Returns (base_index, 0) where base_index is where the packet should be written.
+    Reserve ``command_in_bytes`` in the SDMA queue with an atomic add on ``cached_write_ptr``.
 
-    Uses atomic_add instead of CAS. Immediately acquires space, and if wraparound
-    is detected, places padding NOP packet, submits it, and tries again.
-    Always returns a non-wrapping allocation.
+    Returns the ring index (in bytes) where the command starts, after waiting until the hardware has consumed
+    enough of the ring to make room. The command may straddle the end of the ring; the packet writers wrap
+    every dword (see ``_store_packet``), so no NOP padding is needed. ``cached_rptr`` is the queue's cached
+    read index (``cached_read_index_slot``).
     """
-    queue_size_u32 = sdma_ep.SDMA_QUEUE_SIZE
-    queue_size_in_bytes = queue_size_u32.to(tl.uint64)
-
-    stop_loop = False
-    base_u32 = 0
-    base = (base_u32).to(tl.uint64)
-    offset_u32 = 0
-    offset = (offset_u32).to(tl.uint64)
-
-    while not stop_loop:
-        # Atomically acquire space for the command
-        base = tl.atomic_add(cached_write_ptr, command_in_bytes, sem="relaxed", scope="gpu")
-        end_index = base + command_in_bytes
-        # Calculate current position in ring buffer
-        cur_ring_pos = wrap_into_ring(base)
-
-        # Block until there is space in the queue to write the command
-        while not can_write_up_to(read_ptr, end_index):
-            pass
-
-        # Check if we need to wrap around
-        if (cur_ring_pos + command_in_bytes) > queue_size_in_bytes:
-            # Wrap detected - need to pad to end of ring
-            padding_bytes = queue_size_in_bytes - cur_ring_pos
-
-            # Place NOP packet at end of ring
-            place_nop_packet(queue_ptr_u32, base, padding_bytes)
-
-            # Place remaining NOP padding at the beginning of the ring.
-            remaining_padding_bytes = command_in_bytes - padding_bytes
-            place_nop_packet(queue_ptr_u32, base + padding_bytes, remaining_padding_bytes)
-
-            # Submit the padding - update committed write pointer
-            # This allows other threads to proceed past this padding
-            submit(write_ptr, doorbell_ptr, committed_write_ptr, base, end_index)
-
-            # Continue loop to acquire space for the actual command (will be at ring start)
-        else:
-            # No wrap - this allocation is good
-            stop_loop = True
-
-    return base, offset
+    base = tl.atomic_add(cached_write_ptr, command_in_bytes, sem="relaxed", scope="gpu")
+    while not can_write_up_to(read_ptr, base + command_in_bytes, cached_rptr):
+        pass
+    return base
 
 
 @triton.jit
@@ -210,13 +174,12 @@ def quiet(read_ptr, cached_write_ptr: tl.pointer_type(tl.uint64)):
 def place_nop_packet(queue_ptr_u32, offset_bytes: tl.uint64, padding_bytes):
     """Place a NOP (no operation) packet for ring buffer padding."""
     num_padding_dwords = (padding_bytes // 4).to(tl.int32)
-    offset_ring_pos = wrap_into_ring(offset_bytes)
-    offset_in_dwords = (offset_ring_pos // 4).to(tl.int32)
     for i in range(num_padding_dwords):
         if i == 0:
-            tl.store(queue_ptr_u32 + offset_in_dwords, ((num_padding_dwords - 1) & 0xFFFF) << 16, cache_modifier=".wt")
+            value = ((num_padding_dwords - 1) & 0xFFFF) << 16
         else:
-            tl.store(queue_ptr_u32 + offset_in_dwords + i, 0, cache_modifier=".wt")
+            value = 0
+        tl.store(queue_ptr_u32 + _ring_dword(offset_bytes, i), value, cache_modifier=".wt")
 
 
 # Packets are assembled in a register tensor (one dword per element) and written with a single vector store.
@@ -231,10 +194,21 @@ def _packet_dword(pkt, idx, i: tl.constexpr, value):
 
 
 @triton.jit
+def _ring_dword(offset_bytes: tl.uint64, i):
+    """Ring position (in dwords) of dword ``i`` of a command placed at queue index ``offset_bytes``.
+
+    Wraps every dword, so a command may straddle the end of the ring: the copy engine fetches the ring modulo
+    its size, like it does for the amdgpu kernel driver, which never pads at the wrap either.
+    """
+    ring_dwords_u32 = sdma_ep.SDMA_QUEUE_SIZE // 4
+    ring_dwords = ring_dwords_u32.to(tl.uint64)
+    return (wrap_into_ring(offset_bytes) // 4 + i) % ring_dwords
+
+
+@triton.jit
 def _store_packet(queue_ptr_u32, offset_bytes: tl.uint64, pkt, idx, num_dwords: tl.constexpr):
-    """Write the first ``num_dwords`` dwords of ``pkt`` to the ring slot at ``offset_bytes``."""
-    slot_ptr_u32 = queue_ptr_u32 + (wrap_into_ring(offset_bytes) // 4)
-    tl.store(slot_ptr_u32 + idx, pkt, mask=idx < num_dwords, cache_modifier=".wt")
+    """Write the first ``num_dwords`` dwords of ``pkt`` to the ring at ``offset_bytes``, wrapping at its end."""
+    tl.store(queue_ptr_u32 + _ring_dword(offset_bytes, idx), pkt, mask=idx < num_dwords, cache_modifier=".wt")
 
 
 @triton.jit
@@ -264,7 +238,7 @@ def copy_linear(copy_engine_ctx, to_rank, src, dst, nbytes):
     Queue one COPY_LINEAR of ``nbytes`` from address ``src`` to address ``dst`` on this rank's
     device-initiated queue to ``to_rank``. ``nbytes`` is at most 1 GiB (a 30-bit count on SDMA 4.4).
     """
-    handle = copy_engine_ctx + sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank
+    handle = queue_ctx(copy_engine_ctx, to_rank)
     queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
     read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
     write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
@@ -273,18 +247,9 @@ def copy_linear(copy_engine_ctx, to_rank, src, dst, nbytes):
     committed_write_ptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
 
     command_in_bytes = sdma_ep.COPY_LINEAR_COMMAND_BYTES
-    base, offset = acquire_fadd(
-        queue_ptr_u32,
-        read_ptr,
-        write_ptr,
-        doorbell_ptr,
-        cached_write_ptr,
-        committed_write_ptr,
-        command_in_bytes,
-    )
-    place_nop_packet(queue_ptr_u32, base, offset)
-    place_copy_packet(queue_ptr_u32, base + offset, nbytes.to(tl.uint32), src, dst)
-    submit(write_ptr, doorbell_ptr, committed_write_ptr, base, base + offset + command_in_bytes)
+    base = acquire_fadd(read_ptr, cached_write_ptr, command_in_bytes, cached_read_index_slot(handle))
+    place_copy_packet(queue_ptr_u32, base, nbytes.to(tl.uint32), src, dst)
+    submit(write_ptr, doorbell_ptr, committed_write_ptr, base, base + command_in_bytes)
 
 
 # atomic op codes and operation

@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 import iris
+from iris.device import sdma_utils
 
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("xio") is None,
@@ -779,6 +780,75 @@ def test_copy_engine_multi_block_concurrent(num_blocks):
         assert torch.allclose(dst, expected)
         # Check all blocks signaled
         assert torch.all(counters == 1).item()
+
+    shmem.barrier()
+    del shmem
+
+
+@triton.jit
+def _copy_engine_ring_wrap_kernel(
+    src,
+    dst,
+    from_rank: tl.constexpr,
+    to_rank: tl.constexpr,
+    heap_bases,
+    copy_engine_ctx,
+    elements_per_block,
+):
+    # One single-element linear copy per command, so every command is checked individually.
+    for i in range(elements_per_block):
+        offsets = tl.program_id(0) * elements_per_block + i + tl.arange(0, 1)
+        iris.put(
+            src + offsets,
+            dst + offsets,
+            from_rank,
+            to_rank,
+            heap_bases,
+            copy_engine_ctx=copy_engine_ctx,
+            use_copy_engine=True,
+            contiguous_copy=True,
+        )
+    iris.quiet(copy_engine_ctx, to_rank)
+
+
+def test_copy_engine_ring_wrap():
+    """Concurrent workgroups wrap the device queue's ring three times.
+
+    Commands are 28-byte linear copies, which do not divide the 8 MiB ring (8 MiB mod 28 = 12), so at most one of
+    the three wraps can land on a command boundary: real commands straddle the end of the ring. Once the ring has
+    filled, reservations also have to refresh the cached HW read index.
+    """
+    shmem = iris.iris(1 << 24, engines=("sdma",))
+    _require_two_ranks(shmem)
+    sdma_ep = sdma_utils.bind_sdma_ep()
+
+    rank = shmem.get_rank()
+    remote_rank = 1 - rank
+    num_blocks = 8
+    command_bytes = sdma_ep.COPY_LINEAR_COMMAND_BYTES
+    assert sdma_ep.SDMA_QUEUE_SIZE % command_bytes != 0
+    elements_per_block = 3 * sdma_ep.SDMA_QUEUE_SIZE // (command_bytes * num_blocks) + 1
+    num_elements = num_blocks * elements_per_block
+
+    src = _allocate_symmetric_range(shmem, num_elements, torch.float32)
+    dst = shmem.zeros(num_elements, device="cuda", dtype=torch.float32)
+    shmem.barrier()
+
+    if rank == 0:
+        _copy_engine_ring_wrap_kernel[(num_blocks,)](
+            src,
+            dst,
+            rank,
+            remote_rank,
+            shmem.get_heap_bases(),
+            shmem.get_copy_engine_ctx(),
+            elements_per_block,
+        )
+
+    shmem.barrier()
+
+    if rank == 1:
+        assert torch.equal(dst, _make_expected(num_elements, torch.float32, dst.device))
 
     shmem.barrier()
     del shmem

@@ -376,7 +376,7 @@ def put(
 
         tl.store(translated_to_ptr, data, mask=mask, cache_modifier=store_cache_modifier)
     else:
-        ctx = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        ctx = sdma_utils.queue_ctx(copy_engine_ctx, to_rank)
         queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
@@ -412,21 +412,12 @@ def put(
         )
 
         # Acquire space in the queue
-        base, offset = sdma_utils.acquire_fadd(
-            queue_ptr_u32,
-            read_ptr,
-            write_ptr,
-            doorbell_ptr,
-            cached_write_ptr,
-            committed_write_ptr,
-            command_in_bytes,
+        base = sdma_utils.acquire_fadd(
+            read_ptr, cached_write_ptr, command_in_bytes, sdma_utils.cached_read_index_slot(ctx)
         )
 
-        # Write padding NOPs if we wrapped around
-        sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
-
         # Place the appropriate packet type
-        packet_offset_bytes = base + offset
+        packet_offset_bytes = base
 
         if not is_2d_copy:
             if mask is None:
@@ -488,7 +479,7 @@ def put(
             )
 
         # Submit the command to the queue
-        pending_wptr = base + offset + command_in_bytes
+        pending_wptr = base + command_in_bytes
         sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
 
@@ -543,7 +534,7 @@ def atomic_add(
     if not use_copy_engine:
         return tl.atomic_add(translated_ptr, val, mask=mask, sem=sem, scope=scope)
     else:
-        handle = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        handle = sdma_utils.queue_ctx(copy_engine_ctx, to_rank)
         queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
@@ -554,29 +545,19 @@ def atomic_add(
         dst_ptr_val = translated_ptr.to(tl.uint64)
 
         command_in_bytes = sdma_utils.sdma_ep.ATOMIC_COMMAND_BYTES
-        # Acquire space (returns base index and wraparound offset)
-        base, offset = sdma_utils.acquire_fadd(
-            # base = sdma_utils.acquire(
-            queue_ptr_u32,
-            read_ptr,
-            write_ptr,
-            doorbell_ptr,
-            cached_write_ptr,
-            committed_write_ptr,
-            command_in_bytes,
+        # Acquire space in the queue
+        base = sdma_utils.acquire_fadd(
+            read_ptr, cached_write_ptr, command_in_bytes, sdma_utils.cached_read_index_slot(handle)
         )
-        # Write padding NOPs if we wrapped around
-        sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
 
-        # Calculate packet position (base + offset for wraparound)
-        packet_offset_bytes = base + offset
+        packet_offset_bytes = base
 
         # Place command packet
         is_64_bit: tl.constexpr = pointer.dtype.element_ty.primitive_bitwidth == 64
         sdma_utils.place_atomic_add_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, val, is_64_bit)
 
         # Submit command
-        pending_wptr = base + offset + command_in_bytes
+        pending_wptr = base + command_in_bytes
         sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
 
@@ -676,7 +657,7 @@ def atomic_cas(
     if not use_copy_engine:
         return tl.atomic_cas(translated_ptr, cmp, val, sem=sem, scope=scope)
     else:
-        handle = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+        handle = sdma_utils.queue_ctx(copy_engine_ctx, to_rank)
         queue_ptr_u32 = tl.load(handle + 0).to(tl.pointer_type(tl.uint32))
         read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
         write_ptr = tl.load(handle + 2).to(tl.pointer_type(tl.uint64))
@@ -687,27 +668,18 @@ def atomic_cas(
         dst_ptr_val = translated_ptr.to(tl.uint64)
 
         command_in_bytes = sdma_utils.sdma_ep.ATOMIC_COMMAND_BYTES
-        # Acquire space (returns base index and wraparound offset)
-        base, offset = sdma_utils.acquire_fadd(
-            queue_ptr_u32,
-            read_ptr,
-            write_ptr,
-            doorbell_ptr,
-            cached_write_ptr,
-            committed_write_ptr,
-            command_in_bytes,
+        # Acquire space in the queue
+        base = sdma_utils.acquire_fadd(
+            read_ptr, cached_write_ptr, command_in_bytes, sdma_utils.cached_read_index_slot(handle)
         )
-        # Write padding NOPs if we wrapped around
-        sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
 
-        # Calculate packet position (base + offset for wraparound)
-        packet_offset_bytes = base + offset
+        packet_offset_bytes = base
 
         # Place command packet
         sdma_utils.place_atomic_cas_packet(queue_ptr_u32, packet_offset_bytes, dst_ptr_val, cmp, val)
 
         # Submit command
-        pending_wptr = base + offset + command_in_bytes
+        pending_wptr = base + command_in_bytes
         sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
         return cmp
@@ -969,8 +941,8 @@ def quiet(copy_engine_ctx: tl.tensor, to_rank):
         >>>     iris.quiet(copy_engine_ctx, 1)
     """
     # Extract queue pointers from context
-    # Context layout: [queue_buf, rptr, wptr, doorbell, cached_wptr, committed_wptr]
-    handle = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+    # Context layout: [queue_buf, rptr, wptr, doorbell, cached_wptr, committed_wptr, cached read index]
+    handle = sdma_utils.queue_ctx(copy_engine_ctx, to_rank)
     read_ptr = tl.load(handle + 1).to(tl.pointer_type(tl.uint64))
     committed_wptr = tl.load(handle + 5).to(tl.pointer_type(tl.uint64))
 
@@ -987,16 +959,17 @@ def _load_queue_ctx(copy_engine_ctx, to_rank):
     """Unpack the SDMA queue context of ``to_rank``.
 
     Returns:
-        (queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr)
+        (queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, cached_read_index)
     """
-    ctx = copy_engine_ctx + (sdma_utils.sdma_ep.QUEUE_DEVICE_CTX_SIZE * to_rank)
+    ctx = sdma_utils.queue_ctx(copy_engine_ctx, to_rank)
     queue_ptr_u32 = tl.load(ctx + 0).to(tl.pointer_type(tl.uint32))
     read_ptr = tl.load(ctx + 1).to(tl.pointer_type(tl.uint64))
     write_ptr = tl.load(ctx + 2).to(tl.pointer_type(tl.uint64))
     doorbell_ptr = tl.load(ctx + 3).to(tl.pointer_type(tl.uint64))
     cached_write_ptr = tl.load(ctx + 4).to(tl.pointer_type(tl.uint64))
     committed_write_ptr = tl.load(ctx + 5).to(tl.pointer_type(tl.uint64))
-    return queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr
+    cached_read_index = sdma_utils.cached_read_index_slot(ctx)
+    return queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, cached_read_index
 
 
 @triton.jit
@@ -1101,8 +1074,8 @@ def put_tile_signal(
     translated_flag_ptr = __translate(flag_ptr, from_rank, to_rank, heap_bases, hint)
 
     # Get copy engine context for target rank
-    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr = _load_queue_ctx(
-        copy_engine_ctx, to_rank
+    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, cached_read_index = (
+        _load_queue_ctx(copy_engine_ctx, to_rank)
     )
 
     # Extract addresses (scalar pointers)
@@ -1116,14 +1089,9 @@ def put_tile_signal(
     command_in_bytes = copy_packet_bytes + atomic_packet_bytes
 
     # Acquire space in queue
-    base, offset = sdma_utils.acquire_fadd(
-        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
-    )
+    base = sdma_utils.acquire_fadd(read_ptr, cached_write_ptr, command_in_bytes, cached_read_index)
 
-    # Write padding NOPs if we wrapped around
-    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
-
-    packet_offset_bytes = base + offset
+    packet_offset_bytes = base
     sdma_utils.place_sub_window_copy_packet(
         queue_ptr_u32,
         packet_offset_bytes,
@@ -1145,7 +1113,7 @@ def put_tile_signal(
         flag_value,
     )
 
-    pending_wptr = base + offset + command_in_bytes
+    pending_wptr = base + command_in_bytes
     sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
 
@@ -1195,20 +1163,17 @@ def wait_then_put_tile(
     """
     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
 
-    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr = _load_queue_ctx(
-        copy_engine_ctx, to_rank
+    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, cached_read_index = (
+        _load_queue_ctx(copy_engine_ctx, to_rank)
     )
 
     poll_packet_bytes = sdma_utils.POLL_REGMEM_COMMAND_BYTES
     copy_packet_bytes = sdma_utils.sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES
     command_in_bytes = poll_packet_bytes + copy_packet_bytes
 
-    base, offset = sdma_utils.acquire_fadd(
-        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
-    )
-    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+    base = sdma_utils.acquire_fadd(read_ptr, cached_write_ptr, command_in_bytes, cached_read_index)
 
-    packet_offset_bytes = base + offset
+    packet_offset_bytes = base
     sdma_utils.place_poll_regmem_packet(
         queue_ptr_u32,
         packet_offset_bytes,
@@ -1230,7 +1195,7 @@ def wait_then_put_tile(
         dst_y=0,
     )
 
-    pending_wptr = base + offset + command_in_bytes
+    pending_wptr = base + command_in_bytes
     sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
 
@@ -1291,20 +1256,17 @@ def wait_then_put_tile_batch(
     """
     translated_to_base_ptr = __translate(to_base_ptr, from_rank, to_rank, heap_bases, hint)
 
-    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr = _load_queue_ctx(
-        copy_engine_ctx, to_rank
+    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, cached_read_index = (
+        _load_queue_ctx(copy_engine_ctx, to_rank)
     )
 
     poll_packet_bytes = sdma_utils.POLL_REGMEM_COMMAND_BYTES
     copy_packet_bytes = sdma_utils.sdma_ep.COPY_LINEAR_SUB_WINDOW_COMMAND_BYTES
     command_in_bytes = poll_packet_bytes + transfer_count * copy_packet_bytes
 
-    base, offset = sdma_utils.acquire_fadd(
-        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
-    )
-    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+    base = sdma_utils.acquire_fadd(read_ptr, cached_write_ptr, command_in_bytes, cached_read_index)
 
-    packet_offset_bytes = base + offset
+    packet_offset_bytes = base
     sdma_utils.place_poll_regmem_packet(
         queue_ptr_u32,
         packet_offset_bytes,
@@ -1329,7 +1291,7 @@ def wait_then_put_tile_batch(
         MAX_TILES,
     )
 
-    pending_wptr = base + offset + command_in_bytes
+    pending_wptr = base + command_in_bytes
     sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
 
@@ -1380,8 +1342,8 @@ def wait_then_put_tile_signal(
     translated_to_ptr = __translate(to_ptr, from_rank, to_rank, heap_bases, hint)
     translated_signal_ptr = __translate(signal_flag_ptr, from_rank, to_rank, heap_bases, hint)
 
-    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr = _load_queue_ctx(
-        copy_engine_ctx, to_rank
+    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, cached_read_index = (
+        _load_queue_ctx(copy_engine_ctx, to_rank)
     )
 
     poll_packet_bytes = sdma_utils.POLL_REGMEM_COMMAND_BYTES
@@ -1389,12 +1351,9 @@ def wait_then_put_tile_signal(
     atomic_packet_bytes = sdma_utils.sdma_ep.ATOMIC_COMMAND_BYTES
     command_in_bytes = poll_packet_bytes + copy_packet_bytes + atomic_packet_bytes
 
-    base, offset = sdma_utils.acquire_fadd(
-        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
-    )
-    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+    base = sdma_utils.acquire_fadd(read_ptr, cached_write_ptr, command_in_bytes, cached_read_index)
 
-    packet_offset_bytes = base + offset
+    packet_offset_bytes = base
     sdma_utils.place_poll_regmem_packet(
         queue_ptr_u32,
         packet_offset_bytes,
@@ -1422,7 +1381,7 @@ def wait_then_put_tile_signal(
         signal_value,
     )
 
-    pending_wptr = base + offset + command_in_bytes
+    pending_wptr = base + command_in_bytes
     sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
 
 
@@ -1485,8 +1444,8 @@ def wait_then_put_tile_batch_signal(
     translated_to_base_ptr = __translate(to_base_ptr, from_rank, to_rank, heap_bases, hint)
     translated_signal_ptr = __translate(signal_flag_ptr, from_rank, to_rank, heap_bases, hint)
 
-    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr = _load_queue_ctx(
-        copy_engine_ctx, to_rank
+    queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, cached_read_index = (
+        _load_queue_ctx(copy_engine_ctx, to_rank)
     )
 
     poll_packet_bytes = sdma_utils.POLL_REGMEM_COMMAND_BYTES
@@ -1494,12 +1453,9 @@ def wait_then_put_tile_batch_signal(
     atomic_packet_bytes = sdma_utils.sdma_ep.ATOMIC_COMMAND_BYTES
     command_in_bytes = poll_packet_bytes + transfer_count * copy_packet_bytes + atomic_packet_bytes
 
-    base, offset = sdma_utils.acquire_fadd(
-        queue_ptr_u32, read_ptr, write_ptr, doorbell_ptr, cached_write_ptr, committed_write_ptr, command_in_bytes
-    )
-    sdma_utils.place_nop_packet(queue_ptr_u32, base, offset)
+    base = sdma_utils.acquire_fadd(read_ptr, cached_write_ptr, command_in_bytes, cached_read_index)
 
-    packet_offset_bytes = base + offset
+    packet_offset_bytes = base
     sdma_utils.place_poll_regmem_packet(
         queue_ptr_u32,
         packet_offset_bytes,
@@ -1531,5 +1487,5 @@ def wait_then_put_tile_batch_signal(
         signal_value,
     )
 
-    pending_wptr = base + offset + command_in_bytes
+    pending_wptr = base + command_in_bytes
     sdma_utils.submit(write_ptr, doorbell_ptr, committed_write_ptr, base, pending_wptr)
