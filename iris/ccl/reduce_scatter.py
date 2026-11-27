@@ -8,16 +8,20 @@ Routes to the Triton two-shot kernel, or with use_gluon and
 reduce_scatter_variant="tdm" to the gfx1250 TDM kernel in gluon/.
 """
 
-from iris.ccl.utils import extract_group_info
+from iris.ccl.utils import extract_group_info, _ensure_symmetric
 
 
 def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_op=False, config=None):
     """
     Reduce-scatter: each rank reduces its assigned tiles, stores locally.
 
+    The input tensor is read remotely by all ranks (via iris.load).
+    The output tensor is only written locally — it does not need to be
+    on the symmetric heap.
+
     Args:
         output_tensor: Shape (M, N)
-        input_tensor: Shape (M, N)
+        input_tensor: Shape (M, N) — must be on symmetric heap
         ctx: Iris instance
         op: ReduceOp (only SUM supported)
         group: ProcessGroup or None
@@ -51,6 +55,9 @@ def reduce_scatter(output_tensor, input_tensor, ctx, op=None, group=None, async_
             "reduce_scatter with use_gluon=True needs reduce_scatter_variant='tdm'; "
             "the two-shot kernel is Triton only. Use use_gluon=False."
         )
+
+    # Input is remote-read by all ranks — must be on symmetric heap
+    input_tensor = _ensure_symmetric(ctx, input_tensor, "input_tensor")
 
     rank_in_group, rank_global, world_size, rank_start, rank_stride = extract_group_info(group, ctx)
     M, N = input_tensor.shape[:2]
