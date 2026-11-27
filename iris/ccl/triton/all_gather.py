@@ -64,6 +64,16 @@ def persistent_all_gather(
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
     total_tiles = num_pid_m * num_pid_n
     tl.assume(total_tiles > 0)
+
+    # Translate the output base once per destination up front. A heap_bases load issued after a store
+    # cannot be hoisted above it, and waiting for that load also waits for every earlier store.
+    local_base = tl.load(heap_bases + iris_rank)
+    output_ptr_int = tl.cast(output_ptr, tl.uint64)
+    remote_output_ptrs = ()
+    for i in tl.static_range(world_size):
+        ptr_delta = tl.load(heap_bases + rank_start + i * rank_stride) - local_base
+        remote_output_ptrs += (tl.cast(output_ptr_int + ptr_delta, output_ptr.dtype),)
+
     for tile_id in range(pid, total_tiles, COMM_SMS):
         num_pid_in_group = GROUP_SIZE_M * num_pid_n
         group_id = tile_id // num_pid_in_group
@@ -103,9 +113,9 @@ def persistent_all_gather(
 
         # Send local shard data to all destination ranks
         # Each rank's input goes to output[group_rank * M : (group_rank + 1) * M, :] on all ranks
-        for i in tl.static_range(world_size):
-            target_rank = rank_start + i * rank_stride
-
+        # Write the local copy first, then the peers in a per-rank rotated order so that each destination
+        # sees a different writer at any given moment.
+        for step in tl.static_range(world_size):
             # Compute global output row indices: offset by group_rank * M
             rm_output = rm_input + group_rank * M
 
@@ -122,21 +132,14 @@ def persistent_all_gather(
             output_ptr_target = output_ptr + output_offset
             output_ptr_target = tl.multiple_of(output_ptr_target, (BLOCK_SIZE_M, BLOCK_SIZE_N))
 
-            if i == group_rank:
-                # Local destination (i == group_rank): use direct store
+            if step == 0:
+                # Local destination (step 0, i.e. group_rank): use direct store
                 tl.store(output_ptr_target, data, mask=combined_mask, cache_modifier=".wt")
             else:
-                # Remote destination: use iris.store to send data to remote destination
-                # Use iris_rank for iris RMA operations (heap_bases indexing)
-                iris.store(
-                    output_ptr_target,
-                    data,
-                    iris_rank,
-                    target_rank,
-                    heap_bases,
-                    mask=combined_mask,
-                    hint=(1, BLOCK_SIZE_N),
-                )
+                # Remote destination: store through the pre-translated output base
+                remote_ptr = remote_output_ptrs[(group_rank + step) % world_size] + output_offset
+                remote_ptr = tl.max_contiguous(tl.multiple_of(remote_ptr, (1, BLOCK_SIZE_N)), (1, BLOCK_SIZE_N))
+                tl.store(remote_ptr, data, mask=combined_mask)
 
 
 @triton.jit()
