@@ -415,6 +415,84 @@ def test_all_gather_matmul_hbm_buffer_trace():
     )
 
 
+def test_all_gather_matmul_hbm_buffer_default_k_per_flag_small_problem():
+    """The default k_per_flag is reduced to divide the K-blocks of small problems."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    ctx = iris.iris(2**33)
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
+
+    dtype = torch.float16
+    config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32)
+    M, K_local, N = 128, 32, 64  # 1-2 K-blocks in total: fewer than the default k_per_flag of 8
+    A_sharded, B, ref_output = _make_reference(rank, world_size, M, K_local, N, dtype)
+    A_sharded_shmem = ctx.zeros((M, K_local), dtype=dtype)
+    A_sharded_shmem.copy_(A_sharded)
+    B_shmem = ctx.zeros((K_local * world_size, N), dtype=dtype)
+    B_shmem.copy_(B)
+    output = ctx.zeros((M, N), dtype=dtype)
+    ctx.barrier()
+
+    all_gather_matmul_hbm_buffer(ctx, output, A_sharded_shmem, B_shmem, config=config, trace=False)
+    torch.cuda.synchronize()
+    ctx.barrier()
+
+    assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize(
+    "m_tiles,group_size_m,num_fetch_stages",
+    [
+        (5, 2, 1),  # last group of the (only) stage is partial
+        (5, 8, 1),  # group larger than the whole problem
+        (5, 4, 2),  # stages of 3 + 2 M-tiles: both partial
+        (6, 4, 2),  # stages of 3 + 3 M-tiles
+        (7, 3, 2),  # stages of 4 + 3 M-tiles: first stage partial
+    ],
+)
+def test_all_gather_matmul_hbm_buffer_partial_m_groups(m_tiles, group_size_m, num_fetch_stages):
+    """M-tiles per stage need not be a multiple of group_size_m (partial last group)."""
+    if not dist.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+
+    ctx = iris.iris(2**33)
+    rank = ctx.get_rank()
+    world_size = ctx.get_num_ranks()
+
+    dtype = torch.float16
+    config = FusedConfig(block_size_m=64, block_size_n=64, block_size_k=32, group_size_m=group_size_m)
+    M, K_local, N = m_tiles * config.block_size_m, 64, 128
+
+    A_sharded, B, ref_output = _make_reference(rank, world_size, M, K_local, N, dtype)
+    A_sharded_shmem = ctx.zeros((M, K_local), dtype=dtype)
+    A_sharded_shmem.copy_(A_sharded)
+    B_shmem = ctx.zeros((K_local * world_size, N), dtype=dtype)
+    B_shmem.copy_(B)
+    output = ctx.zeros((M, N), dtype=dtype)
+    ctx.barrier()
+
+    # k_per_flag=1 gives several flag groups along K, which the partial-group decode must all cover.
+    all_gather_matmul_hbm_buffer(
+        ctx,
+        output,
+        A_sharded_shmem,
+        B_shmem,
+        config=config,
+        k_per_flag=1,
+        num_fetch_stages=num_fetch_stages,
+        trace=False,
+    )
+    torch.cuda.synchronize()
+    ctx.barrier()
+
+    max_diff = (output - ref_output).abs().max().item()
+    assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2), (
+        f"Rank {rank}: max diff {max_diff} (m_tiles={m_tiles}, group_size_m={group_size_m}, stages={num_fetch_stages})"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Unit tests for _auto_config (no distributed context required)
 # ──────────────────────────────────────────────────────────────────────
